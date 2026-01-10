@@ -91,22 +91,22 @@ impl Pg2Sqlite {
     /// * If the SQL files could not be read.
     /// * If the SQL files could not be parsed.
     pub fn ups<P: AsRef<std::path::Path>>(
-        mut self,
         directory: P,
     ) -> Result<Self, crate::errors::Error> {
+        let mut translator = Self::default();
         // Collect all up.sql paths recursively
         let mut up_sql_paths = Vec::new();
-        self.collect_up_sql_paths(directory.as_ref(), &mut up_sql_paths)?;
+        translator.collect_up_sql_paths(directory.as_ref(), &mut up_sql_paths)?;
 
         // Sort the paths alphabetically
         up_sql_paths.sort();
 
         // Process each up.sql file in sorted order
         for path in up_sql_paths {
-            self = self.file(path)?;
+            translator = translator.file(path)?;
         }
 
-        Ok(self)
+        Ok(translator)
     }
 
     fn collect_up_sql_paths(
@@ -151,11 +151,11 @@ impl Pg2Sqlite {
     /// * If the git repository could not be cloned.
     /// * If the SQL files could not be read.
     /// * If the SQL files could not be parsed.
-    pub fn ups_from_git(self, url: &str) -> Result<Self, crate::errors::Error> {
+    pub fn from_git(url: &str) -> Result<Self, crate::errors::Error> {
         let temp_dir = TempDir::new()?;
         Repository::clone(url, temp_dir.path())
             .map_err(|e| crate::errors::Error::GitError(e.to_string()))?;
-        self.ups(temp_dir.path())
+        Self::ups(temp_dir.path())
     }
 
     /// Translates the set of `PostgreSQL` statements to `SQLite` statements.

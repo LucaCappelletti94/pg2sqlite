@@ -8,12 +8,11 @@ use pg2sqlite::{
 
 #[test]
 /// Test translating the core migrations used in the `core_structures` crate.
-fn test_translator() {
-    let translated_migrations = Pg2Sqlite::default()
-        .ups_from_git("https://github.com/earth-metabolome-initiative/asset-procedure-schema")
-        .expect("Failed to load the migrations")
-        .translate(&Pg2SqliteOptions::default().remove_unsupported_check_constraints())
-        .expect("Failed to translate the migrations");
+fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
+    let translated_migrations = Pg2Sqlite::from_git(
+        "https://github.com/earth-metabolome-initiative/asset-procedure-schema",
+    )?
+    .translate(&Pg2SqliteOptions::default().remove_unsupported_check_constraints())?;
 
     // We try to parse the translated migrations using the `sqlparser` crate,
     // for the `SQLite` dialect.
@@ -28,8 +27,7 @@ fn test_translator() {
     // We create a testcontainer `Docker` for `SQLite` and run the translated
     // migrations, considering the severe limitations of our target use case
     // which is `WASM + SQLite`.
-    let mut connection = SqliteConnection::establish(":memory:")
-        .expect("Failed to establish a connection to the SQLite database");
+    let mut connection = SqliteConnection::establish(":memory:")?;
 
     let number_of_migrations = translated_migrations.len();
     for (i, translated_migration) in
@@ -40,4 +38,6 @@ fn test_translator() {
             panic!("Failed to run the translated statement {i}/{number_of_migrations} {sql}: {err}")
         }
     }
+
+    Ok(())
 }
