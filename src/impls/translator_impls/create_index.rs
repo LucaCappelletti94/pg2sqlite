@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`CreateIndex`](sqlparser::ast::CreateIndex) type.
+//! `CreateIndex` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{CreateIndex, IndexType};

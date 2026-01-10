@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`ReferentialAction`](sqlparser::ast::ReferentialAction) type.
+//! `ReferentialAction` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::ReferentialAction;

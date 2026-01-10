@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`OrderByExpr`](sqlparser::ast::OrderByExpr) type.
+//! `OrderByExpr` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::OrderByExpr;

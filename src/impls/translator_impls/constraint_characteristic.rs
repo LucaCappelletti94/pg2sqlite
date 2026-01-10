@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`ConstraintCharacteristics`](sqlparser::ast::ConstraintCharacteristics)
+//! `ConstraintCharacteristics` type.
 //! type.
 
 use sql_traits::structs::ParserDB;

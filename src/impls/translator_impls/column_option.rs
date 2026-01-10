@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`Column`](sqlparser::ast::Column) type.
+//! `Column` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, Expr, ForeignKeyConstraint};

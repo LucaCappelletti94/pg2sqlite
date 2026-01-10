@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`TableConstraint`](sqlparser::ast::TableConstraint) type.
+//! `TableConstraint` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Function, TableConstraint};

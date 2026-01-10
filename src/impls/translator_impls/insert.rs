@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`Insert`](sqlparser::ast::Insert) type.
+//! `Insert` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Insert;

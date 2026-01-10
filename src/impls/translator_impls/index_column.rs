@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`IndexColumn`](sqlparser::ast::IndexColumn) type.
+//! `IndexColumn` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::IndexColumn;

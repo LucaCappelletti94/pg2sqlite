@@ -1,4 +1,5 @@
-//! Submodule with the implementations of the [`Translator`] trait.
+//! Submodule with the implementations of the [`crate::traits::Translator`]
+//! trait.
 
 mod column;
 mod column_option;

@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`Statement`](sqlparser::ast::Statement) type.
+//! `Statement` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Statement;

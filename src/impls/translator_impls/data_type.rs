@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`DataType`](sqlparser::ast::DataType) type.
+//! `DataType` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{DataType, ExactNumberInfo};

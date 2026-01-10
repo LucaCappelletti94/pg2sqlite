@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`CreateTable`](sqlparser::ast::CreateTable) type.
+//! `CreateTable` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{CreateTable, TableConstraint};

@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`Expr`](sqlparser::ast::Expr) type.
+//! `Expr` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Expr;

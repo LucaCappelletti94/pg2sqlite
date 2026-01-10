@@ -1,5 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
-//! [`Function`](sqlparser::ast::Function) type.
+//! `Function` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Function, Ident, ObjectName};
