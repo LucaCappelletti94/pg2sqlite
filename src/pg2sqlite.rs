@@ -1,5 +1,7 @@
 //! Submodule defining the main translator struct.
 
+use std::path::PathBuf;
+
 use git2::Repository;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Statement;
@@ -92,23 +94,42 @@ impl Pg2Sqlite {
         mut self,
         directory: P,
     ) -> Result<Self, crate::errors::Error> {
+        // Collect all up.sql paths recursively
+        let mut up_sql_paths = Vec::new();
+        self.collect_up_sql_paths(directory.as_ref(), &mut up_sql_paths)?;
+
+        // Sort the paths alphabetically
+        up_sql_paths.sort();
+
+        // Process each up.sql file in sorted order
+        for path in up_sql_paths {
+            self = self.file(path)?;
+        }
+
+        Ok(self)
+    }
+
+    fn collect_up_sql_paths(
+        &self,
+        directory: &std::path::Path,
+        paths: &mut Vec<PathBuf>,
+    ) -> Result<(), crate::errors::Error> {
         // We iterate recursively over the migrations directory.
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_file() {
-                // If the file name is `up.sql` we parse it and add it to the
-                // set of PostgreSQL statements to be translated.
+                // If the file name is `up.sql` we collect it
                 if let Some(file_name) = path.file_name()
                     && file_name == "up.sql"
                 {
-                    self = self.file(path)?;
+                    paths.push(path);
                 }
             } else if path.is_dir() {
-                self = self.ups(path)?;
+                self.collect_up_sql_paths(&path, paths)?;
             }
         }
-        Ok(self)
+        Ok(())
     }
 
     /// Adds all of the `up.sql` migrations found in the provided git repository
