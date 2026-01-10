@@ -1,0 +1,43 @@
+[package]
+name = "pg2sqlite"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sqlparser = "0.60"
+sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits" }
+git2 = "0.20"
+tempfile = "3.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+diesel = { version = "2.3.5", features = ["sqlite"] }
+
+[workspace.lints.rust]
+missing_docs = "forbid"
+unused_macro_rules = "forbid"
+unconditional_recursion = "forbid"
+unreachable_patterns = "forbid"
+unused_import_braces = "forbid"
+unused_must_use = "forbid"
+deprecated = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "forbid"
+bare_urls = "forbid"
+invalid_codeblock_attributes = "forbid"
+invalid_html_tags = "forbid"
+missing_crate_level_docs = "forbid"
+unescaped_backticks = "forbid"
+redundant_explicit_links = "forbid"
+invalid_rust_codeblocks = "forbid"
+
+[workspace.lints.clippy]
+unreadable_literal = "allow"
+missing_panics_doc = "allow"
+new_ret_no_self = "allow"
+struct_excessive_bools = "allow"
+should_panic_without_expect = "allow"
+doc_markdown = "allow"
+clone_on_copy = "forbid"
+pedantic = { level = "deny", priority = -1 }
