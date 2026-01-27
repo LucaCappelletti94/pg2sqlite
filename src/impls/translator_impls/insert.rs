@@ -27,7 +27,7 @@ impl Translator for Insert {
                             insert.or = Some(sqlparser::ast::SqliteOnConflict::Ignore);
                             insert.on = None;
                         }
-                        _ => {
+                        sqlparser::ast::OnConflictAction::DoUpdate(_) => {
                             unimplemented!(
                                 "Unsupported ON CONFLICT action: {:?}",
                                 on_conflict.action

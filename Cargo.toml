@@ -12,6 +12,10 @@ thiserror = "2.0"
 
 [dev-dependencies]
 diesel = { version = "2.3.5", features = ["sqlite"] }
+insta = "1.46.1"
+
+[lints]
+workspace = true
 
 [workspace.lints.rust]
 missing_docs = "forbid"

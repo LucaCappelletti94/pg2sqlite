@@ -1,6 +1,6 @@
 //! Test translating the core migrations used in the `core_structures` crate.
 
-use diesel::{Connection, SqliteConnection, connection::SimpleConnection};
+use diesel::{Connection, RunQueryDsl, SqliteConnection, connection::SimpleConnection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     traits::TranslationOptions,
@@ -28,6 +28,21 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
     // migrations, considering the severe limitations of our target use case
     // which is `WASM + SQLite`.
     let mut connection = SqliteConnection::establish(":memory:")?;
+
+    // Enable foreign key constraints
+    diesel::sql_query("PRAGMA foreign_keys = ON")
+        .execute(&mut connection)
+        .expect("Failed to enable foreign key constraints");
+
+    // Enable recursive triggers
+    diesel::sql_query("PRAGMA recursive_triggers = ON")
+        .execute(&mut connection)
+        .expect("Failed to enable recursive triggers");
+
+    // Set journal mode to WAL for better performance
+    diesel::sql_query("PRAGMA journal_mode = WAL")
+        .execute(&mut connection)
+        .expect("Failed to set journal mode to WAL");
 
     let number_of_migrations = translated_migrations.len();
     for (i, translated_migration) in

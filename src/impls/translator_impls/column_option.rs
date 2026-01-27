@@ -63,8 +63,7 @@ impl Translator for ColumnOptionDef {
                     }
                 }
             }
-            ColumnOption::NotNull => Ok(Some(self.clone())),
-            ColumnOption::PrimaryKey(_) => Ok(Some(self.clone())),
+            ColumnOption::NotNull | ColumnOption::PrimaryKey(_) => Ok(Some(self.clone())),
             ColumnOption::Check(_) => Ok(None),
             ColumnOption::ForeignKey(ForeignKeyConstraint {
                 name,

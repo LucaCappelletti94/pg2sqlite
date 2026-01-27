@@ -90,13 +90,11 @@ impl Pg2Sqlite {
     ///
     /// * If the SQL files could not be read.
     /// * If the SQL files could not be parsed.
-    pub fn ups<P: AsRef<std::path::Path>>(
-        directory: P,
-    ) -> Result<Self, crate::errors::Error> {
+    pub fn ups<P: AsRef<std::path::Path>>(directory: P) -> Result<Self, crate::errors::Error> {
         let mut translator = Self::default();
         // Collect all up.sql paths recursively
         let mut up_sql_paths = Vec::new();
-        translator.collect_up_sql_paths(directory.as_ref(), &mut up_sql_paths)?;
+        Self::collect_up_sql_paths(directory.as_ref(), &mut up_sql_paths)?;
 
         // Sort the paths alphabetically
         up_sql_paths.sort();
@@ -110,7 +108,6 @@ impl Pg2Sqlite {
     }
 
     fn collect_up_sql_paths(
-        &self,
         directory: &std::path::Path,
         paths: &mut Vec<PathBuf>,
     ) -> Result<(), crate::errors::Error> {
@@ -126,7 +123,7 @@ impl Pg2Sqlite {
                     paths.push(path);
                 }
             } else if path.is_dir() {
-                self.collect_up_sql_paths(&path, paths)?;
+                Self::collect_up_sql_paths(&path, paths)?;
             }
         }
         Ok(())
