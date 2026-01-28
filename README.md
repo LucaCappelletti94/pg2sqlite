@@ -18,6 +18,7 @@ This crate uses `sqlparser` to parse PostgreSQL statements and then translates t
   - `BOOLEAN` -> `INTEGER`
   - `TIMESTAMP` -> `TEXT`
   - `GEOGRAPHY` -> `BLOB`
+- **Primary Keys**: Automatically adds `NOT NULL` to all Primary Key columns.
 - **Migration Loading**:
   - Parse raw SQL strings.
   - Read individual SQL files.
@@ -49,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(sqlite_statements.len(), 2);
     
     let create_table = &sqlite_statements[0];
-    assert_eq!(create_table.to_string(), "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL)");
+    assert_eq!(create_table.to_string(), "CREATE TABLE users (id INTEGER PRIMARY KEY NOT NULL, username TEXT NOT NULL)");
 
     let insert = &sqlite_statements[1];
     assert_eq!(insert.to_string(), "INSERT OR IGNORE INTO users (username) VALUES ('alice')");

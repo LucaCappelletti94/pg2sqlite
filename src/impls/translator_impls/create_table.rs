@@ -1,8 +1,10 @@
 //! Implementation of the [`Translator`] trait for the
 //! `CreateTable` type.
 
+use std::collections::HashSet;
+
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{CreateTable, TableConstraint};
+use sqlparser::ast::{ColumnOption, ColumnOptionDef, CreateTable, TableConstraint};
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
@@ -16,7 +18,7 @@ impl Translator for CreateTable {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        let created_table = Self {
+        let mut created_table = Self {
             columns: self
                 .columns
                 .iter()
@@ -32,6 +34,34 @@ impl Translator for CreateTable {
                 .collect(),
             ..self.clone()
         };
+
+        let mut pk_column_names = HashSet::new();
+
+        for constraint in &created_table.constraints {
+            if let TableConstraint::PrimaryKey(pk_constraint) = constraint {
+                for col in &pk_constraint.columns {
+                    if let sqlparser::ast::Expr::Identifier(ident) = &col.column.expr {
+                        pk_column_names.insert(ident.value.clone());
+                    }
+                }
+            }
+        }
+
+        for col in &created_table.columns {
+            for option in &col.options {
+                if let ColumnOption::PrimaryKey(_) = &option.option {
+                    pk_column_names.insert(col.name.value.clone());
+                }
+            }
+        }
+
+        for col in &mut created_table.columns {
+            if pk_column_names.contains(&col.name.value)
+                && !col.options.iter().any(|o| matches!(o.option, ColumnOption::NotNull))
+            {
+                col.options.push(ColumnOptionDef { name: None, option: ColumnOption::NotNull });
+            }
+        }
 
         Ok(created_table)
     }
