@@ -16,3 +16,4 @@ mod order_by_expr;
 mod referential_action;
 mod statement;
 mod table_constraint;
+mod uuid;

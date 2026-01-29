@@ -19,6 +19,10 @@ This crate uses `sqlparser` to parse PostgreSQL statements and then translates t
   - `TIMESTAMP` -> `TEXT`
   - `GEOGRAPHY` -> `BLOB`
 - **Primary Keys**: Automatically adds `NOT NULL` to all Primary Key columns.
+- **UUID Generation**: Converts PostgreSQL default value expressions for UUIDs into pure SQLite equivalents:
+  - `gen_random_uuid()` / `uuidv4()` -> Pure SQL UUID v4 generation (random).
+  - `uuidv7()` -> Pure SQL UUID v7 generation (time-ordered).
+  - Configurable representation as `BLOB` (16 bytes) or `TEXT` (36 chars).
 - **Migration Loading**:
   - Parse raw SQL strings.
   - Read individual SQL files.

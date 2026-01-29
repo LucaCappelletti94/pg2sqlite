@@ -11,6 +11,6 @@ pub mod prelude {
     pub use crate::{
         options::Pg2SqliteOptions,
         pg2sqlite::Pg2Sqlite,
-        traits::{Schema, TranslationOptions, Translator},
+        traits::{Schema, TranslationOptions, Translator, UuidRepresentation, UuidVersion},
     };
 }

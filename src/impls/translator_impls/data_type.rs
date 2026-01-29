@@ -4,7 +4,10 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{DataType, ExactNumberInfo};
 
-use crate::prelude::{Pg2SqliteOptions, Translator};
+use crate::{
+    prelude::{Pg2SqliteOptions, Translator},
+    traits::{TranslationOptions, UuidRepresentation},
+};
 
 impl Translator for DataType {
     type Schema = ParserDB;
@@ -14,7 +17,7 @@ impl Translator for DataType {
     fn translate(
         &self,
         _schema: &Self::Schema,
-        _options: &Self::Options,
+        options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match self {
             DataType::Text | DataType::Integer(None) | DataType::Real => Ok(self.clone()),
@@ -25,9 +28,16 @@ impl Translator for DataType {
             DataType::Bytea => Ok(DataType::Blob(None)),
             DataType::Varchar(_) => Ok(DataType::Text),
             DataType::Uuid => {
-                // SQLite does not have a UUID type, so we use BLOB instead as
-                // a workaround, as described in the `rosetta_uuid` crate.
-                Ok(DataType::Blob(None))
+                match options.get_uuid_representation() {
+                    Some(UuidRepresentation::Blob) => Ok(DataType::Blob(None)),
+                    Some(UuidRepresentation::Text) => Ok(DataType::Text),
+                    None => {
+                        Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                            "UUID translation requires specifying a representation (TEXT or BLOB)"
+                                .to_string(),
+                        ))
+                    }
+                }
             }
             DataType::Timestamp(None, sqlparser::ast::TimezoneInfo::WithTimeZone) => {
                 // SQLite does not support timezone information, and these type of

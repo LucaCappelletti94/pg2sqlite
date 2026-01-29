@@ -6,4 +6,4 @@ pub use translator::Translator;
 pub mod schema;
 pub use schema::Schema;
 pub mod translation_options;
-pub use translation_options::TranslationOptions;
+pub use translation_options::{TranslationOptions, UuidRepresentation, UuidVersion};

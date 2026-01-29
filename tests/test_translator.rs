@@ -3,7 +3,7 @@
 use diesel::{Connection, RunQueryDsl, SqliteConnection, connection::SimpleConnection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
+    traits::{TranslationOptions, UuidRepresentation},
 };
 
 #[test]
@@ -12,7 +12,11 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
     let translated_migrations = Pg2Sqlite::from_git(
         "https://github.com/earth-metabolome-initiative/asset-procedure-schema",
     )?
-    .translate(&Pg2SqliteOptions::default().remove_unsupported_check_constraints())?;
+    .translate(
+        &Pg2SqliteOptions::default()
+            .remove_unsupported_check_constraints()
+            .with_uuid_representation(UuidRepresentation::Blob),
+    )?;
 
     // We try to parse the translated migrations using the `sqlparser` crate,
     // for the `SQLite` dialect.
