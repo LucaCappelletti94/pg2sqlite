@@ -37,7 +37,7 @@ fn get_create_table_sql(
     let sql = format!("CREATE TABLE {table_name} (id UUID PRIMARY KEY DEFAULT {func})");
     let translator = Pg2Sqlite::default().sql(&sql).unwrap();
     let options =
-        Pg2SqliteOptions::default().use_pure_sql_for_uuid(true).with_uuid_representation(repr);
+        Pg2SqliteOptions::default().use_pure_sql_for_uuid().with_uuid_representation(repr);
 
     let translated = translator.translate(&options).unwrap();
     translated[0].to_string()

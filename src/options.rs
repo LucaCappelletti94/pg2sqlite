@@ -37,8 +37,8 @@ impl TranslationOptions for Pg2SqliteOptions {
         self.remove_unsupported_check_constraints
     }
 
-    fn use_pure_sql_for_uuid(mut self, yes: bool) -> Self {
-        self.use_pure_sql_for_uuid = yes;
+    fn use_pure_sql_for_uuid(mut self) -> Self {
+        self.use_pure_sql_for_uuid = true;
         self
     }
 

@@ -31,7 +31,7 @@ pub trait TranslationOptions {
 
     #[must_use]
     /// Sets the option to use pure SQL for UUID generation.
-    fn use_pure_sql_for_uuid(self, yes: bool) -> Self;
+    fn use_pure_sql_for_uuid(self) -> Self;
 
     /// Returns whether to use pure SQL for UUID generation.
     fn should_use_pure_sql_for_uuid(&self) -> bool;

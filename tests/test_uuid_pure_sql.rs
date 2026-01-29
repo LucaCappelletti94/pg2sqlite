@@ -7,7 +7,7 @@ fn test_pure_sql_uuid_v4_text() {
     let sql = "CREATE TABLE t_v4 (id UUID PRIMARY KEY DEFAULT gen_random_uuid())";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let options = Pg2SqliteOptions::default()
-        .use_pure_sql_for_uuid(true)
+        .use_pure_sql_for_uuid()
         .with_uuid_representation(UuidRepresentation::Text);
 
     let translated = translator.translate(&options).unwrap();
@@ -25,7 +25,7 @@ fn test_pure_sql_uuid_v4_blob() {
     let sql = "CREATE TABLE t_v4_bin (id UUID PRIMARY KEY DEFAULT gen_random_uuid())";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let options = Pg2SqliteOptions::default()
-        .use_pure_sql_for_uuid(true)
+        .use_pure_sql_for_uuid()
         .with_uuid_representation(UuidRepresentation::Blob);
 
     let translated = translator.translate(&options).unwrap();
@@ -43,7 +43,7 @@ fn test_pure_sql_uuid_v7_text() {
     let sql = "CREATE TABLE t_v7 (id UUID PRIMARY KEY DEFAULT uuidv7())";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let options = Pg2SqliteOptions::default()
-        .use_pure_sql_for_uuid(true)
+        .use_pure_sql_for_uuid()
         .with_uuid_representation(UuidRepresentation::Text);
 
     let translated = translator.translate(&options).unwrap();
@@ -59,7 +59,7 @@ fn test_pure_sql_uuid_v7_blob() {
     let sql = "CREATE TABLE t_v7_bin (id UUID PRIMARY KEY DEFAULT uuidv7())";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let options = Pg2SqliteOptions::default()
-        .use_pure_sql_for_uuid(true)
+        .use_pure_sql_for_uuid()
         .with_uuid_representation(UuidRepresentation::Blob);
 
     let translated = translator.translate(&options).unwrap();
