@@ -13,7 +13,7 @@ fn test_explicit_uuidv4_overrides_default_v7() {
 
     let translated = translator.translate(&options).unwrap();
     let stmt = translated[0].to_string();
-    
+
     assert!(
         stmt.contains("printf('%04x', (abs(random()) & 4095) | 16384)"),
         "Should contain V4 version bits"
