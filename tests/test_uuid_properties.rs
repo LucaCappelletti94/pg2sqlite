@@ -46,7 +46,7 @@ fn uuidv4_text_impl() -> String {
 /// Returns a UUID v7 as a byte vector, using the UTC timestamp.
 fn uuidv7_impl() -> Vec<u8> {
     let utc_now = chrono::Utc::now();
-    let seconds = utc_now.timestamp() as u64;
+    let seconds = u64::try_from(utc_now.timestamp()).expect("Went back in time");
     let subsec_nanos = utc_now.timestamp_subsec_nanos();
     let counter = 0;
     let usable_counter_bits = 12;
@@ -58,7 +58,7 @@ fn uuidv7_impl() -> Vec<u8> {
 /// Returns a textual UUID v7, using the UTC timestamp.
 fn uuidv7_text_impl() -> String {
     let utc_now = chrono::Utc::now();
-    let seconds = utc_now.timestamp() as u64;
+    let seconds = u64::try_from(utc_now.timestamp()).expect("Went back in time");
     let subsec_nanos = utc_now.timestamp_subsec_nanos();
     let counter = 0;
     let usable_counter_bits = 12;
