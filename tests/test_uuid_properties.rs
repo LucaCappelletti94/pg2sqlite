@@ -68,8 +68,22 @@ fn uuidv7_text_impl() -> String {
 }
 
 fn establish_connection() -> SqliteConnection {
-    let connection =
+    let mut connection =
         SqliteConnection::establish(":memory:").expect("Error connecting to in-memory SQLite");
+    // Enable foreign key constraints
+    diesel::sql_query("PRAGMA foreign_keys = ON")
+        .execute(&mut connection)
+        .expect("Failed to enable foreign key constraints");
+
+    // Enable recursive triggers
+    diesel::sql_query("PRAGMA recursive_triggers = ON")
+        .execute(&mut connection)
+        .expect("Failed to enable recursive triggers");
+
+    // Set journal mode to WAL for better performance
+    diesel::sql_query("PRAGMA journal_mode = WAL")
+        .execute(&mut connection)
+        .expect("Failed to set journal mode to WAL");
     uuidv4_utils::register_impl(&connection, uuidv4_impl).expect("Failed to register uuidv4");
     uuidv7_utils::register_impl(&connection, uuidv7_impl).expect("Failed to register uuidv7");
     uuidv4_text_utils::register_impl(&connection, uuidv4_text_impl)
