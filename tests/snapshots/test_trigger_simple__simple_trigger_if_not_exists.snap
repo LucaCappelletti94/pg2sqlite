@@ -1,0 +1,7 @@
+---
+source: tests/test_trigger_simple.rs
+expression: translated_sql
+---
+CREATE TABLE orders (id BLOB PRIMARY KEY NOT NULL, customer_name TEXT NOT NULL)
+CREATE TABLE log_entries (id BLOB PRIMARY KEY NOT NULL, order_id BLOB NOT NULL, message TEXT)
+CREATE TRIGGER log_new_order_trigger AFTER INSERT ON orders FOR EACH ROW BEGIN INSERT INTO log_entries (id, order_id, message) WITH v_log_id (val) AS (SELECT uuidv7()) SELECT v_log_id.val, NEW.id, 'Order created' FROM v_log_id WHERE (NOT EXISTS (SELECT 1 FROM log_entries WHERE order_id = NEW.id)); END

@@ -11,6 +11,8 @@ use sqlparser::{
     tokenizer::{Token, TokenWithSpan, Tokenizer, Word},
 };
 
+use crate::impls::translator_impls::plpgsql::PlPgSqlPreprocessor;
+
 /// Trait to define a schema for the translation between `PostgreSQL` and
 /// `SQLite`.
 pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
@@ -27,21 +29,28 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
         // We strip spaces and semicolons from the body.
         let maybe_body = function_body.trim().trim_end_matches(';').trim();
 
+        // Preprocess the PL/pgSQL body to handle syntax like `variable := expr`
+        let (preprocessed_body, _context) = PlPgSqlPreprocessor::preprocess(maybe_body);
+
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
-        let tokens = Tokenizer::new(&dialect, maybe_body).tokenize().unwrap_or_else(|e| {
-            panic!("Failed to tokenize function body: {maybe_body}. Error: {e:?}")
+        let tokens = Tokenizer::new(&dialect, &preprocessed_body).tokenize().unwrap_or_else(|e| {
+            panic!("Failed to tokenize function body: {preprocessed_body}. Error: {e:?}")
         });
 
         let begin_idx = tokens
             .iter()
             .position(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::BEGIN))
-            .unwrap_or_else(|| panic!("Function body should start with BEGIN. Is: {maybe_body}"));
+            .unwrap_or_else(|| {
+                panic!("Function body should start with BEGIN. Is: {preprocessed_body}")
+            });
 
         // We look for the last END that is a keyword
         let end_idx = tokens
             .iter()
             .rposition(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::END))
-            .unwrap_or_else(|| panic!("Function body should end with END. Is: {maybe_body}"));
+            .unwrap_or_else(|| {
+                panic!("Function body should end with END. Is: {preprocessed_body}")
+            });
 
         let body_tokens = tokens[begin_idx + 1..end_idx].to_vec();
 
@@ -49,7 +58,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
             .with_tokens(body_tokens)
             .parse_statements()
             .unwrap_or_else(|e| {
-                panic!("Failed to parse function body statements: {e:?}. Body: {maybe_body}")
+                panic!("Failed to parse function body statements: {e:?}. Body: {preprocessed_body}")
             });
 
         // The function body may end with a `RETURN NEW;` or `RETURN OLD;` statement.

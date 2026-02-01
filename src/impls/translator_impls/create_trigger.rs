@@ -89,12 +89,7 @@ fn generate_standard_trigger_body(
 ) -> Result<Option<sqlparser::ast::BeginEndStatements>, crate::errors::Error> {
     let function_name = exec_body.func_desc.name.clone();
     if let Some(mut body) = schema.function_body(&function_name.to_string()) {
-        let mut new_statements = Vec::new();
-        for stmt in body.statements {
-            let translated_stmts = stmt.translate(schema, options)?;
-            new_statements.extend(translated_stmts);
-        }
-        body.statements = new_statements;
+        body.statements = super::plpgsql::PlPgSqlTranslator::translate(&body, schema, options)?;
         Ok(Some(body))
     } else {
         Ok(None)

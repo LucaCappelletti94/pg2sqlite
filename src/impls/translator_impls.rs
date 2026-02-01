@@ -14,6 +14,7 @@ mod function;
 mod index_column;
 mod insert;
 mod order_by_expr;
+pub mod plpgsql;
 mod referential_action;
 mod statement;
 mod table_constraint;
