@@ -1,0 +1,7 @@
+---
+source: tests/test_delete_using.rs
+expression: translated_sql
+---
+CREATE TABLE teams (id INTEGER PRIMARY KEY NOT NULL, parent_team_id INTEGER)
+CREATE TABLE team_members (team_id INTEGER NOT NULL, member_id INTEGER NOT NULL, PRIMARY KEY (team_id, member_id))
+CREATE TRIGGER trigger_remove_team_member_from_child_teams AFTER DELETE ON team_members FOR EACH ROW BEGIN DELETE FROM team_members WHERE EXISTS (SELECT 1 FROM teams WHERE teams.parent_team_id = OLD.team_id AND team_members.team_id = teams.id AND team_members.member_id = OLD.member_id); END

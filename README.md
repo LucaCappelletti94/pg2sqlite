@@ -5,24 +5,25 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Codecov](https://codecov.io/gh/LucaCappelletti94/pg2sqlite/branch/main/graph/badge.svg)](https://codecov.io/gh/LucaCappelletti94/pg2sqlite)
 
-A Rust library to translate PostgreSQL SQL schemas and migrations into SQLite-compatible SQL.
+A Rust library to translate `PostgreSQL` SQL schemas and migrations into `SQLite`-compatible SQL.
 
-This crate uses `sqlparser` to parse PostgreSQL statements and then translates them into their SQLite equivalents, handling data type conversions and syntax differences.
+This crate uses `sqlparser` to parse `PostgreSQL` statements and then translates them into their `SQLite` equivalents, handling data type conversions and syntax differences.
 
 ## Features
 
-- **Translation**: Converts PostgreSQL `CREATE TABLE`, `CREATE INDEX`, `CREATE TRIGGER`, and `INSERT` statements to SQLite.
-- **Type Mapping**: Automatically maps PostgreSQL types to SQLite types:
+- **Translation**: Converts `PostgreSQL` `CREATE TABLE`, `CREATE INDEX`, `CREATE TRIGGER`, and `INSERT` statements to `SQLite`.
+- **Type Mapping**: Automatically maps `PostgreSQL` types to `SQLite` types:
   - `SERIAL`/`SMALLSERIAL` -> `INTEGER`
   - `UUID`/`BYTEA` -> `BLOB`
   - `BOOLEAN` -> `INTEGER`
   - `TIMESTAMP` -> `TEXT`
   - `GEOGRAPHY` -> `BLOB`
 - **Primary Keys**: Automatically adds `NOT NULL` to all Primary Key columns.
-- **UUID Generation**: Converts PostgreSQL default value expressions for UUIDs into pure SQLite equivalents:
+- **UUID Generation**: Converts `PostgreSQL` default value expressions for UUIDs into pure `SQLite` equivalents:
   - `gen_random_uuid()` / `uuidv4()` -> Pure SQL UUID v4 generation (random).
   - `uuidv7()` -> Pure SQL UUID v7 generation (time-ordered).
   - Configurable representation as `BLOB` (16 bytes) or `TEXT` (36 chars).
+  - Configurable extension function to use for UUID generation.
 - **Migration Loading**:
   - Parse raw SQL strings.
   - Read individual SQL files.

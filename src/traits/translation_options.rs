@@ -1,6 +1,6 @@
 //! Submodule defining a set of translation options.
 
-/// Enum for defining the representation of UUIDs in SQLite.
+/// Enum for defining the representation of UUIDs in `SQLite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UuidRepresentation {
     /// Represent UUIDs as BLOBs.
@@ -37,10 +37,10 @@ pub trait TranslationOptions {
     fn should_use_pure_sql_for_uuid(&self) -> bool;
 
     #[must_use]
-    /// Sets the option to specify the representation of UUIDs in SQLite.
+    /// Sets the option to specify the representation of UUIDs in `SQLite`.
     fn with_uuid_representation(self, representation: UuidRepresentation) -> Self;
 
-    /// Returns the representation of UUIDs in SQLite.
+    /// Returns the representation of UUIDs in `SQLite`.
     fn get_uuid_representation(&self) -> Option<UuidRepresentation>;
 
     #[must_use]

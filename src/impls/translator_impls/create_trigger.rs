@@ -1,15 +1,110 @@
-use sql_traits::structs::ParserDB;
-use sqlparser::ast::{ConditionalStatements, CreateTrigger, DropTrigger, TriggerExecBodyType};
+use sql_traits::{
+    structs::ParserDB,
+    traits::{ColumnLike, TriggerLike},
+};
+use sqlparser::{
+    ast::{
+        Assignment, AssignmentTarget, BinaryOperator, ConditionalStatements, CreateTrigger,
+        DropTrigger, Expr, Ident, ObjectName, ObjectNamePart, Statement, TableFactor,
+        TableWithJoins, TriggerExecBodyType, Update, helpers::attached_token::AttachedToken,
+    },
+    keywords::Keyword,
+    tokenizer::{Token, TokenWithSpan, Word},
+};
 
 use crate::{
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translator::Translator},
 };
 
+fn generate_maintenance_trigger_body(
+    trigger: &CreateTrigger,
+    schema: &ParserDB,
+) -> sqlparser::ast::BeginEndStatements {
+    let assignments = trigger
+        .maintenance_assignments(schema)
+        .map(|(col, expr)| {
+            Assignment {
+                target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
+                    Ident::new(col.column_name()),
+                )])),
+                value: expr,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let update_stmt = Statement::Update(Update {
+        update_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
+            value: "UPDATE".into(),
+            quote_style: None,
+            keyword: Keyword::UPDATE,
+        }))),
+        table: TableWithJoins {
+            relation: TableFactor::Table {
+                name: trigger.table_name.clone(),
+                alias: None,
+                args: None,
+                with_hints: vec![],
+                version: None,
+                partitions: vec![],
+                json_path: None,
+                sample: None,
+                index_hints: vec![],
+                with_ordinality: false,
+            },
+            joins: vec![],
+        },
+        assignments,
+        from: None,
+        selection: Some(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("rowid"))),
+            op: BinaryOperator::Eq,
+            right: Box::new(Expr::CompoundIdentifier(vec![Ident::new("OLD"), Ident::new("rowid")])),
+        }),
+        returning: None,
+        or: None,
+        limit: None,
+        optimizer_hint: None,
+    });
+
+    sqlparser::ast::BeginEndStatements {
+        begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
+            value: "BEGIN".into(),
+            quote_style: None,
+            keyword: Keyword::BEGIN,
+        }))),
+        statements: vec![update_stmt],
+        end_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
+            value: "END".into(),
+            quote_style: None,
+            keyword: Keyword::END,
+        }))),
+    }
+}
+
+fn generate_standard_trigger_body(
+    exec_body: &sqlparser::ast::TriggerExecBody,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::BeginEndStatements>, crate::errors::Error> {
+    let function_name = exec_body.func_desc.name.clone();
+    if let Some(mut body) = schema.function_body(&function_name.to_string()) {
+        let mut new_statements = Vec::new();
+        for stmt in body.statements {
+            let translated_stmts = stmt.translate(schema, options)?;
+            new_statements.extend(translated_stmts);
+        }
+        body.statements = new_statements;
+        Ok(Some(body))
+    } else {
+        Ok(None)
+    }
+}
+
 impl Translator for CreateTrigger {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
-    type SQLiteEntry = (Option<DropTrigger>, Self);
+    type SQLiteEntry = Option<(Option<DropTrigger>, Self)>;
 
     fn translate(
         &self,
@@ -54,12 +149,14 @@ impl Translator for CreateTrigger {
             )));
         }
 
-        let function_name = exec_body.func_desc.name;
-        let function_body = schema.function_body(&function_name.to_string()).ok_or_else(|| {
-            crate::errors::Error::UnknownPostgresFeature(format!(
-                "Trigger function `{function_name}` is not defined"
-            ))
-        })?;
+        let function_body = if self.is_maintenance_trigger(schema) {
+            generate_maintenance_trigger_body(self, schema)
+        } else {
+            match generate_standard_trigger_body(&exec_body, schema, options)? {
+                Some(body) => body,
+                None => return Ok(None),
+            }
+        };
 
         let maybe_drop_trigger = or_replace.then(|| {
             DropTrigger {
@@ -88,7 +185,7 @@ impl Translator for CreateTrigger {
             )));
         }
 
-        Ok((
+        Ok(Some((
             maybe_drop_trigger,
             CreateTrigger {
                 or_alter,
@@ -112,6 +209,6 @@ impl Translator for CreateTrigger {
                 statements: Some(ConditionalStatements::BeginEnd(function_body)),
                 characteristics: None,
             },
-        ))
+        )))
     }
 }

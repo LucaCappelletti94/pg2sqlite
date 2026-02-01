@@ -1,4 +1,4 @@
-//! Tests for explicit UUID version overrides (gen_random_uuid/uuidv4 -> V4,
+//! Tests for explicit UUID version overrides (`gen_random_uuid/uuidv4` -> V4,
 //! uuidv7 -> V7).
 
 use pg2sqlite::{pg2sqlite::Pg2Sqlite, prelude::*};

@@ -7,7 +7,7 @@ use crate::traits::{TranslationOptions, UuidRepresentation};
 pub struct Pg2SqliteOptions {
     /// Whether to drop check constraints containing unsupported functions.
     remove_unsupported_check_constraints: bool,
-    /// The representation of UUIDs in SQLite.
+    /// The representation of UUIDs in `SQLite`.
     uuid_representation: Option<UuidRepresentation>,
     /// Whether to use pure SQL for UUID generation.
     use_pure_sql_for_uuid: bool,

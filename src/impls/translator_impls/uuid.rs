@@ -1,7 +1,7 @@
-//! Helpers for generating UUIDs in Pure SQL (SQLite compatible).
+//! Helpers for generating UUIDs in Pure SQL (`SQLite` compatible).
 //!
 //! This module contains helper functions that construct `sqlparser::ast::Expr`
-//! nodes representing complex SQLite expressions for generating UUIDs (v4 and
+//! nodes representing complex `SQLite` expressions for generating UUIDs (v4 and
 //! v7).
 
 use sqlparser::ast::{
@@ -115,6 +115,7 @@ fn unix_ms() -> Expr {
         expr: box_expr(mul(nested(diff), ms_per_day)),
         data_type: DataType::Integer(None),
         format: None,
+        array: false,
         kind: CastKind::Cast,
     }
 }

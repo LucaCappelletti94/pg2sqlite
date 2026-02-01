@@ -8,6 +8,7 @@ mod create_index;
 mod create_table;
 mod create_trigger;
 mod data_type;
+mod delete;
 mod expr;
 mod function;
 mod index_column;

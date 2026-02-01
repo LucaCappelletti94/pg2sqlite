@@ -1,15 +1,14 @@
 //! Submodule defining a schema for the translation between `PostgreSQL` and
 //! `SQLite`.
 
-use sql_traits::traits::DatabaseLike;
+use sql_traits::traits::{DatabaseLike, FunctionLike};
 use sqlparser::{
     ast::{
-        BeginEndStatements, CreateFunction, CreateFunctionBody, CreateTable, DollarQuotedString,
-        Expr, ReturnStatement, ReturnStatementValue, Statement, Value, ValueWithSpan,
-        helpers::attached_token::AttachedToken,
+        BeginEndStatements, CreateFunction, CreateTable, ReturnStatement, ReturnStatementValue,
+        Statement, helpers::attached_token::AttachedToken,
     },
     keywords::Keyword,
-    tokenizer::{Token, TokenWithSpan, Word},
+    tokenizer::{Token, TokenWithSpan, Tokenizer, Word},
 };
 
 /// Trait to define a schema for the translation between `PostgreSQL` and
@@ -23,68 +22,61 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
     /// * `name` - The name of the function to be searched.
     fn function_body(&self, name: &str) -> Option<BeginEndStatements> {
         let function = self.function(name)?;
-        let function_body = function.function_body.as_ref()?;
-        match function_body {
-            CreateFunctionBody::AsBeginEnd(body) => Some(body.clone()),
-            CreateFunctionBody::AsBeforeOptions {
-                body:
-                    Expr::Value(ValueWithSpan {
-                        value:
-                            Value::DollarQuotedString(DollarQuotedString { value: maybe_body, tag: _ }),
-                        span: _,
-                    }),
-                ..
-            } => {
-                // We strip spaces and semicolons from the body.
-                let maybe_body = maybe_body.trim().trim_end_matches(';').trim();
+        let function_body = function.body()?;
 
-                // We strip the `BEGIN` and `END` tokens, as they are not part of the
-                // actual body.
-                let maybe_body = maybe_body
-                    .strip_prefix("BEGIN")
-                    .expect("Function body should start with BEGIN")
-                    .strip_suffix("END")
-                    .expect("Function body should end with END")
-                    .trim();
+        // We strip spaces and semicolons from the body.
+        let maybe_body = function_body.trim().trim_end_matches(';').trim();
 
-                let mut statements = sqlparser::parser::Parser::parse_sql(
-                    &sqlparser::dialect::PostgreSqlDialect {},
-                    maybe_body,
-                )
-                .unwrap_or_else(|_| panic!("Failed to parse function body: {maybe_body}"));
+        let dialect = sqlparser::dialect::PostgreSqlDialect {};
+        let tokens = Tokenizer::new(&dialect, maybe_body).tokenize().unwrap_or_else(|e| {
+            panic!("Failed to tokenize function body: {maybe_body}. Error: {e:?}")
+        });
 
-                // The function body may end with a `RETURN NEW;` or `RETURN OLD;` statement.
-                // If that's the case, we remove it.
-                if let Some(Statement::Return(ReturnStatement {
-                    value: Some(ReturnStatementValue::Expr(expr)),
-                })) = statements.last()
-                {
-                    let string_expr = expr.to_string();
-                    if string_expr == "NEW" || string_expr == "OLD" {
-                        statements.pop();
-                    }
-                }
+        let begin_idx = tokens
+            .iter()
+            .position(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::BEGIN))
+            .unwrap_or_else(|| panic!("Function body should start with BEGIN. Is: {maybe_body}"));
 
-                Some(BeginEndStatements {
-                    begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-                        value: "BEGIN".into(),
-                        quote_style: None,
-                        keyword: Keyword::BEGIN,
-                    }))),
-                    statements,
-                    end_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-                        value: "END".into(),
-                        quote_style: None,
-                        keyword: Keyword::END,
-                    }))),
-                })
-            }
-            _ => {
-                unimplemented!(
-                    "Function body extraction for definition `{function_body:?}` is not yet implemented.",
-                )
+        // We look for the last END that is a keyword
+        let end_idx = tokens
+            .iter()
+            .rposition(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::END))
+            .unwrap_or_else(|| panic!("Function body should end with END. Is: {maybe_body}"));
+
+        let body_tokens = tokens[begin_idx + 1..end_idx].to_vec();
+
+        let mut statements = sqlparser::parser::Parser::new(&dialect)
+            .with_tokens(body_tokens)
+            .parse_statements()
+            .unwrap_or_else(|e| {
+                panic!("Failed to parse function body statements: {e:?}. Body: {maybe_body}")
+            });
+
+        // The function body may end with a `RETURN NEW;` or `RETURN OLD;` statement.
+        // If that's the case, we remove it.
+        if let Some(Statement::Return(ReturnStatement {
+            value: Some(ReturnStatementValue::Expr(expr)),
+        })) = statements.last()
+        {
+            let string_expr = expr.to_string();
+            if string_expr == "NEW" || string_expr == "OLD" {
+                statements.pop();
             }
         }
+
+        Some(BeginEndStatements {
+            begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
+                value: "BEGIN".into(),
+                quote_style: None,
+                keyword: Keyword::BEGIN,
+            }))),
+            statements,
+            end_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
+                value: "END".into(),
+                quote_style: None,
+                keyword: Keyword::END,
+            }))),
+        })
     }
 }
 
