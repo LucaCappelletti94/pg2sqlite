@@ -259,8 +259,6 @@ impl PlPgSqlPreprocessor {
 
     /// Transforms variable assignments from := to SET syntax.
     fn transform_assignments(body: &str, context: &PlPgSqlContext) -> String {
-        // Pattern: starts at line beginning (after whitespace), variable name, :=,
-        // expression, ; We use a regex to match this pattern
         let mut result = String::new();
         let lines: Vec<&str> = body.lines().collect();
 

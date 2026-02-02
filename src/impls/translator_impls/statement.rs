@@ -1,10 +1,19 @@
 //! Implementation of the [`Translator`] trait for the
 //! `Statement` type.
 
-use sql_traits::structs::ParserDB;
+use sql_traits::{
+    structs::ParserDB,
+    traits::{PolicyLike, TableLike},
+};
 use sqlparser::ast::{BinaryOperator, Expr, Statement};
 
-use crate::prelude::{Pg2SqliteOptions, Translator};
+use crate::{
+    impls::translator_impls::rls::{
+        generate_rls_statements, rename_table_for_rls, validate_session_variables,
+    },
+    prelude::{Pg2SqliteOptions, Translator},
+    traits::TranslationOptions,
+};
 
 fn inject_condition(stmt: &mut Statement, condition: Expr) {
     match stmt {
@@ -69,7 +78,45 @@ impl Translator for Statement {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         Ok(match self {
             Self::CreateTable(create_table) => {
-                vec![create_table.translate(schema, options)?.into()]
+                // Check if this table has RLS enabled
+                if create_table.has_row_level_security(schema) {
+                    // Validate all policies have required session variable mappings
+                    for policy in create_table.policies(schema) {
+                        if let Some(using_expr) = policy.using_expression(schema) {
+                            validate_session_variables(
+                                using_expr,
+                                options,
+                                create_table.table_name(),
+                                policy.name(),
+                            )?;
+                        }
+                        if let Some(check_expr) = policy.check_expression(schema) {
+                            validate_session_variables(
+                                check_expr,
+                                options,
+                                create_table.table_name(),
+                                policy.name(),
+                            )?;
+                        }
+                    }
+
+                    // Translate the table first
+                    let translated_table = create_table.translate(schema, options)?;
+
+                    // Rename the table to the inner table name
+                    let inner_table =
+                        rename_table_for_rls(&translated_table, options.get_rls_table_suffix());
+
+                    let mut statements = vec![Statement::CreateTable(inner_table)];
+
+                    // Generate the view and triggers
+                    let rls_statements = generate_rls_statements(create_table, schema, options)?;
+                    statements.extend(rls_statements);
+
+                    statements
+                } else {
+                    vec![create_table.translate(schema, options)?.into()]
+                }
             }
             Self::CreateIndex(create_index) => {
                 create_index.translate(schema, options)?.map(Into::into).into_iter().collect()

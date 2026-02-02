@@ -16,6 +16,7 @@ mod insert;
 mod order_by_expr;
 pub mod plpgsql;
 mod referential_action;
+pub mod rls;
 mod statement;
 mod table_constraint;
 mod uuid;

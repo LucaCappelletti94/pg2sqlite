@@ -1,6 +1,8 @@
 //! Submodule defining a struct providing options for the translation.
 
-use crate::traits::{TranslationOptions, UuidRepresentation};
+use crate::traits::{
+    SessionVariableMapping, SessionVariablePattern, TranslationOptions, UuidRepresentation,
+};
 
 /// Struct to hold options for the translation.
 #[derive(Debug, Clone)]
@@ -14,6 +16,12 @@ pub struct Pg2SqliteOptions {
     /// The name of the function to use for UUID generation (if not using pure
     /// SQL).
     uuid_function_name: String,
+    /// The suffix to append to table names when renaming them for RLS views.
+    rls_table_suffix: String,
+    /// The role name to use when filtering policies.
+    session_user_role: Option<String>,
+    /// Mappings from PostgreSQL session variable patterns to SQLite functions.
+    session_variables: Vec<SessionVariableMapping>,
 }
 
 impl Default for Pg2SqliteOptions {
@@ -23,6 +31,9 @@ impl Default for Pg2SqliteOptions {
             uuid_representation: None,
             use_pure_sql_for_uuid: false,
             uuid_function_name: "uuid".to_string(),
+            rls_table_suffix: "_rls".to_string(),
+            session_user_role: None,
+            session_variables: Vec::new(),
         }
     }
 }
@@ -62,5 +73,54 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn get_uuid_function_name(&self) -> &str {
         &self.uuid_function_name
+    }
+
+    // ==================== RLS Options ====================
+
+    fn with_rls_table_suffix(mut self, suffix: impl Into<String>) -> Self {
+        self.rls_table_suffix = suffix.into();
+        self
+    }
+
+    fn get_rls_table_suffix(&self) -> &str {
+        &self.rls_table_suffix
+    }
+
+    fn with_session_user_role(mut self, role: impl Into<String>) -> Self {
+        self.session_user_role = Some(role.into());
+        self
+    }
+
+    fn get_session_user_role(&self) -> Option<&str> {
+        self.session_user_role.as_deref()
+    }
+
+    fn with_session_variable(mut self, mapping: SessionVariableMapping) -> Self {
+        self.session_variables.push(mapping);
+        self
+    }
+
+    fn get_session_variables(&self) -> &[SessionVariableMapping] {
+        &self.session_variables
+    }
+
+    fn find_session_variable_function(&self, pattern: &SessionVariablePattern) -> Option<&str> {
+        self.session_variables
+            .iter()
+            .find(|m| &m.pg_pattern == pattern)
+            .map(|m| m.sqlite_function.as_str())
+    }
+
+    fn with_session_user(
+        self,
+        variable_name: impl Into<String>,
+        sqlite_function: impl Into<String>,
+    ) -> Self {
+        let func_name = sqlite_function.into();
+        self.with_session_variable(SessionVariableMapping::current_user(func_name.clone()))
+            .with_session_variable(SessionVariableMapping::current_setting(
+                variable_name,
+                func_name,
+            ))
     }
 }

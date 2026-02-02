@@ -36,6 +36,7 @@ pub fn establish_connection_base() -> SqliteConnection {
     connection
 }
 
+#[allow(dead_code)]
 /// Common query result type for counting rows.
 #[derive(QueryableByName, Debug)]
 pub struct Count {

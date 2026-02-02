@@ -6,4 +6,7 @@ pub use translator::Translator;
 pub mod schema;
 pub use schema::Schema;
 pub mod translation_options;
-pub use translation_options::{TranslationOptions, UuidRepresentation, UuidVersion};
+pub use translation_options::{
+    SessionVariableMapping, SessionVariablePattern, TranslationOptions, UuidRepresentation,
+    UuidVersion,
+};

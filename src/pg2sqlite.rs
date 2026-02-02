@@ -248,8 +248,7 @@ impl Pg2Sqlite {
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
         let schema =
-            ParserDB::from_statements(self.pg_statements.clone(), "translation_db".to_owned())
-                .unwrap();
+            ParserDB::from_statements(self.pg_statements.clone(), "translation_db".to_owned())?;
         self.pg_statements
             .iter()
             .map(|statement| statement.translate(&schema, options))
