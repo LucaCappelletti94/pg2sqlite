@@ -7,36 +7,151 @@
 
 A Rust library to translate `PostgreSQL` SQL schemas and migrations into `SQLite`-compatible SQL.
 
-This crate uses `sqlparser` to parse `PostgreSQL` statements and then translates them into their `SQLite` equivalents, handling data type conversions and syntax differences.
+This crate uses [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) to parse `PostgreSQL`-dialect statements and then translates them into their `SQLite` equivalents, handling data type conversions, syntax and semantical differences.
 
 ## Features
 
-- **Translation**: Converts `PostgreSQL` `CREATE TABLE`, `CREATE INDEX`, `CREATE TRIGGER`, and `INSERT` statements to `SQLite`.
-- **Type Mapping**: Automatically maps `PostgreSQL` types to `SQLite` types:
-  - `SERIAL`/`SMALLSERIAL` -> `INTEGER`
-  - `UUID`/`BYTEA` -> `BLOB`
-  - `BOOLEAN` -> `INTEGER`
-  - `TIMESTAMP` -> `TEXT`
-  - `GEOGRAPHY` -> `BLOB`
-- **Primary Keys**: Automatically adds `NOT NULL` to all Primary Key columns.
-- **UUID Generation**: Converts `PostgreSQL` default value expressions for UUIDs into pure `SQLite` equivalents:
-  - `gen_random_uuid()` / `uuidv4()` -> Pure SQL UUID v4 generation (random).
-  - `uuidv7()` -> Pure SQL UUID v7 generation (time-ordered).
-  - Configurable representation as `BLOB` (16 bytes) or `TEXT` (36 chars).
-  - Configurable extension function to use for UUID generation.
-- **Migration Loading**:
-  - Parse raw SQL strings.
-  - Read individual SQL files.
-  - Recursively load `up.sql` migration files from a directory.
-  - **Git Integration**: Clone a git repository and load `up.sql` migrations directly.
+### Statement Translation
+
+Converts `PostgreSQL` statements to `SQLite`:
+
+- `CREATE TABLE` — with automatic type mapping and `STRICT` tables
+- `CREATE INDEX`
+- `CREATE TRIGGER` — including PL/pgSQL function bodies
+- `INSERT` — with `ON CONFLICT DO NOTHING` → `OR IGNORE`
+- `UPDATE` and `DELETE` — including `DELETE ... USING` syntax
+- `ALTER TABLE ENABLE ROW LEVEL SECURITY`
+- `CREATE POLICY`
+- `CREATE ROLE`
+- `GRANT` / `REVOKE`
+
+### Type Mapping
+
+Automatically maps `PostgreSQL` types to `SQLite` types:
+
+| PostgreSQL | SQLite |
+|------------|--------|
+| `SERIAL` / `SMALLSERIAL` | `INTEGER` |
+| `UUID` / `BYTEA` | `BLOB` |
+| `BOOLEAN` | `INTEGER` |
+| `TIMESTAMP` / `TIMESTAMPTZ` | `TEXT` |
+| `GEOGRAPHY` | `BLOB` |
+
+### Primary Keys
+
+Automatically adds `NOT NULL` to all Primary Key columns.
+
+### UUID Generation
+
+Translates `PostgreSQL` UUID default expressions to a configurable SQLite function call:
+
+- `gen_random_uuid()` / `uuidv4()` / `uuidv7()` → calls your configured UUID function
+- Configurable representation as `BLOB` (16 bytes) or `TEXT` (36 chars)
+- Configurable extension function name (e.g., `uuid`, `uuidv7`, etc.)
+
+### Row-Level Security (RLS)
+
+Translates `PostgreSQL` RLS policies to `SQLite` using views and `INSTEAD OF` triggers:
+
+1. **Table renaming**: The original table is renamed with a suffix (default `_rls`)
+2. **View creation**: A view with the original table name filters rows based on policies
+3. **INSTEAD OF triggers**: Enforce `INSERT`, `UPDATE`, and `DELETE` policies
+
+```mermaid
+flowchart TB
+    subgraph Input["PostgreSQL RLS Schema"]
+        T1["CREATE TABLE documents"]
+        T2["ALTER TABLE ... ENABLE ROW LEVEL SECURITY"]
+        T3["CREATE POLICY ... FOR SELECT"]
+        T4["CREATE POLICY ... FOR INSERT"]
+    end
+    
+    subgraph Output["SQLite Output"]
+        subgraph Storage["Data Storage"]
+            ST["documents_rls table"]
+        end
+        subgraph Access["Access Layer"]
+            V["documents view"]
+            TI["INSERT trigger"]
+            TU["UPDATE trigger"]
+            TD["DELETE trigger"]
+        end
+        ST --> V
+        V --> TI
+        V --> TU
+        V --> TD
+    end
+    
+    Input --> Output
+```
+
+Session variables are mapped from PostgreSQL patterns to SQLite functions:
+
+```mermaid
+flowchart LR
+    subgraph PostgreSQL["PostgreSQL Session"]
+        CS["current_setting('app.user_id')"]
+        CU["current_user"]
+    end
+    
+    subgraph SQLite["SQLite Function"]
+        SF["current_app_user()"]
+    end
+    
+    CS -->|"mapped to"| SF
+    CU -->|"mapped to"| SF
+```
+
+### Roles and Grants
+
+Parses and uses `CREATE ROLE` and `GRANT` statements to determine table accessibility:
+
+- **No grants**: Table is excluded from translation (server-only tables)
+- **SELECT only**: Table and view created without write triggers (read-only sync)
+- **Full CRUD grants**: Complete RLS treatment with `INSTEAD OF` triggers
+
+```mermaid
+flowchart TD
+    Table["Table with RLS"]
+    
+    Table --> Check{"Grants to Role?"}
+    
+    Check -->|"None"| Skip["Skip table entirely"]
+    Check -->|"SELECT only"| ReadOnly["Create table + view<br/>No write triggers"]
+    Check -->|"Full CRUD"| Full["Create table + view<br/>+ INSTEAD OF triggers"]
+    
+    Skip --> ServerOnly["Server-only table"]
+    ReadOnly --> SyncRead["Read-only sync"]
+    Full --> SyncFull["Full sync with RLS"]
+```
+
+This enables generating SQLite schemas tailored to a specific role's permissions, ideal for client-side replicas that should only see/modify data they're authorized to access.
+
+### PL/pgSQL Trigger Translation
+
+Translates `PostgreSQL` PL/pgSQL trigger functions to `SQLite` trigger bodies:
+
+- Variable declarations and assignments
+- `IF`/`ELSIF`/`ELSE` conditionals
+- `SELECT INTO` variable binding
+- `NEW` and `OLD` record references
+- `RAISE EXCEPTION` → `SELECT RAISE(ABORT, ...)`
+
+### Migration Loading
+
+- Parse raw SQL strings
+- Read individual SQL files
+- Recursively load `up.sql` migration files from a directory
+- **Git Integration**: Clone a git repository and load `up.sql` migrations directly
 
 ## Usage
+
+### Basic Translation
 
 ```rust
 use pg2sqlite::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Define some PostgreSQL SQL
     let pg_sql = r#"
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
@@ -45,13 +160,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         INSERT INTO users (username) VALUES ('alice') ON CONFLICT DO NOTHING;
     "#;
 
-    // Translate to SQLite
     let sqlite_statements = Pg2Sqlite::default()
         .sql(pg_sql)?
         .translate(&Pg2SqliteOptions::default())?;
 
-    // Verify the output
-    // The SERIAL becomes INTEGER, and ON CONFLICT DO NOTHING becomes OR IGNORE (semantically)
     assert_eq!(sqlite_statements.len(), 2);
     
     let create_table = &sqlite_statements[0];
@@ -60,8 +172,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let insert = &sqlite_statements[1];
     assert_eq!(insert.to_string(), "INSERT OR IGNORE INTO users (username) VALUES ('alice')");
     
-    println!("SQLite Statements:\n{}\n{}", create_table, insert);
-    
+    Ok(())
+}
+```
+
+### RLS Translation with Session Variables
+
+```rust
+use pg2sqlite::prelude::*;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pg_sql = r#"
+        CREATE TABLE documents (
+            id UUID PRIMARY KEY DEFAULT uuidv7(),
+            owner_id UUID NOT NULL,
+            title TEXT NOT NULL
+        );
+        ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY documents_select ON documents
+            FOR SELECT USING (owner_id = current_setting('app.user_id')::uuid);
+        CREATE POLICY documents_insert ON documents
+            FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id')::uuid);
+    "#;
+
+    let options = Pg2SqliteOptions::default()
+        .with_uuid_representation(UuidRepresentation::Blob)
+        .with_uuid_function_name("uuidv7".to_string())
+        .with_session_user_role("authenticated")
+        .with_session_variable(SessionVariableMapping::current_setting(
+            "app.user_id",
+            "current_app_user",  // Your SQLite function that returns the current user ID
+        ));
+
+    let sqlite_statements = Pg2Sqlite::default()
+        .sql(pg_sql)?
+        .translate(&options)?;
+
+    // Results in:
+    // 1. CREATE TABLE documents_rls (...) STRICT
+    // 2. CREATE VIEW documents AS SELECT ... FROM documents_rls WHERE owner_id = current_app_user()
+    // 3. CREATE TRIGGER documents_insert_trigger INSTEAD OF INSERT ON documents ...
+
+    Ok(())
+}
+```
+
+### Grant-Based Filtering
+
+```rust
+use pg2sqlite::prelude::*;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pg_sql = r#"
+        CREATE ROLE app_user;
+
+        -- Server-only table (no grants to app_user)
+        CREATE TABLE audit_logs (id UUID PRIMARY KEY, event TEXT);
+
+        -- Read-only reference table
+        CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);
+        GRANT SELECT ON users TO app_user;
+
+        -- User-writable table
+        CREATE TABLE posts (id UUID PRIMARY KEY, author_id UUID, content TEXT);
+        GRANT SELECT, INSERT, UPDATE, DELETE ON posts TO app_user;
+    "#;
+
+    let options = Pg2SqliteOptions::default()
+        .with_uuid_representation(UuidRepresentation::Blob)
+        .with_session_user_role("app_user");  // Filter based on this role's grants
+
+    let sqlite_statements = Pg2Sqlite::default()
+        .sql(pg_sql)?
+        .translate(&options)?;
+
+    // Results in:
+    // - audit_logs: NOT created (no grants to app_user)
+    // - users: Created as read-only (SELECT only)
+    // - posts: Created with full RLS triggers (full CRUD)
+
     Ok(())
 }
 ```
