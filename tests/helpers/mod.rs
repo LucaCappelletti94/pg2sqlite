@@ -1,18 +1,152 @@
 //! Shared test helpers for pg2sqlite integration tests.
 
-use diesel::{prelude::*, sqlite::SqliteConnection};
-use uuid::Uuid;
+use std::cell::RefCell;
 
-/// Implementation of UUIDv7 generation for SQLite.
-pub fn uuidv7_impl() -> Vec<u8> {
-    let utc_now = chrono::Utc::now();
-    let seconds = u64::try_from(utc_now.timestamp()).expect("Went back in time");
-    let subsec_nanos = utc_now.timestamp_subsec_nanos();
-    let counter = 0;
-    let usable_counter_bits = 12;
-    let timestamp =
-        uuid::Timestamp::from_unix_time(seconds, subsec_nanos, counter, usable_counter_bits);
-    Uuid::new_v7(timestamp).as_bytes().to_vec()
+use diesel::{prelude::*, sqlite::SqliteConnection};
+use rosetta_uuid::Uuid;
+
+#[declare_sql_function]
+extern "SQL" {
+    /// Generates a UUIDv7 value as a BLOB.
+    fn uuidv7() -> diesel::sql_types::Binary;
+    /// Returns the current application user ID.
+    fn current_app_user() -> diesel::sql_types::Binary;
+}
+
+// ============================================================================
+// Diesel Schema Definitions for RLS backing tables
+// ============================================================================
+
+diesel::table! {
+    /// The backing table for users (read-only via view).
+    users_rls (id) {
+        id -> Binary,
+        username -> Text,
+        email -> Text,
+    }
+}
+
+diesel::table! {
+    /// The backing table for posts (writable via view with RLS).
+    posts_rls (id) {
+        id -> Binary,
+        author_id -> Binary,
+        title -> Text,
+        content -> Nullable<Text>,
+        created_by -> Binary,
+    }
+}
+
+diesel::joinable!(posts_rls -> users_rls (author_id));
+diesel::allow_tables_to_appear_in_same_query!(users_rls, posts_rls);
+
+// ============================================================================
+// Model Structs
+// ============================================================================
+
+/// A user in the system.
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, PartialEq, Eq)]
+#[diesel(table_name = users_rls)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct User {
+    /// The user's unique identifier.
+    pub id: Vec<u8>,
+    /// The user's username.
+    pub username: String,
+    /// The user's email address.
+    pub email: String,
+}
+
+impl User {
+    /// Creates a new user with the given details.
+    #[must_use]
+    pub fn new(id: Uuid, username: impl Into<String>, email: impl Into<String>) -> Self {
+        Self { id: id.as_bytes().to_vec(), username: username.into(), email: email.into() }
+    }
+
+    /// Returns the user's ID as a UUID.
+    #[must_use]
+    pub fn uuid(&self) -> Uuid {
+        let bytes: [u8; 16] = self.id.clone().try_into().expect("Invalid UUID length");
+        Uuid::from(bytes)
+    }
+}
+
+/// A post created by a user.
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, PartialEq, Eq)]
+#[diesel(table_name = posts_rls)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct Post {
+    /// The post's unique identifier.
+    pub id: Vec<u8>,
+    /// The author's user ID.
+    pub author_id: Vec<u8>,
+    /// The post title.
+    pub title: String,
+    /// The post content (optional).
+    pub content: Option<String>,
+    /// The user who created this post (for RLS).
+    pub created_by: Vec<u8>,
+}
+
+impl Post {
+    /// Creates a new post with the given details.
+    #[must_use]
+    pub fn new(
+        id: Uuid,
+        author_id: Uuid,
+        title: impl Into<String>,
+        content: Option<String>,
+        created_by: Uuid,
+    ) -> Self {
+        Self {
+            id: id.as_bytes().to_vec(),
+            author_id: author_id.as_bytes().to_vec(),
+            title: title.into(),
+            content,
+            created_by: created_by.as_bytes().to_vec(),
+        }
+    }
+
+    /// Returns the post's ID as a UUID.
+    #[must_use]
+    pub fn uuid(&self) -> Uuid {
+        let bytes: [u8; 16] = self.id.clone().try_into().expect("Invalid UUID length");
+        Uuid::from(bytes)
+    }
+}
+
+// ============================================================================
+// Session User Management
+// ============================================================================
+
+// Thread-local storage for the current session user ID
+thread_local! {
+    static SESSION_USER_ID: RefCell<Option<rosetta_uuid::Uuid>> = const { RefCell::new(None) };
+}
+
+/// Sets the current session user ID for RLS filtering.
+#[allow(dead_code)]
+pub fn set_session_user_id(user_id: &Uuid) {
+    SESSION_USER_ID.with(|u| {
+        *u.borrow_mut() = Some(*user_id);
+    });
+}
+
+/// Clears the current session user ID.
+#[allow(dead_code)]
+fn clear_session_user_id() {
+    SESSION_USER_ID.with(|u| {
+        *u.borrow_mut() = None;
+    });
+}
+
+/// Implementation of the current_app_user function for SQLite.
+/// Returns the current user ID as a blob, or panics if not set.
+fn current_app_user_impl() -> rosetta_uuid::Uuid {
+    SESSION_USER_ID.with(|u| {
+        (*u.borrow()).expect("Session user ID not set - call set_session_user_id() first")
+    })
 }
 
 /// Establishes an in-memory SQLite connection with:
@@ -21,7 +155,7 @@ pub fn uuidv7_impl() -> Vec<u8> {
 ///
 /// Note: The caller must register the uuidv7 function after calling this,
 /// using the `uuidv7_utils` module generated by `#[declare_sql_function]`.
-pub fn establish_connection_base() -> SqliteConnection {
+pub fn establish_connection() -> SqliteConnection {
     let mut connection =
         SqliteConnection::establish(":memory:").expect("Error connecting to in-memory SQLite");
 
@@ -32,6 +166,10 @@ pub fn establish_connection_base() -> SqliteConnection {
     diesel::sql_query("PRAGMA recursive_triggers = ON")
         .execute(&mut connection)
         .expect("Failed to enable recursive triggers");
+
+    uuidv7_utils::register_impl(&connection, Uuid::utc_v7).expect("Failed to register uuidv7");
+    current_app_user_utils::register_impl(&connection, current_app_user_impl)
+        .expect("Failed to register current_app_user");
 
     connection
 }
@@ -50,4 +188,36 @@ pub struct Count {
 pub struct IdResult {
     #[diesel(sql_type = diesel::sql_types::Binary)]
     pub id: Vec<u8>,
+}
+
+// ============================================================================
+// Database Operations
+// ============================================================================
+
+/// Inserts a user into the backing table (simulating sync from server).
+#[allow(dead_code)]
+pub fn insert_user(conn: &mut SqliteConnection, user: &User) -> QueryResult<usize> {
+    diesel::insert_into(users_rls::table).values(user).execute(conn)
+}
+
+/// Inserts a post into the backing table (simulating sync from server).
+#[allow(dead_code)]
+pub fn insert_post_rls(conn: &mut SqliteConnection, post: &Post) -> QueryResult<usize> {
+    diesel::insert_into(posts_rls::table).values(post).execute(conn)
+}
+
+/// Counts rows in the users view.
+#[allow(dead_code)]
+pub fn count_users(conn: &mut SqliteConnection) -> QueryResult<i64> {
+    diesel::sql_query("SELECT COUNT(*) as count FROM users")
+        .get_result::<Count>(conn)
+        .map(|c| c.count)
+}
+
+/// Counts rows in the posts view.
+#[allow(dead_code)]
+pub fn count_posts(conn: &mut SqliteConnection) -> QueryResult<i64> {
+    diesel::sql_query("SELECT COUNT(*) as count FROM posts")
+        .get_result::<Count>(conn)
+        .map(|c| c.count)
 }

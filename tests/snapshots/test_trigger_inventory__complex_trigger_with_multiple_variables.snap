@@ -2,8 +2,8 @@
 source: tests/test_trigger_inventory.rs
 expression: translated_sql
 ---
-CREATE TABLE products (id BLOB PRIMARY KEY NOT NULL, name TEXT NOT NULL, price REAL NOT NULL, initial_stock INTEGER NOT NULL DEFAULT 0)
-CREATE TABLE inventory (id BLOB PRIMARY KEY NOT NULL, product_id BLOB NOT NULL UNIQUE, quantity INTEGER NOT NULL DEFAULT 0, last_updated TEXT DEFAULT CURRENT_TIMESTAMP)
-CREATE TABLE inventory_audit (id BLOB PRIMARY KEY NOT NULL, inventory_id BLOB NOT NULL, product_id BLOB NOT NULL, old_quantity INTEGER, new_quantity INTEGER NOT NULL, change_type TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)
+CREATE TABLE products (id BLOB PRIMARY KEY NOT NULL, name TEXT NOT NULL, price REAL NOT NULL, initial_stock INTEGER NOT NULL DEFAULT 0) STRICT
+CREATE TABLE inventory (id BLOB PRIMARY KEY NOT NULL, product_id BLOB NOT NULL UNIQUE, quantity INTEGER NOT NULL DEFAULT 0, last_updated TEXT DEFAULT CURRENT_TIMESTAMP) STRICT
+CREATE TABLE inventory_audit (id BLOB PRIMARY KEY NOT NULL, inventory_id BLOB NOT NULL, product_id BLOB NOT NULL, old_quantity INTEGER, new_quantity INTEGER NOT NULL, change_type TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP) STRICT
 CREATE TRIGGER create_product_inventory_trigger AFTER INSERT ON products FOR EACH ROW BEGIN INSERT INTO inventory (id, product_id, quantity) WITH v_inventory_id (val) AS (SELECT uuidv7()) SELECT v_inventory_id.val, NEW.id, NEW.initial_stock FROM v_inventory_id WHERE (NOT EXISTS (SELECT 1 FROM inventory WHERE product_id = NEW.id)); END
 CREATE TRIGGER audit_inventory_creation_trigger AFTER INSERT ON inventory FOR EACH ROW BEGIN INSERT INTO inventory_audit (id, inventory_id, product_id, old_quantity, new_quantity, change_type) WITH v_audit_id (val) AS (SELECT uuidv7()) SELECT v_audit_id.val, NEW.id, NEW.product_id, NULL, NEW.quantity, 'INITIAL' FROM v_audit_id WHERE (NOT EXISTS (SELECT 1 FROM inventory_audit WHERE inventory_id = NEW.id AND change_type = 'INITIAL')); END

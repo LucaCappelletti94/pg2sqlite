@@ -11,10 +11,7 @@ pub struct Pg2SqliteOptions {
     remove_unsupported_check_constraints: bool,
     /// The representation of UUIDs in `SQLite`.
     uuid_representation: Option<UuidRepresentation>,
-    /// Whether to use pure SQL for UUID generation.
-    use_pure_sql_for_uuid: bool,
-    /// The name of the function to use for UUID generation (if not using pure
-    /// SQL).
+    /// The name of the function to use for UUID generation.
     uuid_function_name: String,
     /// The suffix to append to table names when renaming them for RLS views.
     rls_table_suffix: String,
@@ -29,7 +26,6 @@ impl Default for Pg2SqliteOptions {
         Self {
             remove_unsupported_check_constraints: false,
             uuid_representation: None,
-            use_pure_sql_for_uuid: false,
             uuid_function_name: "uuid".to_string(),
             rls_table_suffix: "_rls".to_string(),
             session_user_role: None,
@@ -46,15 +42,6 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn should_remove_unsupported_check_constraints(&self) -> bool {
         self.remove_unsupported_check_constraints
-    }
-
-    fn use_pure_sql_for_uuid(mut self) -> Self {
-        self.use_pure_sql_for_uuid = true;
-        self
-    }
-
-    fn should_use_pure_sql_for_uuid(&self) -> bool {
-        self.use_pure_sql_for_uuid
     }
 
     fn with_uuid_representation(mut self, representation: UuidRepresentation) -> Self {

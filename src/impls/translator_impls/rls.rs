@@ -120,12 +120,20 @@ pub fn validate_session_variables<O: TranslationOptions>(
 /// 1. Replacing session variable patterns with their SQLite function
 ///    equivalents
 /// 2. Optionally prefixing column references with NEW. or OLD.
-fn transform_expr<O: TranslationOptions>(
+/// 3. Renaming table references from `table_name` to `inner_table_name` (for
+///    RLS views)
+#[allow(clippy::too_many_lines)]
+fn transform_expr<O: TranslationOptions, DB: DatabaseLike>(
     expr: &Expr,
     options: &O,
-    columns: &[String],
+    table: &DB::Table,
+    schema: &DB,
     prefix: Option<&str>,
-) -> Expr {
+    table_rename: Option<(&str, &str)>,
+) -> Expr
+where
+    DB::Table: TableLike<DB = DB>,
+{
     match expr {
         // Handle current_setting('name')::type -> sqlite_func()
         Expr::Cast { expr: inner, .. } => {
@@ -135,7 +143,7 @@ fn transform_expr<O: TranslationOptions>(
                 return transformed;
             }
             // Recursively transform the inner expression, removing the cast
-            transform_expr(inner, options, columns, prefix)
+            transform_expr(inner, options, table, schema, prefix, table_rename)
         }
 
         // Handle current_setting('name') without cast
@@ -161,7 +169,7 @@ fn transform_expr<O: TranslationOptions>(
 
             // Check if it's a column that needs prefixing
             if let Some(pfx) = prefix
-                && columns.iter().any(|c| c.to_lowercase() == ident_lower)
+                && table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower)
             {
                 return Expr::CompoundIdentifier(vec![Ident::new(pfx), ident.clone()]);
             }
@@ -169,15 +177,41 @@ fn transform_expr<O: TranslationOptions>(
             Expr::Identifier(ident.clone())
         }
 
-        // Handle already-qualified identifiers (e.g., table.column)
-        Expr::CompoundIdentifier(idents) => Expr::CompoundIdentifier(idents.clone()),
+        // Handle already-qualified identifiers (e.g., table.column) - may need table rename or
+        // prefix
+        Expr::CompoundIdentifier(idents) => {
+            if let Some((old_name, new_name)) = table_rename
+                && idents.len() >= 2
+                && idents[0].value.to_lowercase() == old_name.to_lowercase()
+            {
+                // This is a reference to the target table (e.g., ownable_owners.owner_id)
+                // In trigger context with a prefix (NEW/OLD), use NEW.column or OLD.column
+                if let Some(pfx) = prefix {
+                    let mut new_idents = idents.clone();
+                    new_idents[0] = Ident::new(pfx);
+                    return Expr::CompoundIdentifier(new_idents);
+                }
+                // Otherwise rename to the _rls table
+                let mut new_idents = idents.clone();
+                new_idents[0] = Ident::new(new_name);
+                return Expr::CompoundIdentifier(new_idents);
+            }
+            Expr::CompoundIdentifier(idents.clone())
+        }
 
         // Recursively handle binary operations
         Expr::BinaryOp { left, op, right } => {
             Expr::BinaryOp {
-                left: Box::new(transform_expr(left, options, columns, prefix)),
+                left: Box::new(transform_expr(left, options, table, schema, prefix, table_rename)),
                 op: op.clone(),
-                right: Box::new(transform_expr(right, options, columns, prefix)),
+                right: Box::new(transform_expr(
+                    right,
+                    options,
+                    table,
+                    schema,
+                    prefix,
+                    table_rename,
+                )),
             }
         }
 
@@ -185,28 +219,52 @@ fn transform_expr<O: TranslationOptions>(
         Expr::UnaryOp { op, expr: inner } => {
             Expr::UnaryOp {
                 op: *op,
-                expr: Box::new(transform_expr(inner, options, columns, prefix)),
+                expr: Box::new(transform_expr(inner, options, table, schema, prefix, table_rename)),
             }
         }
 
         // Handle nested/parenthesized expressions
         Expr::Nested(inner) => {
-            Expr::Nested(Box::new(transform_expr(inner, options, columns, prefix)))
+            Expr::Nested(Box::new(transform_expr(
+                inner,
+                options,
+                table,
+                schema,
+                prefix,
+                table_rename,
+            )))
         }
 
         // Handle IS NULL / IS NOT NULL
         Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(transform_expr(inner, options, columns, prefix)))
+            Expr::IsNull(Box::new(transform_expr(
+                inner,
+                options,
+                table,
+                schema,
+                prefix,
+                table_rename,
+            )))
         }
         Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(transform_expr(inner, options, columns, prefix)))
+            Expr::IsNotNull(Box::new(transform_expr(
+                inner,
+                options,
+                table,
+                schema,
+                prefix,
+                table_rename,
+            )))
         }
 
         // Handle IN lists
         Expr::InList { expr: inner, list, negated } => {
             Expr::InList {
-                expr: Box::new(transform_expr(inner, options, columns, prefix)),
-                list: list.iter().map(|e| transform_expr(e, options, columns, prefix)).collect(),
+                expr: Box::new(transform_expr(inner, options, table, schema, prefix, table_rename)),
+                list: list
+                    .iter()
+                    .map(|e| transform_expr(e, options, table, schema, prefix, table_rename))
+                    .collect(),
                 negated: *negated,
             }
         }
@@ -214,14 +272,278 @@ fn transform_expr<O: TranslationOptions>(
         // Handle BETWEEN
         Expr::Between { expr: inner, negated, low, high } => {
             Expr::Between {
-                expr: Box::new(transform_expr(inner, options, columns, prefix)),
+                expr: Box::new(transform_expr(inner, options, table, schema, prefix, table_rename)),
                 negated: *negated,
-                low: Box::new(transform_expr(low, options, columns, prefix)),
-                high: Box::new(transform_expr(high, options, columns, prefix)),
+                low: Box::new(transform_expr(low, options, table, schema, prefix, table_rename)),
+                high: Box::new(transform_expr(high, options, table, schema, prefix, table_rename)),
             }
         }
 
+        // Handle EXISTS (subquery) - recursively transform the subquery's selection
+        Expr::Exists { subquery, negated } => {
+            Expr::Exists {
+                subquery: Box::new(transform_query(
+                    subquery,
+                    options,
+                    table,
+                    schema,
+                    prefix,
+                    table_rename,
+                )),
+                negated: *negated,
+            }
+        }
+
+        // Handle subquery expressions
+        Expr::Subquery(subquery) => {
+            Expr::Subquery(Box::new(transform_query(
+                subquery,
+                options,
+                table,
+                schema,
+                prefix,
+                table_rename,
+            )))
+        }
+
         // For any other expression type, return as-is
+        other => other.clone(),
+    }
+}
+
+/// Transforms a Query (used in subqueries) by recursively transforming its
+/// WHERE clause and FROM clause table references.
+///
+/// Inside a trigger context:
+/// - References to the outer table (e.g., `ownables.id`) should become `OLD.id`
+///   or `NEW.id` (using the prefix)
+/// - Other tables in the FROM clause get renamed to `_rls` suffix if they have
+///   RLS
+fn transform_query<O: TranslationOptions, DB: DatabaseLike>(
+    query: &sqlparser::ast::Query,
+    options: &O,
+    table: &DB::Table,
+    schema: &DB,
+    prefix: Option<&str>,
+    outer_table: Option<(&str, &str)>,
+) -> sqlparser::ast::Query
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    let mut transformed = query.clone();
+    let rls_suffix = options.get_rls_table_suffix();
+
+    // Transform the body of the query (SELECT, etc.)
+    if let sqlparser::ast::SetExpr::Select(ref mut select) = *transformed.body {
+        // Collect table renames from the FROM clause
+        let mut subquery_table_renames: Vec<(String, String)> = Vec::new();
+
+        // Rename tables in the FROM clause to use _rls suffix
+        // (In PostgreSQL, RLS policies query raw tables, not RLS-filtered views)
+        for from in &mut select.from {
+            if let sqlparser::ast::TableFactor::Table { name, .. } = &mut from.relation {
+                let old_name = name.to_string();
+                // Skip if already has RLS suffix to prevent double-suffix
+                if old_name.ends_with(rls_suffix) {
+                    subquery_table_renames.push((old_name.clone(), old_name));
+                    continue;
+                }
+                // Only rename tables that have RLS policies (look up in schema)
+                let has_rls =
+                    schema.table(None, &old_name).is_some_and(|t| t.has_row_level_security(schema));
+                if !has_rls {
+                    subquery_table_renames.push((old_name.clone(), old_name));
+                    continue;
+                }
+                let new_name = format!("{old_name}{rls_suffix}");
+                subquery_table_renames.push((old_name, new_name.clone()));
+
+                if let Ok(mut stmts) = sqlparser::parser::Parser::parse_sql(
+                    &sqlparser::dialect::SQLiteDialect {},
+                    &format!("SELECT * FROM {new_name}"),
+                ) && let Some(sqlparser::ast::Statement::Query(q)) = stmts.pop()
+                    && let sqlparser::ast::SetExpr::Select(s) = *q.body
+                    && let Some(f) = s.from.first()
+                    && let sqlparser::ast::TableFactor::Table { name: new_obj_name, .. } =
+                        &f.relation
+                {
+                    *name = new_obj_name.clone();
+                }
+            }
+        }
+
+        // Transform the WHERE clause
+        if let Some(ref selection) = select.selection {
+            let mut transformed_selection = selection.clone();
+
+            // For references to the outer table (e.g., `ownables.id`):
+            // - In trigger context (prefix is Some): convert to OLD.id or NEW.id
+            // - In view context (prefix is None): rename to ownables_rls.id
+            if let Some((outer_table_name, renamed_table_name)) = outer_table {
+                transformed_selection = transform_outer_table_refs(
+                    &transformed_selection,
+                    outer_table_name,
+                    prefix,
+                    Some(renamed_table_name),
+                );
+            }
+
+            // Apply subquery table renames (tables in the FROM clause of this subquery)
+            // We also pass the prefix here to handle unqualified column references
+            // (e.g., `ownable_id` in subquery should become `NEW.ownable_id`)
+            for (old, new) in &subquery_table_renames {
+                transformed_selection = transform_expr(
+                    &transformed_selection,
+                    options,
+                    table,
+                    schema,
+                    prefix, // Pass prefix to handle bare column identifiers
+                    Some((old.as_str(), new.as_str())),
+                );
+            }
+
+            // Transform session variables in the subquery
+            // Also pass prefix for any remaining bare column identifiers
+            transformed_selection =
+                transform_expr(&transformed_selection, options, table, schema, prefix, None);
+
+            select.selection = Some(transformed_selection);
+        }
+    }
+
+    transformed
+}
+
+/// Transforms references to the outer table to use the prefix (OLD/NEW) or
+/// rename.
+///
+/// - If prefix is Some("OLD") or Some("NEW"): `ownables.id` -> `OLD.id` or
+///   `NEW.id`
+/// - If prefix is None: `ownables.id` -> `ownables_rls.id` (using
+///   renamed_table)
+#[allow(clippy::too_many_lines)]
+fn transform_outer_table_refs(
+    expr: &Expr,
+    outer_table_name: &str,
+    prefix: Option<&str>,
+    renamed_table: Option<&str>,
+) -> Expr {
+    match expr {
+        Expr::CompoundIdentifier(idents) => {
+            // Check if this is a reference to the outer table
+            if idents.len() >= 2
+                && idents[0].value.to_lowercase() == outer_table_name.to_lowercase()
+            {
+                let mut new_idents = idents.clone();
+                if let Some(pfx) = prefix {
+                    // In trigger context: ownables.id -> OLD.id or NEW.id
+                    new_idents[0] = Ident::new(pfx);
+                } else if let Some(renamed) = renamed_table {
+                    // In view context: ownables.id -> ownables_rls.id
+                    new_idents[0] = Ident::new(renamed);
+                }
+                return Expr::CompoundIdentifier(new_idents);
+            }
+            Expr::CompoundIdentifier(idents.clone())
+        }
+
+        Expr::BinaryOp { left, op, right } => {
+            Expr::BinaryOp {
+                left: Box::new(transform_outer_table_refs(
+                    left,
+                    outer_table_name,
+                    prefix,
+                    renamed_table,
+                )),
+                op: op.clone(),
+                right: Box::new(transform_outer_table_refs(
+                    right,
+                    outer_table_name,
+                    prefix,
+                    renamed_table,
+                )),
+            }
+        }
+
+        Expr::UnaryOp { op, expr: inner } => {
+            Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(transform_outer_table_refs(
+                    inner,
+                    outer_table_name,
+                    prefix,
+                    renamed_table,
+                )),
+            }
+        }
+
+        Expr::Nested(inner) => {
+            Expr::Nested(Box::new(transform_outer_table_refs(
+                inner,
+                outer_table_name,
+                prefix,
+                renamed_table,
+            )))
+        }
+
+        Expr::IsNull(inner) => {
+            Expr::IsNull(Box::new(transform_outer_table_refs(
+                inner,
+                outer_table_name,
+                prefix,
+                renamed_table,
+            )))
+        }
+
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(transform_outer_table_refs(
+                inner,
+                outer_table_name,
+                prefix,
+                renamed_table,
+            )))
+        }
+
+        Expr::InList { expr: inner, list, negated } => {
+            Expr::InList {
+                expr: Box::new(transform_outer_table_refs(
+                    inner,
+                    outer_table_name,
+                    prefix,
+                    renamed_table,
+                )),
+                list: list
+                    .iter()
+                    .map(|e| transform_outer_table_refs(e, outer_table_name, prefix, renamed_table))
+                    .collect(),
+                negated: *negated,
+            }
+        }
+
+        Expr::Between { expr: inner, negated, low, high } => {
+            Expr::Between {
+                expr: Box::new(transform_outer_table_refs(
+                    inner,
+                    outer_table_name,
+                    prefix,
+                    renamed_table,
+                )),
+                negated: *negated,
+                low: Box::new(transform_outer_table_refs(
+                    low,
+                    outer_table_name,
+                    prefix,
+                    renamed_table,
+                )),
+                high: Box::new(transform_outer_table_refs(
+                    high,
+                    outer_table_name,
+                    prefix,
+                    renamed_table,
+                )),
+            }
+        }
+
         other => other.clone(),
     }
 }
@@ -287,6 +609,7 @@ where
 {
     let table_name = table.table_name();
     let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
+    let table_rename = Some((table_name, inner_table_name.as_str()));
 
     // Collect SELECT policies for this table
     let select_policies: Vec<_> = table
@@ -294,10 +617,9 @@ where
         .filter(|p| matches!(p.command(), CreatePolicyCommand::Select | CreatePolicyCommand::All))
         .collect();
 
-    // Get all column names from the table
-    let columns: Vec<_> = table.columns(schema).map(|c| c.column_name().to_string()).collect();
-
-    let column_list = columns.join(", ");
+    // Get all column names from the table for the SELECT clause
+    let column_list =
+        table.columns(schema).map(|c| c.column_name().to_string()).collect::<Vec<_>>().join(", ");
 
     // Build the WHERE clause by combining all USING expressions
     let where_clause = if select_policies.is_empty() {
@@ -306,8 +628,9 @@ where
         let mut conditions = Vec::new();
         for policy in &select_policies {
             if let Some(using_expr) = policy.using_expression(schema) {
-                // Transform the AST directly, no column prefix needed for view WHERE
-                let transformed = transform_expr(using_expr, options, &columns, None);
+                // Transform the AST, renaming table refs from table_name to inner_table_name
+                let transformed =
+                    transform_expr(using_expr, options, table, schema, None, table_rename);
                 conditions.push(format!("({transformed})"));
             }
         }
@@ -335,6 +658,7 @@ where
 {
     let table_name = table.table_name();
     let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
+    let table_rename = Some((table_name, inner_table_name.as_str()));
 
     // Find INSERT policies
     let insert_policies: Vec<_> = table
@@ -342,9 +666,8 @@ where
         .filter(|p| matches!(p.command(), CreatePolicyCommand::Insert | CreatePolicyCommand::All))
         .collect();
 
-    // Get all column names
+    // Get all column names for the INSERT statement
     let columns: Vec<_> = table.columns(schema).map(|c| c.column_name().to_string()).collect();
-
     let column_list = columns.join(", ");
     let value_list = columns.iter().map(|c| format!("NEW.{c}")).collect::<Vec<_>>().join(", ");
 
@@ -353,7 +676,8 @@ where
         .iter()
         .filter_map(|policy| {
             policy.check_expression(schema).map(|expr| {
-                let transformed = transform_expr(expr, options, &columns, Some("NEW"));
+                let transformed =
+                    transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
                 format!("({transformed})")
             })
         })
@@ -387,6 +711,7 @@ where
 {
     let table_name = table.table_name();
     let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
+    let table_rename = Some((table_name, inner_table_name.as_str()));
 
     // Find UPDATE policies
     let update_policies: Vec<_> = table
@@ -394,7 +719,7 @@ where
         .filter(|p| matches!(p.command(), CreatePolicyCommand::Update | CreatePolicyCommand::All))
         .collect();
 
-    // Get all column names
+    // Get all column names for the SET clause
     let columns: Vec<_> = table.columns(schema).map(|c| c.column_name().to_string()).collect();
 
     // Get primary key columns
@@ -417,7 +742,8 @@ where
         .iter()
         .filter_map(|policy| {
             policy.using_expression(schema).map(|expr| {
-                let transformed = transform_expr(expr, options, &columns, Some("OLD"));
+                let transformed =
+                    transform_expr(expr, options, table, schema, Some("OLD"), table_rename);
                 format!("({transformed})")
             })
         })
@@ -428,7 +754,8 @@ where
         .iter()
         .filter_map(|policy| {
             policy.check_expression(schema).map(|expr| {
-                let transformed = transform_expr(expr, options, &columns, Some("NEW"));
+                let transformed =
+                    transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
                 format!("({transformed})")
             })
         })
@@ -468,6 +795,7 @@ where
 {
     let table_name = table.table_name();
     let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
+    let table_rename = Some((table_name, inner_table_name.as_str()));
 
     // Find DELETE policies
     let delete_policies: Vec<_> = table
@@ -475,7 +803,7 @@ where
         .filter(|p| matches!(p.command(), CreatePolicyCommand::Delete | CreatePolicyCommand::All))
         .collect();
 
-    // Get all column names
+    // Get all column names for the WHERE clause fallback
     let columns: Vec<_> = table.columns(schema).map(|c| c.column_name().to_string()).collect();
 
     // Get primary key columns
@@ -494,7 +822,8 @@ where
         .iter()
         .filter_map(|policy| {
             policy.using_expression(schema).map(|expr| {
-                let transformed = transform_expr(expr, options, &columns, Some("OLD"));
+                let transformed =
+                    transform_expr(expr, options, table, schema, Some("OLD"), table_rename);
                 format!("({transformed})")
             })
         })
@@ -567,9 +896,49 @@ where
     Ok(statements)
 }
 
+/// Generates SQLite statements for a read-only RLS view (no write triggers).
+///
+/// This is used for tables where the session user role only has SELECT
+/// permission. The backing table is created for sync purposes, but no INSTEAD
+/// OF triggers are generated since the user cannot write to this table.
+///
+/// # Errors
+///
+/// Returns an error if the generated SQL cannot be parsed by the SQLite dialect
+/// parser.
+pub fn generate_readonly_rls_statements<O: TranslationOptions, DB: DatabaseLike>(
+    table: &DB::Table,
+    schema: &DB,
+    options: &O,
+) -> Result<Vec<Statement>, Error>
+where
+    DB::Table: TableLike<DB = DB>,
+    DB::Policy: PolicyLike<DB = DB>,
+{
+    let dialect = sqlparser::dialect::SQLiteDialect {};
+    let mut statements = Vec::new();
+
+    // Generate view only (no write triggers)
+    let view_sql = generate_rls_view_sql(table, schema, options)?;
+    let view_stmts = sqlparser::parser::Parser::parse_sql(&dialect, &view_sql)
+        .map_err(|e| Error::UnknownPostgresFeature(format!("Failed to parse view SQL: {e}")))?;
+    statements.extend(view_stmts);
+
+    Ok(statements)
+}
+
 /// Renames a CREATE TABLE statement to use the inner table name for RLS.
+/// Also updates any foreign key references to other RLS tables.
 #[must_use]
-pub fn rename_table_for_rls(create_table: &CreateTable, suffix: &str) -> CreateTable {
+pub fn rename_table_for_rls<O: TranslationOptions, DB: DatabaseLike>(
+    create_table: &CreateTable,
+    options: &O,
+    schema: &DB,
+) -> CreateTable
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    let suffix = options.get_rls_table_suffix();
     let mut renamed = create_table.clone();
     // Get the current table name and append suffix
     let current_name = renamed.name.to_string();
@@ -585,6 +954,32 @@ pub fn rename_table_for_rls(create_table: &CreateTable, suffix: &str) -> CreateT
         && let sqlparser::ast::TableFactor::Table { name, .. } = &from.relation
     {
         renamed.name = name.clone();
+    }
+
+    // Update foreign key references to other RLS tables
+    for column in &mut renamed.columns {
+        for option in &mut column.options {
+            if let sqlparser::ast::ColumnOption::ForeignKey(fk_constraint) = &mut option.option {
+                let fk_table_name = fk_constraint.foreign_table.to_string();
+                // Only update if the referenced table has RLS (look up in schema)
+                let has_rls = schema
+                    .table(None, &fk_table_name)
+                    .is_some_and(|t| t.has_row_level_security(schema));
+                if has_rls {
+                    let new_fk_name = format!("{fk_table_name}{suffix}");
+                    if let Ok(mut stmts) = sqlparser::parser::Parser::parse_sql(
+                        &dialect,
+                        &format!("SELECT * FROM {new_fk_name}"),
+                    ) && let Some(Statement::Query(query)) = stmts.pop()
+                        && let sqlparser::ast::SetExpr::Select(select) = *query.body
+                        && let Some(from) = select.from.first()
+                        && let sqlparser::ast::TableFactor::Table { name, .. } = &from.relation
+                    {
+                        fk_constraint.foreign_table = name.clone();
+                    }
+                }
+            }
+        }
     }
 
     renamed

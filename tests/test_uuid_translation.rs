@@ -13,5 +13,5 @@ fn test_default_gen_random_uuid() {
     assert_eq!(translated.len(), 1);
     let stmt = translated[0].to_string();
 
-    assert_eq!(stmt, "CREATE TABLE users (id BLOB PRIMARY KEY DEFAULT (uuid()) NOT NULL)");
+    assert_eq!(stmt, "CREATE TABLE users (id BLOB PRIMARY KEY DEFAULT (uuid()) NOT NULL) STRICT");
 }

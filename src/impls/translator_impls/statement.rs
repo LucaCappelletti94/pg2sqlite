@@ -3,13 +3,14 @@
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{PolicyLike, TableLike},
+    traits::{DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::{BinaryOperator, Expr, Statement};
 
 use crate::{
     impls::translator_impls::rls::{
-        generate_rls_statements, rename_table_for_rls, validate_session_variables,
+        generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
+        validate_session_variables,
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
@@ -71,6 +72,7 @@ impl Translator for Statement {
     type Options = Pg2SqliteOptions;
     type SQLiteEntry = Vec<Statement>;
 
+    #[allow(clippy::too_many_lines)]
     fn translate(
         &self,
         schema: &Self::Schema,
@@ -78,7 +80,72 @@ impl Translator for Statement {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         Ok(match self {
             Self::CreateTable(create_table) => {
-                // Check if this table has RLS enabled
+                // Check if we need to filter based on grants to a specific role
+                if let Some(role_name) = options.get_session_user_role()
+                    && let Some(role) = schema.role(role_name)
+                {
+                    // Look up the table in the schema to access TableLike methods
+                    if let Some(table) =
+                        schema.table(create_table.table_schema(), create_table.table_name())
+                    {
+                        // If the role has no SELECT permission, skip this table entirely
+                        if !table.can_select(role, schema) {
+                            return Ok(Vec::new());
+                        }
+
+                        // Check if this is a read-only table (SELECT but no write grants)
+                        let is_readonly = !table.can_write(role, schema);
+
+                        // Check if this table has RLS enabled
+                        if table.has_row_level_security(schema) {
+                            // Validate all policies have required session variable mappings
+                            for policy in table.policies(schema) {
+                                if let Some(using_expr) = policy.using_expression(schema) {
+                                    validate_session_variables(
+                                        using_expr,
+                                        options,
+                                        table.table_name(),
+                                        policy.name(),
+                                    )?;
+                                }
+                                if let Some(check_expr) = policy.check_expression(schema) {
+                                    validate_session_variables(
+                                        check_expr,
+                                        options,
+                                        table.table_name(),
+                                        policy.name(),
+                                    )?;
+                                }
+                            }
+
+                            // Translate the table first
+                            let translated_table = create_table.translate(schema, options)?;
+
+                            // Rename the table to the inner table name
+                            let inner_table =
+                                rename_table_for_rls(&translated_table, options, schema);
+
+                            let mut statements = vec![Statement::CreateTable(inner_table)];
+
+                            // Generate the view and triggers (or just view for readonly)
+                            let rls_statements = if is_readonly {
+                                generate_readonly_rls_statements(table, schema, options)?
+                            } else {
+                                generate_rls_statements(table, schema, options)?
+                            };
+                            statements.extend(rls_statements);
+
+                            return Ok(statements);
+                        } else if is_readonly {
+                            // Non-RLS readonly table: just create the table as-is
+                            return Ok(vec![create_table.translate(schema, options)?.into()]);
+                        }
+                        // Non-RLS writable table: fall through to normal
+                        // handling
+                    }
+                }
+
+                // Original logic: Check if this table has RLS enabled
                 if create_table.has_row_level_security(schema) {
                     // Validate all policies have required session variable mappings
                     for policy in create_table.policies(schema) {
@@ -104,8 +171,7 @@ impl Translator for Statement {
                     let translated_table = create_table.translate(schema, options)?;
 
                     // Rename the table to the inner table name
-                    let inner_table =
-                        rename_table_for_rls(&translated_table, options.get_rls_table_suffix());
+                    let inner_table = rename_table_for_rls(&translated_table, options, schema);
 
                     let mut statements = vec![Statement::CreateTable(inner_table)];
 
@@ -121,9 +187,12 @@ impl Translator for Statement {
             Self::CreateIndex(create_index) => {
                 create_index.translate(schema, options)?.map(Into::into).into_iter().collect()
             }
-            Self::CreateFunction(_) | Self::CreateExtension(_) | Self::CreatePolicy(_) => {
-                Vec::new()
-            }
+            Self::CreateFunction(_)
+            | Self::CreateExtension(_)
+            | Self::CreatePolicy(_)
+            | Self::CreateRole(_)
+            | Self::Grant(_)
+            | Self::Revoke(_) => Vec::new(),
             Self::CreateTrigger(create_trigger) => {
                 let maybe_translated = create_trigger.translate(schema, options)?;
                 let mut statements = vec![];

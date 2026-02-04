@@ -5,24 +5,13 @@
 
 mod helpers;
 
-use diesel::{prelude::*, sqlite::SqliteConnection};
-use helpers::{Count, establish_connection_base, uuidv7_impl};
+use diesel::prelude::*;
+use helpers::{Count, establish_connection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
     traits::TranslationOptions,
 };
-
-#[declare_sql_function]
-extern "SQL" {
-    /// Generates a UUIDv7 value.
-    fn uuidv7() -> diesel::sql_types::Binary;
-}
-
-fn establish_connection() -> SqliteConnection {
-    let connection = establish_connection_base();
-    uuidv7_utils::register_impl(&connection, uuidv7_impl).expect("Failed to register uuidv7");
-    connection
-}
+use rosetta_uuid::Uuid;
 
 /// Test a simple trigger with a single IF NOT EXISTS block.
 #[test]
@@ -70,7 +59,7 @@ FOR EACH ROW EXECUTE FUNCTION log_new_order();
     }
 
     // Test: Insert an order - should automatically create a log entry
-    let order_id = uuid::Uuid::new_v4();
+    let order_id = Uuid::new_v4();
     diesel::sql_query("INSERT INTO orders (id, customer_name) VALUES (?, 'Alice')")
         .bind::<diesel::sql_types::Binary, _>(order_id.as_bytes().to_vec())
         .execute(&mut connection)?;
@@ -81,7 +70,7 @@ FOR EACH ROW EXECUTE FUNCTION log_new_order();
     assert_eq!(log_count.count, 1, "Expected 1 log entry");
 
     // Insert another order
-    let order_id_2 = uuid::Uuid::new_v4();
+    let order_id_2 = Uuid::new_v4();
     diesel::sql_query("INSERT INTO orders (id, customer_name) VALUES (?, 'Bob')")
         .bind::<diesel::sql_types::Binary, _>(order_id_2.as_bytes().to_vec())
         .execute(&mut connection)?;

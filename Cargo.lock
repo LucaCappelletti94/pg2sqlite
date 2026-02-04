@@ -71,7 +71,6 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -149,6 +148,7 @@ dependencies = [
  "libsqlite3-sys",
  "sqlite-wasm-rs",
  "time",
+ "uuid",
 ]
 
 [[package]]
@@ -282,6 +282,19 @@ dependencies = [
  "num-traits",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+dependencies = [
+ "cfg-if",
+ "js-sys",
+ "libc",
+ "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -485,7 +498,7 @@ version = "0.1.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9afb3de4395d6b3e67a780b6de64b51c978ecf11cb9a462c66be7d4ca9039d33"
 dependencies = [
- "getrandom",
+ "getrandom 0.3.4",
  "libc",
 ]
 
@@ -658,15 +671,14 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "pg2sqlite"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "diesel",
  "git2",
  "insta",
+ "rosetta-uuid",
  "sql-traits",
  "sqlparser 0.60.0 (git+https://github.com/LucaCappelletti94/sqlparser-rs?branch=dialect-derives)",
  "tempfile",
  "thiserror",
- "uuid",
 ]
 
 [[package]]
@@ -742,6 +754,18 @@ checksum = "76009fbe0614077fc1a2ce255e3a1881a2e3a3527097d5dc6d8212c585e7e38b"
 dependencies = [
  "quote",
  "syn",
+]
+
+[[package]]
+name = "rosetta-uuid"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a2219cf5fb57eb37a261712e6d8826733381750f882982929a6a8b0b22b90a1"
+dependencies = [
+ "chrono",
+ "diesel",
+ "getrandom 0.2.17",
+ "uuid",
 ]
 
 [[package]]
@@ -830,7 +854,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/sql-traits#21df91f71a3a7952624c990cd20c2069fd53d9b3"
+source = "git+https://github.com/earth-metabolome-initiative/sql-traits#d1c31d3e87eb6535415386ef4baa12387d18ef81"
 dependencies = [
  "geometric-traits",
  "git2",
@@ -863,7 +887,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.60.0"
-source = "git+https://github.com/LucaCappelletti94/sqlparser-rs?branch=dialect-derives#679277bffc0d481b986dc9e51ea29db2e73c40f0"
+source = "git+https://github.com/LucaCappelletti94/sqlparser-rs?branch=dialect-derives#ca652610a1a1de3664be97f2871e6e7836c16d04"
 dependencies = [
  "log",
  "recursive",
@@ -872,7 +896,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.60.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#ed1c4e2cee02cecc26cc0a2f3b860ae0a1526cdb"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#3ac567076ce505adb033f08a2044cfe5c3a7b229"
 dependencies = [
  "log",
  "recursive",
@@ -938,7 +962,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "655da9c7eb6305c55742045d5a8d2037996d61d8de95806335c7c86ce0f82e9c"
 dependencies = [
  "fastrand",
- "getrandom",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -1035,8 +1059,9 @@ version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee48d38b119b0cd71fe4141b30f5ba9c7c5d9f4e7a3a8b4a674e4b6ef789976f"
 dependencies = [
- "getrandom",
+ "getrandom 0.3.4",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -1045,6 +1070,12 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasip2"

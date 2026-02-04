@@ -1,12 +1,13 @@
 use sql_traits::{
     structs::ParserDB,
-    traits::{ColumnLike, TriggerLike},
+    traits::{ColumnLike, DatabaseLike, TableLike, TriggerLike},
 };
 use sqlparser::{
     ast::{
         Assignment, AssignmentTarget, BinaryOperator, ConditionalStatements, CreateTrigger,
         DropTrigger, Expr, Ident, ObjectName, ObjectNamePart, Statement, TableFactor,
-        TableWithJoins, TriggerExecBodyType, Update, helpers::attached_token::AttachedToken,
+        TableWithJoins, TriggerExecBodyType, TriggerPeriod, Update,
+        helpers::attached_token::AttachedToken,
     },
     keywords::Keyword,
     tokenizer::{Token, TokenWithSpan, Word},
@@ -14,7 +15,7 @@ use sqlparser::{
 
 use crate::{
     options::Pg2SqliteOptions,
-    traits::{schema::Schema, translator::Translator},
+    traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
 };
 
 fn generate_maintenance_trigger_body(
@@ -101,6 +102,7 @@ impl Translator for CreateTrigger {
     type Options = Pg2SqliteOptions;
     type SQLiteEntry = Option<(Option<DropTrigger>, Self)>;
 
+    #[allow(clippy::too_many_lines)]
     fn translate(
         &self,
         schema: &Self::Schema,
@@ -180,6 +182,29 @@ impl Translator for CreateTrigger {
             )));
         }
 
+        // For BEFORE/AFTER triggers on RLS-protected tables, redirect to the underlying
+        // _rls table. INSTEAD OF triggers are used on the view, but
+        // BEFORE/AFTER triggers must target the actual table (which has been
+        // renamed to table_rls).
+        let redirected_table_name =
+            if matches!(period, Some(TriggerPeriod::Before | TriggerPeriod::After)) {
+                let table_name_str = table_name.to_string();
+                if let Some(table) = schema.table(None, &table_name_str) {
+                    if table.has_row_level_security(schema) {
+                        let rls_suffix = options.get_rls_table_suffix();
+                        ObjectName(vec![ObjectNamePart::Identifier(Ident::new(format!(
+                            "{table_name_str}{rls_suffix}"
+                        )))])
+                    } else {
+                        table_name
+                    }
+                } else {
+                    table_name
+                }
+            } else {
+                table_name
+            };
+
         Ok(Some((
             maybe_drop_trigger,
             CreateTrigger {
@@ -190,7 +215,7 @@ impl Translator for CreateTrigger {
                 name,
                 period,
                 events,
-                table_name,
+                table_name: redirected_table_name,
                 referenced_table_name,
                 referencing,
                 trigger_object,

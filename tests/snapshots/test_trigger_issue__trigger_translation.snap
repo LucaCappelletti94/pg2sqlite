@@ -2,8 +2,8 @@
 source: tests/test_trigger_issue.rs
 expression: generated_sql
 ---
-CREATE TABLE procedure_template_asset_models (id INTEGER PRIMARY KEY NOT NULL, name TEXT, procedure_template_id INTEGER, based_on_id INTEGER, asset_model_id INTEGER)
-CREATE TABLE parent_procedure_templates (parent_id INTEGER NOT NULL, child_id INTEGER NOT NULL, PRIMARY KEY (parent_id, child_id))
-CREATE TABLE next_procedure_templates (parent_id INTEGER NOT NULL, predecessor_id INTEGER NOT NULL, successor_id INTEGER NOT NULL, PRIMARY KEY (parent_id, predecessor_id, successor_id))
+CREATE TABLE procedure_template_asset_models (id INTEGER PRIMARY KEY NOT NULL, name TEXT, procedure_template_id INTEGER, based_on_id INTEGER, asset_model_id INTEGER) STRICT
+CREATE TABLE parent_procedure_templates (parent_id INTEGER NOT NULL, child_id INTEGER NOT NULL, PRIMARY KEY (parent_id, child_id)) STRICT
+CREATE TABLE next_procedure_templates (parent_id INTEGER NOT NULL, predecessor_id INTEGER NOT NULL, successor_id INTEGER NOT NULL, PRIMARY KEY (parent_id, predecessor_id, successor_id)) STRICT
 CREATE TRIGGER before_insert_next_procedure_templates BEFORE INSERT ON next_procedure_templates FOR EACH ROW BEGIN INSERT OR IGNORE INTO parent_procedure_templates (parent_id, child_id) VALUES (NEW.parent_id, NEW.predecessor_id); INSERT OR IGNORE INTO parent_procedure_templates (parent_id, child_id) VALUES (NEW.parent_id, NEW.successor_id); END
 CREATE TRIGGER trg_inherit_procedure_template_asset_models AFTER INSERT ON parent_procedure_templates FOR EACH ROW BEGIN INSERT INTO procedure_template_asset_models (name, procedure_template_id, based_on_id, asset_model_id) SELECT pam.name, NEW.parent_id, pam.id, pam.asset_model_id FROM procedure_template_asset_models pam WHERE pam.procedure_template_id = NEW.child_id; END

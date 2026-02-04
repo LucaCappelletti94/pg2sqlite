@@ -8,14 +8,13 @@
 
 mod helpers;
 
-use std::cell::RefCell;
-
-use diesel::{prelude::*, sqlite::SqliteConnection};
-use helpers::{establish_connection_base, uuidv7_impl};
+use diesel::prelude::*;
+use helpers::establish_connection;
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
     traits::TranslationOptions,
 };
+use rosetta_uuid::Uuid;
 
 /// Diesel table definition for the documents view.
 /// The RLS translation makes this transparent - all operations go through
@@ -38,6 +37,8 @@ mod schema {
 
 use schema::documents;
 
+use crate::helpers::set_session_user_id;
+
 /// Model for querying documents.
 #[derive(Queryable, Insertable, Selectable, Debug)]
 #[diesel(table_name = documents)]
@@ -50,50 +51,6 @@ struct Document {
     title: String,
     /// Document content.
     content: String,
-}
-
-// Thread-local storage for the current session user ID
-thread_local! {
-    static SESSION_USER_ID: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
-}
-
-/// Sets the current session user ID for RLS filtering.
-fn set_session_user_id(user_id: &uuid::Uuid) {
-    SESSION_USER_ID.with(|u| {
-        *u.borrow_mut() = Some(user_id.as_bytes().to_vec());
-    });
-}
-
-/// Clears the current session user ID.
-#[allow(dead_code)]
-fn clear_session_user_id() {
-    SESSION_USER_ID.with(|u| {
-        *u.borrow_mut() = None;
-    });
-}
-
-/// Implementation of the current_app_user function for SQLite.
-/// Returns the current user ID as a blob, or panics if not set.
-fn current_app_user_impl() -> Vec<u8> {
-    SESSION_USER_ID.with(|u| {
-        u.borrow().clone().expect("Session user ID not set - call set_session_user_id() first")
-    })
-}
-
-#[declare_sql_function]
-extern "SQL" {
-    /// Generates a UUIDv7 value.
-    fn uuidv7() -> diesel::sql_types::Binary;
-    /// Returns the current application user ID.
-    fn current_app_user() -> diesel::sql_types::Binary;
-}
-
-fn establish_connection() -> SqliteConnection {
-    let connection = establish_connection_base();
-    uuidv7_utils::register_impl(&connection, uuidv7_impl).expect("Failed to register uuidv7");
-    current_app_user_utils::register_impl(&connection, current_app_user_impl)
-        .expect("Failed to register current_app_user");
-    connection
 }
 
 /// Test that RLS SELECT policy filters rows correctly.
@@ -128,8 +85,8 @@ fn test_rls_select_policy_filters_rows() -> Result<(), Box<dyn std::error::Error
     }
 
     // Create two users
-    let user_alice = uuid::Uuid::new_v4();
-    let user_bob = uuid::Uuid::new_v4();
+    let user_alice = Uuid::new_v4();
+    let user_bob = Uuid::new_v4();
 
     // Insert documents through the RLS view (triggers handle the actual insert)
     // As Alice, insert Alice's documents
@@ -137,13 +94,13 @@ fn test_rls_select_policy_filters_rows() -> Result<(), Box<dyn std::error::Error
     diesel::insert_into(documents::table)
         .values(&[
             Document {
-                id: uuid::Uuid::new_v4().as_bytes().to_vec(),
+                id: Uuid::new_v4().as_bytes().to_vec(),
                 owner_id: user_alice.as_bytes().to_vec(),
                 title: "Alice Doc 1".to_string(),
                 content: "Alice content 1".to_string(),
             },
             Document {
-                id: uuid::Uuid::new_v4().as_bytes().to_vec(),
+                id: Uuid::new_v4().as_bytes().to_vec(),
                 owner_id: user_alice.as_bytes().to_vec(),
                 title: "Alice Doc 2".to_string(),
                 content: "Alice content 2".to_string(),
@@ -155,7 +112,7 @@ fn test_rls_select_policy_filters_rows() -> Result<(), Box<dyn std::error::Error
     set_session_user_id(&user_bob);
     diesel::insert_into(documents::table)
         .values(Document {
-            id: uuid::Uuid::new_v4().as_bytes().to_vec(),
+            id: Uuid::new_v4().as_bytes().to_vec(),
             owner_id: user_bob.as_bytes().to_vec(),
             title: "Bob Doc 1".to_string(),
             content: "Bob content 1".to_string(),
@@ -173,7 +130,7 @@ fn test_rls_select_policy_filters_rows() -> Result<(), Box<dyn std::error::Error
     assert_eq!(bob_count, 1, "Bob should see 1 document, but saw {bob_count}");
 
     // Test: As a new user with no documents, should see 0 docs
-    let user_charlie = uuid::Uuid::new_v4();
+    let user_charlie = Uuid::new_v4();
     set_session_user_id(&user_charlie);
     let charlie_count = documents::table.count().get_result::<i64>(&mut connection)?;
     assert_eq!(charlie_count, 0, "Charlie should see 0 documents, but saw {charlie_count}");
@@ -204,14 +161,14 @@ fn test_rls_insert_policy_enforces_owner() -> Result<(), Box<dyn std::error::Err
         diesel::sql_query(&sql_stmt).execute(&mut connection)?;
     }
 
-    let user_alice = uuid::Uuid::new_v4();
-    let user_bob = uuid::Uuid::new_v4();
+    let user_alice = Uuid::new_v4();
+    let user_bob = Uuid::new_v4();
 
     // Set session as Alice
     set_session_user_id(&user_alice);
 
     // Test: Alice can insert a document with her own owner_id
-    let doc_id = uuid::Uuid::new_v4();
+    let doc_id = Uuid::new_v4();
     let result = diesel::insert_into(documents::table)
         .values(Document {
             id: doc_id.as_bytes().to_vec(),
@@ -223,7 +180,7 @@ fn test_rls_insert_policy_enforces_owner() -> Result<(), Box<dyn std::error::Err
     assert!(result.is_ok(), "Alice should be able to insert a document with her own owner_id");
 
     // Test: Alice cannot insert a document with Bob's owner_id (policy violation)
-    let doc_id2 = uuid::Uuid::new_v4();
+    let doc_id2 = Uuid::new_v4();
     let result = diesel::insert_into(documents::table)
         .values(Document {
             id: doc_id2.as_bytes().to_vec(),
@@ -260,11 +217,11 @@ fn test_rls_update_policy_restricts_updates() -> Result<(), Box<dyn std::error::
         diesel::sql_query(&sql_stmt).execute(&mut connection)?;
     }
 
-    let user_alice = uuid::Uuid::new_v4();
-    let user_bob = uuid::Uuid::new_v4();
+    let user_alice = Uuid::new_v4();
+    let user_bob = Uuid::new_v4();
 
     // Insert documents through the RLS view as each user
-    let alice_doc_id = uuid::Uuid::new_v4();
+    let alice_doc_id = Uuid::new_v4();
     set_session_user_id(&user_alice);
     diesel::insert_into(documents::table)
         .values(Document {
@@ -275,7 +232,7 @@ fn test_rls_update_policy_restricts_updates() -> Result<(), Box<dyn std::error::
         })
         .execute(&mut connection)?;
 
-    let bob_doc_id = uuid::Uuid::new_v4();
+    let bob_doc_id = Uuid::new_v4();
     set_session_user_id(&user_bob);
     diesel::insert_into(documents::table)
         .values(Document {
@@ -348,11 +305,11 @@ fn test_rls_delete_policy_restricts_deletes() -> Result<(), Box<dyn std::error::
         diesel::sql_query(&sql_stmt).execute(&mut connection)?;
     }
 
-    let user_alice = uuid::Uuid::new_v4();
-    let user_bob = uuid::Uuid::new_v4();
+    let user_alice = Uuid::new_v4();
+    let user_bob = Uuid::new_v4();
 
     // Insert documents through the RLS view as each user
-    let alice_doc_id = uuid::Uuid::new_v4();
+    let alice_doc_id = Uuid::new_v4();
     set_session_user_id(&user_alice);
     diesel::insert_into(documents::table)
         .values(Document {
@@ -363,7 +320,7 @@ fn test_rls_delete_policy_restricts_deletes() -> Result<(), Box<dyn std::error::
         })
         .execute(&mut connection)?;
 
-    let bob_doc_id = uuid::Uuid::new_v4();
+    let bob_doc_id = Uuid::new_v4();
     set_session_user_id(&user_bob);
     diesel::insert_into(documents::table)
         .values(Document {
@@ -443,12 +400,12 @@ fn test_rls_all_policy_works_like_individual_policies() -> Result<(), Box<dyn st
         diesel::sql_query(&sql_stmt).execute(&mut connection)?;
     }
 
-    let user_alice = uuid::Uuid::new_v4();
-    let user_bob = uuid::Uuid::new_v4();
+    let user_alice = Uuid::new_v4();
+    let user_bob = Uuid::new_v4();
 
     // Test SELECT: Each user can only see their own documents
     set_session_user_id(&user_alice);
-    let alice_doc_id = uuid::Uuid::new_v4();
+    let alice_doc_id = Uuid::new_v4();
     diesel::insert_into(documents::table)
         .values(Document {
             id: alice_doc_id.as_bytes().to_vec(),
@@ -459,7 +416,7 @@ fn test_rls_all_policy_works_like_individual_policies() -> Result<(), Box<dyn st
         .execute(&mut connection)?;
 
     set_session_user_id(&user_bob);
-    let bob_doc_id = uuid::Uuid::new_v4();
+    let bob_doc_id = Uuid::new_v4();
     diesel::insert_into(documents::table)
         .values(Document {
             id: bob_doc_id.as_bytes().to_vec(),
@@ -481,7 +438,7 @@ fn test_rls_all_policy_works_like_individual_policies() -> Result<(), Box<dyn st
 
     // Test INSERT: Cannot insert with wrong owner_id
     set_session_user_id(&user_alice);
-    let fake_doc_id = uuid::Uuid::new_v4();
+    let fake_doc_id = Uuid::new_v4();
     let result = diesel::insert_into(documents::table)
         .values(Document {
             id: fake_doc_id.as_bytes().to_vec(),

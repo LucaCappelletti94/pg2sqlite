@@ -81,13 +81,6 @@ pub trait TranslationOptions {
     fn should_remove_unsupported_check_constraints(&self) -> bool;
 
     #[must_use]
-    /// Sets the option to use pure SQL for UUID generation.
-    fn use_pure_sql_for_uuid(self) -> Self;
-
-    /// Returns whether to use pure SQL for UUID generation.
-    fn should_use_pure_sql_for_uuid(&self) -> bool;
-
-    #[must_use]
     /// Sets the option to specify the representation of UUIDs in `SQLite`.
     fn with_uuid_representation(self, representation: UuidRepresentation) -> Self;
 

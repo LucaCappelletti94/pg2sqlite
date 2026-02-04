@@ -17,7 +17,11 @@ use super::{
     context::{PlPgSqlContext, VariableBinding},
     cte_builder::CteBuilder,
 };
-use crate::{errors::Error, options::Pg2SqliteOptions, traits::Translator};
+use crate::{
+    errors::Error,
+    options::Pg2SqliteOptions,
+    traits::{TranslationOptions, Translator},
+};
 
 /// Main translator for PL/pgSQL function bodies.
 pub struct PlPgSqlTranslator;
@@ -80,6 +84,11 @@ impl PlPgSqlTranslator {
             // Handle INSERT statements
             Statement::Insert(insert) => {
                 Self::translate_insert_statement(insert, context, schema, options)
+            }
+
+            // Handle Query statements (e.g., WITH RECURSIVE ... INSERT/DELETE)
+            Statement::Query(query) => {
+                Self::translate_query_statement(query, context, schema, options)
             }
 
             // Handle UPDATE and DELETE statements - both need condition injection
@@ -156,6 +165,523 @@ impl PlPgSqlTranslator {
         // TODO: Handle ELSE and ELSIF blocks
 
         Ok(result)
+    }
+
+    /// Translates a Query statement (e.g., WITH RECURSIVE ... INSERT/DELETE).
+    ///
+    /// SQLite does NOT support `WITH` clauses directly in trigger bodies.
+    /// We must transform:
+    ///   `WITH RECURSIVE cte AS (...) INSERT INTO t SELECT ... FROM cte`
+    /// Into:
+    ///   `INSERT INTO t SELECT ... FROM (WITH RECURSIVE cte AS (...) SELECT *
+    /// FROM cte) AS subq`
+    ///
+    /// For DELETE with IN (SELECT ... FROM cte):
+    ///   `WITH RECURSIVE cte AS (...) DELETE FROM t WHERE col IN (SELECT id
+    /// FROM cte)` Stays as-is because the WITH is inside a subquery in the
+    /// WHERE clause.
+    fn translate_query_statement(
+        query: &Query,
+        context: &mut PlPgSqlContext,
+        _schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<Statement>, Error> {
+        // Check if this is a WITH ... INSERT pattern that needs transformation
+        if let Some(with) = &query.with {
+            if let SetExpr::Insert(Statement::Insert(insert)) = &*query.body {
+                return Self::transform_with_insert_to_subquery(with, insert, context, options);
+            }
+            if let SetExpr::Delete(Statement::Delete(delete)) = &*query.body {
+                return Ok(Self::transform_with_delete_to_subquery(with, delete, context, options));
+            }
+        }
+
+        // For other patterns, transform normally
+        let transformed_body = Self::transform_query_body(&query.body, context, options)?;
+
+        let transformed_with = query.with.as_ref().map(|with| {
+            let mut new_with = with.clone();
+            for cte in &mut new_with.cte_tables {
+                Self::transform_cte_query(&mut cte.query, context, options);
+            }
+            new_with
+        });
+
+        let translated_query = Query {
+            with: transformed_with,
+            body: Box::new(transformed_body),
+            order_by: query.order_by.clone(),
+            limit_clause: query.limit_clause.clone(),
+            fetch: query.fetch.clone(),
+            locks: query.locks.clone(),
+            for_clause: query.for_clause.clone(),
+            settings: query.settings.clone(),
+            format_clause: query.format_clause.clone(),
+            pipe_operators: query.pipe_operators.clone(),
+        };
+
+        Ok(vec![Statement::Query(Box::new(translated_query))])
+    }
+
+    /// Transforms `WITH RECURSIVE cte AS (...) INSERT INTO t SELECT ... FROM
+    /// cte` into `INSERT INTO t SELECT * FROM (WITH RECURSIVE cte AS (...)
+    /// SELECT ... FROM cte) AS subq`
+    #[allow(clippy::too_many_lines)]
+    fn transform_with_insert_to_subquery(
+        with: &sqlparser::ast::With,
+        insert: &sqlparser::ast::Insert,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<Statement>, Error> {
+        // Get the source SELECT from the INSERT
+        let Some(source) = &insert.source else {
+            return Err(Error::UnsupportedSQLiteFeature(
+                "WITH ... INSERT without source SELECT not supported".to_string(),
+            ));
+        };
+
+        // Create a new WITH query that wraps the original SELECT
+        let inner_query = Query {
+            with: Some(with.clone()),
+            body: source.body.clone(),
+            order_by: source.order_by.clone(),
+            limit_clause: source.limit_clause.clone(),
+            fetch: source.fetch.clone(),
+            locks: source.locks.clone(),
+            for_clause: source.for_clause.clone(),
+            settings: source.settings.clone(),
+            format_clause: source.format_clause.clone(),
+            pipe_operators: source.pipe_operators.clone(),
+        };
+
+        // Transform NEW/OLD references in the inner query
+        let mut transformed_inner = inner_query;
+        Self::transform_cte_query(&mut transformed_inner, context, options);
+
+        // Get the column list from the original SELECT to preserve
+        let projection: Vec<SelectItem> = match &*source.body {
+            SetExpr::Select(select) => select.projection.clone(),
+            _ => vec![SelectItem::Wildcard(sqlparser::ast::WildcardAdditionalOptions::default())],
+        };
+
+        // Create a new SELECT that just selects * from the subquery
+        // The inner query already has the right columns projected
+        let subquery_alias = "recursive_cte_subquery";
+
+        // We need to determine the column names from the inner projection
+        // and select them from the subquery alias
+        let outer_projection: Vec<SelectItem> = projection
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                match item {
+                    SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                        // Column reference - keep it, prepend alias
+                        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
+                            Ident::new(subquery_alias.to_string()),
+                            ident.clone(),
+                        ]))
+                    }
+                    SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => {
+                        // Compound identifier - just use the last part (column name)
+                        if let Some(col_name) = parts.last() {
+                            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
+                                Ident::new(subquery_alias.to_string()),
+                                col_name.clone(),
+                            ]))
+                        } else {
+                            SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(format!("col{i}"))))
+                        }
+                    }
+                    SelectItem::ExprWithAlias { alias, .. } => {
+                        // Use the alias
+                        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
+                            Ident::new(subquery_alias.to_string()),
+                            alias.clone(),
+                        ]))
+                    }
+                    _ => {
+                        // For other cases (expressions, wildcards), use positional
+                        SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(format!("col{i}"))))
+                    }
+                }
+            })
+            .collect();
+
+        // Simpler approach: just use SELECT * FROM (subquery)
+        let use_wildcard = outer_projection.iter().any(|item| {
+            matches!(item, SelectItem::UnnamedExpr(Expr::Identifier(id)) if id.value.starts_with("col"))
+        });
+
+        let final_projection = if use_wildcard {
+            vec![SelectItem::Wildcard(sqlparser::ast::WildcardAdditionalOptions::default())]
+        } else {
+            outer_projection
+        };
+
+        let new_select = Select {
+            select_token: AttachedToken::empty(),
+            optimizer_hint: None,
+            distinct: None,
+            top: None,
+            top_before_distinct: false,
+            projection: final_projection,
+            into: None,
+            from: vec![TableWithJoins {
+                relation: TableFactor::Derived {
+                    lateral: false,
+                    subquery: Box::new(transformed_inner),
+                    alias: Some(TableAlias {
+                        name: Ident::new(subquery_alias.to_string()),
+                        columns: vec![],
+                        explicit: false,
+                    }),
+                    sample: None,
+                },
+                joins: vec![],
+            }],
+            lateral_views: vec![],
+            prewhere: None,
+            selection: None,
+            group_by: GroupByExpr::Expressions(vec![], vec![]),
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+            named_window: vec![],
+            qualify: None,
+            window_before_qualify: false,
+            value_table_mode: None,
+            connect_by: None,
+            exclude: None,
+            flavor: SelectFlavor::Standard,
+        };
+
+        // Build new source query
+        let new_source = Query {
+            with: None,
+            body: Box::new(SetExpr::Select(Box::new(new_select))),
+            order_by: None,
+            limit_clause: None,
+            fetch: None,
+            locks: vec![],
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: vec![],
+        };
+
+        // Build the new INSERT, handling ON CONFLICT DO NOTHING -> OR IGNORE
+        let mut new_insert = insert.clone();
+        new_insert.source = Some(Box::new(new_source));
+
+        // Check for ON CONFLICT DO NOTHING and convert to OR IGNORE
+        if let Some(sqlparser::ast::OnInsert::OnConflict(conflict)) = &insert.on
+            && conflict.action == sqlparser::ast::OnConflictAction::DoNothing
+        {
+            // Set INSERT OR IGNORE and remove the ON CONFLICT clause
+            new_insert.or = Some(sqlparser::ast::SqliteOnConflict::Ignore);
+            new_insert.on = None;
+        }
+
+        Ok(vec![Statement::Insert(new_insert)])
+    }
+
+    /// Transforms `WITH RECURSIVE cte AS (...) DELETE FROM t WHERE ... IN
+    /// (SELECT FROM cte)` The CTE needs to be moved inside the IN subquery.
+    fn transform_with_delete_to_subquery(
+        with: &sqlparser::ast::With,
+        delete: &sqlparser::ast::Delete,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) -> Vec<Statement> {
+        let mut new_delete = delete.clone();
+
+        // Transform the selection - move WITH into IN subqueries
+        if let Some(selection) = &mut new_delete.selection {
+            Self::inject_with_into_in_subqueries(selection, with, context, options);
+        }
+
+        vec![Statement::Delete(new_delete)]
+    }
+
+    /// Injects a WITH clause into IN subqueries that reference CTEs from that
+    /// WITH.
+    fn inject_with_into_in_subqueries(
+        expr: &mut Expr,
+        with: &sqlparser::ast::With,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) {
+        match expr {
+            Expr::InSubquery { subquery, .. } => {
+                // Check if the subquery references any CTE from the WITH clause
+                let cte_names: Vec<String> =
+                    with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
+
+                if Self::query_references_ctes(subquery, &cte_names) {
+                    // Move the WITH clause into the subquery
+                    let mut new_with = with.clone();
+                    for cte in &mut new_with.cte_tables {
+                        Self::transform_cte_query(&mut cte.query, context, options);
+                    }
+                    subquery.with = Some(new_with);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::inject_with_into_in_subqueries(left, with, context, options);
+                Self::inject_with_into_in_subqueries(right, with, context, options);
+            }
+            Expr::UnaryOp { expr: inner, .. } | Expr::Nested(inner) => {
+                Self::inject_with_into_in_subqueries(inner, with, context, options);
+            }
+            _ => {}
+        }
+    }
+
+    /// Checks if a query references any of the given CTE names.
+    fn query_references_ctes(query: &Query, cte_names: &[String]) -> bool {
+        // Simple check: see if any CTE name appears in the query string
+        let query_str = query.to_string().to_lowercase();
+        cte_names.iter().any(|name| query_str.contains(&name.to_lowercase()))
+    }
+
+    /// Transforms the body of a Query (INSERT, DELETE, SELECT, etc.).
+    fn transform_query_body(
+        body: &SetExpr,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) -> Result<SetExpr, Error> {
+        match body {
+            SetExpr::Insert(Statement::Insert(insert)) => {
+                let transformed_insert =
+                    Self::transform_insert_for_sqlite(insert, context, options);
+                Ok(SetExpr::Insert(Statement::Insert(transformed_insert)))
+            }
+            SetExpr::Delete(Statement::Delete(delete)) => {
+                let transformed_delete =
+                    Self::transform_delete_for_sqlite(delete, context, options);
+                Ok(SetExpr::Delete(Statement::Delete(transformed_delete)))
+            }
+            SetExpr::Select(select) => {
+                let mut transformed_select = (**select).clone();
+                Self::transform_selection(&mut transformed_select.selection, context, options);
+                // Transform FROM clauses
+                for from in &mut transformed_select.from {
+                    Self::transform_table_with_joins(from, context, options);
+                }
+                Ok(SetExpr::Select(Box::new(transformed_select)))
+            }
+            SetExpr::SetOperation { op, set_quantifier, left, right } => {
+                let transformed_left = Self::transform_query_body(left, context, options)?;
+                let transformed_right = Self::transform_query_body(right, context, options)?;
+                Ok(SetExpr::SetOperation {
+                    op: *op,
+                    set_quantifier: *set_quantifier,
+                    left: Box::new(transformed_left),
+                    right: Box::new(transformed_right),
+                })
+            }
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// Transforms a CTE query (used in WITH clauses).
+    fn transform_cte_query(
+        query: &mut Query,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) {
+        // Transform the body
+        if let Ok(transformed_body) = Self::transform_query_body(&query.body, context, options) {
+            *query.body = transformed_body;
+        }
+    }
+
+    /// Transforms an INSERT statement for SQLite compatibility.
+    fn transform_insert_for_sqlite(
+        insert: &sqlparser::ast::Insert,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) -> sqlparser::ast::Insert {
+        let mut new_insert = insert.clone();
+
+        // Transform source query if present
+        if let Some(source) = &mut new_insert.source {
+            if let Ok(transformed_body) = Self::transform_query_body(&source.body, context, options)
+            {
+                *source.body = transformed_body;
+            }
+            // Also transform VALUES - handle NEW/OLD references and UUID functions
+            Self::transform_set_expr(&mut source.body, context, options);
+        }
+
+        new_insert
+    }
+
+    /// Transforms a DELETE statement for SQLite compatibility.
+    fn transform_delete_for_sqlite(
+        delete: &sqlparser::ast::Delete,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) -> sqlparser::ast::Delete {
+        let mut new_delete = delete.clone();
+
+        // Transform selection (WHERE clause)
+        Self::transform_selection(&mut new_delete.selection, context, options);
+
+        // Transform FROM clause (FromTable is an enum wrapping Vec<TableWithJoins>)
+        match &mut new_delete.from {
+            sqlparser::ast::FromTable::WithFromKeyword(tables)
+            | sqlparser::ast::FromTable::WithoutKeyword(tables) => {
+                for from in tables {
+                    Self::transform_table_with_joins(from, context, options);
+                }
+            }
+        }
+
+        new_delete
+    }
+
+    /// Transforms a SetExpr, handling NEW/OLD references and UUID functions.
+    fn transform_set_expr(
+        set_expr: &mut SetExpr,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) {
+        match set_expr {
+            SetExpr::Select(select) => {
+                // Transform projection items
+                for item in &mut select.projection {
+                    if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } =
+                        item
+                    {
+                        Self::transform_expr(expr, context, options);
+                    }
+                }
+                // Transform selection
+                Self::transform_selection(&mut select.selection, context, options);
+                // Transform FROM clauses
+                for from in &mut select.from {
+                    Self::transform_table_with_joins(from, context, options);
+                }
+            }
+            SetExpr::Values(values) => {
+                for row in &mut values.rows {
+                    for expr in row {
+                        Self::transform_expr(expr, context, options);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Transforms table WITH JOINS in FROM clause.
+    fn transform_table_with_joins(
+        table_with_joins: &mut TableWithJoins,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) {
+        // Transform the main table
+        Self::transform_table_factor(&mut table_with_joins.relation, context, options);
+
+        // Transform joined tables
+        for join in &mut table_with_joins.joins {
+            Self::transform_table_factor(&mut join.relation, context, options);
+            // Transform join condition
+            match &mut join.join_operator {
+                sqlparser::ast::JoinOperator::Join(constraint)
+                | sqlparser::ast::JoinOperator::Inner(constraint)
+                | sqlparser::ast::JoinOperator::LeftOuter(constraint)
+                | sqlparser::ast::JoinOperator::RightOuter(constraint)
+                | sqlparser::ast::JoinOperator::FullOuter(constraint) => {
+                    if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
+                        Self::transform_expr(expr, context, options);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Transforms a table factor (table reference).
+    fn transform_table_factor(
+        _factor: &mut TableFactor,
+        _context: &mut PlPgSqlContext,
+        _options: &Pg2SqliteOptions,
+    ) {
+        // Currently no transformation needed for table factors
+        // This could be extended to rename tables if needed
+    }
+
+    /// Transforms an optional selection (WHERE clause).
+    fn transform_selection(
+        selection: &mut Option<Expr>,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) {
+        if let Some(expr) = selection {
+            Self::transform_expr(expr, context, options);
+        }
+    }
+
+    /// Transforms an expression, handling NEW/OLD references and UUID
+    /// functions.
+    fn transform_expr(expr: &mut Expr, context: &mut PlPgSqlContext, options: &Pg2SqliteOptions) {
+        match expr {
+            Expr::CompoundIdentifier(parts) => {
+                // Check if this is a NEW.col or OLD.col reference - keep it as is for SQLite
+                // triggers SQLite supports NEW and OLD directly in triggers
+                if parts.len() == 2 {
+                    let first = parts[0].value.to_uppercase();
+                    if first == "NEW" || first == "OLD" {
+                        // Keep as-is, SQLite supports NEW.col and OLD.col
+                    }
+                }
+            }
+            Expr::Function(func) => {
+                // Transform UUID function names
+                let func_name = func.name.to_string().to_lowercase();
+                if func_name == "gen_random_uuid" || func_name == "uuid_generate_v4" {
+                    let new_name = options.get_uuid_function_name();
+                    func.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(new_name))]);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::transform_expr(left, context, options);
+                Self::transform_expr(right, context, options);
+            }
+            Expr::UnaryOp { expr: inner, .. }
+            | Expr::Nested(inner)
+            | Expr::IsNotNull(inner)
+            | Expr::IsNull(inner) => {
+                Self::transform_expr(inner, context, options);
+            }
+            Expr::InList { expr: inner, list, .. } => {
+                Self::transform_expr(inner, context, options);
+                for item in list {
+                    Self::transform_expr(item, context, options);
+                }
+            }
+            Expr::InSubquery { expr: inner, subquery, .. } => {
+                Self::transform_expr(inner, context, options);
+                // Transform the subquery
+                if let Ok(transformed) =
+                    Self::transform_query_body(&subquery.body, context, options)
+                {
+                    *subquery.body = transformed;
+                }
+            }
+            Expr::Subquery(subquery) => {
+                if let Ok(transformed) =
+                    Self::transform_query_body(&subquery.body, context, options)
+                {
+                    *subquery.body = transformed;
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Translates an INSERT statement with CTE injection for variables.

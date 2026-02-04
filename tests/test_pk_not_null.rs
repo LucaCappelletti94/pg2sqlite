@@ -10,7 +10,7 @@ fn test_pk_simple_int_nullable() {
     assert_eq!(translated.len(), 1);
     assert_eq!(
         translated[0].to_string(),
-        "CREATE TABLE test_int (id INTEGER PRIMARY KEY NOT NULL)"
+        "CREATE TABLE test_int (id INTEGER PRIMARY KEY NOT NULL) STRICT"
     );
 }
 
@@ -22,7 +22,7 @@ fn test_pk_simple_int_not_null() {
     assert_eq!(translated.len(), 1);
     assert_eq!(
         translated[0].to_string(),
-        "CREATE TABLE test_int_nn (id INTEGER PRIMARY KEY NOT NULL)"
+        "CREATE TABLE test_int_nn (id INTEGER PRIMARY KEY NOT NULL) STRICT"
     );
 }
 
@@ -35,8 +35,14 @@ fn test_pk_string_binary_nullable() {
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
     assert_eq!(translated.len(), 2);
-    assert_eq!(translated[0].to_string(), "CREATE TABLE test_text (id TEXT PRIMARY KEY NOT NULL)");
-    assert_eq!(translated[1].to_string(), "CREATE TABLE test_blob (id BLOB PRIMARY KEY NOT NULL)");
+    assert_eq!(
+        translated[0].to_string(),
+        "CREATE TABLE test_text (id TEXT PRIMARY KEY NOT NULL) STRICT"
+    );
+    assert_eq!(
+        translated[1].to_string(),
+        "CREATE TABLE test_blob (id BLOB PRIMARY KEY NOT NULL) STRICT"
+    );
 }
 
 #[test]
@@ -53,6 +59,6 @@ fn test_pk_composite() {
     assert_eq!(translated.len(), 1);
     assert_eq!(
         translated[0].to_string(),
-        "CREATE TABLE test_composite (id1 INTEGER NOT NULL, id2 TEXT NOT NULL, PRIMARY KEY (id1, id2))"
+        "CREATE TABLE test_composite (id1 INTEGER NOT NULL, id2 TEXT NOT NULL, PRIMARY KEY (id1, id2)) STRICT"
     );
 }

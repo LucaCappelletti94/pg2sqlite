@@ -19,4 +19,3 @@ mod referential_action;
 pub mod rls;
 mod statement;
 mod table_constraint;
-mod uuid;

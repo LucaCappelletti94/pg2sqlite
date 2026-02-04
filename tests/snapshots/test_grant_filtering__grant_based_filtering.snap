@@ -1,0 +1,11 @@
+---
+source: tests/test_grant_filtering.rs
+expression: translated_sql
+---
+CREATE TABLE users_rls (id BLOB PRIMARY KEY NOT NULL, username TEXT NOT NULL UNIQUE, email TEXT NOT NULL) STRICT
+CREATE VIEW users AS SELECT id, username, email FROM users_rls WHERE (true)
+CREATE TABLE posts_rls (id BLOB PRIMARY KEY NOT NULL, author_id BLOB NOT NULL REFERENCES users_rls (id), title TEXT NOT NULL, content TEXT, created_by BLOB NOT NULL REFERENCES users_rls (id)) STRICT
+CREATE VIEW posts AS SELECT id, author_id, title, content, created_by FROM posts_rls WHERE (true)
+CREATE TRIGGER posts_insert_trigger INSTEAD OF INSERT ON posts FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.created_by = current_app_user())); INSERT INTO posts_rls (id, author_id, title, content, created_by) VALUES (NEW.id, NEW.author_id, NEW.title, NEW.content, NEW.created_by); END
+CREATE TRIGGER posts_update_trigger INSTEAD OF UPDATE ON posts FOR EACH ROW BEGIN UPDATE posts_rls SET id = NEW.id, author_id = NEW.author_id, title = NEW.title, content = NEW.content, created_by = NEW.created_by WHERE (id = OLD.id) AND ((OLD.created_by = current_app_user())); END
+CREATE TRIGGER posts_delete_trigger INSTEAD OF DELETE ON posts FOR EACH ROW BEGIN DELETE FROM posts_rls WHERE (id = OLD.id) AND ((OLD.created_by = current_app_user())); END

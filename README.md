@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(sqlite_statements.len(), 2);
     
     let create_table = &sqlite_statements[0];
-    assert_eq!(create_table.to_string(), "CREATE TABLE users (id INTEGER PRIMARY KEY NOT NULL, username TEXT NOT NULL)");
+    assert_eq!(create_table.to_string(), "CREATE TABLE users (id INTEGER PRIMARY KEY NOT NULL, username TEXT NOT NULL) STRICT");
 
     let insert = &sqlite_statements[1];
     assert_eq!(insert.to_string(), "INSERT OR IGNORE INTO users (username) VALUES ('alice')");

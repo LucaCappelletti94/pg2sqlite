@@ -2,7 +2,7 @@
 source: tests/test_trigger_shared_uuid.rs
 expression: translated_sql
 ---
-CREATE TABLE entities (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, name TEXT NOT NULL)
-CREATE TABLE ownables (id BLOB PRIMARY KEY REFERENCES entities (id) NOT NULL, owner TEXT NOT NULL)
-CREATE TABLE entity_staging (name TEXT NOT NULL, owner TEXT NOT NULL)
+CREATE TABLE entities (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, name TEXT NOT NULL) STRICT
+CREATE TABLE ownables (id BLOB PRIMARY KEY REFERENCES entities (id) NOT NULL, owner TEXT NOT NULL) STRICT
+CREATE TABLE entity_staging (name TEXT NOT NULL, owner TEXT NOT NULL) STRICT
 CREATE TRIGGER trigger_create_entity_ownable AFTER INSERT ON entity_staging FOR EACH ROW BEGIN INSERT INTO entities (id, name) WITH v_new_id (val) AS (SELECT uuidv7()) SELECT v_new_id.val, NEW.name FROM v_new_id; INSERT INTO ownables (id, owner) WITH v_new_id (val) AS (SELECT (SELECT id FROM entities WHERE rowid = last_insert_rowid())) SELECT v_new_id.val, NEW.owner FROM v_new_id; END

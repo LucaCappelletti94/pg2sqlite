@@ -5,9 +5,8 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, Expr, ForeignKeyConstraint};
 
 use crate::{
-    impls::translator_impls::uuid,
     prelude::{Pg2SqliteOptions, Translator},
-    traits::{TranslationOptions, UuidRepresentation, UuidVersion},
+    traits::TranslationOptions,
 };
 
 impl Translator for ColumnOptionDef {
@@ -39,47 +38,16 @@ impl Translator for ColumnOptionDef {
                                 option: ColumnOption::Default(Expr::Function(func.clone())),
                             }));
                         }
-                        // We translate `gen_random_uuid()`/`uuidv4()` to pure SQL V4 and `uuidv7()`
-                        // to pure SQL V7.
+                        // Translate UUID functions to use the configured function name
                         let func_name =
                             func.name.0.first().and_then(|s| Some(s.as_ident()?.value.as_str()));
                         if let Some(name) = func_name {
-                            let target_version = match name.to_lowercase().as_str() {
-                                "gen_random_uuid" | "uuidv4" => Some(UuidVersion::V4),
-                                "uuidv7" => Some(UuidVersion::V7),
-                                _ => None,
-                            };
+                            let is_uuid_func = matches!(
+                                name.to_lowercase().as_str(),
+                                "gen_random_uuid" | "uuidv4" | "uuidv7"
+                            );
 
-                            if let Some(version) = target_version {
-                                if options.should_use_pure_sql_for_uuid() {
-                                    let repr = options.get_uuid_representation().ok_or_else(|| {
-                                        crate::errors::Error::UnsupportedSQLiteFeature(
-                                            "UUID translation requires specifying a representation (TEXT or BLOB)".to_string(),
-                                        )
-                                    })?;
-
-                                    let parsed = match (version, repr) {
-                                        (UuidVersion::V4, UuidRepresentation::Text) => {
-                                            uuid::generate_uuid_v4_text()
-                                        }
-                                        (UuidVersion::V4, UuidRepresentation::Blob) => {
-                                            uuid::generate_uuid_v4_blob()
-                                        }
-                                        (UuidVersion::V7, UuidRepresentation::Text) => {
-                                            uuid::generate_uuid_v7_text()
-                                        }
-                                        (UuidVersion::V7, UuidRepresentation::Blob) => {
-                                            uuid::generate_uuid_v7_blob()
-                                        }
-                                    };
-
-                                    return Ok(Some(ColumnOptionDef {
-                                        name: self.name.clone(),
-                                        option: ColumnOption::Default(Expr::Nested(Box::new(
-                                            parsed,
-                                        ))),
-                                    }));
-                                }
+                            if is_uuid_func {
                                 let mut new_func = func.clone();
                                 new_func.name.0 = vec![sqlparser::ast::ObjectNamePart::Identifier(
                                     sqlparser::ast::Ident::new(options.get_uuid_function_name()),

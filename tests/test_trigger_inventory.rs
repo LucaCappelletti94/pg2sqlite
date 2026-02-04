@@ -6,25 +6,13 @@
 
 mod helpers;
 
-use diesel::{prelude::*, sqlite::SqliteConnection};
-use helpers::{Count, establish_connection_base, uuidv7_impl};
+use diesel::prelude::*;
+use helpers::{Count, establish_connection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
     traits::TranslationOptions,
 };
-
-#[declare_sql_function]
-extern "SQL" {
-    /// Generates a UUIDv7 value.
-    fn uuidv7() -> diesel::sql_types::Binary;
-}
-
-fn establish_connection() -> SqliteConnection {
-    let connection = establish_connection_base();
-    uuidv7_utils::register_impl(&connection, uuidv7_impl).expect("Failed to register uuidv7");
-    connection
-}
-
+use rosetta_uuid::Uuid;
 /// Test a complex trigger scenario with multiple tables and cascading effects.
 #[test]
 #[allow(clippy::too_many_lines)]
@@ -134,7 +122,7 @@ FOR EACH ROW EXECUTE FUNCTION audit_inventory_creation();
     }
 
     // Test 1: Insert a product with initial stock of 100
-    let product_id_1 = uuid::Uuid::new_v4();
+    let product_id_1 = Uuid::new_v4();
     diesel::sql_query(
         "INSERT INTO products (id, name, price, initial_stock) VALUES (?, 'Widget A', 19.99, 100)",
     )
@@ -171,7 +159,7 @@ FOR EACH ROW EXECUTE FUNCTION audit_inventory_creation();
     assert_eq!(audit_info[0].change_type, "INITIAL");
 
     // Test 2: Insert another product with different initial stock
-    let product_id_2 = uuid::Uuid::new_v4();
+    let product_id_2 = Uuid::new_v4();
     diesel::sql_query(
         "INSERT INTO products (id, name, price, initial_stock) VALUES (?, 'Gadget B', 49.99, 50)",
     )

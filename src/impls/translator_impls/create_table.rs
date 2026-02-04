@@ -32,6 +32,8 @@ impl Translator for CreateTable {
                 .into_iter()
                 .flatten()
                 .collect(),
+            // SQLite STRICT mode enforces type checking
+            strict: true,
             ..self.clone()
         };
 

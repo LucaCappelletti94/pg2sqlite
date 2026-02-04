@@ -3,24 +3,12 @@
 
 mod helpers;
 
-use diesel::{prelude::*, sqlite::SqliteConnection};
-use helpers::{Count, IdResult, establish_connection_base, uuidv7_impl};
+use diesel::prelude::*;
+use helpers::{Count, IdResult, establish_connection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
     traits::TranslationOptions,
 };
-
-#[declare_sql_function]
-extern "SQL" {
-    /// Generates a UUIDv7 value.
-    fn uuidv7() -> diesel::sql_types::Binary;
-}
-
-fn establish_connection() -> SqliteConnection {
-    let connection = establish_connection_base();
-    uuidv7_utils::register_impl(&connection, uuidv7_impl).expect("Failed to register uuidv7");
-    connection
-}
 
 /// Test that the trigger translation generates the last_insert_rowid() pattern
 /// for sharing UUIDs across multiple INSERTs.

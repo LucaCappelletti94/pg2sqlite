@@ -7,24 +7,13 @@
 
 mod helpers;
 
-use diesel::{prelude::*, sqlite::SqliteConnection};
-use helpers::{Count, establish_connection_base, uuidv7_impl};
+use diesel::prelude::*;
+use helpers::{Count, establish_connection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
     traits::TranslationOptions,
 };
-
-#[declare_sql_function]
-extern "SQL" {
-    /// Generates a UUIDv7 value.
-    fn uuidv7() -> diesel::sql_types::Binary;
-}
-
-fn establish_connection() -> SqliteConnection {
-    let connection = establish_connection_base();
-    uuidv7_utils::register_impl(&connection, uuidv7_impl).expect("Failed to register uuidv7");
-    connection
-}
+use rosetta_uuid::Uuid;
 
 /// Test a trigger that:
 /// 1. Fetches context via SELECT INTO from related tables
@@ -116,8 +105,8 @@ FOR EACH ROW EXECUTE FUNCTION log_task_creation();
     }
 
     // Setup: Create a project
-    let project_id = uuid::Uuid::new_v4();
-    let owner_id = uuid::Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let owner_id = Uuid::new_v4();
     let priority = 5;
 
     diesel::sql_query(
@@ -139,7 +128,7 @@ FOR EACH ROW EXECUTE FUNCTION log_task_creation();
 
     // TEST: Insert a task - trigger should create a task_log with context from
     // project
-    let task_id = uuid::Uuid::new_v4();
+    let task_id = Uuid::new_v4();
     diesel::sql_query("INSERT INTO tasks (id, project_id, title) VALUES (?, ?, 'Test Task')")
         .bind::<diesel::sql_types::Binary, _>(task_id.as_bytes().to_vec())
         .bind::<diesel::sql_types::Binary, _>(project_id.as_bytes().to_vec())
@@ -169,7 +158,7 @@ FOR EACH ROW EXECUTE FUNCTION log_task_creation();
     );
 
     // TEST 2: Insert another task for the same project
-    let task_id_2 = uuid::Uuid::new_v4();
+    let task_id_2 = Uuid::new_v4();
     diesel::sql_query("INSERT INTO tasks (id, project_id, title) VALUES (?, ?, 'Test Task 2')")
         .bind::<diesel::sql_types::Binary, _>(task_id_2.as_bytes().to_vec())
         .bind::<diesel::sql_types::Binary, _>(project_id.as_bytes().to_vec())
@@ -293,9 +282,9 @@ FOR EACH ROW EXECUTE FUNCTION audit_team_membership();
     }
 
     // Setup: Create org -> team -> member
-    let org_id = uuid::Uuid::new_v4();
-    let team_id = uuid::Uuid::new_v4();
-    let member_id = uuid::Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let team_id = Uuid::new_v4();
+    let member_id = Uuid::new_v4();
     let org_level = 3;
 
     diesel::sql_query("INSERT INTO organizations (id, name, level) VALUES (?, 'Test Org', ?)")
@@ -319,7 +308,7 @@ FOR EACH ROW EXECUTE FUNCTION audit_team_membership();
     assert_eq!(audit_count_before.count, 0, "Should have 0 audit entries before");
 
     // TEST: Add member to team - should trigger 2 audit entries (added + verified)
-    let membership_id = uuid::Uuid::new_v4();
+    let membership_id = Uuid::new_v4();
     diesel::sql_query("INSERT INTO team_members (id, team_id, member_id) VALUES (?, ?, ?)")
         .bind::<diesel::sql_types::Binary, _>(membership_id.as_bytes().to_vec())
         .bind::<diesel::sql_types::Binary, _>(team_id.as_bytes().to_vec())
@@ -350,7 +339,7 @@ FOR EACH ROW EXECUTE FUNCTION audit_team_membership();
     // TEST 2: Try to add the same member again (should be blocked by UNIQUE)
     let result =
         diesel::sql_query("INSERT INTO team_members (id, team_id, member_id) VALUES (?, ?, ?)")
-            .bind::<diesel::sql_types::Binary, _>(uuid::Uuid::new_v4().as_bytes().to_vec())
+            .bind::<diesel::sql_types::Binary, _>(Uuid::new_v4().as_bytes().to_vec())
             .bind::<diesel::sql_types::Binary, _>(team_id.as_bytes().to_vec())
             .bind::<diesel::sql_types::Binary, _>(member_id.as_bytes().to_vec())
             .execute(&mut connection);
@@ -364,12 +353,12 @@ FOR EACH ROW EXECUTE FUNCTION audit_team_membership();
     assert_eq!(audit_count_final.count, 2, "Should still have 2 audit entries");
 
     // TEST 3: Add a different member to the same team
-    let member_id_2 = uuid::Uuid::new_v4();
+    let member_id_2 = Uuid::new_v4();
     diesel::sql_query("INSERT INTO members (id, name) VALUES (?, 'Test Member 2')")
         .bind::<diesel::sql_types::Binary, _>(member_id_2.as_bytes().to_vec())
         .execute(&mut connection)?;
 
-    let membership_id_2 = uuid::Uuid::new_v4();
+    let membership_id_2 = Uuid::new_v4();
     diesel::sql_query("INSERT INTO team_members (id, team_id, member_id) VALUES (?, ?, ?)")
         .bind::<diesel::sql_types::Binary, _>(membership_id_2.as_bytes().to_vec())
         .bind::<diesel::sql_types::Binary, _>(team_id.as_bytes().to_vec())
