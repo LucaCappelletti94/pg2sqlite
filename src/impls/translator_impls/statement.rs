@@ -3,14 +3,14 @@
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{DatabaseLike, PolicyLike, TableLike},
+    traits::{DatabaseLike, TableLike},
 };
 use sqlparser::ast::{BinaryOperator, Expr, Statement};
 
 use crate::{
     impls::translator_impls::rls::{
         generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
-        validate_session_variables,
+        validate_table_policies,
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
@@ -99,24 +99,7 @@ impl Translator for Statement {
                         // Check if this table has RLS enabled
                         if table.has_row_level_security(schema) {
                             // Validate all policies have required session variable mappings
-                            for policy in table.policies(schema) {
-                                if let Some(using_expr) = policy.using_expression(schema) {
-                                    validate_session_variables(
-                                        using_expr,
-                                        options,
-                                        table.table_name(),
-                                        policy.name(),
-                                    )?;
-                                }
-                                if let Some(check_expr) = policy.check_expression(schema) {
-                                    validate_session_variables(
-                                        check_expr,
-                                        options,
-                                        table.table_name(),
-                                        policy.name(),
-                                    )?;
-                                }
-                            }
+                            validate_table_policies(table, schema, options)?;
 
                             // Translate the table first
                             let translated_table = create_table.translate(schema, options)?;
@@ -148,24 +131,7 @@ impl Translator for Statement {
                 // Original logic: Check if this table has RLS enabled
                 if create_table.has_row_level_security(schema) {
                     // Validate all policies have required session variable mappings
-                    for policy in create_table.policies(schema) {
-                        if let Some(using_expr) = policy.using_expression(schema) {
-                            validate_session_variables(
-                                using_expr,
-                                options,
-                                create_table.table_name(),
-                                policy.name(),
-                            )?;
-                        }
-                        if let Some(check_expr) = policy.check_expression(schema) {
-                            validate_session_variables(
-                                check_expr,
-                                options,
-                                create_table.table_name(),
-                                policy.name(),
-                            )?;
-                        }
-                    }
+                    validate_table_policies(create_table, schema, options)?;
 
                     // Translate the table first
                     let translated_table = create_table.translate(schema, options)?;

@@ -17,6 +17,70 @@ use crate::{
     traits::{SessionVariablePattern, TranslationOptions},
 };
 
+/// Error message used when a row violates RLS policy constraints.
+const RLS_VIOLATION_ERROR: &str = "new row violates row-level security policy";
+
+/// Collects all column names from a table.
+fn collect_column_names<DB: DatabaseLike>(table: &DB::Table, schema: &DB) -> Vec<String>
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    table.columns(schema).map(|c| c.column_name().to_string()).collect()
+}
+
+/// Collects primary key column names from a table.
+fn collect_pk_column_names<DB: DatabaseLike>(table: &DB::Table, schema: &DB) -> Vec<String>
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect()
+}
+
+/// Builds a WHERE clause for row identity using primary key columns if
+/// available, otherwise falls back to all columns.
+fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> String {
+    let identity_cols = if pk_columns.is_empty() { columns } else { pk_columns };
+    identity_cols.iter().map(|c| format!("{c} = OLD.{c}")).collect::<Vec<_>>().join(" AND ")
+}
+
+/// Filters policies for a table by the specified commands.
+/// Returns policies that match any of the given commands or the All command.
+fn filter_policies<'a, DB: DatabaseLike>(
+    table: &'a DB::Table,
+    schema: &'a DB,
+    commands: &[CreatePolicyCommand],
+) -> Vec<&'a DB::Policy>
+where
+    DB::Table: TableLike<DB = DB>,
+    DB::Policy: PolicyLike<DB = DB>,
+{
+    table
+        .policies(schema)
+        .filter(|p| commands.contains(&p.command()) || p.command() == CreatePolicyCommand::All)
+        .collect()
+}
+
+/// Context for RLS trigger generation, encapsulating common setup.
+struct RlsTriggerContext<'a> {
+    table_name: &'a str,
+    inner_table_name: String,
+}
+
+impl<'a> RlsTriggerContext<'a> {
+    fn new<O: TranslationOptions, DB: DatabaseLike>(table: &'a DB::Table, options: &O) -> Self
+    where
+        DB::Table: TableLike<DB = DB>,
+    {
+        let table_name = table.table_name();
+        let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
+        Self { table_name, inner_table_name }
+    }
+
+    fn as_rename_tuple(&self) -> (&str, &str) {
+        (self.table_name, self.inner_table_name.as_str())
+    }
+}
+
 /// Checks if an expression contains a `current_setting('name')` call and
 /// returns the setting name if found.
 fn find_current_setting_call(expr: &Expr) -> Option<String> {
@@ -113,6 +177,33 @@ pub fn validate_session_variables<O: TranslationOptions>(
         }
     }
 
+    Ok(())
+}
+
+/// Validates that all policies for a table have required session variable
+/// mappings configured.
+///
+/// # Errors
+///
+/// Returns `Error::SessionVariableMappingNotFound` if any policy contains
+/// a session variable pattern without a corresponding SQLite function mapping.
+pub fn validate_table_policies<O: TranslationOptions, DB: DatabaseLike>(
+    table: &DB::Table,
+    schema: &DB,
+    options: &O,
+) -> Result<(), Error>
+where
+    DB::Table: TableLike<DB = DB>,
+    DB::Policy: PolicyLike<DB = DB>,
+{
+    for policy in table.policies(schema) {
+        if let Some(using_expr) = policy.using_expression(schema) {
+            validate_session_variables(using_expr, options, table.table_name(), policy.name())?;
+        }
+        if let Some(check_expr) = policy.check_expression(schema) {
+            validate_session_variables(check_expr, options, table.table_name(), policy.name())?;
+        }
+    }
     Ok(())
 }
 
@@ -607,19 +698,17 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
-    let table_name = table.table_name();
-    let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
-    let table_rename = Some((table_name, inner_table_name.as_str()));
+    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+    let table_name = ctx.table_name;
+    let inner_table_name = &ctx.inner_table_name;
+    let table_rename = Some(ctx.as_rename_tuple());
 
     // Collect SELECT policies for this table
-    let select_policies: Vec<_> = table
-        .policies(schema)
-        .filter(|p| matches!(p.command(), CreatePolicyCommand::Select | CreatePolicyCommand::All))
-        .collect();
+    let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select]);
 
     // Get all column names from the table for the SELECT clause
-    let column_list =
-        table.columns(schema).map(|c| c.column_name().to_string()).collect::<Vec<_>>().join(", ");
+    let columns = collect_column_names(table, schema);
+    let column_list = columns.join(", ");
 
     // Build the WHERE clause by combining all USING expressions
     let where_clause = if select_policies.is_empty() {
@@ -656,18 +745,16 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
-    let table_name = table.table_name();
-    let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
-    let table_rename = Some((table_name, inner_table_name.as_str()));
+    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+    let table_name = ctx.table_name;
+    let inner_table_name = &ctx.inner_table_name;
+    let table_rename = Some(ctx.as_rename_tuple());
 
     // Find INSERT policies
-    let insert_policies: Vec<_> = table
-        .policies(schema)
-        .filter(|p| matches!(p.command(), CreatePolicyCommand::Insert | CreatePolicyCommand::All))
-        .collect();
+    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert]);
 
     // Get all column names for the INSERT statement
-    let columns: Vec<_> = table.columns(schema).map(|c| c.column_name().to_string()).collect();
+    let columns = collect_column_names(table, schema);
     let column_list = columns.join(", ");
     let value_list = columns.iter().map(|c| format!("NEW.{c}")).collect::<Vec<_>>().join(", ");
 
@@ -690,7 +777,7 @@ where
     } else {
         let check = check_conditions.join(" OR ");
         format!(
-            "BEGIN\n    SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ({check});\n    INSERT INTO {inner_table_name} ({column_list}) VALUES ({value_list});\nEND"
+            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({check});\n    INSERT INTO {inner_table_name} ({column_list}) VALUES ({value_list});\nEND"
         )
     };
 
@@ -709,33 +796,26 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
-    let table_name = table.table_name();
-    let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
-    let table_rename = Some((table_name, inner_table_name.as_str()));
+    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+    let table_name = ctx.table_name;
+    let inner_table_name = &ctx.inner_table_name;
+    let table_rename = Some(ctx.as_rename_tuple());
 
     // Find UPDATE policies
-    let update_policies: Vec<_> = table
-        .policies(schema)
-        .filter(|p| matches!(p.command(), CreatePolicyCommand::Update | CreatePolicyCommand::All))
-        .collect();
+    let update_policies = filter_policies(table, schema, &[CreatePolicyCommand::Update]);
 
     // Get all column names for the SET clause
-    let columns: Vec<_> = table.columns(schema).map(|c| c.column_name().to_string()).collect();
+    let columns = collect_column_names(table, schema);
 
     // Get primary key columns
-    let pk_columns: Vec<_> =
-        table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect();
+    let pk_columns = collect_pk_column_names(table, schema);
 
     // Build SET clause
     let set_clause =
         columns.iter().map(|c| format!("{c} = NEW.{c}")).collect::<Vec<_>>().join(", ");
 
     // Build PK WHERE clause
-    let pk_where = if pk_columns.is_empty() {
-        columns.iter().map(|c| format!("{c} = OLD.{c}")).collect::<Vec<_>>().join(" AND ")
-    } else {
-        pk_columns.iter().map(|c| format!("{c} = OLD.{c}")).collect::<Vec<_>>().join(" AND ")
-    };
+    let pk_where = build_row_identity_clause(&columns, &pk_columns);
 
     // Build USING expression (filter which rows can be updated) - use OLD. prefix
     let using_conditions: Vec<String> = update_policies
@@ -774,7 +854,7 @@ where
     } else {
         let check = check_conditions.join(" OR ");
         format!(
-            "BEGIN\n    SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ({check});\n    UPDATE {inner_table_name} SET {set_clause} WHERE {full_where};\nEND"
+            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({check});\n    UPDATE {inner_table_name} SET {set_clause} WHERE {full_where};\nEND"
         )
     };
 
@@ -793,29 +873,22 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
-    let table_name = table.table_name();
-    let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
-    let table_rename = Some((table_name, inner_table_name.as_str()));
+    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+    let table_name = ctx.table_name;
+    let inner_table_name = &ctx.inner_table_name;
+    let table_rename = Some(ctx.as_rename_tuple());
 
     // Find DELETE policies
-    let delete_policies: Vec<_> = table
-        .policies(schema)
-        .filter(|p| matches!(p.command(), CreatePolicyCommand::Delete | CreatePolicyCommand::All))
-        .collect();
+    let delete_policies = filter_policies(table, schema, &[CreatePolicyCommand::Delete]);
 
     // Get all column names for the WHERE clause fallback
-    let columns: Vec<_> = table.columns(schema).map(|c| c.column_name().to_string()).collect();
+    let columns = collect_column_names(table, schema);
 
     // Get primary key columns
-    let pk_columns: Vec<_> =
-        table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect();
+    let pk_columns = collect_pk_column_names(table, schema);
 
     // Build PK WHERE clause
-    let pk_where = if pk_columns.is_empty() {
-        columns.iter().map(|c| format!("{c} = OLD.{c}")).collect::<Vec<_>>().join(" AND ")
-    } else {
-        pk_columns.iter().map(|c| format!("{c} = OLD.{c}")).collect::<Vec<_>>().join(" AND ")
-    };
+    let pk_where = build_row_identity_clause(&columns, &pk_columns);
 
     // Build USING expression - use OLD. prefix for delete
     let using_conditions: Vec<String> = delete_policies
