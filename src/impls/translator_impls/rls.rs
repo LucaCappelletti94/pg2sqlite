@@ -124,6 +124,8 @@ fn find_current_setting_call(expr: &Expr) -> Option<String> {
 fn contains_current_user(expr: &Expr) -> bool {
     match expr {
         Expr::Identifier(ident) => ident.value.to_lowercase() == "current_user",
+        // In PostgreSQL, current_user is parsed as a no-argument function
+        Expr::Function(func) => func.name.to_string().to_lowercase() == "current_user",
         Expr::BinaryOp { left, right, .. } => {
             contains_current_user(left) || contains_current_user(right)
         }
@@ -237,11 +239,21 @@ where
             transform_expr(inner, options, table, schema, prefix, table_rename)
         }
 
-        // Handle current_setting('name') without cast
+        // Handle current_setting('name') without cast, and current_user as a function
         Expr::Function(func) => {
             if let Some(transformed) = try_transform_session_function(func, options) {
                 return transformed;
             }
+
+            // Check if it's current_user (parsed as a no-arg function in PostgreSQL)
+            let func_name = func.name.to_string().to_lowercase();
+            if func_name == "current_user"
+                && let Some(sqlite_func) =
+                    options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
+            {
+                return make_function_call(sqlite_func);
+            }
+
             // Not a session function, return as-is (could recurse into args if needed)
             Expr::Function(func.clone())
         }
@@ -397,9 +409,294 @@ where
             )))
         }
 
+        // Handle IN (subquery) expressions
+        Expr::InSubquery { expr: inner, subquery, negated } => {
+            Expr::InSubquery {
+                expr: Box::new(transform_expr(inner, options, table, schema, prefix, table_rename)),
+                subquery: Box::new(transform_query(
+                    subquery,
+                    options,
+                    table,
+                    schema,
+                    prefix,
+                    table_rename,
+                )),
+                negated: *negated,
+            }
+        }
+
         // For any other expression type, return as-is
         other => other.clone(),
     }
+}
+
+/// Transforms an expression for UPDATE WITH CHECK clauses.
+/// Uses COALESCE(NEW.column, OLD.column) for column references to handle
+/// partial updates, since in SQLite INSTEAD OF triggers, NEW.column is only
+/// defined for columns in the SET clause.
+#[allow(clippy::too_many_lines)]
+fn transform_expr_for_update_check<O: TranslationOptions, DB: DatabaseLike>(
+    expr: &Expr,
+    options: &O,
+    table: &DB::Table,
+    schema: &DB,
+    table_rename: Option<(&str, &str)>,
+) -> Expr
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    match expr {
+        // Handle current_setting('name')::type -> sqlite_func()
+        Expr::Cast { expr: inner, .. } => {
+            if let Expr::Function(func) = inner.as_ref()
+                && let Some(transformed) = try_transform_session_function(func, options)
+            {
+                return transformed;
+            }
+            transform_expr_for_update_check(inner, options, table, schema, table_rename)
+        }
+
+        // Handle current_setting('name') without cast, and current_user as a function
+        Expr::Function(func) => {
+            if let Some(transformed) = try_transform_session_function(func, options) {
+                return transformed;
+            }
+
+            let func_name = func.name.to_string().to_lowercase();
+            if func_name == "current_user"
+                && let Some(sqlite_func) =
+                    options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
+            {
+                return make_function_call(sqlite_func);
+            }
+
+            Expr::Function(func.clone())
+        }
+
+        // Handle bare column identifiers -> COALESCE(NEW.column, OLD.column)
+        Expr::Identifier(ident) => {
+            let ident_lower = ident.value.to_lowercase();
+
+            // Check if it's current_user
+            if ident_lower == "current_user"
+                && let Some(sqlite_func) =
+                    options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
+            {
+                return make_function_call(sqlite_func);
+            }
+
+            // Check if it's a column that needs COALESCE wrapping
+            if table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower) {
+                return make_coalesce_expr(ident);
+            }
+
+            Expr::Identifier(ident.clone())
+        }
+
+        // Handle already-qualified identifiers (e.g., table.column)
+        Expr::CompoundIdentifier(idents) => {
+            if let Some((old_name, _new_name)) = table_rename
+                && idents.len() >= 2
+                && idents[0].value.to_lowercase() == old_name.to_lowercase()
+            {
+                // Reference to the target table - use COALESCE
+                return make_coalesce_expr(&idents[1]);
+            }
+            Expr::CompoundIdentifier(idents.clone())
+        }
+
+        // Recursively handle binary operations
+        Expr::BinaryOp { left, op, right } => {
+            Expr::BinaryOp {
+                left: Box::new(transform_expr_for_update_check(
+                    left,
+                    options,
+                    table,
+                    schema,
+                    table_rename,
+                )),
+                op: op.clone(),
+                right: Box::new(transform_expr_for_update_check(
+                    right,
+                    options,
+                    table,
+                    schema,
+                    table_rename,
+                )),
+            }
+        }
+
+        // Recursively handle unary operations
+        Expr::UnaryOp { op, expr: inner } => {
+            Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(transform_expr_for_update_check(
+                    inner,
+                    options,
+                    table,
+                    schema,
+                    table_rename,
+                )),
+            }
+        }
+
+        // Handle nested/parenthesized expressions
+        Expr::Nested(inner) => {
+            Expr::Nested(Box::new(transform_expr_for_update_check(
+                inner,
+                options,
+                table,
+                schema,
+                table_rename,
+            )))
+        }
+
+        // Handle IS NULL / IS NOT NULL
+        Expr::IsNull(inner) => {
+            Expr::IsNull(Box::new(transform_expr_for_update_check(
+                inner,
+                options,
+                table,
+                schema,
+                table_rename,
+            )))
+        }
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(transform_expr_for_update_check(
+                inner,
+                options,
+                table,
+                schema,
+                table_rename,
+            )))
+        }
+
+        // Handle IN lists
+        Expr::InList { expr: inner, list, negated } => {
+            Expr::InList {
+                expr: Box::new(transform_expr_for_update_check(
+                    inner,
+                    options,
+                    table,
+                    schema,
+                    table_rename,
+                )),
+                list: list
+                    .iter()
+                    .map(|e| {
+                        transform_expr_for_update_check(e, options, table, schema, table_rename)
+                    })
+                    .collect(),
+                negated: *negated,
+            }
+        }
+
+        // Handle EXISTS (subquery) - delegate to transform_query for proper handling
+        Expr::Exists { subquery, negated } => {
+            Expr::Exists {
+                subquery: Box::new(transform_query(
+                    subquery,
+                    options,
+                    table,
+                    schema,
+                    Some("NEW"), // Use NEW prefix for subquery column refs
+                    table_rename,
+                )),
+                negated: *negated,
+            }
+        }
+
+        // Handle subquery expressions
+        Expr::Subquery(subquery) => {
+            Expr::Subquery(Box::new(transform_query(
+                subquery,
+                options,
+                table,
+                schema,
+                Some("NEW"),
+                table_rename,
+            )))
+        }
+
+        // Handle IN (subquery) expressions
+        Expr::InSubquery { expr: inner, subquery, negated } => {
+            Expr::InSubquery {
+                expr: Box::new(transform_expr_for_update_check(
+                    inner,
+                    options,
+                    table,
+                    schema,
+                    table_rename,
+                )),
+                subquery: Box::new(transform_query(
+                    subquery,
+                    options,
+                    table,
+                    schema,
+                    Some("NEW"),
+                    table_rename,
+                )),
+                negated: *negated,
+            }
+        }
+
+        // Handle BETWEEN
+        Expr::Between { expr: inner, negated, low, high } => {
+            Expr::Between {
+                expr: Box::new(transform_expr_for_update_check(
+                    inner,
+                    options,
+                    table,
+                    schema,
+                    table_rename,
+                )),
+                negated: *negated,
+                low: Box::new(transform_expr_for_update_check(
+                    low,
+                    options,
+                    table,
+                    schema,
+                    table_rename,
+                )),
+                high: Box::new(transform_expr_for_update_check(
+                    high,
+                    options,
+                    table,
+                    schema,
+                    table_rename,
+                )),
+            }
+        }
+
+        // For any other expression type, return as-is
+        other => other.clone(),
+    }
+}
+
+/// Creates a COALESCE(NEW.column, OLD.column) expression.
+fn make_coalesce_expr(column: &Ident) -> Expr {
+    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArgumentList, ObjectNamePart};
+
+    let new_ref = Expr::CompoundIdentifier(vec![Ident::new("NEW"), column.clone()]);
+    let old_ref = Expr::CompoundIdentifier(vec![Ident::new("OLD"), column.clone()]);
+
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("COALESCE"))]),
+        args: FunctionArguments::List(FunctionArgumentList {
+            args: vec![
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(new_ref)),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(old_ref)),
+            ],
+            duplicate_treatment: None,
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+        parameters: FunctionArguments::None,
+        uses_odbc_syntax: false,
+    })
 }
 
 /// Transforms a Query (used in subqueries) by recursively transforming its
@@ -810,9 +1107,14 @@ where
     // Get primary key columns
     let pk_columns = collect_pk_column_names(table, schema);
 
-    // Build SET clause
-    let set_clause =
-        columns.iter().map(|c| format!("{c} = NEW.{c}")).collect::<Vec<_>>().join(", ");
+    // Build SET clause - use COALESCE to handle partial updates
+    // In SQLite INSTEAD OF triggers, NEW.column is only defined for columns in the
+    // SET clause
+    let set_clause = columns
+        .iter()
+        .map(|c| format!("{c} = COALESCE(NEW.{c}, OLD.{c})"))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     // Build PK WHERE clause
     let pk_where = build_row_identity_clause(&columns, &pk_columns);
@@ -829,13 +1131,15 @@ where
         })
         .collect();
 
-    // Build WITH CHECK expression - use NEW. prefix
+    // Build WITH CHECK expression - use COALESCE(NEW.col, OLD.col) for partial
+    // updates In SQLite INSTEAD OF triggers, NEW.column is only defined for
+    // columns in SET clause
     let check_conditions: Vec<String> = update_policies
         .iter()
         .filter_map(|policy| {
             policy.check_expression(schema).map(|expr| {
                 let transformed =
-                    transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
+                    transform_expr_for_update_check(expr, options, table, schema, table_rename);
                 format!("({transformed})")
             })
         })

@@ -1,0 +1,10 @@
+---
+source: tests/test_rls_current_user.rs
+assertion_line: 76
+expression: translated_sql
+---
+CREATE TABLE profiles_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, username TEXT NOT NULL UNIQUE, email TEXT NOT NULL, is_public INTEGER NOT NULL DEFAULT false) STRICT
+CREATE VIEW profiles AS SELECT id, username, email, is_public FROM profiles_rls WHERE (username = current_app_username() OR is_public = true)
+CREATE TRIGGER profiles_insert_trigger INSTEAD OF INSERT ON profiles FOR EACH ROW BEGIN INSERT INTO profiles_rls (id, username, email, is_public) VALUES (NEW.id, NEW.username, NEW.email, NEW.is_public); END
+CREATE TRIGGER profiles_update_trigger INSTEAD OF UPDATE ON profiles FOR EACH ROW BEGIN UPDATE profiles_rls SET id = COALESCE(NEW.id, OLD.id), username = COALESCE(NEW.username, OLD.username), email = COALESCE(NEW.email, OLD.email), is_public = COALESCE(NEW.is_public, OLD.is_public) WHERE (id = OLD.id) AND ((OLD.username = current_app_username())); END
+CREATE TRIGGER profiles_delete_trigger INSTEAD OF DELETE ON profiles FOR EACH ROW BEGIN DELETE FROM profiles_rls WHERE id = OLD.id; END

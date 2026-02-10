@@ -1,9 +1,10 @@
 ---
 source: tests/test_rls_translation.rs
+assertion_line: 394
 expression: translated_sql
 ---
 CREATE TABLE documents_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, owner_id BLOB NOT NULL, title TEXT NOT NULL, content TEXT) STRICT
 CREATE VIEW documents AS SELECT id, owner_id, title, content FROM documents_rls WHERE (owner_id = current_app_user())
 CREATE TRIGGER documents_insert_trigger INSTEAD OF INSERT ON documents FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.owner_id = current_app_user())); INSERT INTO documents_rls (id, owner_id, title, content) VALUES (NEW.id, NEW.owner_id, NEW.title, NEW.content); END
-CREATE TRIGGER documents_update_trigger INSTEAD OF UPDATE ON documents FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.owner_id = current_app_user())); UPDATE documents_rls SET id = NEW.id, owner_id = NEW.owner_id, title = NEW.title, content = NEW.content WHERE (id = OLD.id) AND ((OLD.owner_id = current_app_user())); END
+CREATE TRIGGER documents_update_trigger INSTEAD OF UPDATE ON documents FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((COALESCE(NEW.owner_id, OLD.owner_id) = current_app_user())); UPDATE documents_rls SET id = COALESCE(NEW.id, OLD.id), owner_id = COALESCE(NEW.owner_id, OLD.owner_id), title = COALESCE(NEW.title, OLD.title), content = COALESCE(NEW.content, OLD.content) WHERE (id = OLD.id) AND ((OLD.owner_id = current_app_user())); END
 CREATE TRIGGER documents_delete_trigger INSTEAD OF DELETE ON documents FOR EACH ROW BEGIN DELETE FROM documents_rls WHERE (id = OLD.id) AND ((OLD.owner_id = current_app_user())); END

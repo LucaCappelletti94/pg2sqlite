@@ -1,0 +1,10 @@
+---
+source: tests/test_rls_self_referential.rs
+assertion_line: 81
+expression: translated_sql
+---
+CREATE TABLE app_users_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, email TEXT NOT NULL UNIQUE, display_name TEXT, settings TEXT) STRICT
+CREATE VIEW app_users AS SELECT id, email, display_name, settings FROM app_users_rls WHERE (id = current_app_user())
+CREATE TRIGGER app_users_insert_trigger INSTEAD OF INSERT ON app_users FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.id = current_app_user())); INSERT INTO app_users_rls (id, email, display_name, settings) VALUES (NEW.id, NEW.email, NEW.display_name, NEW.settings); END
+CREATE TRIGGER app_users_update_trigger INSTEAD OF UPDATE ON app_users FOR EACH ROW BEGIN UPDATE app_users_rls SET id = COALESCE(NEW.id, OLD.id), email = COALESCE(NEW.email, OLD.email), display_name = COALESCE(NEW.display_name, OLD.display_name), settings = COALESCE(NEW.settings, OLD.settings) WHERE (id = OLD.id) AND ((OLD.id = current_app_user())); END
+CREATE TRIGGER app_users_delete_trigger INSTEAD OF DELETE ON app_users FOR EACH ROW BEGIN DELETE FROM app_users_rls WHERE id = OLD.id; END

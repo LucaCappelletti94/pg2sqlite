@@ -1,0 +1,10 @@
+---
+source: tests/test_rls_multiple_policies.rs
+assertion_line: 91
+expression: translated_sql
+---
+CREATE TABLE documents_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, owner_id BLOB NOT NULL, is_public INTEGER NOT NULL DEFAULT false, department TEXT, title TEXT NOT NULL) STRICT
+CREATE VIEW documents AS SELECT id, owner_id, is_public, department, title FROM documents_rls WHERE (department = current_app_department()) OR (owner_id = current_app_user()) OR (is_public = true)
+CREATE TRIGGER documents_insert_trigger INSTEAD OF INSERT ON documents FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.owner_id = current_app_user())); INSERT INTO documents_rls (id, owner_id, is_public, department, title) VALUES (NEW.id, NEW.owner_id, NEW.is_public, NEW.department, NEW.title); END
+CREATE TRIGGER documents_update_trigger INSTEAD OF UPDATE ON documents FOR EACH ROW BEGIN UPDATE documents_rls SET id = COALESCE(NEW.id, OLD.id), owner_id = COALESCE(NEW.owner_id, OLD.owner_id), is_public = COALESCE(NEW.is_public, OLD.is_public), department = COALESCE(NEW.department, OLD.department), title = COALESCE(NEW.title, OLD.title) WHERE (id = OLD.id) AND ((OLD.owner_id = current_app_user())); END
+CREATE TRIGGER documents_delete_trigger INSTEAD OF DELETE ON documents FOR EACH ROW BEGIN DELETE FROM documents_rls WHERE (id = OLD.id) AND ((OLD.owner_id = current_app_user())); END
