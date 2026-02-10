@@ -15,10 +15,7 @@ diesel = { version = "2.3.5", features = ["sqlite"] }
 insta = "1.46.3"
 rosetta-uuid = { version = "0.1", features = ["diesel", "sqlite"] }
 
-[lints]
-workspace = true
-
-[workspace.lints.rust]
+[lints.rust]
 missing_docs = "forbid"
 unused_macro_rules = "forbid"
 unconditional_recursion = "forbid"
@@ -27,7 +24,7 @@ unused_import_braces = "forbid"
 unused_must_use = "forbid"
 deprecated = "deny"
 
-[workspace.lints.rustdoc]
+[lints.rustdoc]
 broken_intra_doc_links = "forbid"
 bare_urls = "forbid"
 invalid_codeblock_attributes = "forbid"
@@ -37,7 +34,7 @@ unescaped_backticks = "forbid"
 redundant_explicit_links = "forbid"
 invalid_rust_codeblocks = "forbid"
 
-[workspace.lints.clippy]
+[lints.clippy]
 unreadable_literal = "allow"
 missing_panics_doc = "allow"
 new_ret_no_self = "allow"
