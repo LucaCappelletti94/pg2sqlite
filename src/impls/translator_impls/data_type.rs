@@ -26,7 +26,10 @@ impl Translator for DataType {
             }
             DataType::Float(ExactNumberInfo::None) => Ok(DataType::Real),
             DataType::Bytea => Ok(DataType::Blob(None)),
-            DataType::Varchar(_) => Ok(DataType::Text),
+            // JSON/JSONB and Arrays are stored as TEXT in SQLite (JSON serialized)
+            DataType::Varchar(_) | DataType::JSON | DataType::JSONB | DataType::Array(_) => {
+                Ok(DataType::Text)
+            }
             DataType::Uuid => {
                 match options.get_uuid_representation() {
                     Some(UuidRepresentation::Blob) => Ok(DataType::Blob(None)),

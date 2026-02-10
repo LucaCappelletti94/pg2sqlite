@@ -114,3 +114,25 @@ fn test_translate() {
     let statements = result.unwrap();
     assert_eq!(statements.len(), 1);
 }
+
+#[test]
+fn test_on_conflict_do_update() {
+    // Test that ON CONFLICT DO UPDATE is properly translated (pass-through)
+    let sql = r#"
+        CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO kv (key, value) VALUES ('a', 'b')
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+    "#;
+    let translator = Pg2Sqlite::default().sql(sql).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    assert_eq!(result.len(), 2);
+
+    let insert_sql = result[1].to_string();
+    assert!(insert_sql.contains("ON CONFLICT"), "Should contain ON CONFLICT");
+    assert!(insert_sql.contains("DO UPDATE"), "Should contain DO UPDATE");
+    assert!(insert_sql.contains("EXCLUDED.value"), "Should contain EXCLUDED reference");
+
+    // Verify it parses as valid SQLite
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, &insert_sql)
+        .expect("INSERT with ON CONFLICT DO UPDATE should be valid SQLite");
+}

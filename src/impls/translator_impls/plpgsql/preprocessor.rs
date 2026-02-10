@@ -125,6 +125,9 @@ impl PlPgSqlPreprocessor {
     fn transform_body(body: &str, context: &PlPgSqlContext) -> String {
         let mut result = body.to_string();
 
+        // Transform PostgreSQL ELSIF → ELSEIF (sqlparser uses ELSEIF keyword)
+        result = Self::transform_elsif(&result);
+
         // Transform variable assignments: `variable := expression;` → `SET variable =
         // expression;` We need to be careful to only transform standalone
         // assignments, not within expressions
@@ -132,6 +135,71 @@ impl PlPgSqlPreprocessor {
 
         // Transform SELECT INTO statements to extract variable bindings
         result = Self::transform_select_into(&result, context);
+
+        result
+    }
+
+    /// Transforms PostgreSQL ELSIF keyword to ELSEIF (which sqlparser expects).
+    fn transform_elsif(body: &str) -> String {
+        // Use case-insensitive replacement
+        // We need to be careful not to replace ELSIF inside strings
+        let mut result = String::new();
+        let mut chars = body.chars().peekable();
+        let mut in_string = false;
+        let mut string_char = ' ';
+
+        while let Some(c) = chars.next() {
+            // Track string literals
+            if (c == '\'' || c == '"') && !in_string {
+                in_string = true;
+                string_char = c;
+                result.push(c);
+                continue;
+            } else if c == string_char && in_string {
+                in_string = false;
+                result.push(c);
+                continue;
+            }
+
+            if in_string {
+                result.push(c);
+                continue;
+            }
+
+            // Check for ELSIF (case-insensitive)
+            if c.eq_ignore_ascii_case(&'E') {
+                let mut word = String::from(c);
+                let remaining = ['L', 'S', 'I', 'F'];
+                let mut matched = true;
+
+                for expected in remaining {
+                    if let Some(&next) = chars.peek() {
+                        if next.eq_ignore_ascii_case(&expected) {
+                            word.push(chars.next().unwrap());
+                        } else {
+                            matched = false;
+                            break;
+                        }
+                    } else {
+                        matched = false;
+                        break;
+                    }
+                }
+
+                if matched && word.to_uppercase() == "ELSIF" {
+                    // Check that next char is whitespace or end (not part of larger word)
+                    if chars.peek().is_none_or(|&c| !c.is_alphanumeric() && c != '_') {
+                        result.push_str("ELSEIF");
+                    } else {
+                        result.push_str(&word);
+                    }
+                } else {
+                    result.push_str(&word);
+                }
+            } else {
+                result.push(c);
+            }
+        }
 
         result
     }

@@ -127,7 +127,7 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Translates an IF statement.
+    /// Translates an IF statement, including ELSIF and ELSE blocks.
     fn translate_if_statement(
         if_stmt: &sqlparser::ast::IfStatement,
         context: &mut PlPgSqlContext,
@@ -136,21 +136,23 @@ impl PlPgSqlTranslator {
     ) -> Result<Vec<Statement>, Error> {
         let mut result = Vec::new();
 
-        // Get the condition
-        let condition = if_stmt
+        // Track negated conditions for ELSIF/ELSE blocks
+        let mut negated_conditions: Vec<String> = Vec::new();
+
+        // Get the IF condition
+        let if_condition = if_stmt
             .if_block
             .condition
             .as_ref()
             .map_or_else(|| "TRUE".to_string(), ToString::to_string);
 
-        // Push condition onto stack
-        context.push_condition(condition);
+        // Push IF condition onto stack
+        context.push_condition(if_condition.clone());
 
         // Clear scoped bindings for this IF block (persistent bindings are kept)
         context.clear_scoped_bindings();
 
-        // Clear UUID first-use tracking for this IF block (new UUID variables may be
-        // assigned)
+        // Clear UUID first-use tracking for this IF block
         context.clear_uuid_first_use();
 
         // Translate statements within the IF block
@@ -159,10 +161,57 @@ impl PlPgSqlTranslator {
             result.extend(translated);
         }
 
-        // Pop condition from stack
+        // Pop IF condition from stack
         context.pop_condition();
 
-        // TODO: Handle ELSE and ELSIF blocks
+        // Remember negation of IF condition for ELSIF/ELSE
+        negated_conditions.push(format!("NOT ({if_condition})"));
+
+        // Handle ELSIF blocks
+        for elseif_block in &if_stmt.elseif_blocks {
+            let elseif_condition = elseif_block
+                .condition
+                .as_ref()
+                .map_or_else(|| "TRUE".to_string(), ToString::to_string);
+
+            // Build combined condition: NOT(prev conditions) AND this condition
+            let combined = if negated_conditions.is_empty() {
+                elseif_condition.clone()
+            } else {
+                format!("{} AND ({})", negated_conditions.join(" AND "), elseif_condition)
+            };
+
+            context.push_condition(combined);
+            context.clear_scoped_bindings();
+            context.clear_uuid_first_use();
+
+            for stmt in elseif_block.statements() {
+                let translated = Self::translate_statement(stmt, context, schema, options)?;
+                result.extend(translated);
+            }
+
+            context.pop_condition();
+
+            // Add this condition's negation for subsequent blocks
+            negated_conditions.push(format!("NOT ({elseif_condition})"));
+        }
+
+        // Handle ELSE block
+        if let Some(else_block) = &if_stmt.else_block {
+            // ELSE condition is negation of all previous conditions
+            let else_condition = negated_conditions.join(" AND ");
+
+            context.push_condition(else_condition);
+            context.clear_scoped_bindings();
+            context.clear_uuid_first_use();
+
+            for stmt in else_block.statements() {
+                let translated = Self::translate_statement(stmt, context, schema, options)?;
+                result.extend(translated);
+            }
+
+            context.pop_condition();
+        }
 
         Ok(result)
     }

@@ -74,6 +74,53 @@ impl Translator for ColumnOptionDef {
                             option: ColumnOption::Default(Expr::Identifier(ident.clone())),
                         }))
                     }
+                    // Handle unary operators (e.g., DEFAULT -1)
+                    Expr::UnaryOp { op, expr } => {
+                        let translated_inner = expr.translate(schema, options)?;
+                        Ok(Some(ColumnOptionDef {
+                            name: self.name.clone(),
+                            option: ColumnOption::Default(Expr::UnaryOp {
+                                op: *op,
+                                expr: Box::new(translated_inner),
+                            }),
+                        }))
+                    }
+                    // Handle nested/parenthesized expressions
+                    Expr::Nested(inner) => {
+                        let translated_inner = inner.translate(schema, options)?;
+                        Ok(Some(ColumnOptionDef {
+                            name: self.name.clone(),
+                            option: ColumnOption::Default(Expr::Nested(Box::new(translated_inner))),
+                        }))
+                    }
+                    // Handle binary operations (e.g., DEFAULT 1 + 2)
+                    Expr::BinaryOp { left, op, right } => {
+                        let translated_left = left.translate(schema, options)?;
+                        let translated_right = right.translate(schema, options)?;
+                        Ok(Some(ColumnOptionDef {
+                            name: self.name.clone(),
+                            option: ColumnOption::Default(Expr::BinaryOp {
+                                left: Box::new(translated_left),
+                                op: op.clone(),
+                                right: Box::new(translated_right),
+                            }),
+                        }))
+                    }
+                    // Handle type casts (e.g., DEFAULT value::type)
+                    Expr::Cast { expr, data_type, format, kind, array } => {
+                        let translated_expr = expr.translate(schema, options)?;
+                        let translated_type = data_type.translate(schema, options)?;
+                        Ok(Some(ColumnOptionDef {
+                            name: self.name.clone(),
+                            option: ColumnOption::Default(Expr::Cast {
+                                expr: Box::new(translated_expr),
+                                data_type: translated_type,
+                                format: format.clone(),
+                                kind: kind.clone(),
+                                array: *array,
+                            }),
+                        }))
+                    }
                     unimplemented => {
                         unimplemented!(
                             "The default expression {:?} is not supported",

@@ -1,0 +1,8 @@
+---
+source: tests/test_trigger_elsif_else.rs
+assertion_line: 75
+expression: translated_sql
+---
+CREATE TABLE audit_log (id INTEGER PRIMARY KEY NOT NULL, action TEXT NOT NULL, severity TEXT NOT NULL) STRICT
+CREATE TABLE events (id INTEGER PRIMARY KEY NOT NULL, event_type TEXT NOT NULL, data TEXT) STRICT
+CREATE TRIGGER event_trigger AFTER INSERT ON events FOR EACH ROW BEGIN INSERT INTO audit_log (action, severity) SELECT 'error_event', 'high' FROM (SELECT 1) _dummy WHERE (NEW.event_type = 'error'); INSERT INTO audit_log (action, severity) SELECT 'warning_event', 'medium' FROM (SELECT 1) _dummy WHERE (NOT (NEW.event_type = 'error') AND (NEW.event_type = 'warning')); INSERT INTO audit_log (action, severity) SELECT 'info_event', 'low' FROM (SELECT 1) _dummy WHERE (NOT (NEW.event_type = 'error') AND NOT (NEW.event_type = 'warning') AND (NEW.event_type = 'info')); INSERT INTO audit_log (action, severity) SELECT 'unknown_event', 'unknown' FROM (SELECT 1) _dummy WHERE (NOT (NEW.event_type = 'error') AND NOT (NEW.event_type = 'warning') AND NOT (NEW.event_type = 'info')); END

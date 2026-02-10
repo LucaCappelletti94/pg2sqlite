@@ -21,17 +21,19 @@ impl Translator for Insert {
         if let Some(on_insert) = &self.on {
             match on_insert {
                 sqlparser::ast::OnInsert::OnConflict(on_conflict) => {
-                    match on_conflict.action {
+                    match &on_conflict.action {
                         sqlparser::ast::OnConflictAction::DoNothing => {
                             // SQLite uses INSERT OR IGNORE
                             insert.or = Some(sqlparser::ast::SqliteOnConflict::Ignore);
                             insert.on = None;
                         }
                         sqlparser::ast::OnConflictAction::DoUpdate(_) => {
-                            unimplemented!(
-                                "Unsupported ON CONFLICT action: {:?}",
-                                on_conflict.action
-                            )
+                            // SQLite supports ON CONFLICT DO UPDATE with nearly
+                            // identical
+                            // syntax to PostgreSQL (since SQLite 3.24.0).
+                            // EXCLUDED references work the same way
+                            // (case-insensitive).
+                            // Pass through as-is.
                         }
                     }
                 }
