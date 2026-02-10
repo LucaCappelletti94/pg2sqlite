@@ -171,6 +171,9 @@ impl Translator for Statement {
                 statements
             }
             Self::Insert(insert) => vec![insert.translate(schema, options)?.into()],
+            Self::CreateView(create_view) => {
+                vec![create_view.translate(schema, options)?.into()]
+            }
             Self::Delete(delete) => vec![delete.translate(schema, options)?],
             Self::If(if_stmt) => {
                 if !if_stmt.elseif_blocks.is_empty() || if_stmt.else_block.is_some() {

@@ -7,6 +7,7 @@ mod constraint_characteristic;
 mod create_index;
 mod create_table;
 mod create_trigger;
+mod create_view;
 mod data_type;
 mod delete;
 mod expr;

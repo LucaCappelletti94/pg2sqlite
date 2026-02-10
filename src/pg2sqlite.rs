@@ -247,8 +247,17 @@ impl Pg2Sqlite {
         self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
-        let schema =
-            ParserDB::from_statements(self.pg_statements.clone(), "translation_db".to_owned())?;
+        // Filter out statements that ParserDB doesn't support (like CREATE VIEW)
+        // ParserDB is used for schema context (table definitions, policies, etc.)
+        let schema_statements: Vec<Statement> = self
+            .pg_statements
+            .iter()
+            .filter(|s| !matches!(s, Statement::CreateView(_)))
+            .cloned()
+            .collect();
+
+        let schema = ParserDB::from_statements(schema_statements, "translation_db".to_owned())?;
+
         self.pg_statements
             .iter()
             .map(|statement| statement.translate(&schema, options))
