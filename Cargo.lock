@@ -286,7 +286,7 @@ dependencies = [
 [[package]]
 name = "geometric-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/geometric-traits?branch=main#69216e1d19d35bd815e024d6508c14db36ce5ff6"
+source = "git+https://github.com/earth-metabolome-initiative/geometric-traits?branch=main#ddaad2a298103fab1f8760ec5e433ebbb595831d"
 dependencies = [
  "hashbrown 0.16.1",
  "lender",
@@ -710,7 +710,7 @@ dependencies = [
  "rusqlite",
  "sql-traits",
  "sqlite-vec",
- "sqlparser 0.60.0 (git+https://github.com/LucaCappelletti94/sqlparser-rs?branch=dialect-derives)",
+ "sqlparser 0.60.0",
  "tempfile",
  "thiserror",
  "zerocopy",
@@ -941,22 +941,22 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/sql-traits#ad9b37e1c1056432c99fd21473fb456dd1917bd8"
+source = "git+https://github.com/earth-metabolome-initiative/sql-traits#bcc1b9ba695a9989e005f73fb2703e5f38380c4c"
 dependencies = [
  "geometric-traits",
  "git2",
  "sql_docs",
- "sqlparser 0.60.0 (git+https://github.com/LucaCappelletti94/sqlparser-rs?branch=dialect-derives)",
+ "sqlparser 0.61.0",
  "tempfile",
  "thiserror",
 ]
 
 [[package]]
 name = "sql_docs"
-version = "1.0.11"
-source = "git+https://github.com/LucaCappelletti94/sql-docs?branch=main#a2cbc3229cbe9df69f1de2b3eb19c68e02186cc8"
+version = "1.2.1"
+source = "git+https://github.com/LucaCappelletti94/sql-docs?branch=main#02b95a44ed5c6f46d0cff857617edd131c19a863"
 dependencies = [
- "sqlparser 0.60.0 (git+https://github.com/apache/datafusion-sqlparser-rs?branch=main)",
+ "sqlparser 0.61.0",
 ]
 
 [[package]]
@@ -991,8 +991,8 @@ dependencies = [
 
 [[package]]
 name = "sqlparser"
-version = "0.60.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#3ac567076ce505adb033f08a2044cfe5c3a7b229"
+version = "0.61.0"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#8e36e8ee85e8d24c3bd6948298a4675e341a1db3"
 dependencies = [
  "log",
  "recursive",
@@ -1053,9 +1053,9 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.24.0"
+version = "3.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "655da9c7eb6305c55742045d5a8d2037996d61d8de95806335c7c86ce0f82e9c"
+checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
 dependencies = [
  "fastrand",
  "getrandom 0.3.4",
