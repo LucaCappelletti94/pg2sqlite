@@ -6,9 +6,10 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArguments, Ident, ObjectName, ObjectNamePart, Query,
-    Select, SelectFlavor, SelectItem, SetExpr, TableFactor, TableWithJoins, Value, ValueWithSpan,
-    helpers::attached_token::AttachedToken,
+    BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function, FunctionArg,
+    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart,
+    Query, Select, SelectFlavor, SelectItem, SetExpr, TableFactor, TableWithJoins, Value,
+    ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
@@ -261,6 +262,98 @@ fn translate_fts_expression(
     })
 }
 
+/// Translate PostgreSQL EXTRACT(field FROM expr) to SQLite
+/// CAST(strftime(format, expr) AS INTEGER).
+///
+/// PostgreSQL's EXTRACT returns a numeric value, while SQLite's strftime
+/// returns a string. We wrap the strftime call in CAST to maintain numeric
+/// semantics.
+fn translate_extract(
+    field: &DateTimeField,
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    // Map PostgreSQL date/time fields to strftime format strings
+    let format_str = match field {
+        DateTimeField::Year | DateTimeField::Years => "%Y",
+        DateTimeField::Month | DateTimeField::Months => "%m",
+        DateTimeField::Day | DateTimeField::Days => "%d",
+        DateTimeField::Hour | DateTimeField::Hours => "%H",
+        DateTimeField::Minute | DateTimeField::Minutes => "%M",
+        DateTimeField::Second | DateTimeField::Seconds => "%S",
+        DateTimeField::Week(_) | DateTimeField::Weeks => "%W",
+        DateTimeField::DayOfWeek => "%w",
+        DateTimeField::DayOfYear => "%j",
+        other => {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "EXTRACT({other}) is not supported in SQLite. Supported fields: \
+                 YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, WEEK, DOW, DOY."
+            )));
+        }
+    };
+
+    // Build: CAST(strftime('format', expr) AS INTEGER)
+    let translated_expr = expr.translate(schema, options)?;
+
+    let strftime_call = Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
+        uses_odbc_syntax: false,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(format_str.to_string()),
+                    span: sqlparser::tokenizer::Span::empty(),
+                }))),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_expr)),
+            ],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+        parameters: FunctionArguments::None,
+    });
+
+    // Wrap in CAST(... AS INTEGER) to match PostgreSQL's numeric return type
+    Ok(Expr::Cast {
+        expr: Box::new(strftime_call),
+        data_type: DataType::Integer(None),
+        format: None,
+        kind: CastKind::Cast,
+        array: false,
+    })
+}
+
+/// Translate a CASE expression, recursively translating all sub-expressions.
+fn translate_case(
+    case_token: &AttachedToken,
+    end_token: &AttachedToken,
+    operand: Option<&Expr>,
+    conditions: &[sqlparser::ast::CaseWhen],
+    else_result: Option<&Expr>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    Ok(Expr::Case {
+        case_token: case_token.clone(),
+        end_token: end_token.clone(),
+        operand: operand.map(|e| e.translate(schema, options).map(Box::new)).transpose()?,
+        conditions: conditions
+            .iter()
+            .map(|cw| {
+                Ok(sqlparser::ast::CaseWhen {
+                    condition: cw.condition.translate(schema, options)?,
+                    result: cw.result.translate(schema, options)?,
+                })
+            })
+            .collect::<Result<Vec<_>, crate::errors::Error>>()?,
+        else_result: else_result.map(|e| e.translate(schema, options).map(Box::new)).transpose()?,
+    })
+}
+
 impl Translator for Expr {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -337,6 +430,50 @@ impl Translator for Expr {
                     escape_char: escape_char.clone(),
                 }
             }
+            // IN list: x IN (1, 2, 3) - pass through with translated expressions
+            Expr::InList { expr, list, negated } => {
+                Expr::InList {
+                    expr: Box::new(expr.translate(schema, options)?),
+                    list: list
+                        .iter()
+                        .map(|e| e.translate(schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    negated: *negated,
+                }
+            }
+            // IN subquery: x IN (SELECT ...) - pass through with translated subquery
+            Expr::InSubquery { expr, subquery, negated } => {
+                Expr::InSubquery {
+                    expr: Box::new(expr.translate(schema, options)?),
+                    subquery: Box::new(subquery.translate(schema, options)?),
+                    negated: *negated,
+                }
+            }
+            // BETWEEN: x BETWEEN low AND high - pass through with translated expressions
+            Expr::Between { expr, negated, low, high } => {
+                Expr::Between {
+                    expr: Box::new(expr.translate(schema, options)?),
+                    negated: *negated,
+                    low: Box::new(low.translate(schema, options)?),
+                    high: Box::new(high.translate(schema, options)?),
+                }
+            }
+            // CASE expression - pass through with translated expressions
+            Expr::Case { case_token, end_token, operand, conditions, else_result } => {
+                translate_case(
+                    case_token,
+                    end_token,
+                    operand.as_deref(),
+                    conditions,
+                    else_result.as_deref(),
+                    schema,
+                    options,
+                )?
+            }
+            // Scalar subquery: (SELECT ...) - pass through with translated query
+            Expr::Subquery(query) => Expr::Subquery(Box::new(query.translate(schema, options)?)),
+            // EXTRACT: translate to SQLite strftime()
+            Expr::Extract { field, expr, .. } => translate_extract(field, expr, schema, options)?,
             _ => {
                 unimplemented!(
                     "Expr translation for definition `{:?}` is not yet implemented.",
