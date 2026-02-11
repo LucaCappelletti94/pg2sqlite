@@ -326,18 +326,9 @@ impl Translator for Expr {
                     negated: *negated,
                 }
             }
-            // Translate ILIKE to LIKE (SQLite LIKE is case-insensitive for ASCII)
-            Expr::ILike { negated, any, expr, pattern, escape_char } => {
-                Expr::Like {
-                    negated: *negated,
-                    any: *any,
-                    expr: Box::new(expr.translate(schema, options)?),
-                    pattern: Box::new(pattern.translate(schema, options)?),
-                    escape_char: escape_char.clone(),
-                }
-            }
-            // Pass through LIKE unchanged
-            Expr::Like { negated, any, expr, pattern, escape_char } => {
+            // ILIKE translates to LIKE (SQLite LIKE is case-insensitive for ASCII)
+            Expr::ILike { negated, any, expr, pattern, escape_char }
+            | Expr::Like { negated, any, expr, pattern, escape_char } => {
                 Expr::Like {
                     negated: *negated,
                     any: *any,
