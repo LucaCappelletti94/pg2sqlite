@@ -118,11 +118,11 @@ fn test_translate() {
 #[test]
 fn test_on_conflict_do_update() {
     // Test that ON CONFLICT DO UPDATE is properly translated (pass-through)
-    let sql = r#"
+    let sql = r"
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
         INSERT INTO kv (key, value) VALUES ('a', 'b')
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
-    "#;
+    ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
     assert_eq!(result.len(), 2);

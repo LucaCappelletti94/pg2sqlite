@@ -2,6 +2,8 @@
 //!
 //! These tests verify that the new type mappings work correctly at runtime.
 
+#![allow(dead_code)]
+
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
@@ -213,9 +215,9 @@ fn test_text_default_value() -> Result<(), Box<dyn std::error::Error>> {
 /// Test ON CONFLICT DO UPDATE (UPSERT) works semantically.
 #[test]
 fn test_upsert_insert_new_row() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = r"
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, counter INTEGER NOT NULL DEFAULT 0);
-    "#;
+    ";
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
@@ -253,9 +255,9 @@ fn test_upsert_insert_new_row() -> Result<(), Box<dyn std::error::Error>> {
 /// Test ON CONFLICT DO UPDATE updates existing row.
 #[test]
 fn test_upsert_update_existing_row() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = r"
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, counter INTEGER NOT NULL DEFAULT 0);
-    "#;
+    ";
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 

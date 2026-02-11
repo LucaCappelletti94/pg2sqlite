@@ -1,5 +1,7 @@
 //! Tests for PostgreSQL to SQLite function translations.
 
+#![allow(dead_code)]
+
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 

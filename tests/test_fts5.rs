@@ -1,5 +1,7 @@
 //! Tests for FTS5 full-text search translation from PostgreSQL GIN/tsvector.
 
+#![allow(dead_code, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+
 use std::time::Instant;
 
 use diesel::prelude::*;

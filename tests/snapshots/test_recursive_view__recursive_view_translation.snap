@@ -1,0 +1,8 @@
+---
+source: tests/test_recursive_view.rs
+assertion_line: 79
+expression: translated_sql
+---
+CREATE TABLE categories (id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, parent_id INTEGER REFERENCES categories (id)) STRICT
+CREATE VIEW category_tree AS WITH RECURSIVE tree AS (SELECT id, name, parent_id, 0 AS depth, name AS path FROM categories WHERE parent_id IS NULL UNION ALL SELECT c.id, c.name, c.parent_id, t.depth + 1, t.path || ' > ' || c.name FROM categories c JOIN tree t ON c.parent_id = t.id) SELECT id, name, parent_id, depth, path FROM tree
+CREATE VIEW category_descendant_count AS WITH RECURSIVE descendants AS (SELECT id, id AS root_id FROM categories UNION ALL SELECT c.id, d.root_id FROM categories c JOIN descendants d ON c.parent_id = d.id) SELECT root_id AS category_id, COUNT(*) - 1 AS descendant_count FROM descendants GROUP BY root_id
