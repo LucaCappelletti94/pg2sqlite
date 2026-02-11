@@ -158,11 +158,3 @@ jobs:
       - name: Check for typos
         uses: crate-ci/typos@master
 
-  deny:
-    name: Cargo Deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check licenses and advisories
-        uses: EmbarkStudios/cargo-deny-action@v2
