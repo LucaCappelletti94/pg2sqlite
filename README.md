@@ -65,7 +65,7 @@ flowchart TB
         T3["CREATE POLICY ... FOR SELECT"]
         T4["CREATE POLICY ... FOR INSERT"]
     end
-    
+
     subgraph Output["SQLite Output"]
         subgraph Storage["Data Storage"]
             ST["documents_rls table"]
@@ -81,7 +81,7 @@ flowchart TB
         V --> TU
         V --> TD
     end
-    
+
     Input --> Output
 ```
 
@@ -93,11 +93,11 @@ flowchart LR
         CS["current_setting('app.user_id')"]
         CU["current_user"]
     end
-    
+
     subgraph SQLite["SQLite Function"]
         SF["current_app_user()"]
     end
-    
+
     CS -->|"mapped to"| SF
     CU -->|"mapped to"| SF
 ```
@@ -113,19 +113,94 @@ Parses and uses `CREATE ROLE` and `GRANT` statements to determine table accessib
 ```mermaid
 flowchart TD
     Table["Table with RLS"]
-    
+
     Table --> Check{"Grants to Role?"}
-    
+
     Check -->|"None"| Skip["Skip table entirely"]
     Check -->|"SELECT only"| ReadOnly["Create table + view<br/>No write triggers"]
     Check -->|"Full CRUD"| Full["Create table + view<br/>+ INSTEAD OF triggers"]
-    
+
     Skip --> ServerOnly["Server-only table"]
     ReadOnly --> SyncRead["Read-only sync"]
     Full --> SyncFull["Full sync with RLS"]
 ```
 
 This enables generating SQLite schemas tailored to a specific role's permissions, ideal for client-side replicas that should only see/modify data they're authorized to access.
+
+### Vector Search (pgvector → sqlite-vec)
+
+Translates `PostgreSQL` pgvector types and operations to sqlite-vec equivalents:
+
+#### Vector Types
+
+| PostgreSQL | SQLite |
+|------------|--------|
+| `vector(N)` | `BLOB` |
+| `halfvec(N)` | `BLOB` |
+
+#### Distance Operators
+
+| PostgreSQL | sqlite-vec |
+|------------|------------|
+| `<->` (L2 distance) | `vec_distance_L2()` |
+| `<=>` (cosine distance) | `vec_distance_cosine()` |
+
+#### Type Casts
+
+| PostgreSQL | sqlite-vec |
+|------------|------------|
+| `'[1,2,3]'::vector` | `vec_f32('[1,2,3]')` |
+| `'[1,2,3]'::halfvec` | `vec_f32('[1,2,3]')` |
+
+#### vec0 Virtual Table Generation
+
+For tables with vector columns, pg2sqlite generates:
+
+1. **Main table** with vector columns as `BLOB`
+2. **vec0 virtual table** for optimized vector operations
+3. **Sync triggers** to keep the vec0 table synchronized
+
+```mermaid
+flowchart TB
+    subgraph Input["PostgreSQL Schema"]
+        T1["CREATE TABLE items (
+          id INTEGER PRIMARY KEY,
+          embedding vector(384)
+        )"]
+    end
+
+    subgraph Output["SQLite Output"]
+        subgraph Storage["Data Storage"]
+            MT["items table (BLOB)"]
+            VT["items_embedding_vec (vec0)"]
+        end
+        subgraph Sync["Synchronization"]
+            TI["INSERT trigger"]
+            TU["UPDATE trigger"]
+            TD["DELETE trigger"]
+        end
+        MT --> TI
+        MT --> TU
+        MT --> TD
+        TI --> VT
+        TU --> VT
+        TD --> VT
+    end
+
+    Input --> Output
+```
+
+#### Performance Limitation
+
+> **Important:** As of sqlite-vec v0.1.x, vec0 uses **brute-force search only** (O(n)), not ANN indexing like pgvector's HNSW/IVFFlat (O(log n)). For large datasets (>100k vectors), this may be slower than pgvector.
+>
+> ANN support is actively being developed: [sqlite-vec#25](https://github.com/asg017/sqlite-vec/issues/25)
+
+The translation is correct and will automatically benefit when ANN is added. In the meantime, consider:
+
+- Binary quantization (`vec_quantize_binary()`) for ~25x constant factor speedup
+- Pre-filtering with `WHERE` clauses to reduce scan size
+- Keeping datasets under 100k vectors for acceptable latency
 
 ### PL/pgSQL Trigger Translation
 
@@ -165,13 +240,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .translate(&Pg2SqliteOptions::default())?;
 
     assert_eq!(sqlite_statements.len(), 2);
-    
+
     let create_table = &sqlite_statements[0];
     assert_eq!(create_table.to_string(), "CREATE TABLE users (id INTEGER PRIMARY KEY NOT NULL, username TEXT NOT NULL) STRICT");
 
     let insert = &sqlite_statements[1];
     assert_eq!(insert.to_string(), "INSERT OR IGNORE INTO users (username) VALUES ('alice')");
-    
+
     Ok(())
 }
 ```

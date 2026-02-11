@@ -20,7 +20,9 @@ impl Translator for DataType {
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match self {
-            DataType::Text | DataType::Integer(None) | DataType::Real => Ok(self.clone()),
+            DataType::Text | DataType::Integer(None) | DataType::Real | DataType::Blob(None) => {
+                Ok(self.clone())
+            }
             DataType::SmallInt(None) | DataType::Int(None) | DataType::Boolean | DataType::Bool => {
                 Ok(DataType::Integer(None))
             }
@@ -76,6 +78,10 @@ impl Translator for DataType {
                         // SQLite does not have a CAS type, so we use BLOB instead.
                         Ok(DataType::Binary(None))
                     }
+                    // pgvector types: vector(N) and halfvec(N) -> BLOB for sqlite-vec
+                    // The vector data is stored as BLOB in the main table, with a companion
+                    // vec0 virtual table for indexed KNN search.
+                    Some("vector" | "VECTOR" | "halfvec" | "HALFVEC") => Ok(DataType::Blob(None)),
                     unimplemented => {
                         unimplemented!("The data type {:?} is not supported", unimplemented)
                     }

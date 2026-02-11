@@ -430,6 +430,82 @@ fn translate_substring(
     })
 }
 
+/// Check if a data type is a pgvector type (vector or halfvec).
+fn is_vector_type(data_type: &DataType) -> bool {
+    if let DataType::Custom(name, _) = data_type
+        && let Some(ident) = name.0.first().and_then(|p| p.as_ident())
+    {
+        let type_name = ident.value.to_lowercase();
+        return type_name == "vector" || type_name == "halfvec";
+    }
+    false
+}
+
+/// Translate a vector type cast (e.g., '[1,2,3]'::vector) to
+/// vec_f32('[1,2,3]').
+fn translate_vector_cast(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_expr = expr.translate(schema, options)?;
+
+    Ok(Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("vec_f32"))]),
+        uses_odbc_syntax: false,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_expr))],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+        parameters: FunctionArguments::None,
+    }))
+}
+
+/// Translate a pgvector distance operator to a sqlite-vec function call.
+///
+/// pgvector operators:
+/// - `<->` (LtDashGt) - Euclidean distance -> vec_distance_L2(a, b)
+/// - `<=>` (Spaceship) - Cosine distance -> vec_distance_cosine(a, b)
+/// - `<~>` (Custom) - Hamming distance -> vec_distance_hamming(a, b)
+///
+/// # Performance Note
+///
+/// sqlite-vec v0.1.x performs brute-force search (O(n)), not indexed search.
+/// ANN indexing is planned: <https://github.com/asg017/sqlite-vec/issues/25>
+fn translate_vector_distance_op(
+    left: &Expr,
+    right: &Expr,
+    function_name: &str,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_left = left.translate(schema, options)?;
+    let translated_right = right.translate(schema, options)?;
+
+    Ok(Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(function_name))]),
+        uses_odbc_syntax: false,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_left)),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_right)),
+            ],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+        parameters: FunctionArguments::None,
+    }))
+}
+
 /// Translate a binary operation expression.
 fn translate_binary_op(
     left: &Expr,
@@ -452,6 +528,61 @@ fn translate_binary_op(
                 .to_string(),
         ));
     }
+
+    // pgvector distance operators -> sqlite-vec functions
+    // <-> (LtDashGt) - Euclidean distance
+    if *op == BinaryOperator::LtDashGt {
+        return translate_vector_distance_op(left, right, "vec_distance_L2", schema, options);
+    }
+
+    // <=> (Spaceship) - Cosine distance
+    // Note: In MySQL this is the NULL-safe equality operator, but in pgvector it's
+    // cosine distance
+    if *op == BinaryOperator::Spaceship {
+        return translate_vector_distance_op(left, right, "vec_distance_cosine", schema, options);
+    }
+
+    // Custom operators for pgvector
+    if let BinaryOperator::Custom(op_str) = op {
+        match op_str.as_str() {
+            // <~> - Hamming distance (pgvector bit vectors)
+            "<~>" => {
+                return translate_vector_distance_op(
+                    left,
+                    right,
+                    "vec_distance_hamming",
+                    schema,
+                    options,
+                );
+            }
+            // <#> - Negative inner product (not supported in sqlite-vec)
+            "<#>" => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "The <#> operator (negative inner product) is not supported by sqlite-vec. \
+                     Consider using <-> (L2 distance) or <=> (cosine distance) instead."
+                        .to_string(),
+                ));
+            }
+            // <+> - L1/Manhattan distance (not supported in sqlite-vec)
+            "<+>" => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "The <+> operator (L1/Manhattan distance) is not supported by sqlite-vec. \
+                     Consider using <-> (L2 distance) or <=> (cosine distance) instead."
+                        .to_string(),
+                ));
+            }
+            // <%> - Jaccard distance (not supported in sqlite-vec)
+            "<%>" => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "The <%> operator (Jaccard distance) is not supported by sqlite-vec. \
+                     Consider using <~> (Hamming distance) for bit vectors instead."
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
     Ok(Expr::BinaryOp {
         left: Box::new(left.translate(schema, options)?),
         op: op.clone(),
@@ -486,6 +617,10 @@ impl Translator for Expr {
             }
             // Handle type casts (e.g., value::text)
             Expr::Cast { expr, data_type, format, kind, array } => {
+                // pgvector casts: '[1,2,3]'::vector -> vec_f32('[1,2,3]')
+                if is_vector_type(data_type) {
+                    return translate_vector_cast(expr, schema, options);
+                }
                 Expr::Cast {
                     expr: Box::new(expr.translate(schema, options)?),
                     data_type: data_type.translate(schema, options)?,

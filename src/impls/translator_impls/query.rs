@@ -19,10 +19,29 @@ impl Translator for Query {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // Translate ORDER BY expressions
+        let order_by = self
+            .order_by
+            .as_ref()
+            .map(|ob| -> Result<sqlparser::ast::OrderBy, crate::errors::Error> {
+                let kind = match &ob.kind {
+                    sqlparser::ast::OrderByKind::Expressions(exprs) => {
+                        let translated_exprs = exprs
+                            .iter()
+                            .map(|expr| expr.translate(schema, options))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        sqlparser::ast::OrderByKind::Expressions(translated_exprs)
+                    }
+                    sqlparser::ast::OrderByKind::All(all) => sqlparser::ast::OrderByKind::All(*all),
+                };
+                Ok(sqlparser::ast::OrderBy { kind, interpolate: ob.interpolate.clone() })
+            })
+            .transpose()?;
+
         Ok(Query {
             with: self.with.clone(), // CTEs - pass through for now
             body: Box::new(self.body.translate(schema, options)?),
-            order_by: self.order_by.clone(),
+            order_by,
             limit_clause: self.limit_clause.clone(),
             fetch: self.fetch.clone(),
             locks: self.locks.clone(),

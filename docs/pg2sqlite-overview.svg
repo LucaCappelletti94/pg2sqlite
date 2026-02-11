@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 900 2030" width="900" height="2030">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 900 2380" width="900" height="2380">
   <defs>
     <linearGradient id="heroGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#1e3a5f"/>
@@ -23,7 +23,7 @@
   </defs>
 
   <!-- Background -->
-  <rect width="900" height="2030" fill="#f8fafc"/>
+  <rect width="900" height="2380" fill="#f8fafc"/>
 
   <!-- ==================== HERO SECTION ==================== -->
   <rect width="900" height="100" fill="url(#heroGrad)"/>
@@ -418,8 +418,93 @@
     </g>
   </g>
 
-  <!-- ==================== SECTION 7: SUPPORT STATUS ==================== -->
+  <!-- ==================== SECTION 7: VECTOR SEARCH ==================== -->
   <g transform="translate(60, 1850)">
+    <rect width="780" height="44" rx="10" fill="#06b6d4"/>
+    <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">7. Vector Search</text>
+    <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">pgvector → sqlite-vec</text>
+
+    <g transform="translate(0, 58)">
+      <rect width="780" height="42" rx="10" fill="white" filter="url(#shadow)"/>
+      <rect x="15" y="8" width="26" height="26" rx="6" fill="#06b6d4" opacity="0.12"/>
+      <text x="28" y="26" font-family="Inter, sans-serif" font-size="14" fill="#06b6d4" text-anchor="middle">∿</text>
+      <text x="52" y="26" font-family="Inter, sans-serif" font-size="11" fill="#64748b">Vector columns generate a companion vec0 virtual table with sync triggers for KNN search.</text>
+    </g>
+
+    <!-- PostgreSQL Schema -->
+    <g transform="translate(0, 112)">
+      <rect width="250" height="190" rx="10" fill="#e0f2fe" stroke="#7dd3fc"/>
+      <text x="125" y="20" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#0284c7" text-anchor="middle">PostgreSQL pgvector</text>
+      <rect x="12" y="32" width="226" height="145" rx="6" fill="#1e293b"/>
+      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
+        <tspan x="20" y="50" fill="#7dd3fc">CREATE TABLE</tspan><tspan> items (</tspan>
+        <tspan x="20" y="66">  id </tspan><tspan fill="#fbbf24">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
+        <tspan x="20" y="82">  embedding </tspan><tspan fill="#fbbf24">vector(384)</tspan>
+        <tspan x="20" y="98">);</tspan>
+        <tspan x="20" y="122" fill="#7dd3fc">SELECT</tspan><tspan> * </tspan><tspan fill="#7dd3fc">FROM</tspan><tspan> items</tspan>
+        <tspan x="20" y="138" fill="#7dd3fc">ORDER BY</tspan><tspan> embedding </tspan><tspan fill="#fbbf24">&lt;-&gt;</tspan><tspan> query</tspan>
+        <tspan x="20" y="154" fill="#7dd3fc">LIMIT</tspan><tspan> 10;</tspan>
+      </text>
+    </g>
+
+    <!-- Arrow -->
+    <g transform="translate(258, 200)">
+      <path d="M0 0 L20 0" stroke="#06b6d4" stroke-width="2"/>
+      <polygon points="25,0 17,-4 17,4" fill="#06b6d4"/>
+    </g>
+
+    <!-- SQLite Translations - 3 boxes -->
+    <g transform="translate(290, 112)">
+      <text x="245" y="-2" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#0284c7" text-anchor="middle">SQLite Translation</text>
+
+      <!-- Main Table with BLOB -->
+      <rect width="490" height="58" rx="6" fill="white" stroke="#7dd3fc"/>
+      <rect width="70" height="58" rx="6" fill="#336791"/>
+      <text x="35" y="25" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">TABLE</text>
+      <text x="35" y="38" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">vector→BLOB</text>
+      <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
+      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
+        <tspan x="90" y="22" fill="#7dd3fc">CREATE TABLE</tspan><tspan> items (id </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
+        <tspan x="90" y="38">  embedding </tspan><tspan fill="#4ade80">BLOB</tspan><tspan>) STRICT;</tspan>
+      </text>
+
+      <!-- vec0 Virtual Table -->
+      <g transform="translate(0, 66)">
+        <rect width="490" height="58" rx="6" fill="white" stroke="#7dd3fc"/>
+        <rect width="70" height="58" rx="6" fill="#0891b2"/>
+        <text x="35" y="25" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">vec0</text>
+        <text x="35" y="38" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">KNN index</text>
+        <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
+          <tspan x="90" y="22" fill="#7dd3fc">CREATE VIRTUAL TABLE</tspan><tspan> items_embedding_vec </tspan><tspan fill="#7dd3fc">USING</tspan><tspan> </tspan><tspan fill="#4ade80">vec0</tspan><tspan>(</tspan>
+          <tspan x="90" y="38">  id_id INTEGER PRIMARY KEY, embedding </tspan><tspan fill="#4ade80">float[384]</tspan><tspan>);</tspan>
+        </text>
+      </g>
+
+      <!-- Sync Triggers -->
+      <g transform="translate(0, 132)">
+        <rect width="490" height="58" rx="6" fill="white" stroke="#7dd3fc"/>
+        <rect width="70" height="58" rx="6" fill="#10b981"/>
+        <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">TRIGGERS</text>
+        <text x="35" y="35" font-family="Inter, sans-serif" font-size="7" fill="rgba(255,255,255,0.8)" text-anchor="middle">sync vec0</text>
+        <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
+          <tspan x="90" y="22" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> items_vec_ai </tspan><tspan fill="#7dd3fc">AFTER INSERT ON</tspan><tspan> items </tspan><tspan fill="#7dd3fc">BEGIN</tspan>
+          <tspan x="90" y="38">  </tspan><tspan fill="#7dd3fc">INSERT INTO</tspan><tspan> items_embedding_vec </tspan><tspan fill="#7dd3fc">VALUES</tspan><tspan> (NEW.id, NEW.embedding); </tspan><tspan fill="#7dd3fc">END</tspan><tspan>;</tspan>
+        </text>
+      </g>
+    </g>
+
+    <g transform="translate(0, 310)">
+      <rect width="780" height="28" rx="6" fill="#fef3c7" stroke="#fcd34d"/>
+      <text font-family="Inter, sans-serif" font-size="10" fill="#92400e">
+        <tspan x="15" y="18" font-weight="600">⚠ Limitation:</tspan><tspan> sqlite-vec v0.1.x uses brute-force O(n). ANN indexing planned: </tspan><tspan fill="#0284c7" font-weight="500">github.com/asg017/sqlite-vec/issues/25</tspan>
+      </text>
+    </g>
+  </g>
+
+  <!-- ==================== SECTION 8: SUPPORT STATUS ==================== -->
+  <g transform="translate(60, 2210)">
     <!-- Future Work box -->
     <rect width="380" height="130" rx="10" fill="white" filter="url(#shadow)"/>
     <rect width="380" height="38" rx="10" fill="#f59e0b"/>
@@ -436,19 +521,19 @@
       </g>
       <g transform="translate(0, 34)">
         <circle cx="8" cy="8" r="6" fill="#fef3c7"/>
-        <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">pgvector</text>
-        <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">sqlite-vec</text>
+        <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">Arrays</text>
+        <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">JSON / carray</text>
       </g>
       <!-- Column 2 -->
       <g transform="translate(175, 0)">
         <circle cx="8" cy="8" r="6" fill="#fef3c7"/>
-        <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">Arrays</text>
-        <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">JSON / carray</text>
+        <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">ts_rank()</text>
+        <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">FTS5 bm25()</text>
       </g>
       <g transform="translate(175, 34)">
         <circle cx="8" cy="8" r="6" fill="#fef3c7"/>
-        <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">ts_rank()</text>
-        <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">FTS5 bm25()</text>
+        <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">LATERAL joins</text>
+        <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">Subqueries</text>
       </g>
     </g>
 
@@ -491,6 +576,6 @@
   </g>
 
   <!-- ==================== FOOTER ==================== -->
-  <text x="450" y="2010" font-family="Inter, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">github.com/LucaCappelletti94/pg2sqlite · February 2026</text>
+  <text x="450" y="2360" font-family="Inter, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">github.com/LucaCappelletti94/pg2sqlite · February 2026</text>
 
 </svg>

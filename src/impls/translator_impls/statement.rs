@@ -8,9 +8,12 @@ use sql_traits::{
 use sqlparser::ast::{BinaryOperator, Expr, Statement};
 
 use crate::{
-    impls::translator_impls::rls::{
-        generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
-        validate_table_policies,
+    impls::translator_impls::{
+        rls::{
+            generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
+            validate_table_policies,
+        },
+        vector::{generate_vec0_statements, has_vector_columns},
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
@@ -145,9 +148,27 @@ impl Translator for Statement {
                     let rls_statements = generate_rls_statements(create_table, schema, options)?;
                     statements.extend(rls_statements);
 
+                    // Generate vec0 virtual tables for vector columns (using original table)
+                    if has_vector_columns(create_table) {
+                        let vec0_statements =
+                            generate_vec0_statements(create_table, schema, options)?;
+                        statements.extend(vec0_statements);
+                    }
+
                     statements
                 } else {
-                    vec![create_table.translate(schema, options)?.into()]
+                    // Translate the table
+                    let translated_table = create_table.translate(schema, options)?;
+                    let mut statements = vec![Statement::CreateTable(translated_table)];
+
+                    // Generate vec0 virtual tables for vector columns
+                    if has_vector_columns(create_table) {
+                        let vec0_statements =
+                            generate_vec0_statements(create_table, schema, options)?;
+                        statements.extend(vec0_statements);
+                    }
+
+                    statements
                 }
             }
             Self::CreateIndex(create_index) => create_index.translate(schema, options)?,
