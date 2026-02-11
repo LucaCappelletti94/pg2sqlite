@@ -602,7 +602,7 @@ impl Translator for Expr {
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         Ok(match self {
-            Expr::Function(func) => Expr::Function(func.translate(schema, options)?),
+            Expr::Function(func) => func.translate(schema, options)?,
             // Pass through simple expressions that work in SQLite
             Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => self.clone(),
             // Handle unary operators (e.g., -1, NOT x)

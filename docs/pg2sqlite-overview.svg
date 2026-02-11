@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 900 2380" width="900" height="2380">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 900 2440" width="900" height="2440">
   <defs>
     <linearGradient id="heroGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#1e3a5f"/>
@@ -23,7 +23,7 @@
   </defs>
 
   <!-- Background -->
-  <rect width="900" height="2380" fill="#f8fafc"/>
+  <rect width="900" height="2440" fill="#f8fafc"/>
 
   <!-- ==================== HERO SECTION ==================== -->
   <rect width="900" height="100" fill="url(#heroGrad)"/>
@@ -174,11 +174,32 @@
         <rect x="128" y="14" width="112" height="24" rx="4" fill="#0891b2" opacity="0.12"/>
         <text x="184" y="31" font-family="SF Mono, monospace" font-size="11" fill="#0891b2" text-anchor="middle">uuidv7()</text>
       </g>
+
+      <!-- Row 3: CONCAT and FILTER -->
+      <g transform="translate(0, 124)">
+        <rect width="370" height="52" rx="8" fill="white" filter="url(#shadow)"/>
+        <rect x="10" y="14" width="100" height="24" rx="4" fill="#336791" opacity="0.12"/>
+        <text x="60" y="31" font-family="SF Mono, monospace" font-size="10" fill="#336791" text-anchor="middle">CONCAT(a,b,c)</text>
+        <path d="M120 26 L138 26" stroke="#cbd5e1" stroke-width="1.5" stroke-linecap="round"/>
+        <polygon points="138,26 132,22 132,30" fill="#cbd5e1"/>
+        <rect x="148" y="14" width="210" height="24" rx="4" fill="#0891b2" opacity="0.12"/>
+        <text x="253" y="31" font-family="SF Mono, monospace" font-size="10" fill="#0891b2" text-anchor="middle">a || b || c</text>
+      </g>
+
+      <g transform="translate(390, 124)">
+        <rect width="390" height="52" rx="8" fill="white" filter="url(#shadow)"/>
+        <rect x="10" y="14" width="130" height="24" rx="4" fill="#336791" opacity="0.12"/>
+        <text x="75" y="31" font-family="SF Mono, monospace" font-size="8" fill="#336791" text-anchor="middle">SUM(x) FILTER(WHERE c)</text>
+        <path d="M150 26 L168 26" stroke="#cbd5e1" stroke-width="1.5" stroke-linecap="round"/>
+        <polygon points="168,26 162,22 162,30" fill="#cbd5e1"/>
+        <rect x="178" y="14" width="200" height="24" rx="4" fill="#0891b2" opacity="0.12"/>
+        <text x="278" y="31" font-family="SF Mono, monospace" font-size="8" fill="#0891b2" text-anchor="middle">SUM(CASE WHEN c THEN x END)</text>
+      </g>
     </g>
   </g>
 
   <!-- ==================== SECTION 3: TRIGGERS ==================== -->
-  <g transform="translate(60, 790)">
+  <g transform="translate(60, 850)">
     <rect width="780" height="44" rx="10" fill="#336791"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">3. PL/pgSQL Triggers</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.7)" text-anchor="end">Procedural → Declarative</text>
@@ -228,7 +249,7 @@
   </g>
 
   <!-- ==================== SECTION 4: ROLE-BASED TRANSLATION ==================== -->
-  <g transform="translate(60, 1070)">
+  <g transform="translate(60, 1130)">
     <rect width="780" height="44" rx="10" fill="#059669"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">4. Role-Based Table Translation</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">Grant-based filtering</text>
@@ -306,7 +327,7 @@
   </g>
 
   <!-- ==================== SECTION 5: RLS ==================== -->
-  <g transform="translate(60, 1350)">
+  <g transform="translate(60, 1410)">
     <rect width="780" height="44" rx="10" fill="#8b5cf6"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">5. Row-Level Security (RLS)</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">Per-row access control</text>
@@ -387,7 +408,7 @@
   </g>
 
   <!-- ==================== SECTION 6: FULL-TEXT SEARCH ==================== -->
-  <g transform="translate(60, 1680)">
+  <g transform="translate(60, 1740)">
     <rect width="780" height="44" rx="10" fill="#336791"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">6. Full-Text Search</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.7)" text-anchor="end">GIN index → FTS5</text>
@@ -419,7 +440,7 @@
   </g>
 
   <!-- ==================== SECTION 7: VECTOR SEARCH ==================== -->
-  <g transform="translate(60, 1850)">
+  <g transform="translate(60, 1910)">
     <rect width="780" height="44" rx="10" fill="#06b6d4"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">7. Vector Search</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">pgvector → sqlite-vec</text>
@@ -504,7 +525,7 @@
   </g>
 
   <!-- ==================== SECTION 8: SUPPORT STATUS ==================== -->
-  <g transform="translate(60, 2210)">
+  <g transform="translate(60, 2270)">
     <!-- Future Work box -->
     <rect width="380" height="130" rx="10" fill="white" filter="url(#shadow)"/>
     <rect width="380" height="38" rx="10" fill="#f59e0b"/>
@@ -562,8 +583,8 @@
         <g transform="translate(175, 0)">
           <circle cx="8" cy="8" r="6" fill="#fee2e2"/>
           <path d="M5 5 L11 11 M11 5 L5 11" stroke="#ef4444" stroke-width="1.2" fill="none" stroke-linecap="round"/>
-          <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">Window Functions</text>
-          <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">Limited support</text>
+          <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">FILTER Clause</text>
+          <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">Use CASE instead</text>
         </g>
         <g transform="translate(175, 34)">
           <circle cx="8" cy="8" r="6" fill="#fee2e2"/>
@@ -576,6 +597,6 @@
   </g>
 
   <!-- ==================== FOOTER ==================== -->
-  <text x="450" y="2360" font-family="Inter, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">github.com/LucaCappelletti94/pg2sqlite · February 2026</text>
+  <text x="450" y="2420" font-family="Inter, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">github.com/LucaCappelletti94/pg2sqlite · February 2026</text>
 
 </svg>

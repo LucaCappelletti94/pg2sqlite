@@ -3,8 +3,8 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident,
-    ObjectName, Value, ValueWithSpan,
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+    FunctionArguments, Ident, ObjectName, Value, ValueWithSpan,
 };
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
@@ -15,6 +15,8 @@ enum FunctionTranslation {
     Rename(String),
     /// Function with modified arguments (e.g., NOW() -> datetime('now'))
     WithArgs { name: String, args: Vec<FunctionArg> },
+    /// Transform to concatenation operator (CONCAT -> ||)
+    ToConcatenation,
     /// Unsupported function with error message
     Unsupported(String),
     /// No translation needed
@@ -48,35 +50,170 @@ fn translate_function(name: &ObjectName, _args: &FunctionArguments) -> FunctionT
              SELECT *, bm25(table_fts) AS rank FROM table_fts WHERE table_fts MATCH 'query' ORDER BY rank"
                 .to_string(),
         ),
+        // CONCAT(a, b, c) -> a || b || c
+        "concat" => FunctionTranslation::ToConcatenation,
+        // CONCAT_WS(sep, a, b, c) is more complex - would need custom handling
+        // For now, we only support simple CONCAT
         _ => FunctionTranslation::PassThrough,
+    }
+}
+
+/// Extract expressions from function arguments.
+fn extract_arg_exprs(args: &FunctionArguments) -> Vec<&Expr> {
+    match args {
+        FunctionArguments::List(list) => {
+            list.args
+                .iter()
+                .filter_map(|arg| {
+                    match arg {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+                        | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. } => Some(e),
+                        _ => None,
+                    }
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Build a concatenation expression from a list of expressions using ||.
+fn build_concatenation(exprs: Vec<Expr>) -> Option<Expr> {
+    if exprs.is_empty() {
+        return None;
+    }
+    if exprs.len() == 1 {
+        return Some(exprs.into_iter().next().unwrap());
+    }
+
+    let mut iter = exprs.into_iter();
+    let first = iter.next().unwrap();
+
+    Some(iter.fold(first, |acc, expr| {
+        Expr::BinaryOp {
+            left: Box::new(acc),
+            op: BinaryOperator::StringConcat,
+            right: Box::new(expr),
+        }
+    }))
+}
+
+/// Wrap an aggregate function argument with CASE WHEN filter THEN value END.
+///
+/// This transforms `AGG(value) FILTER (WHERE condition)` to
+/// `AGG(CASE WHEN condition THEN value END)`.
+fn wrap_arg_with_case_filter(arg: &FunctionArg, filter: &Expr) -> FunctionArg {
+    match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Case {
+                case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                operand: None,
+                conditions: vec![sqlparser::ast::CaseWhen {
+                    condition: filter.clone(),
+                    result: expr.clone(),
+                }],
+                else_result: None,
+            }))
+        }
+        FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
+            // COUNT(*) FILTER (WHERE cond) -> SUM(CASE WHEN cond THEN 1 END)
+            // But we can't change the function name here, so we wrap it differently
+            // COUNT(*) FILTER -> COUNT(CASE WHEN cond THEN 1 END)
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Case {
+                case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                operand: None,
+                conditions: vec![sqlparser::ast::CaseWhen {
+                    condition: filter.clone(),
+                    result: Expr::Value(ValueWithSpan {
+                        value: Value::Number("1".to_string(), false),
+                        span: sqlparser::tokenizer::Span::empty(),
+                    }),
+                }],
+                else_result: None,
+            }))
+        }
+        FunctionArg::Named { name, arg: FunctionArgExpr::Expr(expr), operator } => {
+            FunctionArg::Named {
+                name: name.clone(),
+                arg: FunctionArgExpr::Expr(Expr::Case {
+                    case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                    end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                    operand: None,
+                    conditions: vec![sqlparser::ast::CaseWhen {
+                        condition: filter.clone(),
+                        result: expr.clone(),
+                    }],
+                    else_result: None,
+                }),
+                operator: operator.clone(),
+            }
+        }
+        // Pass through other argument types unchanged
+        other => other.clone(),
+    }
+}
+
+/// Transform a function with FILTER clause to use CASE expression instead.
+fn transform_filter_to_case(func: &Function) -> Function {
+    let filter = match &func.filter {
+        Some(f) => f.as_ref(),
+        None => return func.clone(),
+    };
+
+    let new_args = match &func.args {
+        FunctionArguments::List(list) => {
+            FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: list.duplicate_treatment,
+                args: list.args.iter().map(|arg| wrap_arg_with_case_filter(arg, filter)).collect(),
+                clauses: list.clauses.clone(),
+            })
+        }
+        other => other.clone(),
+    };
+
+    Function {
+        name: func.name.clone(),
+        uses_odbc_syntax: func.uses_odbc_syntax,
+        parameters: func.parameters.clone(),
+        args: new_args,
+        filter: None, // Remove the FILTER clause
+        null_treatment: func.null_treatment,
+        over: func.over.clone(),
+        within_group: func.within_group.clone(),
     }
 }
 
 impl Translator for Function {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Self;
+    type SQLiteEntry = Expr;
 
     fn translate(
         &self,
         _schema: &Self::Schema,
         _options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        match translate_function(&self.name, &self.args) {
+        // Transform FILTER clause to CASE expression
+        let func =
+            if self.filter.is_some() { transform_filter_to_case(self) } else { self.clone() };
+
+        match translate_function(&func.name, &func.args) {
             FunctionTranslation::Rename(new_name) => {
-                Ok(Function {
+                Ok(Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new(new_name)]),
-                    uses_odbc_syntax: self.uses_odbc_syntax,
-                    parameters: self.parameters.clone(),
-                    args: self.args.clone(),
-                    filter: self.filter.clone(),
-                    null_treatment: self.null_treatment,
-                    over: self.over.clone(),
-                    within_group: self.within_group.clone(),
-                })
+                    uses_odbc_syntax: func.uses_odbc_syntax,
+                    parameters: func.parameters.clone(),
+                    args: func.args.clone(),
+                    filter: None,
+                    null_treatment: func.null_treatment,
+                    over: func.over.clone(),
+                    within_group: func.within_group.clone(),
+                }))
             }
             FunctionTranslation::WithArgs { name, args } => {
-                Ok(Function {
+                Ok(Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new(name)]),
                     uses_odbc_syntax: false,
                     parameters: FunctionArguments::None,
@@ -89,12 +226,21 @@ impl Translator for Function {
                     null_treatment: None,
                     over: None,
                     within_group: vec![],
+                }))
+            }
+            FunctionTranslation::ToConcatenation => {
+                // CONCAT(a, b, c) -> a || b || c
+                let exprs: Vec<Expr> = extract_arg_exprs(&func.args).into_iter().cloned().collect();
+                build_concatenation(exprs).ok_or_else(|| {
+                    crate::errors::Error::UnsupportedSQLiteFeature(
+                        "CONCAT requires at least one argument".to_string(),
+                    )
                 })
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
             }
-            FunctionTranslation::PassThrough => Ok(self.clone()),
+            FunctionTranslation::PassThrough => Ok(Expr::Function(func)),
         }
     }
 }

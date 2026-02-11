@@ -202,6 +202,40 @@ The translation is correct and will automatically benefit when ANN is added. In 
 - Pre-filtering with `WHERE` clauses to reduce scan size
 - Keeping datasets under 100k vectors for acceptable latency
 
+### Window Functions
+
+Window functions are supported in SQLite 3.25+ with identical syntax to PostgreSQL, so most translations are pass-through:
+
+| Function | Status | Notes |
+|----------|--------|-------|
+| `ROW_NUMBER() OVER (...)` | Pass-through | |
+| `RANK() OVER (...)` | Pass-through | |
+| `DENSE_RANK() OVER (...)` | Pass-through | |
+| `NTILE(n) OVER (...)` | Pass-through | |
+| `LAG(col, n, default) OVER (...)` | Pass-through | |
+| `LEAD(col, n, default) OVER (...)` | Pass-through | |
+| `FIRST_VALUE(col) OVER (...)` | Pass-through | |
+| `LAST_VALUE(col) OVER (...)` | Pass-through | |
+| `NTH_VALUE(col, n) OVER (...)` | Pass-through | |
+| `SUM/AVG/COUNT OVER (...)` | Pass-through | Aggregates as windows |
+| `ROWS BETWEEN ...` | Pass-through | Frame clauses |
+| `RANGE BETWEEN ...` | Pass-through | Frame clauses |
+| `FILTER (WHERE ...)` | Error | Not supported in SQLite |
+
+#### FILTER Clause Limitation
+
+The `FILTER` clause is a PostgreSQL-specific feature not supported in SQLite:
+
+```sql
+-- PostgreSQL only (not supported)
+SELECT COUNT(*) FILTER (WHERE status = 'active') OVER (PARTITION BY dept)
+
+-- Equivalent SQLite-compatible syntax
+SELECT SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) OVER (PARTITION BY dept)
+```
+
+When a `FILTER` clause is detected, pg2sqlite returns an `UnsupportedSQLiteFeature` error with a helpful message suggesting the CASE expression alternative.
+
 ### PL/pgSQL Trigger Translation
 
 Translates `PostgreSQL` PL/pgSQL trigger functions to `SQLite` trigger bodies:
