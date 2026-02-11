@@ -13,11 +13,16 @@ impl Translator for Insert {
 
     fn translate(
         &self,
-        _schema: &Self::Schema,
-        _options: &Self::Options,
+        schema: &Self::Schema,
+        options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        // For now, assume INSERT is compatible, but handle ON CONFLICT
-        let mut insert = self.clone();
+        // Translate the source (VALUES or SELECT)
+        let source =
+            self.source.as_ref().map(|q| q.translate(schema, options)).transpose()?.map(Box::new);
+
+        let mut insert = Insert { source, ..self.clone() };
+
+        // Handle ON CONFLICT
         if let Some(on_insert) = &self.on {
             match on_insert {
                 sqlparser::ast::OnInsert::OnConflict(on_conflict) => {
@@ -29,8 +34,8 @@ impl Translator for Insert {
                         }
                         sqlparser::ast::OnConflictAction::DoUpdate(_) => {
                             // SQLite supports ON CONFLICT DO UPDATE with nearly
-                            // identical
-                            // syntax to PostgreSQL (since SQLite 3.24.0).
+                            // identical syntax to PostgreSQL (since SQLite
+                            // 3.24.0).
                             // EXCLUDED references work the same way
                             // (case-insensitive).
                             // Pass through as-is.

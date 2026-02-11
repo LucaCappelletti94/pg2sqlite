@@ -32,9 +32,8 @@ impl Translator for DataType {
             // depending on use case (regular arrays vs embeddings)
             DataType::Array(inner) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                    "Array type {:?} is not supported. Arrays could be JSON-serialized or \
+                    "Array type {inner:?} is not supported. Arrays could be JSON-serialized or \
                      use vector extensions depending on use case.",
-                    inner
                 )))
             }
             DataType::Uuid => {

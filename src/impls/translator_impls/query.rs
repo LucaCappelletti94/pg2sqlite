@@ -2,7 +2,7 @@
 //! `Query`, `SetExpr`, and `Select` types.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Query, Select, SelectItem, SetExpr, TableFactor, TableWithJoins};
+use sqlparser::ast::{Query, Select, SelectItem, SetExpr, TableFactor, TableWithJoins, Values};
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
@@ -54,8 +54,8 @@ impl Translator for SetExpr {
                     right: Box::new(right.translate(schema, options)?),
                 }
             }
-            SetExpr::Values(_)
-            | SetExpr::Insert(_)
+            SetExpr::Values(values) => SetExpr::Values(translate_values(values, schema, options)?),
+            SetExpr::Insert(_)
             | SetExpr::Table(_)
             | SetExpr::Update(_)
             | SetExpr::Delete(_)
@@ -175,5 +175,25 @@ fn translate_select_item(
         }
         // Wildcards and qualified wildcards don't need translation
         other => other.clone(),
+    })
+}
+
+fn translate_values(
+    values: &Values,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Values, crate::errors::Error> {
+    let translated_rows = values
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter().map(|expr| expr.translate(schema, options)).collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Values {
+        explicit_row: values.explicit_row,
+        rows: translated_rows,
+        value_keyword: values.value_keyword,
     })
 }

@@ -274,7 +274,7 @@ impl Translator for Expr {
         Ok(match self {
             Expr::Function(func) => Expr::Function(func.translate(schema, options)?),
             // Pass through simple expressions that work in SQLite
-            Expr::Identifier(_) | Expr::Value(_) => self.clone(),
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => self.clone(),
             // Handle unary operators (e.g., -1, NOT x)
             Expr::UnaryOp { op, expr } => {
                 Expr::UnaryOp { op: *op, expr: Box::new(expr.translate(schema, options)?) }
@@ -314,6 +314,36 @@ impl Translator for Expr {
                     format: format.clone(),
                     kind: kind.clone(),
                     array: *array,
+                }
+            }
+            // Handle NULL checks (IS NULL, IS NOT NULL)
+            Expr::IsNull(inner) => Expr::IsNull(Box::new(inner.translate(schema, options)?)),
+            Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(inner.translate(schema, options)?)),
+            // Handle EXISTS subqueries
+            Expr::Exists { subquery, negated } => {
+                Expr::Exists {
+                    subquery: Box::new(subquery.translate(schema, options)?),
+                    negated: *negated,
+                }
+            }
+            // Translate ILIKE to LIKE (SQLite LIKE is case-insensitive for ASCII)
+            Expr::ILike { negated, any, expr, pattern, escape_char } => {
+                Expr::Like {
+                    negated: *negated,
+                    any: *any,
+                    expr: Box::new(expr.translate(schema, options)?),
+                    pattern: Box::new(pattern.translate(schema, options)?),
+                    escape_char: escape_char.clone(),
+                }
+            }
+            // Pass through LIKE unchanged
+            Expr::Like { negated, any, expr, pattern, escape_char } => {
+                Expr::Like {
+                    negated: *negated,
+                    any: *any,
+                    expr: Box::new(expr.translate(schema, options)?),
+                    pattern: Box::new(pattern.translate(schema, options)?),
+                    escape_char: escape_char.clone(),
                 }
             }
             _ => {
