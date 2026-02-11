@@ -354,11 +354,117 @@ fn translate_case(
     })
 }
 
+/// Translate PostgreSQL POSITION(substr IN str) to SQLite INSTR(str, substr).
+///
+/// Note that the argument order is reversed: POSITION searches for the first
+/// argument within the second, while INSTR searches for the second argument
+/// within the first.
+fn translate_position(
+    substr_expr: &Expr,
+    in_expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_substr = substr_expr.translate(schema, options)?;
+    let translated_in = in_expr.translate(schema, options)?;
+
+    // Build: INSTR(str, substr) - note the reversed argument order
+    Ok(Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("INSTR"))]),
+        uses_odbc_syntax: false,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_in)),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_substr)),
+            ],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+        parameters: FunctionArguments::None,
+    }))
+}
+
+/// Translate a TRIM expression, recursively translating all sub-expressions.
+fn translate_trim(
+    expr: &Expr,
+    trim_where: Option<sqlparser::ast::TrimWhereField>,
+    trim_what: Option<&Expr>,
+    trim_characters: Option<&[Expr]>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    Ok(Expr::Trim {
+        expr: Box::new(expr.translate(schema, options)?),
+        trim_where,
+        trim_what: trim_what.map(|e| e.translate(schema, options).map(Box::new)).transpose()?,
+        trim_characters: trim_characters
+            .map(|chars| {
+                chars.iter().map(|e| e.translate(schema, options)).collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?,
+    })
+}
+
+/// Translate a SUBSTRING expression to SQLite SUBSTR.
+fn translate_substring(
+    expr: &Expr,
+    substring_from: Option<&Expr>,
+    substring_for: Option<&Expr>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    Ok(Expr::Substring {
+        expr: Box::new(expr.translate(schema, options)?),
+        substring_from: substring_from
+            .map(|e| e.translate(schema, options).map(Box::new))
+            .transpose()?,
+        substring_for: substring_for
+            .map(|e| e.translate(schema, options).map(Box::new))
+            .transpose()?,
+        special: true,   // Use SUBSTR(expr, start, len) syntax
+        shorthand: true, // Use SUBSTR name
+    })
+}
+
+/// Translate a binary operation expression.
+fn translate_binary_op(
+    left: &Expr,
+    op: &BinaryOperator,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    // Check for full-text search: to_tsvector(...) @@ to_tsquery(...)
+    if *op == BinaryOperator::AtAt {
+        if let (Expr::Function(tsvector_func), Expr::Function(tsquery_func)) = (left, right)
+            && is_to_tsvector(tsvector_func)
+            && is_to_tsquery(tsquery_func)
+        {
+            return translate_fts_expression(tsvector_func, tsquery_func, schema);
+        }
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            "The @@ operator is only supported for to_tsvector(...) @@ to_tsquery(...) \
+             full-text search expressions."
+                .to_string(),
+        ));
+    }
+    Ok(Expr::BinaryOp {
+        left: Box::new(left.translate(schema, options)?),
+        op: op.clone(),
+        right: Box::new(right.translate(schema, options)?),
+    })
+}
+
 impl Translator for Expr {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
     type SQLiteEntry = Self;
 
+    #[allow(clippy::too_many_lines)]
     fn translate(
         &self,
         schema: &Self::Schema,
@@ -376,28 +482,7 @@ impl Translator for Expr {
             Expr::Nested(inner) => Expr::Nested(Box::new(inner.translate(schema, options)?)),
             // Handle binary operations (e.g., 1 + 2, a || b)
             Expr::BinaryOp { left, op, right } => {
-                // Check for full-text search: to_tsvector(...) @@ to_tsquery(...)
-                if *op == BinaryOperator::AtAt {
-                    if let (Expr::Function(tsvector_func), Expr::Function(tsquery_func)) =
-                        (left.as_ref(), right.as_ref())
-                        && is_to_tsvector(tsvector_func)
-                        && is_to_tsquery(tsquery_func)
-                    {
-                        return translate_fts_expression(tsvector_func, tsquery_func, schema);
-                    }
-                    // Unsupported @@ usage
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "The @@ operator is only supported for to_tsvector(...) @@ to_tsquery(...) \
-                         full-text search expressions."
-                            .to_string(),
-                    ));
-                }
-
-                Expr::BinaryOp {
-                    left: Box::new(left.translate(schema, options)?),
-                    op: op.clone(),
-                    right: Box::new(right.translate(schema, options)?),
-                }
+                translate_binary_op(left, op, right, schema, options)?
             }
             // Handle type casts (e.g., value::text)
             Expr::Cast { expr, data_type, format, kind, array } => {
@@ -412,6 +497,13 @@ impl Translator for Expr {
             // Handle NULL checks (IS NULL, IS NOT NULL)
             Expr::IsNull(inner) => Expr::IsNull(Box::new(inner.translate(schema, options)?)),
             Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(inner.translate(schema, options)?)),
+            // Handle boolean checks (IS TRUE, IS FALSE, IS NOT TRUE, IS NOT FALSE)
+            Expr::IsTrue(inner) => Expr::IsTrue(Box::new(inner.translate(schema, options)?)),
+            Expr::IsNotTrue(inner) => Expr::IsNotTrue(Box::new(inner.translate(schema, options)?)),
+            Expr::IsFalse(inner) => Expr::IsFalse(Box::new(inner.translate(schema, options)?)),
+            Expr::IsNotFalse(inner) => {
+                Expr::IsNotFalse(Box::new(inner.translate(schema, options)?))
+            }
             // Handle EXISTS subqueries
             Expr::Exists { subquery, negated } => {
                 Expr::Exists {
@@ -474,6 +566,53 @@ impl Translator for Expr {
             Expr::Subquery(query) => Expr::Subquery(Box::new(query.translate(schema, options)?)),
             // EXTRACT: translate to SQLite strftime()
             Expr::Extract { field, expr, .. } => translate_extract(field, expr, schema, options)?,
+            // Tuple/row value expression: (a, b, c) - pass through with translated elements
+            Expr::Tuple(exprs) => {
+                Expr::Tuple(
+                    exprs
+                        .iter()
+                        .map(|e| e.translate(schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
+            // TRIM expression - pass through with translated parts
+            Expr::Trim { expr, trim_where, trim_what, trim_characters } => {
+                translate_trim(
+                    expr,
+                    *trim_where,
+                    trim_what.as_deref(),
+                    trim_characters.as_deref(),
+                    schema,
+                    options,
+                )?
+            }
+            // CEIL expression - pass through with translated expression
+            Expr::Ceil { expr, field } => {
+                Expr::Ceil {
+                    expr: Box::new(expr.translate(schema, options)?),
+                    field: field.clone(),
+                }
+            }
+            // FLOOR expression - pass through with translated expression
+            Expr::Floor { expr, field } => {
+                Expr::Floor {
+                    expr: Box::new(expr.translate(schema, options)?),
+                    field: field.clone(),
+                }
+            }
+            // POSITION(substr IN str) -> INSTR(str, substr)
+            // Note: SQLite's INSTR has arguments in reverse order
+            Expr::Position { expr, r#in } => translate_position(expr, r#in, schema, options)?,
+            // SUBSTRING(str FROM pos FOR len) -> SUBSTR(str, pos, len)
+            Expr::Substring { expr, substring_from, substring_for, .. } => {
+                translate_substring(
+                    expr,
+                    substring_from.as_deref(),
+                    substring_for.as_deref(),
+                    schema,
+                    options,
+                )?
+            }
             _ => {
                 unimplemented!(
                     "Expr translation for definition `{:?}` is not yet implemented.",
