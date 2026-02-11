@@ -527,3 +527,296 @@ fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// Test that prefix matching syntax is translated correctly (:* -> *).
+#[test]
+fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX idx_documents_search ON documents
+            USING GIN (to_tsvector('english', title || ' ' || body));
+        SELECT * FROM documents WHERE to_tsvector('english', title) @@ to_tsquery('prog:*');
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    // Find the SELECT statement
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    // Should contain FTS5 prefix syntax (prog*) not PostgreSQL syntax (prog:*)
+    assert!(
+        select_stmt.contains("prog*"),
+        "Should translate :* to * for prefix matching, got: {select_stmt}"
+    );
+    assert!(
+        !select_stmt.contains("prog:*"),
+        "Should not contain PostgreSQL prefix syntax :*, got: {select_stmt}"
+    );
+
+    Ok(())
+}
+
+/// Test that prefix matching works semantically.
+#[test]
+fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX idx_documents_search ON documents
+            USING GIN (to_tsvector('english', title || ' ' || body));
+        SELECT * FROM documents WHERE to_tsvector('english', title) @@ to_tsquery('prog:*');
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute DDL statements
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert test documents
+    diesel::insert_into(documents::table)
+        .values(&[
+            NewDocument {
+                title: "Programming Guide".to_string(),
+                body: "Learn to program".to_string(),
+            },
+            NewDocument {
+                title: "Cooking Recipes".to_string(),
+                body: "Delicious food".to_string(),
+            },
+            NewDocument {
+                title: "Progress Report".to_string(),
+                body: "Project status".to_string(),
+            },
+        ])
+        .execute(&mut connection)?;
+
+    // Get and execute the SELECT statement with prefix search
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    let results = diesel::sql_query(&select_stmt).load::<SearchResult>(&mut connection)?;
+
+    // Should match "Programming" and "Progress" (both start with "prog")
+    assert_eq!(results.len(), 2, "Prefix 'prog*' should match 'Programming' and 'Progress'");
+
+    Ok(())
+}
+
+/// Test that tsquery operators are translated correctly.
+#[test]
+fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>> {
+    // Test AND operator (&)
+    let sql_and = r#"
+        CREATE TABLE docs (id SERIAL PRIMARY KEY, body TEXT NOT NULL);
+        CREATE INDEX idx ON docs USING GIN (to_tsvector('english', body));
+        SELECT * FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('rust & safety');
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql_and)?.translate(&options)?;
+    let select = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .unwrap()
+        .to_string();
+
+    // & should become space (implicit AND in FTS5)
+    assert!(
+        select.contains("rust safety") || select.contains("rust  safety"),
+        "AND operator should translate to space, got: {select}"
+    );
+
+    // Test OR operator (|)
+    let sql_or = r#"
+        CREATE TABLE docs2 (id SERIAL PRIMARY KEY, body TEXT NOT NULL);
+        CREATE INDEX idx2 ON docs2 USING GIN (to_tsvector('english', body));
+        SELECT * FROM docs2 WHERE to_tsvector('english', body) @@ to_tsquery('rust | python');
+    "#;
+
+    let translated = Pg2Sqlite::default().sql(sql_or)?.translate(&options)?;
+    let select = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .unwrap()
+        .to_string();
+
+    assert!(select.contains("rust OR python"), "OR operator should translate to OR, got: {select}");
+
+    // Test NOT operator (!)
+    let sql_not = r#"
+        CREATE TABLE docs3 (id SERIAL PRIMARY KEY, body TEXT NOT NULL);
+        CREATE INDEX idx3 ON docs3 USING GIN (to_tsvector('english', body));
+        SELECT * FROM docs3 WHERE to_tsvector('english', body) @@ to_tsquery('rust & !python');
+    "#;
+
+    let translated = Pg2Sqlite::default().sql(sql_not)?.translate(&options)?;
+    let select = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .unwrap()
+        .to_string();
+
+    assert!(select.contains("NOT python"), "NOT operator should translate to NOT, got: {select}");
+
+    Ok(())
+}
+
+/// Test that ts_rank function produces a clear error message.
+#[test]
+fn test_ts_rank_error_message() {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            body TEXT NOT NULL
+        );
+        SELECT ts_rank(to_tsvector('english', body), to_tsquery('rust')) FROM documents;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+
+    assert!(result.is_err(), "ts_rank should produce an error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ts_rank") || err.contains("bm25"),
+        "Error should mention ts_rank or bm25: {err}"
+    );
+}
+
+/// Test that ts_rank_cd function produces a clear error message.
+#[test]
+fn test_ts_rank_cd_error_message() {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            body TEXT NOT NULL
+        );
+        SELECT ts_rank_cd(to_tsvector('english', body), to_tsquery('rust')) FROM documents;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+
+    assert!(result.is_err(), "ts_rank_cd should produce an error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ts_rank") || err.contains("bm25"),
+        "Error should mention ts_rank or bm25: {err}"
+    );
+}
+
+/// Test that FTS5 works with a non-standard primary key name.
+#[test]
+fn test_fts5_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>> {
+    // Use doc_id instead of id as primary key
+    let sql = r#"
+        CREATE TABLE posts (
+            doc_id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL
+        );
+        CREATE INDEX idx_posts_search ON posts
+            USING GIN (to_tsvector('english', title || ' ' || content));
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+
+    // Triggers should use doc_id, not id
+    assert!(
+        translated_sql.contains("new.doc_id"),
+        "Triggers should use doc_id, got: {translated_sql}"
+    );
+    assert!(
+        translated_sql.contains("old.doc_id"),
+        "Triggers should use doc_id, got: {translated_sql}"
+    );
+    assert!(
+        !translated_sql.contains("new.id"),
+        "Triggers should NOT use id, got: {translated_sql}"
+    );
+
+    // Test it works semantically
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    for stmt in &translated {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert and search
+    diesel::sql_query(
+        "INSERT INTO posts (title, content) VALUES ('Rust Guide', 'Learn Rust programming')",
+    )
+    .execute(&mut connection)?;
+
+    #[derive(QueryableByName, Debug)]
+    struct PostResult {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        doc_id: i32,
+    }
+
+    let results = diesel::sql_query(
+        "SELECT p.doc_id FROM posts p \
+         WHERE p.doc_id IN (SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'rust')",
+    )
+    .load::<PostResult>(&mut connection)?;
+
+    assert_eq!(results.len(), 1, "Should find the post");
+    assert_eq!(results[0].doc_id, 1);
+
+    Ok(())
+}
+
+/// Test that @@ operator translation uses the correct primary key.
+#[test]
+fn test_at_at_operator_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE posts (
+            post_id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL
+        );
+        CREATE INDEX idx ON posts USING GIN (to_tsvector('english', title));
+        SELECT * FROM posts WHERE to_tsvector('english', title) @@ to_tsquery('rust');
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    // Should use post_id, not id
+    assert!(
+        select_stmt.contains("post_id IN"),
+        "Should use post_id in subquery, got: {select_stmt}"
+    );
+
+    Ok(())
+}

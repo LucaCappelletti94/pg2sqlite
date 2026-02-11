@@ -2,7 +2,7 @@
 //! `Query`, `SetExpr`, and `Select` types.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Query, Select, SetExpr, TableFactor, TableWithJoins};
+use sqlparser::ast::{Query, Select, SelectItem, SetExpr, TableFactor, TableWithJoins};
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
@@ -85,12 +85,19 @@ impl Translator for Select {
             .map(|table_with_joins| translate_table_with_joins(table_with_joins, schema, options))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Translate expressions in projections (SELECT clause)
+        let projection = self
+            .projection
+            .iter()
+            .map(|item| translate_select_item(item, schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Select {
             select_token: self.select_token.clone(),
             distinct: self.distinct.clone(),
             top: self.top.clone(),
             top_before_distinct: self.top_before_distinct,
-            projection: self.projection.clone(), // TODO: translate expressions in projections
+            projection,
             into: self.into.clone(),
             from,
             lateral_views: self.lateral_views.clone(),
@@ -149,6 +156,24 @@ fn translate_table_factor(
             }
         }
         // Pass through other table factors unchanged
+        other => other.clone(),
+    })
+}
+
+fn translate_select_item(
+    item: &SelectItem,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<SelectItem, crate::errors::Error> {
+    Ok(match item {
+        SelectItem::UnnamedExpr(expr) => SelectItem::UnnamedExpr(expr.translate(schema, options)?),
+        SelectItem::ExprWithAlias { expr, alias } => {
+            SelectItem::ExprWithAlias {
+                expr: expr.translate(schema, options)?,
+                alias: alias.clone(),
+            }
+        }
+        // Wildcards and qualified wildcards don't need translation
         other => other.clone(),
     })
 }
