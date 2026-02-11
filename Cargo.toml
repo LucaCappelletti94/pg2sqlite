@@ -7,7 +7,7 @@ edition = "2024"
 sqlparser = { version = "0.60", git = "https://github.com/LucaCappelletti94/sqlparser-rs", branch = "dialect-derives" }
 sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits" }
 git2 = "0.20.4"
-tempfile = "3.0"
+tempfile = "3.25"
 thiserror = "2.0"
 
 [dev-dependencies]
