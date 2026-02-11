@@ -1,0 +1,552 @@
+//! Tests for JOIN condition translation from PostgreSQL to SQLite.
+//!
+//! These tests verify that expressions in JOIN ON clauses are properly
+//! translated (e.g., ILIKE -> LIKE, function translations, etc.).
+
+#![allow(dead_code)]
+
+mod helpers;
+
+use diesel::prelude::*;
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+
+// ============================================================================
+// Translation Tests - Verify SQL is correctly transformed
+// ============================================================================
+
+/// Test that ILIKE in JOIN ON clause is translated to LIKE.
+#[test]
+fn test_join_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE users (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE posts (
+            id SERIAL PRIMARY KEY,
+            author_name TEXT NOT NULL,
+            title TEXT NOT NULL
+        );
+        SELECT u.id, p.title
+        FROM users u
+        JOIN posts p ON p.author_name ILIKE u.name;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    // Should contain LIKE, not ILIKE
+    assert!(
+        select_stmt.to_uppercase().contains(" LIKE "),
+        "ILIKE in JOIN should translate to LIKE, got: {select_stmt}"
+    );
+    assert!(
+        !select_stmt.to_uppercase().contains("ILIKE"),
+        "Should not contain ILIKE, got: {select_stmt}"
+    );
+
+    Ok(())
+}
+
+/// Test that NOW() in JOIN ON clause is translated to datetime('now').
+#[test]
+fn test_join_now_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE events (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            event_time TIMESTAMP NOT NULL
+        );
+        CREATE TABLE schedules (
+            id SERIAL PRIMARY KEY,
+            start_time TIMESTAMP NOT NULL,
+            end_time TIMESTAMP NOT NULL
+        );
+        SELECT e.name, s.id
+        FROM events e
+        JOIN schedules s ON e.event_time > NOW();
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    // Should contain datetime('now'), not NOW()
+    assert!(
+        select_stmt.contains("datetime('now')"),
+        "NOW() in JOIN should translate to datetime('now'), got: {select_stmt}"
+    );
+    assert!(
+        !select_stmt.to_uppercase().contains("NOW()"),
+        "Should not contain NOW(), got: {select_stmt}"
+    );
+
+    Ok(())
+}
+
+/// Test that LEAST/GREATEST in JOIN ON clause are translated to MIN/MAX.
+#[test]
+fn test_join_least_greatest_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE ranges (
+            id SERIAL PRIMARY KEY,
+            range_start INTEGER NOT NULL,
+            range_end INTEGER NOT NULL
+        );
+        CREATE TABLE values_table (
+            id SERIAL PRIMARY KEY,
+            value INTEGER NOT NULL
+        );
+        SELECT r.id, v.value
+        FROM ranges r
+        JOIN values_table v ON v.value >= LEAST(r.range_start, r.range_end)
+                            AND v.value <= GREATEST(r.range_start, r.range_end);
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    // Should contain MIN/MAX, not LEAST/GREATEST
+    assert!(
+        select_stmt.to_uppercase().contains("MIN("),
+        "LEAST in JOIN should translate to MIN, got: {select_stmt}"
+    );
+    assert!(
+        select_stmt.to_uppercase().contains("MAX("),
+        "GREATEST in JOIN should translate to MAX, got: {select_stmt}"
+    );
+    assert!(
+        !select_stmt.to_uppercase().contains("LEAST"),
+        "Should not contain LEAST, got: {select_stmt}"
+    );
+    assert!(
+        !select_stmt.to_uppercase().contains("GREATEST"),
+        "Should not contain GREATEST, got: {select_stmt}"
+    );
+
+    Ok(())
+}
+
+/// Test that string_agg in JOIN ON subquery is translated to group_concat.
+#[test]
+fn test_join_subquery_function_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE categories (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE items (
+            id SERIAL PRIMARY KEY,
+            category_id INTEGER NOT NULL,
+            tags TEXT NOT NULL
+        );
+        SELECT c.name, sub.all_tags
+        FROM categories c
+        JOIN (
+            SELECT category_id, string_agg(tags, ', ') as all_tags
+            FROM items
+            GROUP BY category_id
+        ) sub ON sub.category_id = c.id;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    // Should contain group_concat, not string_agg
+    assert!(
+        select_stmt.to_lowercase().contains("group_concat"),
+        "string_agg in JOIN subquery should translate to group_concat, got: {select_stmt}"
+    );
+    assert!(
+        !select_stmt.to_lowercase().contains("string_agg"),
+        "Should not contain string_agg, got: {select_stmt}"
+    );
+
+    Ok(())
+}
+
+/// Test multiple JOINs with different conditions all get translated.
+#[test]
+fn test_multiple_joins_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE users (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL
+        );
+        CREATE TABLE posts (
+            id SERIAL PRIMARY KEY,
+            author_name TEXT NOT NULL,
+            title TEXT NOT NULL
+        );
+        CREATE TABLE comments (
+            id SERIAL PRIMARY KEY,
+            post_id INTEGER NOT NULL,
+            commenter_name TEXT NOT NULL
+        );
+        SELECT u.id, p.title, c.id as comment_id
+        FROM users u
+        JOIN posts p ON p.author_name ILIKE u.name
+        JOIN comments c ON c.commenter_name ILIKE u.name AND c.post_id = p.id;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    // Count LIKE occurrences (should be 2, translated from ILIKE)
+    let like_count = select_stmt.to_uppercase().matches(" LIKE ").count();
+    assert_eq!(
+        like_count, 2,
+        "Should have 2 LIKE clauses (from ILIKE), got {like_count} in: {select_stmt}"
+    );
+
+    // Should not contain any ILIKE
+    assert!(
+        !select_stmt.to_uppercase().contains("ILIKE"),
+        "Should not contain ILIKE, got: {select_stmt}"
+    );
+
+    Ok(())
+}
+
+/// Test LEFT JOIN with translated conditions.
+#[test]
+fn test_left_join_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE users (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE posts (
+            id SERIAL PRIMARY KEY,
+            author_name TEXT NOT NULL,
+            title TEXT NOT NULL
+        );
+        SELECT u.id, p.title
+        FROM users u
+        LEFT JOIN posts p ON p.author_name ILIKE u.name;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    // Should preserve LEFT JOIN and translate ILIKE
+    assert!(
+        select_stmt.to_uppercase().contains("LEFT JOIN"),
+        "Should preserve LEFT JOIN, got: {select_stmt}"
+    );
+    assert!(
+        select_stmt.to_uppercase().contains(" LIKE "),
+        "ILIKE should translate to LIKE, got: {select_stmt}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Semantic Tests - Verify translated SQL works correctly in SQLite
+// ============================================================================
+
+/// Test that JOIN with translated ILIKE works semantically.
+#[test]
+fn test_join_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE authors (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE books (
+            id INTEGER PRIMARY KEY,
+            author_name TEXT NOT NULL,
+            title TEXT NOT NULL
+        );
+        SELECT a.id, b.title
+        FROM authors a
+        JOIN books b ON b.author_name ILIKE a.name;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute DDL
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert test data - author with lowercase name
+    diesel::sql_query("INSERT INTO authors (id, name) VALUES (1, 'alice')")
+        .execute(&mut connection)?;
+    // Book with uppercase author name should match via case-insensitive LIKE
+    diesel::sql_query("INSERT INTO books (id, author_name, title) VALUES (1, 'ALICE', 'Book One')")
+        .execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO books (id, author_name, title) VALUES (2, 'Bob', 'Book Two')")
+        .execute(&mut connection)?;
+
+    // Get and execute the SELECT statement
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    #[derive(QueryableByName, Debug)]
+    struct JoinResult {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        id: i32,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        title: String,
+    }
+
+    let results = diesel::sql_query(&select_stmt).load::<JoinResult>(&mut connection)?;
+
+    // Should match 'alice' with 'ALICE' (case-insensitive)
+    assert_eq!(results.len(), 1, "Should match 1 row via case-insensitive join");
+    assert_eq!(results[0].title, "Book One");
+
+    Ok(())
+}
+
+/// Test that JOIN with LEAST/GREATEST works semantically.
+#[test]
+fn test_join_least_greatest_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE ranges (
+            id INTEGER PRIMARY KEY,
+            low INTEGER NOT NULL,
+            high INTEGER NOT NULL
+        );
+        CREATE TABLE nums (
+            id INTEGER PRIMARY KEY,
+            val INTEGER NOT NULL
+        );
+        SELECT r.id as range_id, n.val
+        FROM ranges r
+        JOIN nums n ON n.val >= LEAST(r.low, r.high) AND n.val <= GREATEST(r.low, r.high);
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute DDL
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Range where low > high (to test that LEAST/GREATEST work correctly)
+    diesel::sql_query("INSERT INTO ranges (id, low, high) VALUES (1, 10, 5)")
+        .execute(&mut connection)?;
+    // Values: 3 is out, 5 is in, 7 is in, 10 is in, 12 is out
+    diesel::sql_query("INSERT INTO nums (id, val) VALUES (1, 3)").execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO nums (id, val) VALUES (2, 5)").execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO nums (id, val) VALUES (3, 7)").execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO nums (id, val) VALUES (4, 10)").execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO nums (id, val) VALUES (5, 12)").execute(&mut connection)?;
+
+    // Get and execute the SELECT statement
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    #[derive(QueryableByName, Debug)]
+    struct RangeResult {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        range_id: i32,
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        val: i32,
+    }
+
+    let results = diesel::sql_query(&select_stmt).load::<RangeResult>(&mut connection)?;
+
+    // Should match values 5, 7, 10 (within range [5, 10])
+    assert_eq!(results.len(), 3, "Should match 3 values in range [5,10], got: {:?}", results);
+    let vals: Vec<i32> = results.iter().map(|r| r.val).collect();
+    assert!(vals.contains(&5));
+    assert!(vals.contains(&7));
+    assert!(vals.contains(&10));
+
+    Ok(())
+}
+
+/// Test LEFT JOIN semantic behavior with translated conditions.
+#[test]
+fn test_left_join_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE departments (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE employees (
+            id INTEGER PRIMARY KEY,
+            dept_name TEXT NOT NULL,
+            name TEXT NOT NULL
+        );
+        SELECT d.name as dept, e.name as emp
+        FROM departments d
+        LEFT JOIN employees e ON e.dept_name ILIKE d.name;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute DDL
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Two departments
+    diesel::sql_query("INSERT INTO departments (id, name) VALUES (1, 'engineering')")
+        .execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO departments (id, name) VALUES (2, 'sales')")
+        .execute(&mut connection)?;
+
+    // Only one employee in engineering (case mismatch to test ILIKE translation)
+    diesel::sql_query(
+        "INSERT INTO employees (id, dept_name, name) VALUES (1, 'ENGINEERING', 'Alice')",
+    )
+    .execute(&mut connection)?;
+
+    // Get and execute the SELECT statement
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    #[derive(QueryableByName, Debug)]
+    struct DeptEmp {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        dept: String,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+        emp: Option<String>,
+    }
+
+    let results = diesel::sql_query(&select_stmt).load::<DeptEmp>(&mut connection)?;
+
+    // Should have 2 rows: engineering with Alice, sales with NULL
+    assert_eq!(results.len(), 2, "Should have 2 rows for LEFT JOIN");
+
+    let eng = results.iter().find(|r| r.dept == "engineering").expect("Should have engineering");
+    assert_eq!(eng.emp, Some("Alice".to_string()));
+
+    let sales = results.iter().find(|r| r.dept == "sales").expect("Should have sales");
+    assert_eq!(sales.emp, None);
+
+    Ok(())
+}
+
+/// Test derived table (subquery) in JOIN with function translation.
+#[test]
+fn test_join_derived_table_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE orders (
+            id INTEGER PRIMARY KEY,
+            customer_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL
+        );
+        CREATE TABLE customers (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        SELECT c.name, totals.total_amount
+        FROM customers c
+        JOIN (
+            SELECT customer_id, GREATEST(SUM(amount), 0) as total_amount
+            FROM orders
+            GROUP BY customer_id
+        ) totals ON totals.customer_id = c.id;
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute DDL
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Setup data
+    diesel::sql_query("INSERT INTO customers (id, name) VALUES (1, 'Alice')")
+        .execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO customers (id, name) VALUES (2, 'Bob')")
+        .execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO orders (id, customer_id, amount) VALUES (1, 1, 100)")
+        .execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO orders (id, customer_id, amount) VALUES (2, 1, 50)")
+        .execute(&mut connection)?;
+    diesel::sql_query("INSERT INTO orders (id, customer_id, amount) VALUES (3, 2, 200)")
+        .execute(&mut connection)?;
+
+    // Get and execute the SELECT statement
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    #[derive(QueryableByName, Debug)]
+    struct CustomerTotal {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        total_amount: i32,
+    }
+
+    let results = diesel::sql_query(&select_stmt).load::<CustomerTotal>(&mut connection)?;
+
+    assert_eq!(results.len(), 2);
+    let alice = results.iter().find(|r| r.name == "Alice").expect("Should have Alice");
+    assert_eq!(alice.total_amount, 150);
+    let bob = results.iter().find(|r| r.name == "Bob").expect("Should have Bob");
+    assert_eq!(bob.total_amount, 200);
+
+    Ok(())
+}

@@ -2,7 +2,10 @@
 //! `Query`, `SetExpr`, and `Select` types.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Query, Select, SelectItem, SetExpr, TableFactor, TableWithJoins, Values};
+use sqlparser::ast::{
+    Join, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr, TableFactor,
+    TableWithJoins, Values,
+};
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
@@ -125,9 +128,103 @@ fn translate_table_with_joins(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<TableWithJoins, crate::errors::Error> {
+    let translated_joins = table_with_joins
+        .joins
+        .iter()
+        .map(|join| translate_join(join, schema, options))
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(TableWithJoins {
         relation: translate_table_factor(&table_with_joins.relation, schema, options)?,
-        joins: table_with_joins.joins.clone(), // TODO: translate join conditions
+        joins: translated_joins,
+    })
+}
+
+fn translate_join(
+    join: &Join,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Join, crate::errors::Error> {
+    Ok(Join {
+        relation: translate_table_factor(&join.relation, schema, options)?,
+        global: join.global,
+        join_operator: translate_join_operator(&join.join_operator, schema, options)?,
+    })
+}
+
+fn translate_join_operator(
+    join_operator: &JoinOperator,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<JoinOperator, crate::errors::Error> {
+    Ok(match join_operator {
+        JoinOperator::Join(constraint) => {
+            JoinOperator::Join(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::Inner(constraint) => {
+            JoinOperator::Inner(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::Left(constraint) => {
+            JoinOperator::Left(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::LeftOuter(constraint) => {
+            JoinOperator::LeftOuter(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::Right(constraint) => {
+            JoinOperator::Right(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::RightOuter(constraint) => {
+            JoinOperator::RightOuter(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::FullOuter(constraint) => {
+            JoinOperator::FullOuter(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::CrossJoin(constraint) => {
+            JoinOperator::CrossJoin(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::Semi(constraint) => {
+            JoinOperator::Semi(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::LeftSemi(constraint) => {
+            JoinOperator::LeftSemi(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::RightSemi(constraint) => {
+            JoinOperator::RightSemi(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::Anti(constraint) => {
+            JoinOperator::Anti(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::LeftAnti(constraint) => {
+            JoinOperator::LeftAnti(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::RightAnti(constraint) => {
+            JoinOperator::RightAnti(translate_join_constraint(constraint, schema, options)?)
+        }
+        JoinOperator::AsOf { constraint, match_condition } => {
+            JoinOperator::AsOf {
+                constraint: translate_join_constraint(constraint, schema, options)?,
+                match_condition: match_condition.translate(schema, options)?,
+            }
+        }
+        JoinOperator::StraightJoin(constraint) => {
+            JoinOperator::StraightJoin(translate_join_constraint(constraint, schema, options)?)
+        }
+        // These operators don't have constraints that need translation
+        JoinOperator::CrossApply | JoinOperator::OuterApply => join_operator.clone(),
+    })
+}
+
+fn translate_join_constraint(
+    constraint: &JoinConstraint,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<JoinConstraint, crate::errors::Error> {
+    Ok(match constraint {
+        JoinConstraint::On(expr) => JoinConstraint::On(expr.translate(schema, options)?),
+        // USING and other constraints don't need expression translation
+        JoinConstraint::Using(idents) => JoinConstraint::Using(idents.clone()),
+        JoinConstraint::Natural => JoinConstraint::Natural,
+        JoinConstraint::None => JoinConstraint::None,
     })
 }
 
