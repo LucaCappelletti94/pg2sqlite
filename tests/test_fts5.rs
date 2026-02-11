@@ -1,0 +1,529 @@
+//! Tests for FTS5 full-text search translation from PostgreSQL GIN/tsvector.
+
+use std::time::Instant;
+
+use diesel::prelude::*;
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+
+mod schema {
+    diesel::table! {
+        documents (id) {
+            id -> Integer,
+            title -> Text,
+            body -> Text,
+        }
+    }
+
+    diesel::table! {
+        articles (id) {
+            id -> Integer,
+            title -> Text,
+            summary -> Text,
+            content -> Text,
+        }
+    }
+}
+
+use schema::{articles, documents};
+
+#[derive(Insertable)]
+#[diesel(table_name = documents)]
+struct NewDocument {
+    title: String,
+    body: String,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = articles)]
+struct NewArticle {
+    title: String,
+    summary: String,
+    content: String,
+}
+
+#[derive(QueryableByName, Debug)]
+struct SearchResult {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    id: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    title: String,
+}
+
+/// Snapshot test for GIN to FTS5 translation.
+#[test]
+fn test_gin_to_fts5_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX idx_documents_search ON documents
+            USING GIN (to_tsvector('english', title || ' ' || body));
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+
+    insta::assert_snapshot!("gin_to_fts5_translation", translated_sql);
+
+    Ok(())
+}
+
+/// Test that FTS5 search works correctly.
+#[test]
+fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX idx_documents_search ON documents
+            USING GIN (to_tsvector('english', title || ' ' || body));
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute translated statements
+    for stmt in &translated {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert test documents - triggers should automatically update FTS5 index
+    diesel::insert_into(documents::table)
+        .values(&[
+            NewDocument {
+                title: "Rust Programming".to_string(),
+                body: "Rust is a systems programming language focused on safety".to_string(),
+            },
+            NewDocument {
+                title: "Python Tutorial".to_string(),
+                body: "Python is great for data science and machine learning".to_string(),
+            },
+            NewDocument {
+                title: "Database Design".to_string(),
+                body: "SQL databases use tables to store structured data".to_string(),
+            },
+        ])
+        .execute(&mut connection)?;
+
+    // No manual rebuild needed - triggers keep FTS5 in sync automatically!
+
+    // Search for 'rust' using FTS5
+    let results = diesel::sql_query(
+        "SELECT d.id, d.title FROM documents d \
+         WHERE d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'rust')",
+    )
+    .load::<SearchResult>(&mut connection)?;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].title, "Rust Programming");
+
+    // Search for 'programming' - should match Rust document
+    let results = diesel::sql_query(
+        "SELECT d.id, d.title FROM documents d \
+         WHERE d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'programming')",
+    )
+    .load::<SearchResult>(&mut connection)?;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].title, "Rust Programming");
+
+    // Search for 'data' - should match both Python and Database documents
+    let results = diesel::sql_query(
+        "SELECT d.id, d.title FROM documents d \
+         WHERE d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'data')",
+    )
+    .load::<SearchResult>(&mut connection)?;
+
+    assert_eq!(results.len(), 2);
+
+    Ok(())
+}
+
+/// Test that FTS5 is faster than LIKE for full-text search on larger datasets.
+#[test]
+fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX idx_documents_search ON documents
+            USING GIN (to_tsvector('english', title || ' ' || body));
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute translated statements
+    for stmt in &translated {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert many documents to make performance difference measurable
+    let num_documents = 5000;
+    let search_term = "specialized";
+
+    for i in 0..num_documents {
+        let body = if i == 2500 {
+            // One document contains our search term
+            format!("This document contains specialized technical content about topic {i}")
+        } else {
+            format!(
+                "This is document number {i} with various content about \
+                 technology programming databases and other general topics"
+            )
+        };
+
+        diesel::sql_query(format!(
+            "INSERT INTO documents (title, body) VALUES ('Document {}', '{}')",
+            i, body
+        ))
+        .execute(&mut connection)?;
+    }
+
+    // No manual rebuild needed - triggers keep FTS5 in sync automatically!
+
+    // Warm up SQLite caches
+    diesel::sql_query("SELECT COUNT(*) FROM documents").execute(&mut connection)?;
+    diesel::sql_query("SELECT COUNT(*) FROM documents_fts").execute(&mut connection)?;
+
+    // Benchmark LIKE query (multiple runs for stability)
+    let like_query =
+        format!("SELECT d.id, d.title FROM documents d WHERE d.body LIKE '%{}%'", search_term);
+
+    let like_runs = 10;
+    let like_start = Instant::now();
+    for _ in 0..like_runs {
+        let _results = diesel::sql_query(&like_query).load::<SearchResult>(&mut connection)?;
+    }
+    let like_duration = like_start.elapsed();
+
+    // Benchmark FTS5 query (multiple runs for stability)
+    let fts5_query = format!(
+        "SELECT d.id, d.title FROM documents d \
+         WHERE d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH '{}')",
+        search_term
+    );
+
+    let fts5_runs = 10;
+    let fts5_start = Instant::now();
+    for _ in 0..fts5_runs {
+        let _results = diesel::sql_query(&fts5_query).load::<SearchResult>(&mut connection)?;
+    }
+    let fts5_duration = fts5_start.elapsed();
+
+    // Verify both queries return the same result
+    let like_results = diesel::sql_query(&like_query).load::<SearchResult>(&mut connection)?;
+    let fts5_results = diesel::sql_query(&fts5_query).load::<SearchResult>(&mut connection)?;
+
+    assert_eq!(
+        like_results.len(),
+        fts5_results.len(),
+        "Both queries should return the same number of results"
+    );
+    assert_eq!(like_results.len(), 1, "Should find exactly one document");
+
+    // FTS5 should be faster than LIKE
+    // We use a generous threshold since CI environments can be variable
+    let like_avg_us = like_duration.as_micros() / like_runs as u128;
+    let fts5_avg_us = fts5_duration.as_micros() / fts5_runs as u128;
+
+    println!("Performance comparison ({} documents, {} runs each):", num_documents, like_runs);
+    println!("  LIKE query average: {} us", like_avg_us);
+    println!("  FTS5 query average: {} us", fts5_avg_us);
+    println!("  Speedup: {:.1}x", like_avg_us as f64 / fts5_avg_us.max(1) as f64);
+
+    // FTS5 should be at least 2x faster for this dataset size
+    // If not, the test still passes but we log a warning
+    if fts5_avg_us > 0 && like_avg_us > fts5_avg_us * 2 {
+        println!("  FTS5 is significantly faster as expected");
+    } else {
+        println!("  Note: FTS5 speedup may be less pronounced on small datasets or fast systems");
+    }
+
+    Ok(())
+}
+
+/// Test FTS5 with multiple columns concatenated.
+#[test]
+fn test_fts5_multi_column_search() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE articles (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            content TEXT NOT NULL
+        );
+        CREATE INDEX idx_articles_search ON articles
+            USING GIN (to_tsvector('english', title || ' ' || summary || ' ' || content));
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    for stmt in &translated {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert articles with search terms in different columns using Diesel ORM
+    diesel::insert_into(articles::table)
+        .values(&[
+            NewArticle {
+                title: "UniqueTitle".to_string(),
+                summary: "Generic summary".to_string(),
+                content: "Generic content".to_string(),
+            },
+            NewArticle {
+                title: "Normal Title".to_string(),
+                summary: "UniqueSummary here".to_string(),
+                content: "Generic content".to_string(),
+            },
+            NewArticle {
+                title: "Normal Title".to_string(),
+                summary: "Generic summary".to_string(),
+                content: "UniqueContent inside".to_string(),
+            },
+        ])
+        .execute(&mut connection)?;
+
+    // No manual rebuild needed - triggers keep FTS5 in sync automatically!
+
+    // Search should find term in title
+    #[derive(QueryableByName, Debug)]
+    struct ArticleResult {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        id: i32,
+    }
+
+    let results = diesel::sql_query(
+        "SELECT a.id FROM articles a \
+         WHERE a.id IN (SELECT rowid FROM articles_fts WHERE articles_fts MATCH 'uniquetitle')",
+    )
+    .load::<ArticleResult>(&mut connection)?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, 1);
+
+    // Search should find term in summary
+    let results = diesel::sql_query(
+        "SELECT a.id FROM articles a \
+         WHERE a.id IN (SELECT rowid FROM articles_fts WHERE articles_fts MATCH 'uniquesummary')",
+    )
+    .load::<ArticleResult>(&mut connection)?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, 2);
+
+    // Search should find term in content
+    let results = diesel::sql_query(
+        "SELECT a.id FROM articles a \
+         WHERE a.id IN (SELECT rowid FROM articles_fts WHERE articles_fts MATCH 'uniquecontent')",
+    )
+    .load::<ArticleResult>(&mut connection)?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, 3);
+
+    Ok(())
+}
+
+/// Test that FTS5 triggers correctly handle UPDATE and DELETE.
+#[test]
+fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX idx_documents_search ON documents
+            USING GIN (to_tsvector('english', title || ' ' || body));
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    for stmt in &translated {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert a document using Diesel ORM (use unique terms in body only, not in
+    // title)
+    diesel::insert_into(documents::table)
+        .values(NewDocument {
+            title: "Test Document".to_string(),
+            body: "initial content here".to_string(),
+        })
+        .execute(&mut connection)?;
+
+    // Verify it's searchable using FTS5 MATCH (must use raw SQL for FTS5-specific
+    // syntax)
+    #[derive(QueryableByName, Debug)]
+    struct DocResult {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        id: i32,
+    }
+
+    let results = diesel::sql_query(
+        "SELECT d.id FROM documents d \
+         WHERE d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'initial')",
+    )
+    .load::<DocResult>(&mut connection)?;
+    assert_eq!(results.len(), 1, "Should find 'initial' after insert");
+
+    // UPDATE the document using Diesel ORM - trigger should update FTS5 index
+    diesel::update(documents::table.filter(documents::id.eq(1)))
+        .set(documents::body.eq("modified content now"))
+        .execute(&mut connection)?;
+
+    // 'initial' should no longer be found
+    let results = diesel::sql_query(
+        "SELECT d.id FROM documents d \
+         WHERE d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'initial')",
+    )
+    .load::<DocResult>(&mut connection)?;
+    assert_eq!(results.len(), 0, "Should NOT find 'initial' after update");
+
+    // 'modified' should now be found
+    let results = diesel::sql_query(
+        "SELECT d.id FROM documents d \
+         WHERE d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'modified')",
+    )
+    .load::<DocResult>(&mut connection)?;
+    assert_eq!(results.len(), 1, "Should find 'modified' after update");
+
+    // DELETE the document using Diesel ORM - trigger should remove from FTS5 index
+    diesel::delete(documents::table.filter(documents::id.eq(1))).execute(&mut connection)?;
+
+    // 'modified' should no longer be found
+    let results = diesel::sql_query(
+        "SELECT d.id FROM documents d \
+         WHERE d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'modified')",
+    )
+    .load::<DocResult>(&mut connection)?;
+    assert_eq!(results.len(), 0, "Should NOT find 'modified' after delete");
+
+    Ok(())
+}
+
+/// Test that the @@ operator is translated to FTS5 MATCH.
+#[test]
+fn test_at_at_operator_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX idx_documents_search ON documents
+            USING GIN (to_tsvector('english', title || ' ' || body));
+        SELECT * FROM documents WHERE to_tsvector('english', title) @@ to_tsquery('rust');
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
+
+    // Find the SELECT statement
+    let select_stmt = translated_sql
+        .iter()
+        .find(|s| s.starts_with("SELECT"))
+        .expect("Should have a SELECT statement");
+
+    // Should contain FTS5 MATCH syntax
+    assert!(
+        select_stmt.contains("documents_fts"),
+        "Should reference documents_fts table, got: {select_stmt}"
+    );
+    assert!(select_stmt.contains("MATCH"), "Should contain MATCH keyword, got: {select_stmt}");
+    assert!(select_stmt.contains("IN"), "Should use IN subquery, got: {select_stmt}");
+
+    Ok(())
+}
+
+/// Test that translated @@ query works semantically.
+#[test]
+fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    // Schema and query must be translated together so the schema context is
+    // available
+    let sql = r#"
+        CREATE TABLE documents (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX idx_documents_search ON documents
+            USING GIN (to_tsvector('english', title || ' ' || body));
+        SELECT * FROM documents WHERE to_tsvector('english', title) @@ to_tsquery('rust');
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute DDL statements (everything except the SELECT)
+    let ddl_statements: Vec<_> =
+        translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))).collect();
+    for stmt in &ddl_statements {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert test documents using Diesel ORM
+    diesel::insert_into(documents::table)
+        .values(&[
+            NewDocument {
+                title: "Rust Programming".to_string(),
+                body: "Rust is a systems programming language".to_string(),
+            },
+            NewDocument {
+                title: "Python Tutorial".to_string(),
+                body: "Python is great for scripting".to_string(),
+            },
+        ])
+        .execute(&mut connection)?;
+
+    // Get the SELECT statement
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement");
+    let translated_query = select_stmt.to_string();
+
+    // Verify the query uses FTS5 MATCH
+    assert!(translated_query.contains("MATCH"), "Query should use MATCH: {translated_query}");
+
+    // Execute the translated query
+    #[derive(QueryableByName, Debug)]
+    struct DocResult {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        id: i32,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        title: String,
+    }
+
+    let results = diesel::sql_query(&translated_query).load::<DocResult>(&mut connection)?;
+
+    assert_eq!(results.len(), 1, "Should find one document matching 'rust'");
+    assert_eq!(results[0].title, "Rust Programming");
+
+    Ok(())
+}

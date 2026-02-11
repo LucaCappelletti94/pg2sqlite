@@ -79,13 +79,13 @@ impl Translator for CreateView {
             name_before_not_exists: self.name_before_not_exists,
             columns: self.columns.clone(),
             query: self.query.clone(),
-            options: Default::default(),
+            options: CreateTableOptions::default(),
             cluster_by: Vec::new(),
             comment: self.comment.clone(), // Comments are harmless, pass through
             if_not_exists: self.if_not_exists,
             temporary: self.temporary,
             to: None,
-            params: Default::default(),
+            params: None,
             with_no_schema_binding: false,
         })
     }

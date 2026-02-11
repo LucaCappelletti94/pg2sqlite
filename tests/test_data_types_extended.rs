@@ -1,5 +1,4 @@
-//! Tests for extended data type support: JSON, JSONB, Arrays, complex defaults,
-//! UPSERT.
+//! Tests for extended data type support: JSON, JSONB, complex defaults, UPSERT.
 //!
 //! These tests verify that the new type mappings work correctly at runtime.
 
@@ -12,14 +11,6 @@ mod schema {
             id -> Integer,
             metadata -> Nullable<Text>,
             settings -> Text,
-        }
-    }
-
-    diesel::table! {
-        array_data (id) {
-            id -> Integer,
-            tags -> Nullable<Text>,
-            scores -> Nullable<Text>,
         }
     }
 
@@ -42,7 +33,7 @@ mod schema {
     }
 }
 
-use schema::{array_data, complex_defaults, json_data, upsert_test};
+use schema::{complex_defaults, json_data, upsert_test};
 
 #[derive(Queryable, Selectable, Debug)]
 #[diesel(table_name = json_data)]
@@ -57,21 +48,6 @@ struct JsonData {
 struct NewJsonData {
     metadata: Option<String>,
     settings: String,
-}
-
-#[derive(Queryable, Selectable, Debug)]
-#[diesel(table_name = array_data)]
-struct ArrayData {
-    id: i32,
-    tags: Option<String>,
-    scores: Option<String>,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = array_data)]
-struct NewArrayData {
-    tags: Option<String>,
-    scores: Option<String>,
 }
 
 #[derive(Queryable, Selectable, Debug)]
@@ -163,24 +139,18 @@ fn test_jsonb_default_empty_object() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test Array type works (stored as TEXT).
+/// Test that Array types cause an error (not yet supported).
 #[test]
-fn test_array_type_stored_as_text() -> Result<(), Box<dyn std::error::Error>> {
-    let mut connection = translate_and_setup()?;
+fn test_array_type_causes_error() {
+    let sql = "CREATE TABLE array_data (id SERIAL PRIMARY KEY, tags TEXT[]);";
 
-    // Insert array data as JSON text (common serialization format)
-    diesel::insert_into(array_data::table)
-        .values(NewArrayData {
-            tags: Some(r#"["rust", "sqlite", "postgresql"]"#.to_string()),
-            scores: Some(r#"[100, 95, 87]"#.to_string()),
-        })
-        .execute(&mut connection)?;
+    let options = Pg2SqliteOptions::default();
 
-    let row = array_data::table.select(ArrayData::as_select()).first(&mut connection)?;
-    assert_eq!(row.tags, Some(r#"["rust", "sqlite", "postgresql"]"#.to_string()));
-    assert_eq!(row.scores, Some(r#"[100, 95, 87]"#.to_string()));
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
 
-    Ok(())
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("Array"), "Error should mention Array type: {}", err);
 }
 
 /// Test negative default value works.
@@ -343,4 +313,129 @@ fn test_all_defaults_together() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(row.text_default, Some("hello".to_string()));
 
     Ok(())
+}
+
+/// Test that GIN index without to_tsvector causes an error.
+#[test]
+fn test_gin_index_non_tsvector_causes_error() {
+    let sql = r#"
+        CREATE TABLE documents (id SERIAL PRIMARY KEY, content TEXT);
+        CREATE INDEX idx_content ON documents USING GIN (content);
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("to_tsvector"), "Error should mention to_tsvector: {}", err);
+}
+
+/// Test that GiST index on non-tsvector column causes an error.
+#[test]
+fn test_gist_index_non_tsvector_causes_error() {
+    let sql = r#"
+        CREATE TABLE locations (id SERIAL PRIMARY KEY, point TEXT);
+        CREATE INDEX idx_point ON locations USING GiST (point);
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("GiST"), "Error should mention GiST index: {}", err);
+}
+
+/// Test that GiST index with to_tsvector translates to FTS5 (same as GIN).
+#[test]
+fn test_gist_tsvector_translates_to_fts5() {
+    let sql = r#"
+        CREATE TABLE articles (id SERIAL PRIMARY KEY, title TEXT, body TEXT);
+        CREATE INDEX idx_search ON articles USING GiST (to_tsvector('english', title || ' ' || body));
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+
+    let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
+
+    // Should have: table + FTS5 virtual table + 3 triggers
+    assert_eq!(translated_sql.len(), 5);
+
+    // First statement is the table
+    assert!(translated_sql[0].contains("CREATE TABLE articles"));
+
+    // Second statement should be CREATE VIRTUAL TABLE ... USING fts5
+    assert!(
+        translated_sql[1].contains("CREATE VIRTUAL TABLE"),
+        "Expected FTS5 virtual table, got: {}",
+        translated_sql[1]
+    );
+    assert!(translated_sql[1].contains("fts5"), "Expected fts5 module, got: {}", translated_sql[1]);
+    assert!(
+        translated_sql[1].contains("articles_fts"),
+        "Expected articles_fts table name, got: {}",
+        translated_sql[1]
+    );
+}
+
+/// Test that GIN index with to_tsvector translates to FTS5.
+#[test]
+fn test_gin_tsvector_translates_to_fts5() {
+    let sql = r#"
+        CREATE TABLE documents (id SERIAL PRIMARY KEY, title TEXT, body TEXT);
+        CREATE INDEX idx_search ON documents USING GIN (to_tsvector('english', title || ' ' || body));
+    "#;
+
+    let options = Pg2SqliteOptions::default();
+
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+
+    let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
+
+    // Should have: table + FTS5 virtual table + 3 triggers (insert, delete, update)
+    assert_eq!(translated_sql.len(), 5);
+
+    // First statement is the table
+    assert!(translated_sql[0].contains("CREATE TABLE documents"));
+
+    // Second statement should be CREATE VIRTUAL TABLE ... USING fts5
+    assert!(
+        translated_sql[1].contains("CREATE VIRTUAL TABLE"),
+        "Expected FTS5 virtual table, got: {}",
+        translated_sql[1]
+    );
+    assert!(translated_sql[1].contains("fts5"), "Expected fts5 module, got: {}", translated_sql[1]);
+    assert!(
+        translated_sql[1].contains("documents_fts"),
+        "Expected documents_fts table name, got: {}",
+        translated_sql[1]
+    );
+    assert!(
+        translated_sql[1].contains("title"),
+        "Expected title column, got: {}",
+        translated_sql[1]
+    );
+    assert!(translated_sql[1].contains("body"), "Expected body column, got: {}", translated_sql[1]);
+
+    // Statements 3-5 should be triggers
+    assert!(
+        translated_sql[2].contains("CREATE TRIGGER") && translated_sql[2].contains("AFTER INSERT"),
+        "Expected INSERT trigger, got: {}",
+        translated_sql[2]
+    );
+    assert!(
+        translated_sql[3].contains("CREATE TRIGGER") && translated_sql[3].contains("AFTER DELETE"),
+        "Expected DELETE trigger, got: {}",
+        translated_sql[3]
+    );
+    assert!(
+        translated_sql[4].contains("CREATE TRIGGER") && translated_sql[4].contains("AFTER UPDATE"),
+        "Expected UPDATE trigger, got: {}",
+        translated_sql[4]
+    );
 }

@@ -150,9 +150,7 @@ impl Translator for Statement {
                     vec![create_table.translate(schema, options)?.into()]
                 }
             }
-            Self::CreateIndex(create_index) => {
-                create_index.translate(schema, options)?.map(Into::into).into_iter().collect()
-            }
+            Self::CreateIndex(create_index) => create_index.translate(schema, options)?,
             Self::CreateFunction(_)
             | Self::CreateExtension(_)
             | Self::CreatePolicy(_)
@@ -175,6 +173,9 @@ impl Translator for Statement {
                 vec![create_view.translate(schema, options)?.into()]
             }
             Self::Delete(delete) => vec![delete.translate(schema, options)?],
+            Self::Query(query) => {
+                vec![Statement::Query(Box::new(query.translate(schema, options)?))]
+            }
             Self::If(if_stmt) => {
                 if !if_stmt.elseif_blocks.is_empty() || if_stmt.else_block.is_some() {
                     return Err(crate::errors::Error::UnknownPostgresFeature(

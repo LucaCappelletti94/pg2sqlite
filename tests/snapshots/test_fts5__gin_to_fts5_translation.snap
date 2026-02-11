@@ -1,0 +1,10 @@
+---
+source: tests/test_fts5.rs
+assertion_line: 53
+expression: translated_sql
+---
+CREATE TABLE documents (id INTEGER PRIMARY KEY NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL) STRICT
+CREATE VIRTUAL TABLE documents_fts USING fts5 (title, body)
+CREATE TRIGGER documents_fts_ai AFTER INSERT ON documents BEGIN INSERT INTO documents_fts (rowid, title, body) VALUES (new.id, new.title, new.body); END
+CREATE TRIGGER documents_fts_ad AFTER DELETE ON documents BEGIN DELETE FROM documents_fts WHERE rowid = old.id; END
+CREATE TRIGGER documents_fts_au AFTER UPDATE ON documents BEGIN DELETE FROM documents_fts WHERE rowid = old.id; INSERT INTO documents_fts (rowid, title, body) VALUES (new.id, new.title, new.body); END

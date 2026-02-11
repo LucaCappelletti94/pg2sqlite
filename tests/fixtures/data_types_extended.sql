@@ -1,15 +1,9 @@
--- Extended data type tests: JSON, JSONB, Arrays, complex defaults
+-- Extended data type tests: JSON, JSONB, complex defaults
 
 CREATE TABLE json_data (
     id SERIAL PRIMARY KEY,
     metadata JSON,
     settings JSONB NOT NULL DEFAULT '{}'
-);
-
-CREATE TABLE array_data (
-    id SERIAL PRIMARY KEY,
-    tags TEXT[],
-    scores INTEGER[]
 );
 
 CREATE TABLE complex_defaults (

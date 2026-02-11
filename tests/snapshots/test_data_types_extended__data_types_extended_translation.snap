@@ -1,9 +1,8 @@
 ---
 source: tests/test_data_types_extended.rs
-assertion_line: 126
+assertion_line: 102
 expression: translated_sql
 ---
 CREATE TABLE json_data (id INTEGER PRIMARY KEY NOT NULL, metadata TEXT, settings TEXT NOT NULL DEFAULT '{}') STRICT
-CREATE TABLE array_data (id INTEGER PRIMARY KEY NOT NULL, tags TEXT, scores TEXT) STRICT
 CREATE TABLE complex_defaults (id INTEGER PRIMARY KEY NOT NULL, negative_value INTEGER NOT NULL DEFAULT -1, calculated REAL NOT NULL DEFAULT 3.14, bool_default INTEGER NOT NULL DEFAULT true, text_default TEXT DEFAULT 'hello') STRICT
 CREATE TABLE upsert_test (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, counter INTEGER NOT NULL DEFAULT 0) STRICT

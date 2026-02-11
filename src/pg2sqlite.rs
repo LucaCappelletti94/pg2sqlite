@@ -247,12 +247,13 @@ impl Pg2Sqlite {
         self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
-        // Filter out statements that ParserDB doesn't support (like CREATE VIEW)
+        // Filter out statements that ParserDB doesn't support
         // ParserDB is used for schema context (table definitions, policies, etc.)
+        // It only needs DDL statements, not DML/query statements
         let schema_statements: Vec<Statement> = self
             .pg_statements
             .iter()
-            .filter(|s| !matches!(s, Statement::CreateView(_)))
+            .filter(|s| !matches!(s, Statement::CreateView(_) | Statement::Query(_)))
             .cloned()
             .collect();
 

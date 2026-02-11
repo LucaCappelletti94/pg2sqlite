@@ -26,9 +26,16 @@ impl Translator for DataType {
             }
             DataType::Float(ExactNumberInfo::None) => Ok(DataType::Real),
             DataType::Bytea => Ok(DataType::Blob(None)),
-            // JSON/JSONB and Arrays are stored as TEXT in SQLite (JSON serialized)
-            DataType::Varchar(_) | DataType::JSON | DataType::JSONB | DataType::Array(_) => {
-                Ok(DataType::Text)
+            // JSON/JSONB are stored as TEXT in SQLite
+            DataType::Varchar(_) | DataType::JSON | DataType::JSONB => Ok(DataType::Text),
+            // Arrays are not yet supported - they could map to JSON or vector extensions
+            // depending on use case (regular arrays vs embeddings)
+            DataType::Array(inner) => {
+                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "Array type {:?} is not supported. Arrays could be JSON-serialized or \
+                     use vector extensions depending on use case.",
+                    inner
+                )))
             }
             DataType::Uuid => {
                 match options.get_uuid_representation() {
