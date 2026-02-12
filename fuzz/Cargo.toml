@@ -1,0 +1,16 @@
+[package]
+name = "pg2sqlite-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[dependencies]
+honggfuzz = "0.5"
+pg2sqlite = { path = ".." }
+
+[[bin]]
+name = "fuzz_sql_translation"
+path = "fuzz_targets/fuzz_sql_translation.rs"
+test = false
+doc = false
+bench = false

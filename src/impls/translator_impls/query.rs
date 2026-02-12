@@ -138,6 +138,7 @@ impl Translator for Select {
             flavor: self.flavor,
             exclude: self.exclude.clone(),
             optimizer_hint: self.optimizer_hint.clone(),
+            select_modifiers: self.select_modifiers.clone(),
         })
     }
 }

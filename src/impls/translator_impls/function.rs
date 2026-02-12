@@ -17,6 +17,8 @@ enum FunctionTranslation {
     WithArgs { name: String, args: Vec<FunctionArg> },
     /// Transform to concatenation operator (CONCAT -> ||)
     ToConcatenation,
+    /// Transform to concatenation with separator (CONCAT_WS)
+    ToConcatenationWithSeparator,
     /// Unsupported function with error message
     Unsupported(String),
     /// No translation needed
@@ -52,8 +54,12 @@ fn translate_function(name: &ObjectName, _args: &FunctionArguments) -> FunctionT
         ),
         // CONCAT(a, b, c) -> a || b || c
         "concat" => FunctionTranslation::ToConcatenation,
-        // CONCAT_WS(sep, a, b, c) is more complex - would need custom handling
-        // For now, we only support simple CONCAT
+        // CONCAT_WS(sep, a, b, c) -> a || sep || b || sep || c
+        "concat_ws" => FunctionTranslation::ToConcatenationWithSeparator,
+        // strpos(string, substring) -> INSTR(string, substring)
+        "strpos" => FunctionTranslation::Rename("INSTR".to_string()),
+        // chr(n) -> char(n)
+        "chr" => FunctionTranslation::Rename("char".to_string()),
         _ => FunctionTranslation::PassThrough,
     }
 }
@@ -92,6 +98,32 @@ fn build_concatenation(exprs: Vec<Expr>) -> Option<Expr> {
     Some(iter.fold(first, |acc, expr| {
         Expr::BinaryOp {
             left: Box::new(acc),
+            op: BinaryOperator::StringConcat,
+            right: Box::new(expr),
+        }
+    }))
+}
+
+/// Build a concatenation expression with separator: a || sep || b || sep || c.
+fn build_concatenation_with_separator(separator: &Expr, exprs: Vec<Expr>) -> Option<Expr> {
+    if exprs.is_empty() {
+        return None;
+    }
+    if exprs.len() == 1 {
+        return Some(exprs.into_iter().next().unwrap());
+    }
+
+    let mut iter = exprs.into_iter();
+    let first = iter.next().unwrap();
+
+    Some(iter.fold(first, |acc, expr| {
+        // acc || separator || expr
+        Expr::BinaryOp {
+            left: Box::new(Expr::BinaryOp {
+                left: Box::new(acc),
+                op: BinaryOperator::StringConcat,
+                right: Box::new(separator.clone()),
+            }),
             op: BinaryOperator::StringConcat,
             right: Box::new(expr),
         }
@@ -234,6 +266,23 @@ impl Translator for Function {
                 build_concatenation(exprs).ok_or_else(|| {
                     crate::errors::Error::UnsupportedSQLiteFeature(
                         "CONCAT requires at least one argument".to_string(),
+                    )
+                })
+            }
+            FunctionTranslation::ToConcatenationWithSeparator => {
+                // CONCAT_WS(sep, a, b, c) -> a || sep || b || sep || c
+                let mut exprs: Vec<Expr> =
+                    extract_arg_exprs(&func.args).into_iter().cloned().collect();
+                if exprs.len() < 2 {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "CONCAT_WS requires at least two arguments (separator and one value)"
+                            .to_string(),
+                    ));
+                }
+                let separator = exprs.remove(0);
+                build_concatenation_with_separator(&separator, exprs).ok_or_else(|| {
+                    crate::errors::Error::UnsupportedSQLiteFeature(
+                        "CONCAT_WS requires at least one value argument".to_string(),
                     )
                 })
             }

@@ -401,9 +401,10 @@ impl PlPgSqlTranslator {
             qualify: None,
             window_before_qualify: false,
             value_table_mode: None,
-            connect_by: None,
+            connect_by: vec![],
             exclude: None,
             flavor: SelectFlavor::Standard,
+            select_modifiers: None,
         };
 
         // Build new source query
@@ -738,7 +739,7 @@ impl PlPgSqlTranslator {
     /// Uses the `last_insert_rowid()` pattern for UUID variables:
     /// - First INSERT using a UUID variable: uses the expression directly
     ///   (e.g., `uuidv7()`)
-    /// - Subsequent INSERTs: use `SELECT col FROM table WHERE rowid =
+    /// - Subsequent INSERTTs: use `SELECT col FROM table WHERE rowid =
     ///   last_insert_rowid()`
     #[allow(clippy::too_many_lines)]
     fn translate_insert_statement(
@@ -807,7 +808,7 @@ impl PlPgSqlTranslator {
                         .push(VariableBinding { name: binding.name.clone(), expression: new_expr });
                 } else {
                     // First use - find which column this variable is being inserted into
-                    // and record it for future INSERTs
+                    // and record it for future INSERTTs
                     if let Some(source) = &insert.source
                         && let SetExpr::Values(values) = &*source.body
                         && !values.rows.is_empty()
@@ -1007,11 +1008,12 @@ impl PlPgSqlTranslator {
                             qualify: None,
                             window_before_qualify: false,
                             value_table_mode: None,
-                            connect_by: None,
+                            connect_by: vec![],
                             flavor: SelectFlavor::Standard,
                             exclude: None,
                             optimizer_hint: None,
                             prewhere: None,
+                            select_modifiers: None,
                         }))),
                         order_by: None,
                         limit_clause: None,
@@ -1055,11 +1057,12 @@ impl PlPgSqlTranslator {
             qualify: None,
             window_before_qualify: false,
             value_table_mode: None,
-            connect_by: None,
+            connect_by: vec![],
             flavor: SelectFlavor::Standard,
             exclude: None,
             optimizer_hint: None,
             prewhere: None,
+            select_modifiers: None,
         })))
     }
 

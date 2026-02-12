@@ -244,10 +244,11 @@ fn translate_fts_expression(
                 qualify: None,
                 window_before_qualify: false,
                 value_table_mode: None,
-                connect_by: None,
+                connect_by: Vec::new(),
                 flavor: SelectFlavor::Standard,
                 exclude: None,
                 optimizer_hint: None,
+                select_modifiers: None,
             }))),
             order_by: None,
             limit_clause: None,
@@ -324,6 +325,128 @@ fn translate_extract(
         format: None,
         kind: CastKind::Cast,
         array: false,
+    })
+}
+
+/// Translate PostgreSQL FLOOR(x) to SQLite-compatible expression.
+///
+/// SQLite doesn't have a native FLOOR function. We translate it to:
+/// `CASE WHEN x >= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
+///       ELSE CAST(x AS INTEGER) - 1 END`
+///
+/// This handles both positive and negative numbers correctly:
+/// - FLOOR(3.7) = 3 (truncate)
+/// - FLOOR(-3.7) = -4 (round toward negative infinity)
+fn translate_floor(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_expr = expr.translate(schema, options)?;
+
+    // Build CAST(x AS INTEGER)
+    let cast_to_int = Expr::Cast {
+        expr: Box::new(translated_expr.clone()),
+        data_type: DataType::Integer(None),
+        format: None,
+        kind: CastKind::Cast,
+        array: false,
+    };
+
+    // Build: CASE WHEN x >= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
+    //        ELSE CAST(x AS INTEGER) - 1 END
+    Ok(Expr::Case {
+        case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+        end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+        operand: None,
+        conditions: vec![sqlparser::ast::CaseWhen {
+            condition: Expr::BinaryOp {
+                left: Box::new(Expr::BinaryOp {
+                    left: Box::new(translated_expr.clone()),
+                    op: BinaryOperator::GtEq,
+                    right: Box::new(Expr::Value(ValueWithSpan {
+                        value: Value::Number("0".to_string(), false),
+                        span: sqlparser::tokenizer::Span::empty(),
+                    })),
+                }),
+                op: BinaryOperator::Or,
+                right: Box::new(Expr::BinaryOp {
+                    left: Box::new(translated_expr.clone()),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(cast_to_int.clone()),
+                }),
+            },
+            result: cast_to_int.clone(),
+        }],
+        else_result: Some(Box::new(Expr::BinaryOp {
+            left: Box::new(cast_to_int),
+            op: BinaryOperator::Minus,
+            right: Box::new(Expr::Value(ValueWithSpan {
+                value: Value::Number("1".to_string(), false),
+                span: sqlparser::tokenizer::Span::empty(),
+            })),
+        })),
+    })
+}
+
+/// Translate PostgreSQL CEIL(x) to SQLite-compatible expression.
+///
+/// SQLite doesn't have a native CEIL function. We translate it to:
+/// `CASE WHEN x <= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
+///       ELSE CAST(x AS INTEGER) + 1 END`
+///
+/// This handles both positive and negative numbers correctly:
+/// - CEIL(3.2) = 4 (round up)
+/// - CEIL(-3.2) = -3 (truncate toward zero)
+fn translate_ceil(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_expr = expr.translate(schema, options)?;
+
+    // Build CAST(x AS INTEGER)
+    let cast_to_int = Expr::Cast {
+        expr: Box::new(translated_expr.clone()),
+        data_type: DataType::Integer(None),
+        format: None,
+        kind: CastKind::Cast,
+        array: false,
+    };
+
+    // Build: CASE WHEN x <= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
+    //        ELSE CAST(x AS INTEGER) + 1 END
+    Ok(Expr::Case {
+        case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+        end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+        operand: None,
+        conditions: vec![sqlparser::ast::CaseWhen {
+            condition: Expr::BinaryOp {
+                left: Box::new(Expr::BinaryOp {
+                    left: Box::new(translated_expr.clone()),
+                    op: BinaryOperator::LtEq,
+                    right: Box::new(Expr::Value(ValueWithSpan {
+                        value: Value::Number("0".to_string(), false),
+                        span: sqlparser::tokenizer::Span::empty(),
+                    })),
+                }),
+                op: BinaryOperator::Or,
+                right: Box::new(Expr::BinaryOp {
+                    left: Box::new(translated_expr),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(cast_to_int.clone()),
+                }),
+            },
+            result: cast_to_int.clone(),
+        }],
+        else_result: Some(Box::new(Expr::BinaryOp {
+            left: Box::new(cast_to_int),
+            op: BinaryOperator::Plus,
+            right: Box::new(Expr::Value(ValueWithSpan {
+                value: Value::Number("1".to_string(), false),
+                span: sqlparser::tokenizer::Span::empty(),
+            })),
+        })),
     })
 }
 
@@ -721,20 +844,10 @@ impl Translator for Expr {
                     options,
                 )?
             }
-            // CEIL expression - pass through with translated expression
-            Expr::Ceil { expr, field } => {
-                Expr::Ceil {
-                    expr: Box::new(expr.translate(schema, options)?),
-                    field: field.clone(),
-                }
-            }
-            // FLOOR expression - pass through with translated expression
-            Expr::Floor { expr, field } => {
-                Expr::Floor {
-                    expr: Box::new(expr.translate(schema, options)?),
-                    field: field.clone(),
-                }
-            }
+            // CEIL expression - translate to SQLite CASE expression
+            Expr::Ceil { expr, .. } => translate_ceil(expr, schema, options)?,
+            // FLOOR expression - translate to SQLite CASE expression
+            Expr::Floor { expr, .. } => translate_floor(expr, schema, options)?,
             // POSITION(substr IN str) -> INSTR(str, substr)
             // Note: SQLite's INSTR has arguments in reverse order
             Expr::Position { expr, r#in } => translate_position(expr, r#in, schema, options)?,
@@ -748,6 +861,18 @@ impl Translator for Expr {
                     options,
                 )?
             }
+            // TypedString (e.g., TEXT 'value') - translate to CAST
+            Expr::TypedString(typed_string) => {
+                Expr::Cast {
+                    expr: Box::new(Expr::Value(typed_string.value.clone())),
+                    data_type: typed_string.data_type.clone(),
+                    format: None,
+                    kind: sqlparser::ast::CastKind::Cast,
+                    array: false,
+                }
+            }
+            // Prefixed string (e.g., N'value', X'value') - translate the inner value
+            Expr::Prefixed { value, .. } => value.translate(schema, options)?,
             _ => {
                 unimplemented!(
                     "Expr translation for definition `{:?}` is not yet implemented.",

@@ -172,12 +172,7 @@ impl Translator for Statement {
                 }
             }
             Self::CreateIndex(create_index) => create_index.translate(schema, options)?,
-            Self::CreateFunction(_)
-            | Self::CreateExtension(_)
-            | Self::CreatePolicy(_)
-            | Self::CreateRole(_)
-            | Self::Grant(_)
-            | Self::Revoke(_) => Vec::new(),
+
             Self::CreateTrigger(create_trigger) => {
                 let maybe_translated = create_trigger.translate(schema, options)?;
                 let mut statements = vec![];
@@ -236,6 +231,46 @@ impl Translator for Statement {
                     )
                 }
             }
+            // VACUUM is supported by SQLite - pass through
+            | Self::Vacuum { .. }
+            // Transaction control statements - pass through unchanged (SQLite supports these)
+            | Self::Commit { .. }
+            | Self::Rollback { .. }
+            | Self::StartTransaction { .. }
+            | Self::Savepoint { .. }
+            | Self::ReleaseSavepoint { .. } => vec![self.clone()],
+            // Session/variable/maintenance/cursor statements - filter out
+            Self::ShowVariable { .. }
+            | Self::Raise { .. }
+            | Self::Print { .. }
+            | Self::Open { .. }
+            | Self::Close { .. }
+            | Self::Fetch { .. }
+            | Self::Declare { .. }
+            | Self::Use { .. }
+            | Self::Throw { .. }
+            | Self::Load { .. }
+            | Self::Return { .. }
+            | Self::Assert { .. }
+            | Self::While { .. }
+            | Self::ExplainTable { .. }
+            | Self::Explain { .. }
+            | Self::Kill { .. }
+            | Self::LISTEN { .. }
+            | Self::UNLISTEN { .. }
+            | Self::NOTIFY { .. }
+            | Self::ShowTables { .. }
+            | Self::Analyze { .. }
+            | Self::Deallocate { .. }
+            | Self::Prepare { .. }
+            | Self::Execute { .. }
+            | Self::CreateFunction(_)
+            | Self::CreateExtension(_)
+            | Self::CreatePolicy(_)
+            | Self::CreateRole(_)
+            | Self::Grant(_)
+            | Self::Revoke(_)
+            | Self::Set(_) => Vec::new(),
             unsupported_statement => {
                 unimplemented!(
                     "Unsupported PostgreSQL statement: `{}` - Parsed as: {unsupported_statement:?}",

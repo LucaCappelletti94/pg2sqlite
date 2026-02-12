@@ -57,8 +57,7 @@ fn extract_dimensions(data_type: &DataType) -> Option<u32> {
         // modifiers contains the type arguments like (384)
         if let Some(first_mod) = modifiers.first() {
             // Try to parse the modifier as a dimension count
-            let mod_str = first_mod.to_string();
-            if let Ok(dim) = mod_str.parse::<u32>() {
+            if let Ok(dim) = first_mod.parse::<u32>() {
                 return Some(dim);
             }
         }

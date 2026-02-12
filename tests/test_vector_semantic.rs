@@ -20,7 +20,7 @@
 use std::time::Instant;
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use rand::Rng;
+use rand::RngExt;
 use rusqlite::{Connection, Result, ffi::sqlite3_auto_extension};
 use sqlite_vec::sqlite3_vec_init;
 use zerocopy::IntoBytes;

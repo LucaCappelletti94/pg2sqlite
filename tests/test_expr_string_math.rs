@@ -193,19 +193,22 @@ fn test_ceil_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .values(&Data { id: 2, text_val: "test".to_string(), num_val: 3.8 })
         .execute(&mut conn)?;
 
+    // Translate the SELECT query through Pg2Sqlite
+    let select_sql = "SELECT CEIL(num_val) as ceiled FROM data ORDER BY id";
+    let translated_select = Pg2Sqlite::default().sql(select_sql)?.translate(&options)?;
+    let select_stmt = translated_select[0].to_string();
+
     #[derive(QueryableByName, Debug)]
     struct CeilResult {
-        #[diesel(sql_type = diesel::sql_types::Float)]
-        ceiled: f32,
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        ceiled: i32,
     }
 
-    let results: Vec<CeilResult> =
-        diesel::sql_query("SELECT CEIL(num_val) as ceiled FROM data ORDER BY id")
-            .load(&mut conn)?;
+    let results: Vec<CeilResult> = diesel::sql_query(&select_stmt).load(&mut conn)?;
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].ceiled, 4.0);
-    assert_eq!(results[1].ceiled, 4.0);
+    assert_eq!(results[0].ceiled, 4);
+    assert_eq!(results[1].ceiled, 4);
 
     Ok(())
 }
@@ -270,19 +273,22 @@ fn test_floor_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .values(&Data { id: 2, text_val: "test".to_string(), num_val: 3.8 })
         .execute(&mut conn)?;
 
+    // Translate the SELECT query through Pg2Sqlite
+    let select_sql = "SELECT FLOOR(num_val) as floored FROM data ORDER BY id";
+    let translated_select = Pg2Sqlite::default().sql(select_sql)?.translate(&options)?;
+    let select_stmt = translated_select[0].to_string();
+
     #[derive(QueryableByName, Debug)]
     struct FloorResult {
-        #[diesel(sql_type = diesel::sql_types::Float)]
-        floored: f32,
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        floored: i32,
     }
 
-    let results: Vec<FloorResult> =
-        diesel::sql_query("SELECT FLOOR(num_val) as floored FROM data ORDER BY id")
-            .load(&mut conn)?;
+    let results: Vec<FloorResult> = diesel::sql_query(&select_stmt).load(&mut conn)?;
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].floored, 3.0);
-    assert_eq!(results[1].floored, 3.0);
+    assert_eq!(results[0].floored, 3);
+    assert_eq!(results[1].floored, 3);
 
     Ok(())
 }

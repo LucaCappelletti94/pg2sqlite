@@ -249,11 +249,48 @@ impl Pg2Sqlite {
     ) -> Result<Vec<Statement>, crate::errors::Error> {
         // Filter out statements that ParserDB doesn't support
         // ParserDB is used for schema context (table definitions, policies, etc.)
-        // It only needs DDL statements, not DML/query statements
+        // It only needs DDL statements, not DML/query/transaction statements
         let schema_statements: Vec<Statement> = self
             .pg_statements
             .iter()
-            .filter(|s| !matches!(s, Statement::CreateView(_) | Statement::Query(_)))
+            .filter(|s| {
+                !matches!(
+                    s,
+                    Statement::CreateView(_)
+                        | Statement::Query(_)
+                        | Statement::Rollback { .. }
+                        | Statement::Commit { .. }
+                        | Statement::StartTransaction { .. }
+                        | Statement::Savepoint { .. }
+                        | Statement::ReleaseSavepoint { .. }
+                        | Statement::ShowVariable { .. }
+                        | Statement::Raise { .. }
+                        | Statement::Vacuum { .. }
+                        | Statement::Print { .. }
+                        | Statement::Open { .. }
+                        | Statement::Close { .. }
+                        | Statement::Fetch { .. }
+                        | Statement::Declare { .. }
+                        | Statement::Use { .. }
+                        | Statement::Throw { .. }
+                        | Statement::Load { .. }
+                        | Statement::Return { .. }
+                        | Statement::Assert { .. }
+                        | Statement::While { .. }
+                        | Statement::ExplainTable { .. }
+                        | Statement::Explain { .. }
+                        | Statement::Kill { .. }
+                        | Statement::LISTEN { .. }
+                        | Statement::UNLISTEN { .. }
+                        | Statement::NOTIFY { .. }
+                        | Statement::ShowTables { .. }
+                        | Statement::Analyze { .. }
+                        | Statement::Deallocate { .. }
+                        | Statement::Prepare { .. }
+                        | Statement::Execute { .. }
+                        | Statement::Set(_)
+                )
+            })
             .cloned()
             .collect();
 
