@@ -6,7 +6,7 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function, FunctionArg,
+    AccessExpr, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function, FunctionArg,
     FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart,
     Query, Select, SelectFlavor, SelectItem, SetExpr, TableFactor, TableWithJoins, Value,
     ValueWithSpan, helpers::attached_token::AttachedToken,
@@ -873,6 +873,56 @@ impl Translator for Expr {
             }
             // Prefixed string (e.g., N'value', X'value') - translate the inner value
             Expr::Prefixed { value, .. } => value.translate(schema, options)?,
+            // COLLATE expression - pass through with translated expression
+            Expr::Collate { expr, collation } => {
+                Expr::Collate {
+                    expr: Box::new(expr.translate(schema, options)?),
+                    collation: collation.clone(),
+                }
+            }
+            // Interval expression - translate value, keep fields as-is
+            Expr::Interval(interval) => {
+                Expr::Interval(sqlparser::ast::Interval {
+                    value: Box::new(interval.value.translate(schema, options)?),
+                    leading_field: interval.leading_field.clone(),
+                    leading_precision: interval.leading_precision,
+                    last_field: interval.last_field.clone(),
+                    fractional_seconds_precision: interval.fractional_seconds_precision,
+                })
+            }
+            // Qualified wildcard (e.g., table.*) - pass through as-is
+            Expr::QualifiedWildcard(name, token) => {
+                Expr::QualifiedWildcard(name.clone(), token.clone())
+            }
+            // RLIKE/REGEXP expression - pass through with translated expressions
+            Expr::RLike { negated, expr, pattern, regexp } => {
+                Expr::RLike {
+                    negated: *negated,
+                    expr: Box::new(expr.translate(schema, options)?),
+                    pattern: Box::new(pattern.translate(schema, options)?),
+                    regexp: *regexp,
+                }
+            }
+            // Compound field access (e.g., value.field or value[0].field)
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                let translated_chain = access_chain
+                    .iter()
+                    .map(|access| {
+                        match access {
+                            AccessExpr::Dot(expr) => {
+                                Ok::<_, crate::errors::Error>(AccessExpr::Dot(
+                                    expr.translate(schema, options)?,
+                                ))
+                            }
+                            AccessExpr::Subscript(s) => Ok(AccessExpr::Subscript(s.clone())),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Expr::CompoundFieldAccess {
+                    root: Box::new(root.translate(schema, options)?),
+                    access_chain: translated_chain,
+                }
+            }
             _ => {
                 unimplemented!(
                     "Expr translation for definition `{:?}` is not yet implemented.",

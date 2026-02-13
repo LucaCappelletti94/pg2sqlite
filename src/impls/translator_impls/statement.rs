@@ -270,7 +270,21 @@ impl Translator for Statement {
             | Self::CreateRole(_)
             | Self::Grant(_)
             | Self::Revoke(_)
-            | Self::Set(_) => Vec::new(),
+            | Self::Set(_)
+            | Self::Pragma { .. }
+            | Self::Call(_)
+            | Self::Reset(_)
+            | Self::Truncate(_)
+            | Self::Directory { .. }
+            | Self::Discard { .. }
+            | Self::ShowViews { .. }
+            | Self::ShowFunctions { .. }
+            | Self::ShowCollation { .. }
+            | Self::ShowCreate { .. }
+            | Self::ShowSchemas { .. }
+            | Self::ShowCharset { .. }
+            | Self::Update(_)
+            | Self::ShowColumns { .. } => Vec::new(),
             unsupported_statement => {
                 unimplemented!(
                     "Unsupported PostgreSQL statement: `{}` - Parsed as: {unsupported_statement:?}",

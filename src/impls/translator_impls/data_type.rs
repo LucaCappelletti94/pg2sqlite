@@ -82,12 +82,18 @@ impl Translator for DataType {
                     // The vector data is stored as BLOB in the main table, with a companion
                     // vec0 virtual table for indexed KNN search.
                     Some("vector" | "VECTOR" | "halfvec" | "HALFVEC") => Ok(DataType::Blob(None)),
-                    unimplemented => {
-                        unimplemented!("The data type {:?} is not supported", unimplemented)
+                    unknown => {
+                        Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                            "Unknown PostgreSQL custom type {unknown:?}"
+                        )))
                     }
                 }
             }
-            unimplemented => unimplemented!("The data type {:?} is not supported", unimplemented),
+            unsupported => {
+                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "The data type {unsupported:?} is not supported"
+                )))
+            }
         }
     }
 }
