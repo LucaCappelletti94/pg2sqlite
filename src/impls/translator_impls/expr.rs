@@ -6,10 +6,10 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    AccessExpr, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart,
-    Query, Select, SelectFlavor, SelectItem, SetExpr, TableFactor, TableWithJoins, Value,
-    ValueWithSpan, helpers::attached_token::AttachedToken,
+    AccessExpr, Array, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName,
+    ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, TableFactor, TableWithJoins,
+    Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
@@ -832,6 +832,16 @@ impl Translator for Expr {
                         .map(|e| e.translate(schema, options))
                         .collect::<Result<Vec<_>, _>>()?,
                 )
+            }
+            // Array expression: ARRAY[a, b, c] or [a, b, c] - pass through with translated elements
+            Expr::Array(Array { elem, named }) => {
+                Expr::Array(Array {
+                    elem: elem
+                        .iter()
+                        .map(|e| e.translate(schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    named: *named,
+                })
             }
             // TRIM expression - pass through with translated parts
             Expr::Trim { expr, trim_where, trim_what, trim_characters } => {
