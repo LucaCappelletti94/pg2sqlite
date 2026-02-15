@@ -564,8 +564,8 @@ fn is_vector_type(data_type: &DataType) -> bool {
     false
 }
 
-/// Translate a vector type cast (e.g., '[1,2,3]'::vector) to
-/// vec_f32('[1,2,3]').
+/// Translate a vector type cast (e.g., `'[1,2,3]'::vector`) to
+/// `vec_f32('[1,2,3]')`.
 fn translate_vector_cast(
     expr: &Expr,
     schema: &ParserDB,

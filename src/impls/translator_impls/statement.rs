@@ -215,24 +215,8 @@ impl Translator for Statement {
                 }
                 statements
             }
-            Self::AlterTable(alter_table) => {
-                if alter_table.operations.iter().all(|op| {
-                    matches!(
-                        op,
-                        sqlparser::ast::AlterTableOperation::EnableRowLevelSecurity
-                            | sqlparser::ast::AlterTableOperation::DisableRowLevelSecurity
-                    )
-                }) {
-                    Vec::new()
-                } else {
-                    unimplemented!(
-                        "Unsupported PostgreSQL statement: `{}` - Parsed as: {alter_table:?}",
-                        Statement::AlterTable(alter_table.clone()).to_string()
-                    )
-                }
-            }
             // VACUUM is supported by SQLite - pass through
-            | Self::Vacuum { .. }
+            Self::Vacuum { .. }
             // Transaction control statements - pass through unchanged (SQLite supports these)
             | Self::Commit { .. }
             | Self::Rollback { .. }
@@ -273,8 +257,10 @@ impl Translator for Statement {
                     option: None,     // SQLite doesn't support CASCADE/RESTRICT
                 })]
             }
+            // ALTER TABLE - no direct SQLite equivalent, filter out
+            Self::AlterTable(_)
             // Session/variable/maintenance/cursor statements - filter out
-            Self::ShowVariable { .. }
+            | Self::ShowVariable { .. }
             | Self::Raise { .. }
             | Self::Print { .. }
             | Self::Open { .. }
