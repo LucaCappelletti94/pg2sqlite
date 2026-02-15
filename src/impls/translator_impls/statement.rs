@@ -5,7 +5,7 @@ use sql_traits::{
     structs::ParserDB,
     traits::{DatabaseLike, TableLike},
 };
-use sqlparser::ast::{BinaryOperator, Expr, Statement};
+use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement};
 
 use crate::{
     impls::translator_impls::{
@@ -239,6 +239,40 @@ impl Translator for Statement {
             | Self::StartTransaction { .. }
             | Self::Savepoint { .. }
             | Self::ReleaseSavepoint { .. } => vec![self.clone()],
+            // DROP TABLE/VIEW/INDEX - translate to SQLite (strip CASCADE/RESTRICT)
+            Self::Drop {
+                object_type,
+                if_exists,
+                names,
+                ..
+            } => {
+                match object_type {
+                    // SQLite supports these object types
+                    ObjectType::Table | ObjectType::View | ObjectType::Index => {
+                        vec![Statement::Drop {
+                            object_type: *object_type,
+                            if_exists: *if_exists,
+                            names: names.clone(),
+                            cascade: false,  // SQLite doesn't support CASCADE
+                            restrict: false, // SQLite doesn't support RESTRICT
+                            purge: false,
+                            temporary: false,
+                            table: None,
+                        }]
+                    }
+                    // Other object types are PostgreSQL-specific, ignore them
+                    _ => Vec::new(),
+                }
+            }
+            // DROP TRIGGER - translate to SQLite (strip table name and CASCADE/RESTRICT)
+            Self::DropTrigger(drop_trigger) => {
+                vec![Statement::DropTrigger(sqlparser::ast::DropTrigger {
+                    if_exists: drop_trigger.if_exists,
+                    trigger_name: drop_trigger.trigger_name.clone(),
+                    table_name: None, // SQLite doesn't use ON table_name
+                    option: None,     // SQLite doesn't support CASCADE/RESTRICT
+                })]
+            }
             // Session/variable/maintenance/cursor statements - filter out
             Self::ShowVariable { .. }
             | Self::Raise { .. }
@@ -268,6 +302,7 @@ impl Translator for Statement {
             | Self::CreateExtension(_)
             | Self::CreatePolicy(_)
             | Self::CreateRole(_)
+            | Self::CreateUser(_)
             | Self::Grant(_)
             | Self::Revoke(_)
             | Self::Set(_)
@@ -284,7 +319,75 @@ impl Translator for Statement {
             | Self::ShowSchemas { .. }
             | Self::ShowCharset { .. }
             | Self::Update(_)
-            | Self::ShowColumns { .. } => Vec::new(),
+            | Self::ShowColumns { .. }
+            // User/Role/Schema management (no SQLite equivalent)
+            | Self::AlterRole { .. }
+            | Self::AlterUser(_)
+            | Self::CreateSchema { .. }
+            | Self::CreateDatabase { .. }
+            | Self::AlterSchema(_)
+            | Self::AlterSession { .. }
+            // PostgreSQL-specific types/domains/sequences
+            | Self::CreateType { .. }
+            | Self::CreateDomain(_)
+            | Self::CreateSequence { .. }
+            | Self::CreateProcedure { .. }
+            | Self::CreateMacro { .. }
+            | Self::AlterType(_)
+            | Self::AlterPolicy(_)
+            | Self::DropPolicy { .. }
+            | Self::DropFunction { .. }
+            | Self::DropExtension { .. }
+            | Self::DropDomain { .. }
+            | Self::DropProcedure { .. }
+            // PostgreSQL operators
+            | Self::CreateOperator(_)
+            | Self::CreateOperatorClass(_)
+            | Self::CreateOperatorFamily(_)
+            | Self::AlterOperator(_)
+            | Self::AlterOperatorClass(_)
+            | Self::AlterOperatorFamily(_)
+            | Self::DropOperator { .. }
+            | Self::DropOperatorClass { .. }
+            | Self::DropOperatorFamily { .. }
+            // Other database-specific statements
+            | Self::Comment { .. }
+            | Self::Copy { .. }
+            | Self::CopyIntoSnowflake { .. }
+            | Self::Merge(_)
+            | Self::LockTables { .. }
+            | Self::UnlockTables
+            | Self::Flush { .. }
+            | Self::ShowStatus { .. }
+            | Self::ShowVariables { .. }
+            | Self::ShowDatabases { .. }
+            | Self::ShowObjects(_)
+            | Self::RaisError { .. }
+            | Self::Deny { .. }
+            | Self::AlterView { .. }
+            | Self::AlterIndex { .. }
+            | Self::Msck(_)
+            | Self::RenameTable(_)
+            // DuckDB-specific
+            | Self::AttachDuckDBDatabase { .. }
+            | Self::DetachDuckDBDatabase { .. }
+            // Other vendor-specific
+            | Self::CreateConnector(_)
+            | Self::AlterConnector { .. }
+            | Self::DropConnector { .. }
+            | Self::CreateSecret { .. }
+            | Self::DropSecret { .. }
+            | Self::CreateServer(_)
+            | Self::CreateStage { .. }
+            | Self::Cache { .. }
+            | Self::UNCache { .. }
+            | Self::Install { .. }
+            | Self::List { .. }
+            | Self::Remove { .. }
+            | Self::LoadData { .. }
+            | Self::OptimizeTable { .. }
+            | Self::Unload { .. }
+            | Self::ExportData(_) => Vec::new(),
             unsupported_statement => {
                 unimplemented!(
                     "Unsupported PostgreSQL statement: `{}` - Parsed as: {unsupported_statement:?}",

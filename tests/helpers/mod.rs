@@ -1,5 +1,7 @@
 //! Shared test helpers for pg2sqlite integration tests.
 
+#![allow(dead_code)]
+
 use std::cell::RefCell;
 
 use diesel::{prelude::*, sqlite::SqliteConnection};

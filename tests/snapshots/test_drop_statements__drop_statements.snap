@@ -1,0 +1,13 @@
+---
+source: tests/test_drop_statements.rs
+assertion_line: 478
+expression: translated_sql
+---
+DROP TABLE users
+DROP TABLE IF EXISTS users
+DROP TABLE users
+DROP VIEW my_view
+DROP VIEW IF EXISTS my_view
+DROP VIEW my_view
+DROP INDEX idx_name
+DROP INDEX IF EXISTS idx_name

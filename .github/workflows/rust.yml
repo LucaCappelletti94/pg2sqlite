@@ -50,6 +50,9 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc
 
+      - name: Check benchmarks compile
+        run: cargo bench --no-run
+
   fmt:
     name: Formatting
     runs-on: ubuntu-latest
@@ -148,4 +151,3 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
           fail_ci_if_error: false
-
