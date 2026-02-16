@@ -3,6 +3,8 @@
 
 pub mod translator;
 pub use translator::Translator;
+pub mod reverse_translator;
+pub use reverse_translator::ReverseTranslator;
 pub mod schema;
 pub use schema::Schema;
 pub mod translation_options;

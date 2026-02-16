@@ -7,7 +7,10 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::Statement;
 use tempfile::TempDir;
 
-use crate::{options::Pg2SqliteOptions, prelude::Translator};
+use crate::{
+    options::Pg2SqliteOptions,
+    prelude::{ReverseTranslator, Translator},
+};
 
 #[derive(Debug, Clone, Default)]
 /// Struct to translate between a `PostgreSQL` entry and a `SQLite` entry.
@@ -255,5 +258,135 @@ impl Pg2Sqlite {
             .map(|statement| statement.translate(&schema, options))
             .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()
             .map(|statements| statements.into_iter().flatten().collect())
+    }
+
+    /// Builds the schema from the loaded PostgreSQL statements.
+    ///
+    /// This method constructs a [`ParserDB`] schema from the PostgreSQL
+    /// statements that have been added to this translator. The schema can
+    /// be reused for multiple reverse translation operations.
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the constructed [`ParserDB`] schema.
+    ///
+    /// # Errors
+    ///
+    /// * If the schema could not be constructed from the statements.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use pg2sqlite::pg2sqlite::Pg2Sqlite;
+    /// let translator =
+    ///     Pg2Sqlite::default().sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);").unwrap();
+    /// let schema = translator.build_schema().unwrap();
+    /// ```
+    pub fn build_schema(&self) -> Result<ParserDB, crate::errors::Error> {
+        ParserDB::from_statements(self.pg_statements.clone(), "translation_db".to_owned())
+            .map_err(crate::errors::Error::from)
+    }
+
+    /// Reverse translates a single SQLite statement to PostgreSQL.
+    ///
+    /// This method converts a SQLite DML statement (INSERT, UPDATE, DELETE,
+    /// SELECT) back to its PostgreSQL equivalent, using the schema built
+    /// from the loaded PostgreSQL statements.
+    ///
+    /// # Arguments
+    ///
+    /// * `sqlite_stmt` - The SQLite statement to reverse translate.
+    /// * `schema` - The schema to use for type recovery and validation.
+    /// * `options` - The translation options.
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the PostgreSQL statement.
+    ///
+    /// # Errors
+    ///
+    /// * [`crate::errors::Error::UnsupportedReverseStatement`] - If the
+    ///   statement is not a DML statement.
+    /// * [`crate::errors::Error::RlsTableDetected`] - If the statement
+    ///   references an RLS backing table.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use pg2sqlite::pg2sqlite::Pg2Sqlite;
+    /// # use pg2sqlite::options::Pg2SqliteOptions;
+    /// # use sqlparser::{dialect::SQLiteDialect, parser::Parser};
+    /// let translator =
+    ///     Pg2Sqlite::default().sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);").unwrap();
+    /// let schema = translator.build_schema().unwrap();
+    /// let options = Pg2SqliteOptions::default();
+    ///
+    /// let sqlite_stmt =
+    ///     Parser::parse_sql(&SQLiteDialect {}, "SELECT * FROM users").unwrap().pop().unwrap();
+    /// let pg_stmt = translator.reverse_translate(&sqlite_stmt, &schema, &options).unwrap();
+    /// ```
+    pub fn reverse_translate(
+        &self,
+        sqlite_stmt: &Statement,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Statement, crate::errors::Error> {
+        sqlite_stmt.reverse_translate(schema, options)
+    }
+
+    /// Parses SQLite SQL and reverse translates it to PostgreSQL statements.
+    ///
+    /// This is a convenience method that parses a SQLite SQL string and
+    /// reverse translates all statements to PostgreSQL.
+    ///
+    /// # Arguments
+    ///
+    /// * `sqlite_sql` - The SQLite SQL string to parse and reverse translate.
+    /// * `schema` - The schema to use for type recovery and validation.
+    /// * `options` - The translation options.
+    ///
+    /// # Returns
+    ///
+    /// A Result containing a vector of PostgreSQL statements.
+    ///
+    /// # Errors
+    ///
+    /// * [`crate::errors::Error::ParserError`] - If the SQL could not be
+    ///   parsed.
+    /// * [`crate::errors::Error::UnsupportedReverseStatement`] - If any
+    ///   statement is not a DML statement.
+    /// * [`crate::errors::Error::RlsTableDetected`] - If any statement
+    ///   references an RLS backing table.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use pg2sqlite::pg2sqlite::Pg2Sqlite;
+    /// # use pg2sqlite::options::Pg2SqliteOptions;
+    /// let translator =
+    ///     Pg2Sqlite::default().sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);").unwrap();
+    /// let schema = translator.build_schema().unwrap();
+    /// let options = Pg2SqliteOptions::default();
+    ///
+    /// let pg_stmts = translator
+    ///     .reverse_sql(
+    ///         "SELECT * FROM users; INSERT INTO users VALUES ('abc', 'test');",
+    ///         &schema,
+    ///         &options,
+    ///     )
+    ///     .unwrap();
+    /// assert_eq!(pg_stmts.len(), 2);
+    /// ```
+    pub fn reverse_sql(
+        &self,
+        sqlite_sql: &str,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<Statement>, crate::errors::Error> {
+        let stmts =
+            sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, sqlite_sql)
+                .map_err(|e| crate::errors::Error::ParserError(sqlite_sql.to_owned(), e))?;
+
+        stmts.iter().map(|stmt| self.reverse_translate(stmt, schema, options)).collect()
     }
 }

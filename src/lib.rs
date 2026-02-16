@@ -12,8 +12,8 @@ pub mod prelude {
         options::Pg2SqliteOptions,
         pg2sqlite::Pg2Sqlite,
         traits::{
-            Schema, SessionVariableMapping, SessionVariablePattern, TranslationOptions, Translator,
-            UuidRepresentation, UuidVersion,
+            ReverseTranslator, Schema, SessionVariableMapping, SessionVariablePattern,
+            TranslationOptions, Translator, UuidRepresentation, UuidVersion,
         },
     };
 }

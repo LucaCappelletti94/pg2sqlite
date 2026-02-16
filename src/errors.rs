@@ -49,4 +49,49 @@ pub enum Error {
         /// Description of why the pattern is not supported.
         description: String,
     },
+    /// Error when attempting to access an RLS backing table directly.
+    #[error(
+        "Direct access to RLS backing table '{table_name}' is not allowed. \
+         Tables with suffix '{suffix}' are internal RLS tables. \
+         Use the corresponding view instead."
+    )]
+    RlsTableDetected {
+        /// The name of the RLS backing table that was accessed.
+        table_name: String,
+        /// The RLS table suffix that was detected.
+        suffix: String,
+    },
+    /// Error when attempting to reverse translate a non-DML statement.
+    #[error(
+        "Reverse translation only supports DML statements (INSERT, UPDATE, DELETE, SELECT). \
+         Received: {statement_type}"
+    )]
+    UnsupportedReverseStatement {
+        /// The type of statement that was attempted.
+        statement_type: String,
+    },
+    /// Error when a table referenced in reverse translation is not found in the
+    /// schema.
+    #[error(
+        "Table '{table_name}' not found in schema. \
+         Reverse translation requires schema information for accurate type recovery."
+    )]
+    TableNotFoundInSchema {
+        /// The name of the table that was not found.
+        table_name: String,
+    },
+    /// Error when an upsert (INSERT OR REPLACE) does not include primary key
+    /// columns.
+    #[error(
+        "INSERT OR REPLACE on table '{table_name}' must include primary key columns {pk_columns:?}. \
+         Found columns: {insert_columns:?}"
+    )]
+    MissingPrimaryKeyInUpsert {
+        /// The name of the table being inserted into.
+        table_name: String,
+        /// The primary key columns that are required.
+        pk_columns: Vec<String>,
+        /// The columns that were provided in the INSERT statement.
+        insert_columns: Vec<String>,
+    },
 }

@@ -933,6 +933,72 @@ impl Translator for Expr {
                     access_chain: translated_chain,
                 }
             }
+            // IS [NOT] NORMALIZED - PostgreSQL Unicode normalization check
+            // SQLite doesn't have built-in Unicode normalization support
+            Expr::IsNormalized { .. } => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "IS NORMALIZED (Unicode normalization check) is not supported in SQLite. \
+                     Consider using application-level normalization with ICU or a similar library."
+                        .to_string(),
+                ));
+            }
+            // ANY/SOME operations: x op ANY(subquery)
+            // SQLite doesn't support ANY/SOME directly, but some cases can be converted
+            Expr::AnyOp { left, compare_op, right, .. } => {
+                // x = ANY(subquery) is equivalent to x IN (subquery)
+                if matches!(compare_op, BinaryOperator::Eq) {
+                    return Ok(Expr::InSubquery {
+                        expr: Box::new(left.translate(schema, options)?),
+                        subquery: Box::new(match right.as_ref() {
+                            Expr::Subquery(q) => q.translate(schema, options)?,
+                            _ => {
+                                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                                        "ANY operator with non-subquery expressions is not supported in SQLite."
+                                            .to_string(),
+                                    ));
+                            }
+                        }),
+                        negated: false,
+                    });
+                }
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "The ANY/SOME operator with {compare_op} is not supported in SQLite. \
+                     Only '= ANY(subquery)' can be converted to 'IN (subquery)'."
+                )));
+            }
+            // ALL operations: x op ALL(subquery)
+            // SQLite doesn't support ALL directly, but some cases can be converted
+            Expr::AllOp { left, compare_op, right } => {
+                // x <> ALL(subquery) is equivalent to x NOT IN (subquery)
+                if matches!(compare_op, BinaryOperator::NotEq) {
+                    return Ok(Expr::InSubquery {
+                        expr: Box::new(left.translate(schema, options)?),
+                        subquery: Box::new(match right.as_ref() {
+                            Expr::Subquery(q) => q.translate(schema, options)?,
+                            _ => {
+                                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                                        "ALL operator with non-subquery expressions is not supported in SQLite."
+                                            .to_string(),
+                                    ));
+                            }
+                        }),
+                        negated: true,
+                    });
+                }
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "The ALL operator with {compare_op} is not supported in SQLite. \
+                     Only '<> ALL(subquery)' can be converted to 'NOT IN (subquery)'."
+                )));
+            }
+            // SIMILAR TO - SQL standard regex-like pattern matching
+            // SQLite doesn't support SIMILAR TO; it only has LIKE and GLOB
+            Expr::SimilarTo { .. } => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "SIMILAR TO is not supported in SQLite. \
+                     Consider using LIKE for simple patterns or application-level regex matching."
+                        .to_string(),
+                ));
+            }
             _ => {
                 unimplemented!(
                     "Expr translation for definition `{:?}` is not yet implemented.",

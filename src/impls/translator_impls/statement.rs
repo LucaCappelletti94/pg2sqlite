@@ -373,13 +373,12 @@ impl Translator for Statement {
             | Self::LoadData { .. }
             | Self::OptimizeTable { .. }
             | Self::Unload { .. }
-            | Self::ExportData(_) => Vec::new(),
-            unsupported_statement => {
-                unimplemented!(
-                    "Unsupported PostgreSQL statement: `{}` - Parsed as: {unsupported_statement:?}",
-                    unsupported_statement.to_string()
-                )
-            }
+            | Self::ExportData(_)
+            // SQLite-specific statements (no PostgreSQL equivalent needed)
+            | Self::AttachDatabase { .. }
+            | Self::CreateVirtualTable { .. }
+            // Case statement (procedural, not supported)
+            | Self::Case(_) => Vec::new()
         })
     }
 }

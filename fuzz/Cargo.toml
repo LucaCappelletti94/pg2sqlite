@@ -14,3 +14,10 @@ path = "fuzz_targets/fuzz_sql_translation.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_reverse_translation"
+path = "fuzz_targets/fuzz_reverse_translation.rs"
+test = false
+doc = false
+bench = false
