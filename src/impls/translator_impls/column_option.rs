@@ -176,6 +176,24 @@ impl Translator for ColumnOptionDef {
                 on_update,
                 characteristics,
             }) => {
+                // Check if the referenced table has RLS and update the foreign_table reference
+                let updated_foreign_table = {
+                    use crate::impls::translator_impls::rls::table_has_rls;
+                    let fk_table_name = foreign_table.to_string();
+
+                    if table_has_rls(&fk_table_name, schema) {
+                        let suffix = options.get_rls_table_suffix();
+                        let new_fk_name = format!("{fk_table_name}{suffix}");
+
+                        // Create new ObjectName with the _rls suffix
+                        sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new(
+                            new_fk_name,
+                        )])
+                    } else {
+                        foreign_table.clone()
+                    }
+                };
+
                 Ok(Some(Self {
                     name: self.name.clone(),
                     option: ForeignKeyConstraint {
@@ -183,7 +201,7 @@ impl Translator for ColumnOptionDef {
                         index_name: index_name.clone(),
                         columns: columns.clone(),
                         match_kind: *match_kind,
-                        foreign_table: foreign_table.clone(),
+                        foreign_table: updated_foreign_table,
                         referred_columns: referred_columns.clone(),
                         on_delete: on_delete
                             .map(|on_delete| on_delete.translate(schema, options))

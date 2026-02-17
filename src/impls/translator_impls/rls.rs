@@ -36,6 +36,14 @@ where
     table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect()
 }
 
+/// Checks if a table has RLS enabled by looking it up in the schema.
+pub fn table_has_rls<DB: DatabaseLike>(table_name: &str, schema: &DB) -> bool
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    schema.table(None, table_name).is_some_and(|t| t.has_row_level_security(schema))
+}
+
 /// Builds a WHERE clause for row identity using primary key columns if
 /// available, otherwise falls back to all columns.
 fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> String {
@@ -1310,7 +1318,7 @@ where
 pub fn rename_table_for_rls<O: TranslationOptions, DB: DatabaseLike>(
     create_table: &CreateTable,
     options: &O,
-    schema: &DB,
+    _schema: &DB,
 ) -> CreateTable
 where
     DB::Table: TableLike<DB = DB>,
@@ -1331,32 +1339,6 @@ where
         && let sqlparser::ast::TableFactor::Table { name, .. } = &from.relation
     {
         renamed.name = name.clone();
-    }
-
-    // Update foreign key references to other RLS tables
-    for column in &mut renamed.columns {
-        for option in &mut column.options {
-            if let sqlparser::ast::ColumnOption::ForeignKey(fk_constraint) = &mut option.option {
-                let fk_table_name = fk_constraint.foreign_table.to_string();
-                // Only update if the referenced table has RLS (look up in schema)
-                let has_rls = schema
-                    .table(None, &fk_table_name)
-                    .is_some_and(|t| t.has_row_level_security(schema));
-                if has_rls {
-                    let new_fk_name = format!("{fk_table_name}{suffix}");
-                    if let Ok(mut stmts) = sqlparser::parser::Parser::parse_sql(
-                        &dialect,
-                        &format!("SELECT * FROM {new_fk_name}"),
-                    ) && let Some(Statement::Query(query)) = stmts.pop()
-                        && let sqlparser::ast::SetExpr::Select(select) = *query.body
-                        && let Some(from) = select.from.first()
-                        && let sqlparser::ast::TableFactor::Table { name, .. } = &from.relation
-                    {
-                        fk_constraint.foreign_table = name.clone();
-                    }
-                }
-            }
-        }
     }
 
     renamed

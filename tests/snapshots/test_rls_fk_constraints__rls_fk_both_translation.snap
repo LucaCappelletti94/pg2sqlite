@@ -1,0 +1,15 @@
+---
+source: tests/test_rls_fk_constraints.rs
+assertion_line: 229
+expression: "translated_sql.join(\";\\n\")"
+---
+CREATE TABLE users_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, username TEXT NOT NULL UNIQUE, email TEXT NOT NULL) STRICT;
+CREATE VIEW users AS SELECT id, username, email FROM users_rls WHERE (true);
+CREATE TRIGGER users_insert_trigger INSTEAD OF INSERT ON users FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.id = current_app_user())); INSERT INTO users_rls (id, username, email) VALUES (NEW.id, NEW.username, NEW.email); END;
+CREATE TRIGGER users_update_trigger INSTEAD OF UPDATE ON users FOR EACH ROW BEGIN UPDATE users_rls SET id = COALESCE(NEW.id, OLD.id), username = COALESCE(NEW.username, OLD.username), email = COALESCE(NEW.email, OLD.email) WHERE id = OLD.id; END;
+CREATE TRIGGER users_delete_trigger INSTEAD OF DELETE ON users FOR EACH ROW BEGIN DELETE FROM users_rls WHERE id = OLD.id; END;
+CREATE TABLE posts_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, author_id BLOB NOT NULL REFERENCES users_rls (id), title TEXT NOT NULL, content TEXT) STRICT;
+CREATE VIEW posts AS SELECT id, author_id, title, content FROM posts_rls WHERE (true);
+CREATE TRIGGER posts_insert_trigger INSTEAD OF INSERT ON posts FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.author_id = current_app_user())); INSERT INTO posts_rls (id, author_id, title, content) VALUES (NEW.id, NEW.author_id, NEW.title, NEW.content); END;
+CREATE TRIGGER posts_update_trigger INSTEAD OF UPDATE ON posts FOR EACH ROW BEGIN UPDATE posts_rls SET id = COALESCE(NEW.id, OLD.id), author_id = COALESCE(NEW.author_id, OLD.author_id), title = COALESCE(NEW.title, OLD.title), content = COALESCE(NEW.content, OLD.content) WHERE (id = OLD.id) AND ((OLD.author_id = current_app_user())); END;
+CREATE TRIGGER posts_delete_trigger INSTEAD OF DELETE ON posts FOR EACH ROW BEGIN DELETE FROM posts_rls WHERE (id = OLD.id) AND ((OLD.author_id = current_app_user())); END

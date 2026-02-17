@@ -16,7 +16,7 @@ impl Translator for TableConstraint {
 
     fn translate(
         &self,
-        _schema: &Self::Schema,
+        schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match self {
@@ -32,6 +32,25 @@ impl Translator for TableConstraint {
                     }
                     _ => Ok(Some(self.clone())),
                 }
+            }
+            Self::ForeignKey(fk_constraint) => {
+                // Check if the referenced table has RLS and update the foreign_table reference
+                use crate::impls::translator_impls::rls::table_has_rls;
+                let fk_table_name = fk_constraint.foreign_table.to_string();
+                let mut updated_fk = fk_constraint.clone();
+
+                if table_has_rls(&fk_table_name, schema) {
+                    let suffix = options.get_rls_table_suffix();
+                    let new_fk_name = format!("{fk_table_name}{suffix}");
+
+                    // Create new ObjectName with the _rls suffix
+                    updated_fk.foreign_table =
+                        sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new(
+                            new_fk_name,
+                        )]);
+                }
+
+                Ok(Some(Self::ForeignKey(updated_fk)))
             }
             other => Ok(Some(other.clone())),
         }
