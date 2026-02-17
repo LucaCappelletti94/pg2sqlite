@@ -7,19 +7,29 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 mod schema {
     diesel::table! {
+        /// Users table for testing views.
         users (id) {
+            /// User ID.
             id -> Integer,
+            /// Username.
             username -> Text,
+            /// Email address.
             email -> Text,
+            /// Active status (1 = active, 0 = inactive).
             is_active -> Integer,
         }
     }
 
     diesel::table! {
+        /// Orders table for testing views.
         orders (id) {
+            /// Order ID.
             id -> Integer,
+            /// User ID (foreign key to users).
             user_id -> Integer,
+            /// Order total amount.
             total -> Float,
+            /// Order status.
             status -> Text,
         }
     }
@@ -27,54 +37,77 @@ mod schema {
 
 use schema::{orders, users};
 
+/// A new user for insertion.
 #[derive(Insertable)]
 #[diesel(table_name = users)]
 struct NewUser {
+    /// Username.
     username: String,
+    /// Email address.
     email: String,
+    /// Active status (1 = active, 0 = inactive).
     is_active: i32,
 }
 
+/// A new order for insertion.
 #[derive(Insertable)]
 #[diesel(table_name = orders)]
 struct NewOrder {
+    /// User ID (foreign key to users).
     user_id: i32,
+    /// Order total amount.
     total: f32,
+    /// Order status.
     status: String,
 }
 
+/// Result from the active_users view.
 #[derive(QueryableByName, Debug)]
 struct ActiveUser {
+    /// User ID.
     #[diesel(sql_type = diesel::sql_types::Integer)]
     id: i32,
+    /// Username.
     #[diesel(sql_type = diesel::sql_types::Text)]
     username: String,
+    /// Email address.
     #[diesel(sql_type = diesel::sql_types::Text)]
     email: String,
 }
 
+/// Result from the user_orders view.
 #[derive(QueryableByName, Debug)]
 struct UserOrder {
+    /// User ID.
     #[diesel(sql_type = diesel::sql_types::Integer)]
     user_id: i32,
+    /// Username.
     #[diesel(sql_type = diesel::sql_types::Text)]
     username: String,
+    /// Order ID.
     #[diesel(sql_type = diesel::sql_types::Integer)]
     order_id: i32,
+    /// Order total amount.
     #[diesel(sql_type = diesel::sql_types::Float)]
     total: f32,
+    /// Order status.
     #[diesel(sql_type = diesel::sql_types::Text)]
     status: String,
 }
 
+/// Result from the user_order_summary view.
 #[derive(QueryableByName, Debug)]
 struct UserOrderSummary {
+    /// User ID.
     #[diesel(sql_type = diesel::sql_types::Integer)]
     id: i32,
+    /// Username.
     #[diesel(sql_type = diesel::sql_types::Text)]
     username: String,
+    /// Total number of orders.
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     order_count: i64,
+    /// Total amount spent (nullable if no orders).
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Float>)]
     total_spent: Option<f32>,
 }

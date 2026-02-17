@@ -1,6 +1,25 @@
 //! Test translation of UUID related defaults.
 
+use diesel::prelude::*;
 use pg2sqlite::{pg2sqlite::Pg2Sqlite, prelude::*};
+
+// Schema definitions for test tables
+diesel::table! {
+    /// Test table for UUID translation.
+    users (id) {
+        /// UUID primary key.
+        id -> Binary,
+    }
+}
+
+/// User record with UUID.
+#[derive(Queryable, Selectable, Insertable, Debug)]
+#[diesel(table_name = users)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct User {
+    /// UUID primary key.
+    id: Vec<u8>,
+}
 
 #[test]
 fn test_default_gen_random_uuid() {

@@ -7,33 +7,122 @@
 mod helpers;
 
 use diesel::prelude::*;
-use helpers::{Count, establish_connection};
+use helpers::establish_connection;
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
     traits::TranslationOptions,
 };
 use rosetta_uuid::Uuid;
+
+// Schema definitions for test tables
+diesel::table! {
+    /// Products table for e-commerce system.
+    products (id) {
+        /// Product ID.
+        id -> Binary,
+        /// Product name.
+        name -> Text,
+        /// Product price.
+        price -> Float,
+        /// Initial stock quantity.
+        initial_stock -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Inventory table tracking stock levels.
+    inventory (id) {
+        /// Inventory record ID.
+        id -> Binary,
+        /// Associated product ID.
+        product_id -> Binary,
+        /// Current quantity in stock.
+        quantity -> Integer,
+        /// Last updated timestamp.
+        last_updated -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Audit log for tracking inventory changes.
+    inventory_audit (id) {
+        /// Audit record ID.
+        id -> Binary,
+        /// Associated inventory ID.
+        inventory_id -> Binary,
+        /// Associated product ID.
+        product_id -> Binary,
+        /// Previous quantity (NULL for initial creation).
+        old_quantity -> Nullable<Integer>,
+        /// New quantity.
+        new_quantity -> Integer,
+        /// Type of change (INITIAL, UPDATE, etc.).
+        change_type -> Text,
+        /// Timestamp when change was recorded.
+        created_at -> Nullable<Text>,
+    }
+}
+
+diesel::allow_tables_to_appear_in_same_query!(products, inventory, inventory_audit);
+
+/// A product in the e-commerce system.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = products)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Product {
+    /// Product ID.
+    id: Vec<u8>,
+    /// Product name.
+    name: String,
+    /// Product price.
+    price: f32,
+    /// Initial stock quantity.
+    initial_stock: i32,
+}
+
+/// An inventory record for a product.
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = inventory)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[allow(dead_code)]
+struct Inventory {
+    /// Inventory record ID.
+    id: Vec<u8>,
+    /// Associated product ID.
+    product_id: Vec<u8>,
+    /// Current quantity in stock.
+    quantity: i32,
+    /// Last updated timestamp.
+    last_updated: Option<String>,
+}
+
+/// An audit log entry for inventory changes.
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = inventory_audit)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[allow(dead_code)]
+struct InventoryAudit {
+    /// Audit record ID.
+    id: Vec<u8>,
+    /// Associated inventory ID.
+    inventory_id: Vec<u8>,
+    /// Associated product ID.
+    product_id: Vec<u8>,
+    /// Previous quantity (NULL for initial creation).
+    old_quantity: Option<i32>,
+    /// New quantity.
+    new_quantity: i32,
+    /// Type of change (INITIAL, UPDATE, etc.).
+    change_type: String,
+    /// Timestamp when change was recorded.
+    created_at: Option<String>,
+}
+
 /// Test a complex trigger scenario with multiple tables and cascading effects.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_complex_trigger_with_multiple_variables() -> Result<(), Box<dyn std::error::Error>> {
-    #[derive(QueryableByName, Debug)]
-    struct InventoryQuantity {
-        #[diesel(sql_type = diesel::sql_types::Integer)]
-        quantity: i32,
-    }
-
-    #[derive(QueryableByName, Debug)]
-    struct AuditInfo {
-        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
-        old_quantity: Option<i32>,
-        #[diesel(sql_type = diesel::sql_types::Integer)]
-        new_quantity: i32,
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        change_type: String,
-    }
-
-    let sql = r"
+    let sql = "
 -- Products table
 CREATE TABLE products (
     id UUID PRIMARY KEY,
@@ -62,15 +151,15 @@ CREATE TABLE inventory_audit (
 );
 
 -- Trigger: When a product is inserted, create inventory record if not exists
-CREATE OR REPLACE FUNCTION create_product_inventory() RETURNS TRIGGER LANGUAGE plpgsql AS $$ 
+CREATE OR REPLACE FUNCTION create_product_inventory() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 DECLARE
     v_inventory_id UUID;
-BEGIN 
+BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM inventory WHERE product_id = NEW.id
     ) THEN
         v_inventory_id := uuidv7();
-        INSERT INTO inventory (id, product_id, quantity) 
+        INSERT INTO inventory (id, product_id, quantity)
         VALUES (v_inventory_id, NEW.id, NEW.initial_stock);
     END IF;
     RETURN NEW;
@@ -82,10 +171,10 @@ AFTER INSERT ON products
 FOR EACH ROW EXECUTE FUNCTION create_product_inventory();
 
 -- Trigger: When inventory is created, create audit record
-CREATE OR REPLACE FUNCTION audit_inventory_creation() RETURNS TRIGGER LANGUAGE plpgsql AS $$ 
+CREATE OR REPLACE FUNCTION audit_inventory_creation() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 DECLARE
     v_audit_id UUID;
-BEGIN 
+BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM inventory_audit WHERE inventory_id = NEW.id AND change_type = 'INITIAL'
     ) THEN
@@ -123,75 +212,80 @@ FOR EACH ROW EXECUTE FUNCTION audit_inventory_creation();
 
     // Test 1: Insert a product with initial stock of 100
     let product_id_1 = Uuid::new_v4();
-    diesel::sql_query(
-        "INSERT INTO products (id, name, price, initial_stock) VALUES (?, 'Widget A', 19.99, 100)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(product_id_1.as_bytes().to_vec())
-    .execute(&mut connection)?;
+    diesel::insert_into(products::table)
+        .values(&Product {
+            id: product_id_1.as_bytes().to_vec(),
+            name: "Widget A".to_string(),
+            price: 19.99,
+            initial_stock: 100,
+        })
+        .execute(&mut connection)?;
 
     // Verify inventory was created
-    let inventory_count: Count =
-        diesel::sql_query("SELECT COUNT(*) as count FROM inventory").get_result(&mut connection)?;
-    assert_eq!(inventory_count.count, 1, "Expected 1 inventory record");
+    let inventory_count: i64 = inventory::table.count().get_result(&mut connection)?;
+    assert_eq!(inventory_count, 1, "Expected 1 inventory record");
 
     // Verify inventory quantity
-    let inventory_qty: Vec<InventoryQuantity> =
-        diesel::sql_query("SELECT quantity FROM inventory WHERE product_id = ?")
-            .bind::<diesel::sql_types::Binary, _>(product_id_1.as_bytes().to_vec())
-            .load(&mut connection)?;
-    assert_eq!(inventory_qty.len(), 1);
-    assert_eq!(inventory_qty[0].quantity, 100);
+    let inventory_records: Vec<Inventory> = inventory::table
+        .filter(inventory::product_id.eq(product_id_1.as_bytes().to_vec()))
+        .select(Inventory::as_select())
+        .load(&mut connection)?;
+    assert_eq!(inventory_records.len(), 1);
+    assert_eq!(inventory_records[0].quantity, 100);
 
     // Verify audit log was created
-    let audit_count: Count = diesel::sql_query("SELECT COUNT(*) as count FROM inventory_audit")
-        .get_result(&mut connection)?;
-    assert_eq!(audit_count.count, 1, "Expected 1 audit entry");
+    let audit_count: i64 = inventory_audit::table.count().get_result(&mut connection)?;
+    assert_eq!(audit_count, 1, "Expected 1 audit entry");
 
     // Verify audit details
-    let audit_info: Vec<AuditInfo> = diesel::sql_query(
-        "SELECT old_quantity, new_quantity, change_type FROM inventory_audit WHERE product_id = ?",
-    )
-    .bind::<diesel::sql_types::Binary, _>(product_id_1.as_bytes().to_vec())
-    .load(&mut connection)?;
-    assert_eq!(audit_info.len(), 1);
-    assert_eq!(audit_info[0].old_quantity, None);
-    assert_eq!(audit_info[0].new_quantity, 100);
-    assert_eq!(audit_info[0].change_type, "INITIAL");
+    let audit_records: Vec<InventoryAudit> = inventory_audit::table
+        .filter(inventory_audit::product_id.eq(product_id_1.as_bytes().to_vec()))
+        .select(InventoryAudit::as_select())
+        .load(&mut connection)?;
+    assert_eq!(audit_records.len(), 1);
+    assert_eq!(audit_records[0].old_quantity, None);
+    assert_eq!(audit_records[0].new_quantity, 100);
+    assert_eq!(audit_records[0].change_type, "INITIAL");
 
     // Test 2: Insert another product with different initial stock
     let product_id_2 = Uuid::new_v4();
-    diesel::sql_query(
-        "INSERT INTO products (id, name, price, initial_stock) VALUES (?, 'Gadget B', 49.99, 50)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(product_id_2.as_bytes().to_vec())
-    .execute(&mut connection)?;
+    diesel::insert_into(products::table)
+        .values(&Product {
+            id: product_id_2.as_bytes().to_vec(),
+            name: "Gadget B".to_string(),
+            price: 49.99,
+            initial_stock: 50,
+        })
+        .execute(&mut connection)?;
 
-    let inventory_count_2: Count =
-        diesel::sql_query("SELECT COUNT(*) as count FROM inventory").get_result(&mut connection)?;
-    assert_eq!(inventory_count_2.count, 2, "Expected 2 inventory records after second product");
+    let inventory_count_2: i64 = inventory::table.count().get_result(&mut connection)?;
+    assert_eq!(inventory_count_2, 2, "Expected 2 inventory records after second product");
 
-    let audit_count_2: Count = diesel::sql_query("SELECT COUNT(*) as count FROM inventory_audit")
-        .get_result(&mut connection)?;
-    assert_eq!(audit_count_2.count, 2, "Expected 2 audit entries after second product");
+    let audit_count_2: i64 = inventory_audit::table.count().get_result(&mut connection)?;
+    assert_eq!(audit_count_2, 2, "Expected 2 audit entries after second product");
 
     // Test 3: Verify that each product has its own inventory with correct quantity
-    let inv_2_qty: Vec<InventoryQuantity> =
-        diesel::sql_query("SELECT quantity FROM inventory WHERE product_id = ?")
-            .bind::<diesel::sql_types::Binary, _>(product_id_2.as_bytes().to_vec())
-            .load(&mut connection)?;
-    assert_eq!(inv_2_qty.len(), 1);
-    assert_eq!(inv_2_qty[0].quantity, 50);
+    let inv_2_records: Vec<Inventory> = inventory::table
+        .filter(inventory::product_id.eq(product_id_2.as_bytes().to_vec()))
+        .select(Inventory::as_select())
+        .load(&mut connection)?;
+    assert_eq!(inv_2_records.len(), 1);
+    assert_eq!(inv_2_records[0].quantity, 50);
 
     // Test 4: Verify the inventory_id in audit matches the actual inventory id
-    let valid_audit_count: Count = diesel::sql_query(
-        "SELECT COUNT(*) as count FROM inventory_audit a 
-         WHERE EXISTS (SELECT 1 FROM inventory i WHERE i.id = a.inventory_id)",
-    )
-    .get_result(&mut connection)?;
-    assert_eq!(
-        valid_audit_count.count, 2,
-        "All audit entries should reference valid inventory IDs"
-    );
+    // Use diesel to load all inventory IDs and audit inventory IDs, then verify in
+    // Rust
+    let inventory_ids: Vec<Vec<u8>> =
+        inventory::table.select(inventory::id).load(&mut connection)?;
+    let audit_inventory_ids: Vec<Vec<u8>> =
+        inventory_audit::table.select(inventory_audit::inventory_id).load(&mut connection)?;
+
+    let valid_audit_count = audit_inventory_ids
+        .iter()
+        .filter(|audit_inv_id| inventory_ids.contains(audit_inv_id))
+        .count();
+
+    assert_eq!(valid_audit_count, 2, "All audit entries should reference valid inventory IDs");
 
     Ok(())
 }

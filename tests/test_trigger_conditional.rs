@@ -5,25 +5,82 @@
 mod helpers;
 
 use diesel::prelude::*;
-use helpers::{Count, establish_connection};
+use helpers::establish_connection;
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
     traits::TranslationOptions,
 };
 use rosetta_uuid::Uuid;
 
+// Schema definitions for test tables
+diesel::table! {
+    /// Customer orders table for testing conditional triggers.
+    customer_orders (id) {
+        /// Order ID.
+        id -> Binary,
+        /// Customer email address.
+        customer_email -> Text,
+        /// Total order amount.
+        total_amount -> Double,
+    }
+}
+
+diesel::table! {
+    /// Notifications table for tracking order notifications.
+    notifications (id) {
+        /// Notification ID.
+        id -> Binary,
+        /// Associated order ID.
+        order_id -> Binary,
+        /// Type of notification.
+        notification_type -> Text,
+        /// Notification message.
+        message -> Text,
+        /// Notification priority level.
+        priority -> Integer,
+    }
+}
+
+diesel::allow_tables_to_appear_in_same_query!(customer_orders, notifications);
+
+/// A customer order record.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = customer_orders)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct CustomerOrder {
+    /// Order ID.
+    id: Vec<u8>,
+    /// Customer email address.
+    customer_email: String,
+    /// Total order amount.
+    total_amount: f64,
+}
+
+/// A notification record.
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = notifications)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Notification {
+    /// Notification ID.
+    #[allow(dead_code)]
+    id: Vec<u8>,
+    /// Associated order ID.
+    #[allow(dead_code)]
+    order_id: Vec<u8>,
+    /// Type of notification.
+    #[diesel(column_name = "notification_type")]
+    kind: String,
+    /// Notification message.
+    #[allow(dead_code)]
+    message: String,
+    /// Notification priority level.
+    priority: i32,
+}
+
 /// Test trigger with IF NOT EXISTS for conditional execution.
 #[test]
 fn test_trigger_with_conditional_logic() -> Result<(), Box<dyn std::error::Error>> {
-    #[derive(QueryableByName, Debug)]
-    struct NotificationInfo {
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        notification_type: String,
-        #[diesel(sql_type = diesel::sql_types::Integer)]
-        priority: i32,
-    }
-
-    let sql = r"
+    let sql = "
 -- Orders table
 CREATE TABLE customer_orders (
     id UUID PRIMARY KEY,
@@ -41,10 +98,10 @@ CREATE TABLE notifications (
 );
 
 -- Trigger: Create standard notification for all orders
-CREATE OR REPLACE FUNCTION notify_new_order() RETURNS TRIGGER LANGUAGE plpgsql AS $$ 
+CREATE OR REPLACE FUNCTION notify_new_order() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 DECLARE
     v_notif_id UUID;
-BEGIN 
+BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM notifications WHERE order_id = NEW.id AND notification_type = 'ORDER_RECEIVED'
     ) THEN
@@ -74,6 +131,9 @@ FOR EACH ROW EXECUTE FUNCTION notify_new_order();
 
     let mut connection = establish_connection();
 
+    // Enable recursive triggers if needed
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut connection)?;
+
     // Run the translations
     for translated_migration in &translated_migrations {
         let sql_stmt = translated_migration.to_string();
@@ -82,43 +142,45 @@ FOR EACH ROW EXECUTE FUNCTION notify_new_order();
 
     // Test 1: Insert a low-value order (should get ORDER_RECEIVED notification)
     let order_id_low = Uuid::new_v4();
-    diesel::sql_query(
-        "INSERT INTO customer_orders (id, customer_email, total_amount) VALUES (?, 'customer1@example.com', 50.00)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(order_id_low.as_bytes().to_vec())
-    .execute(&mut connection)?;
+    diesel::insert_into(customer_orders::table)
+        .values(&CustomerOrder {
+            id: order_id_low.as_bytes().to_vec(),
+            customer_email: "customer1@example.com".to_string(),
+            total_amount: 50.00,
+        })
+        .execute(&mut connection)?;
 
-    let notifications_low: Vec<NotificationInfo> = diesel::sql_query(
-        "SELECT notification_type, priority FROM notifications WHERE order_id = ?",
-    )
-    .bind::<diesel::sql_types::Binary, _>(order_id_low.as_bytes().to_vec())
-    .load(&mut connection)?;
+    let notifications_low: Vec<Notification> = notifications::table
+        .filter(notifications::order_id.eq(order_id_low.as_bytes().to_vec()))
+        .select(Notification::as_select())
+        .load(&mut connection)?;
 
     assert_eq!(notifications_low.len(), 1, "Low-value order should have 1 notification");
-    assert_eq!(notifications_low[0].notification_type, "ORDER_RECEIVED");
+    assert_eq!(notifications_low[0].kind, "ORDER_RECEIVED");
     assert_eq!(notifications_low[0].priority, 1);
 
     // Test 2: Insert another order (also gets notification)
     let order_id_high = Uuid::new_v4();
-    diesel::sql_query(
-        "INSERT INTO customer_orders (id, customer_email, total_amount) VALUES (?, 'customer2@example.com', 1500.00)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(order_id_high.as_bytes().to_vec())
-    .execute(&mut connection)?;
+    diesel::insert_into(customer_orders::table)
+        .values(&CustomerOrder {
+            id: order_id_high.as_bytes().to_vec(),
+            customer_email: "customer2@example.com".to_string(),
+            total_amount: 1500.00,
+        })
+        .execute(&mut connection)?;
 
-    let notifications_high: Vec<NotificationInfo> = diesel::sql_query(
-        "SELECT notification_type, priority FROM notifications WHERE order_id = ? ORDER BY priority DESC",
-    )
-    .bind::<diesel::sql_types::Binary, _>(order_id_high.as_bytes().to_vec())
-    .load(&mut connection)?;
+    let notifications_high: Vec<Notification> = notifications::table
+        .filter(notifications::order_id.eq(order_id_high.as_bytes().to_vec()))
+        .order(notifications::priority.desc())
+        .select(Notification::as_select())
+        .load(&mut connection)?;
 
     assert_eq!(notifications_high.len(), 1, "High-value order should have 1 notification");
-    assert_eq!(notifications_high[0].notification_type, "ORDER_RECEIVED");
+    assert_eq!(notifications_high[0].kind, "ORDER_RECEIVED");
 
     // Test 3: Total notification count
-    let total_count: Count = diesel::sql_query("SELECT COUNT(*) as count FROM notifications")
-        .get_result(&mut connection)?;
-    assert_eq!(total_count.count, 2, "Should have 2 total notifications");
+    let total_count: i64 = notifications::table.count().get_result(&mut connection)?;
+    assert_eq!(total_count, 2, "Should have 2 total notifications");
 
     Ok(())
 }

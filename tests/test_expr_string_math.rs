@@ -47,14 +47,14 @@ struct Data {
 /// Test that TRIM expressions are translated correctly.
 #[test]
 fn test_trim_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL,
             num_val REAL NOT NULL
         );
         SELECT TRIM(text_val) as trimmed FROM data;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -73,13 +73,13 @@ fn test_trim_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test TRIM semantic execution.
 #[test]
 fn test_trim_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL,
             num_val REAL NOT NULL
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -112,14 +112,14 @@ fn test_trim_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test TRIM with LEADING/TRAILING/BOTH.
 #[test]
 fn test_trim_variants_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL,
             num_val REAL NOT NULL
         );
         SELECT TRIM(LEADING ' ' FROM text_val) as ltrimmed FROM data;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -142,14 +142,14 @@ fn test_trim_variants_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that CEIL expressions are translated correctly.
 #[test]
 fn test_ceil_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL,
             num_val REAL NOT NULL
         );
         SELECT CEIL(num_val) as ceiled FROM data;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -169,13 +169,13 @@ fn test_ceil_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test CEIL semantic execution.
 #[test]
 fn test_ceil_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL,
             num_val REAL NOT NULL
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -220,14 +220,14 @@ fn test_ceil_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that FLOOR expressions are translated correctly.
 #[test]
 fn test_floor_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL,
             num_val REAL NOT NULL
         );
         SELECT FLOOR(num_val) as floored FROM data;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -249,13 +249,13 @@ fn test_floor_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test FLOOR semantic execution.
 #[test]
 fn test_floor_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL,
             num_val REAL NOT NULL
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;

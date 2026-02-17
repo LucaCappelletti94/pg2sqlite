@@ -22,9 +22,27 @@ extern "SQL" {
 // ============================================================================
 // Diesel Schema Definitions for RLS backing tables
 // ============================================================================
+//
+// IMPORTANT: The `*_rls` backing table schemas defined below are ONLY for
+// testing the RLS translation implementation. Real applications should NOT
+// define schemas for backing tables - they are implementation details of the
+// RLS translation.
+//
+// In production code, only define schemas for the VIEWS (e.g., `users`,
+// `posts`), not the backing tables (e.g., `users_rls`, `posts_rls`). The view
+// schemas provide transparent RLS enforcement through INSTEAD OF triggers.
+//
+// These backing table schemas are included here to:
+// - Simulate direct server-side data insertion (bypassing RLS)
+// - Verify that triggers correctly synchronize data between views and backing
+//   tables
+// - Test the internal mechanics of the RLS translation
+// ============================================================================
 
 diesel::table! {
     /// The backing table for users (read-only via view).
+    ///
+    /// **Testing only** - Real applications should use the `users` view schema.
     users_rls (id) {
         id -> Binary,
         username -> Text,
@@ -34,6 +52,8 @@ diesel::table! {
 
 diesel::table! {
     /// The backing table for posts (writable via view with RLS).
+    ///
+    /// **Testing only** - Real applications should use the `posts` view schema.
     posts_rls (id) {
         id -> Binary,
         author_id -> Binary,
@@ -43,8 +63,35 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    /// The users view (RLS-filtered).
+    ///
+    /// **This is what real applications should use** - the view provides transparent
+    /// RLS enforcement. All queries and mutations go through this view.
+    users (id) {
+        id -> Binary,
+        username -> Text,
+        email -> Text,
+    }
+}
+
+diesel::table! {
+    /// The posts view (RLS-filtered).
+    ///
+    /// **This is what real applications should use** - the view provides transparent
+    /// RLS enforcement. INSTEAD OF triggers handle INSERT/UPDATE/DELETE operations.
+    posts (id) {
+        id -> Binary,
+        author_id -> Binary,
+        title -> Text,
+        content -> Nullable<Text>,
+        created_by -> Binary,
+    }
+}
+
 diesel::joinable!(posts_rls -> users_rls (author_id));
-diesel::allow_tables_to_appear_in_same_query!(users_rls, posts_rls);
+diesel::joinable!(posts -> users (author_id));
+diesel::allow_tables_to_appear_in_same_query!(users_rls, posts_rls, users, posts);
 
 // ============================================================================
 // Model Structs
@@ -239,12 +286,20 @@ pub struct IdResult {
 // ============================================================================
 
 /// Inserts a user into the backing table (simulating sync from server).
+///
+/// **Testing only** - This directly inserts into the backing table, bypassing
+/// RLS. Real applications should insert into the `users` view, which enforces
+/// RLS policies.
 #[allow(dead_code)]
 pub fn insert_user(conn: &mut SqliteConnection, user: &User) -> QueryResult<usize> {
     diesel::insert_into(users_rls::table).values(user).execute(conn)
 }
 
 /// Inserts a post into the backing table (simulating sync from server).
+///
+/// **Testing only** - This directly inserts into the backing table, bypassing
+/// RLS. Real applications should insert into the `posts` view, which enforces
+/// RLS policies.
 #[allow(dead_code)]
 pub fn insert_post_rls(conn: &mut SqliteConnection, post: &Post) -> QueryResult<usize> {
     diesel::insert_into(posts_rls::table).values(post).execute(conn)
@@ -253,15 +308,11 @@ pub fn insert_post_rls(conn: &mut SqliteConnection, post: &Post) -> QueryResult<
 /// Counts rows in the users view.
 #[allow(dead_code)]
 pub fn count_users(conn: &mut SqliteConnection) -> QueryResult<i64> {
-    diesel::sql_query("SELECT COUNT(*) as count FROM users")
-        .get_result::<Count>(conn)
-        .map(|c| c.count)
+    users::table.count().get_result(conn)
 }
 
 /// Counts rows in the posts view.
 #[allow(dead_code)]
 pub fn count_posts(conn: &mut SqliteConnection) -> QueryResult<i64> {
-    diesel::sql_query("SELECT COUNT(*) as count FROM posts")
-        .get_result::<Count>(conn)
-        .map(|c| c.count)
+    posts::table.count().get_result(conn)
 }

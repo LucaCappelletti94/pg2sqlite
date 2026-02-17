@@ -1,13 +1,18 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
-        Delete, Expr, GroupByExpr, Query, Select, SelectFlavor, SelectItem, SetExpr, Statement,
-        Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+        Delete, Expr, GroupByExpr, Ident, ObjectName, Query, Select, SelectFlavor, SelectItem,
+        SetExpr, Statement, TableFactor, Value, ValueWithSpan,
+        helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
 
-use crate::{options::Pg2SqliteOptions, traits::translator::Translator};
+use crate::{
+    impls::translator_impls::rls::table_has_rls,
+    options::Pg2SqliteOptions,
+    traits::{TranslationOptions, translator::Translator},
+};
 
 impl Translator for Delete {
     type Schema = ParserDB;
@@ -16,8 +21,8 @@ impl Translator for Delete {
 
     fn translate(
         &self,
-        _schema: &Self::Schema,
-        _options: &Self::Options,
+        schema: &Self::Schema,
+        options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         let mut delete = self.clone();
 
@@ -29,7 +34,7 @@ impl Translator for Delete {
             let original_selection = delete.selection;
 
             // Create the subquery
-            let subquery = Query {
+            let mut subquery = Query {
                 with: None,
                 body: Box::new(SetExpr::Select(Box::new(Select {
                     select_token: AttachedToken::empty(),
@@ -69,6 +74,35 @@ impl Translator for Delete {
                 format_clause: None,
                 pipe_operators: vec![],
             };
+
+            // Walk the FROM clause and update table names for RLS tables
+            // Tables with RLS are renamed to table_rls (backing table), and we need
+            // to reference the backing table in queries, not the view.
+            let rls_suffix = options.get_rls_table_suffix();
+
+            if let SetExpr::Select(ref mut select) = *subquery.body {
+                for table_with_joins in &mut select.from {
+                    // Update main table reference
+                    if let TableFactor::Table { name, .. } = &mut table_with_joins.relation {
+                        let table_name = name.to_string();
+                        if table_has_rls(&table_name, schema) {
+                            let new_name = format!("{table_name}{rls_suffix}");
+                            *name = ObjectName::from(vec![Ident::new(new_name)]);
+                        }
+                    }
+
+                    // Update JOINed table references
+                    for join in &mut table_with_joins.joins {
+                        if let TableFactor::Table { name, .. } = &mut join.relation {
+                            let table_name = name.to_string();
+                            if table_has_rls(&table_name, schema) {
+                                let new_name = format!("{table_name}{rls_suffix}");
+                                *name = ObjectName::from(vec![Ident::new(new_name)]);
+                            }
+                        }
+                    }
+                }
+            }
 
             // New selection is EXISTS(subquery)
             delete.selection = Some(Expr::Exists { subquery: Box::new(subquery), negated: false });

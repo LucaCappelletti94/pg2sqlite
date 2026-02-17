@@ -11,13 +11,205 @@ use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 // ============================================================================
+// Schema Definitions
+// ============================================================================
+
+diesel::table! {
+    /// Test table for authors (used in JOIN tests).
+    authors (id) {
+        /// Author ID.
+        id -> Integer,
+        /// Author name.
+        name -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for books (used in JOIN tests).
+    books (id) {
+        /// Book ID.
+        id -> Integer,
+        /// Author name.
+        author_name -> Text,
+        /// Book title.
+        title -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for ranges (used in LEAST/GREATEST tests).
+    ranges (id) {
+        /// Range ID.
+        id -> Integer,
+        /// Low value.
+        low -> Integer,
+        /// High value.
+        high -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for numeric values (used in range tests).
+    nums (id) {
+        /// Number ID.
+        id -> Integer,
+        /// Numeric value.
+        val -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for departments (used in LEFT JOIN tests).
+    departments (id) {
+        /// Department ID.
+        id -> Integer,
+        /// Department name.
+        name -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for employees (used in LEFT JOIN tests).
+    employees (id) {
+        /// Employee ID.
+        id -> Integer,
+        /// Department name.
+        dept_name -> Text,
+        /// Employee name.
+        name -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for orders (used in derived table tests).
+    orders (id) {
+        /// Order ID.
+        id -> Integer,
+        /// Customer ID.
+        customer_id -> Integer,
+        /// Order amount.
+        amount -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for customers (used in derived table tests).
+    customers (id) {
+        /// Customer ID.
+        id -> Integer,
+        /// Customer name.
+        name -> Text,
+    }
+}
+
+// ============================================================================
+// Struct Definitions
+// ============================================================================
+
+/// An author.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = authors)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Author {
+    /// Author ID.
+    id: i32,
+    /// Author name.
+    name: String,
+}
+
+/// A book.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = books)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Book {
+    /// Book ID.
+    id: i32,
+    /// Author name.
+    author_name: String,
+    /// Book title.
+    title: String,
+}
+
+/// A range with low and high values.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = ranges)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Range {
+    /// Range ID.
+    id: i32,
+    /// Low value.
+    low: i32,
+    /// High value.
+    high: i32,
+}
+
+/// A numeric value.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = nums)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Num {
+    /// Number ID.
+    id: i32,
+    /// Numeric value.
+    val: i32,
+}
+
+/// A department.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = departments)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Department {
+    /// Department ID.
+    id: i32,
+    /// Department name.
+    name: String,
+}
+
+/// An employee.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = employees)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Employee {
+    /// Employee ID.
+    id: i32,
+    /// Department name.
+    dept_name: String,
+    /// Employee name.
+    name: String,
+}
+
+/// An order.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = orders)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Order {
+    /// Order ID.
+    id: i32,
+    /// Customer ID.
+    customer_id: i32,
+    /// Order amount.
+    amount: i32,
+}
+
+/// A customer.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = customers)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Customer {
+    /// Customer ID.
+    id: i32,
+    /// Customer name.
+    name: String,
+}
+
+// ============================================================================
 // Translation Tests - Verify SQL is correctly transformed
 // ============================================================================
 
 /// Test that ILIKE in JOIN ON clause is translated to LIKE.
 #[test]
 fn test_join_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
@@ -30,7 +222,7 @@ fn test_join_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
         SELECT u.id, p.title
         FROM users u
         JOIN posts p ON p.author_name ILIKE u.name;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -57,7 +249,7 @@ fn test_join_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that NOW() in JOIN ON clause is translated to datetime('now').
 #[test]
 fn test_join_now_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE events (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
@@ -71,7 +263,7 @@ fn test_join_now_translation() -> Result<(), Box<dyn std::error::Error>> {
         SELECT e.name, s.id
         FROM events e
         JOIN schedules s ON e.event_time > NOW();
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -98,7 +290,7 @@ fn test_join_now_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that LEAST/GREATEST in JOIN ON clause are translated to MIN/MAX.
 #[test]
 fn test_join_least_greatest_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE ranges (
             id SERIAL PRIMARY KEY,
             range_start INTEGER NOT NULL,
@@ -112,7 +304,7 @@ fn test_join_least_greatest_translation() -> Result<(), Box<dyn std::error::Erro
         FROM ranges r
         JOIN values_table v ON v.value >= LEAST(r.range_start, r.range_end)
                             AND v.value <= GREATEST(r.range_start, r.range_end);
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -147,7 +339,7 @@ fn test_join_least_greatest_translation() -> Result<(), Box<dyn std::error::Erro
 /// Test that string_agg in JOIN ON subquery is translated to group_concat.
 #[test]
 fn test_join_subquery_function_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE categories (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
@@ -164,7 +356,7 @@ fn test_join_subquery_function_translation() -> Result<(), Box<dyn std::error::E
             FROM items
             GROUP BY category_id
         ) sub ON sub.category_id = c.id;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -191,7 +383,7 @@ fn test_join_subquery_function_translation() -> Result<(), Box<dyn std::error::E
 /// Test multiple JOINs with different conditions all get translated.
 #[test]
 fn test_multiple_joins_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
@@ -211,7 +403,7 @@ fn test_multiple_joins_translation() -> Result<(), Box<dyn std::error::Error>> {
         FROM users u
         JOIN posts p ON p.author_name ILIKE u.name
         JOIN comments c ON c.commenter_name ILIKE u.name AND c.post_id = p.id;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -241,7 +433,7 @@ fn test_multiple_joins_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test LEFT JOIN with translated conditions.
 #[test]
 fn test_left_join_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
@@ -254,7 +446,7 @@ fn test_left_join_translation() -> Result<(), Box<dyn std::error::Error>> {
         SELECT u.id, p.title
         FROM users u
         LEFT JOIN posts p ON p.author_name ILIKE u.name;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -285,7 +477,7 @@ fn test_left_join_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that JOIN with translated ILIKE works semantically.
 #[test]
 fn test_join_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE authors (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL
@@ -298,7 +490,7 @@ fn test_join_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
         SELECT a.id, b.title
         FROM authors a
         JOIN books b ON b.author_name ILIKE a.name;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -311,13 +503,16 @@ fn test_join_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data - author with lowercase name
-    diesel::sql_query("INSERT INTO authors (id, name) VALUES (1, 'alice')")
+    // Insert test data using Diesel ORM - author with lowercase name
+    diesel::insert_into(authors::table)
+        .values(&Author { id: 1, name: "alice".to_string() })
         .execute(&mut connection)?;
     // Book with uppercase author name should match via case-insensitive LIKE
-    diesel::sql_query("INSERT INTO books (id, author_name, title) VALUES (1, 'ALICE', 'Book One')")
+    diesel::insert_into(books::table)
+        .values(&Book { id: 1, author_name: "ALICE".to_string(), title: "Book One".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO books (id, author_name, title) VALUES (2, 'Bob', 'Book Two')")
+    diesel::insert_into(books::table)
+        .values(&Book { id: 2, author_name: "Bob".to_string(), title: "Book Two".to_string() })
         .execute(&mut connection)?;
 
     // Get and execute the SELECT statement
@@ -347,7 +542,7 @@ fn test_join_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that JOIN with LEAST/GREATEST works semantically.
 #[test]
 fn test_join_least_greatest_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE ranges (
             id INTEGER PRIMARY KEY,
             low INTEGER NOT NULL,
@@ -360,7 +555,7 @@ fn test_join_least_greatest_semantic() -> Result<(), Box<dyn std::error::Error>>
         SELECT r.id as range_id, n.val
         FROM ranges r
         JOIN nums n ON n.val >= LEAST(r.low, r.high) AND n.val <= GREATEST(r.low, r.high);
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -373,15 +568,17 @@ fn test_join_least_greatest_semantic() -> Result<(), Box<dyn std::error::Error>>
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Range where low > high (to test that LEAST/GREATEST work correctly)
-    diesel::sql_query("INSERT INTO ranges (id, low, high) VALUES (1, 10, 5)")
+    // Range where low > high (to test that LEAST/GREATEST work correctly) using
+    // Diesel ORM
+    diesel::insert_into(ranges::table)
+        .values(&Range { id: 1, low: 10, high: 5 })
         .execute(&mut connection)?;
     // Values: 3 is out, 5 is in, 7 is in, 10 is in, 12 is out
-    diesel::sql_query("INSERT INTO nums (id, val) VALUES (1, 3)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO nums (id, val) VALUES (2, 5)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO nums (id, val) VALUES (3, 7)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO nums (id, val) VALUES (4, 10)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO nums (id, val) VALUES (5, 12)").execute(&mut connection)?;
+    diesel::insert_into(nums::table).values(&Num { id: 1, val: 3 }).execute(&mut connection)?;
+    diesel::insert_into(nums::table).values(&Num { id: 2, val: 5 }).execute(&mut connection)?;
+    diesel::insert_into(nums::table).values(&Num { id: 3, val: 7 }).execute(&mut connection)?;
+    diesel::insert_into(nums::table).values(&Num { id: 4, val: 10 }).execute(&mut connection)?;
+    diesel::insert_into(nums::table).values(&Num { id: 5, val: 12 }).execute(&mut connection)?;
 
     // Get and execute the SELECT statement
     let select_stmt = translated
@@ -413,7 +610,7 @@ fn test_join_least_greatest_semantic() -> Result<(), Box<dyn std::error::Error>>
 /// Test LEFT JOIN semantic behavior with translated conditions.
 #[test]
 fn test_left_join_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE departments (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL
@@ -426,7 +623,7 @@ fn test_left_join_semantic() -> Result<(), Box<dyn std::error::Error>> {
         SELECT d.name as dept, e.name as emp
         FROM departments d
         LEFT JOIN employees e ON e.dept_name ILIKE d.name;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -439,17 +636,22 @@ fn test_left_join_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Two departments
-    diesel::sql_query("INSERT INTO departments (id, name) VALUES (1, 'engineering')")
+    // Two departments using Diesel ORM
+    diesel::insert_into(departments::table)
+        .values(&Department { id: 1, name: "engineering".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO departments (id, name) VALUES (2, 'sales')")
+    diesel::insert_into(departments::table)
+        .values(&Department { id: 2, name: "sales".to_string() })
         .execute(&mut connection)?;
 
     // Only one employee in engineering (case mismatch to test ILIKE translation)
-    diesel::sql_query(
-        "INSERT INTO employees (id, dept_name, name) VALUES (1, 'ENGINEERING', 'Alice')",
-    )
-    .execute(&mut connection)?;
+    diesel::insert_into(employees::table)
+        .values(&Employee {
+            id: 1,
+            dept_name: "ENGINEERING".to_string(),
+            name: "Alice".to_string(),
+        })
+        .execute(&mut connection)?;
 
     // Get and execute the SELECT statement
     let select_stmt = translated
@@ -483,7 +685,7 @@ fn test_left_join_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test derived table (subquery) in JOIN with function translation.
 #[test]
 fn test_join_derived_table_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE orders (
             id INTEGER PRIMARY KEY,
             customer_id INTEGER NOT NULL,
@@ -500,7 +702,7 @@ fn test_join_derived_table_semantic() -> Result<(), Box<dyn std::error::Error>> 
             FROM orders
             GROUP BY customer_id
         ) totals ON totals.customer_id = c.id;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -513,16 +715,21 @@ fn test_join_derived_table_semantic() -> Result<(), Box<dyn std::error::Error>> 
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Setup data
-    diesel::sql_query("INSERT INTO customers (id, name) VALUES (1, 'Alice')")
+    // Setup data using Diesel ORM
+    diesel::insert_into(customers::table)
+        .values(&Customer { id: 1, name: "Alice".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO customers (id, name) VALUES (2, 'Bob')")
+    diesel::insert_into(customers::table)
+        .values(&Customer { id: 2, name: "Bob".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (id, customer_id, amount) VALUES (1, 1, 100)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 1, customer_id: 1, amount: 100 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (id, customer_id, amount) VALUES (2, 1, 50)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 2, customer_id: 1, amount: 50 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (id, customer_id, amount) VALUES (3, 2, 200)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 3, customer_id: 2, amount: 200 })
         .execute(&mut connection)?;
 
     // Get and execute the SELECT statement

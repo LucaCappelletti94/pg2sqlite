@@ -10,16 +10,215 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
+// ============================================================================
+// Schema Definitions
+// ============================================================================
+
+diesel::table! {
+    /// Test table for items (used in ROW_NUMBER and NTILE tests).
+    /// Different tests create this table with different columns.
+    items (id) {
+        /// Item ID.
+        id -> Integer,
+        /// Item name (nullable - not present in all tests).
+        name -> Nullable<Text>,
+        /// Item value (nullable - not present in all tests).
+        value -> Nullable<Integer>,
+    }
+}
+
+diesel::table! {
+    /// Test table for employees (used in RANK tests).
+    employees (id) {
+        /// Employee ID.
+        id -> Integer,
+        /// Department.
+        dept -> Text,
+        /// Employee salary.
+        salary -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for scores (used in DENSE_RANK tests).
+    scores (id) {
+        /// Score ID.
+        id -> Integer,
+        /// Score value.
+        score -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for time series (used in LAG/LEAD tests).
+    time_series (id) {
+        /// Time series ID.
+        id -> Integer,
+        /// Time series value.
+        value -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for readings (used in FIRST_VALUE/LAST_VALUE tests).
+    readings (id) {
+        /// Reading ID.
+        id -> Integer,
+        /// Sensor name.
+        sensor -> Text,
+        /// Reading value.
+        reading -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for rankings (used in NTH_VALUE tests).
+    rankings (id) {
+        /// Ranking ID.
+        id -> Integer,
+        /// Ranking value.
+        value -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for orders (used in aggregate window function tests and FILTER tests).
+    /// Different tests create this table with different columns.
+    orders (id) {
+        /// Order ID.
+        id -> Integer,
+        /// User ID (nullable - not present in all tests).
+        user_id -> Nullable<Integer>,
+        /// Order status (nullable - not present in all tests).
+        status -> Nullable<Text>,
+        /// Order amount.
+        amount -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for transactions (used in running total tests).
+    transactions (id) {
+        /// Transaction ID.
+        id -> Integer,
+        /// Transaction amount.
+        amount -> Integer,
+    }
+}
+
+// ============================================================================
+// Struct Definitions
+// ============================================================================
+
+/// An item.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = items)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Item {
+    /// Item ID.
+    id: i32,
+    /// Item name.
+    name: Option<String>,
+    /// Item value.
+    value: Option<i32>,
+}
+
+/// An employee.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = employees)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Employee {
+    /// Employee ID.
+    id: i32,
+    /// Department.
+    dept: String,
+    /// Employee salary.
+    salary: i32,
+}
+
+/// A score.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = scores)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Score {
+    /// Score ID.
+    id: i32,
+    /// Score value.
+    score: i32,
+}
+
+/// A time series value.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = time_series)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct TimeSeries {
+    /// Time series ID.
+    id: i32,
+    /// Time series value.
+    value: i32,
+}
+
+/// A reading.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = readings)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Reading {
+    /// Reading ID.
+    id: i32,
+    /// Sensor name.
+    sensor: String,
+    /// Value of the reading.
+    #[diesel(column_name = "reading")]
+    value: i32,
+}
+
+/// A ranking.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = rankings)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Ranking {
+    /// Ranking ID.
+    id: i32,
+    /// Ranking value.
+    value: i32,
+}
+
+/// An order.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = orders)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Order {
+    /// Order ID.
+    id: i32,
+    /// User ID.
+    user_id: Option<i32>,
+    /// Order status.
+    status: Option<String>,
+    /// Order amount.
+    amount: i32,
+}
+
+/// A transaction.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = transactions)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Transaction {
+    /// Transaction ID.
+    id: i32,
+    /// Transaction amount.
+    amount: i32,
+}
+
 /// Test that ROW_NUMBER() OVER passes through unchanged.
 #[test]
 fn test_row_number() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
         );
         SELECT name, ROW_NUMBER() OVER (ORDER BY id) as row_num FROM users;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -49,7 +248,7 @@ fn test_row_number() -> Result<(), Box<dyn std::error::Error>> {
 /// Test RANK() with PARTITION BY and ORDER BY clauses.
 #[test]
 fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE employees (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
@@ -58,7 +257,7 @@ fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
         );
         SELECT name, department, salary, RANK() OVER (PARTITION BY department ORDER BY salary DESC) as rank
         FROM employees;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -88,7 +287,7 @@ fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
 /// Test DENSE_RANK() window function.
 #[test]
 fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE scores (
             id SERIAL PRIMARY KEY,
             player TEXT NOT NULL,
@@ -96,7 +295,7 @@ fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
         );
         SELECT player, score, DENSE_RANK() OVER (ORDER BY score DESC) as dense_rank
         FROM scores;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -118,13 +317,13 @@ fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
 /// Test NTILE() window function.
 #[test]
 fn test_ntile() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id SERIAL PRIMARY KEY,
             value INTEGER NOT NULL
         );
         SELECT value, NTILE(4) OVER (ORDER BY value) as quartile FROM items;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -146,7 +345,7 @@ fn test_ntile() -> Result<(), Box<dyn std::error::Error>> {
 /// Test LAG() and LEAD() window functions.
 #[test]
 fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE time_series (
             id SERIAL PRIMARY KEY,
             ts TEXT NOT NULL,
@@ -156,7 +355,7 @@ fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
                LAG(value, 1, 0) OVER (ORDER BY ts) as prev_value,
                LEAD(value, 1, 0) OVER (ORDER BY ts) as next_value
         FROM time_series;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -182,7 +381,7 @@ fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
 /// Test FIRST_VALUE() and LAST_VALUE() window functions.
 #[test]
 fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE readings (
             id SERIAL PRIMARY KEY,
             sensor TEXT NOT NULL,
@@ -192,7 +391,7 @@ fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
                FIRST_VALUE(reading) OVER (PARTITION BY sensor ORDER BY id) as first_reading,
                LAST_VALUE(reading) OVER (PARTITION BY sensor ORDER BY id) as last_reading
         FROM readings;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -218,7 +417,7 @@ fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
 /// Test NTH_VALUE() window function.
 #[test]
 fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE rankings (
             id SERIAL PRIMARY KEY,
             category TEXT NOT NULL,
@@ -227,7 +426,7 @@ fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
         SELECT category, value,
                NTH_VALUE(value, 2) OVER (PARTITION BY category ORDER BY value DESC) as second_highest
         FROM rankings;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -249,7 +448,7 @@ fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
 /// Test aggregate functions used as window functions (SUM, AVG, etc.).
 #[test]
 fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE orders (
             id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
@@ -260,7 +459,7 @@ fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
                AVG(amount) OVER (PARTITION BY user_id) as user_avg,
                COUNT(*) OVER (PARTITION BY user_id) as user_count
         FROM orders;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -290,7 +489,7 @@ fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
 /// Test running total with ROWS BETWEEN frame clause.
 #[test]
 fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE transactions (
             id SERIAL PRIMARY KEY,
             ts TEXT NOT NULL,
@@ -299,7 +498,7 @@ fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
         SELECT ts, amount,
                SUM(amount) OVER (ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as running_total
         FROM transactions;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -325,7 +524,7 @@ fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
 /// Test RANGE BETWEEN frame clause.
 #[test]
 fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id SERIAL PRIMARY KEY,
             value INTEGER NOT NULL
@@ -333,7 +532,7 @@ fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
         SELECT value,
                SUM(value) OVER (ORDER BY value RANGE BETWEEN 10 PRECEDING AND 10 FOLLOWING) as range_sum
         FROM data;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -355,14 +554,14 @@ fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
 /// Test FILTER clause is translated to CASE expression.
 #[test]
 fn test_filter_clause_to_case() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (
             id SERIAL PRIMARY KEY,
             status TEXT NOT NULL,
             value INTEGER NOT NULL
         );
         SELECT COUNT(*) FILTER (WHERE status = 'active') OVER () as active_count FROM data;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -389,13 +588,13 @@ fn test_filter_clause_to_case() -> Result<(), Box<dyn std::error::Error>> {
 /// Test FILTER clause with aggregate (not window) is translated to CASE.
 #[test]
 fn test_filter_clause_aggregate_to_case() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE events (
             id SERIAL PRIMARY KEY,
             event_type TEXT NOT NULL
         );
         SELECT COUNT(*) FILTER (WHERE event_type = 'click') as click_count FROM events;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -418,7 +617,7 @@ fn test_filter_clause_aggregate_to_case() -> Result<(), Box<dyn std::error::Erro
 /// Semantic test: FILTER clause converted to CASE works correctly.
 #[test]
 fn test_filter_clause_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE orders (
             id SERIAL PRIMARY KEY,
             status TEXT NOT NULL,
@@ -428,7 +627,7 @@ fn test_filter_clause_semantic() -> Result<(), Box<dyn std::error::Error>> {
             COUNT(*) FILTER (WHERE status = 'completed') as completed_count,
             SUM(amount) FILTER (WHERE status = 'completed') as completed_total
         FROM orders;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -441,14 +640,18 @@ fn test_filter_clause_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO orders (status, amount) VALUES ('completed', 100)")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 1, user_id: None, status: Some("completed".to_string()), amount: 100 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (status, amount) VALUES ('pending', 50)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 2, user_id: None, status: Some("pending".to_string()), amount: 50 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (status, amount) VALUES ('completed', 75)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 3, user_id: None, status: Some("completed".to_string()), amount: 75 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (status, amount) VALUES ('cancelled', 25)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 4, user_id: None, status: Some("cancelled".to_string()), amount: 25 })
         .execute(&mut connection)?;
 
     // Execute the SELECT with FILTER->CASE conversion
@@ -478,13 +681,13 @@ fn test_filter_clause_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: ROW_NUMBER() works correctly in SQLite.
 #[test]
 fn test_row_number_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
         );
         SELECT name, ROW_NUMBER() OVER (ORDER BY id) as row_num FROM items;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -497,10 +700,16 @@ fn test_row_number_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO items (name) VALUES ('apple')").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO items (name) VALUES ('banana')").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO items (name) VALUES ('cherry')").execute(&mut connection)?;
+    // Insert test data using Diesel ORM
+    diesel::insert_into(items::table)
+        .values(&Item { id: 1, name: Some("apple".to_string()), value: None })
+        .execute(&mut connection)?;
+    diesel::insert_into(items::table)
+        .values(&Item { id: 2, name: Some("banana".to_string()), value: None })
+        .execute(&mut connection)?;
+    diesel::insert_into(items::table)
+        .values(&Item { id: 3, name: Some("cherry".to_string()), value: None })
+        .execute(&mut connection)?;
 
     // Execute the SELECT with window function
     let select_stmt = translated
@@ -530,7 +739,7 @@ fn test_row_number_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: LAG() and LEAD() work correctly in SQLite.
 #[test]
 fn test_lag_lead_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE time_series (
             id SERIAL PRIMARY KEY,
             value INTEGER NOT NULL
@@ -539,7 +748,7 @@ fn test_lag_lead_semantic() -> Result<(), Box<dyn std::error::Error>> {
                LAG(value, 1) OVER (ORDER BY id) as prev_value,
                LEAD(value, 1) OVER (ORDER BY id) as next_value
         FROM time_series;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -552,10 +761,16 @@ fn test_lag_lead_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO time_series (value) VALUES (10)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO time_series (value) VALUES (20)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO time_series (value) VALUES (30)").execute(&mut connection)?;
+    // Insert test data using Diesel ORM
+    diesel::insert_into(time_series::table)
+        .values(&TimeSeries { id: 1, value: 10 })
+        .execute(&mut connection)?;
+    diesel::insert_into(time_series::table)
+        .values(&TimeSeries { id: 2, value: 20 })
+        .execute(&mut connection)?;
+    diesel::insert_into(time_series::table)
+        .values(&TimeSeries { id: 3, value: 30 })
+        .execute(&mut connection)?;
 
     // Execute the SELECT with window function
     let select_stmt = translated
@@ -601,7 +816,7 @@ fn test_lag_lead_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: SUM() as window function (running total).
 #[test]
 fn test_running_total_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE transactions (
             id SERIAL PRIMARY KEY,
             amount INTEGER NOT NULL
@@ -609,7 +824,7 @@ fn test_running_total_semantic() -> Result<(), Box<dyn std::error::Error>> {
         SELECT id, amount,
                SUM(amount) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as running_total
         FROM transactions;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -622,10 +837,16 @@ fn test_running_total_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO transactions (amount) VALUES (100)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO transactions (amount) VALUES (50)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO transactions (amount) VALUES (75)").execute(&mut connection)?;
+    // Insert test data using Diesel ORM
+    diesel::insert_into(transactions::table)
+        .values(&Transaction { id: 1, amount: 100 })
+        .execute(&mut connection)?;
+    diesel::insert_into(transactions::table)
+        .values(&Transaction { id: 2, amount: 50 })
+        .execute(&mut connection)?;
+    diesel::insert_into(transactions::table)
+        .values(&Transaction { id: 3, amount: 75 })
+        .execute(&mut connection)?;
 
     // Execute the SELECT with window function
     let select_stmt = translated
@@ -657,7 +878,7 @@ fn test_running_total_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: RANK() with PARTITION BY.
 #[test]
 fn test_rank_partition_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE employees (
             id SERIAL PRIMARY KEY,
             dept TEXT NOT NULL,
@@ -666,7 +887,7 @@ fn test_rank_partition_semantic() -> Result<(), Box<dyn std::error::Error>> {
         SELECT id, dept, salary,
                RANK() OVER (PARTITION BY dept ORDER BY salary DESC) as dept_rank
         FROM employees;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -679,16 +900,21 @@ fn test_rank_partition_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data - two departments
-    diesel::sql_query("INSERT INTO employees (dept, salary) VALUES ('eng', 100000)")
+    // Insert test data - two departments using Diesel ORM
+    diesel::insert_into(employees::table)
+        .values(&Employee { id: 1, dept: "eng".to_string(), salary: 100_000 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO employees (dept, salary) VALUES ('eng', 80000)")
+    diesel::insert_into(employees::table)
+        .values(&Employee { id: 2, dept: "eng".to_string(), salary: 80_000 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO employees (dept, salary) VALUES ('sales', 90000)")
+    diesel::insert_into(employees::table)
+        .values(&Employee { id: 3, dept: "sales".to_string(), salary: 90_000 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO employees (dept, salary) VALUES ('sales', 90000)")
+    diesel::insert_into(employees::table)
+        .values(&Employee { id: 4, dept: "sales".to_string(), salary: 90_000 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO employees (dept, salary) VALUES ('sales', 70000)")
+    diesel::insert_into(employees::table)
+        .values(&Employee { id: 5, dept: "sales".to_string(), salary: 70_000 })
         .execute(&mut connection)?;
 
     // Execute the SELECT with window function
@@ -735,13 +961,13 @@ fn test_rank_partition_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: DENSE_RANK() works correctly (no gaps in ranking).
 #[test]
 fn test_dense_rank_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE scores (
             id SERIAL PRIMARY KEY,
             score INTEGER NOT NULL
         );
         SELECT id, score, DENSE_RANK() OVER (ORDER BY score DESC) as drank FROM scores;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -753,11 +979,19 @@ fn test_dense_rank_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert scores with ties
-    diesel::sql_query("INSERT INTO scores (score) VALUES (100)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO scores (score) VALUES (90)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO scores (score) VALUES (90)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO scores (score) VALUES (80)").execute(&mut connection)?;
+    // Insert scores with ties using Diesel ORM
+    diesel::insert_into(scores::table)
+        .values(&Score { id: 1, score: 100 })
+        .execute(&mut connection)?;
+    diesel::insert_into(scores::table)
+        .values(&Score { id: 2, score: 90 })
+        .execute(&mut connection)?;
+    diesel::insert_into(scores::table)
+        .values(&Score { id: 3, score: 90 })
+        .execute(&mut connection)?;
+    diesel::insert_into(scores::table)
+        .values(&Score { id: 4, score: 80 })
+        .execute(&mut connection)?;
 
     let select_stmt = translated
         .iter()
@@ -788,13 +1022,13 @@ fn test_dense_rank_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: NTILE() divides rows into buckets.
 #[test]
 fn test_ntile_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id SERIAL PRIMARY KEY,
             value INTEGER NOT NULL
         );
         SELECT id, value, NTILE(3) OVER (ORDER BY value) as bucket FROM items;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -806,9 +1040,10 @@ fn test_ntile_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert 9 items so they divide evenly into 3 buckets
+    // Insert 9 items so they divide evenly into 3 buckets using Diesel ORM
     for i in 1..=9 {
-        diesel::sql_query(format!("INSERT INTO items (value) VALUES ({i})"))
+        diesel::insert_into(items::table)
+            .values(&Item { id: i, name: None, value: Some(i) })
             .execute(&mut connection)?;
     }
 
@@ -843,7 +1078,7 @@ fn test_ntile_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: FIRST_VALUE() and LAST_VALUE() work correctly.
 #[test]
 fn test_first_last_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE readings (
             id SERIAL PRIMARY KEY,
             sensor TEXT NOT NULL,
@@ -852,7 +1087,7 @@ fn test_first_last_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
         SELECT id, sensor, reading,
                FIRST_VALUE(reading) OVER (PARTITION BY sensor ORDER BY id) as first_r
         FROM readings;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -864,14 +1099,18 @@ fn test_first_last_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert readings for two sensors
-    diesel::sql_query("INSERT INTO readings (sensor, reading) VALUES ('A', 10)")
+    // Insert readings for two sensors using Diesel ORM
+    diesel::insert_into(readings::table)
+        .values(&Reading { id: 1, sensor: "A".to_string(), value: 10 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO readings (sensor, reading) VALUES ('A', 20)")
+    diesel::insert_into(readings::table)
+        .values(&Reading { id: 2, sensor: "A".to_string(), value: 20 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO readings (sensor, reading) VALUES ('B', 100)")
+    diesel::insert_into(readings::table)
+        .values(&Reading { id: 3, sensor: "B".to_string(), value: 100 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO readings (sensor, reading) VALUES ('B', 200)")
+    diesel::insert_into(readings::table)
+        .values(&Reading { id: 4, sensor: "B".to_string(), value: 200 })
         .execute(&mut connection)?;
 
     let select_stmt = translated
@@ -908,7 +1147,7 @@ fn test_first_last_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: NTH_VALUE() works correctly.
 #[test]
 fn test_nth_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE rankings (
             id SERIAL PRIMARY KEY,
             value INTEGER NOT NULL
@@ -916,7 +1155,7 @@ fn test_nth_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
         SELECT id, value,
                NTH_VALUE(value, 2) OVER (ORDER BY value DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as second_highest
         FROM rankings;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -928,9 +1167,15 @@ fn test_nth_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    diesel::sql_query("INSERT INTO rankings (value) VALUES (100)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO rankings (value) VALUES (80)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO rankings (value) VALUES (60)").execute(&mut connection)?;
+    diesel::insert_into(rankings::table)
+        .values(&Ranking { id: 1, value: 100 })
+        .execute(&mut connection)?;
+    diesel::insert_into(rankings::table)
+        .values(&Ranking { id: 2, value: 80 })
+        .execute(&mut connection)?;
+    diesel::insert_into(rankings::table)
+        .values(&Ranking { id: 3, value: 60 })
+        .execute(&mut connection)?;
 
     let select_stmt = translated
         .iter()
@@ -960,7 +1205,7 @@ fn test_nth_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: Aggregate window functions (SUM, AVG, COUNT) work correctly.
 #[test]
 fn test_aggregate_window_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE orders (
             id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
@@ -970,7 +1215,7 @@ fn test_aggregate_window_semantic() -> Result<(), Box<dyn std::error::Error>> {
                SUM(amount) OVER (PARTITION BY user_id) as user_total,
                COUNT(*) OVER (PARTITION BY user_id) as user_count
         FROM orders;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -982,13 +1227,16 @@ fn test_aggregate_window_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // User 1: orders of 100 and 50
-    diesel::sql_query("INSERT INTO orders (user_id, amount) VALUES (1, 100)")
+    // User 1: orders of 100 and 50 using Diesel ORM
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 1, user_id: Some(1), status: None, amount: 100 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (user_id, amount) VALUES (1, 50)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 2, user_id: Some(1), status: None, amount: 50 })
         .execute(&mut connection)?;
     // User 2: single order of 200
-    diesel::sql_query("INSERT INTO orders (user_id, amount) VALUES (2, 200)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 3, user_id: Some(2), status: None, amount: 200 })
         .execute(&mut connection)?;
 
     let select_stmt = translated

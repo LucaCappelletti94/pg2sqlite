@@ -3,17 +3,158 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
+// ============================================================================
+// Schema for tests
+// ============================================================================
+
+diesel::table! {
+    /// Table for testing CONCAT function.
+    users (id) {
+        /// Primary key.
+        id -> Integer,
+        /// First name.
+        first_name -> Text,
+        /// Last name.
+        last_name -> Text,
+    }
+}
+
+diesel::table! {
+    /// Table for testing CONCAT with multiple columns.
+    items (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Column A.
+        a -> Nullable<Text>,
+        /// Column B.
+        b -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Table for testing CONCAT with many arguments.
+    data (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Column A.
+        a -> Nullable<Text>,
+        /// Column B.
+        b -> Nullable<Text>,
+        /// Column C.
+        c -> Nullable<Text>,
+        /// Column D.
+        d -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Table for testing generated columns.
+    products (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Product price.
+        price -> Integer,
+        /// Product quantity.
+        quantity -> Integer,
+        /// Total value (generated column).
+        total -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Table for testing generated column expressions.
+    rectangles (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Width of rectangle.
+        width -> Integer,
+        /// Height of rectangle.
+        height -> Integer,
+        /// Area (generated column).
+        area -> Integer,
+    }
+}
+
+/// A user record for testing CONCAT.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = users)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct User {
+    /// Primary key.
+    id: i32,
+    /// First name.
+    first_name: String,
+    /// Last name.
+    last_name: String,
+}
+
+/// An item record for testing CONCAT.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = items)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Item {
+    /// Primary key.
+    id: i32,
+    /// Column A.
+    a: Option<String>,
+    /// Column B.
+    b: Option<String>,
+}
+
+/// A data record for testing CONCAT with many arguments.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Data {
+    /// Primary key.
+    id: i32,
+    /// Column A.
+    a: Option<String>,
+    /// Column B.
+    b: Option<String>,
+    /// Column C.
+    c: Option<String>,
+    /// Column D.
+    d: Option<String>,
+}
+
+/// A product record (for insertion only, excluding generated column).
+#[derive(Insertable)]
+#[diesel(table_name = products)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct NewProduct {
+    /// Primary key.
+    id: i32,
+    /// Product price.
+    price: i32,
+    /// Product quantity.
+    quantity: i32,
+}
+
+/// A rectangle record (for insertion only, excluding generated column).
+#[derive(Insertable)]
+#[diesel(table_name = rectangles)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct NewRectangle {
+    /// Primary key.
+    id: i32,
+    /// Width of rectangle.
+    width: i32,
+    /// Height of rectangle.
+    height: i32,
+}
+
 /// Test that CONCAT(a, b, c) is translated to a || b || c.
 #[test]
 fn test_concat_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             first_name TEXT NOT NULL,
             last_name TEXT NOT NULL
         );
         SELECT CONCAT(first_name, ' ', last_name) as full_name FROM users;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -40,10 +181,10 @@ fn test_concat_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test CONCAT with two arguments.
 #[test]
 fn test_concat_two_args() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (id SERIAL PRIMARY KEY, a TEXT, b TEXT);
         SELECT CONCAT(a, b) FROM items;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -62,10 +203,10 @@ fn test_concat_two_args() -> Result<(), Box<dyn std::error::Error>> {
 /// Test CONCAT with single argument (degenerate case).
 #[test]
 fn test_concat_single_arg() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (id SERIAL PRIMARY KEY, a TEXT);
         SELECT CONCAT(a) FROM items;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -88,14 +229,14 @@ fn test_concat_single_arg() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: CONCAT translation works correctly in SQLite.
 #[test]
 fn test_concat_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             first_name TEXT NOT NULL,
             last_name TEXT NOT NULL
         );
         SELECT CONCAT(first_name, ' ', last_name) as full_name FROM users;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -108,10 +249,12 @@ fn test_concat_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO users (first_name, last_name) VALUES ('John', 'Doe')")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(users::table)
+        .values(&User { id: 1, first_name: "John".to_string(), last_name: "Doe".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO users (first_name, last_name) VALUES ('Jane', 'Smith')")
+    diesel::insert_into(users::table)
+        .values(&User { id: 2, first_name: "Jane".to_string(), last_name: "Smith".to_string() })
         .execute(&mut connection)?;
 
     // Execute the SELECT
@@ -139,10 +282,10 @@ fn test_concat_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test CONCAT with multiple (4+) arguments.
 #[test]
 fn test_concat_many_args_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE data (id SERIAL PRIMARY KEY, a TEXT, b TEXT, c TEXT, d TEXT);
         SELECT CONCAT(a, '-', b, '-', c, '-', d) as combined FROM data;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -154,7 +297,15 @@ fn test_concat_many_args_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    diesel::sql_query("INSERT INTO data (a, b, c, d) VALUES ('one', 'two', 'three', 'four')")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(data::table)
+        .values(&Data {
+            id: 1,
+            a: Some("one".to_string()),
+            b: Some("two".to_string()),
+            c: Some("three".to_string()),
+            d: Some("four".to_string()),
+        })
         .execute(&mut connection)?;
 
     let select_stmt = translated
@@ -180,14 +331,14 @@ fn test_concat_many_args_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test generated column translation (GENERATED ALWAYS AS).
 #[test]
 fn test_generated_column_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE products (
             id SERIAL PRIMARY KEY,
             price INTEGER NOT NULL,
             quantity INTEGER NOT NULL,
             total INTEGER GENERATED ALWAYS AS (price * quantity) STORED
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -210,14 +361,14 @@ fn test_generated_column_translation() -> Result<(), Box<dyn std::error::Error>>
 /// Semantic test: generated columns work correctly in SQLite.
 #[test]
 fn test_generated_column_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE products (
             id SERIAL PRIMARY KEY,
             price INTEGER NOT NULL,
             quantity INTEGER NOT NULL,
             total INTEGER GENERATED ALWAYS AS (price * quantity) STORED
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -230,10 +381,12 @@ fn test_generated_column_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data (don't specify total - it's generated)
-    diesel::sql_query("INSERT INTO products (price, quantity) VALUES (10, 5)")
+    // Insert test data using Diesel ORM (don't specify total - it's generated)
+    diesel::insert_into(products::table)
+        .values(&NewProduct { id: 1, price: 10, quantity: 5 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO products (price, quantity) VALUES (25, 4)")
+    diesel::insert_into(products::table)
+        .values(&NewProduct { id: 2, price: 25, quantity: 4 })
         .execute(&mut connection)?;
 
     // Query the generated column
@@ -258,14 +411,14 @@ fn test_generated_column_semantic() -> Result<(), Box<dyn std::error::Error>> {
 fn test_generated_column_expression() -> Result<(), Box<dyn std::error::Error>> {
     // PostgreSQL only supports STORED for generated columns (VIRTUAL is
     // SQLite-specific)
-    let sql = r#"
+    let sql = "
         CREATE TABLE rectangles (
             id SERIAL PRIMARY KEY,
             width INTEGER NOT NULL,
             height INTEGER NOT NULL,
             area INTEGER GENERATED ALWAYS AS (width * height) STORED
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -277,9 +430,12 @@ fn test_generated_column_expression() -> Result<(), Box<dyn std::error::Error>> 
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    diesel::sql_query("INSERT INTO rectangles (width, height) VALUES (3, 4)")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(rectangles::table)
+        .values(&NewRectangle { id: 1, width: 3, height: 4 })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO rectangles (width, height) VALUES (5, 6)")
+    diesel::insert_into(rectangles::table)
+        .values(&NewRectangle { id: 2, width: 5, height: 6 })
         .execute(&mut connection)?;
 
     #[derive(QueryableByName, Debug)]

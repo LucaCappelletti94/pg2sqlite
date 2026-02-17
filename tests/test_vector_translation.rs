@@ -22,12 +22,12 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 /// Test that vector(N) type is translated to BLOB.
 #[test]
 fn test_vector_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding vector(384)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -51,12 +51,12 @@ fn test_vector_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that halfvec type is translated to BLOB.
 #[test]
 fn test_halfvec_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding halfvec(768)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -82,13 +82,13 @@ fn test_halfvec_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that <-> (L2 distance) is translated to vec_distance_L2().
 #[test]
 fn test_l2_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding BLOB
         );
         SELECT * FROM items ORDER BY embedding <-> '[1,2,3]';
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -110,13 +110,13 @@ fn test_l2_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that <=> (cosine distance) is translated to vec_distance_cosine().
 #[test]
 fn test_cosine_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding BLOB
         );
         SELECT * FROM items ORDER BY embedding <=> '[1,2,3]';
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -142,13 +142,13 @@ fn test_cosine_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that ::vector cast is translated to vec_f32().
 #[test]
 fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding BLOB
         );
         SELECT * FROM items WHERE embedding <-> '[1,2,3]'::vector < 0.5;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -170,13 +170,13 @@ fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that ::halfvec cast is also translated to vec_f32().
 #[test]
 fn test_halfvec_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding BLOB
         );
         SELECT * FROM items WHERE embedding <=> '[1,2,3]'::halfvec < 0.5;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -202,13 +202,13 @@ fn test_halfvec_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that a table with vector column generates vec0 virtual table.
 #[test]
 fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             name TEXT,
             embedding vector(384)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -250,13 +250,13 @@ fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>>
 /// Test that multiple vector columns generate multiple vec0 tables.
 #[test]
 fn test_multiple_vector_columns() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             title_embedding vector(384),
             content_embedding vector(768)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -284,13 +284,13 @@ fn test_multiple_vector_columns() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that a table without vector columns does not generate vec0.
 #[test]
 fn test_no_vector_columns_no_vec0() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             price INTEGER
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -311,14 +311,14 @@ fn test_no_vector_columns_no_vec0() -> Result<(), Box<dyn std::error::Error>> {
 /// Test distance operator with cast in same expression.
 #[test]
 fn test_distance_with_cast() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding BLOB
         );
         SELECT id FROM items WHERE embedding <-> '[1,2,3]'::vector < 1.0
         ORDER BY embedding <-> '[1,2,3]'::vector;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -342,13 +342,13 @@ fn test_distance_with_cast() -> Result<(), Box<dyn std::error::Error>> {
 /// Test ORDER BY with distance expression.
 #[test]
 fn test_order_by_distance() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding BLOB
         );
         SELECT * FROM items ORDER BY embedding <-> '[0.1,0.2,0.3]'::vector LIMIT 10;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -376,13 +376,13 @@ fn test_order_by_distance() -> Result<(), Box<dyn std::error::Error>> {
 /// Snapshot test for vector column translation.
 #[test]
 fn test_vector_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             embedding vector(384)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -396,7 +396,7 @@ fn test_vector_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> 
 /// Snapshot test for distance query translation.
 #[test]
 fn test_vector_query_snapshot() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding BLOB
@@ -405,7 +405,7 @@ fn test_vector_query_snapshot() -> Result<(), Box<dyn std::error::Error>> {
         WHERE embedding <=> '[1,2,3]'::vector < 0.5
         ORDER BY embedding <-> '[1,2,3]'::vector
         LIMIT 5;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;

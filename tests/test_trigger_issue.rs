@@ -9,57 +9,73 @@ use pg2sqlite::{
 // Define Diesel schema and models
 
 diesel::table! {
-    /// Table for procedure template asset models
+    /// Table for procedure template asset models.
     procedure_template_asset_models (id) {
-        /// Primary key
+        /// Primary key.
         id -> Integer,
-        /// Name of the asset model
+        /// Name of the asset model.
         name -> Text,
-        /// ID of the procedure template
+        /// ID of the procedure template.
         procedure_template_id -> Integer,
-        /// Optional based on ID
+        /// Optional based on ID.
         based_on_id -> Nullable<Integer>,
-        /// Optional asset model ID
+        /// Optional asset model ID.
         asset_model_id -> Nullable<Integer>,
     }
 }
 
 diesel::table! {
-    /// Table for parent procedure templates
+    /// Table for parent procedure templates.
     parent_procedure_templates (parent_id, child_id) {
-        /// Parent ID
+        /// Parent ID.
         parent_id -> Integer,
-        /// Child ID
+        /// Child ID.
         child_id -> Integer,
     }
 }
 
 diesel::table! {
-    /// Table for next procedure templates
+    /// Table for next procedure templates.
     next_procedure_templates (parent_id, predecessor_id, successor_id) {
-        /// Parent ID
+        /// Parent ID.
         parent_id -> Integer,
-        /// Predecessor ID
+        /// Predecessor ID.
         predecessor_id -> Integer,
-        /// Successor ID
+        /// Successor ID.
         successor_id -> Integer,
     }
 }
 
+diesel::allow_tables_to_appear_in_same_query!(
+    procedure_template_asset_models,
+    parent_procedure_templates,
+    next_procedure_templates
+);
+
+/// A procedure template asset model record for insertion.
 #[derive(Insertable)]
 #[diesel(table_name = procedure_template_asset_models)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct NewAssetModel<'a> {
+    /// Name of the asset model.
     name: &'a str,
+    /// ID of the procedure template.
     procedure_template_id: i32,
+    /// Asset model ID.
     asset_model_id: i32,
 }
 
+/// A next procedure template record for insertion.
 #[derive(Insertable)]
 #[diesel(table_name = next_procedure_templates)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 #[allow(clippy::struct_field_names)]
 struct NewNextProcedure {
+    /// Parent ID.
     parent_id: i32,
+    /// Predecessor ID.
     predecessor_id: i32,
+    /// Successor ID.
     successor_id: i32,
 }
 

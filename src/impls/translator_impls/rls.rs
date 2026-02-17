@@ -44,6 +44,50 @@ where
     schema.table(None, table_name).is_some_and(|t| t.has_row_level_security(schema))
 }
 
+/// Resolves the correct table name for attaching AFTER triggers.
+///
+/// When a table has RLS, it's split into a view and a backing table.
+/// AFTER triggers must be attached to the backing table (e.g., `table_rls`),
+/// not the view, because views don't fire AFTER triggers in SQLite.
+///
+/// # Arguments
+/// * `base_name` - The original table name (e.g., "users")
+/// * `table` - The table object from schema
+/// * `schema` - The database schema
+/// * `options` - Options containing the RLS table suffix
+///
+/// # Returns
+/// The table name to use for trigger attachment:
+/// - `table_rls` if table has RLS
+/// - `table` if table has no RLS
+///
+/// # Example
+/// ```rust,ignore
+/// let trigger_table = resolve_trigger_table_name(
+///     "documents",
+///     &table_obj,
+///     schema,
+///     options,
+/// );
+/// // Returns "documents_rls" if table has RLS, "documents" otherwise
+/// ```
+pub fn resolve_trigger_table_name<DB: DatabaseLike>(
+    base_name: &str,
+    table: &DB::Table,
+    schema: &DB,
+    options: &impl TranslationOptions,
+) -> String
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    if table.has_row_level_security(schema) {
+        let suffix = options.get_rls_table_suffix();
+        format!("{base_name}{suffix}")
+    } else {
+        base_name.to_string()
+    }
+}
+
 /// Builds a WHERE clause for row identity using primary key columns if
 /// available, otherwise falls back to all columns.
 fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> String {

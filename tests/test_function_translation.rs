@@ -2,20 +2,118 @@
 
 #![allow(dead_code)]
 
-use diesel::prelude::*;
+use diesel::{RunQueryDsl, SqliteConnection, prelude::*};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+
+// Schema definitions for test tables
+diesel::table! {
+    /// Events table for testing NOW() function translation.
+    events (id) {
+        /// Event ID.
+        id -> Integer,
+        /// Event name.
+        name -> Text,
+        /// Timestamp when event was created.
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    /// Tags table for testing string_agg function translation.
+    tags (id) {
+        /// Tag ID.
+        id -> Integer,
+        /// Associated item ID.
+        item_id -> Integer,
+        /// Tag text.
+        tag -> Text,
+    }
+}
+
+diesel::table! {
+    /// Items table for testing COALESCE function.
+    items (id) {
+        /// Item ID.
+        id -> Integer,
+        /// Item name (nullable).
+        name -> Nullable<Text>,
+        /// Item description (nullable).
+        description -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Users table for testing ILIKE translation.
+    users (id) {
+        /// User ID.
+        id -> Integer,
+        /// User name.
+        name -> Text,
+    }
+}
+
+/// An event record.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = events)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Event {
+    /// Event ID.
+    id: i32,
+    /// Event name.
+    name: String,
+    /// Timestamp when event was created.
+    created_at: String,
+}
+
+/// A tag record.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = tags)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Tag {
+    /// Tag ID.
+    id: i32,
+    /// Associated item ID.
+    item_id: i32,
+    /// Tag text.
+    #[diesel(column_name = "tag")]
+    text: String,
+}
+
+/// An item record.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = items)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Item {
+    /// Item ID.
+    id: i32,
+    /// Item name (nullable).
+    name: Option<String>,
+    /// Item description (nullable).
+    description: Option<String>,
+}
+
+/// A user record.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = users)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct User {
+    /// User ID.
+    id: i32,
+    /// User name.
+    name: String,
+}
 
 /// Test that NOW() is translated to datetime('now').
 #[test]
 fn test_now_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE events (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             created_at TIMESTAMP NOT NULL
         );
         SELECT * FROM events WHERE created_at > NOW();
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -42,20 +140,19 @@ fn test_now_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that NOW() translation works semantically.
 #[test]
 fn test_now_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE events (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
         INSERT INTO events (name, created_at) VALUES ('test', NOW());
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
-    let mut connection =
-        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
     // Execute all statements
     for stmt in &translated {
@@ -64,15 +161,15 @@ fn test_now_semantic() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify the row was inserted with a timestamp
     #[derive(QueryableByName, Debug)]
-    struct Event {
+    struct EventResult {
         #[diesel(sql_type = diesel::sql_types::Integer)]
         id: i32,
         #[diesel(sql_type = diesel::sql_types::Text)]
         created_at: String,
     }
 
-    let results =
-        diesel::sql_query("SELECT id, created_at FROM events").load::<Event>(&mut connection)?;
+    let results = diesel::sql_query("SELECT id, created_at FROM events")
+        .load::<EventResult>(&mut connection)?;
 
     assert_eq!(results.len(), 1);
     // created_at should be a valid timestamp (not empty, not "NOW()")
@@ -91,14 +188,14 @@ fn test_now_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that string_agg() is translated to group_concat().
 #[test]
 fn test_string_agg_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE tags (
             id SERIAL PRIMARY KEY,
             item_id INTEGER NOT NULL,
             tag TEXT NOT NULL
         );
         SELECT item_id, string_agg(tag, ', ') FROM tags GROUP BY item_id;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -125,20 +222,19 @@ fn test_string_agg_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test COALESCE works in both PostgreSQL and SQLite (pass-through).
 #[test]
 fn test_coalesce_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id SERIAL PRIMARY KEY,
             name TEXT,
             description TEXT
         );
         SELECT COALESCE(name, description, 'default') as result FROM items;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
-    let mut connection =
-        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
     // Execute DDL
     for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
@@ -146,11 +242,18 @@ fn test_coalesce_semantic() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Insert test data
-    diesel::sql_query("INSERT INTO items (name, description) VALUES ('Item1', 'Desc1')")
+    diesel::insert_into(items::table)
+        .values(&Item {
+            id: 1,
+            name: Some("Item1".to_string()),
+            description: Some("Desc1".to_string()),
+        })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO items (name, description) VALUES (NULL, 'Desc2')")
+    diesel::insert_into(items::table)
+        .values(&Item { id: 2, name: None, description: Some("Desc2".to_string()) })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO items (name, description) VALUES (NULL, NULL)")
+    diesel::insert_into(items::table)
+        .values(&Item { id: 3, name: None, description: None })
         .execute(&mut connection)?;
 
     // Get and execute the SELECT statement
@@ -180,13 +283,13 @@ fn test_coalesce_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// ASCII).
 #[test]
 fn test_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
         );
         SELECT * FROM users WHERE name ILIKE '%test%';
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -213,19 +316,18 @@ fn test_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that ILIKE translation works semantically (case-insensitive matching).
 #[test]
 fn test_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
         );
         SELECT * FROM users WHERE name ILIKE '%test%';
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
-    let mut connection =
-        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
     // Execute DDL
     for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
@@ -233,10 +335,18 @@ fn test_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Insert test data with various cases
-    diesel::sql_query("INSERT INTO users (name) VALUES ('TEST')").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO users (name) VALUES ('test')").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO users (name) VALUES ('TeSt')").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO users (name) VALUES ('other')").execute(&mut connection)?;
+    diesel::insert_into(users::table)
+        .values(&User { id: 1, name: "TEST".to_string() })
+        .execute(&mut connection)?;
+    diesel::insert_into(users::table)
+        .values(&User { id: 2, name: "test".to_string() })
+        .execute(&mut connection)?;
+    diesel::insert_into(users::table)
+        .values(&User { id: 3, name: "TeSt".to_string() })
+        .execute(&mut connection)?;
+    diesel::insert_into(users::table)
+        .values(&User { id: 4, name: "other".to_string() })
+        .execute(&mut connection)?;
 
     // Get and execute the SELECT statement
     let select_stmt = translated
@@ -246,14 +356,14 @@ fn test_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
 
     #[derive(QueryableByName, Debug)]
-    struct User {
+    struct UserResult {
         #[diesel(sql_type = diesel::sql_types::Integer)]
         id: i32,
         #[diesel(sql_type = diesel::sql_types::Text)]
         name: String,
     }
 
-    let results = diesel::sql_query(&select_stmt).load::<User>(&mut connection)?;
+    let results = diesel::sql_query(&select_stmt).load::<UserResult>(&mut connection)?;
 
     // Should match all three "test" variants (case-insensitive), not "other"
     assert_eq!(results.len(), 3, "Should match 3 users with 'test' in name, got: {results:?}");
@@ -264,20 +374,19 @@ fn test_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that string_agg() translation works semantically.
 #[test]
 fn test_string_agg_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE tags (
             id SERIAL PRIMARY KEY,
             item_id INTEGER NOT NULL,
             tag TEXT NOT NULL
         );
         SELECT item_id, string_agg(tag, ', ') as tags FROM tags GROUP BY item_id;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
-    let mut connection =
-        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
     // Execute DDL
     for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
@@ -285,11 +394,14 @@ fn test_string_agg_semantic() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Insert test data
-    diesel::sql_query("INSERT INTO tags (item_id, tag) VALUES (1, 'rust')")
+    diesel::insert_into(tags::table)
+        .values(&Tag { id: 1, item_id: 1, text: "rust".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO tags (item_id, tag) VALUES (1, 'programming')")
+    diesel::insert_into(tags::table)
+        .values(&Tag { id: 2, item_id: 1, text: "programming".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO tags (item_id, tag) VALUES (2, 'python')")
+    diesel::insert_into(tags::table)
+        .values(&Tag { id: 3, item_id: 2, text: "python".to_string() })
         .execute(&mut connection)?;
 
     // Get and execute the SELECT statement

@@ -42,13 +42,13 @@ struct StringData {
 /// Test that POSITION expressions are translated to INSTR.
 #[test]
 fn test_position_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL
         );
         SELECT POSITION('world' IN text_val) as pos FROM strings;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -75,12 +75,12 @@ fn test_position_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test POSITION semantic execution.
 #[test]
 fn test_position_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -108,6 +108,7 @@ fn test_position_semantic() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // INSTR returns 1-based position, 0 if not found
+    // Raw SQL needed to test INSTR function translation
     let results: Vec<PosResult> =
         diesel::sql_query("SELECT id, INSTR(text_val, 'world') as pos FROM strings ORDER BY id")
             .load(&mut conn)?;
@@ -126,13 +127,13 @@ fn test_position_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that SUBSTRING expressions are translated to SUBSTR.
 #[test]
 fn test_substring_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL
         );
         SELECT SUBSTRING(text_val FROM 1 FOR 5) as sub FROM strings;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -155,12 +156,12 @@ fn test_substring_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test SUBSTRING semantic execution.
 #[test]
 fn test_substring_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -182,6 +183,7 @@ fn test_substring_semantic() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // SUBSTR(str, start, length) - 1-based indexing
+    // Raw SQL needed to test SUBSTR function translation
     let results: Vec<SubResult> =
         diesel::sql_query("SELECT SUBSTR(text_val, 1, 5) as sub FROM strings").load(&mut conn)?;
 
@@ -194,13 +196,13 @@ fn test_substring_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test SUBSTRING without FOR (length).
 #[test]
 fn test_substring_no_length_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL
         );
         SELECT SUBSTRING(text_val FROM 7) as sub FROM strings;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -222,12 +224,12 @@ fn test_substring_no_length_translation() -> Result<(), Box<dyn std::error::Erro
 /// Test SUBSTRING without FOR (length) semantic execution.
 #[test]
 fn test_substring_no_length_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
             text_val TEXT NOT NULL
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -249,6 +251,7 @@ fn test_substring_no_length_semantic() -> Result<(), Box<dyn std::error::Error>>
     }
 
     // SUBSTR(str, start) without length returns from start to end
+    // Raw SQL needed to test SUBSTR function translation
     let results: Vec<SubResult> =
         diesel::sql_query("SELECT SUBSTR(text_val, 7) as sub FROM strings").load(&mut conn)?;
 

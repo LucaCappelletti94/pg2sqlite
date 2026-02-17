@@ -1,11 +1,99 @@
 //! Tests for DROP statement translations (DROP TABLE, DROP VIEW, DROP INDEX,
 //! DROP TRIGGER).
 
-use diesel::prelude::*;
+use diesel::{Connection, RunQueryDsl, SqliteConnection, prelude::*};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, Translator};
 
 mod helpers;
 use helpers::Count;
+
+// ============================================================================
+// Schema Definitions
+// ============================================================================
+
+diesel::table! {
+    /// Test table for users.
+    users (id) {
+        /// User ID.
+        id -> Integer,
+        /// User name.
+        name -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Test table for users with email field.
+    users_with_email (id) {
+        /// User ID.
+        id -> Integer,
+        /// User email.
+        email -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for audit log.
+    audit_log (id) {
+        /// Log entry ID.
+        id -> Integer,
+        /// Log message.
+        message -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Test table for other_table.
+    other_table (id) {
+        /// ID.
+        id -> Integer,
+    }
+}
+
+// ============================================================================
+// Model Structs
+// ============================================================================
+
+/// A user record.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = users)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct User {
+    /// User ID.
+    id: i32,
+    /// User name.
+    name: Option<String>,
+}
+
+/// A user record with email.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = users_with_email)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct UserWithEmail {
+    /// User ID.
+    id: i32,
+    /// User email.
+    email: String,
+}
+
+/// An audit log entry.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = audit_log)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct AuditLogEntry {
+    /// Log entry ID.
+    id: i32,
+    /// Log message.
+    message: Option<String>,
+}
+
+/// An entry in other_table.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = other_table)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct OtherTableEntry {
+    /// ID.
+    id: i32,
+}
 
 /// Helper to create an empty schema for direct translation tests.
 fn empty_schema() -> Result<sql_traits::structs::ParserDB, sql_traits::errors::Error> {
@@ -31,14 +119,11 @@ fn translate_statement(
 }
 
 /// Helper to create a connection and run translated SQL.
-fn translate_and_execute(
-    sql: &str,
-) -> Result<diesel::SqliteConnection, Box<dyn std::error::Error>> {
+fn translate_and_execute(sql: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default();
     let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
-    let mut connection =
-        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
     diesel::sql_query("PRAGMA foreign_keys = ON").execute(&mut connection)?;
 
@@ -51,7 +136,7 @@ fn translate_and_execute(
 }
 
 /// Helper to check if a table exists in SQLite.
-fn table_exists(conn: &mut diesel::SqliteConnection, table_name: &str) -> bool {
+fn table_exists(conn: &mut SqliteConnection, table_name: &str) -> bool {
     let result: Result<Count, _> = diesel::sql_query(format!(
         "SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='{table_name}'"
     ))
@@ -61,7 +146,7 @@ fn table_exists(conn: &mut diesel::SqliteConnection, table_name: &str) -> bool {
 }
 
 /// Helper to check if a view exists in SQLite.
-fn view_exists(conn: &mut diesel::SqliteConnection, view_name: &str) -> bool {
+fn view_exists(conn: &mut SqliteConnection, view_name: &str) -> bool {
     let result: Result<Count, _> = diesel::sql_query(format!(
         "SELECT COUNT(*) as count FROM sqlite_master WHERE type='view' AND name='{view_name}'"
     ))
@@ -71,7 +156,7 @@ fn view_exists(conn: &mut diesel::SqliteConnection, view_name: &str) -> bool {
 }
 
 /// Helper to check if an index exists in SQLite.
-fn index_exists(conn: &mut diesel::SqliteConnection, index_name: &str) -> bool {
+fn index_exists(conn: &mut SqliteConnection, index_name: &str) -> bool {
     let result: Result<Count, _> = diesel::sql_query(format!(
         "SELECT COUNT(*) as count FROM sqlite_master WHERE type='index' AND name='{index_name}'"
     ))
@@ -81,7 +166,7 @@ fn index_exists(conn: &mut diesel::SqliteConnection, index_name: &str) -> bool {
 }
 
 /// Helper to check if a trigger exists in SQLite.
-fn trigger_exists(conn: &mut diesel::SqliteConnection, trigger_name: &str) -> bool {
+fn trigger_exists(conn: &mut SqliteConnection, trigger_name: &str) -> bool {
     let result: Result<Count, _> = diesel::sql_query(format!(
         "SELECT COUNT(*) as count FROM sqlite_master WHERE type='trigger' AND name='{trigger_name}'"
     ))
@@ -123,10 +208,9 @@ fn test_drop_table_if_exists_translation() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn test_drop_table_if_exists_nonexistent() -> Result<(), Box<dyn std::error::Error>> {
     // Create a minimal setup, then execute DROP TABLE IF EXISTS
-    let mut connection =
-        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
-    // Create a table first
+    // Create a table first using DDL (table creation is DDL, not DML)
     diesel::sql_query("CREATE TABLE other_table (id INTEGER PRIMARY KEY)")
         .execute(&mut connection)?;
 
@@ -169,10 +253,9 @@ fn test_drop_table_restrict_stripped() -> Result<(), Box<dyn std::error::Error>>
 /// Test DROP TABLE execution in SQLite.
 #[test]
 fn test_drop_table_execution() -> Result<(), Box<dyn std::error::Error>> {
-    let mut connection =
-        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
-    // Create table directly in SQLite
+    // Create table directly in SQLite using DDL (table creation is DDL, not DML)
     diesel::sql_query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         .execute(&mut connection)?;
     assert!(table_exists(&mut connection, "users"), "Table should exist after CREATE");
@@ -195,7 +278,7 @@ fn test_drop_table_execution() -> Result<(), Box<dyn std::error::Error>> {
 /// Test basic DROP VIEW translation and execution.
 #[test]
 fn test_drop_view() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r"
+    let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
@@ -216,7 +299,7 @@ fn test_drop_view() -> Result<(), Box<dyn std::error::Error>> {
 /// Test DROP VIEW IF EXISTS.
 #[test]
 fn test_drop_view_if_exists() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r"
+    let sql = "
         CREATE TABLE users (id SERIAL PRIMARY KEY);
         DROP VIEW IF EXISTS nonexistent_view;
     ";
@@ -230,7 +313,7 @@ fn test_drop_view_if_exists() -> Result<(), Box<dyn std::error::Error>> {
 /// Test DROP VIEW CASCADE is stripped.
 #[test]
 fn test_drop_view_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r"
+    let sql = "
         CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
         CREATE VIEW all_users AS SELECT * FROM users;
         DROP VIEW all_users CASCADE;
@@ -257,7 +340,7 @@ fn test_drop_view_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> {
 /// Test basic DROP INDEX translation and execution.
 #[test]
 fn test_drop_index() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r"
+    let sql = "
         CREATE TABLE users (id SERIAL PRIMARY KEY, email TEXT NOT NULL);
         CREATE INDEX idx_users_email ON users (email);
         DROP INDEX idx_users_email;
@@ -274,7 +357,7 @@ fn test_drop_index() -> Result<(), Box<dyn std::error::Error>> {
 /// Test DROP INDEX IF EXISTS.
 #[test]
 fn test_drop_index_if_exists() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r"
+    let sql = "
         CREATE TABLE users (id SERIAL PRIMARY KEY);
         DROP INDEX IF EXISTS nonexistent_index;
     ";
@@ -304,7 +387,7 @@ fn test_drop_index_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test DROP TRIGGER translation - verifies ON table_name is stripped.
 #[test]
 fn test_drop_trigger_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r"
+    let sql = "
         CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE audit_log (id SERIAL PRIMARY KEY, message TEXT);
 
@@ -371,16 +454,16 @@ fn test_drop_trigger_cascade_stripped() -> Result<(), Box<dyn std::error::Error>
 /// Test DROP TRIGGER execution with SQLite.
 #[test]
 fn test_drop_trigger_execution() -> Result<(), Box<dyn std::error::Error>> {
-    let mut connection =
-        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
-    // Create tables directly in SQLite
+    // Create tables directly in SQLite using DDL (table creation is DDL, not DML)
     diesel::sql_query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         .execute(&mut connection)?;
     diesel::sql_query("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, message TEXT)")
         .execute(&mut connection)?;
 
-    // Create a trigger directly in SQLite
+    // Create a trigger directly in SQLite using DDL (trigger creation is DDL, not
+    // DML)
     diesel::sql_query(
         "CREATE TRIGGER log_user_insert AFTER INSERT ON users \
          BEGIN INSERT INTO audit_log (message) VALUES ('user added'); END",

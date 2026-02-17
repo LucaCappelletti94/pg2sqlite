@@ -1,6 +1,6 @@
 //! Test translating the core migrations used in the `core_structures` crate.
 
-use diesel::{Connection, RunQueryDsl, SqliteConnection, connection::SimpleConnection};
+use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     traits::{TranslationOptions, UuidRepresentation},
@@ -33,27 +33,28 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
     // which is `WASM + SQLite`.
     let mut connection = SqliteConnection::establish(":memory:")?;
 
-    // Enable foreign key constraints
+    // Enable foreign key constraints (PRAGMA)
     diesel::sql_query("PRAGMA foreign_keys = ON")
         .execute(&mut connection)
         .expect("Failed to enable foreign key constraints");
 
-    // Enable recursive triggers
+    // Enable recursive triggers (PRAGMA)
     diesel::sql_query("PRAGMA recursive_triggers = ON")
         .execute(&mut connection)
         .expect("Failed to enable recursive triggers");
 
-    // Set journal mode to WAL for better performance
+    // Set journal mode to WAL for better performance (PRAGMA)
     diesel::sql_query("PRAGMA journal_mode = WAL")
         .execute(&mut connection)
         .expect("Failed to set journal mode to WAL");
 
+    // Execute all translated DDL statements
     let number_of_migrations = translated_migrations.len();
     for (i, translated_migration) in
         translated_migrations.iter().enumerate().map(|(v, s)| (v + 1, s))
     {
         let sql = translated_migration.to_string();
-        if let Err(err) = connection.batch_execute(&sql) {
+        if let Err(err) = diesel::sql_query(&sql).execute(&mut connection) {
             eprintln!(
                 "Failed to run the translated statement {i}/{number_of_migrations} {sql}: {err}"
             );

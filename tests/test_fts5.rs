@@ -7,42 +7,85 @@ use std::time::Instant;
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-mod schema {
-    diesel::table! {
-        documents (id) {
-            id -> Integer,
-            title -> Text,
-            body -> Text,
-        }
-    }
+// ============================================================================
+// Diesel Schema Definitions
+// ============================================================================
 
-    diesel::table! {
-        articles (id) {
-            id -> Integer,
-            title -> Text,
-            summary -> Text,
-            content -> Text,
-        }
+diesel::table! {
+    /// Documents table for full-text search testing.
+    documents (id) {
+        /// Document ID.
+        id -> Integer,
+        /// Document title.
+        title -> Text,
+        /// Document body content.
+        body -> Text,
     }
 }
 
-use schema::{articles, documents};
+diesel::table! {
+    /// Articles table for multi-column full-text search testing.
+    articles (id) {
+        /// Article ID.
+        id -> Integer,
+        /// Article title.
+        title -> Text,
+        /// Article summary.
+        summary -> Text,
+        /// Article content.
+        content -> Text,
+    }
+}
 
+diesel::table! {
+    /// Posts table with custom primary key for testing FTS5 with non-standard PKs.
+    posts (doc_id) {
+        /// Document ID (custom primary key name).
+        doc_id -> Integer,
+        /// Post title.
+        title -> Text,
+        /// Post content.
+        content -> Text,
+    }
+}
+
+// ============================================================================
+// Model Structs
+// ============================================================================
+
+/// A new document to be inserted (without ID, as it's auto-generated).
 #[derive(Insertable)]
 #[diesel(table_name = documents)]
-struct NewDocument {
-    title: String,
-    body: String,
+struct NewDocument<'a> {
+    /// Document title.
+    title: &'a str,
+    /// Document body content.
+    body: &'a str,
 }
 
+/// A new article to be inserted (without ID, as it's auto-generated).
 #[derive(Insertable)]
 #[diesel(table_name = articles)]
-struct NewArticle {
-    title: String,
-    summary: String,
-    content: String,
+struct NewArticle<'a> {
+    /// Article title.
+    title: &'a str,
+    /// Article summary.
+    summary: &'a str,
+    /// Article content.
+    content: &'a str,
 }
 
+/// A new post to be inserted (without doc_id, as it's auto-generated).
+#[derive(Insertable)]
+#[diesel(table_name = posts)]
+struct NewPost<'a> {
+    /// Post title.
+    title: &'a str,
+    /// Post content.
+    content: &'a str,
+}
+
+/// Query result for FTS5 search operations returning id and title.
 #[derive(QueryableByName, Debug)]
 struct SearchResult {
     #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -54,7 +97,7 @@ struct SearchResult {
 /// Snapshot test for GIN to FTS5 translation.
 #[test]
 fn test_gin_to_fts5_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -62,7 +105,7 @@ fn test_gin_to_fts5_translation_snapshot() -> Result<(), Box<dyn std::error::Err
         );
         CREATE INDEX idx_documents_search ON documents
             USING GIN (to_tsvector('english', title || ' ' || body));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -77,7 +120,7 @@ fn test_gin_to_fts5_translation_snapshot() -> Result<(), Box<dyn std::error::Err
 /// Test that FTS5 search works correctly.
 #[test]
 fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -85,7 +128,7 @@ fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
         );
         CREATE INDEX idx_documents_search ON documents
             USING GIN (to_tsvector('english', title || ' ' || body));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -102,16 +145,16 @@ fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
     diesel::insert_into(documents::table)
         .values(&[
             NewDocument {
-                title: "Rust Programming".to_string(),
-                body: "Rust is a systems programming language focused on safety".to_string(),
+                title: "Rust Programming",
+                body: "Rust is a systems programming language focused on safety",
             },
             NewDocument {
-                title: "Python Tutorial".to_string(),
-                body: "Python is great for data science and machine learning".to_string(),
+                title: "Python Tutorial",
+                body: "Python is great for data science and machine learning",
             },
             NewDocument {
-                title: "Database Design".to_string(),
-                body: "SQL databases use tables to store structured data".to_string(),
+                title: "Database Design",
+                body: "SQL databases use tables to store structured data",
             },
         ])
         .execute(&mut connection)?;
@@ -153,7 +196,7 @@ fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that FTS5 is faster than LIKE for full-text search on larger datasets.
 #[test]
 fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -161,7 +204,7 @@ fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>>
         );
         CREATE INDEX idx_documents_search ON documents
             USING GIN (to_tsvector('english', title || ' ' || body));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -179,6 +222,7 @@ fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>>
     let search_term = "specialized";
 
     for i in 0..num_documents {
+        let title = format!("Document {i}");
         let body = if i == 2500 {
             // One document contains our search term
             format!("This document contains specialized technical content about topic {i}")
@@ -189,17 +233,17 @@ fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>>
             )
         };
 
-        diesel::sql_query(format!(
-            "INSERT INTO documents (title, body) VALUES ('Document {}', '{}')",
-            i, body
-        ))
-        .execute(&mut connection)?;
+        diesel::insert_into(documents::table)
+            .values(NewDocument { title: &title, body: &body })
+            .execute(&mut connection)?;
     }
 
     // No manual rebuild needed - triggers keep FTS5 in sync automatically!
 
-    // Warm up SQLite caches
-    diesel::sql_query("SELECT COUNT(*) FROM documents").execute(&mut connection)?;
+    // Warm up SQLite caches with simple SELECT queries
+    let _: i64 = documents::table.count().get_result(&mut connection)?;
+    // Note: Can't use diesel for FTS5 virtual table count (no schema), so use raw
+    // SQL
     diesel::sql_query("SELECT COUNT(*) FROM documents_fts").execute(&mut connection)?;
 
     // Benchmark LIKE query (multiple runs for stability)
@@ -262,7 +306,7 @@ fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>>
 /// Test FTS5 with multiple columns concatenated.
 #[test]
 fn test_fts5_multi_column_search() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE articles (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -271,7 +315,7 @@ fn test_fts5_multi_column_search() -> Result<(), Box<dyn std::error::Error>> {
         );
         CREATE INDEX idx_articles_search ON articles
             USING GIN (to_tsvector('english', title || ' ' || summary || ' ' || content));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -287,19 +331,19 @@ fn test_fts5_multi_column_search() -> Result<(), Box<dyn std::error::Error>> {
     diesel::insert_into(articles::table)
         .values(&[
             NewArticle {
-                title: "UniqueTitle".to_string(),
-                summary: "Generic summary".to_string(),
-                content: "Generic content".to_string(),
+                title: "UniqueTitle",
+                summary: "Generic summary",
+                content: "Generic content",
             },
             NewArticle {
-                title: "Normal Title".to_string(),
-                summary: "UniqueSummary here".to_string(),
-                content: "Generic content".to_string(),
+                title: "Normal Title",
+                summary: "UniqueSummary here",
+                content: "Generic content",
             },
             NewArticle {
-                title: "Normal Title".to_string(),
-                summary: "Generic summary".to_string(),
-                content: "UniqueContent inside".to_string(),
+                title: "Normal Title",
+                summary: "Generic summary",
+                content: "UniqueContent inside",
             },
         ])
         .execute(&mut connection)?;
@@ -345,7 +389,7 @@ fn test_fts5_multi_column_search() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that FTS5 triggers correctly handle UPDATE and DELETE.
 #[test]
 fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -353,7 +397,7 @@ fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> 
         );
         CREATE INDEX idx_documents_search ON documents
             USING GIN (to_tsvector('english', title || ' ' || body));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -368,10 +412,7 @@ fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> 
     // Insert a document using Diesel ORM (use unique terms in body only, not in
     // title)
     diesel::insert_into(documents::table)
-        .values(NewDocument {
-            title: "Test Document".to_string(),
-            body: "initial content here".to_string(),
-        })
+        .values(NewDocument { title: "Test Document", body: "initial content here" })
         .execute(&mut connection)?;
 
     // Verify it's searchable using FTS5 MATCH (must use raw SQL for FTS5-specific
@@ -427,7 +468,7 @@ fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> 
 /// Test that the @@ operator is translated to FTS5 MATCH.
 #[test]
 fn test_at_at_operator_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -436,7 +477,7 @@ fn test_at_at_operator_translation() -> Result<(), Box<dyn std::error::Error>> {
         CREATE INDEX idx_documents_search ON documents
             USING GIN (to_tsvector('english', title || ' ' || body));
         SELECT * FROM documents WHERE to_tsvector('english', title) @@ to_tsquery('rust');
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -465,7 +506,7 @@ fn test_at_at_operator_translation() -> Result<(), Box<dyn std::error::Error>> {
 fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
     // Schema and query must be translated together so the schema context is
     // available
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -474,7 +515,7 @@ fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
         CREATE INDEX idx_documents_search ON documents
             USING GIN (to_tsvector('english', title || ' ' || body));
         SELECT * FROM documents WHERE to_tsvector('english', title) @@ to_tsquery('rust');
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -493,13 +534,10 @@ fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
     diesel::insert_into(documents::table)
         .values(&[
             NewDocument {
-                title: "Rust Programming".to_string(),
-                body: "Rust is a systems programming language".to_string(),
+                title: "Rust Programming",
+                body: "Rust is a systems programming language",
             },
-            NewDocument {
-                title: "Python Tutorial".to_string(),
-                body: "Python is great for scripting".to_string(),
-            },
+            NewDocument { title: "Python Tutorial", body: "Python is great for scripting" },
         ])
         .execute(&mut connection)?;
 
@@ -533,7 +571,7 @@ fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that prefix matching syntax is translated correctly (:* -> *).
 #[test]
 fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -542,7 +580,7 @@ fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> 
         CREATE INDEX idx_documents_search ON documents
             USING GIN (to_tsvector('english', title || ' ' || body));
         SELECT * FROM documents WHERE to_tsvector('english', title) @@ to_tsquery('prog:*');
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -570,7 +608,7 @@ fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> 
 /// Test that prefix matching works semantically.
 #[test]
 fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -579,7 +617,7 @@ fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
         CREATE INDEX idx_documents_search ON documents
             USING GIN (to_tsvector('english', title || ' ' || body));
         SELECT * FROM documents WHERE to_tsvector('english', title) @@ to_tsquery('prog:*');
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -595,18 +633,9 @@ fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
     // Insert test documents
     diesel::insert_into(documents::table)
         .values(&[
-            NewDocument {
-                title: "Programming Guide".to_string(),
-                body: "Learn to program".to_string(),
-            },
-            NewDocument {
-                title: "Cooking Recipes".to_string(),
-                body: "Delicious food".to_string(),
-            },
-            NewDocument {
-                title: "Progress Report".to_string(),
-                body: "Project status".to_string(),
-            },
+            NewDocument { title: "Programming Guide", body: "Learn to program" },
+            NewDocument { title: "Cooking Recipes", body: "Delicious food" },
+            NewDocument { title: "Progress Report", body: "Project status" },
         ])
         .execute(&mut connection)?;
 
@@ -629,11 +658,11 @@ fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>> {
     // Test AND operator (&)
-    let sql_and = r#"
+    let sql_and = "
         CREATE TABLE docs (id SERIAL PRIMARY KEY, body TEXT NOT NULL);
         CREATE INDEX idx ON docs USING GIN (to_tsvector('english', body));
         SELECT * FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('rust & safety');
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql_and)?.translate(&options)?;
@@ -650,11 +679,11 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
     );
 
     // Test OR operator (|)
-    let sql_or = r#"
+    let sql_or = "
         CREATE TABLE docs2 (id SERIAL PRIMARY KEY, body TEXT NOT NULL);
         CREATE INDEX idx2 ON docs2 USING GIN (to_tsvector('english', body));
         SELECT * FROM docs2 WHERE to_tsvector('english', body) @@ to_tsquery('rust | python');
-    "#;
+    ";
 
     let translated = Pg2Sqlite::default().sql(sql_or)?.translate(&options)?;
     let select = translated
@@ -666,11 +695,11 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
     assert!(select.contains("rust OR python"), "OR operator should translate to OR, got: {select}");
 
     // Test NOT operator (!)
-    let sql_not = r#"
+    let sql_not = "
         CREATE TABLE docs3 (id SERIAL PRIMARY KEY, body TEXT NOT NULL);
         CREATE INDEX idx3 ON docs3 USING GIN (to_tsvector('english', body));
         SELECT * FROM docs3 WHERE to_tsvector('english', body) @@ to_tsquery('rust & !python');
-    "#;
+    ";
 
     let translated = Pg2Sqlite::default().sql(sql_not)?.translate(&options)?;
     let select = translated
@@ -687,13 +716,13 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
 /// Test that ts_rank function produces a clear error message.
 #[test]
 fn test_ts_rank_error_message() {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             body TEXT NOT NULL
         );
         SELECT ts_rank(to_tsvector('english', body), to_tsquery('rust')) FROM documents;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
@@ -709,13 +738,13 @@ fn test_ts_rank_error_message() {
 /// Test that ts_rank_cd function produces a clear error message.
 #[test]
 fn test_ts_rank_cd_error_message() {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (
             id SERIAL PRIMARY KEY,
             body TEXT NOT NULL
         );
         SELECT ts_rank_cd(to_tsvector('english', body), to_tsquery('rust')) FROM documents;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
@@ -732,7 +761,7 @@ fn test_ts_rank_cd_error_message() {
 #[test]
 fn test_fts5_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>> {
     // Use doc_id instead of id as primary key
-    let sql = r#"
+    let sql = "
         CREATE TABLE posts (
             doc_id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -740,7 +769,7 @@ fn test_fts5_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>>
         );
         CREATE INDEX idx_posts_search ON posts
             USING GIN (to_tsvector('english', title || ' ' || content));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -769,18 +798,19 @@ fn test_fts5_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>>
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert and search
-    diesel::sql_query(
-        "INSERT INTO posts (title, content) VALUES ('Rust Guide', 'Learn Rust programming')",
-    )
-    .execute(&mut connection)?;
+    // Insert using Diesel ORM
+    diesel::insert_into(posts::table)
+        .values(NewPost { title: "Rust Guide", content: "Learn Rust programming" })
+        .execute(&mut connection)?;
 
+    // Query result for posts with custom primary key
     #[derive(QueryableByName, Debug)]
     struct PostResult {
         #[diesel(sql_type = diesel::sql_types::Integer)]
         doc_id: i32,
     }
 
+    // Search using FTS5 MATCH (requires raw SQL for FTS5-specific syntax)
     let results = diesel::sql_query(
         "SELECT p.doc_id FROM posts p \
          WHERE p.doc_id IN (SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'rust')",
@@ -796,14 +826,14 @@ fn test_fts5_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>>
 /// Test that @@ operator translation uses the correct primary key.
 #[test]
 fn test_at_at_operator_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE posts (
             post_id SERIAL PRIMARY KEY,
             title TEXT NOT NULL
         );
         CREATE INDEX idx ON posts USING GIN (to_tsvector('english', title));
         SELECT * FROM posts WHERE to_tsvector('english', title) @@ to_tsquery('rust');
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;

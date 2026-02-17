@@ -45,14 +45,14 @@ struct Point {
 /// Test that tuple equality expressions are translated correctly.
 #[test]
 fn test_tuple_equality_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE points (
             id INTEGER PRIMARY KEY,
             x INTEGER NOT NULL,
             y INTEGER NOT NULL
         );
         SELECT * FROM points WHERE (x, y) = (10, 20);
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -75,13 +75,13 @@ fn test_tuple_equality_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test tuple equality semantic execution.
 #[test]
 fn test_tuple_equality_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE points (
             id INTEGER PRIMARY KEY,
             x INTEGER NOT NULL,
             y INTEGER NOT NULL
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -97,7 +97,8 @@ fn test_tuple_equality_semantic() -> Result<(), Box<dyn std::error::Error>> {
     diesel::insert_into(points::table).values(&Point { id: 2, x: 10, y: 30 }).execute(&mut conn)?;
     diesel::insert_into(points::table).values(&Point { id: 3, x: 5, y: 20 }).execute(&mut conn)?;
 
-    // Query using tuple comparison
+    // Query using tuple comparison (raw SQL needed as Diesel doesn't support tuple
+    // comparisons)
     let results: Vec<Point> =
         diesel::sql_query("SELECT * FROM points WHERE (x, y) = (10, 20)").load(&mut conn)?;
 
@@ -112,14 +113,14 @@ fn test_tuple_equality_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test tuple IN list expressions.
 #[test]
 fn test_tuple_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE points (
             id INTEGER PRIMARY KEY,
             x INTEGER NOT NULL,
             y INTEGER NOT NULL
         );
         SELECT * FROM points WHERE (x, y) IN ((1, 2), (3, 4), (5, 6));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -138,13 +139,13 @@ fn test_tuple_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test tuple IN list semantic execution.
 #[test]
 fn test_tuple_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE points (
             id INTEGER PRIMARY KEY,
             x INTEGER NOT NULL,
             y INTEGER NOT NULL
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -160,7 +161,8 @@ fn test_tuple_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
     diesel::insert_into(points::table).values(&Point { id: 3, x: 5, y: 5 }).execute(&mut conn)?; // Not in the list
     diesel::insert_into(points::table).values(&Point { id: 4, x: 5, y: 6 }).execute(&mut conn)?;
 
-    // Query using tuple IN list
+    // Query using tuple IN list (raw SQL needed as Diesel doesn't support tuple IN
+    // lists)
     let results: Vec<Point> =
         diesel::sql_query("SELECT * FROM points WHERE (x, y) IN ((1, 2), (3, 4), (5, 6))")
             .load(&mut conn)?;

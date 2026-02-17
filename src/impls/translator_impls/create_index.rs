@@ -11,6 +11,7 @@ use sqlparser::ast::{
 
 use crate::{
     errors::Error,
+    impls::translator_impls::rls::resolve_trigger_table_name,
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -172,27 +173,32 @@ fn create_fts5_virtual_table(base_name: &str, columns: &[String]) -> Statement {
 /// These triggers keep the FTS5 index in sync with the source table using
 /// standard DELETE and INSERT statements (not external content 'delete'
 /// command).
-fn create_fts5_triggers(base_name: &str, pk_column: &str, columns: &[String]) -> Vec<String> {
-    let fts_name = format!("{base_name}_fts");
+fn create_fts5_triggers(
+    trigger_table: &str,
+    fts_table_base: &str,
+    pk_column: &str,
+    columns: &[String],
+) -> Vec<String> {
+    let fts_name = format!("{fts_table_base}_fts");
     let columns_list = columns.join(", ");
     let new_values = columns.iter().map(|c| format!("new.{c}")).collect::<Vec<_>>().join(", ");
 
     vec![
-        // AFTER INSERT trigger
+        // AFTER INSERT trigger - attached to the actual table (may be RLS backing table)
         format!(
-            "CREATE TRIGGER {base_name}_fts_ai AFTER INSERT ON {base_name} BEGIN \
+            "CREATE TRIGGER {fts_table_base}_fts_ai AFTER INSERT ON {trigger_table} BEGIN \
              INSERT INTO {fts_name}(rowid, {columns_list}) VALUES (new.{pk_column}, {new_values}); \
              END"
         ),
         // AFTER DELETE trigger
         format!(
-            "CREATE TRIGGER {base_name}_fts_ad AFTER DELETE ON {base_name} BEGIN \
+            "CREATE TRIGGER {fts_table_base}_fts_ad AFTER DELETE ON {trigger_table} BEGIN \
              DELETE FROM {fts_name} WHERE rowid = old.{pk_column}; \
              END"
         ),
         // AFTER UPDATE trigger
         format!(
-            "CREATE TRIGGER {base_name}_fts_au AFTER UPDATE ON {base_name} BEGIN \
+            "CREATE TRIGGER {fts_table_base}_fts_au AFTER UPDATE ON {trigger_table} BEGIN \
              DELETE FROM {fts_name} WHERE rowid = old.{pk_column}; \
              INSERT INTO {fts_name}(rowid, {columns_list}) VALUES (new.{pk_column}, {new_values}); \
              END"
@@ -205,6 +211,7 @@ fn create_fts5_statements(
     table_name: &ObjectName,
     columns: &[String],
     schema: &ParserDB,
+    options: &Pg2SqliteOptions,
 ) -> Result<Vec<Statement>, Error> {
     let base_name = table_name
         .0
@@ -228,11 +235,14 @@ fn create_fts5_statements(
     }
     let pk_column = pk_columns[0].column_name();
 
+    // Determine the correct table for trigger attachment (accounts for RLS)
+    let trigger_table_name = resolve_trigger_table_name(&base_name, table, schema, options);
+
     let mut statements = vec![create_fts5_virtual_table(&base_name, columns)];
 
     // Add triggers as raw SQL statements
     // We parse them using sqlparser to get proper Statement objects
-    for trigger_sql in create_fts5_triggers(&base_name, pk_column, columns) {
+    for trigger_sql in create_fts5_triggers(&trigger_table_name, &base_name, pk_column, columns) {
         // Since sqlparser may not fully support SQLite trigger syntax,
         // we use a simple approach: wrap the trigger as a raw statement
         // by parsing it. If parsing fails, we skip the trigger.
@@ -262,7 +272,7 @@ impl Translator for CreateIndex {
         if matches!(self.using, Some(IndexType::GIN | IndexType::GiST)) {
             return match analyze_fts_index(self) {
                 FtsTranslation::Fts5 { table_name, columns } => {
-                    create_fts5_statements(&table_name, &columns, schema)
+                    create_fts5_statements(&table_name, &columns, schema, options)
                 }
                 FtsTranslation::Unsupported(reason) => Err(Error::UnsupportedSQLiteFeature(reason)),
             };

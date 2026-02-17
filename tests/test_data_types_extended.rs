@@ -7,66 +7,98 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-mod schema {
-    diesel::table! {
-        json_data (id) {
-            id -> Integer,
-            metadata -> Nullable<Text>,
-            settings -> Text,
-        }
-    }
-
-    diesel::table! {
-        complex_defaults (id) {
-            id -> Integer,
-            negative_value -> Integer,
-            calculated -> Float,
-            bool_default -> Integer,
-            text_default -> Nullable<Text>,
-        }
-    }
-
-    diesel::table! {
-        upsert_test (key) {
-            key -> Text,
-            value -> Text,
-            counter -> Integer,
-        }
+// Schema definitions for test tables
+diesel::table! {
+    /// Test table for JSON/JSONB data types.
+    json_data (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Optional JSON metadata.
+        metadata -> Nullable<Text>,
+        /// Required JSON settings (defaults to '{}').
+        settings -> Text,
     }
 }
 
-use schema::{complex_defaults, json_data, upsert_test};
+diesel::table! {
+    /// Test table for complex default values.
+    complex_defaults (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Negative default value.
+        negative_value -> Integer,
+        /// Float default value.
+        calculated -> Float,
+        /// Boolean default value.
+        bool_default -> Integer,
+        /// Text default value.
+        text_default -> Nullable<Text>,
+    }
+}
 
+diesel::table! {
+    /// Test table for UPSERT operations.
+    upsert_test (key) {
+        /// Primary key.
+        key -> Text,
+        /// Value field.
+        value -> Text,
+        /// Counter field.
+        counter -> Integer,
+    }
+}
+
+/// JSON data record.
 #[derive(Queryable, Selectable, Debug)]
 #[diesel(table_name = json_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct JsonData {
+    /// Primary key.
     id: i32,
+    /// Optional JSON metadata.
     metadata: Option<String>,
+    /// Required JSON settings.
     settings: String,
 }
 
+/// New JSON data for insertion.
 #[derive(Insertable)]
 #[diesel(table_name = json_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct NewJsonData {
+    /// Optional JSON metadata.
     metadata: Option<String>,
+    /// Required JSON settings.
     settings: String,
 }
 
+/// Complex defaults record.
 #[derive(Queryable, Selectable, Debug)]
 #[diesel(table_name = complex_defaults)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct ComplexDefaults {
+    /// Primary key.
     id: i32,
+    /// Negative default value.
     negative_value: i32,
+    /// Float default value.
     calculated: f32,
+    /// Boolean default value.
     bool_default: i32,
+    /// Text default value.
     text_default: Option<String>,
 }
 
+/// UPSERT test record.
 #[derive(Queryable, Selectable, Insertable, Debug)]
 #[diesel(table_name = upsert_test)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct UpsertRow {
+    /// Primary key.
     key: String,
+    /// Value field.
     value: String,
+    /// Counter field.
     counter: i32,
 }
 
@@ -114,14 +146,14 @@ fn test_json_type_stored_as_text() -> Result<(), Box<dyn std::error::Error>> {
     // Insert JSON data as text
     diesel::insert_into(json_data::table)
         .values(NewJsonData {
-            metadata: Some(r#"{"key": "value", "number": 42}"#.to_string()),
-            settings: r#"{"theme": "dark"}"#.to_string(),
+            metadata: Some("{\"key\": \"value\", \"number\": 42}".to_string()),
+            settings: "{\"theme\": \"dark\"}".to_string(),
         })
         .execute(&mut connection)?;
 
     let row = json_data::table.select(JsonData::as_select()).first(&mut connection)?;
-    assert_eq!(row.metadata, Some(r#"{"key": "value", "number": 42}"#.to_string()));
-    assert_eq!(row.settings, r#"{"theme": "dark"}"#.to_string());
+    assert_eq!(row.metadata, Some("{\"key\": \"value\", \"number\": 42}".to_string()));
+    assert_eq!(row.settings, "{\"theme\": \"dark\"}".to_string());
 
     Ok(())
 }
@@ -132,6 +164,9 @@ fn test_jsonb_default_empty_object() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
 
     // Insert with only metadata (settings should default to '{}')
+    // Note: We use diesel::sql_query here because Diesel's Insertable requires all
+    // non-nullable fields without defaults to be provided, but the schema has a
+    // default.
     diesel::sql_query("INSERT INTO json_data (metadata) VALUES ('{\"test\": true}')")
         .execute(&mut connection)?;
 
@@ -215,7 +250,7 @@ fn test_text_default_value() -> Result<(), Box<dyn std::error::Error>> {
 /// Test ON CONFLICT DO UPDATE (UPSERT) works semantically.
 #[test]
 fn test_upsert_insert_new_row() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r"
+    let sql = "
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, counter INTEGER NOT NULL DEFAULT 0);
     ";
     let options = Pg2SqliteOptions::default();
@@ -255,7 +290,7 @@ fn test_upsert_insert_new_row() -> Result<(), Box<dyn std::error::Error>> {
 /// Test ON CONFLICT DO UPDATE updates existing row.
 #[test]
 fn test_upsert_update_existing_row() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r"
+    let sql = "
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, counter INTEGER NOT NULL DEFAULT 0);
     ";
     let options = Pg2SqliteOptions::default();
@@ -320,10 +355,10 @@ fn test_all_defaults_together() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that GIN index without to_tsvector causes an error.
 #[test]
 fn test_gin_index_non_tsvector_causes_error() {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (id SERIAL PRIMARY KEY, content TEXT);
         CREATE INDEX idx_content ON documents USING GIN (content);
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
 
@@ -337,10 +372,10 @@ fn test_gin_index_non_tsvector_causes_error() {
 /// Test that GiST index on non-tsvector column causes an error.
 #[test]
 fn test_gist_index_non_tsvector_causes_error() {
-    let sql = r#"
+    let sql = "
         CREATE TABLE locations (id SERIAL PRIMARY KEY, point TEXT);
         CREATE INDEX idx_point ON locations USING GiST (point);
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
 
@@ -354,10 +389,10 @@ fn test_gist_index_non_tsvector_causes_error() {
 /// Test that GiST index with to_tsvector translates to FTS5 (same as GIN).
 #[test]
 fn test_gist_tsvector_translates_to_fts5() {
-    let sql = r#"
+    let sql = "
         CREATE TABLE articles (id SERIAL PRIMARY KEY, title TEXT, body TEXT);
         CREATE INDEX idx_search ON articles USING GiST (to_tsvector('english', title || ' ' || body));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
 
@@ -388,10 +423,10 @@ fn test_gist_tsvector_translates_to_fts5() {
 /// Test that GIN index with to_tsvector translates to FTS5.
 #[test]
 fn test_gin_tsvector_translates_to_fts5() {
-    let sql = r#"
+    let sql = "
         CREATE TABLE documents (id SERIAL PRIMARY KEY, title TEXT, body TEXT);
         CREATE INDEX idx_search ON documents USING GIN (to_tsvector('english', title || ' ' || body));
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
 

@@ -67,12 +67,143 @@
 mod helpers;
 
 use diesel::prelude::*;
-use helpers::{User, count_users, establish_connection, insert_user, set_session_user_id};
+use helpers::{establish_connection, set_session_user_id};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
     traits::{SessionVariableMapping, TranslationOptions},
 };
 use rosetta_uuid::Uuid;
+
+// ============================================================================
+// Schema definitions for test tables
+// ============================================================================
+
+diesel::table! {
+    /// Backing table for users with RLS (read-only for app_user).
+    users_rls (id) {
+        /// User ID (UUIDv7 as BLOB).
+        id -> Binary,
+        /// Username.
+        username -> Text,
+        /// Email address.
+        email -> Text,
+    }
+}
+
+diesel::table! {
+    /// View for users (read-only access).
+    users (id) {
+        /// User ID (UUIDv7 as BLOB).
+        id -> Binary,
+        /// Username.
+        username -> Text,
+        /// Email address.
+        email -> Text,
+    }
+}
+
+diesel::table! {
+    /// Backing table for posts with RLS (writable with policies).
+    posts_rls (id) {
+        /// Post ID (UUIDv7 as BLOB).
+        id -> Binary,
+        /// Author user ID.
+        author_id -> Binary,
+        /// Post title.
+        title -> Text,
+        /// Post content.
+        content -> Nullable<Text>,
+        /// User who created this post (for RLS).
+        created_by -> Binary,
+    }
+}
+
+diesel::table! {
+    /// View for posts (RLS-filtered with INSTEAD OF triggers).
+    posts (id) {
+        /// Post ID (UUIDv7 as BLOB).
+        id -> Binary,
+        /// Author user ID.
+        author_id -> Binary,
+        /// Post title.
+        title -> Text,
+        /// Post content.
+        content -> Nullable<Text>,
+        /// User who created this post (for RLS).
+        created_by -> Binary,
+    }
+}
+
+diesel::joinable!(posts_rls -> users_rls (author_id));
+diesel::joinable!(posts -> users (author_id));
+diesel::allow_tables_to_appear_in_same_query!(users_rls, posts_rls, users, posts);
+
+/// A user in the system (for backing table).
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, PartialEq, Eq)]
+#[diesel(table_name = users_rls)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct User {
+    /// User ID (UUIDv7 as BLOB).
+    id: Vec<u8>,
+    /// Username.
+    username: String,
+    /// Email address.
+    email: String,
+}
+
+impl User {
+    /// Creates a new user with the given details.
+    fn new(id: Uuid, username: impl Into<String>, email: impl Into<String>) -> Self {
+        Self { id: id.as_bytes().to_vec(), username: username.into(), email: email.into() }
+    }
+}
+
+/// A user for insertion into the users view (read-only, should fail).
+#[derive(Debug, Clone, Insertable, PartialEq, Eq)]
+#[diesel(table_name = users)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct UserView {
+    /// User ID (UUIDv7 as BLOB).
+    id: Vec<u8>,
+    /// Username.
+    username: String,
+    /// Email address.
+    email: String,
+}
+
+/// A post created by a user (for backing table).
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, PartialEq, Eq)]
+#[diesel(table_name = posts_rls)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Post {
+    /// Post ID (UUIDv7 as BLOB).
+    id: Vec<u8>,
+    /// Author user ID.
+    author_id: Vec<u8>,
+    /// Post title.
+    title: String,
+    /// Post content.
+    content: Option<String>,
+    /// User who created this post (for RLS).
+    created_by: Vec<u8>,
+}
+
+/// A post for insertion into the posts view (with INSTEAD OF triggers).
+#[derive(Debug, Clone, Insertable, PartialEq, Eq)]
+#[diesel(table_name = posts)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct PostView {
+    /// Post ID (UUIDv7 as BLOB).
+    id: Vec<u8>,
+    /// Author user ID.
+    author_id: Vec<u8>,
+    /// Post title.
+    title: String,
+    /// Post content.
+    content: Option<String>,
+    /// User who created this post (for RLS).
+    created_by: Vec<u8>,
+}
 
 /// SQL fixture with three tables demonstrating different grant patterns:
 /// - `audit_logs`: No grants to app_user (server-only)
@@ -230,9 +361,9 @@ fn test_readonly_select_works() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
 
     let user = User::new(Uuid::new_v4(), "testuser", "test@example.com");
-    insert_user(&mut conn, &user)?;
+    diesel::insert_into(users_rls::table).values(&user).execute(&mut conn)?;
 
-    let count = count_users(&mut conn)?;
+    let count: i64 = users::table.count().get_result(&mut conn)?;
     assert_eq!(count, 1, "Should be able to SELECT from read-only users view");
 
     Ok(())
@@ -244,13 +375,14 @@ fn test_readonly_insert_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
 
     let user_id = Uuid::new_v4();
+    let user_view = UserView {
+        id: user_id.as_bytes().to_vec(),
+        username: "testuser".to_string(),
+        email: "test@example.com".to_string(),
+    };
 
     // Attempt to insert via the view (not the backing table) - should fail
-    let result = diesel::sql_query(
-        "INSERT INTO users (id, username, email) VALUES (?, 'testuser', 'test@example.com')",
-    )
-    .bind::<diesel::sql_types::Binary, _>(user_id.as_bytes().to_vec())
-    .execute(&mut conn);
+    let result = diesel::insert_into(users::table).values(&user_view).execute(&mut conn);
 
     assert!(result.is_err(), "INSERT into read-only 'users' view should fail, but got: {result:?}");
 
@@ -263,11 +395,11 @@ fn test_readonly_update_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
 
     let user = User::new(Uuid::new_v4(), "testuser", "test@example.com");
-    insert_user(&mut conn, &user)?;
+    diesel::insert_into(users_rls::table).values(&user).execute(&mut conn)?;
 
     // Attempt to update via the view - should fail
-    let result = diesel::sql_query("UPDATE users SET username = 'newname' WHERE id = ?")
-        .bind::<diesel::sql_types::Binary, _>(user.id.clone())
+    let result = diesel::update(users::table.filter(users::id.eq(&user.id)))
+        .set(users::username.eq("newname"))
         .execute(&mut conn);
 
     assert!(result.is_err(), "UPDATE on read-only 'users' view should fail, but got: {result:?}");
@@ -281,12 +413,10 @@ fn test_readonly_delete_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
 
     let user = User::new(Uuid::new_v4(), "testuser", "test@example.com");
-    insert_user(&mut conn, &user)?;
+    diesel::insert_into(users_rls::table).values(&user).execute(&mut conn)?;
 
     // Attempt to delete via the view - should fail
-    let result = diesel::sql_query("DELETE FROM users WHERE id = ?")
-        .bind::<diesel::sql_types::Binary, _>(user.id.clone())
-        .execute(&mut conn);
+    let result = diesel::delete(users::table.filter(users::id.eq(&user.id))).execute(&mut conn);
 
     assert!(result.is_err(), "DELETE on read-only 'users' view should fail, but got: {result:?}");
 
@@ -305,19 +435,20 @@ fn test_writable_insert_succeeds() -> Result<(), Box<dyn std::error::Error>> {
 
     let user_id = Uuid::new_v4();
     let user = User::new(user_id, "testuser", "test@example.com");
-    insert_user(&mut conn, &user)?;
+    diesel::insert_into(users_rls::table).values(&user).execute(&mut conn)?;
 
     set_session_user_id(&user_id);
 
     // Insert via the view - should succeed because created_by matches session user
-    let post_id = Uuid::new_v4();
-    let result = diesel::sql_query(
-        "INSERT INTO posts (id, author_id, title, content, created_by) VALUES (?, ?, 'Test Post', 'Content', ?)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(post_id.as_bytes().to_vec())
-    .bind::<diesel::sql_types::Binary, _>(user_id.as_bytes().to_vec())
-    .bind::<diesel::sql_types::Binary, _>(user_id.as_bytes().to_vec())
-    .execute(&mut conn);
+    let post = PostView {
+        id: Uuid::new_v4().as_bytes().to_vec(),
+        author_id: user_id.as_bytes().to_vec(),
+        title: "Test Post".to_string(),
+        content: Some("Content".to_string()),
+        created_by: user_id.as_bytes().to_vec(),
+    };
+
+    let result = diesel::insert_into(posts::table).values(&post).execute(&mut conn);
 
     assert!(
         result.is_ok(),
@@ -336,21 +467,26 @@ fn test_writable_insert_fails_wrong_user() -> Result<(), Box<dyn std::error::Err
     let user1_id = Uuid::new_v4();
     let user2_id = Uuid::new_v4();
 
-    insert_user(&mut conn, &User::new(user1_id, "user1", "user1@example.com"))?;
-    insert_user(&mut conn, &User::new(user2_id, "user2", "user2@example.com"))?;
+    diesel::insert_into(users_rls::table)
+        .values(&User::new(user1_id, "user1", "user1@example.com"))
+        .execute(&mut conn)?;
+    diesel::insert_into(users_rls::table)
+        .values(&User::new(user2_id, "user2", "user2@example.com"))
+        .execute(&mut conn)?;
 
     // Set session user to user1
     set_session_user_id(&user1_id);
 
     // Attempt to insert a post with created_by = user2 - should fail RLS policy
-    let post_id = Uuid::new_v4();
-    let result = diesel::sql_query(
-        "INSERT INTO posts (id, author_id, title, content, created_by) VALUES (?, ?, 'Test Post', 'Content', ?)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(post_id.as_bytes().to_vec())
-    .bind::<diesel::sql_types::Binary, _>(user1_id.as_bytes().to_vec())
-    .bind::<diesel::sql_types::Binary, _>(user2_id.as_bytes().to_vec()) // Different from session user!
-    .execute(&mut conn);
+    let post = PostView {
+        id: Uuid::new_v4().as_bytes().to_vec(),
+        author_id: user1_id.as_bytes().to_vec(),
+        title: "Test Post".to_string(),
+        content: Some("Content".to_string()),
+        created_by: user2_id.as_bytes().to_vec(), // Different from session user!
+    };
+
+    let result = diesel::insert_into(posts::table).values(&post).execute(&mut conn);
 
     assert!(
         result.is_err(),

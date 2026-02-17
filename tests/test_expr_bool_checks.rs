@@ -45,14 +45,14 @@ struct Flag {
 /// Test that IS TRUE expressions are translated correctly.
 #[test]
 fn test_is_true_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE flags (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             active BOOLEAN
         );
         SELECT * FROM flags WHERE active IS TRUE;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -74,13 +74,13 @@ fn test_is_true_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test IS TRUE semantic execution using diesel.
 #[test]
 fn test_is_true_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE flags (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             active INTEGER
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -121,14 +121,14 @@ fn test_is_true_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that IS FALSE expressions are translated correctly.
 #[test]
 fn test_is_false_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE flags (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             active BOOLEAN
         );
         SELECT * FROM flags WHERE active IS FALSE;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -150,13 +150,13 @@ fn test_is_false_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test IS FALSE semantic execution.
 #[test]
 fn test_is_false_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE flags (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             active INTEGER
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -194,13 +194,13 @@ fn test_is_false_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that IS NOT TRUE expressions are translated correctly.
 #[test]
 fn test_is_not_true_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE flags (
             id INTEGER PRIMARY KEY,
             active BOOLEAN
         );
         SELECT * FROM flags WHERE active IS NOT TRUE;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -222,13 +222,13 @@ fn test_is_not_true_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that IS NOT FALSE expressions are translated correctly.
 #[test]
 fn test_is_not_false_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE flags (
             id INTEGER PRIMARY KEY,
             active BOOLEAN
         );
         SELECT * FROM flags WHERE active IS NOT FALSE;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;

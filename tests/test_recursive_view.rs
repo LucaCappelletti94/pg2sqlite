@@ -7,9 +7,13 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 mod schema {
     diesel::table! {
+        /// Categories table for testing recursive views.
         categories (id) {
+            /// Category ID.
             id -> Integer,
+            /// Category name.
             name -> Text,
+            /// Parent category ID (nullable for root categories).
             parent_id -> Nullable<Integer>,
         }
     }
@@ -17,31 +21,43 @@ mod schema {
 
 use schema::categories;
 
+/// A new category for insertion.
 #[derive(Insertable)]
 #[diesel(table_name = categories)]
 struct NewCategory {
+    /// Category name.
     name: String,
+    /// Parent category ID (nullable for root categories).
     parent_id: Option<i32>,
 }
 
+/// Result from the category_tree recursive view.
 #[derive(QueryableByName, Debug)]
 struct CategoryTree {
+    /// Category ID.
     #[diesel(sql_type = diesel::sql_types::Integer)]
     id: i32,
+    /// Category name.
     #[diesel(sql_type = diesel::sql_types::Text)]
     name: String,
+    /// Parent category ID (nullable for root categories).
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
     parent_id: Option<i32>,
+    /// Depth in the category hierarchy (0 for root).
     #[diesel(sql_type = diesel::sql_types::Integer)]
     depth: i32,
+    /// Full path from root to this category.
     #[diesel(sql_type = diesel::sql_types::Text)]
     path: String,
 }
 
+/// Result from the category_descendant_count view.
 #[derive(QueryableByName, Debug)]
 struct CategoryDescendantCount {
+    /// Category ID.
     #[diesel(sql_type = diesel::sql_types::Integer)]
     category_id: i32,
+    /// Number of descendant categories.
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     descendant_count: i64,
 }

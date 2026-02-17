@@ -65,13 +65,13 @@ fn test_sqlite_vec_loaded() -> Result<()> {
 fn test_translated_vector_table_works() -> Result<()> {
     register_sqlite_vec();
 
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             embedding vector(4)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
@@ -110,13 +110,13 @@ fn test_translated_vector_table_works() -> Result<()> {
 fn test_vec0_knn_query_correctness() -> Result<()> {
     register_sqlite_vec();
 
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             embedding vector(4)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
@@ -177,12 +177,12 @@ fn test_vec0_indexed_knn_large_dataset() -> Result<()> {
     const DIMENSIONS: usize = 128;
     const K: usize = 10;
 
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding vector(128)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
@@ -304,12 +304,12 @@ fn test_vec0_faster_than_naive_at_scale() -> Result<()> {
     const K: usize = 10;
     const NUM_QUERIES: usize = 10;
 
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding vector(64)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
@@ -407,12 +407,12 @@ fn test_vec0_faster_than_naive_at_scale() -> Result<()> {
 fn test_update_trigger_syncs_to_vec0() -> Result<()> {
     register_sqlite_vec();
 
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding vector(4)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
@@ -450,12 +450,12 @@ fn test_update_trigger_syncs_to_vec0() -> Result<()> {
 fn test_delete_trigger_removes_from_vec0() -> Result<()> {
     register_sqlite_vec();
 
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             embedding vector(4)
         );
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();

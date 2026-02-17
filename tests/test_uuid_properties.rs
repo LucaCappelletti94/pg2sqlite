@@ -11,6 +11,57 @@ use diesel::{
 use pg2sqlite::prelude::*;
 use rosetta_uuid::Uuid;
 
+// Schema definitions for test tables
+diesel::table! {
+    /// Test table for UUID v4 text representation.
+    users_v4_text (id) {
+        /// UUID v4 as text.
+        id -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for UUID v4 blob representation.
+    users_v4_blob (id) {
+        /// UUID v4 as blob.
+        id -> Binary,
+    }
+}
+
+diesel::table! {
+    /// Test table for UUID v7 text representation.
+    users_v7_text (id) {
+        /// UUID v7 as text.
+        id -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for UUID v7 blob representation.
+    users_v7_blob (id) {
+        /// UUID v7 as blob.
+        id -> Binary,
+    }
+}
+
+/// UUID as text (for v4/v7 text tests).
+#[derive(Queryable, Selectable, Debug, Clone)]
+#[diesel(table_name = users_v4_text)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct UuidText {
+    /// UUID as text.
+    id: String,
+}
+
+/// UUID as blob (for v4/v7 blob tests).
+#[derive(Queryable, Selectable, Debug, Clone)]
+#[diesel(table_name = users_v4_blob)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct UuidBlob {
+    /// UUID as blob.
+    id: Vec<u8>,
+}
+
 #[derive(QueryableByName, Debug, Clone)]
 struct IdText {
     #[diesel(sql_type = Text)]
@@ -120,8 +171,7 @@ fn test_v4_text_unique_and_valid() {
         diesel::sql_query("INSERT INTO users_v4_text DEFAULT VALUES").execute(&mut conn).unwrap();
     }
 
-    let results =
-        diesel::sql_query("SELECT id FROM users_v4_text").load::<IdText>(&mut conn).unwrap();
+    let results = users_v4_text::table.select(UuidText::as_select()).load(&mut conn).unwrap();
 
     let mut ids: Vec<String> = results.iter().map(|r| r.id.clone()).collect();
     let total = ids.len();
@@ -160,8 +210,7 @@ fn test_v4_blob_unique_and_valid() {
         diesel::sql_query("INSERT INTO users_v4_blob DEFAULT VALUES").execute(&mut conn).unwrap();
     }
 
-    let results =
-        diesel::sql_query("SELECT id FROM users_v4_blob").load::<IdBlob>(&mut conn).unwrap();
+    let results = users_v4_blob::table.select(UuidBlob::as_select()).load(&mut conn).unwrap();
 
     let mut ids: Vec<Vec<u8>> = results.iter().map(|r| r.id.clone()).collect();
     let total = ids.len();

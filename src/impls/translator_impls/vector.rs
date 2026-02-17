@@ -29,7 +29,10 @@ use sql_traits::{
 };
 use sqlparser::ast::{CreateTable, DataType, Ident, ObjectName, ObjectNamePart, Statement};
 
-use crate::{errors::Error, prelude::Pg2SqliteOptions};
+use crate::{
+    errors::Error, impls::translator_impls::rls::resolve_trigger_table_name,
+    prelude::Pg2SqliteOptions,
+};
 
 /// Information about a vector column in a table.
 #[derive(Debug, Clone)]
@@ -219,7 +222,7 @@ fn create_vec0_triggers(
 pub fn generate_vec0_statements(
     create_table: &CreateTable,
     schema: &ParserDB,
-    _options: &Pg2SqliteOptions,
+    options: &Pg2SqliteOptions,
 ) -> Result<Vec<Statement>, Error> {
     let vector_cols = extract_vector_columns(create_table);
     if vector_cols.is_empty() {
@@ -234,6 +237,16 @@ pub fn generate_vec0_statements(
         ))
     })?;
 
+    // Look up the table in schema to check for RLS
+    let table_obj = schema.table(None, &table_name).ok_or_else(|| {
+        Error::UnsupportedSQLiteFeature(format!(
+            "Table '{table_name}' not found in schema for vector sync triggers"
+        ))
+    })?;
+
+    // Determine the correct table for trigger attachment (accounts for RLS)
+    let trigger_table_name = resolve_trigger_table_name(&table_name, table_obj, schema, options);
+
     let dialect = sqlparser::dialect::SQLiteDialect {};
     let mut statements = Vec::new();
 
@@ -246,10 +259,13 @@ pub fn generate_vec0_statements(
         let create_vec0 = create_vec0_virtual_table(&vec_table_name, &pk_column, vec_col);
         statements.push(create_vec0);
 
-        // Generate triggers
-        for trigger_sql in
-            create_vec0_triggers(&table_name, &vec_table_name, &pk_column, &vec_col.column_name)
-        {
+        // Generate triggers (use trigger_table_name for RLS support)
+        for trigger_sql in create_vec0_triggers(
+            &trigger_table_name,
+            &vec_table_name,
+            &pk_column,
+            &vec_col.column_name,
+        ) {
             if let Ok(parsed) = sqlparser::parser::Parser::parse_sql(&dialect, &trigger_sql) {
                 statements.extend(parsed);
             }

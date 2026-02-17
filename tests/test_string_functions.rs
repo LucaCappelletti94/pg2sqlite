@@ -3,17 +3,92 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
+// ============================================================================
+// Schema for tests
+// ============================================================================
+
+diesel::table! {
+    /// Table for testing string functions.
+    texts (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Text content.
+        content -> Text,
+    }
+}
+
+diesel::table! {
+    /// Table for testing chr function.
+    codes (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Character code value.
+        code -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Table for testing CONCAT_WS function.
+    names (id) {
+        /// Primary key.
+        id -> Integer,
+        /// First name.
+        first -> Nullable<Text>,
+        /// Middle name.
+        middle -> Nullable<Text>,
+        /// Last name.
+        last -> Nullable<Text>,
+    }
+}
+
+/// A text record for testing string functions.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = texts)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Text {
+    /// Primary key.
+    id: i32,
+    /// Text content.
+    content: String,
+}
+
+/// A code record for testing chr function.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = codes)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Code {
+    /// Primary key.
+    id: i32,
+    /// Character code value.
+    code: i32,
+}
+
+/// A name record for testing CONCAT_WS function.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = names)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Name {
+    /// Primary key.
+    id: i32,
+    /// First name.
+    first: Option<String>,
+    /// Middle name.
+    middle: Option<String>,
+    /// Last name.
+    last: Option<String>,
+}
+
 /// Test that strpos(string, substring) is translated to INSTR(string,
 /// substring).
 #[test]
 fn test_strpos_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE texts (
             id SERIAL PRIMARY KEY,
             content TEXT NOT NULL
         );
         SELECT strpos(content, 'hello') as pos FROM texts;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -40,13 +115,13 @@ fn test_strpos_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: strpos translation works correctly in SQLite.
 #[test]
 fn test_strpos_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE texts (
             id SERIAL PRIMARY KEY,
             content TEXT NOT NULL
         );
         SELECT content, strpos(content, 'world') as pos FROM texts;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -59,12 +134,15 @@ fn test_strpos_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO texts (content) VALUES ('hello world')")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(texts::table)
+        .values(&Text { id: 1, content: "hello world".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO texts (content) VALUES ('no match here')")
+    diesel::insert_into(texts::table)
+        .values(&Text { id: 2, content: "no match here".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO texts (content) VALUES ('world at start')")
+    diesel::insert_into(texts::table)
+        .values(&Text { id: 3, content: "world at start".to_string() })
         .execute(&mut connection)?;
 
     let select_stmt = translated
@@ -92,10 +170,10 @@ fn test_strpos_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that chr(n) is translated to char(n).
 #[test]
 fn test_chr_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE codes (id SERIAL PRIMARY KEY, code INTEGER NOT NULL);
         SELECT chr(code) as character FROM codes;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -122,10 +200,10 @@ fn test_chr_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: chr translation works correctly in SQLite.
 #[test]
 fn test_chr_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE codes (id SERIAL PRIMARY KEY, code INTEGER NOT NULL);
         SELECT chr(code) as character FROM codes;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -137,9 +215,16 @@ fn test_chr_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    diesel::sql_query("INSERT INTO codes (code) VALUES (65)").execute(&mut connection)?; // 'A'
-    diesel::sql_query("INSERT INTO codes (code) VALUES (66)").execute(&mut connection)?; // 'B'
-    diesel::sql_query("INSERT INTO codes (code) VALUES (97)").execute(&mut connection)?; // 'a'
+    // Insert test data using Diesel ORM
+    diesel::insert_into(codes::table)
+        .values(&Code { id: 1, code: 65 }) // 'A'
+        .execute(&mut connection)?;
+    diesel::insert_into(codes::table)
+        .values(&Code { id: 2, code: 66 }) // 'B'
+        .execute(&mut connection)?;
+    diesel::insert_into(codes::table)
+        .values(&Code { id: 3, code: 97 }) // 'a'
+        .execute(&mut connection)?;
 
     let select_stmt = translated
         .iter()
@@ -167,10 +252,10 @@ fn test_chr_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// c.
 #[test]
 fn test_concat_ws_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE names (id SERIAL PRIMARY KEY, first TEXT, middle TEXT, last TEXT);
         SELECT CONCAT_WS(' ', first, middle, last) as full_name FROM names;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -197,10 +282,10 @@ fn test_concat_ws_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Semantic test: CONCAT_WS translation works correctly in SQLite.
 #[test]
 fn test_concat_ws_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE names (id SERIAL PRIMARY KEY, first TEXT, middle TEXT, last TEXT);
         SELECT CONCAT_WS('-', first, middle, last) as full_name FROM names;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -212,9 +297,22 @@ fn test_concat_ws_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    diesel::sql_query("INSERT INTO names (first, middle, last) VALUES ('John', 'Q', 'Public')")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(names::table)
+        .values(&Name {
+            id: 1,
+            first: Some("John".to_string()),
+            middle: Some("Q".to_string()),
+            last: Some("Public".to_string()),
+        })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO names (first, middle, last) VALUES ('Jane', 'A', 'Doe')")
+    diesel::insert_into(names::table)
+        .values(&Name {
+            id: 2,
+            first: Some("Jane".to_string()),
+            middle: Some("A".to_string()),
+            last: Some("Doe".to_string()),
+        })
         .execute(&mut connection)?;
 
     let select_stmt = translated

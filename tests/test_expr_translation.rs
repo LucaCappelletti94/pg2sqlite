@@ -9,19 +9,193 @@ use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 // ============================================================================
+// Schema Definitions
+// ============================================================================
+
+diesel::table! {
+    /// Test table for items with categories (used in IN list tests).
+    items (id) {
+        /// Item ID.
+        id -> Integer,
+        /// Item category.
+        category -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for users (used in subquery tests).
+    users (id) {
+        /// User ID.
+        id -> Integer,
+        /// User name.
+        name -> Text,
+    }
+}
+
+diesel::table! {
+    /// Test table for orders (used in multiple tests with varying schemas).
+    /// Different tests create this table with different combinations of columns.
+    orders (id) {
+        /// Order ID.
+        id -> Integer,
+        /// User ID who made the order (nullable - not present in all tests).
+        user_id -> Nullable<Integer>,
+        /// Order amount (nullable - not present in all tests).
+        amount -> Nullable<Integer>,
+        /// Order status (nullable - not present in all tests).
+        status -> Nullable<Text>,
+        /// Order date (nullable - not present in all tests).
+        order_date -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Test table for products (used in BETWEEN tests).
+    products (id) {
+        /// Product ID.
+        id -> Integer,
+        /// Product price.
+        price -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for scores (used in CASE tests).
+    scores (id) {
+        /// Score ID.
+        id -> Integer,
+        /// Score value.
+        score -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Test table for events (used in EXTRACT tests).
+    events (id) {
+        /// Event ID.
+        id -> Integer,
+        /// Event date.
+        event_date -> Text,
+        /// Event name (nullable in some tests).
+        name -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Test table for logs (used in EXTRACT time tests).
+    logs (id) {
+        /// Log ID.
+        id -> Integer,
+        /// Log timestamp.
+        timestamp -> Text,
+    }
+}
+
+// ============================================================================
+// Struct Definitions
+// ============================================================================
+
+/// An item with a category.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = items)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Item {
+    /// Item ID.
+    id: i32,
+    /// Item category.
+    category: String,
+}
+
+/// A user.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = users)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct User {
+    /// User ID.
+    id: i32,
+    /// User name.
+    name: String,
+}
+
+/// An order.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = orders)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Order {
+    /// Order ID.
+    id: i32,
+    /// User ID.
+    user_id: Option<i32>,
+    /// Order amount.
+    amount: Option<i32>,
+    /// Order status.
+    status: Option<String>,
+    /// Date of the order.
+    #[diesel(column_name = "order_date")]
+    date: Option<String>,
+}
+
+/// A product.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = products)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Product {
+    /// Product ID.
+    id: i32,
+    /// Product price.
+    price: i32,
+}
+
+/// A score.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = scores)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Score {
+    /// Score ID.
+    id: i32,
+    /// Score value.
+    score: i32,
+}
+
+/// An event.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = events)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Event {
+    /// Event ID.
+    id: i32,
+    /// Date of the event.
+    #[diesel(column_name = "event_date")]
+    date: String,
+    /// Event name.
+    name: Option<String>,
+}
+
+/// A log entry.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = logs)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Log {
+    /// Log ID.
+    id: i32,
+    /// Log timestamp.
+    timestamp: String,
+}
+
+// ============================================================================
 // IN List Tests
 // ============================================================================
 
 /// Test that IN list expressions are translated correctly.
 #[test]
 fn test_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             category TEXT NOT NULL
         );
         SELECT * FROM items WHERE category IN ('electronics', 'books', 'toys');
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -40,13 +214,13 @@ fn test_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test IN list semantic execution.
 #[test]
 fn test_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             category TEXT NOT NULL
         );
         SELECT id FROM items WHERE category IN ('electronics', 'books');
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -59,12 +233,15 @@ fn test_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO items (id, category) VALUES (1, 'electronics')")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(items::table)
+        .values(&Item { id: 1, category: "electronics".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO items (id, category) VALUES (2, 'books')")
+    diesel::insert_into(items::table)
+        .values(&Item { id: 2, category: "books".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO items (id, category) VALUES (3, 'clothing')")
+    diesel::insert_into(items::table)
+        .values(&Item { id: 3, category: "clothing".to_string() })
         .execute(&mut connection)?;
 
     let select_stmt = translated
@@ -97,7 +274,7 @@ fn test_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that IN subquery expressions are translated correctly.
 #[test]
 fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL
@@ -107,7 +284,7 @@ fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
             user_id INTEGER NOT NULL
         );
         SELECT * FROM users WHERE id IN (SELECT user_id FROM orders);
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -129,7 +306,7 @@ fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test IN subquery semantic execution.
 #[test]
 fn test_in_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE users (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL
@@ -139,7 +316,7 @@ fn test_in_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
             user_id INTEGER NOT NULL
         );
         SELECT name FROM users WHERE id IN (SELECT user_id FROM orders);
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -152,15 +329,20 @@ fn test_in_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(users::table)
+        .values(&User { id: 1, name: "Alice".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO users (id, name) VALUES (2, 'Bob')").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO users (id, name) VALUES (3, 'Carol')")
+    diesel::insert_into(users::table)
+        .values(&User { id: 2, name: "Bob".to_string() })
         .execute(&mut connection)?;
-    // Only Alice and Bob have orders
-    diesel::sql_query("INSERT INTO orders (id, user_id) VALUES (1, 1)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (id, user_id) VALUES (2, 2)").execute(&mut connection)?;
+    diesel::insert_into(users::table)
+        .values(&User { id: 3, name: "Carol".to_string() })
+        .execute(&mut connection)?;
+    // Only Alice and Bob have orders (using DSL to insert only specific columns)
+    use crate::orders::dsl::*;
+    diesel::insert_into(orders).values((id.eq(1), user_id.eq(Some(1)))).execute(&mut connection)?;
+    diesel::insert_into(orders).values((id.eq(2), user_id.eq(Some(2)))).execute(&mut connection)?;
 
     let select_stmt = translated
         .iter()
@@ -192,13 +374,13 @@ fn test_in_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that BETWEEN expressions are translated correctly.
 #[test]
 fn test_between_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE products (
             id INTEGER PRIMARY KEY,
             price INTEGER NOT NULL
         );
         SELECT * FROM products WHERE price BETWEEN 10 AND 50;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -217,13 +399,13 @@ fn test_between_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test BETWEEN semantic execution.
 #[test]
 fn test_between_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE products (
             id INTEGER PRIMARY KEY,
             price INTEGER NOT NULL
         );
         SELECT id FROM products WHERE price BETWEEN 10 AND 50;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -236,15 +418,21 @@ fn test_between_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO products (id, price) VALUES (1, 5)").execute(&mut connection)?; // too low
-    diesel::sql_query("INSERT INTO products (id, price) VALUES (2, 10)")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(products::table)
+        .values(&Product { id: 1, price: 5 })
+        .execute(&mut connection)?; // too low
+    diesel::insert_into(products::table)
+        .values(&Product { id: 2, price: 10 })
         .execute(&mut connection)?; // boundary
-    diesel::sql_query("INSERT INTO products (id, price) VALUES (3, 30)")
+    diesel::insert_into(products::table)
+        .values(&Product { id: 3, price: 30 })
         .execute(&mut connection)?; // in range
-    diesel::sql_query("INSERT INTO products (id, price) VALUES (4, 50)")
+    diesel::insert_into(products::table)
+        .values(&Product { id: 4, price: 50 })
         .execute(&mut connection)?; // boundary
-    diesel::sql_query("INSERT INTO products (id, price) VALUES (5, 100)")
+    diesel::insert_into(products::table)
+        .values(&Product { id: 5, price: 100 })
         .execute(&mut connection)?; // too high
 
     let select_stmt = translated
@@ -277,7 +465,7 @@ fn test_between_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that CASE expressions are translated correctly.
 #[test]
 fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
             status TEXT NOT NULL
@@ -288,7 +476,7 @@ fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
             ELSE 'Unknown'
         END as status_label
         FROM items;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -309,7 +497,7 @@ fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test searched CASE expression (without operand).
 #[test]
 fn test_case_searched_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE scores (
             id INTEGER PRIMARY KEY,
             score INTEGER NOT NULL
@@ -321,7 +509,7 @@ fn test_case_searched_semantic() -> Result<(), Box<dyn std::error::Error>> {
             ELSE 'F'
         END as grade
         FROM scores;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -334,11 +522,19 @@ fn test_case_searched_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO scores (id, score) VALUES (1, 95)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO scores (id, score) VALUES (2, 85)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO scores (id, score) VALUES (3, 75)").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO scores (id, score) VALUES (4, 50)").execute(&mut connection)?;
+    // Insert test data using Diesel ORM
+    diesel::insert_into(scores::table)
+        .values(&Score { id: 1, score: 95 })
+        .execute(&mut connection)?;
+    diesel::insert_into(scores::table)
+        .values(&Score { id: 2, score: 85 })
+        .execute(&mut connection)?;
+    diesel::insert_into(scores::table)
+        .values(&Score { id: 3, score: 75 })
+        .execute(&mut connection)?;
+    diesel::insert_into(scores::table)
+        .values(&Score { id: 4, score: 50 })
+        .execute(&mut connection)?;
 
     let select_stmt = translated
         .iter()
@@ -374,13 +570,13 @@ fn test_case_searched_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that scalar subqueries are translated correctly.
 #[test]
 fn test_scalar_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE orders (
             id INTEGER PRIMARY KEY,
             amount INTEGER NOT NULL
         );
         SELECT (SELECT MAX(amount) FROM orders) as max_amount;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -399,7 +595,7 @@ fn test_scalar_subquery_translation() -> Result<(), Box<dyn std::error::Error>> 
 /// Test scalar subquery semantic execution.
 #[test]
 fn test_scalar_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE orders (
             id INTEGER PRIMARY KEY,
             user_id INTEGER NOT NULL,
@@ -411,7 +607,7 @@ fn test_scalar_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
         );
         SELECT name, (SELECT SUM(amount) FROM orders WHERE user_id = users.id) as total
         FROM users;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -424,15 +620,21 @@ fn test_scalar_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+    // Insert test data using Diesel ORM
+    diesel::insert_into(users::table)
+        .values(&User { id: 1, name: "Alice".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO users (id, name) VALUES (2, 'Bob')").execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (id, user_id, amount) VALUES (1, 1, 100)")
+    diesel::insert_into(users::table)
+        .values(&User { id: 2, name: "Bob".to_string() })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (id, user_id, amount) VALUES (2, 1, 50)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 1, user_id: Some(1), amount: Some(100), status: None, date: None })
         .execute(&mut connection)?;
-    diesel::sql_query("INSERT INTO orders (id, user_id, amount) VALUES (3, 2, 200)")
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 2, user_id: Some(1), amount: Some(50), status: None, date: None })
+        .execute(&mut connection)?;
+    diesel::insert_into(orders::table)
+        .values(&Order { id: 3, user_id: Some(2), amount: Some(200), status: None, date: None })
         .execute(&mut connection)?;
 
     let select_stmt = translated
@@ -467,13 +669,13 @@ fn test_scalar_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that EXTRACT is translated to strftime.
 #[test]
 fn test_extract_translation() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE events (
             id INTEGER PRIMARY KEY,
             event_date TEXT NOT NULL
         );
         SELECT id, EXTRACT(YEAR FROM event_date) as year FROM events;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -500,7 +702,7 @@ fn test_extract_translation() -> Result<(), Box<dyn std::error::Error>> {
 /// Test EXTRACT with various date fields.
 #[test]
 fn test_extract_fields_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE events (
             id INTEGER PRIMARY KEY,
             event_date TEXT NOT NULL
@@ -510,7 +712,7 @@ fn test_extract_fields_semantic() -> Result<(), Box<dyn std::error::Error>> {
             EXTRACT(MONTH FROM event_date) as month,
             EXTRACT(DAY FROM event_date) as day
         FROM events;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -523,8 +725,10 @@ fn test_extract_fields_semantic() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data with ISO date format
-    diesel::sql_query("INSERT INTO events (id, event_date) VALUES (1, '2024-03-15')")
+    // Insert test data with ISO date format using Diesel ORM
+    use crate::events::dsl::*;
+    diesel::insert_into(events)
+        .values((id.eq(1), event_date.eq("2024-03-15")))
         .execute(&mut connection)?;
 
     let select_stmt = translated
@@ -556,7 +760,7 @@ fn test_extract_fields_semantic() -> Result<(), Box<dyn std::error::Error>> {
 /// Test EXTRACT with time fields.
 #[test]
 fn test_extract_time_fields_semantic() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE logs (
             id INTEGER PRIMARY KEY,
             timestamp TEXT NOT NULL
@@ -566,7 +770,7 @@ fn test_extract_time_fields_semantic() -> Result<(), Box<dyn std::error::Error>>
             EXTRACT(MINUTE FROM timestamp) as minute,
             EXTRACT(SECOND FROM timestamp) as second
         FROM logs;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -579,8 +783,9 @@ fn test_extract_time_fields_semantic() -> Result<(), Box<dyn std::error::Error>>
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data with ISO datetime format
-    diesel::sql_query("INSERT INTO logs (id, timestamp) VALUES (1, '2024-03-15 14:30:45')")
+    // Insert test data with ISO datetime format using Diesel ORM
+    diesel::insert_into(logs::table)
+        .values(&Log { id: 1, timestamp: "2024-03-15 14:30:45".to_string() })
         .execute(&mut connection)?;
 
     let select_stmt = translated
@@ -612,14 +817,14 @@ fn test_extract_time_fields_semantic() -> Result<(), Box<dyn std::error::Error>>
 /// Test EXTRACT in WHERE clause.
 #[test]
 fn test_extract_in_where_clause() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE events (
             id INTEGER PRIMARY KEY,
             event_date TEXT NOT NULL,
             name TEXT NOT NULL
         );
         SELECT name FROM events WHERE EXTRACT(YEAR FROM event_date) = 2024;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -632,19 +837,16 @@ fn test_extract_in_where_clause() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query(
-        "INSERT INTO events (id, event_date, name) VALUES (1, '2024-01-15', 'Event A')",
-    )
-    .execute(&mut connection)?;
-    diesel::sql_query(
-        "INSERT INTO events (id, event_date, name) VALUES (2, '2023-06-20', 'Event B')",
-    )
-    .execute(&mut connection)?;
-    diesel::sql_query(
-        "INSERT INTO events (id, event_date, name) VALUES (3, '2024-12-25', 'Event C')",
-    )
-    .execute(&mut connection)?;
+    // Insert test data using Diesel ORM
+    diesel::insert_into(events::table)
+        .values(&Event { id: 1, date: "2024-01-15".to_string(), name: Some("Event A".to_string()) })
+        .execute(&mut connection)?;
+    diesel::insert_into(events::table)
+        .values(&Event { id: 2, date: "2023-06-20".to_string(), name: Some("Event B".to_string()) })
+        .execute(&mut connection)?;
+    diesel::insert_into(events::table)
+        .values(&Event { id: 3, date: "2024-12-25".to_string(), name: Some("Event C".to_string()) })
+        .execute(&mut connection)?;
 
     let select_stmt = translated
         .iter()
@@ -676,7 +878,7 @@ fn test_extract_in_where_clause() -> Result<(), Box<dyn std::error::Error>> {
 /// Test combining multiple expression types in a single query.
 #[test]
 fn test_combined_expressions() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = r#"
+    let sql = "
         CREATE TABLE orders (
             id INTEGER PRIMARY KEY,
             status TEXT NOT NULL,
@@ -694,7 +896,7 @@ fn test_combined_expressions() -> Result<(), Box<dyn std::error::Error>> {
         FROM orders
         WHERE status IN ('pending', 'shipped')
           AND amount BETWEEN 50 AND 5000;
-    "#;
+    ";
 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -707,23 +909,43 @@ fn test_combined_expressions() -> Result<(), Box<dyn std::error::Error>> {
         diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
     }
 
-    // Insert test data
-    diesel::sql_query(
-        "INSERT INTO orders (id, status, amount, order_date) VALUES (1, 'pending', 500, '2024-03-15')",
-    )
-    .execute(&mut connection)?;
-    diesel::sql_query(
-        "INSERT INTO orders (id, status, amount, order_date) VALUES (2, 'shipped', 1500, '2024-06-20')",
-    )
-    .execute(&mut connection)?;
-    diesel::sql_query(
-        "INSERT INTO orders (id, status, amount, order_date) VALUES (3, 'cancelled', 200, '2024-01-10')",
-    )
-    .execute(&mut connection)?; // excluded by status
-    diesel::sql_query(
-        "INSERT INTO orders (id, status, amount, order_date) VALUES (4, 'pending', 10, '2024-02-01')",
-    )
-    .execute(&mut connection)?; // excluded by amount
+    // Insert test data using Diesel ORM
+    diesel::insert_into(orders::table)
+        .values(&Order {
+            id: 1,
+            user_id: None,
+            status: Some("pending".to_string()),
+            amount: Some(500),
+            date: Some("2024-03-15".to_string()),
+        })
+        .execute(&mut connection)?;
+    diesel::insert_into(orders::table)
+        .values(&Order {
+            id: 2,
+            user_id: None,
+            status: Some("shipped".to_string()),
+            amount: Some(1500),
+            date: Some("2024-06-20".to_string()),
+        })
+        .execute(&mut connection)?;
+    diesel::insert_into(orders::table)
+        .values(&Order {
+            id: 3,
+            user_id: None,
+            status: Some("cancelled".to_string()),
+            amount: Some(200),
+            date: Some("2024-01-10".to_string()),
+        })
+        .execute(&mut connection)?; // excluded by status
+    diesel::insert_into(orders::table)
+        .values(&Order {
+            id: 4,
+            user_id: None,
+            status: Some("pending".to_string()),
+            amount: Some(10),
+            date: Some("2024-02-01".to_string()),
+        })
+        .execute(&mut connection)?; // excluded by amount
 
     let select_stmt = translated
         .iter()
