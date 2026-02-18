@@ -103,7 +103,8 @@ fn bench_rls_translation(c: &mut Criterion) {
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.tenant_id",
             "current_tenant",
-        ));
+        ))
+        .with_rls_audit_table_name("rls_violations");
 
     let mut group = c.benchmark_group("rls_translation");
 
