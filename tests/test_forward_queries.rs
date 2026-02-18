@@ -352,3 +352,32 @@ fn cte_body_translates_expressions() {
     let output = translate(sql);
     assert!(output.contains("datetime('now')"), "Expected datetime('now') in CTE body: {output}");
 }
+
+// ==================== DISTINCT ON error ====================
+
+#[test]
+fn distinct_on_returns_error() {
+    let sql = "
+        CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+        SELECT DISTINCT ON (id) * FROM users;
+    ";
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    assert!(result.is_err(), "Expected error for DISTINCT ON");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("DISTINCT ON"), "Expected DISTINCT ON error: {err}");
+}
+
+// ==================== Named window expression translation ====================
+
+#[test]
+fn named_window_translates_expressions() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, ts TEXT);
+        SELECT *, ROW_NUMBER() OVER w FROM events WINDOW w AS (PARTITION BY NOW() ORDER BY id);
+    ";
+    let output = translate(sql);
+    assert!(
+        output.contains("datetime('now')"),
+        "Expected datetime('now') in named window: {output}"
+    );
+}

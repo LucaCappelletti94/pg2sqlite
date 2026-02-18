@@ -969,3 +969,19 @@ fn insert_on_conflict_do_update_translates_expressions() {
         "Expected datetime('now') in ON CONFLICT DO UPDATE: {output}"
     );
 }
+
+// ==================== INSERT RETURNING expression translation
+// ====================
+
+#[test]
+fn insert_returning_translates_expressions() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, name TEXT);
+        INSERT INTO events (id, name) VALUES (1, 'test') RETURNING NOW() AS ts;
+    ";
+    let output = translate(sql);
+    assert!(
+        output.contains("datetime('now')"),
+        "Expected datetime('now') in INSERT RETURNING: {output}"
+    );
+}

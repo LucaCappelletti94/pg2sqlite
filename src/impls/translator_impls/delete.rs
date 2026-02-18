@@ -8,7 +8,7 @@ use sqlparser::{
     tokenizer::Span,
 };
 
-use super::helpers::translate_table_with_joins;
+use super::helpers::{translate_select_item, translate_table_with_joins};
 use crate::{
     impls::translator_impls::rls::table_has_rls,
     options::Pg2SqliteOptions,
@@ -32,7 +32,19 @@ impl Translator for Delete {
         // Translate the FROM clause
         let from = translate_from_table(&self.from, schema, options)?;
 
-        let mut delete = Delete { selection, from, ..self.clone() };
+        // Translate RETURNING expressions
+        let returning = self
+            .returning
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| translate_select_item(item, schema, options))
+                    .collect::<Result<Vec<_>, crate::errors::Error>>()
+            })
+            .transpose()?;
+
+        let mut delete = Delete { selection, from, returning, ..self.clone() };
 
         if let Some(using) = delete.using.take().filter(|u| !u.is_empty()) {
             // Convert DELETE FROM T USING U WHERE cond

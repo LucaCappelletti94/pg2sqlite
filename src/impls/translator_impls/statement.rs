@@ -215,7 +215,7 @@ impl Translator for Statement {
                 }
 
                 let condition = if let Some(cond) = &if_stmt.if_block.condition {
-                    cond.clone()
+                    cond.translate(schema, options)?
                 } else {
                     return Ok(Vec::new());
                 };

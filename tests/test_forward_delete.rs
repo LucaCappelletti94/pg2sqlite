@@ -79,3 +79,19 @@ fn delete_where_translates_expressions() {
         "Expected datetime('now') in DELETE WHERE: {output}"
     );
 }
+
+// ==================== DELETE RETURNING expression translation
+// ====================
+
+#[test]
+fn delete_returning_translates_expressions() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, name TEXT);
+        DELETE FROM events WHERE id = 1 RETURNING NOW() AS ts;
+    ";
+    let output = translate(sql);
+    assert!(
+        output.contains("datetime('now')"),
+        "Expected datetime('now') in DELETE RETURNING: {output}"
+    );
+}

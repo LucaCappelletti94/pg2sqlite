@@ -60,7 +60,9 @@ impl Translator for ColumnOptionDef {
                                 }));
                             }
                         }
-                        unimplemented!("The default expression function {func:?} is not supported",)
+                        Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                            "Unsupported default expression function: {func}"
+                        )))
                     }
                     Expr::Value(value) => {
                         Ok(Some(ColumnOptionDef {
@@ -121,11 +123,10 @@ impl Translator for ColumnOptionDef {
                             }),
                         }))
                     }
-                    unimplemented => {
-                        unimplemented!(
-                            "The default expression {:?} is not supported",
-                            unimplemented
-                        )
+                    other => {
+                        Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                            "Unsupported default expression: {other}"
+                        )))
                     }
                 }
             }
@@ -216,8 +217,10 @@ impl Translator for ColumnOptionDef {
                     .into(),
                 }))
             }
-            unimplemented => {
-                unimplemented!("The column option {unimplemented:?} is not supported")
+            other => {
+                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "Unsupported column option: {other}"
+                )))
             }
         }
     }

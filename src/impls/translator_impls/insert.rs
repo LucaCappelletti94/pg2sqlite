@@ -4,6 +4,7 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Insert;
 
+use super::helpers::translate_select_item;
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
 impl Translator for Insert {
@@ -20,7 +21,19 @@ impl Translator for Insert {
         let source =
             self.source.as_ref().map(|q| q.translate(schema, options)).transpose()?.map(Box::new);
 
-        let mut insert = Insert { source, ..self.clone() };
+        // Translate RETURNING expressions
+        let returning = self
+            .returning
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| translate_select_item(item, schema, options))
+                    .collect::<Result<Vec<_>, crate::errors::Error>>()
+            })
+            .transpose()?;
+
+        let mut insert = Insert { source, returning, ..self.clone() };
 
         // Handle ON CONFLICT
         if let Some(on_insert) = &self.on {
@@ -68,7 +81,11 @@ impl Translator for Insert {
                         }
                     }
                 }
-                _ => unimplemented!("Unsupported ON INSERT: {:?}", on_insert),
+                _ => {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "Unsupported ON INSERT clause: {on_insert:?}"
+                    )));
+                }
             }
         }
         Ok(insert)

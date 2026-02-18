@@ -1000,10 +1000,9 @@ impl Translator for Expr {
                 ));
             }
             _ => {
-                unimplemented!(
-                    "Expr translation for definition `{:?}` is not yet implemented.",
-                    self
-                )
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "Expression translation not yet implemented: {self}"
+                )));
             }
         })
     }
