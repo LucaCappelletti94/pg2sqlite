@@ -952,3 +952,20 @@ fn before_trigger_on_rls_table() {
     // BEFORE trigger should be redirected to items_rls table
     assert!(output.contains("items_rls"), "Expected items_rls redirect: {output}");
 }
+
+// ==================== INSERT ON CONFLICT DO UPDATE expression translation
+// ====================
+
+#[test]
+fn insert_on_conflict_do_update_translates_expressions() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, name TEXT, updated_at TEXT);
+        INSERT INTO events (id, name, updated_at) VALUES (1, 'test', 'x')
+        ON CONFLICT (id) DO UPDATE SET updated_at = NOW();
+    ";
+    let output = translate(sql);
+    assert!(
+        output.contains("datetime('now')"),
+        "Expected datetime('now') in ON CONFLICT DO UPDATE: {output}"
+    );
+}

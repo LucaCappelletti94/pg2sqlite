@@ -547,4 +547,21 @@ mod vector_functions {
         assert!(pg_sql.contains("::vector"));
         assert!(!pg_sql.contains("vec_f32"));
     }
+
+    #[test]
+    fn test_cte_reverse_roundtrip() {
+        let pg_ddl = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);";
+        let translator = setup_translator(pg_ddl);
+        let schema = translator.build_schema().unwrap();
+        let options = Pg2SqliteOptions::default();
+
+        let sqlite_sql = "WITH cte AS (SELECT * FROM users) SELECT * FROM cte";
+        let pg_stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
+
+        assert_eq!(pg_stmts.len(), 1);
+        let pg_sql = pg_stmts[0].to_string();
+        assert!(pg_sql.contains("WITH"), "Expected WITH in CTE roundtrip: {pg_sql}");
+        assert!(pg_sql.contains("cte"), "Expected cte alias in CTE roundtrip: {pg_sql}");
+        assert!(pg_sql.contains("users"), "Expected users table in CTE roundtrip: {pg_sql}");
+    }
 }

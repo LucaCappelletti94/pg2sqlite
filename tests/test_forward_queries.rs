@@ -304,3 +304,51 @@ fn insert_select_with_using_join() {
     let output = translate(sql);
     assert!(output.contains("USING"), "Expected USING join: {output}");
 }
+
+// ==================== View body expression translation ====================
+
+#[test]
+fn view_body_translates_now() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, name TEXT);
+        CREATE VIEW recent_events AS
+        SELECT *, NOW() AS created FROM events;
+    ";
+    let output = translate(sql);
+    assert!(output.contains("datetime('now')"), "Expected datetime('now') in view body: {output}");
+}
+
+// ==================== GROUP BY / HAVING expression translation
+// ====================
+
+#[test]
+fn group_by_translates_expressions() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, name TEXT, ts TEXT);
+        SELECT NOW(), COUNT(*) FROM events GROUP BY NOW();
+    ";
+    let output = translate(sql);
+    assert!(output.contains("GROUP BY datetime('now')"), "Expected translated GROUP BY: {output}");
+}
+
+#[test]
+fn having_translates_expressions() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, name TEXT, ts TEXT);
+        SELECT ts, COUNT(*) FROM events GROUP BY ts HAVING NOW() > ts;
+    ";
+    let output = translate(sql);
+    assert!(output.contains("HAVING datetime('now')"), "Expected translated HAVING: {output}");
+}
+
+// ==================== CTE expression translation ====================
+
+#[test]
+fn cte_body_translates_expressions() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, name TEXT);
+        WITH cte AS (SELECT NOW() AS ts FROM events) SELECT * FROM cte;
+    ";
+    let output = translate(sql);
+    assert!(output.contains("datetime('now')"), "Expected datetime('now') in CTE body: {output}");
+}

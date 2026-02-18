@@ -64,3 +64,18 @@ fn delete_all() {
     let output = translate(sql);
     assert!(output.contains("DELETE"), "Expected DELETE: {output}");
 }
+
+// ==================== DELETE with expression translation ====================
+
+#[test]
+fn delete_where_translates_expressions() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY, created_at TEXT);
+        DELETE FROM events WHERE NOW() > created_at;
+    ";
+    let output = translate(sql);
+    assert!(
+        output.contains("datetime('now')"),
+        "Expected datetime('now') in DELETE WHERE: {output}"
+    );
+}

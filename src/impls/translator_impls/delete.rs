@@ -1,13 +1,14 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
-        Delete, Expr, GroupByExpr, Ident, ObjectName, Query, Select, SelectFlavor, SelectItem,
-        SetExpr, Statement, TableFactor, Value, ValueWithSpan,
+        Delete, Expr, FromTable, GroupByExpr, Ident, ObjectName, Query, Select, SelectFlavor,
+        SelectItem, SetExpr, Statement, TableFactor, Value, ValueWithSpan,
         helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
 
+use super::helpers::translate_table_with_joins;
 use crate::{
     impls::translator_impls::rls::table_has_rls,
     options::Pg2SqliteOptions,
@@ -24,13 +25,26 @@ impl Translator for Delete {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        let mut delete = self.clone();
+        // Translate the WHERE clause up front
+        let selection =
+            self.selection.as_ref().map(|e| e.translate(schema, options)).transpose()?;
+
+        // Translate the FROM clause
+        let from = translate_from_table(&self.from, schema, options)?;
+
+        let mut delete = Delete { selection, from, ..self.clone() };
 
         if let Some(using) = delete.using.take().filter(|u| !u.is_empty()) {
             // Convert DELETE FROM T USING U WHERE cond
             // to DELETE FROM T WHERE EXISTS (SELECT 1 FROM U WHERE cond)
 
-            // Keep the original selection (WHERE clause)
+            // Translate USING tables
+            let translated_using = using
+                .iter()
+                .map(|twj| translate_table_with_joins(twj, schema, options))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Keep the already-translated selection (WHERE clause)
             let original_selection = delete.selection;
 
             // Create the subquery
@@ -46,9 +60,9 @@ impl Translator for Delete {
                         span: Span::empty(),
                     }))],
                     into: None,
-                    from: using, // The tables from USING go here
+                    from: translated_using, // The translated USING tables go here
                     lateral_views: vec![],
-                    selection: original_selection, // The WHERE clause moves here
+                    selection: original_selection, // The translated WHERE clause moves here
                     group_by: GroupByExpr::Expressions(vec![], vec![]),
                     cluster_by: vec![],
                     distribute_by: vec![],
@@ -113,4 +127,29 @@ impl Translator for Delete {
 
         Ok(Statement::Delete(delete))
     }
+}
+
+fn translate_from_table(
+    from: &FromTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<FromTable, crate::errors::Error> {
+    Ok(match from {
+        FromTable::WithFromKeyword(tables) => {
+            FromTable::WithFromKeyword(
+                tables
+                    .iter()
+                    .map(|t| translate_table_with_joins(t, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        FromTable::WithoutKeyword(tables) => {
+            FromTable::WithoutKeyword(
+                tables
+                    .iter()
+                    .map(|t| translate_table_with_joins(t, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+    })
 }

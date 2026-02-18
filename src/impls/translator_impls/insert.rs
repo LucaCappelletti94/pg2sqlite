@@ -32,13 +32,39 @@ impl Translator for Insert {
                             insert.or = Some(sqlparser::ast::SqliteOnConflict::Ignore);
                             insert.on = None;
                         }
-                        sqlparser::ast::OnConflictAction::DoUpdate(_) => {
+                        sqlparser::ast::OnConflictAction::DoUpdate(do_update) => {
                             // SQLite supports ON CONFLICT DO UPDATE with nearly
                             // identical syntax to PostgreSQL (since SQLite
                             // 3.24.0).
                             // EXCLUDED references work the same way
                             // (case-insensitive).
-                            // Pass through as-is.
+                            // Translate expressions in assignments and selection.
+                            let translated_assignments = do_update
+                                .assignments
+                                .iter()
+                                .map(|a| {
+                                    Ok(sqlparser::ast::Assignment {
+                                        target: a.target.clone(),
+                                        value: a.value.translate(schema, options)?,
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
+                            let translated_selection = do_update
+                                .selection
+                                .as_ref()
+                                .map(|expr| expr.translate(schema, options))
+                                .transpose()?;
+                            insert.on = Some(sqlparser::ast::OnInsert::OnConflict(
+                                sqlparser::ast::OnConflict {
+                                    conflict_target: on_conflict.conflict_target.clone(),
+                                    action: sqlparser::ast::OnConflictAction::DoUpdate(
+                                        sqlparser::ast::DoUpdate {
+                                            assignments: translated_assignments,
+                                            selection: translated_selection,
+                                        },
+                                    ),
+                                },
+                            ));
                         }
                     }
                 }

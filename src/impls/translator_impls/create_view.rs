@@ -16,8 +16,8 @@ impl Translator for CreateView {
 
     fn translate(
         &self,
-        _schema: &Self::Schema,
-        _options: &Self::Options,
+        schema: &Self::Schema,
+        options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         // Check for unsupported PostgreSQL features
         if self.materialized {
@@ -78,7 +78,7 @@ impl Translator for CreateView {
             name: self.name.clone(),
             name_before_not_exists: self.name_before_not_exists,
             columns: self.columns.clone(),
-            query: self.query.clone(),
+            query: Box::new(self.query.translate(schema, options)?),
             options: CreateTableOptions::default(),
             cluster_by: Vec::new(),
             comment: self.comment.clone(), // Comments are harmless, pass through

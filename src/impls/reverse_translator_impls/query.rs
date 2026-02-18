@@ -40,7 +40,7 @@ impl ReverseTranslator for Query {
             .transpose()?;
 
         Ok(Query {
-            with: self.with.clone(),
+            with: reverse_translate_with(self.with.as_ref(), schema, options)?,
             body: Box::new(self.body.reverse_translate(schema, options)?),
             order_by,
             limit_clause: self.limit_clause.clone(),
@@ -192,6 +192,34 @@ fn reverse_translate_order_by_expr(
         options: expr.options,
         with_fill: expr.with_fill.clone(),
     })
+}
+
+fn reverse_translate_with(
+    with: Option<&sqlparser::ast::With>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::With>, Error> {
+    with.map(|w| {
+        let cte_tables = w
+            .cte_tables
+            .iter()
+            .map(|cte| {
+                Ok(sqlparser::ast::Cte {
+                    alias: cte.alias.clone(),
+                    query: Box::new(cte.query.reverse_translate(schema, options)?),
+                    from: cte.from.clone(),
+                    materialized: cte.materialized,
+                    closing_paren_token: cte.closing_paren_token.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(sqlparser::ast::With {
+            with_token: w.with_token.clone(),
+            recursive: w.recursive,
+            cte_tables,
+        })
+    })
+    .transpose()
 }
 
 fn reverse_translate_group_by(
