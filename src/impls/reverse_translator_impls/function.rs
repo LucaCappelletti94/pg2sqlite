@@ -1,4 +1,4 @@
-//! Implementation of the [`ReverseTranslator`] trait for the
+//! Implementation of the [`crate::traits::ReverseTranslator`] trait for the
 //! `Function` type.
 //!
 //! This module handles the reversal of SQLite functions to their PostgreSQL
