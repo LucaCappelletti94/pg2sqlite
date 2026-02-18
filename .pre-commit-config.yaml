@@ -64,6 +64,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: cargo-doc-check
+        name: cargo doc check
+        description: Check for broken doc links
+        entry: env RUSTDOCFLAGS="-F rustdoc::broken-intra-doc-links" cargo doc --no-deps
+        language: system
+        types: [rust]
+        pass_filenames: false
+
   # Markdown linting
   - repo: https://github.com/igorshubovych/markdownlint-cli
     rev: v0.43.0
