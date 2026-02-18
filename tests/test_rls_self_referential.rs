@@ -43,6 +43,7 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",
@@ -69,6 +70,7 @@ fn test_self_referential_translation_snapshot() -> Result<(), Box<dyn std::error
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",

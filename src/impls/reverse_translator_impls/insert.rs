@@ -42,18 +42,15 @@ fn build_upsert_on_conflict(
     insert_columns: &[Ident],
 ) -> Result<OnInsert, Error> {
     // Validate that all PK columns are present in insert_columns
-    let insert_col_names: Vec<String> = insert_columns.iter().map(|c| c.value.clone()).collect();
-
-    let missing_pk_cols: Vec<&String> = pk_columns
+    let has_missing_pk = pk_columns
         .iter()
-        .filter(|pk| !insert_col_names.iter().any(|ic| ic.eq_ignore_ascii_case(pk)))
-        .collect();
+        .any(|pk| !insert_columns.iter().any(|ic| ic.value.eq_ignore_ascii_case(pk)));
 
-    if !missing_pk_cols.is_empty() {
+    if has_missing_pk {
         return Err(Error::MissingPrimaryKeyInUpsert {
             table_name: table_name.to_string(),
             pk_columns: pk_columns.to_vec(),
-            insert_columns: insert_col_names,
+            insert_columns: insert_columns.iter().map(|c| c.value.clone()).collect(),
         });
     }
 

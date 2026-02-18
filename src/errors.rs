@@ -94,4 +94,24 @@ pub enum Error {
         /// The columns that were provided in the INSERT statement.
         insert_columns: Vec<String>,
     },
+    /// Error when RLS tables are present but no audit table name is configured.
+    #[error(
+        "RLS audit table name must be configured via `with_rls_audit_table_name()` \
+         when translating schemas with RLS policies. \
+         Example: .with_rls_audit_table_name(\"rls_violations\".to_string())"
+    )]
+    RlsAuditTableNameRequired,
+    /// Error when a row violates RLS policy during strict validation.
+    #[error(
+        "RLS validation: row violates row-level security policy for table '{table}'. \
+         Policy: {policy}. Row: {row_identifier}"
+    )]
+    RlsValidationViolation {
+        /// The table where the violation occurred.
+        table: String,
+        /// The policy that was violated.
+        policy: String,
+        /// Identifier for the row that violated the policy.
+        row_identifier: String,
+    },
 }

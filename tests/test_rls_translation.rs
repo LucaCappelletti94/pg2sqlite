@@ -63,6 +63,7 @@ fn test_rls_select_policy_filters_rows() -> Result<(), Box<dyn std::error::Error
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",
@@ -147,6 +148,7 @@ fn test_rls_insert_policy_enforces_owner() -> Result<(), Box<dyn std::error::Err
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",
@@ -203,6 +205,7 @@ fn test_rls_update_policy_restricts_updates() -> Result<(), Box<dyn std::error::
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",
@@ -291,6 +294,7 @@ fn test_rls_delete_policy_restricts_deletes() -> Result<(), Box<dyn std::error::
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",
@@ -381,6 +385,7 @@ fn test_rls_all_policy_works_like_individual_policies() -> Result<(), Box<dyn st
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",
@@ -509,7 +514,8 @@ fn test_missing_session_variable_mapping_error() -> Result<(), Box<dyn std::erro
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
-        .with_session_user_role("authenticated".to_string());
+        .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string());
     // Note: NOT calling .with_session_variable()
 
     // Translation should fail with SessionVariableMappingNotFound error

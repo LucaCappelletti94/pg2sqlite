@@ -19,6 +19,10 @@ pub struct Pg2SqliteOptions {
     session_user_role: Option<String>,
     /// Mappings from PostgreSQL session variable patterns to SQLite functions.
     session_variables: Vec<SessionVariableMapping>,
+    /// The name of the audit table for RLS validation monitoring.
+    rls_audit_table_name: Option<String>,
+    /// Whether to enable strict RLS validation (abort on violations).
+    strict_rls_validation: bool,
 }
 
 impl Default for Pg2SqliteOptions {
@@ -30,6 +34,8 @@ impl Default for Pg2SqliteOptions {
             rls_table_suffix: "_rls".to_string(),
             session_user_role: None,
             session_variables: Vec::new(),
+            rls_audit_table_name: None,
+            strict_rls_validation: false,
         }
     }
 }
@@ -109,5 +115,25 @@ impl TranslationOptions for Pg2SqliteOptions {
                 variable_name,
                 func_name,
             ))
+    }
+
+    // ==================== RLS Validation Options ====================
+
+    fn with_rls_audit_table_name(mut self, name: impl Into<String>) -> Self {
+        self.rls_audit_table_name = Some(name.into());
+        self
+    }
+
+    fn get_rls_audit_table_name(&self) -> Option<&str> {
+        self.rls_audit_table_name.as_deref()
+    }
+
+    fn with_strict_rls_validation(mut self) -> Self {
+        self.strict_rls_validation = true;
+        self
+    }
+
+    fn is_strict_rls_validation(&self) -> bool {
+        self.strict_rls_validation
     }
 }

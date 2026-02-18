@@ -21,10 +21,7 @@ mod test_groups;
 
 use diesel::{prelude::*, sqlite::SqliteConnection};
 use helpers::{establish_connection, set_session_user_id};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rosetta_uuid::Uuid;
 // Re-use models from test_groups
 pub use test_groups::{Group, User};
@@ -360,6 +357,8 @@ impl HasOwnerId for Group {
 // =============================================================================
 
 fn translation_options() -> Pg2SqliteOptions {
+    use pg2sqlite::traits::TranslationOptions;
+
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
@@ -367,6 +366,7 @@ fn translation_options() -> Pg2SqliteOptions {
             "app.user_id",
             "current_app_user",
         ))
+        .with_rls_audit_table_name("rls_audit".to_string())
 }
 
 fn setup_database(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {

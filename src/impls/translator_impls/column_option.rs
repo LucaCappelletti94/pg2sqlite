@@ -30,8 +30,8 @@ impl Translator for ColumnOptionDef {
             ColumnOption::Default(expr) => {
                 match expr {
                     Expr::Function(func) => {
-                        if let Some("CURRENT_TIMESTAMP") =
-                            func.name.0.first().and_then(|s| Some(s.as_ident()?.value.as_str()))
+                        if func.name.0.first().and_then(|s| Some(s.as_ident()?.value.as_str()))
+                            == Some("CURRENT_TIMESTAMP")
                         {
                             return Ok(Some(ColumnOptionDef {
                                 name: self.name.clone(),

@@ -333,14 +333,19 @@ impl PlPgSqlTranslator {
                     }
                     SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => {
                         // Compound identifier - just use the last part (column name)
-                        if let Some(col_name) = parts.last() {
-                            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
-                                Ident::new(subquery_alias.to_string()),
-                                col_name.clone(),
-                            ]))
-                        } else {
-                            SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(format!("col{i}"))))
-                        }
+                        parts.last().map_or_else(
+                            || {
+                                SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(format!(
+                                    "col{i}"
+                                ))))
+                            },
+                            |col_name| {
+                                SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
+                                    Ident::new(subquery_alias.to_string()),
+                                    col_name.clone(),
+                                ]))
+                            },
+                        )
                     }
                     SelectItem::ExprWithAlias { alias, .. } => {
                         // Use the alias
@@ -656,7 +661,7 @@ impl PlPgSqlTranslator {
     }
 
     /// Transforms a table factor (table reference).
-    fn transform_table_factor(
+    const fn transform_table_factor(
         _factor: &mut TableFactor,
         _context: &mut PlPgSqlContext,
         _options: &Pg2SqliteOptions,

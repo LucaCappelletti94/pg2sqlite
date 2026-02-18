@@ -8,10 +8,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::{establish_connection, set_session_username};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rosetta_uuid::Uuid;
 
 mod schema {
@@ -38,12 +35,15 @@ struct Profile {
 }
 
 fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error::Error>> {
+    use pg2sqlite::traits::TranslationOptions;
+
     let sql = include_str!("fixtures/rls_current_user.sql");
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"));
 
     let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -61,12 +61,15 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
 /// Snapshot test for current_user RLS translation.
 #[test]
 fn test_current_user_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    use pg2sqlite::traits::TranslationOptions;
+
     let sql = include_str!("fixtures/rls_current_user.sql");
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"));
 
     let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;

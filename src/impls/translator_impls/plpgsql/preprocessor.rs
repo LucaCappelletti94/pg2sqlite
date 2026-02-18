@@ -213,7 +213,7 @@ impl PlPgSqlPreprocessor {
         // We need to find SELECT ... INTO ... FROM patterns
         // and transform them into SET statements that can be parsed
         let mut result = String::new();
-        let chars = body.chars().peekable();
+        let chars = body.chars();
         let mut current_stmt = String::new();
         let mut in_string = false;
         let mut string_char = ' ';
@@ -255,11 +255,7 @@ impl PlPgSqlPreprocessor {
         let into_pos = stmt_upper.find(" INTO ");
 
         // Find FROM that comes AFTER INTO (not before, which could be in comments)
-        let from_pos = if let Some(i) = into_pos {
-            stmt_upper[i..].find(" FROM ").map(|f| f + i)
-        } else {
-            None
-        };
+        let from_pos = into_pos.and_then(|i| stmt_upper[i..].find(" FROM ").map(|f| f + i));
 
         // Must have SELECT, INTO, FROM in that order
         match (select_pos, into_pos, from_pos) {
@@ -339,11 +335,10 @@ impl PlPgSqlPreprocessor {
                 let indent = &line[..line.len() - line.trim_start().len()];
                 result.push_str(indent);
                 let _ = write!(result, "SET {} = {};", assignment.name, assignment.expression);
-                result.push('\n');
             } else {
                 result.push_str(line);
-                result.push('\n');
             }
+            result.push('\n');
         }
 
         result

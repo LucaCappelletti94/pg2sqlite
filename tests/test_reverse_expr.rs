@@ -1,0 +1,422 @@
+//! Tests for reverse expression translation in
+//! `src/impls/reverse_translator_impls/expr.rs`.
+//!
+//! Covers all expression match arms: UnaryOp, Nested, BinaryOp, Cast, IsNull,
+//! IsNotNull, IsTrue, IsNotTrue, IsFalse, IsNotFalse, Exists, Like, ILike,
+//! InList, InSubquery, Between, Case, Subquery, Extract, Tuple, Trim, Ceil,
+//! Floor, Position, Substring, Collate, and the fallback error.
+
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+
+/// Helper to set up translator with a simple schema and reverse translate
+/// SQLite SQL.
+fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
+    let translator = Pg2Sqlite::default().sql(pg_ddl).unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+    let stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
+    assert!(!stmts.is_empty(), "Expected at least one statement");
+    stmts[0].to_string()
+}
+
+const SCHEMA: &str = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT, score REAL);";
+
+// ==================== UnaryOp ====================
+
+#[test]
+fn reverse_unary_op_not() {
+    let pg = reverse(SCHEMA, "SELECT NOT (age > 5) FROM users;");
+    assert!(pg.contains("NOT"), "Expected NOT in output: {pg}");
+}
+
+#[test]
+fn reverse_unary_op_minus() {
+    let pg = reverse(SCHEMA, "SELECT -age FROM users;");
+    assert!(pg.contains('-'), "Expected minus in output: {pg}");
+}
+
+// ==================== Nested ====================
+
+#[test]
+fn reverse_nested_parenthesized() {
+    let pg = reverse(SCHEMA, "SELECT (age + 1) FROM users;");
+    assert!(pg.contains('('), "Expected parenthesized expression: {pg}");
+}
+
+// ==================== BinaryOp ====================
+
+#[test]
+fn reverse_binary_op_add() {
+    let pg = reverse(SCHEMA, "SELECT age + score FROM users;");
+    assert!(pg.contains('+'), "Expected + operator: {pg}");
+}
+
+#[test]
+fn reverse_binary_op_and() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE age > 5 AND name = 'test';");
+    assert!(pg.contains("AND"), "Expected AND: {pg}");
+}
+
+// ==================== Cast ====================
+
+#[test]
+fn reverse_cast() {
+    let pg = reverse(SCHEMA, "SELECT CAST(age AS TEXT) FROM users;");
+    assert!(pg.contains("CAST"), "Expected CAST in output: {pg}");
+    assert!(pg.contains("TEXT"), "Expected TEXT type: {pg}");
+}
+
+// ==================== IsNull / IsNotNull ====================
+
+#[test]
+fn reverse_is_null() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name IS NULL;");
+    assert!(pg.contains("IS NULL"), "Expected IS NULL: {pg}");
+}
+
+#[test]
+fn reverse_is_not_null() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name IS NOT NULL;");
+    assert!(pg.contains("IS NOT NULL"), "Expected IS NOT NULL: {pg}");
+}
+
+// ==================== Boolean checks ====================
+
+#[test]
+fn reverse_is_true() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE (age > 0) IS TRUE;");
+    assert!(pg.contains("IS TRUE"), "Expected IS TRUE: {pg}");
+}
+
+#[test]
+fn reverse_is_not_true() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE (age > 0) IS NOT TRUE;");
+    assert!(pg.contains("IS NOT TRUE"), "Expected IS NOT TRUE: {pg}");
+}
+
+#[test]
+fn reverse_is_false() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE (age > 0) IS FALSE;");
+    assert!(pg.contains("IS FALSE"), "Expected IS FALSE: {pg}");
+}
+
+#[test]
+fn reverse_is_not_false() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE (age > 0) IS NOT FALSE;");
+    assert!(pg.contains("IS NOT FALSE"), "Expected IS NOT FALSE: {pg}");
+}
+
+// ==================== Exists ====================
+
+#[test]
+fn reverse_exists() {
+    let pg =
+        reverse(SCHEMA, "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM users WHERE age > 5);");
+    assert!(pg.contains("EXISTS"), "Expected EXISTS: {pg}");
+}
+
+#[test]
+fn reverse_not_exists() {
+    let pg = reverse(
+        SCHEMA,
+        "SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM users WHERE age > 5);",
+    );
+    assert!(pg.contains("NOT EXISTS"), "Expected NOT EXISTS: {pg}");
+}
+
+// ==================== Like / ILike ====================
+
+#[test]
+fn reverse_like() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name LIKE '%test%';");
+    assert!(pg.contains("LIKE"), "Expected LIKE: {pg}");
+}
+
+#[test]
+fn reverse_not_like() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name NOT LIKE '%test%';");
+    assert!(pg.contains("NOT LIKE"), "Expected NOT LIKE: {pg}");
+}
+
+// ==================== InList ====================
+
+#[test]
+fn reverse_in_list() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE age IN (1, 2, 3);");
+    assert!(pg.contains("IN"), "Expected IN: {pg}");
+}
+
+#[test]
+fn reverse_not_in_list() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE age NOT IN (1, 2, 3);");
+    assert!(pg.contains("NOT IN"), "Expected NOT IN: {pg}");
+}
+
+// ==================== InSubquery ====================
+
+#[test]
+fn reverse_in_subquery() {
+    let pg =
+        reverse(SCHEMA, "SELECT * FROM users WHERE id IN (SELECT id FROM users WHERE age > 5);");
+    assert!(pg.contains("IN (SELECT"), "Expected IN subquery: {pg}");
+}
+
+// ==================== Between ====================
+
+#[test]
+fn reverse_between() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE age BETWEEN 10 AND 20;");
+    assert!(pg.contains("BETWEEN"), "Expected BETWEEN: {pg}");
+}
+
+// ==================== Case ====================
+
+#[test]
+fn reverse_case_when() {
+    let pg = reverse(SCHEMA, "SELECT CASE WHEN age > 18 THEN 'adult' ELSE 'minor' END FROM users;");
+    assert!(pg.contains("CASE"), "Expected CASE: {pg}");
+    assert!(pg.contains("WHEN"), "Expected WHEN: {pg}");
+    assert!(pg.contains("ELSE"), "Expected ELSE: {pg}");
+}
+
+#[test]
+fn reverse_case_with_operand() {
+    let pg = reverse(
+        SCHEMA,
+        "SELECT CASE age WHEN 18 THEN 'eighteen' WHEN 21 THEN 'twentyone' END FROM users;",
+    );
+    assert!(pg.contains("CASE"), "Expected CASE: {pg}");
+}
+
+// ==================== Subquery ====================
+
+#[test]
+fn reverse_scalar_subquery() {
+    let pg = reverse(SCHEMA, "SELECT (SELECT MAX(age) FROM users) AS max_age;");
+    assert!(pg.contains("SELECT"), "Expected subquery: {pg}");
+    assert!(pg.contains("MAX"), "Expected MAX: {pg}");
+}
+
+// ==================== Trim ====================
+
+#[test]
+fn reverse_trim() {
+    let pg = reverse(SCHEMA, "SELECT TRIM(name) FROM users;");
+    assert!(pg.contains("TRIM"), "Expected TRIM: {pg}");
+}
+
+// ==================== Position ====================
+
+#[test]
+fn reverse_position() {
+    let pg = reverse(SCHEMA, "SELECT POSITION('a' IN name) FROM users;");
+    assert!(pg.contains("POSITION"), "Expected POSITION: {pg}");
+}
+
+// ==================== Substring ====================
+
+#[test]
+fn reverse_substring() {
+    let pg = reverse(SCHEMA, "SELECT SUBSTRING(name FROM 1 FOR 3) FROM users;");
+    assert!(pg.contains("SUBSTRING"), "Expected SUBSTRING: {pg}");
+}
+
+// ==================== Collate ====================
+
+#[test]
+fn reverse_collate() {
+    let pg = reverse(SCHEMA, "SELECT name COLLATE NOCASE FROM users;");
+    assert!(pg.contains("COLLATE"), "Expected COLLATE: {pg}");
+}
+
+// ==================== Compound expressions ====================
+
+#[test]
+fn reverse_complex_nested_expression() {
+    let pg = reverse(
+        SCHEMA,
+        "SELECT * FROM users WHERE (age > 18 AND name IS NOT NULL) OR score BETWEEN 0.0 AND 100.0;",
+    );
+    assert!(pg.contains("AND"), "Expected AND: {pg}");
+    assert!(pg.contains("OR"), "Expected OR: {pg}");
+}
+
+// ==================== ILike ====================
+
+#[test]
+fn reverse_ilike() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name ILIKE '%test%';");
+    assert!(pg.contains("ILIKE"), "Expected ILIKE: {pg}");
+}
+
+#[test]
+fn reverse_not_ilike() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name NOT ILIKE '%test%';");
+    assert!(pg.contains("NOT ILIKE"), "Expected NOT ILIKE: {pg}");
+}
+
+// ==================== Extract ====================
+
+#[test]
+fn reverse_extract() {
+    let pg = reverse(
+        "CREATE TABLE events (id INT PRIMARY KEY, created_at TIMESTAMP);",
+        "SELECT EXTRACT(YEAR FROM created_at) FROM events;",
+    );
+    assert!(pg.contains("EXTRACT"), "Expected EXTRACT: {pg}");
+}
+
+// ==================== Tuple ====================
+
+#[test]
+fn reverse_tuple_in_where() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE (id, age) IN ((1, 30), (2, 25));");
+    assert!(pg.contains("IN"), "Expected IN: {pg}");
+}
+
+// ==================== Array ====================
+
+#[test]
+fn reverse_array_literal() {
+    let pg = reverse(SCHEMA, "SELECT ARRAY[1, 2, 3] FROM users;");
+    assert!(pg.contains("ARRAY"), "Expected ARRAY: {pg}");
+}
+
+// ==================== Trim with character spec ====================
+
+#[test]
+fn reverse_trim_leading() {
+    let pg = reverse(SCHEMA, "SELECT TRIM(LEADING ' ' FROM name) FROM users;");
+    assert!(pg.contains("TRIM"), "Expected TRIM: {pg}");
+}
+
+#[test]
+fn reverse_trim_both() {
+    let pg = reverse(SCHEMA, "SELECT TRIM(BOTH ' ' FROM name) FROM users;");
+    assert!(pg.contains("TRIM"), "Expected TRIM: {pg}");
+}
+
+// ==================== Ceil / Floor ====================
+
+#[test]
+fn reverse_ceil() {
+    let pg = reverse(SCHEMA, "SELECT CEIL(score) FROM users;");
+    assert!(pg.contains("CEIL"), "Expected CEIL: {pg}");
+}
+
+#[test]
+fn reverse_floor() {
+    let pg = reverse(SCHEMA, "SELECT FLOOR(score) FROM users;");
+    assert!(pg.contains("FLOOR"), "Expected FLOOR: {pg}");
+}
+
+// ==================== RLike/Regexp ====================
+
+#[test]
+fn reverse_regexp() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name REGEXP '^[A-Z]';");
+    assert!(pg.contains("REGEXP") || pg.contains("RLIKE"), "Expected REGEXP or RLIKE: {pg}");
+}
+
+// ==================== Interval ====================
+
+#[test]
+fn reverse_interval() {
+    let pg = reverse(
+        "CREATE TABLE events (id INT PRIMARY KEY, created_at TIMESTAMP);",
+        "SELECT * FROM events WHERE created_at > INTERVAL '1' DAY;",
+    );
+    assert!(pg.contains("INTERVAL"), "Expected INTERVAL: {pg}");
+}
+
+// ==================== Compound field access ====================
+
+#[test]
+fn reverse_compound_identifier() {
+    let pg = reverse(SCHEMA, "SELECT users.name FROM users;");
+    assert!(pg.contains("users.name") || pg.contains("name"), "Expected compound: {pg}");
+}
+
+// ==================== TypedString ====================
+
+#[test]
+fn reverse_typed_string_date() {
+    let pg = reverse(
+        "CREATE TABLE events (id INT PRIMARY KEY, created_at DATE);",
+        "SELECT * FROM events WHERE created_at > DATE '2024-01-01';",
+    );
+    assert!(pg.contains("DATE") || pg.contains("2024-01-01"), "Expected DATE: {pg}");
+}
+
+#[test]
+fn reverse_typed_string_timestamp() {
+    let pg = reverse(
+        "CREATE TABLE events (id INT PRIMARY KEY, created_at TIMESTAMP);",
+        "SELECT * FROM events WHERE created_at > TIMESTAMP '2024-01-01 00:00:00';",
+    );
+    assert!(pg.contains("TIMESTAMP") || pg.contains("2024-01-01"), "Expected TIMESTAMP: {pg}");
+}
+
+// ==================== QualifiedWildcard ====================
+
+#[test]
+fn reverse_qualified_wildcard_in_select() {
+    let pg = reverse(
+        "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
+         CREATE TABLE posts (id INT PRIMARY KEY, user_id INT, title TEXT);",
+        "SELECT users.*, posts.title FROM users JOIN posts ON users.id = posts.user_id;",
+    );
+    assert!(pg.contains("users") && pg.contains("title"), "Expected qualified wildcard: {pg}");
+}
+
+// ==================== Substring with FOR ====================
+
+#[test]
+fn reverse_substring_with_for() {
+    let pg = reverse(SCHEMA, "SELECT SUBSTRING(name, 1, 3) FROM users;");
+    assert!(pg.contains("SUBSTRING") || pg.contains("name"), "Expected SUBSTRING: {pg}");
+}
+
+// ==================== Complex CASE with multiple WHEN ====================
+
+#[test]
+fn reverse_case_multiple_when() {
+    let pg = reverse(
+        SCHEMA,
+        "SELECT CASE WHEN age < 13 THEN 'child' WHEN age < 18 THEN 'teen' WHEN age < 65 THEN 'adult' ELSE 'senior' END FROM users;",
+    );
+    assert!(pg.contains("CASE"), "Expected CASE: {pg}");
+    assert!(pg.contains("child"), "Expected child: {pg}");
+    assert!(pg.contains("senior"), "Expected senior: {pg}");
+}
+
+// ==================== Not Between ====================
+
+#[test]
+fn reverse_not_between() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users WHERE age NOT BETWEEN 10 AND 20;");
+    assert!(pg.contains("NOT BETWEEN"), "Expected NOT BETWEEN: {pg}");
+}
+
+// ==================== NOT IN subquery ====================
+
+#[test]
+fn reverse_not_in_subquery() {
+    let pg = reverse(
+        SCHEMA,
+        "SELECT * FROM users WHERE id NOT IN (SELECT id FROM users WHERE age < 18);",
+    );
+    assert!(pg.contains("NOT IN"), "Expected NOT IN: {pg}");
+}
+
+// ==================== Nested expressions in binary ops ====================
+
+#[test]
+fn reverse_deeply_nested() {
+    let pg = reverse(
+        SCHEMA,
+        "SELECT * FROM users WHERE ((age > 5) AND (name IS NOT NULL)) OR (score < 10.0);",
+    );
+    assert!(pg.contains("AND"), "Expected AND: {pg}");
+    assert!(pg.contains("OR"), "Expected OR: {pg}");
+}

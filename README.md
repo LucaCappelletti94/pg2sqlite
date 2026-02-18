@@ -311,7 +311,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",  // Your SQLite function that returns the current user ID
-        ));
+        ))
+        .with_rls_audit_table_name("rls_violations".to_string());
 
     let sqlite_statements = Pg2Sqlite::default()
         .sql(pg_sql)?

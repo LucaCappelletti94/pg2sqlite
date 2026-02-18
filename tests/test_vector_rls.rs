@@ -72,8 +72,10 @@ struct Embedding<'a> {
 /// **Expected to FAIL initially** - demonstrates the bug.
 #[test]
 fn test_vec0_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::error::Error>> {
+    use pg2sqlite::traits::TranslationOptions;
+
     let fixture = include_str!("fixtures/vector_rls.sql");
-    let options = Pg2SqliteOptions::default();
+    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
     let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;
 
     let translated_sql: Vec<String> = translated.iter().map(ToString::to_string).collect();
@@ -126,9 +128,11 @@ fn test_vec0_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::e
 #[test]
 #[ignore = "sqlite-vec requires rusqlite, see test_vector_semantic.rs"]
 fn test_vec0_sync_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
+    use pg2sqlite::traits::TranslationOptions;
+
     let mut conn = establish_connection();
     let fixture = include_str!("fixtures/vector_rls.sql");
-    let options = Pg2SqliteOptions::default();
+    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
     let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;
 
     // Execute translated SQL
@@ -165,8 +169,10 @@ fn test_vec0_sync_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
 /// Snapshot test to verify the full translated SQL output.
 #[test]
 fn test_vector_rls_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    use pg2sqlite::traits::TranslationOptions;
+
     let fixture = include_str!("fixtures/vector_rls.sql");
-    let options = Pg2SqliteOptions::default();
+    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
     let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;
 
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");

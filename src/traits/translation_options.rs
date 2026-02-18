@@ -133,4 +133,46 @@ pub trait TranslationOptions {
         variable_name: impl Into<String>,
         sqlite_function: impl Into<String>,
     ) -> Self;
+
+    // ==================== RLS Validation Options ====================
+
+    #[must_use]
+    /// Sets the name of the audit table for RLS validation monitoring.
+    ///
+    /// This table will store all RLS policy violations detected during sync.
+    /// The audit table name must be configured when using RLS policies.
+    ///
+    /// # Example
+    /// ```
+    /// use pg2sqlite::prelude::*;
+    ///
+    /// let options =
+    ///     Pg2SqliteOptions::default().with_rls_audit_table_name("rls_violations".to_string());
+    /// ```
+    fn with_rls_audit_table_name(self, name: impl Into<String>) -> Self;
+
+    /// Returns the configured RLS audit table name, if set.
+    fn get_rls_audit_table_name(&self) -> Option<&str>;
+
+    #[must_use]
+    /// Enables strict RLS validation mode.
+    ///
+    /// In strict mode, RLS violations will cause transactions to abort
+    /// immediately instead of just logging. This is useful for development
+    /// and testing to catch backend RLS bugs early.
+    ///
+    /// Default is monitor mode (log only, no abort).
+    ///
+    /// # Example
+    /// ```
+    /// use pg2sqlite::prelude::*;
+    ///
+    /// let options = Pg2SqliteOptions::default()
+    ///     .with_rls_audit_table_name("rls_violations".to_string())
+    ///     .with_strict_rls_validation(); // Abort on violations
+    /// ```
+    fn with_strict_rls_validation(self) -> Self;
+
+    /// Returns whether strict RLS validation is enabled.
+    fn is_strict_rls_validation(&self) -> bool;
 }

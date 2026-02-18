@@ -1,13 +1,16 @@
 ---
 source: tests/test_fts5_rls.rs
-assertion_line: 144
 expression: translated_sql
 ---
+CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
 CREATE TABLE documents_rls (id INTEGER PRIMARY KEY NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL) STRICT
 CREATE VIEW documents AS SELECT id, title, content FROM documents_rls WHERE (true)
 CREATE TRIGGER documents_insert_trigger INSTEAD OF INSERT ON documents FOR EACH ROW BEGIN INSERT INTO documents_rls (id, title, content) VALUES (NEW.id, NEW.title, NEW.content); END
 CREATE TRIGGER documents_update_trigger INSTEAD OF UPDATE ON documents FOR EACH ROW BEGIN UPDATE documents_rls SET id = COALESCE(NEW.id, OLD.id), title = COALESCE(NEW.title, OLD.title), content = COALESCE(NEW.content, OLD.content) WHERE (id = OLD.id) AND ((true)); END
 CREATE TRIGGER documents_delete_trigger INSTEAD OF DELETE ON documents FOR EACH ROW BEGIN DELETE FROM documents_rls WHERE (id = OLD.id) AND ((true)); END
+CREATE TRIGGER documents_rls_rls_monitor_insert AFTER INSERT ON documents_rls FOR EACH ROW BEGIN INSERT INTO rls_audit (table_name, violation_type, row_identifier, policy_name, detected_at, severity, details, reported_at) SELECT 'documents', 'rls_policy_violation', 'id=' || quote(NEW.id), 'INSERT policy', datetime('now'), 'warning', 'Row inserted into backing table but not visible through RLS view', NULL WHERE NOT (EXISTS (SELECT 1 FROM documents WHERE documents.id = NEW.id)); END
+CREATE TRIGGER documents_rls_rls_monitor_update AFTER UPDATE ON documents_rls FOR EACH ROW BEGIN INSERT INTO rls_audit (table_name, violation_type, row_identifier, policy_name, detected_at, severity, details, reported_at) SELECT 'documents', 'rls_policy_violation', 'id=' || quote(NEW.id), 'UPDATE policy', datetime('now'), 'warning', 'Row updated in backing table but not visible through RLS view', NULL WHERE NOT (EXISTS (SELECT 1 FROM documents WHERE documents.id = NEW.id)); END
+CREATE VIEW documents_rls_violations AS SELECT id, title, content FROM documents_rls WHERE NOT EXISTS (SELECT 1 FROM documents WHERE documents_rls.id = documents.id)
 CREATE VIRTUAL TABLE documents_fts USING fts5 (title, content)
 CREATE TRIGGER documents_fts_ai AFTER INSERT ON documents_rls BEGIN INSERT INTO documents_fts (rowid, title, content) VALUES (new.id, new.title, new.content); END
 CREATE TRIGGER documents_fts_ad AFTER DELETE ON documents_rls BEGIN DELETE FROM documents_fts WHERE rowid = old.id; END

@@ -70,7 +70,7 @@ use diesel::prelude::*;
 use helpers::{establish_connection, set_session_user_id};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
-    traits::{SessionVariableMapping, TranslationOptions},
+    traits::SessionVariableMapping,
 };
 use rosetta_uuid::Uuid;
 
@@ -213,10 +213,13 @@ const SQL_FIXTURE: &str = include_str!("fixtures/grant_filtering.sql");
 
 /// Creates translation options for grant-based filtering tests.
 fn translation_options() -> Pg2SqliteOptions {
+    use pg2sqlite::traits::TranslationOptions;
+
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("uuidv7".to_string())
         .with_session_user_role("app_user")
+        .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_user("current_app_user"))
 }
 

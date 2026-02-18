@@ -144,14 +144,12 @@ impl PlPgSqlContext {
     /// `gen_random_uuid()`, etc.)
     #[must_use]
     pub fn is_uuid_generation(&self, name: &str) -> bool {
-        if let Some(binding) = self.get_binding(name) {
+        self.get_binding(name).is_some_and(|binding| {
             let expr_lower = binding.expression.to_lowercase();
             expr_lower.contains("uuidv7()")
                 || expr_lower.contains("uuidv4()")
                 || expr_lower.contains("gen_random_uuid()")
-        } else {
-            false
-        }
+        })
     }
 
     /// Records that a UUID variable was first used in an INSERT to a specific

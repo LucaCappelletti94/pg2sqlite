@@ -226,6 +226,71 @@ mod roundtrip {
         assert!(pg_sql.contains("chr("));
         assert!(!pg_sql.contains("char("));
     }
+
+    /// A SELECT with a JOIN passes through the reverse translator with the
+    /// JOIN intact.
+    #[test]
+    fn test_join_roundtrip() {
+        let pg_ddl = "
+            CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);
+            CREATE TABLE posts (id UUID PRIMARY KEY, user_id UUID, title TEXT);
+        ";
+        let translator = setup_translator(pg_ddl);
+        let schema = translator.build_schema().unwrap();
+        let options = Pg2SqliteOptions::default();
+
+        let sqlite_sql = "SELECT u.name, p.title FROM users u JOIN posts p ON u.id = p.user_id";
+        let pg_stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
+
+        assert_eq!(pg_stmts.len(), 1);
+        let pg_sql = pg_stmts[0].to_string();
+        assert!(pg_sql.contains("JOIN"), "Output should contain JOIN: {pg_sql}");
+        assert!(pg_sql.contains("users"), "Output should reference 'users': {pg_sql}");
+        assert!(pg_sql.contains("posts"), "Output should reference 'posts': {pg_sql}");
+    }
+
+    /// A SELECT with GROUP BY and HAVING passes through the reverse translator
+    /// with those clauses intact.
+    #[test]
+    fn test_select_with_group_by_roundtrip() {
+        let pg_ddl = "CREATE TABLE items (id UUID PRIMARY KEY, category TEXT, price INTEGER);";
+        let translator = setup_translator(pg_ddl);
+        let schema = translator.build_schema().unwrap();
+        let options = Pg2SqliteOptions::default();
+
+        let sqlite_sql =
+            "SELECT category, COUNT(*) AS cnt FROM items GROUP BY category HAVING COUNT(*) > 1";
+        let pg_stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
+
+        assert_eq!(pg_stmts.len(), 1);
+        let pg_sql = pg_stmts[0].to_string();
+        assert!(pg_sql.contains("GROUP BY"), "Output should contain GROUP BY: {pg_sql}");
+        assert!(pg_sql.contains("HAVING"), "Output should contain HAVING: {pg_sql}");
+        assert!(pg_sql.contains("category"), "Output should reference 'category': {pg_sql}");
+    }
+
+    /// A SELECT with an IN subquery passes through the reverse translator with
+    /// the subquery intact.
+    #[test]
+    fn test_select_with_subquery_roundtrip() {
+        let pg_ddl = "
+            CREATE TABLE orders (id UUID PRIMARY KEY, user_id UUID, total INTEGER);
+            CREATE TABLE users (id UUID PRIMARY KEY, active BOOLEAN);
+        ";
+        let translator = setup_translator(pg_ddl);
+        let schema = translator.build_schema().unwrap();
+        let options = Pg2SqliteOptions::default();
+
+        let sqlite_sql =
+            "SELECT * FROM orders WHERE user_id IN (SELECT id FROM users WHERE active = 1)";
+        let pg_stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
+
+        assert_eq!(pg_stmts.len(), 1);
+        let pg_sql = pg_stmts[0].to_string();
+        assert!(pg_sql.contains("IN"), "Output should contain IN clause: {pg_sql}");
+        assert!(pg_sql.contains("SELECT"), "Output should contain nested SELECT: {pg_sql}");
+        assert!(pg_sql.contains("users"), "Output should reference 'users': {pg_sql}");
+    }
 }
 
 // =============================================================================

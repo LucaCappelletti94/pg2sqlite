@@ -8,8 +8,10 @@ use sqlparser::ast::Statement;
 use tempfile::TempDir;
 
 use crate::{
+    impls::translator_impls::rls::generate_rls_audit_table,
     options::Pg2SqliteOptions,
     prelude::{ReverseTranslator, Translator},
+    traits::TranslationOptions,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -250,14 +252,30 @@ impl Pg2Sqlite {
         self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
+        use sql_traits::traits::{DatabaseLike, TableLike};
+
         let schema =
             ParserDB::from_statements(self.pg_statements.clone(), "translation_db".to_owned())?;
 
-        self.pg_statements
+        let mut result: Vec<Statement> = self
+            .pg_statements
             .iter()
             .map(|statement| statement.translate(&schema, options))
-            .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()
-            .map(|statements| statements.into_iter().flatten().collect())
+            .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // If any table has RLS enabled and audit table name is configured,
+        // prepend the audit table creation statement
+        let has_rls_tables = schema.tables().any(|table| table.has_row_level_security(&schema));
+
+        if has_rls_tables && let Some(audit_table_name) = options.get_rls_audit_table_name() {
+            let audit_table_stmt = generate_rls_audit_table(audit_table_name)?;
+            result.insert(0, audit_table_stmt);
+        }
+
+        Ok(result)
     }
 
     /// Builds the schema from the loaded PostgreSQL statements.

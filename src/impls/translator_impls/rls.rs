@@ -128,7 +128,7 @@ impl<'a> RlsTriggerContext<'a> {
         Self { table_name, inner_table_name }
     }
 
-    fn as_rename_tuple(&self) -> (&str, &str) {
+    const fn as_rename_tuple(&self) -> (&str, &str) {
         (self.table_name, self.inner_table_name.as_str())
     }
 }
@@ -1289,6 +1289,10 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
+    // Validate that audit table name is configured
+    let audit_table_name =
+        options.get_rls_audit_table_name().ok_or(Error::RlsAuditTableNameRequired)?;
+
     let dialect = sqlparser::dialect::SQLiteDialect {};
     let mut statements = Vec::new();
 
@@ -1322,6 +1326,11 @@ where
         })?;
     statements.extend(delete_stmts);
 
+    // Generate RLS validation monitoring triggers and views
+    let validation_stmts =
+        generate_rls_validation_statements(table, schema, options, audit_table_name)?;
+    statements.extend(validation_stmts);
+
     Ok(statements)
 }
 
@@ -1344,6 +1353,10 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
+    // Validate that audit table name is configured
+    let audit_table_name =
+        options.get_rls_audit_table_name().ok_or(Error::RlsAuditTableNameRequired)?;
+
     let dialect = sqlparser::dialect::SQLiteDialect {};
     let mut statements = Vec::new();
 
@@ -1352,6 +1365,12 @@ where
     let view_stmts = sqlparser::parser::Parser::parse_sql(&dialect, &view_sql)
         .map_err(|e| Error::UnknownPostgresFeature(format!("Failed to parse view SQL: {e}")))?;
     statements.extend(view_stmts);
+
+    // Generate RLS validation monitoring triggers and views
+    // (even for read-only tables, we monitor sync operations)
+    let validation_stmts =
+        generate_rls_validation_statements(table, schema, options, audit_table_name)?;
+    statements.extend(validation_stmts);
 
     Ok(statements)
 }
@@ -1386,4 +1405,393 @@ where
     }
 
     renamed
+}
+
+// ============================================================================
+// RLS Validation and Monitoring
+// ============================================================================
+
+/// Error message prefix used in RLS validation triggers.
+const RLS_VALIDATION_ERROR: &str = "RLS validation";
+
+/// Generates the SQL to create the RLS audit table.
+///
+/// This table stores all detected RLS policy violations during sync operations.
+/// The audit table is created once and shared by all RLS-enabled tables.
+///
+/// # Schema
+/// - `id`: Auto-incrementing primary key
+/// - `table_name`: Name of the table where violation occurred
+/// - `violation_type`: Type of violation (always 'rls_policy_violation')
+/// - `row_identifier`: Primary key values of the violating row
+/// - `policy_name`: Name of the policy that was violated
+/// - `detected_at`: Timestamp when violation was detected
+/// - `severity`: Severity level ('warning' in monitor mode, 'error' in strict)
+/// - `details`: Additional contextual information
+/// - `reported_at`: Timestamp when violation was reported to backend (NULL
+///   until reported)
+///
+/// # Arguments
+/// * `audit_table_name` - The name to use for the audit table (user-configured)
+///
+/// # Returns
+/// SQL string to create the audit table with STRICT mode for better type
+/// safety.
+#[must_use]
+pub fn generate_audit_table_sql(audit_table_name: &str) -> String {
+    format!(
+        r"CREATE TABLE IF NOT EXISTS {audit_table_name} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    violation_type TEXT NOT NULL,
+    row_identifier TEXT NOT NULL,
+    policy_name TEXT,
+    detected_at TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    details TEXT,
+    reported_at TEXT
+) STRICT"
+    )
+}
+
+/// Builds an expression that identifies a row using its primary key columns.
+///
+/// For example, if a table has primary key columns `(id, tenant_id)`, this
+/// generates: `'id=' || quote(NEW.id) || ', tenant_id=' ||
+/// quote(NEW.tenant_id)`
+///
+/// # Arguments
+/// * `pk_columns` - List of primary key column names
+/// * `prefix` - Row reference prefix ("NEW" or "OLD")
+///
+/// # Returns
+/// SQLite expression that builds a human-readable identifier string.
+fn build_row_identifier_expr(pk_columns: &[String], prefix: &str) -> String {
+    if pk_columns.is_empty() {
+        return "'<no PK>'".to_string();
+    }
+
+    pk_columns
+        .iter()
+        .map(|col| format!("'{col}=' || quote({prefix}.{col})"))
+        .collect::<Vec<_>>()
+        .join(" || ', ' || ")
+}
+
+/// Generates a WHERE clause check that tests if a row is visible through the
+/// RLS view.
+///
+/// This builds an EXISTS subquery that checks if the inserted/updated row would
+/// be visible when querying through the RLS-filtered view.
+///
+/// # Arguments
+/// * `table_name` - Name of the RLS view (e.g., "documents")
+/// * `pk_columns` - Primary key columns for row identification
+/// * `prefix` - Row reference prefix ("NEW" or "OLD")
+///
+/// # Returns
+/// SQL expression: `EXISTS (SELECT 1 FROM view WHERE pk_match)`
+fn generate_row_visibility_check(table_name: &str, pk_columns: &[String], prefix: &str) -> String {
+    let where_clause = if pk_columns.is_empty() {
+        // No PK - check all rows (will be slow but correct)
+        "1=1".to_string()
+    } else {
+        pk_columns
+            .iter()
+            .map(|col| format!("{table_name}.{col} = {prefix}.{col}"))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    };
+
+    format!("EXISTS (SELECT 1 FROM {table_name} WHERE {where_clause})")
+}
+
+/// Generates an AFTER INSERT trigger that monitors for RLS violations.
+///
+/// This trigger fires after a row is inserted into the backing table (e.g.,
+/// `documents_rls`). It checks if the newly inserted row is visible through the
+/// RLS view (e.g., `documents`). If not visible, the row violates RLS policy.
+///
+/// In monitor mode: logs violation to audit table
+/// In strict mode: logs violation + aborts transaction
+///
+/// # Arguments
+/// * `table_name` - Name of the RLS view (e.g., "documents")
+/// * `inner_table_name` - Name of the backing table (e.g., "documents_rls")
+/// * `pk_columns` - Primary key column names
+/// * `audit_table_name` - Name of the audit table for logging
+/// * `strict_mode` - If true, add RAISE(ABORT) to block violations
+///
+/// # Returns
+/// SQL string for CREATE TRIGGER statement
+fn generate_monitoring_insert_trigger_sql(
+    table_name: &str,
+    inner_table_name: &str,
+    pk_columns: &[String],
+    audit_table_name: &str,
+    strict_mode: bool,
+) -> String {
+    let visibility_check = generate_row_visibility_check(table_name, pk_columns, "NEW");
+    let row_identifier = build_row_identifier_expr(pk_columns, "NEW");
+    let severity = if strict_mode { "error" } else { "warning" };
+
+    let abort_clause = if strict_mode {
+        format!(
+            r"
+        SELECT RAISE(ABORT, '{RLS_VALIDATION_ERROR}: row violates row-level security policy for table ''{table_name}''');"
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r"CREATE TRIGGER {inner_table_name}_rls_monitor_insert
+AFTER INSERT ON {inner_table_name}
+FOR EACH ROW
+BEGIN
+    -- Check if inserted row is visible through RLS view
+    INSERT INTO {audit_table_name} (
+        table_name,
+        violation_type,
+        row_identifier,
+        policy_name,
+        detected_at,
+        severity,
+        details,
+        reported_at
+    )
+    SELECT
+        '{table_name}',
+        'rls_policy_violation',
+        {row_identifier},
+        'INSERT policy',
+        datetime('now'),
+        '{severity}',
+        'Row inserted into backing table but not visible through RLS view',
+        NULL
+    WHERE NOT ({visibility_check});{abort_clause}
+END"
+    )
+}
+
+/// Generates an AFTER UPDATE trigger that monitors for RLS violations.
+///
+/// Similar to the INSERT monitor, but triggers after UPDATE operations.
+/// Checks if the updated row remains visible through the RLS view.
+///
+/// # Arguments
+/// * `table_name` - Name of the RLS view
+/// * `inner_table_name` - Name of the backing table
+/// * `pk_columns` - Primary key column names
+/// * `audit_table_name` - Name of the audit table for logging
+/// * `strict_mode` - If true, add RAISE(ABORT) to block violations
+///
+/// # Returns
+/// SQL string for CREATE TRIGGER statement
+fn generate_monitoring_update_trigger_sql(
+    table_name: &str,
+    inner_table_name: &str,
+    pk_columns: &[String],
+    audit_table_name: &str,
+    strict_mode: bool,
+) -> String {
+    let visibility_check = generate_row_visibility_check(table_name, pk_columns, "NEW");
+    let row_identifier = build_row_identifier_expr(pk_columns, "NEW");
+    let severity = if strict_mode { "error" } else { "warning" };
+
+    let abort_clause = if strict_mode {
+        format!(
+            r"
+        SELECT RAISE(ABORT, '{RLS_VALIDATION_ERROR}: row violates row-level security policy for table ''{table_name}''');"
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r"CREATE TRIGGER {inner_table_name}_rls_monitor_update
+AFTER UPDATE ON {inner_table_name}
+FOR EACH ROW
+BEGIN
+    -- Check if updated row is visible through RLS view
+    INSERT INTO {audit_table_name} (
+        table_name,
+        violation_type,
+        row_identifier,
+        policy_name,
+        detected_at,
+        severity,
+        details,
+        reported_at
+    )
+    SELECT
+        '{table_name}',
+        'rls_policy_violation',
+        {row_identifier},
+        'UPDATE policy',
+        datetime('now'),
+        '{severity}',
+        'Row updated in backing table but not visible through RLS view',
+        NULL
+    WHERE NOT ({visibility_check});{abort_clause}
+END"
+    )
+}
+
+/// Generates a view that shows all rows violating RLS policies.
+///
+/// This validation view makes it easy to query for violations without going
+/// through the audit table. It shows all rows in the backing table that are NOT
+/// visible through the RLS view.
+///
+/// # Arguments
+/// * `table_name` - Name of the RLS view (e.g., "documents")
+/// * `inner_table_name` - Name of the backing table (e.g., "documents_rls")
+/// * `columns` - All column names in the table
+/// * `pk_columns` - Primary key columns for matching rows
+///
+/// # Returns
+/// SQL string for CREATE VIEW statement
+fn generate_validation_view_sql(
+    table_name: &str,
+    inner_table_name: &str,
+    columns: &[String],
+    pk_columns: &[String],
+) -> String {
+    let column_list = columns.join(", ");
+
+    // Build the WHERE clause to match rows by primary key
+    let pk_match = if pk_columns.is_empty() {
+        // No PK - this is rare but we'll use all columns (inefficient but correct)
+        columns
+            .iter()
+            .map(|col| format!("{inner_table_name}.{col} = {table_name}.{col}"))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    } else {
+        pk_columns
+            .iter()
+            .map(|col| format!("{inner_table_name}.{col} = {table_name}.{col}"))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    };
+
+    format!(
+        r"CREATE VIEW {inner_table_name}_violations AS
+SELECT {column_list}
+FROM {inner_table_name}
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM {table_name}
+    WHERE {pk_match}
+)"
+    )
+}
+
+/// Generates the complete set of RLS validation statements for a table.
+///
+/// This includes:
+/// - AFTER INSERT monitoring trigger
+/// - AFTER UPDATE monitoring trigger
+/// - Validation view showing current violations
+///
+/// Note: The audit table itself is generated separately (once per schema).
+///
+/// # Arguments
+/// * `table` - The table with RLS policies
+/// * `schema` - The database schema
+/// * `options` - Translation options (contains audit table name and strict mode
+///   setting)
+///
+/// # Returns
+/// Vector of SQL statements parsed and ready for execution
+///
+/// # Errors
+/// Returns an error if the generated SQL cannot be parsed
+pub fn generate_rls_validation_statements<O: TranslationOptions, DB: DatabaseLike>(
+    table: &DB::Table,
+    schema: &DB,
+    options: &O,
+    audit_table_name: &str,
+) -> Result<Vec<Statement>, Error>
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    let dialect = sqlparser::dialect::SQLiteDialect {};
+    let mut statements = Vec::new();
+
+    let table_name = table.table_name();
+    let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
+    let pk_columns = collect_pk_column_names(table, schema);
+    let all_columns = collect_column_names(table, schema);
+    let strict_mode = options.is_strict_rls_validation();
+
+    // Generate INSERT monitoring trigger
+    let insert_monitor_sql = generate_monitoring_insert_trigger_sql(
+        table_name,
+        &inner_table_name,
+        &pk_columns,
+        audit_table_name,
+        strict_mode,
+    );
+    let insert_stmts = sqlparser::parser::Parser::parse_sql(&dialect, &insert_monitor_sql)
+        .map_err(|e| {
+            Error::UnknownPostgresFeature(format!(
+                "Failed to parse RLS insert monitor trigger: {e}"
+            ))
+        })?;
+    statements.extend(insert_stmts);
+
+    // Generate UPDATE monitoring trigger
+    let update_monitor_sql = generate_monitoring_update_trigger_sql(
+        table_name,
+        &inner_table_name,
+        &pk_columns,
+        audit_table_name,
+        strict_mode,
+    );
+    let update_stmts = sqlparser::parser::Parser::parse_sql(&dialect, &update_monitor_sql)
+        .map_err(|e| {
+            Error::UnknownPostgresFeature(format!(
+                "Failed to parse RLS update monitor trigger: {e}"
+            ))
+        })?;
+    statements.extend(update_stmts);
+
+    // Generate validation view
+    let validation_view_sql =
+        generate_validation_view_sql(table_name, &inner_table_name, &all_columns, &pk_columns);
+    let view_stmts =
+        sqlparser::parser::Parser::parse_sql(&dialect, &validation_view_sql).map_err(|e| {
+            Error::UnknownPostgresFeature(format!("Failed to parse RLS validation view: {e}"))
+        })?;
+    statements.extend(view_stmts);
+
+    Ok(statements)
+}
+
+/// Helper function to generate the audit table SQL as a Statement.
+///
+/// This is a convenience wrapper around `generate_audit_table_sql` that parses
+/// the result into a Statement for easier integration.
+///
+/// # Arguments
+/// * `audit_table_name` - The name to use for the audit table
+///
+/// # Returns
+/// Parsed CREATE TABLE statement
+///
+/// # Errors
+/// Returns an error if the generated SQL cannot be parsed
+pub fn generate_rls_audit_table(audit_table_name: &str) -> Result<Statement, Error> {
+    let dialect = sqlparser::dialect::SQLiteDialect {};
+    let sql = generate_audit_table_sql(audit_table_name);
+
+    let mut stmts = sqlparser::parser::Parser::parse_sql(&dialect, &sql).map_err(|e| {
+        Error::UnknownPostgresFeature(format!("Failed to parse RLS audit table SQL: {e}"))
+    })?;
+
+    stmts.pop().ok_or_else(|| {
+        Error::UnknownPostgresFeature("No statement generated for audit table".to_string())
+    })
 }

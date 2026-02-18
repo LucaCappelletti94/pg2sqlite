@@ -1,8 +1,8 @@
 ---
 source: tests/test_rls_tenant_isolation.rs
-assertion_line: 119
 expression: translated_sql
 ---
+CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
 CREATE TABLE tenants (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, name TEXT NOT NULL) STRICT
 CREATE TABLE tenant_users (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, tenant_id BLOB NOT NULL REFERENCES tenants (id), user_id BLOB NOT NULL, role TEXT NOT NULL DEFAULT 'member') STRICT
 CREATE TABLE projects_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, tenant_id BLOB NOT NULL REFERENCES tenants (id), name TEXT NOT NULL, created_by BLOB NOT NULL) STRICT
@@ -10,3 +10,6 @@ CREATE VIEW projects AS SELECT id, tenant_id, name, created_by FROM projects_rls
 CREATE TRIGGER projects_insert_trigger INSTEAD OF INSERT ON projects FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.tenant_id IN (SELECT tu.tenant_id FROM tenant_users tu WHERE tu.user_id = current_app_user()) AND NEW.created_by = current_app_user())); INSERT INTO projects_rls (id, tenant_id, name, created_by) VALUES (NEW.id, NEW.tenant_id, NEW.name, NEW.created_by); END
 CREATE TRIGGER projects_update_trigger INSTEAD OF UPDATE ON projects FOR EACH ROW BEGIN UPDATE projects_rls SET id = COALESCE(NEW.id, OLD.id), tenant_id = COALESCE(NEW.tenant_id, OLD.tenant_id), name = COALESCE(NEW.name, OLD.name), created_by = COALESCE(NEW.created_by, OLD.created_by) WHERE id = OLD.id; END
 CREATE TRIGGER projects_delete_trigger INSTEAD OF DELETE ON projects FOR EACH ROW BEGIN DELETE FROM projects_rls WHERE (id = OLD.id) AND ((OLD.tenant_id IN (SELECT tu.tenant_id FROM tenant_users tu WHERE tu.user_id = current_app_user() AND tu.role = 'admin'))); END
+CREATE TRIGGER projects_rls_rls_monitor_insert AFTER INSERT ON projects_rls FOR EACH ROW BEGIN INSERT INTO rls_audit (table_name, violation_type, row_identifier, policy_name, detected_at, severity, details, reported_at) SELECT 'projects', 'rls_policy_violation', 'id=' || quote(NEW.id), 'INSERT policy', datetime('now'), 'warning', 'Row inserted into backing table but not visible through RLS view', NULL WHERE NOT (EXISTS (SELECT 1 FROM projects WHERE projects.id = NEW.id)); END
+CREATE TRIGGER projects_rls_rls_monitor_update AFTER UPDATE ON projects_rls FOR EACH ROW BEGIN INSERT INTO rls_audit (table_name, violation_type, row_identifier, policy_name, detected_at, severity, details, reported_at) SELECT 'projects', 'rls_policy_violation', 'id=' || quote(NEW.id), 'UPDATE policy', datetime('now'), 'warning', 'Row updated in backing table but not visible through RLS view', NULL WHERE NOT (EXISTS (SELECT 1 FROM projects WHERE projects.id = NEW.id)); END
+CREATE VIEW projects_rls_violations AS SELECT id, tenant_id, name, created_by FROM projects_rls WHERE NOT EXISTS (SELECT 1 FROM projects WHERE projects_rls.id = projects.id)

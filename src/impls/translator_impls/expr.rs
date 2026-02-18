@@ -228,7 +228,7 @@ fn translate_fts_expression(
                 lateral_views: Vec::new(),
                 prewhere: None,
                 selection: Some(Expr::BinaryOp {
-                    left: Box::new(Expr::Identifier(Ident::new(fts_table_name.clone()))),
+                    left: Box::new(Expr::Identifier(Ident::new(fts_table_name))),
                     op: BinaryOperator::Match,
                     right: Box::new(Expr::Value(ValueWithSpan {
                         value: Value::SingleQuotedString(fts5_query),
@@ -371,7 +371,7 @@ fn translate_floor(
                 }),
                 op: BinaryOperator::Or,
                 right: Box::new(Expr::BinaryOp {
-                    left: Box::new(translated_expr.clone()),
+                    left: Box::new(translated_expr),
                     op: BinaryOperator::Eq,
                     right: Box::new(cast_to_int.clone()),
                 }),
