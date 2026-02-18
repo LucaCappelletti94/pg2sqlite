@@ -154,6 +154,127 @@ fn rls_table_in_delete_produces_error() {
     );
 }
 
+#[test]
+fn rls_table_in_set_operation_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "SELECT id, name FROM users UNION SELECT id, name FROM users_rls;",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in set operation, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_in_insert_source_set_operation_produces_error() {
+    let translator = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+             CREATE TABLE archive (id INT PRIMARY KEY, name TEXT);",
+        )
+        .unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "INSERT INTO archive (id, name)
+         SELECT id, name FROM users
+         UNION
+         SELECT id, name FROM users_rls;",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in INSERT set operation source, got: {err}"
+    );
+}
+
+// ==================== RLS table in expression subqueries ====================
+
+#[test]
+fn rls_table_in_where_subquery_produces_error() {
+    let translator = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+             CREATE TABLE orders (id INT PRIMARY KEY, user_id INT);",
+        )
+        .unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "SELECT * FROM orders WHERE EXISTS (SELECT 1 FROM users_rls WHERE users_rls.id = orders.user_id);",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in WHERE subquery, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_in_having_subquery_produces_error() {
+    let translator = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+             CREATE TABLE orders (id INT PRIMARY KEY, user_id INT);",
+        )
+        .unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "SELECT user_id, COUNT(*) FROM orders GROUP BY user_id HAVING COUNT(*) > (SELECT COUNT(*) FROM users_rls);",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in HAVING subquery, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_in_projection_subquery_produces_error() {
+    let translator = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+             CREATE TABLE orders (id INT PRIMARY KEY, user_id INT);",
+        )
+        .unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "SELECT id, (SELECT name FROM users_rls WHERE users_rls.id = orders.user_id) AS user_name FROM orders;",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in projection subquery, got: {err}"
+    );
+}
+
 // ==================== Custom RLS suffix ====================
 
 #[test]

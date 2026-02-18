@@ -114,4 +114,10 @@ pub enum Error {
         /// Identifier for the row that violated the policy.
         row_identifier: String,
     },
+    /// Error when a migration file is not found among discovered migrations.
+    #[error("stop_at path '{path}' was not found among discovered up.sql migrations")]
+    MigrationNotFound {
+        /// The path that was not found.
+        path: String,
+    },
 }

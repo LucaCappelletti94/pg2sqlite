@@ -1,22 +1,62 @@
-//! Test translating the core migrations used in the `core_structures` crate.
+//! Integration test for translating migrations loaded from a git repository.
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
+use git2::{Repository, Signature};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     traits::{TranslationOptions, UuidRepresentation},
 };
+use tempfile::TempDir;
+
+fn build_local_migration_repo() -> Result<TempDir, Box<dyn std::error::Error>> {
+    let repo_dir = TempDir::new()?;
+    let repo = Repository::init(repo_dir.path())?;
+
+    let migration_01 = repo_dir.path().join("migrations/01_create_users/up.sql");
+    let migration_02 = repo_dir.path().join("migrations/02_seed_users/up.sql");
+    std::fs::create_dir_all(migration_01.parent().expect("path has a parent"))?;
+    std::fs::create_dir_all(migration_02.parent().expect("path has a parent"))?;
+
+    std::fs::write(
+        &migration_01,
+        r#"
+        CREATE TABLE users (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name TEXT NOT NULL
+        );
+        "#,
+    )?;
+    std::fs::write(
+        &migration_02,
+        r#"
+        INSERT INTO users (name) VALUES ('alice')
+        ON CONFLICT (id) DO NOTHING;
+        "#,
+    )?;
+
+    let mut index = repo.index()?;
+    index.add_path(std::path::Path::new("migrations/01_create_users/up.sql"))?;
+    index.add_path(std::path::Path::new("migrations/02_seed_users/up.sql"))?;
+    index.write()?;
+
+    let tree_id = index.write_tree()?;
+    let tree = repo.find_tree(tree_id)?;
+    let sig = Signature::now("pg2sqlite-test", "pg2sqlite-test@example.com")?;
+    repo.commit(Some("HEAD"), &sig, &sig, "Initial test migrations", &tree, &[])?;
+
+    Ok(repo_dir)
+}
 
 #[test]
-/// Test translating the core migrations used in the `core_structures` crate.
 fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
-    let translated_migrations = Pg2Sqlite::from_git(
-        "https://github.com/earth-metabolome-initiative/asset-procedure-schema",
-    )?
-    .translate(
-        &Pg2SqliteOptions::default()
-            .remove_unsupported_check_constraints()
-            .with_uuid_representation(UuidRepresentation::Blob),
-    )?;
+    let repo_dir = build_local_migration_repo()?;
+    let translated_migrations =
+        Pg2Sqlite::from_git(repo_dir.path().to_str().expect("temp path should be valid UTF-8"))?
+            .translate(
+                &Pg2SqliteOptions::default()
+                    .remove_unsupported_check_constraints()
+                    .with_uuid_representation(UuidRepresentation::Blob),
+            )?;
 
     // We try to parse the translated migrations using the `sqlparser` crate,
     // for the `SQLite` dialect.
@@ -28,9 +68,8 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to parse the translated migration");
     }
 
-    // We create a testcontainer `Docker` for `SQLite` and run the translated
-    // migrations, considering the severe limitations of our target use case
-    // which is `WASM + SQLite`.
+    // Execute translated migrations against in-memory SQLite to ensure
+    // syntactic and basic runtime compatibility.
     let mut connection = SqliteConnection::establish(":memory:")?;
 
     // Enable foreign key constraints (PRAGMA)

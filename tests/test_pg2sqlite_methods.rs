@@ -106,6 +106,32 @@ fn test_ups_until() {
 }
 
 #[test]
+fn test_ups_until_stop_not_found() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    let dir1 = root.join("01");
+    std::fs::create_dir(&dir1).unwrap();
+    std::fs::write(dir1.join("up.sql"), "CREATE TABLE t1 (id INT);").unwrap();
+
+    let dir2 = root.join("02");
+    std::fs::create_dir(&dir2).unwrap();
+    std::fs::write(dir2.join("up.sql"), "CREATE TABLE t2 (id INT);").unwrap();
+
+    // Existing file, but not a discovered up.sql migration path.
+    let stop_at = root.join("not_a_migration.sql");
+    std::fs::write(&stop_at, "-- not an up migration").unwrap();
+
+    let result = Pg2Sqlite::ups_until(root, &stop_at);
+    assert!(result.is_err(), "Expected ups_until to fail when stop_at is not in up.sql set");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not found among discovered up.sql migrations"),
+        "Expected not-found migration error, got: {err}"
+    );
+}
+
+#[test]
 fn test_translate() {
     // Basic test of translate flow, more detailed translation tests are elsewhere
     let translator = Pg2Sqlite::default().sql("CREATE TABLE test_trans (id INT);").unwrap();

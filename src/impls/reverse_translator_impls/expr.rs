@@ -325,9 +325,10 @@ impl ReverseTranslator for Expr {
             }
 
             _ => {
+                let debug = format!("{self:?}");
+                let variant_name = debug.split(['(', '{', ' ']).next().unwrap_or("Unknown");
                 return Err(Error::UnsupportedSQLiteFeature(format!(
-                    "Reverse translation for expression type {:?} is not yet implemented",
-                    std::mem::discriminant(self)
+                    "Reverse translation for expression type {variant_name} is not yet implemented",
                 )));
             }
         })

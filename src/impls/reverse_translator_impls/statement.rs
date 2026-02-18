@@ -3,7 +3,8 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    FromTable, ObjectName, Statement, TableFactor, TableObject, TableWithJoins, UpdateTableFromKind,
+    Delete, Expr, FromTable, Insert, ObjectName, Query, Select, SelectItem, SetExpr, Statement,
+    TableFactor, TableObject, TableWithJoins, Update, UpdateTableFromKind,
 };
 
 use crate::{
@@ -83,13 +84,7 @@ fn check_table_factor_for_rls(
 ) -> Result<(), Error> {
     match factor {
         TableFactor::Table { name, .. } => check_table_for_rls(name, options),
-        TableFactor::Derived { subquery, .. } => {
-            // Check subquery for RLS tables
-            if let sqlparser::ast::SetExpr::Select(select) = subquery.body.as_ref() {
-                check_from_clause_for_rls(&select.from, options)?;
-            }
-            Ok(())
-        }
+        TableFactor::Derived { subquery, .. } => check_query_for_rls(subquery, options),
         TableFactor::NestedJoin { table_with_joins, .. } => {
             check_table_factor_for_rls(&table_with_joins.relation, options)?;
             for join in &table_with_joins.joins {
@@ -99,6 +94,154 @@ fn check_table_factor_for_rls(
         }
         _ => Ok(()),
     }
+}
+
+/// Check an expression tree for RLS table references in subqueries.
+fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    match expr {
+        Expr::Subquery(query) => check_query_for_rls(query, options),
+        Expr::Exists { subquery, .. } => check_query_for_rls(subquery, options),
+        Expr::InSubquery { expr, subquery, .. } => {
+            check_expr_for_rls(expr, options)?;
+            check_query_for_rls(subquery, options)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            check_expr_for_rls(left, options)?;
+            check_expr_for_rls(right, options)
+        }
+        Expr::UnaryOp { expr, .. } => check_expr_for_rls(expr, options),
+        Expr::Nested(inner) => check_expr_for_rls(inner, options),
+        Expr::Case { operand, conditions, else_result, .. } => {
+            if let Some(op) = operand {
+                check_expr_for_rls(op, options)?;
+            }
+            for cw in conditions {
+                check_expr_for_rls(&cw.condition, options)?;
+                check_expr_for_rls(&cw.result, options)?;
+            }
+            if let Some(el) = else_result {
+                check_expr_for_rls(el, options)?;
+            }
+            Ok(())
+        }
+        Expr::Between { expr, low, high, .. } => {
+            check_expr_for_rls(expr, options)?;
+            check_expr_for_rls(low, options)?;
+            check_expr_for_rls(high, options)
+        }
+        Expr::InList { expr, list, .. } => {
+            check_expr_for_rls(expr, options)?;
+            for item in list {
+                check_expr_for_rls(item, options)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Check a select item for RLS table references in subqueries.
+fn check_select_item_for_rls(item: &SelectItem, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    match item {
+        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+            check_expr_for_rls(expr, options)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_select_for_rls(select: &Select, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    check_from_clause_for_rls(&select.from, options)?;
+
+    if let Some(selection) = &select.selection {
+        check_expr_for_rls(selection, options)?;
+    }
+
+    if let Some(having) = &select.having {
+        check_expr_for_rls(having, options)?;
+    }
+
+    for item in &select.projection {
+        check_select_item_for_rls(item, options)?;
+    }
+
+    Ok(())
+}
+
+fn check_set_expr_for_rls(set_expr: &SetExpr, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    match set_expr {
+        SetExpr::Select(select) => check_select_for_rls(select, options),
+        SetExpr::Query(query) => check_query_for_rls(query, options),
+        SetExpr::SetOperation { left, right, .. } => {
+            check_set_expr_for_rls(left, options)?;
+            check_set_expr_for_rls(right, options)
+        }
+        SetExpr::Insert(stmt) => {
+            if let Statement::Insert(insert) = stmt {
+                check_insert_for_rls(insert, options)?;
+            }
+            Ok(())
+        }
+        SetExpr::Update(stmt) => {
+            if let Statement::Update(update) = stmt {
+                check_update_for_rls(update, options)?;
+            }
+            Ok(())
+        }
+        SetExpr::Delete(stmt) => {
+            if let Statement::Delete(delete) = stmt {
+                check_delete_for_rls(delete, options)?;
+            }
+            Ok(())
+        }
+        SetExpr::Values(_) | SetExpr::Table(_) | SetExpr::Merge(_) => Ok(()),
+    }
+}
+
+fn check_query_for_rls(query: &Query, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            check_query_for_rls(&cte.query, options)?;
+        }
+    }
+    check_set_expr_for_rls(query.body.as_ref(), options)
+}
+
+fn check_insert_for_rls(insert: &Insert, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    check_table_object_for_rls(&insert.table, options)?;
+
+    if let Some(source) = &insert.source {
+        check_query_for_rls(source, options)?;
+    }
+
+    Ok(())
+}
+
+fn check_update_for_rls(update: &Update, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    check_table_factor_for_rls(&update.table.relation, options)?;
+    for join in &update.table.joins {
+        check_table_factor_for_rls(&join.relation, options)?;
+    }
+
+    if let Some(from) = &update.from {
+        check_update_from_for_rls(from, options)?;
+    }
+
+    Ok(())
+}
+
+fn check_delete_for_rls(delete: &Delete, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    for table_name in &delete.tables {
+        check_table_for_rls(table_name, options)?;
+    }
+
+    check_from_table_for_rls(&delete.from, options)?;
+
+    if let Some(using) = &delete.using {
+        check_from_clause_for_rls(using, options)?;
+    }
+
+    Ok(())
 }
 
 impl ReverseTranslator for Statement {
@@ -113,58 +256,30 @@ impl ReverseTranslator for Statement {
     ) -> Result<Self::PostgresEntry, Error> {
         match self {
             Statement::Insert(insert) => {
-                // Check table for RLS
-                check_table_object_for_rls(&insert.table, options)?;
-
-                // Check source query for RLS tables
-                if let Some(source) = &insert.source
-                    && let sqlparser::ast::SetExpr::Select(select) = source.body.as_ref()
-                {
-                    check_from_clause_for_rls(&select.from, options)?;
-                }
+                check_insert_for_rls(insert, options)?;
 
                 Ok(Statement::Insert(insert.reverse_translate(schema, options)?))
             }
             Statement::Update(update) => {
-                // Check table for RLS (update.table is TableWithJoins)
-                check_table_factor_for_rls(&update.table.relation, options)?;
-
-                // Check FROM clause for RLS tables
-                if let Some(from) = &update.from {
-                    check_update_from_for_rls(from, options)?;
-                }
+                check_update_for_rls(update, options)?;
 
                 Ok(Statement::Update(update.reverse_translate(schema, options)?))
             }
             Statement::Delete(delete) => {
-                // Check tables for RLS
-                for table_name in &delete.tables {
-                    check_table_for_rls(table_name, options)?;
-                }
-
-                // Check FROM clause for RLS tables
-                check_from_table_for_rls(&delete.from, options)?;
-
-                // Check USING clause for RLS tables
-                if let Some(using) = &delete.using {
-                    check_from_clause_for_rls(using, options)?;
-                }
+                check_delete_for_rls(delete, options)?;
 
                 Ok(Statement::Delete(delete.reverse_translate(schema, options)?))
             }
             Statement::Query(query) => {
-                // Check FROM clause for RLS tables
-                if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
-                    check_from_clause_for_rls(&select.from, options)?;
-                }
+                check_query_for_rls(query, options)?;
 
                 Ok(Statement::Query(Box::new(query.reverse_translate(schema, options)?)))
             }
             // Non-DML statements are not supported for reverse translation
             other => {
-                Err(Error::UnsupportedReverseStatement {
-                    statement_type: format!("{:?}", std::mem::discriminant(other)),
-                })
+                let debug = format!("{other:?}");
+                let variant_name = debug.split(['(', '{', ' ']).next().unwrap_or("Unknown");
+                Err(Error::UnsupportedReverseStatement { statement_type: variant_name.to_string() })
             }
         }
     }

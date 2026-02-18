@@ -146,10 +146,7 @@ fn multiple_triggers_translate() {
 }
 
 // ==================== IF with UPDATE inside trigger ====================
-// Note: Standalone UPDATE statements are currently filtered out by the
-// top-level statement translator (like other DML). The PL/pgSQL IF-block
-// translation still executes (condition injection path), but the UPDATE
-// itself is dropped. This test verifies the trigger structure is created.
+// Ensure UPDATE statements survive IF condition injection in trigger bodies.
 
 #[test]
 fn if_with_update_in_trigger() {
@@ -171,7 +168,7 @@ fn if_with_update_in_trigger() {
         FOR EACH ROW EXECUTE FUNCTION update_counter();
     "#;
     let output = translate(sql);
-    // The trigger structure is created even though UPDATE is filtered out
+    assert!(output.contains("UPDATE"), "Expected UPDATE in trigger body: {output}");
     assert!(output.contains("counter_trigger"), "Expected trigger to be created: {output}");
 }
 

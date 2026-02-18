@@ -10,6 +10,7 @@ use sqlparser::ast::{
     ObjectNamePart, OnConflict, OnConflictAction, OnInsert, SqliteOnConflict, TableObject,
 };
 
+use super::helpers::reverse_translate_select_item;
 use crate::{
     errors::Error,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
@@ -225,23 +226,4 @@ impl ReverseTranslator for Insert {
 
         Ok(insert)
     }
-}
-
-fn reverse_translate_select_item(
-    item: &sqlparser::ast::SelectItem,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::SelectItem, Error> {
-    Ok(match item {
-        sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
-            sqlparser::ast::SelectItem::UnnamedExpr(expr.reverse_translate(schema, options)?)
-        }
-        sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
-            sqlparser::ast::SelectItem::ExprWithAlias {
-                expr: expr.reverse_translate(schema, options)?,
-                alias: alias.clone(),
-            }
-        }
-        other => other.clone(),
-    })
 }

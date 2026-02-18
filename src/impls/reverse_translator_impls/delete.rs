@@ -4,6 +4,7 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Delete, FromTable};
 
+use super::helpers::{reverse_translate_select_item, reverse_translate_table_with_joins};
 use crate::{
     errors::Error,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
@@ -91,81 +92,5 @@ fn reverse_translate_from_table(
                     .collect::<Result<Vec<_>, _>>()?,
             )
         }
-    })
-}
-
-fn reverse_translate_table_with_joins(
-    table_with_joins: &sqlparser::ast::TableWithJoins,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::TableWithJoins, Error> {
-    let translated_joins = table_with_joins
-        .joins
-        .iter()
-        .map(|join| reverse_translate_join(join, schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(sqlparser::ast::TableWithJoins {
-        relation: reverse_translate_table_factor(&table_with_joins.relation, schema, options)?,
-        joins: translated_joins,
-    })
-}
-
-fn reverse_translate_join(
-    join: &sqlparser::ast::Join,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::Join, Error> {
-    Ok(sqlparser::ast::Join {
-        relation: reverse_translate_table_factor(&join.relation, schema, options)?,
-        global: join.global,
-        join_operator: join.join_operator.clone(),
-    })
-}
-
-fn reverse_translate_table_factor(
-    table_factor: &sqlparser::ast::TableFactor,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::TableFactor, Error> {
-    Ok(match table_factor {
-        sqlparser::ast::TableFactor::Derived { subquery, lateral, alias, sample } => {
-            sqlparser::ast::TableFactor::Derived {
-                subquery: Box::new(subquery.reverse_translate(schema, options)?),
-                lateral: *lateral,
-                alias: alias.clone(),
-                sample: sample.clone(),
-            }
-        }
-        sqlparser::ast::TableFactor::NestedJoin { table_with_joins, alias } => {
-            sqlparser::ast::TableFactor::NestedJoin {
-                table_with_joins: Box::new(reverse_translate_table_with_joins(
-                    table_with_joins,
-                    schema,
-                    options,
-                )?),
-                alias: alias.clone(),
-            }
-        }
-        other => other.clone(),
-    })
-}
-
-fn reverse_translate_select_item(
-    item: &sqlparser::ast::SelectItem,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::SelectItem, Error> {
-    Ok(match item {
-        sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
-            sqlparser::ast::SelectItem::UnnamedExpr(expr.reverse_translate(schema, options)?)
-        }
-        sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
-            sqlparser::ast::SelectItem::ExprWithAlias {
-                expr: expr.reverse_translate(schema, options)?,
-                alias: alias.clone(),
-            }
-        }
-        other => other.clone(),
     })
 }

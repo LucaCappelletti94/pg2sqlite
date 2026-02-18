@@ -1,70 +1,66 @@
-//! Implementation of the [`ReverseTranslator`] trait for the
+//! Implementation of the [`Translator`] trait for the
 //! `Update` type.
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Update, UpdateTableFromKind};
 
-use super::helpers::{reverse_translate_select_item, reverse_translate_table_with_joins};
+use super::helpers::{translate_select_item, translate_table_with_joins};
 use crate::{
     errors::Error,
-    prelude::{Pg2SqliteOptions, ReverseTranslator},
+    prelude::{Pg2SqliteOptions, Translator},
 };
 
-impl ReverseTranslator for Update {
+impl Translator for Update {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
-    type PostgresEntry = Update;
+    type SQLiteEntry = Update;
 
-    fn reverse_translate(
+    fn translate(
         &self,
         schema: &Self::Schema,
         options: &Self::Options,
-    ) -> Result<Self::PostgresEntry, Error> {
-        // Reverse translate SET clause expressions
+    ) -> Result<Self::SQLiteEntry, Error> {
+        // SQLite does not support join syntax directly on the UPDATE target table.
+        if !self.table.joins.is_empty() {
+            return Err(Error::UnsupportedSQLiteFeature(
+                "UPDATE with joins on the target table is not supported in SQLite. \
+                 Use UPDATE ... FROM ... instead."
+                    .to_string(),
+            ));
+        }
+
         let assignments = self
             .assignments
             .iter()
             .map(|assignment| {
                 Ok(sqlparser::ast::Assignment {
                     target: assignment.target.clone(),
-                    value: assignment.value.reverse_translate(schema, options)?,
+                    value: assignment.value.translate(schema, options)?,
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
-        // Reverse translate WHERE clause
-        let selection = self
-            .selection
-            .as_ref()
-            .map(|expr| expr.reverse_translate(schema, options))
-            .transpose()?;
+        let selection =
+            self.selection.as_ref().map(|expr| expr.translate(schema, options)).transpose()?;
 
-        // Reverse translate FROM clause if present
-        let from = self
-            .from
-            .as_ref()
-            .map(|f| reverse_translate_update_from(f, schema, options))
-            .transpose()?;
+        let from =
+            self.from.as_ref().map(|f| translate_update_from(f, schema, options)).transpose()?;
 
-        // Reverse translate RETURNING clause if present
         let returning = self
             .returning
             .as_ref()
             .map(|items| {
                 items
                     .iter()
-                    .map(|item| reverse_translate_select_item(item, schema, options))
+                    .map(|item| translate_select_item(item, schema, options))
                     .collect::<Result<Vec<_>, Error>>()
             })
             .transpose()?;
 
-        // Reverse translate the table
-        let table = reverse_translate_table_with_joins(&self.table, schema, options)?;
-
         Ok(Update {
             update_token: self.update_token.clone(),
             optimizer_hint: self.optimizer_hint.clone(),
-            table,
+            table: translate_table_with_joins(&self.table, schema, options)?,
             assignments,
             from,
             selection,
@@ -75,7 +71,7 @@ impl ReverseTranslator for Update {
     }
 }
 
-fn reverse_translate_update_from(
+fn translate_update_from(
     from: &UpdateTableFromKind,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
@@ -85,7 +81,7 @@ fn reverse_translate_update_from(
             UpdateTableFromKind::BeforeSet(
                 tables
                     .iter()
-                    .map(|t| reverse_translate_table_with_joins(t, schema, options))
+                    .map(|t| translate_table_with_joins(t, schema, options))
                     .collect::<Result<Vec<_>, _>>()?,
             )
         }
@@ -93,7 +89,7 @@ fn reverse_translate_update_from(
             UpdateTableFromKind::AfterSet(
                 tables
                     .iter()
-                    .map(|t| reverse_translate_table_with_joins(t, schema, options))
+                    .map(|t| translate_table_with_joins(t, schema, options))
                     .collect::<Result<Vec<_>, _>>()?,
             )
         }

@@ -369,17 +369,17 @@ fn forward_delete_simple() {
     assert!(output.contains("DELETE FROM"), "Expected DELETE FROM: {output}");
 }
 
-// ==================== Forward UPDATE is filtered ====================
+// ==================== Forward UPDATE simple ====================
 
 #[test]
-fn forward_update_is_filtered() {
+fn forward_update_simple() {
     let sql = "
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
         UPDATE users SET name = 'test' WHERE id = 1;
     ";
     let output = translate(sql);
-    // UPDATE statements are silently filtered in forward translation
-    assert!(!output.contains("UPDATE"), "UPDATE should be filtered: {output}");
+    assert!(output.contains("UPDATE"), "Expected UPDATE in output: {output}");
+    assert!(output.contains("WHERE"), "Expected WHERE clause in output: {output}");
 }
 
 // ==================== Forward INSERT with VALUES ====================

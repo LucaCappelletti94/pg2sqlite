@@ -5,6 +5,7 @@
 mod delete;
 mod expr;
 mod function;
+mod helpers;
 mod insert;
 mod query;
 mod statement;

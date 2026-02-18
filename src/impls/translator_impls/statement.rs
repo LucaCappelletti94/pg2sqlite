@@ -19,7 +19,7 @@ use crate::{
     traits::TranslationOptions,
 };
 
-fn inject_condition(stmt: &mut Statement, condition: Expr) {
+fn inject_condition(stmt: &mut Statement, condition: Expr) -> Result<(), crate::errors::Error> {
     match stmt {
         Statement::Insert(insert) => {
             if let Some(source) = &mut insert.source {
@@ -36,10 +36,17 @@ fn inject_condition(stmt: &mut Statement, condition: Expr) {
                         };
                         select.selection = Some(new_selection);
                     }
-                    _ => unimplemented!("Cannot inject condition into non-SELECT insert source"),
+                    _ => {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                            "Cannot inject IF condition into INSERT with non-SELECT source"
+                                .to_string(),
+                        ));
+                    }
                 }
             } else {
-                unimplemented!("Cannot inject condition into INSERT without source")
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "Cannot inject IF condition into INSERT without source".to_string(),
+                ));
             }
         }
         Statement::Update(update) => {
@@ -66,8 +73,15 @@ fn inject_condition(stmt: &mut Statement, condition: Expr) {
             };
             delete.selection = Some(new_selection);
         }
-        _ => unimplemented!("Cannot inject condition into statement: {:?}", stmt),
+        _ => {
+            let debug = format!("{stmt:?}");
+            let variant_name = debug.split(['(', '{', ' ']).next().unwrap_or("Unknown");
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "Cannot inject IF condition into statement type: {variant_name}",
+            )));
+        }
     }
+    Ok(())
 }
 
 impl Translator for Statement {
@@ -188,6 +202,7 @@ impl Translator for Statement {
             Self::CreateView(create_view) => {
                 vec![create_view.translate(schema, options)?.into()]
             }
+            Self::Update(update) => vec![Statement::Update(update.translate(schema, options)?)],
             Self::Delete(delete) => vec![delete.translate(schema, options)?],
             Self::Query(query) => {
                 vec![Statement::Query(Box::new(query.translate(schema, options)?))]
@@ -209,7 +224,7 @@ impl Translator for Statement {
                 for stmt in if_stmt.if_block.statements() {
                     let mut translated_stmts = stmt.translate(schema, options)?;
                     for translated_stmt in &mut translated_stmts {
-                        inject_condition(translated_stmt, condition.clone());
+                        inject_condition(translated_stmt, condition.clone())?;
                         statements.push(translated_stmt.clone());
                     }
                 }
@@ -304,7 +319,6 @@ impl Translator for Statement {
             | Self::ShowCreate { .. }
             | Self::ShowSchemas { .. }
             | Self::ShowCharset { .. }
-            | Self::Update(_)
             | Self::ShowColumns { .. }
             // User/Role/Schema management (no SQLite equivalent)
             | Self::AlterRole { .. }
@@ -380,5 +394,30 @@ impl Translator for Statement {
             // Case statement (procedural, not supported)
             | Self::Case(_) => Vec::new()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::{
+        ast::{Expr, Value, ValueWithSpan},
+        dialect::SQLiteDialect,
+        parser::Parser,
+    };
+
+    use super::inject_condition;
+
+    #[test]
+    fn inject_condition_returns_error_for_unsupported_statement() {
+        let mut stmt =
+            Parser::parse_sql(&SQLiteDialect {}, "VACUUM;").unwrap().into_iter().next().unwrap();
+
+        let condition = Expr::Value(ValueWithSpan {
+            value: Value::Boolean(true),
+            span: sqlparser::tokenizer::Span::empty(),
+        });
+
+        let result = inject_condition(&mut stmt, condition);
+        assert!(result.is_err(), "Expected unsupported statement to return an error");
     }
 }
