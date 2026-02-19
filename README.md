@@ -45,30 +45,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Statement translation
 
-| PostgreSQL | SQLite |
-|---|---|
-| `CREATE TABLE` | Translated with `STRICT` mode and automatic type mapping |
-| `CREATE INDEX` | Translated (including `CREATE INDEX IF NOT EXISTS`) |
-| `CREATE TRIGGER` | PL/pgSQL function bodies are translated to SQLite trigger syntax |
-| `CREATE VIEW` | Pass-through |
-| `INSERT` | `ON CONFLICT DO NOTHING` becomes `OR IGNORE` |
-| `UPDATE` / `DELETE` | Including `DELETE ... USING` syntax |
-| `DROP TABLE` / `DROP VIEW` / `DROP INDEX` | Strips `CASCADE` / `RESTRICT` |
-| `ALTER TABLE ENABLE ROW LEVEL SECURITY` | Translated to views + `INSTEAD OF` triggers (see [RLS](#row-level-security)) |
-| `CREATE POLICY` / `CREATE ROLE` / `GRANT` / `REVOKE` | Consumed for RLS and grant-based filtering |
+| PostgreSQL                                             | SQLite                                                                                  |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `CREATE TABLE`                                         | Translated with `STRICT` mode and automatic type mapping                                |
+| `CREATE INDEX`                                         | Translated (including `CREATE INDEX IF NOT EXISTS`)                                     |
+| `CREATE TRIGGER`                                       | PL/pgSQL function bodies are translated to SQLite trigger syntax                        |
+| `CREATE VIEW`                                          | Pass-through                                                                            |
+| `INSERT`                                               | `ON CONFLICT DO NOTHING` becomes `OR IGNORE`                                            |
+| `UPDATE` / `DELETE`                                    | Including `DELETE ... USING` syntax                                                     |
+| `DROP TABLE` / `DROP VIEW` / `DROP INDEX`              | Strips `CASCADE` / `RESTRICT`                                                           |
+| `ALTER TABLE ENABLE ROW LEVEL SECURITY`                | Translated to views + `INSTEAD OF` triggers (see [RLS](#row-level-security))            |
+| `CREATE POLICY` / `CREATE ROLE` / `GRANT` / `REVOKE`   | Consumed for RLS and grant-based filtering                                              |
 
 Statements without a SQLite equivalent (`CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `ALTER ROLE`, `COPY`, etc.) are silently skipped.
 
 ### Type mapping
 
-| PostgreSQL | SQLite |
-|---|---|
-| `SERIAL` / `SMALLSERIAL` / `SMALLINT` / `INT` / `BOOLEAN` | `INTEGER` |
-| `FLOAT` / `DOUBLE PRECISION` | `REAL` |
-| `VARCHAR` / `JSON` / `JSONB` / `TIMESTAMP` / `TIMESTAMPTZ` | `TEXT` |
-| `UUID` | `BLOB` or `TEXT` (configurable) |
-| `BYTEA` / `GEOGRAPHY` | `BLOB` |
-| `vector(N)` / `halfvec(N)` | `BLOB` (see [Vector search](#vector-search)) |
+| PostgreSQL                                                  | SQLite                                         |
+| ----------------------------------------------------------- | ---------------------------------------------- |
+| `SERIAL` / `SMALLSERIAL` / `SMALLINT` / `INT` / `BOOLEAN`   | `INTEGER`                                      |
+| `FLOAT` / `DOUBLE PRECISION`                                | `REAL`                                         |
+| `VARCHAR` / `JSON` / `JSONB` / `TIMESTAMP` / `TIMESTAMPTZ`  | `TEXT`                                         |
+| `UUID`                                                      | `BLOB` or `TEXT` (configurable)                |
+| `BYTEA` / `GEOGRAPHY`                                       | `BLOB`                                         |
+| `vector(N)` / `halfvec(N)`                                  | `BLOB` (see [Vector search](#vector-search))   |
 
 All `CREATE TABLE` output uses SQLite `STRICT` mode, and `NOT NULL` is automatically added to primary key columns.
 
@@ -110,10 +110,10 @@ flowchart LR
 
 PostgreSQL session variables are mapped to SQLite function calls:
 
-| PostgreSQL | SQLite |
-|---|---|
+| PostgreSQL                       | SQLite                              |
+| -------------------------------- | ----------------------------------- |
 | `current_setting('app.user_id')` | `current_app_user()` (configurable) |
-| `current_user` | `current_app_user()` (configurable) |
+| `current_user`                   | `current_app_user()` (configurable) |
 
 ```rust
 # use pg2sqlite::prelude::*;
@@ -129,11 +129,11 @@ let options = Pg2SqliteOptions::default()
 
 When `with_session_user_role` is set, the translation output is tailored to that role's permissions:
 
-| Grants to role | Result |
-|---|---|
-| None | Table skipped entirely (server-only) |
-| `SELECT` only | Table + view, no write triggers (read-only) |
-| Full CRUD | Table + view + `INSTEAD OF` triggers |
+| Grants to role | Result                                      |
+| -------------- | ------------------------------------------- |
+| None           | Table skipped entirely (server-only)        |
+| `SELECT` only  | Table + view, no write triggers (read-only) |
+| Full CRUD      | Table + view + `INSTEAD OF` triggers        |
 
 ```rust
 # use pg2sqlite::prelude::*;
@@ -147,11 +147,11 @@ This is useful for generating SQLite schemas for client-side replicas that shoul
 
 Translates [pgvector](https://github.com/pgvector/pgvector) types and operators to [sqlite-vec](https://github.com/asg017/sqlite-vec) equivalents:
 
-| PostgreSQL | sqlite-vec |
-|---|---|
-| `<->` (L2 distance) | `vec_distance_L2()` |
-| `<=>` (cosine distance) | `vec_distance_cosine()` |
-| `'[1,2,3]'::vector` | `vec_f32('[1,2,3]')` |
+| PostgreSQL              | sqlite-vec                |
+| ----------------------- | ------------------------- |
+| `<->` (L2 distance)     | `vec_distance_L2()`       |
+| `<=>` (cosine distance) | `vec_distance_cosine()`   |
+| `'[1,2,3]'::vector`     | `vec_f32('[1,2,3]')`      |
 
 For tables with vector columns, pg2sqlite additionally generates a `vec0` virtual table and sync triggers (`INSERT`, `UPDATE`, `DELETE`) to keep it synchronized with the main table.
 
@@ -189,13 +189,13 @@ assert_eq!(pg_stmts.len(), 2);
 
 ### Migration loading
 
-| Method | Description |
-|---|---|
-| `.sql(str)` | Parse a SQL string |
-| `.file(path)` | Read and parse a SQL file |
-| `Pg2Sqlite::ups(dir)` | Recursively load all `up.sql` migration files (sorted) |
-| `Pg2Sqlite::ups_until(dir, stop)` | Load migrations up to a specific file |
-| `Pg2Sqlite::from_git(url)` | Clone a git repository and load its `up.sql` migrations |
+| Method                              | Description                                                  |
+| ----------------------------------- | ------------------------------------------------------------ |
+| `.sql(str)`                         | Parse a SQL string                                           |
+| `.file(path)`                       | Read and parse a SQL file                                    |
+| `Pg2Sqlite::ups(dir)`               | Recursively load all `up.sql` migration files (sorted)       |
+| `Pg2Sqlite::ups_until(dir, stop)`   | Load migrations up to a specific file                        |
+| `Pg2Sqlite::from_git(url)`          | Clone a git repository and load its `up.sql` migrations      |
 
 ## Full RLS example
 
