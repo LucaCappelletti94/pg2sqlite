@@ -10,9 +10,10 @@ use sqlparser::ast::{
     ObjectNamePart, OnConflict, OnConflictAction, OnInsert, SqliteOnConflict, TableObject,
 };
 
-use super::helpers::reverse_translate_select_item;
+use super::helpers::Reverse;
 use crate::{
     errors::Error,
+    impls::shared_helpers::translate_returning,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -111,16 +112,7 @@ impl ReverseTranslator for Insert {
             .transpose()?;
 
         // Reverse translate RETURNING clause if present
-        let returning = self
-            .returning
-            .as_ref()
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| reverse_translate_select_item(item, schema, options))
-                    .collect::<Result<Vec<_>, Error>>()
-            })
-            .transpose()?;
+        let returning = translate_returning::<Reverse>(self.returning.as_ref(), schema, options)?;
 
         // Reverse translate assignments if present
         let assignments = self

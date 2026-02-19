@@ -4,9 +4,10 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Update, UpdateTableFromKind};
 
-use super::helpers::{translate_select_item, translate_table_with_joins};
+use super::helpers::{Forward, translate_table_with_joins};
 use crate::{
     errors::Error,
+    impls::shared_helpers::translate_returning,
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -46,16 +47,7 @@ impl Translator for Update {
         let from =
             self.from.as_ref().map(|f| translate_update_from(f, schema, options)).transpose()?;
 
-        let returning = self
-            .returning
-            .as_ref()
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| translate_select_item(item, schema, options))
-                    .collect::<Result<Vec<_>, Error>>()
-            })
-            .transpose()?;
+        let returning = translate_returning::<Forward>(self.returning.as_ref(), schema, options)?;
 
         Ok(Update {
             update_token: self.update_token.clone(),

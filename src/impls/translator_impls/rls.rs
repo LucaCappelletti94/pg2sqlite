@@ -261,24 +261,55 @@ where
     Ok(())
 }
 
-/// Transforms an expression AST by:
-/// 1. Replacing session variable patterns with their SQLite function
-///    equivalents
-/// 2. Optionally prefixing column references with NEW. or OLD.
-/// 3. Renaming table references from `table_name` to `inner_table_name` (for
-///    RLS views)
+/// Strategy for handling column references in expression transformation.
+///
+/// - `Prefix`: Prefixes bare column references with `NEW.`/`OLD.` and renames
+///   qualified table refs. Used in most trigger contexts.
+/// - `Coalesce`: Wraps column references in `COALESCE(NEW.col, OLD.col)`. Used
+///   in UPDATE WITH CHECK clauses where NEW.column is only defined for columns
+///   in the SET clause.
+enum ColumnRefStrategy<'a> {
+    Prefix { prefix: Option<&'a str>, table_rename: Option<(&'a str, &'a str)> },
+    Coalesce { table_rename: Option<(&'a str, &'a str)> },
+}
+
+impl ColumnRefStrategy<'_> {
+    fn table_rename(&self) -> Option<(&str, &str)> {
+        match self {
+            ColumnRefStrategy::Prefix { table_rename, .. }
+            | ColumnRefStrategy::Coalesce { table_rename, .. } => *table_rename,
+        }
+    }
+
+    /// The prefix to use when transforming subqueries. Coalesce strategy
+    /// always uses `Some("NEW")` for subqueries.
+    fn subquery_prefix(&self) -> Option<&str> {
+        match self {
+            ColumnRefStrategy::Prefix { prefix, .. } => *prefix,
+            ColumnRefStrategy::Coalesce { .. } => Some("NEW"),
+        }
+    }
+}
+
+/// Core expression transformation, generic over column reference strategy.
+///
+/// 1. Replaces session variable patterns with their SQLite function equivalents
+/// 2. Handles column references according to the given `ColumnRefStrategy`
+/// 3. Recursively transforms all sub-expressions
 #[allow(clippy::too_many_lines)]
-fn transform_expr<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_expr_generic<O: TranslationOptions, DB: DatabaseLike>(
     expr: &Expr,
     options: &O,
     table: &DB::Table,
     schema: &DB,
-    prefix: Option<&str>,
-    table_rename: Option<(&str, &str)>,
+    strategy: &ColumnRefStrategy<'_>,
 ) -> Expr
 where
     DB::Table: TableLike<DB = DB>,
 {
+    let recurse =
+        |e: &Expr| -> Expr { transform_expr_generic(e, options, table, schema, strategy) };
+
     match expr {
         // Handle current_setting('name')::type -> sqlite_func()
         Expr::Cast { expr: inner, .. } => {
@@ -287,8 +318,7 @@ where
             {
                 return transformed;
             }
-            // Recursively transform the inner expression, removing the cast
-            transform_expr(inner, options, table, schema, prefix, table_rename)
+            recurse(inner)
         }
 
         // Handle current_setting('name') without cast, and current_user as a function
@@ -297,7 +327,6 @@ where
                 return transformed;
             }
 
-            // Check if it's current_user (parsed as a no-arg function in PostgreSQL)
             let func_name = func.name.to_string().to_lowercase();
             if func_name == "current_user"
                 && let Some(sqlite_func) =
@@ -306,15 +335,13 @@ where
                 return make_function_call(sqlite_func);
             }
 
-            // Not a session function, return as-is (could recurse into args if needed)
             Expr::Function(func.clone())
         }
 
-        // Handle bare column identifiers -> PREFIX.column
+        // Handle bare column identifiers
         Expr::Identifier(ident) => {
             let ident_lower = ident.value.to_lowercase();
 
-            // Check if it's current_user
             if ident_lower == "current_user"
                 && let Some(sqlite_func) =
                     options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
@@ -322,34 +349,46 @@ where
                 return make_function_call(sqlite_func);
             }
 
-            // Check if it's a column that needs prefixing
-            if let Some(pfx) = prefix
-                && table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower)
-            {
-                return Expr::CompoundIdentifier(vec![Ident::new(pfx), ident.clone()]);
+            match strategy {
+                ColumnRefStrategy::Prefix { prefix: Some(pfx), .. } => {
+                    if table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower)
+                    {
+                        return Expr::CompoundIdentifier(vec![Ident::new(*pfx), ident.clone()]);
+                    }
+                }
+                ColumnRefStrategy::Coalesce { .. } => {
+                    if table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower)
+                    {
+                        return make_coalesce_expr(ident);
+                    }
+                }
+                ColumnRefStrategy::Prefix { prefix: None, .. } => {}
             }
 
             Expr::Identifier(ident.clone())
         }
 
-        // Handle already-qualified identifiers (e.g., table.column) - may need table rename or
-        // prefix
+        // Handle already-qualified identifiers (e.g., table.column)
         Expr::CompoundIdentifier(idents) => {
-            if let Some((old_name, new_name)) = table_rename
+            if let Some((old_name, new_name)) = strategy.table_rename()
                 && idents.len() >= 2
                 && idents[0].value.to_lowercase() == old_name.to_lowercase()
             {
-                // This is a reference to the target table (e.g., ownable_owners.owner_id)
-                // In trigger context with a prefix (NEW/OLD), use NEW.column or OLD.column
-                if let Some(pfx) = prefix {
-                    let mut new_idents = idents.clone();
-                    new_idents[0] = Ident::new(pfx);
-                    return Expr::CompoundIdentifier(new_idents);
+                match strategy {
+                    ColumnRefStrategy::Prefix { prefix: Some(pfx), .. } => {
+                        let mut new_idents = idents.clone();
+                        new_idents[0] = Ident::new(*pfx);
+                        return Expr::CompoundIdentifier(new_idents);
+                    }
+                    ColumnRefStrategy::Prefix { prefix: None, .. } => {
+                        let mut new_idents = idents.clone();
+                        new_idents[0] = Ident::new(new_name);
+                        return Expr::CompoundIdentifier(new_idents);
+                    }
+                    ColumnRefStrategy::Coalesce { .. } => {
+                        return make_coalesce_expr(&idents[1]);
+                    }
                 }
-                // Otherwise rename to the _rls table
-                let mut new_idents = idents.clone();
-                new_idents[0] = Ident::new(new_name);
-                return Expr::CompoundIdentifier(new_idents);
             }
             Expr::CompoundIdentifier(idents.clone())
         }
@@ -357,80 +396,35 @@ where
         // Recursively handle binary operations
         Expr::BinaryOp { left, op, right } => {
             Expr::BinaryOp {
-                left: Box::new(transform_expr(left, options, table, schema, prefix, table_rename)),
+                left: Box::new(recurse(left)),
                 op: op.clone(),
-                right: Box::new(transform_expr(
-                    right,
-                    options,
-                    table,
-                    schema,
-                    prefix,
-                    table_rename,
-                )),
+                right: Box::new(recurse(right)),
             }
         }
 
-        // Recursively handle unary operations
         Expr::UnaryOp { op, expr: inner } => {
-            Expr::UnaryOp {
-                op: *op,
-                expr: Box::new(transform_expr(inner, options, table, schema, prefix, table_rename)),
-            }
+            Expr::UnaryOp { op: *op, expr: Box::new(recurse(inner)) }
         }
 
-        // Handle nested/parenthesized expressions
-        Expr::Nested(inner) => {
-            Expr::Nested(Box::new(transform_expr(
-                inner,
-                options,
-                table,
-                schema,
-                prefix,
-                table_rename,
-            )))
-        }
+        Expr::Nested(inner) => Expr::Nested(Box::new(recurse(inner))),
 
-        // Handle IS NULL / IS NOT NULL
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(transform_expr(
-                inner,
-                options,
-                table,
-                schema,
-                prefix,
-                table_rename,
-            )))
-        }
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(transform_expr(
-                inner,
-                options,
-                table,
-                schema,
-                prefix,
-                table_rename,
-            )))
-        }
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(recurse(inner))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(recurse(inner))),
 
-        // Handle IN lists
         Expr::InList { expr: inner, list, negated } => {
             Expr::InList {
-                expr: Box::new(transform_expr(inner, options, table, schema, prefix, table_rename)),
-                list: list
-                    .iter()
-                    .map(|e| transform_expr(e, options, table, schema, prefix, table_rename))
-                    .collect(),
+                expr: Box::new(recurse(inner)),
+                list: list.iter().map(recurse).collect(),
                 negated: *negated,
             }
         }
 
-        // Handle BETWEEN
         Expr::Between { expr: inner, negated, low, high } => {
             Expr::Between {
-                expr: Box::new(transform_expr(inner, options, table, schema, prefix, table_rename)),
+                expr: Box::new(recurse(inner)),
                 negated: *negated,
-                low: Box::new(transform_expr(low, options, table, schema, prefix, table_rename)),
-                high: Box::new(transform_expr(high, options, table, schema, prefix, table_rename)),
+                low: Box::new(recurse(low)),
+                high: Box::new(recurse(high)),
             }
         }
 
@@ -442,36 +436,34 @@ where
                     options,
                     table,
                     schema,
-                    prefix,
-                    table_rename,
+                    strategy.subquery_prefix(),
+                    strategy.table_rename(),
                 )),
                 negated: *negated,
             }
         }
 
-        // Handle subquery expressions
         Expr::Subquery(subquery) => {
             Expr::Subquery(Box::new(transform_query(
                 subquery,
                 options,
                 table,
                 schema,
-                prefix,
-                table_rename,
+                strategy.subquery_prefix(),
+                strategy.table_rename(),
             )))
         }
 
-        // Handle IN (subquery) expressions
         Expr::InSubquery { expr: inner, subquery, negated } => {
             Expr::InSubquery {
-                expr: Box::new(transform_expr(inner, options, table, schema, prefix, table_rename)),
+                expr: Box::new(recurse(inner)),
                 subquery: Box::new(transform_query(
                     subquery,
                     options,
                     table,
                     schema,
-                    prefix,
-                    table_rename,
+                    strategy.subquery_prefix(),
+                    strategy.table_rename(),
                 )),
                 negated: *negated,
             }
@@ -482,11 +474,36 @@ where
     }
 }
 
+/// Transforms an expression AST by:
+/// 1. Replacing session variable patterns with their SQLite function
+///    equivalents
+/// 2. Optionally prefixing column references with NEW. or OLD.
+/// 3. Renaming table references from `table_name` to `inner_table_name` (for
+///    RLS views)
+fn transform_expr<O: TranslationOptions, DB: DatabaseLike>(
+    expr: &Expr,
+    options: &O,
+    table: &DB::Table,
+    schema: &DB,
+    prefix: Option<&str>,
+    table_rename: Option<(&str, &str)>,
+) -> Expr
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    transform_expr_generic(
+        expr,
+        options,
+        table,
+        schema,
+        &ColumnRefStrategy::Prefix { prefix, table_rename },
+    )
+}
+
 /// Transforms an expression for UPDATE WITH CHECK clauses.
 /// Uses COALESCE(NEW.column, OLD.column) for column references to handle
 /// partial updates, since in SQLite INSTEAD OF triggers, NEW.column is only
 /// defined for columns in the SET clause.
-#[allow(clippy::too_many_lines)]
 fn transform_expr_for_update_check<O: TranslationOptions, DB: DatabaseLike>(
     expr: &Expr,
     options: &O,
@@ -497,232 +514,13 @@ fn transform_expr_for_update_check<O: TranslationOptions, DB: DatabaseLike>(
 where
     DB::Table: TableLike<DB = DB>,
 {
-    match expr {
-        // Handle current_setting('name')::type -> sqlite_func()
-        Expr::Cast { expr: inner, .. } => {
-            if let Expr::Function(func) = inner.as_ref()
-                && let Some(transformed) = try_transform_session_function(func, options)
-            {
-                return transformed;
-            }
-            transform_expr_for_update_check(inner, options, table, schema, table_rename)
-        }
-
-        // Handle current_setting('name') without cast, and current_user as a function
-        Expr::Function(func) => {
-            if let Some(transformed) = try_transform_session_function(func, options) {
-                return transformed;
-            }
-
-            let func_name = func.name.to_string().to_lowercase();
-            if func_name == "current_user"
-                && let Some(sqlite_func) =
-                    options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
-            {
-                return make_function_call(sqlite_func);
-            }
-
-            Expr::Function(func.clone())
-        }
-
-        // Handle bare column identifiers -> COALESCE(NEW.column, OLD.column)
-        Expr::Identifier(ident) => {
-            let ident_lower = ident.value.to_lowercase();
-
-            // Check if it's current_user
-            if ident_lower == "current_user"
-                && let Some(sqlite_func) =
-                    options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
-            {
-                return make_function_call(sqlite_func);
-            }
-
-            // Check if it's a column that needs COALESCE wrapping
-            if table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower) {
-                return make_coalesce_expr(ident);
-            }
-
-            Expr::Identifier(ident.clone())
-        }
-
-        // Handle already-qualified identifiers (e.g., table.column)
-        Expr::CompoundIdentifier(idents) => {
-            if let Some((old_name, _new_name)) = table_rename
-                && idents.len() >= 2
-                && idents[0].value.to_lowercase() == old_name.to_lowercase()
-            {
-                // Reference to the target table - use COALESCE
-                return make_coalesce_expr(&idents[1]);
-            }
-            Expr::CompoundIdentifier(idents.clone())
-        }
-
-        // Recursively handle binary operations
-        Expr::BinaryOp { left, op, right } => {
-            Expr::BinaryOp {
-                left: Box::new(transform_expr_for_update_check(
-                    left,
-                    options,
-                    table,
-                    schema,
-                    table_rename,
-                )),
-                op: op.clone(),
-                right: Box::new(transform_expr_for_update_check(
-                    right,
-                    options,
-                    table,
-                    schema,
-                    table_rename,
-                )),
-            }
-        }
-
-        // Recursively handle unary operations
-        Expr::UnaryOp { op, expr: inner } => {
-            Expr::UnaryOp {
-                op: *op,
-                expr: Box::new(transform_expr_for_update_check(
-                    inner,
-                    options,
-                    table,
-                    schema,
-                    table_rename,
-                )),
-            }
-        }
-
-        // Handle nested/parenthesized expressions
-        Expr::Nested(inner) => {
-            Expr::Nested(Box::new(transform_expr_for_update_check(
-                inner,
-                options,
-                table,
-                schema,
-                table_rename,
-            )))
-        }
-
-        // Handle IS NULL / IS NOT NULL
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(transform_expr_for_update_check(
-                inner,
-                options,
-                table,
-                schema,
-                table_rename,
-            )))
-        }
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(transform_expr_for_update_check(
-                inner,
-                options,
-                table,
-                schema,
-                table_rename,
-            )))
-        }
-
-        // Handle IN lists
-        Expr::InList { expr: inner, list, negated } => {
-            Expr::InList {
-                expr: Box::new(transform_expr_for_update_check(
-                    inner,
-                    options,
-                    table,
-                    schema,
-                    table_rename,
-                )),
-                list: list
-                    .iter()
-                    .map(|e| {
-                        transform_expr_for_update_check(e, options, table, schema, table_rename)
-                    })
-                    .collect(),
-                negated: *negated,
-            }
-        }
-
-        // Handle EXISTS (subquery) - delegate to transform_query for proper handling
-        Expr::Exists { subquery, negated } => {
-            Expr::Exists {
-                subquery: Box::new(transform_query(
-                    subquery,
-                    options,
-                    table,
-                    schema,
-                    Some("NEW"), // Use NEW prefix for subquery column refs
-                    table_rename,
-                )),
-                negated: *negated,
-            }
-        }
-
-        // Handle subquery expressions
-        Expr::Subquery(subquery) => {
-            Expr::Subquery(Box::new(transform_query(
-                subquery,
-                options,
-                table,
-                schema,
-                Some("NEW"),
-                table_rename,
-            )))
-        }
-
-        // Handle IN (subquery) expressions
-        Expr::InSubquery { expr: inner, subquery, negated } => {
-            Expr::InSubquery {
-                expr: Box::new(transform_expr_for_update_check(
-                    inner,
-                    options,
-                    table,
-                    schema,
-                    table_rename,
-                )),
-                subquery: Box::new(transform_query(
-                    subquery,
-                    options,
-                    table,
-                    schema,
-                    Some("NEW"),
-                    table_rename,
-                )),
-                negated: *negated,
-            }
-        }
-
-        // Handle BETWEEN
-        Expr::Between { expr: inner, negated, low, high } => {
-            Expr::Between {
-                expr: Box::new(transform_expr_for_update_check(
-                    inner,
-                    options,
-                    table,
-                    schema,
-                    table_rename,
-                )),
-                negated: *negated,
-                low: Box::new(transform_expr_for_update_check(
-                    low,
-                    options,
-                    table,
-                    schema,
-                    table_rename,
-                )),
-                high: Box::new(transform_expr_for_update_check(
-                    high,
-                    options,
-                    table,
-                    schema,
-                    table_rename,
-                )),
-            }
-        }
-
-        // For any other expression type, return as-is
-        other => other.clone(),
-    }
+    transform_expr_generic(
+        expr,
+        options,
+        table,
+        schema,
+        &ColumnRefStrategy::Coalesce { table_rename },
+    )
 }
 
 /// Creates a COALESCE(NEW.column, OLD.column) expression.
@@ -1506,10 +1304,11 @@ fn generate_row_visibility_check(table_name: &str, pk_columns: &[String], prefix
     format!("EXISTS (SELECT 1 FROM {table_name} WHERE {where_clause})")
 }
 
-/// Generates an AFTER INSERT trigger that monitors for RLS violations.
+/// Generates an AFTER INSERT or AFTER UPDATE trigger that monitors for RLS
+/// violations.
 ///
-/// This trigger fires after a row is inserted into the backing table (e.g.,
-/// `documents_rls`). It checks if the newly inserted row is visible through the
+/// This trigger fires after a row is inserted into or updated in the backing
+/// table (e.g., `documents_rls`). It checks if the row is visible through the
 /// RLS view (e.g., `documents`). If not visible, the row violates RLS policy.
 ///
 /// In monitor mode: logs violation to audit table
@@ -1521,19 +1320,23 @@ fn generate_row_visibility_check(table_name: &str, pk_columns: &[String], prefix
 /// * `pk_columns` - Primary key column names
 /// * `audit_table_name` - Name of the audit table for logging
 /// * `strict_mode` - If true, add RAISE(ABORT) to block violations
+/// * `operation` - Either "insert" or "update"
 ///
 /// # Returns
 /// SQL string for CREATE TRIGGER statement
-fn generate_monitoring_insert_trigger_sql(
+fn generate_monitoring_trigger_sql(
     table_name: &str,
     inner_table_name: &str,
     pk_columns: &[String],
     audit_table_name: &str,
     strict_mode: bool,
+    operation: &str,
 ) -> String {
     let visibility_check = generate_row_visibility_check(table_name, pk_columns, "NEW");
     let row_identifier = build_row_identifier_expr(pk_columns, "NEW");
     let severity = if strict_mode { "error" } else { "warning" };
+    let op_upper = operation.to_uppercase();
+    let past_participle = if operation == "insert" { "inserted into" } else { "updated in" };
 
     let abort_clause = if strict_mode {
         format!(
@@ -1545,11 +1348,11 @@ fn generate_monitoring_insert_trigger_sql(
     };
 
     format!(
-        r"CREATE TRIGGER {inner_table_name}_rls_monitor_insert
-AFTER INSERT ON {inner_table_name}
+        r"CREATE TRIGGER {inner_table_name}_rls_monitor_{operation}
+AFTER {op_upper} ON {inner_table_name}
 FOR EACH ROW
 BEGIN
-    -- Check if inserted row is visible through RLS view
+    -- Check if {operation}d row is visible through RLS view
     INSERT INTO {audit_table_name} (
         table_name,
         violation_type,
@@ -1564,74 +1367,10 @@ BEGIN
         '{table_name}',
         'rls_policy_violation',
         {row_identifier},
-        'INSERT policy',
+        '{op_upper} policy',
         datetime('now'),
         '{severity}',
-        'Row inserted into backing table but not visible through RLS view',
-        NULL
-    WHERE NOT ({visibility_check});{abort_clause}
-END"
-    )
-}
-
-/// Generates an AFTER UPDATE trigger that monitors for RLS violations.
-///
-/// Similar to the INSERT monitor, but triggers after UPDATE operations.
-/// Checks if the updated row remains visible through the RLS view.
-///
-/// # Arguments
-/// * `table_name` - Name of the RLS view
-/// * `inner_table_name` - Name of the backing table
-/// * `pk_columns` - Primary key column names
-/// * `audit_table_name` - Name of the audit table for logging
-/// * `strict_mode` - If true, add RAISE(ABORT) to block violations
-///
-/// # Returns
-/// SQL string for CREATE TRIGGER statement
-fn generate_monitoring_update_trigger_sql(
-    table_name: &str,
-    inner_table_name: &str,
-    pk_columns: &[String],
-    audit_table_name: &str,
-    strict_mode: bool,
-) -> String {
-    let visibility_check = generate_row_visibility_check(table_name, pk_columns, "NEW");
-    let row_identifier = build_row_identifier_expr(pk_columns, "NEW");
-    let severity = if strict_mode { "error" } else { "warning" };
-
-    let abort_clause = if strict_mode {
-        format!(
-            r"
-        SELECT RAISE(ABORT, '{RLS_VALIDATION_ERROR}: row violates row-level security policy for table ''{table_name}''');"
-        )
-    } else {
-        String::new()
-    };
-
-    format!(
-        r"CREATE TRIGGER {inner_table_name}_rls_monitor_update
-AFTER UPDATE ON {inner_table_name}
-FOR EACH ROW
-BEGIN
-    -- Check if updated row is visible through RLS view
-    INSERT INTO {audit_table_name} (
-        table_name,
-        violation_type,
-        row_identifier,
-        policy_name,
-        detected_at,
-        severity,
-        details,
-        reported_at
-    )
-    SELECT
-        '{table_name}',
-        'rls_policy_violation',
-        {row_identifier},
-        'UPDATE policy',
-        datetime('now'),
-        '{severity}',
-        'Row updated in backing table but not visible through RLS view',
+        'Row {past_participle} backing table but not visible through RLS view',
         NULL
     WHERE NOT ({visibility_check});{abort_clause}
 END"
@@ -1726,37 +1465,23 @@ where
     let all_columns = collect_column_names(table, schema);
     let strict_mode = options.is_strict_rls_validation();
 
-    // Generate INSERT monitoring trigger
-    let insert_monitor_sql = generate_monitoring_insert_trigger_sql(
-        table_name,
-        &inner_table_name,
-        &pk_columns,
-        audit_table_name,
-        strict_mode,
-    );
-    let insert_stmts = sqlparser::parser::Parser::parse_sql(&dialect, &insert_monitor_sql)
-        .map_err(|e| {
+    // Generate INSERT and UPDATE monitoring triggers
+    for operation in &["insert", "update"] {
+        let monitor_sql = generate_monitoring_trigger_sql(
+            table_name,
+            &inner_table_name,
+            &pk_columns,
+            audit_table_name,
+            strict_mode,
+            operation,
+        );
+        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, &monitor_sql).map_err(|e| {
             Error::UnknownPostgresFeature(format!(
-                "Failed to parse RLS insert monitor trigger: {e}"
+                "Failed to parse RLS {operation} monitor trigger: {e}"
             ))
         })?;
-    statements.extend(insert_stmts);
-
-    // Generate UPDATE monitoring trigger
-    let update_monitor_sql = generate_monitoring_update_trigger_sql(
-        table_name,
-        &inner_table_name,
-        &pk_columns,
-        audit_table_name,
-        strict_mode,
-    );
-    let update_stmts = sqlparser::parser::Parser::parse_sql(&dialect, &update_monitor_sql)
-        .map_err(|e| {
-            Error::UnknownPostgresFeature(format!(
-                "Failed to parse RLS update monitor trigger: {e}"
-            ))
-        })?;
-    statements.extend(update_stmts);
+        statements.extend(stmts);
+    }
 
     // Generate validation view
     let validation_view_sql =

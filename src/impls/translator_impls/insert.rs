@@ -4,8 +4,11 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Insert;
 
-use super::helpers::translate_select_item;
-use crate::prelude::{Pg2SqliteOptions, Translator};
+use super::helpers::Forward;
+use crate::{
+    impls::shared_helpers::translate_returning,
+    prelude::{Pg2SqliteOptions, Translator},
+};
 
 impl Translator for Insert {
     type Schema = ParserDB;
@@ -22,16 +25,7 @@ impl Translator for Insert {
             self.source.as_ref().map(|q| q.translate(schema, options)).transpose()?.map(Box::new);
 
         // Translate RETURNING expressions
-        let returning = self
-            .returning
-            .as_ref()
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| translate_select_item(item, schema, options))
-                    .collect::<Result<Vec<_>, crate::errors::Error>>()
-            })
-            .transpose()?;
+        let returning = translate_returning::<Forward>(self.returning.as_ref(), schema, options)?;
 
         let mut insert = Insert { source, returning, ..self.clone() };
 

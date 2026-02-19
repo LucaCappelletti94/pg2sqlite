@@ -4,9 +4,10 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Update, UpdateTableFromKind};
 
-use super::helpers::{reverse_translate_select_item, reverse_translate_table_with_joins};
+use super::helpers::{Reverse, reverse_translate_table_with_joins};
 use crate::{
     errors::Error,
+    impls::shared_helpers::translate_returning,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -47,16 +48,7 @@ impl ReverseTranslator for Update {
             .transpose()?;
 
         // Reverse translate RETURNING clause if present
-        let returning = self
-            .returning
-            .as_ref()
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| reverse_translate_select_item(item, schema, options))
-                    .collect::<Result<Vec<_>, Error>>()
-            })
-            .transpose()?;
+        let returning = translate_returning::<Reverse>(self.returning.as_ref(), schema, options)?;
 
         // Reverse translate the table
         let table = reverse_translate_table_with_joins(&self.table, schema, options)?;
