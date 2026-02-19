@@ -165,10 +165,6 @@ FOR EACH ROW EXECUTE FUNCTION propagate_delete();
 /// Test that DELETE...USING correctly references RLS backing tables in the
 /// EXISTS subquery.
 ///
-/// **Expected to FAIL initially** - demonstrates the bug where USING tables
-/// with RLS are not renamed to their backing tables in the converted EXISTS
-/// subquery.
-///
 /// ## Note on RLS Translation and Diesel ORM
 ///
 /// When pg2sqlite translates a PostgreSQL table with RLS enabled, it creates:
@@ -221,11 +217,6 @@ fn test_delete_using_with_rls_table() -> Result<(), Box<dyn std::error::Error>> 
         .expect("Should have DELETE statement");
 
     let sql_str = delete_stmt.to_string();
-
-    // BUG: Currently the EXISTS subquery references "users" (the view),
-    // but it should reference "users_rls" (the backing table).
-    // The view filters rows based on RLS policies, which could cause incorrect
-    // deletions.
 
     assert!(
         sql_str.contains("users_rls"),

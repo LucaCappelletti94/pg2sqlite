@@ -66,8 +66,6 @@ struct Document<'a> {
 
 /// Snapshot test: verify that FTS5 triggers reference the backing table
 /// (documents_rls) instead of the view (documents).
-///
-/// **Expected to FAIL initially** - demonstrates the bug.
 #[test]
 fn test_fts5_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::error::Error>> {
     use pg2sqlite::traits::TranslationOptions;
@@ -96,10 +94,6 @@ fn test_fts5_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::e
         .find(|s| s.contains("CREATE TRIGGER") && s.contains("_fts_ad"))
         .expect("Should have DELETE trigger for FTS5");
 
-    // BUG: Currently these triggers reference "documents" (the view),
-    // but they should reference "documents_rls" (the backing table).
-    // Views don't fire AFTER triggers in SQLite, so FTS5 never gets updated.
-
     assert!(
         insert_trigger.contains("ON documents_rls"),
         "INSERT trigger should be ON documents_rls (backing table), got: {insert_trigger}"
@@ -120,9 +114,6 @@ fn test_fts5_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::e
 
 /// Diesel functionality test: verify that FTS5 search actually works with RLS
 /// tables.
-///
-/// **Expected to FAIL initially** - demonstrates that search doesn't work
-/// because triggers never fire on the view.
 #[test]
 fn test_fts5_search_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
     use pg2sqlite::traits::TranslationOptions;
@@ -155,19 +146,14 @@ fn test_fts5_search_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(count, 2, "Should have 2 documents in backing table");
 
-    // Search using FTS5
-    // BUG: This will fail because the FTS5 triggers never fired (they're on the
-    // view, not the backing table), so the FTS5 index is empty.
-    // Note: FTS5 queries require raw SQL since they use MATCH operator
+    // Search using FTS5. Note: FTS5 queries require raw SQL since they use
+    // the MATCH operator.
     let results: Vec<helpers::Count> = diesel::sql_query(
         "SELECT COUNT(*) as count FROM documents_fts WHERE documents_fts MATCH 'Rust'",
     )
     .load(&mut conn)?;
 
-    assert!(
-        !results.is_empty() && results[0].count > 0,
-        "Should find search results for 'Rust', but FTS5 index is empty because triggers never fired"
-    );
+    assert!(!results.is_empty() && results[0].count > 0, "Should find search results for 'Rust'");
 
     // Verify we can find both documents with different search terms
     let rust_count: i64 = diesel::sql_query(

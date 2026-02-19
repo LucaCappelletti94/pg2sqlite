@@ -1,16 +1,21 @@
-use sql_traits::structs::ParserDB;
+use sql_traits::{
+    structs::ParserDB,
+    traits::{DatabaseLike, TableLike},
+};
 use sqlparser::{
     ast::{
-        Delete, Expr, FromTable, GroupByExpr, Ident, ObjectName, Query, Select, SelectFlavor,
-        SelectItem, SetExpr, Statement, TableFactor, Value, ValueWithSpan,
-        helpers::attached_token::AttachedToken,
+        Delete, Expr, FromTable, GroupByExpr, Query, Select, SelectFlavor, SelectItem, SetExpr,
+        Statement, TableFactor, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
 
 use super::helpers::{Forward, translate_table_with_joins};
 use crate::{
-    impls::{shared_helpers::translate_returning, translator_impls::rls::table_has_rls},
+    impls::{
+        object_name::{append_suffix, schema_and_table_for_lookup},
+        shared_helpers::translate_returning,
+    },
     options::Pg2SqliteOptions,
     traits::{TranslationOptions, translator::Translator},
 };
@@ -101,20 +106,24 @@ impl Translator for Delete {
                 for table_with_joins in &mut select.from {
                     // Update main table reference
                     if let TableFactor::Table { name, .. } = &mut table_with_joins.relation {
-                        let table_name = name.to_string();
-                        if table_has_rls(&table_name, schema) {
-                            let new_name = format!("{table_name}{rls_suffix}");
-                            *name = ObjectName::from(vec![Ident::new(new_name)]);
+                        let (table_schema, table_name) = schema_and_table_for_lookup(name);
+                        if table_name
+                            .and_then(|table_name| schema.table(table_schema, table_name))
+                            .is_some_and(|table| table.has_row_level_security(schema))
+                        {
+                            *name = append_suffix(name, rls_suffix);
                         }
                     }
 
                     // Update JOINed table references
                     for join in &mut table_with_joins.joins {
                         if let TableFactor::Table { name, .. } = &mut join.relation {
-                            let table_name = name.to_string();
-                            if table_has_rls(&table_name, schema) {
-                                let new_name = format!("{table_name}{rls_suffix}");
-                                *name = ObjectName::from(vec![Ident::new(new_name)]);
+                            let (table_schema, table_name) = schema_and_table_for_lookup(name);
+                            if table_name
+                                .and_then(|table_name| schema.table(table_schema, table_name))
+                                .is_some_and(|table| table.has_row_level_security(schema))
+                            {
+                                *name = append_suffix(name, rls_suffix);
                             }
                         }
                     }

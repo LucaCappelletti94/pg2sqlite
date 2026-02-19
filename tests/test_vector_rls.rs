@@ -68,8 +68,6 @@ struct Embedding<'a> {
 
 /// Snapshot test: verify that vec0 triggers reference the backing table
 /// (embeddings_rls) instead of the view (embeddings).
-///
-/// **Expected to FAIL initially** - demonstrates the bug.
 #[test]
 fn test_vec0_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::error::Error>> {
     use pg2sqlite::traits::TranslationOptions;
@@ -97,10 +95,6 @@ fn test_vec0_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::e
         .iter()
         .find(|s| s.contains("CREATE TRIGGER") && s.contains("_vec_ad"))
         .expect("Should have DELETE trigger for vec0");
-
-    // BUG: Currently these triggers reference "embeddings" (the view),
-    // but they should reference "embeddings_rls" (the backing table).
-    // Views don't fire AFTER triggers in SQLite, so vec0 never gets updated.
 
     assert!(
         insert_trigger.contains("ON embeddings_rls"),
@@ -153,14 +147,49 @@ fn test_vec0_sync_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(count, 1, "Should have 1 embedding in backing table");
 
-    // Check that vec0 table was synchronized
-    // BUG: This will fail because the vec0 triggers never fired (they're on the
-    // view, not the backing table), so the vec0 index is empty.
+    // Check that vec0 table was synchronized.
     let vec0_count: i64 = embeddings_embedding_vec::table.count().get_result(&mut conn)?;
 
-    assert_eq!(
-        vec0_count, 1,
-        "Should have 1 entry in vec0 table, but vec0 is empty because triggers never fired"
+    assert_eq!(vec0_count, 1, "Should have 1 entry in vec0 table");
+
+    Ok(())
+}
+
+/// Regression test: role-filtered table translation must still emit vec0
+/// artifacts for vector columns.
+#[test]
+fn test_role_filtered_vector_translation_keeps_vec0_artifacts()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pg2sqlite::traits::TranslationOptions;
+
+    let sql = r#"
+        CREATE ROLE readonly_user;
+
+        CREATE TABLE embeddings (
+            id SERIAL PRIMARY KEY,
+            content TEXT NOT NULL,
+            embedding vector(3)
+        );
+
+        ALTER TABLE embeddings ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY embeddings_policy ON embeddings FOR ALL TO PUBLIC USING (true);
+
+        GRANT SELECT ON embeddings TO readonly_user;
+    "#;
+
+    let options = Pg2SqliteOptions::default()
+        .with_session_user_role("readonly_user".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string());
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+
+    assert!(
+        output.contains("CREATE VIRTUAL TABLE embeddings_embedding_vec USING vec0"),
+        "Role-filtered translation should still emit vec0 table, got:\n{output}"
+    );
+    assert!(
+        output.contains("AFTER INSERT ON embeddings_rls"),
+        "Role-filtered translation should emit vec0 triggers on backing table, got:\n{output}"
     );
 
     Ok(())

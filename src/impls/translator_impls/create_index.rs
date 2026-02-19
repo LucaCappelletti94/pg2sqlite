@@ -11,7 +11,11 @@ use sqlparser::ast::{
 
 use crate::{
     errors::Error,
-    impls::translator_impls::rls::resolve_trigger_table_name,
+    impls::{
+        generated_sql::parse_generated_sql,
+        object_name::{last_ident, schema_and_table_for_lookup},
+        translator_impls::rls::resolve_trigger_table_name,
+    },
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -219,8 +223,12 @@ fn create_fts5_statements(
         .and_then(|p| p.as_ident())
         .map_or_else(|| "unknown".to_string(), |i| i.value.clone());
 
+    let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(table_name);
+    let table_name_for_lookup = table_name_for_lookup
+        .unwrap_or_else(|| last_ident(table_name).map_or("unknown", |ident| ident.value.as_str()));
+
     // Look up the table to get its primary key column
-    let table = schema.table(None, &base_name).ok_or_else(|| {
+    let table = schema.table(table_schema, table_name_for_lookup).ok_or_else(|| {
         Error::UnsupportedSQLiteFeature(format!(
             "Could not find table '{base_name}' in schema for FTS5 index creation"
         ))
@@ -243,15 +251,12 @@ fn create_fts5_statements(
     // Add triggers as raw SQL statements
     // We parse them using sqlparser to get proper Statement objects
     for trigger_sql in create_fts5_triggers(&trigger_table_name, &base_name, pk_column, columns) {
-        // Since sqlparser may not fully support SQLite trigger syntax,
-        // we use a simple approach: wrap the trigger as a raw statement
-        // by parsing it. If parsing fails, we skip the trigger.
-        if let Ok(parsed) = sqlparser::parser::Parser::parse_sql(
+        let parsed = parse_generated_sql(
             &sqlparser::dialect::SQLiteDialect {},
             &trigger_sql,
-        ) {
-            statements.extend(parsed);
-        }
+            "Failed to parse generated FTS5 trigger SQL",
+        )?;
+        statements.extend(parsed);
     }
 
     Ok(statements)

@@ -9,11 +9,16 @@
 use sql_traits::traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{
     CreatePolicyCommand, CreateTable, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, Statement,
+    FunctionArgumentList, FunctionArguments, Ident, JoinConstraint, JoinOperator, ObjectName,
+    Statement, TableFactor, Value,
 };
 
 use crate::{
     errors::Error,
+    impls::{
+        generated_sql::{parse_generated_sql, parse_single_generated_sql},
+        object_name::{append_suffix, last_ident, schema_and_table_for_lookup},
+    },
     traits::{SessionVariablePattern, TranslationOptions},
 };
 
@@ -195,6 +200,43 @@ fn contains_current_user(expr: &Expr) -> bool {
     }
 }
 
+fn function_name_lower(func: &Function) -> String {
+    func.name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .map_or_else(String::new, |ident| ident.value.to_lowercase())
+}
+
+fn extract_string_literal(expr: &Expr) -> Option<String> {
+    if let Expr::Value(value) = expr {
+        match &value.value {
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Some(s.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+fn extract_current_setting_name(func: &Function) -> Option<String> {
+    if function_name_lower(func) != "current_setting" {
+        return None;
+    }
+    if let FunctionArguments::List(FunctionArgumentList { args, .. }) = &func.args {
+        return args.first().and_then(|arg| {
+            match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. } => {
+                    extract_string_literal(expr)
+                }
+                _ => None,
+            }
+        });
+    }
+    None
+}
+
 /// Validates that all session variable patterns in an expression have mappings
 /// configured.
 ///
@@ -327,7 +369,7 @@ where
                 return transformed;
             }
 
-            let func_name = func.name.to_string().to_lowercase();
+            let func_name = function_name_lower(func);
             if func_name == "current_user"
                 && let Some(sqlite_func) =
                     options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
@@ -549,14 +591,8 @@ fn make_coalesce_expr(column: &Ident) -> Expr {
     })
 }
 
-/// Transforms a Query (used in subqueries) by recursively transforming its
-/// WHERE clause and FROM clause table references.
-///
-/// Inside a trigger context:
-/// - References to the outer table (e.g., `ownables.id`) should become `OLD.id`
-///   or `NEW.id` (using the prefix)
-/// - Other tables in the FROM clause get renamed to `_rls` suffix if they have
-///   RLS
+/// Transforms a Query (used in subqueries) by recursively transforming table
+/// references and all relevant expressions.
 fn transform_query<O: TranslationOptions, DB: DatabaseLike>(
     query: &sqlparser::ast::Query,
     options: &O,
@@ -570,86 +606,268 @@ where
 {
     let mut transformed = query.clone();
     let rls_suffix = options.get_rls_table_suffix();
+    let context =
+        SubqueryTransformContext { options, table, schema, prefix, outer_table, rls_suffix };
 
-    // Transform the body of the query (SELECT, etc.)
     if let sqlparser::ast::SetExpr::Select(ref mut select) = *transformed.body {
-        // Collect table renames from the FROM clause
         let mut subquery_table_renames: Vec<(String, String)> = Vec::new();
 
-        // Rename tables in the FROM clause to use _rls suffix
-        // (In PostgreSQL, RLS policies query raw tables, not RLS-filtered views)
-        for from in &mut select.from {
-            if let sqlparser::ast::TableFactor::Table { name, .. } = &mut from.relation {
-                let old_name = name.to_string();
-                // Skip if already has RLS suffix to prevent double-suffix
-                if old_name.ends_with(rls_suffix) {
-                    subquery_table_renames.push((old_name.clone(), old_name));
-                    continue;
-                }
-                // Only rename tables that have RLS policies (look up in schema)
-                let has_rls =
-                    schema.table(None, &old_name).is_some_and(|t| t.has_row_level_security(schema));
-                if !has_rls {
-                    subquery_table_renames.push((old_name.clone(), old_name));
-                    continue;
-                }
-                let new_name = format!("{old_name}{rls_suffix}");
-                subquery_table_renames.push((old_name, new_name.clone()));
+        for table_with_joins in &mut select.from {
+            transform_table_with_joins_for_subquery(
+                table_with_joins,
+                &context,
+                &mut subquery_table_renames,
+            );
+        }
 
-                if let Ok(mut stmts) = sqlparser::parser::Parser::parse_sql(
-                    &sqlparser::dialect::SQLiteDialect {},
-                    &format!("SELECT * FROM {new_name}"),
-                ) && let Some(sqlparser::ast::Statement::Query(q)) = stmts.pop()
-                    && let sqlparser::ast::SetExpr::Select(s) = *q.body
-                    && let Some(f) = s.from.first()
-                    && let sqlparser::ast::TableFactor::Table { name: new_obj_name, .. } =
-                        &f.relation
-                {
-                    *name = new_obj_name.clone();
+        if let Some(selection) = &mut select.selection {
+            *selection = transform_subquery_expression(
+                selection,
+                options,
+                table,
+                schema,
+                prefix,
+                outer_table,
+                &subquery_table_renames,
+            );
+        }
+
+        for item in &mut select.projection {
+            match item {
+                sqlparser::ast::SelectItem::UnnamedExpr(expr)
+                | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
+                    *expr = transform_subquery_expression(
+                        expr,
+                        options,
+                        table,
+                        schema,
+                        prefix,
+                        outer_table,
+                        &subquery_table_renames,
+                    );
                 }
+                _ => {}
             }
         }
 
-        // Transform the WHERE clause
-        if let Some(ref selection) = select.selection {
-            let mut transformed_selection = selection.clone();
+        if let Some(having) = &mut select.having {
+            *having = transform_subquery_expression(
+                having,
+                options,
+                table,
+                schema,
+                prefix,
+                outer_table,
+                &subquery_table_renames,
+            );
+        }
 
-            // For references to the outer table (e.g., `ownables.id`):
-            // - In trigger context (prefix is Some): convert to OLD.id or NEW.id
-            // - In view context (prefix is None): rename to ownables_rls.id
-            if let Some((outer_table_name, renamed_table_name)) = outer_table {
-                transformed_selection = transform_outer_table_refs(
-                    &transformed_selection,
-                    outer_table_name,
-                    prefix,
-                    Some(renamed_table_name),
-                );
-            }
+        if let Some(qualify) = &mut select.qualify {
+            *qualify = transform_subquery_expression(
+                qualify,
+                options,
+                table,
+                schema,
+                prefix,
+                outer_table,
+                &subquery_table_renames,
+            );
+        }
 
-            // Apply subquery table renames (tables in the FROM clause of this subquery)
-            // We also pass the prefix here to handle unqualified column references
-            // (e.g., `ownable_id` in subquery should become `NEW.ownable_id`)
-            for (old, new) in &subquery_table_renames {
-                transformed_selection = transform_expr(
-                    &transformed_selection,
+        if let sqlparser::ast::GroupByExpr::Expressions(group_exprs, _) = &mut select.group_by {
+            for group_expr in group_exprs {
+                *group_expr = transform_subquery_expression(
+                    group_expr,
                     options,
                     table,
                     schema,
-                    prefix, // Pass prefix to handle bare column identifiers
-                    Some((old.as_str(), new.as_str())),
+                    prefix,
+                    outer_table,
+                    &subquery_table_renames,
                 );
             }
-
-            // Transform session variables in the subquery
-            // Also pass prefix for any remaining bare column identifiers
-            transformed_selection =
-                transform_expr(&transformed_selection, options, table, schema, prefix, None);
-
-            select.selection = Some(transformed_selection);
         }
     }
 
     transformed
+}
+
+fn transform_subquery_expression<O: TranslationOptions, DB: DatabaseLike>(
+    expr: &Expr,
+    options: &O,
+    table: &DB::Table,
+    schema: &DB,
+    prefix: Option<&str>,
+    outer_table: Option<(&str, &str)>,
+    subquery_table_renames: &[(String, String)],
+) -> Expr
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    let mut transformed = expr.clone();
+
+    if let Some((outer_table_name, renamed_table_name)) = outer_table {
+        transformed = transform_outer_table_refs(
+            &transformed,
+            outer_table_name,
+            prefix,
+            Some(renamed_table_name),
+        );
+    }
+
+    for (old_name, new_name) in subquery_table_renames {
+        transformed = transform_expr(
+            &transformed,
+            options,
+            table,
+            schema,
+            prefix,
+            Some((old_name.as_str(), new_name.as_str())),
+        );
+    }
+
+    transform_expr(&transformed, options, table, schema, prefix, None)
+}
+
+struct SubqueryTransformContext<'a, O: TranslationOptions, DB: DatabaseLike>
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    options: &'a O,
+    table: &'a DB::Table,
+    schema: &'a DB,
+    prefix: Option<&'a str>,
+    outer_table: Option<(&'a str, &'a str)>,
+    rls_suffix: &'a str,
+}
+
+fn transform_table_with_joins_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
+    table_with_joins: &mut sqlparser::ast::TableWithJoins,
+    context: &SubqueryTransformContext<'_, O, DB>,
+    subquery_table_renames: &mut Vec<(String, String)>,
+) where
+    DB::Table: TableLike<DB = DB>,
+{
+    transform_table_factor_for_subquery(
+        &mut table_with_joins.relation,
+        context,
+        subquery_table_renames,
+    );
+
+    for join in &mut table_with_joins.joins {
+        transform_table_factor_for_subquery(&mut join.relation, context, subquery_table_renames);
+        transform_join_operator_for_subquery(
+            &mut join.join_operator,
+            context,
+            subquery_table_renames,
+        );
+    }
+}
+
+fn transform_table_factor_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
+    factor: &mut TableFactor,
+    context: &SubqueryTransformContext<'_, O, DB>,
+    subquery_table_renames: &mut Vec<(String, String)>,
+) where
+    DB::Table: TableLike<DB = DB>,
+{
+    match factor {
+        TableFactor::Table { name, .. } => {
+            let old_name =
+                last_ident(name).map_or_else(|| name.to_string(), |ident| ident.value.clone());
+            if old_name.ends_with(context.rls_suffix) {
+                subquery_table_renames.push((old_name.clone(), old_name));
+                return;
+            }
+
+            let (table_schema, table_name) = schema_and_table_for_lookup(name);
+            let has_rls = table_name
+                .and_then(|table_name| context.schema.table(table_schema, table_name))
+                .is_some_and(|table| table.has_row_level_security(context.schema));
+            if has_rls {
+                let renamed_name = append_suffix(name, context.rls_suffix);
+                let new_name = last_ident(&renamed_name)
+                    .map_or_else(|| old_name.clone(), |ident| ident.value.clone());
+                subquery_table_renames.push((old_name, new_name));
+                *name = renamed_name;
+            } else {
+                subquery_table_renames.push((old_name.clone(), old_name));
+            }
+        }
+        TableFactor::Derived { subquery, .. } => {
+            **subquery = transform_query(
+                subquery,
+                context.options,
+                context.table,
+                context.schema,
+                context.prefix,
+                context.outer_table,
+            );
+        }
+        TableFactor::NestedJoin { table_with_joins, .. } => {
+            transform_table_with_joins_for_subquery(
+                table_with_joins,
+                context,
+                subquery_table_renames,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn transform_join_operator_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
+    join_operator: &mut JoinOperator,
+    context: &SubqueryTransformContext<'_, O, DB>,
+    subquery_table_renames: &[(String, String)],
+) where
+    DB::Table: TableLike<DB = DB>,
+{
+    let rewrite_constraint = |constraint: &mut JoinConstraint| {
+        if let JoinConstraint::On(expr) = constraint {
+            *expr = transform_subquery_expression(
+                expr,
+                context.options,
+                context.table,
+                context.schema,
+                context.prefix,
+                context.outer_table,
+                subquery_table_renames,
+            );
+        }
+    };
+
+    match join_operator {
+        JoinOperator::Join(constraint)
+        | JoinOperator::Inner(constraint)
+        | JoinOperator::Left(constraint)
+        | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::Right(constraint)
+        | JoinOperator::RightOuter(constraint)
+        | JoinOperator::FullOuter(constraint)
+        | JoinOperator::CrossJoin(constraint)
+        | JoinOperator::Semi(constraint)
+        | JoinOperator::LeftSemi(constraint)
+        | JoinOperator::RightSemi(constraint)
+        | JoinOperator::Anti(constraint)
+        | JoinOperator::LeftAnti(constraint)
+        | JoinOperator::RightAnti(constraint)
+        | JoinOperator::StraightJoin(constraint) => {
+            rewrite_constraint(constraint);
+        }
+        JoinOperator::AsOf { constraint, match_condition } => {
+            rewrite_constraint(constraint);
+            *match_condition = transform_subquery_expression(
+                match_condition,
+                context.options,
+                context.table,
+                context.schema,
+                context.prefix,
+                context.outer_table,
+                subquery_table_renames,
+            );
+        }
+        JoinOperator::CrossApply | JoinOperator::OuterApply => {}
+    }
 }
 
 /// Transforms references to the outer table to use the prefix (OLD/NEW) or
@@ -792,16 +1010,8 @@ fn try_transform_session_function<O: TranslationOptions>(
     func: &Function,
     options: &O,
 ) -> Option<Expr> {
-    let func_name = func.name.to_string().to_lowercase();
-
-    if func_name == "current_setting"
-        && let FunctionArguments::List(FunctionArgumentList { args, .. }) = &func.args
-        && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))) = args.first()
-    {
-        let value_str = value.to_string();
-        let setting_name = value_str.trim_matches('\'');
-        let pattern = SessionVariablePattern::CurrentSetting { name: setting_name.to_string() };
-
+    if let Some(setting_name) = extract_current_setting_name(func) {
+        let pattern = SessionVariablePattern::CurrentSetting { name: setting_name };
         if let Some(sqlite_func) = options.find_session_variable_function(&pattern) {
             return Some(make_function_call(sqlite_func));
         }
@@ -1096,32 +1306,35 @@ where
 
     // Generate view
     let view_sql = generate_rls_view_sql(table, schema, options)?;
-    let view_stmts = sqlparser::parser::Parser::parse_sql(&dialect, &view_sql)
-        .map_err(|e| Error::UnknownPostgresFeature(format!("Failed to parse view SQL: {e}")))?;
+    let view_stmts =
+        parse_generated_sql(&dialect, &view_sql, "Failed to parse generated RLS view SQL")?;
     statements.extend(view_stmts);
 
     // Generate INSERT trigger
     let insert_sql = generate_insert_trigger_sql(table, schema, options);
-    let insert_stmts =
-        sqlparser::parser::Parser::parse_sql(&dialect, &insert_sql).map_err(|e| {
-            Error::UnknownPostgresFeature(format!("Failed to parse insert trigger: {e}"))
-        })?;
+    let insert_stmts = parse_generated_sql(
+        &dialect,
+        &insert_sql,
+        "Failed to parse generated RLS INSERT trigger SQL",
+    )?;
     statements.extend(insert_stmts);
 
     // Generate UPDATE trigger
     let update_sql = generate_update_trigger_sql(table, schema, options);
-    let update_stmts =
-        sqlparser::parser::Parser::parse_sql(&dialect, &update_sql).map_err(|e| {
-            Error::UnknownPostgresFeature(format!("Failed to parse update trigger: {e}"))
-        })?;
+    let update_stmts = parse_generated_sql(
+        &dialect,
+        &update_sql,
+        "Failed to parse generated RLS UPDATE trigger SQL",
+    )?;
     statements.extend(update_stmts);
 
     // Generate DELETE trigger
     let delete_sql = generate_delete_trigger_sql(table, schema, options);
-    let delete_stmts =
-        sqlparser::parser::Parser::parse_sql(&dialect, &delete_sql).map_err(|e| {
-            Error::UnknownPostgresFeature(format!("Failed to parse delete trigger: {e}"))
-        })?;
+    let delete_stmts = parse_generated_sql(
+        &dialect,
+        &delete_sql,
+        "Failed to parse generated RLS DELETE trigger SQL",
+    )?;
     statements.extend(delete_stmts);
 
     // Generate RLS validation monitoring triggers and views
@@ -1160,8 +1373,8 @@ where
 
     // Generate view only (no write triggers)
     let view_sql = generate_rls_view_sql(table, schema, options)?;
-    let view_stmts = sqlparser::parser::Parser::parse_sql(&dialect, &view_sql)
-        .map_err(|e| Error::UnknownPostgresFeature(format!("Failed to parse view SQL: {e}")))?;
+    let view_stmts =
+        parse_generated_sql(&dialect, &view_sql, "Failed to parse generated read-only RLS view")?;
     statements.extend(view_stmts);
 
     // Generate RLS validation monitoring triggers and views
@@ -1186,21 +1399,7 @@ where
 {
     let suffix = options.get_rls_table_suffix();
     let mut renamed = create_table.clone();
-    // Get the current table name and append suffix
-    let current_name = renamed.name.to_string();
-    let new_name = format!("{current_name}{suffix}");
-
-    // Parse the new name back into an ObjectName
-    let dialect = sqlparser::dialect::PostgreSqlDialect {};
-    if let Ok(mut stmts) =
-        sqlparser::parser::Parser::parse_sql(&dialect, &format!("SELECT * FROM {new_name}"))
-        && let Some(Statement::Query(query)) = stmts.pop()
-        && let sqlparser::ast::SetExpr::Select(select) = *query.body
-        && let Some(from) = select.from.first()
-        && let sqlparser::ast::TableFactor::Table { name, .. } = &from.relation
-    {
-        renamed.name = name.clone();
-    }
+    renamed.name = append_suffix(&renamed.name, suffix);
 
     renamed
 }
@@ -1475,21 +1674,22 @@ where
             strict_mode,
             operation,
         );
-        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, &monitor_sql).map_err(|e| {
-            Error::UnknownPostgresFeature(format!(
-                "Failed to parse RLS {operation} monitor trigger: {e}"
-            ))
-        })?;
+        let stmts = parse_generated_sql(
+            &dialect,
+            &monitor_sql,
+            &format!("Failed to parse generated RLS {operation} monitoring trigger"),
+        )?;
         statements.extend(stmts);
     }
 
     // Generate validation view
     let validation_view_sql =
         generate_validation_view_sql(table_name, &inner_table_name, &all_columns, &pk_columns);
-    let view_stmts =
-        sqlparser::parser::Parser::parse_sql(&dialect, &validation_view_sql).map_err(|e| {
-            Error::UnknownPostgresFeature(format!("Failed to parse RLS validation view: {e}"))
-        })?;
+    let view_stmts = parse_generated_sql(
+        &dialect,
+        &validation_view_sql,
+        "Failed to parse generated RLS validation view",
+    )?;
     statements.extend(view_stmts);
 
     Ok(statements)
@@ -1512,11 +1712,5 @@ pub fn generate_rls_audit_table(audit_table_name: &str) -> Result<Statement, Err
     let dialect = sqlparser::dialect::SQLiteDialect {};
     let sql = generate_audit_table_sql(audit_table_name);
 
-    let mut stmts = sqlparser::parser::Parser::parse_sql(&dialect, &sql).map_err(|e| {
-        Error::UnknownPostgresFeature(format!("Failed to parse RLS audit table SQL: {e}"))
-    })?;
-
-    stmts.pop().ok_or_else(|| {
-        Error::UnknownPostgresFeature("No statement generated for audit table".to_string())
-    })
+    parse_single_generated_sql(&dialect, &sql, "Failed to parse generated RLS audit table SQL")
 }

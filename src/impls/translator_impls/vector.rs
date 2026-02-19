@@ -30,7 +30,12 @@ use sql_traits::{
 use sqlparser::ast::{CreateTable, DataType, Ident, ObjectName, ObjectNamePart, Statement};
 
 use crate::{
-    errors::Error, impls::translator_impls::rls::resolve_trigger_table_name,
+    errors::Error,
+    impls::{
+        generated_sql::parse_generated_sql,
+        object_name::{last_ident, schema_and_table_for_lookup},
+        translator_impls::rls::resolve_trigger_table_name,
+    },
     prelude::Pg2SqliteOptions,
 };
 
@@ -112,10 +117,10 @@ fn find_pk_column(create_table: &CreateTable, schema: &ParserDB) -> Option<Strin
     }
 
     // Try to look up from schema
-    if let Some(table) = schema.table(
-        create_table.name.0.first().and_then(|p| p.as_ident()).map(|i| i.value.as_str()),
-        &create_table.name.to_string(),
-    ) {
+    let (table_schema, table_name) = schema_and_table_for_lookup(&create_table.name);
+    if let Some(table_name) = table_name
+        && let Some(table) = schema.table(table_schema, table_name)
+    {
         let pk_cols: Vec<_> = table.primary_key_columns(schema).collect();
         if pk_cols.len() == 1 {
             return Some(pk_cols[0].column_name().to_string());
@@ -229,7 +234,8 @@ pub fn generate_vec0_statements(
         return Ok(Vec::new());
     }
 
-    let table_name = create_table.name.to_string();
+    let table_name = last_ident(&create_table.name)
+        .map_or_else(|| create_table.name.to_string(), |ident| ident.value.clone());
     let pk_column = find_pk_column(create_table, schema).ok_or_else(|| {
         Error::UnsupportedSQLiteFeature(format!(
             "Table '{table_name}' with vector columns requires a single-column primary key \
@@ -238,11 +244,14 @@ pub fn generate_vec0_statements(
     })?;
 
     // Look up the table in schema to check for RLS
-    let table_obj = schema.table(None, &table_name).ok_or_else(|| {
-        Error::UnsupportedSQLiteFeature(format!(
-            "Table '{table_name}' not found in schema for vector sync triggers"
-        ))
-    })?;
+    let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(&create_table.name);
+    let table_obj = table_name_for_lookup
+        .and_then(|table_name| schema.table(table_schema, table_name))
+        .ok_or_else(|| {
+            Error::UnsupportedSQLiteFeature(format!(
+                "Table '{table_name}' not found in schema for vector sync triggers"
+            ))
+        })?;
 
     // Determine the correct table for trigger attachment (accounts for RLS)
     let trigger_table_name = resolve_trigger_table_name(&table_name, table_obj, schema, options);
@@ -266,9 +275,12 @@ pub fn generate_vec0_statements(
             &pk_column,
             &vec_col.column_name,
         ) {
-            if let Ok(parsed) = sqlparser::parser::Parser::parse_sql(&dialect, &trigger_sql) {
-                statements.extend(parsed);
-            }
+            let parsed = parse_generated_sql(
+                &dialect,
+                &trigger_sql,
+                "Failed to parse generated vec0 synchronization trigger SQL",
+            )?;
+            statements.extend(parsed);
         }
     }
 

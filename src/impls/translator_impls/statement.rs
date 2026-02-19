@@ -8,6 +8,7 @@ use sql_traits::{
 use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement};
 
 use crate::{
+    errors::Error,
     impls::translator_impls::{
         rls::{
             generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
@@ -218,88 +219,79 @@ fn translate_create_table(
     create_table: &sqlparser::ast::CreateTable,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
-) -> Result<Vec<Statement>, crate::errors::Error> {
-    // Check if we need to filter based on grants to a specific role
-    if let Some(role_name) = options.get_session_user_role()
-        && let Some(role) = schema.role(role_name)
-    {
-        // Look up the table in the schema to access TableLike methods
-        if let Some(table) = schema.table(create_table.table_schema(), create_table.table_name()) {
-            // If the role has no SELECT permission, skip this table entirely
-            if !table.can_select(role, schema) {
-                return Ok(Vec::new());
-            }
-
-            // Check if this is a read-only table (SELECT but no write grants)
-            let is_readonly = !table.can_write(role, schema);
-
-            // Check if this table has RLS enabled
-            if table.has_row_level_security(schema) {
-                // Validate all policies have required session variable mappings
-                validate_table_policies(table, schema, options)?;
-
-                // Translate the table first
-                let translated_table = create_table.translate(schema, options)?;
-
-                // Rename the table to the inner table name
-                let inner_table = rename_table_for_rls(&translated_table, options, schema);
-
-                let mut statements = vec![Statement::CreateTable(inner_table)];
-
-                // Generate the view and triggers (or just view for readonly)
-                let rls_statements = if is_readonly {
-                    generate_readonly_rls_statements(table, schema, options)?
-                } else {
-                    generate_rls_statements(table, schema, options)?
-                };
-                statements.extend(rls_statements);
-
-                return Ok(statements);
-            } else if is_readonly {
-                // Non-RLS readonly table: just create the table as-is
-                return Ok(vec![create_table.translate(schema, options)?.into()]);
-            }
-            // Non-RLS writable table: fall through to normal handling
-        }
+) -> Result<Vec<Statement>, Error> {
+    if let Some(role_filtered) = translate_create_table_for_role(create_table, schema, options)? {
+        return Ok(role_filtered);
     }
 
-    // Original logic: Check if this table has RLS enabled
-    if create_table.has_row_level_security(schema) {
-        // Validate all policies have required session variable mappings
+    let mut statements = if create_table.has_row_level_security(schema) {
         validate_table_policies(create_table, schema, options)?;
-
-        // Translate the table first
         let translated_table = create_table.translate(schema, options)?;
-
-        // Rename the table to the inner table name
         let inner_table = rename_table_for_rls(&translated_table, options, schema);
-
         let mut statements = vec![Statement::CreateTable(inner_table)];
-
-        // Generate the view and triggers
-        let rls_statements = generate_rls_statements(create_table, schema, options)?;
-        statements.extend(rls_statements);
-
-        // Generate vec0 virtual tables for vector columns (using original table)
-        if has_vector_columns(create_table) {
-            let vec0_statements = generate_vec0_statements(create_table, schema, options)?;
-            statements.extend(vec0_statements);
-        }
-
-        Ok(statements)
+        statements.extend(generate_rls_statements(create_table, schema, options)?);
+        statements
     } else {
-        // Translate the table
-        let translated_table = create_table.translate(schema, options)?;
-        let mut statements = vec![Statement::CreateTable(translated_table)];
+        vec![Statement::CreateTable(create_table.translate(schema, options)?)]
+    };
 
-        // Generate vec0 virtual tables for vector columns
-        if has_vector_columns(create_table) {
-            let vec0_statements = generate_vec0_statements(create_table, schema, options)?;
-            statements.extend(vec0_statements);
-        }
+    append_vec0_statements_if_needed(&mut statements, create_table, schema, options)?;
+    Ok(statements)
+}
 
-        Ok(statements)
+fn translate_create_table_for_role(
+    create_table: &sqlparser::ast::CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<Vec<Statement>>, Error> {
+    let Some(role_name) = options.get_session_user_role() else {
+        return Ok(None);
+    };
+    let Some(role) = schema.role(role_name) else {
+        return Ok(None);
+    };
+    let Some(table) = schema.table(create_table.table_schema(), create_table.table_name()) else {
+        return Ok(None);
+    };
+
+    if !table.can_select(role, schema) {
+        return Ok(Some(Vec::new()));
     }
+
+    let is_readonly = !table.can_write(role, schema);
+    if table.has_row_level_security(schema) {
+        validate_table_policies(table, schema, options)?;
+        let translated_table = create_table.translate(schema, options)?;
+        let inner_table = rename_table_for_rls(&translated_table, options, schema);
+        let mut statements = vec![Statement::CreateTable(inner_table)];
+        if is_readonly {
+            statements.extend(generate_readonly_rls_statements(table, schema, options)?);
+        } else {
+            statements.extend(generate_rls_statements(table, schema, options)?);
+        }
+        append_vec0_statements_if_needed(&mut statements, create_table, schema, options)?;
+        return Ok(Some(statements));
+    }
+
+    if is_readonly {
+        let mut statements = vec![Statement::CreateTable(create_table.translate(schema, options)?)];
+        append_vec0_statements_if_needed(&mut statements, create_table, schema, options)?;
+        return Ok(Some(statements));
+    }
+
+    Ok(None)
+}
+
+fn append_vec0_statements_if_needed(
+    statements: &mut Vec<Statement>,
+    create_table: &sqlparser::ast::CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    if has_vector_columns(create_table) {
+        statements.extend(generate_vec0_statements(create_table, schema, options)?);
+    }
+    Ok(())
 }
 
 impl Translator for Statement {

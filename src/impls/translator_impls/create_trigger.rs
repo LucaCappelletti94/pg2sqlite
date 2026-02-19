@@ -14,6 +14,7 @@ use sqlparser::{
 };
 
 use crate::{
+    impls::object_name::{append_suffix, schema_and_table_for_lookup},
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
 };
@@ -188,16 +189,12 @@ impl Translator for CreateTrigger {
         // renamed to table_rls).
         let redirected_table_name =
             if matches!(period, Some(TriggerPeriod::Before | TriggerPeriod::After)) {
-                let table_name_str = table_name.to_string();
-                if let Some(table) = schema.table(None, &table_name_str) {
-                    if table.has_row_level_security(schema) {
-                        let rls_suffix = options.get_rls_table_suffix();
-                        ObjectName(vec![ObjectNamePart::Identifier(Ident::new(format!(
-                            "{table_name_str}{rls_suffix}"
-                        )))])
-                    } else {
-                        table_name
-                    }
+                let (table_schema, table_name_part) = schema_and_table_for_lookup(&table_name);
+                if table_name_part
+                    .and_then(|name_part| schema.table(table_schema, name_part))
+                    .is_some_and(|table| table.has_row_level_security(schema))
+                {
+                    append_suffix(&table_name, options.get_rls_table_suffix())
                 } else {
                     table_name
                 }
