@@ -553,6 +553,233 @@ fn translate_substring(
     })
 }
 
+/// Create a SQLite-compatible boolean literal expression.
+fn boolean_literal(value: bool) -> Expr {
+    Expr::Value(ValueWithSpan {
+        value: Value::Boolean(value),
+        span: sqlparser::tokenizer::Span::empty(),
+    })
+}
+
+/// Create a SQLite-compatible integer literal expression.
+fn integer_literal(value: i64) -> Expr {
+    Expr::Value(ValueWithSpan {
+        value: Value::Number(value.to_string(), false),
+        span: sqlparser::tokenizer::Span::empty(),
+    })
+}
+
+/// Build a function call expression with unnamed positional arguments.
+fn function_call(name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
+        uses_odbc_syntax: false,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: args.into_iter().map(FunctionArgExpr::Expr).map(FunctionArg::Unnamed).collect(),
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+        parameters: FunctionArguments::None,
+    })
+}
+
+/// Translate PostgreSQL IS DISTINCT FROM / IS NOT DISTINCT FROM semantics
+/// using a CASE expression compatible with SQLite.
+fn translate_distinct_comparison(
+    left: &Expr,
+    right: &Expr,
+    is_not_distinct: bool,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_left = left.translate(schema, options)?;
+    let translated_right = right.translate(schema, options)?;
+
+    let both_null = Expr::BinaryOp {
+        left: Box::new(Expr::IsNull(Box::new(translated_left.clone()))),
+        op: BinaryOperator::And,
+        right: Box::new(Expr::IsNull(Box::new(translated_right.clone()))),
+    };
+
+    let one_null = Expr::BinaryOp {
+        left: Box::new(Expr::IsNull(Box::new(translated_left.clone()))),
+        op: BinaryOperator::Or,
+        right: Box::new(Expr::IsNull(Box::new(translated_right.clone()))),
+    };
+
+    let non_null_comparison = Expr::BinaryOp {
+        left: Box::new(translated_left),
+        op: if is_not_distinct { BinaryOperator::Eq } else { BinaryOperator::NotEq },
+        right: Box::new(translated_right),
+    };
+
+    let (both_null_result, one_null_result) =
+        if is_not_distinct { (true, false) } else { (false, true) };
+
+    Ok(Expr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: None,
+        conditions: vec![
+            sqlparser::ast::CaseWhen {
+                condition: both_null,
+                result: boolean_literal(both_null_result),
+            },
+            sqlparser::ast::CaseWhen {
+                condition: one_null,
+                result: boolean_literal(one_null_result),
+            },
+        ],
+        else_result: Some(Box::new(non_null_comparison)),
+    })
+}
+
+/// Translate PostgreSQL OVERLAY(str PLACING repl FROM pos [FOR len]) to
+/// SQLite substr/concatenation operations.
+fn translate_overlay(
+    expr: &Expr,
+    overlay_what: &Expr,
+    overlay_from: &Expr,
+    overlay_for: Option<&Expr>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_expr = expr.translate(schema, options)?;
+    let translated_overlay_what = overlay_what.translate(schema, options)?;
+    let translated_overlay_from = overlay_from.translate(schema, options)?;
+
+    let replacement_len = if let Some(overlay_for) = overlay_for {
+        overlay_for.translate(schema, options)?
+    } else {
+        function_call("length", vec![translated_overlay_what.clone()])
+    };
+
+    let prefix = function_call(
+        "substr",
+        vec![
+            translated_expr.clone(),
+            integer_literal(1),
+            Expr::BinaryOp {
+                left: Box::new(translated_overlay_from.clone()),
+                op: BinaryOperator::Minus,
+                right: Box::new(integer_literal(1)),
+            },
+        ],
+    );
+
+    let suffix = function_call(
+        "substr",
+        vec![
+            translated_expr,
+            Expr::BinaryOp {
+                left: Box::new(translated_overlay_from),
+                op: BinaryOperator::Plus,
+                right: Box::new(replacement_len),
+            },
+        ],
+    );
+
+    Ok(Expr::BinaryOp {
+        left: Box::new(Expr::BinaryOp {
+            left: Box::new(prefix),
+            op: BinaryOperator::StringConcat,
+            right: Box::new(translated_overlay_what),
+        }),
+        op: BinaryOperator::StringConcat,
+        right: Box::new(suffix),
+    })
+}
+
+/// Return true when value is a SQLite-supported fixed UTC offset (`+HH:MM`,
+/// `-HH:MM`).
+fn is_sqlite_fixed_offset(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 6 || (bytes[0] != b'+' && bytes[0] != b'-') || bytes[3] != b':' {
+        return false;
+    }
+    if !bytes[1].is_ascii_digit()
+        || !bytes[2].is_ascii_digit()
+        || !bytes[4].is_ascii_digit()
+        || !bytes[5].is_ascii_digit()
+    {
+        return false;
+    }
+
+    let hour = value[1..3].parse::<u8>().ok();
+    let minute = value[4..6].parse::<u8>().ok();
+
+    match (hour, minute) {
+        (Some(h), Some(m)) => h <= 23 && m <= 59,
+        _ => false,
+    }
+}
+
+/// Normalize PostgreSQL AT TIME ZONE literal names to SQLite datetime
+/// modifiers.
+fn normalize_at_time_zone_modifier(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    match lower.as_str() {
+        "utc" | "gmt" | "z" => return Some("utc".to_string()),
+        "local" | "localtime" => return Some("localtime".to_string()),
+        _ => {}
+    }
+
+    if is_sqlite_fixed_offset(trimmed) {
+        return Some(trimmed.to_string());
+    }
+
+    for prefix in ["utc", "gmt"] {
+        if let Some(rest) = lower.strip_prefix(prefix)
+            && is_sqlite_fixed_offset(rest)
+        {
+            return Some(rest.to_string());
+        }
+    }
+
+    None
+}
+
+/// Translate PostgreSQL `expr AT TIME ZONE '...'` to SQLite
+/// `datetime(expr, modifier)`.
+fn translate_at_time_zone(
+    timestamp: &Expr,
+    time_zone: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_timestamp = timestamp.translate(schema, options)?;
+
+    let modifier = match time_zone {
+        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(value), .. }) => {
+            normalize_at_time_zone_modifier(value)
+        }
+        _ => None,
+    }
+    .ok_or_else(|| {
+        crate::errors::Error::UnsupportedSQLiteFeature(
+            "AT TIME ZONE supports only literal UTC/local or fixed offsets (+HH:MM/-HH:MM) in SQLite translation."
+                .to_string(),
+        )
+    })?;
+
+    Ok(function_call(
+        "datetime",
+        vec![
+            translated_timestamp,
+            Expr::Value(ValueWithSpan {
+                value: Value::SingleQuotedString(modifier),
+                span: sqlparser::tokenizer::Span::empty(),
+            }),
+        ],
+    ))
+}
+
 /// Check if a data type is a pgvector type (vector or halfvec).
 fn is_vector_type(data_type: &DataType) -> bool {
     if let DataType::Custom(name, _) = data_type
@@ -802,9 +1029,26 @@ impl Translator for Expr {
                     array: *array,
                 }
             }
-            // Handle NULL checks (IS NULL, IS NOT NULL)
-            Expr::IsNull(inner) => Expr::IsNull(Box::new(inner.translate(schema, options)?)),
-            Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(inner.translate(schema, options)?)),
+            // AT TIME ZONE expression - map to SQLite datetime(..., modifier)
+            Expr::AtTimeZone { timestamp, time_zone } => {
+                translate_at_time_zone(timestamp, time_zone, schema, options)?
+            }
+            // Handle NULL checks and UNKNOWN checks. UNKNOWN is rewritten as
+            // a NULL check on the boolean expression result.
+            Expr::IsNull(inner) | Expr::IsUnknown(inner) => {
+                Expr::IsNull(Box::new(inner.translate(schema, options)?))
+            }
+            Expr::IsNotNull(inner) | Expr::IsNotUnknown(inner) => {
+                Expr::IsNotNull(Box::new(inner.translate(schema, options)?))
+            }
+            // IS [NOT] DISTINCT FROM maps to explicit CASE expression for stable
+            // null-aware equality semantics in SQLite.
+            Expr::IsDistinctFrom(left, right) => {
+                translate_distinct_comparison(left, right, false, schema, options)?
+            }
+            Expr::IsNotDistinctFrom(left, right) => {
+                translate_distinct_comparison(left, right, true, schema, options)?
+            }
             // Handle boolean checks (IS TRUE, IS FALSE, IS NOT TRUE, IS NOT FALSE)
             Expr::IsTrue(inner) => Expr::IsTrue(Box::new(inner.translate(schema, options)?)),
             Expr::IsNotTrue(inner) => Expr::IsNotTrue(Box::new(inner.translate(schema, options)?)),
@@ -917,6 +1161,18 @@ impl Translator for Expr {
                     expr,
                     substring_from.as_deref(),
                     substring_for.as_deref(),
+                    schema,
+                    options,
+                )?
+            }
+            // OVERLAY(str PLACING repl FROM pos [FOR len]) ->
+            // substr(str, 1, pos - 1) || repl || substr(str, pos + len)
+            Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
+                translate_overlay(
+                    expr,
+                    overlay_what,
+                    overlay_from,
+                    overlay_for.as_deref(),
                     schema,
                     options,
                 )?
