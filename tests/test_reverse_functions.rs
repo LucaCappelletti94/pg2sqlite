@@ -3,7 +3,7 @@
 //!
 //! Covers: filter clause on group_concat (Rename path), filter clause on
 //! passthrough, vec_distance_hamming, vec_f32, strftime with various formats,
-//! and named function args.
+//! named function args, and scalar MIN/MAX reversal.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
@@ -166,6 +166,29 @@ fn reverse_char_to_chr() {
     let pg = reverse(SCHEMA, "SELECT char(65) FROM users;");
     assert!(pg.contains("chr("), "Expected chr: {pg}");
     assert!(!pg.contains("char("), "Should not contain char: {pg}");
+}
+
+// ==================== scalar MIN/MAX -> LEAST/GREATEST ====================
+
+#[test]
+fn reverse_min_two_args_to_least() {
+    let pg = reverse(SCHEMA, "SELECT MIN(id, age) FROM users;");
+    assert!(pg.contains("LEAST"), "Expected LEAST: {pg}");
+    assert!(!pg.contains("MIN("), "Should not contain scalar MIN: {pg}");
+}
+
+#[test]
+fn reverse_max_two_args_to_greatest() {
+    let pg = reverse(SCHEMA, "SELECT MAX(id, age) FROM users;");
+    assert!(pg.contains("GREATEST"), "Expected GREATEST: {pg}");
+    assert!(!pg.contains("MAX("), "Should not contain scalar MAX: {pg}");
+}
+
+#[test]
+fn reverse_min_single_arg_stays_min() {
+    let pg = reverse(SCHEMA, "SELECT MIN(age) FROM users;");
+    assert!(pg.contains("MIN("), "Single-arg aggregate MIN should stay MIN: {pg}");
+    assert!(!pg.contains("LEAST"), "Single-arg MIN should not become LEAST: {pg}");
 }
 
 // ==================== datetime passthrough (non-'now') ====================

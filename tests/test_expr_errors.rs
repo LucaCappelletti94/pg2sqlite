@@ -2,8 +2,8 @@
 //! `src/impls/translator_impls/expr.rs`.
 //!
 //! Covers:
-//! - ANY/SOME: = ANY(subquery) -> IN, other ops -> error, non-subquery -> error
-//! - ALL: <> ALL(subquery) -> NOT IN, other ops -> error, non-subquery -> error
+//! - ANY/SOME: = ANY(subquery/array literal) -> IN, other ops -> error
+//! - ALL: <> ALL(subquery/array literal) -> NOT IN, other ops -> error
 //! - SIMILAR TO -> error
 //! - IS NORMALIZED -> error
 //! - @@ (non-FTS) -> error
@@ -34,6 +34,17 @@ fn any_eq_subquery_translates_to_in() {
 }
 
 #[test]
+fn any_eq_array_literal_translates_to_in_list() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
+               SELECT * FROM t WHERE val = ANY(ARRAY[1, 2, 3]);";
+    let output = translate(sql).unwrap();
+    assert!(
+        output.contains("IN (1, 2, 3)"),
+        "= ANY(ARRAY[..]) should translate to IN list, got: {output}"
+    );
+}
+
+#[test]
 fn any_gt_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val > ANY(SELECT id FROM t);";
@@ -51,6 +62,17 @@ fn all_neq_subquery_translates_to_not_in() {
     assert!(
         output.contains("NOT IN"),
         "<> ALL(subquery) should translate to NOT IN, got: {output}"
+    );
+}
+
+#[test]
+fn all_neq_array_literal_translates_to_not_in_list() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
+               SELECT * FROM t WHERE val <> ALL(ARRAY[1, 2, 3]);";
+    let output = translate(sql).unwrap();
+    assert!(
+        output.contains("NOT IN (1, 2, 3)"),
+        "<> ALL(ARRAY[..]) should translate to NOT IN list, got: {output}"
     );
 }
 

@@ -629,6 +629,56 @@ fn translate_vector_distance_op(
     }))
 }
 
+/// Translate ANY/ALL right-hand side into an IN/NOT IN target.
+///
+/// Supported forms:
+/// - subquery: `x = ANY(SELECT ...)` -> `x IN (SELECT ...)`
+/// - array literal: `x = ANY(ARRAY[...])` -> `x IN (...)`
+/// - tuple: `x = ANY((...))` -> `x IN (...)`
+fn translate_any_all_to_in(
+    left: &Expr,
+    right: &Expr,
+    negated: bool,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_left = left.translate(schema, options)?;
+
+    match right {
+        Expr::Subquery(q) => {
+            Ok(Expr::InSubquery {
+                expr: Box::new(translated_left),
+                subquery: Box::new(q.translate(schema, options)?),
+                negated,
+            })
+        }
+        Expr::Array(Array { elem, .. }) => {
+            Ok(Expr::InList {
+                expr: Box::new(translated_left),
+                list: elem
+                    .iter()
+                    .map(|e| e.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                negated,
+            })
+        }
+        Expr::Tuple(exprs) => {
+            Ok(Expr::InList {
+                expr: Box::new(translated_left),
+                list: exprs
+                    .iter()
+                    .map(|e| e.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                negated,
+            })
+        }
+        _ => Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            "ANY/ALL operator with non-subquery/non-array expressions is not supported in SQLite."
+                .to_string(),
+        )),
+    }
+}
+
 /// Translate a binary operation expression.
 fn translate_binary_op(
     left: &Expr,
@@ -947,23 +997,11 @@ impl Translator for Expr {
             Expr::AnyOp { left, compare_op, right, .. } => {
                 // x = ANY(subquery) is equivalent to x IN (subquery)
                 if matches!(compare_op, BinaryOperator::Eq) {
-                    return Ok(Expr::InSubquery {
-                        expr: Box::new(left.translate(schema, options)?),
-                        subquery: Box::new(match right.as_ref() {
-                            Expr::Subquery(q) => q.translate(schema, options)?,
-                            _ => {
-                                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                                        "ANY operator with non-subquery expressions is not supported in SQLite."
-                                            .to_string(),
-                                    ));
-                            }
-                        }),
-                        negated: false,
-                    });
+                    return translate_any_all_to_in(left, right, false, schema, options);
                 }
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                     "The ANY/SOME operator with {compare_op} is not supported in SQLite. \
-                     Only '= ANY(subquery)' can be converted to 'IN (subquery)'."
+                     Only '= ANY(subquery)' and '= ANY(ARRAY[...])' can be converted to IN."
                 )));
             }
             // ALL operations: x op ALL(subquery)
@@ -971,23 +1009,11 @@ impl Translator for Expr {
             Expr::AllOp { left, compare_op, right } => {
                 // x <> ALL(subquery) is equivalent to x NOT IN (subquery)
                 if matches!(compare_op, BinaryOperator::NotEq) {
-                    return Ok(Expr::InSubquery {
-                        expr: Box::new(left.translate(schema, options)?),
-                        subquery: Box::new(match right.as_ref() {
-                            Expr::Subquery(q) => q.translate(schema, options)?,
-                            _ => {
-                                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                                        "ALL operator with non-subquery expressions is not supported in SQLite."
-                                            .to_string(),
-                                    ));
-                            }
-                        }),
-                        negated: true,
-                    });
+                    return translate_any_all_to_in(left, right, true, schema, options);
                 }
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                     "The ALL operator with {compare_op} is not supported in SQLite. \
-                     Only '<> ALL(subquery)' can be converted to 'NOT IN (subquery)'."
+                     Only '<> ALL(subquery)' and '<> ALL(ARRAY[...])' can be converted to NOT IN."
                 )));
             }
             // SIMILAR TO - SQL standard regex-like pattern matching

@@ -84,11 +84,28 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
         "instr" => FunctionReversal::ToPosition,
         // group_concat -> string_agg
         "group_concat" => FunctionReversal::Rename("string_agg".to_string()),
+        // min(a, b, ...) -> LEAST(a, b, ...)
+        // Keep aggregate MIN(x) unchanged (single-arg form).
+        "min" => {
+            if let FunctionArguments::List(list) = args
+                && list.args.len() > 1
+            {
+                return FunctionReversal::Rename("LEAST".to_string());
+            }
+            FunctionReversal::PassThrough
+        }
+        // max(a, b, ...) -> GREATEST(a, b, ...)
+        // Keep aggregate MAX(x) unchanged (single-arg form).
+        "max" => {
+            if let FunctionArguments::List(list) = args
+                && list.args.len() > 1
+            {
+                return FunctionReversal::Rename("GREATEST".to_string());
+            }
+            FunctionReversal::PassThrough
+        }
         // char(n) -> chr(n)
         "char" => FunctionReversal::ToChr,
-        // MIN -> LEAST (when used as scalar, not aggregate)
-        // We can't easily distinguish, so we leave this as PassThrough
-        // and let the user handle context-sensitive cases
 
         // vec_distance_L2(a, b) -> a <-> b
         "vec_distance_l2" => FunctionReversal::ToOperator(BinaryOperator::LtDashGt),
