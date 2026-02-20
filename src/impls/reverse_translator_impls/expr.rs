@@ -56,6 +56,12 @@ impl ReverseTranslator for Expr {
                     array: *array,
                 }
             }
+            Expr::AtTimeZone { timestamp, time_zone } => {
+                Expr::AtTimeZone {
+                    timestamp: Box::new(timestamp.reverse_translate(schema, options)?),
+                    time_zone: Box::new(time_zone.reverse_translate(schema, options)?),
+                }
+            }
 
             // Handle NULL checks
             Expr::IsNull(inner) => {
@@ -63,6 +69,31 @@ impl ReverseTranslator for Expr {
             }
             Expr::IsNotNull(inner) => {
                 Expr::IsNotNull(Box::new(inner.reverse_translate(schema, options)?))
+            }
+            Expr::IsUnknown(inner) => {
+                Expr::IsUnknown(Box::new(inner.reverse_translate(schema, options)?))
+            }
+            Expr::IsNotUnknown(inner) => {
+                Expr::IsNotUnknown(Box::new(inner.reverse_translate(schema, options)?))
+            }
+            Expr::IsDistinctFrom(left, right) => {
+                Expr::IsDistinctFrom(
+                    Box::new(left.reverse_translate(schema, options)?),
+                    Box::new(right.reverse_translate(schema, options)?),
+                )
+            }
+            Expr::IsNormalized { expr, form, negated } => {
+                Expr::IsNormalized {
+                    expr: Box::new(expr.reverse_translate(schema, options)?),
+                    form: *form,
+                    negated: *negated,
+                }
+            }
+            Expr::IsNotDistinctFrom(left, right) => {
+                Expr::IsNotDistinctFrom(
+                    Box::new(left.reverse_translate(schema, options)?),
+                    Box::new(right.reverse_translate(schema, options)?),
+                )
             }
 
             // Handle boolean checks
@@ -104,6 +135,31 @@ impl ReverseTranslator for Expr {
                     expr: Box::new(expr.reverse_translate(schema, options)?),
                     pattern: Box::new(pattern.reverse_translate(schema, options)?),
                     escape_char: escape_char.clone(),
+                }
+            }
+            Expr::SimilarTo { negated, expr, pattern, escape_char } => {
+                Expr::SimilarTo {
+                    negated: *negated,
+                    expr: Box::new(expr.reverse_translate(schema, options)?),
+                    pattern: Box::new(pattern.reverse_translate(schema, options)?),
+                    escape_char: escape_char.clone(),
+                }
+            }
+
+            // Handle ANY/ALL comparison operations
+            Expr::AnyOp { left, compare_op, right, is_some } => {
+                Expr::AnyOp {
+                    left: Box::new(left.reverse_translate(schema, options)?),
+                    compare_op: compare_op.clone(),
+                    right: Box::new(right.reverse_translate(schema, options)?),
+                    is_some: *is_some,
+                }
+            }
+            Expr::AllOp { left, compare_op, right } => {
+                Expr::AllOp {
+                    left: Box::new(left.reverse_translate(schema, options)?),
+                    compare_op: compare_op.clone(),
+                    right: Box::new(right.reverse_translate(schema, options)?),
                 }
             }
 
@@ -255,6 +311,17 @@ impl ReverseTranslator for Expr {
                         .transpose()?,
                     special: *special,
                     shorthand: *shorthand,
+                }
+            }
+            Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
+                Expr::Overlay {
+                    expr: Box::new(expr.reverse_translate(schema, options)?),
+                    overlay_what: Box::new(overlay_what.reverse_translate(schema, options)?),
+                    overlay_from: Box::new(overlay_from.reverse_translate(schema, options)?),
+                    overlay_for: overlay_for
+                        .as_ref()
+                        .map(|expr| expr.reverse_translate(schema, options).map(Box::new))
+                        .transpose()?,
                 }
             }
 

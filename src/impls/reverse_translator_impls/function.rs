@@ -19,6 +19,8 @@ pub enum FunctionReversal {
     Rename(String),
     /// Transform to NOW() function
     ToNow,
+    /// Transform datetime(expr, modifier) to expr AT TIME ZONE '...'
+    ToAtTimeZone(String),
     /// Transform to EXTRACT expression
     ToExtract(DateTimeField),
     /// Transform to POSITION expression (INSTR -> POSITION with arg swap)
@@ -49,6 +51,56 @@ fn parse_strftime_format(format: &str) -> Option<DateTimeField> {
     }
 }
 
+/// Return true when value is a fixed UTC offset in `+HH:MM` / `-HH:MM` format.
+fn is_fixed_utc_offset(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 6 || (bytes[0] != b'+' && bytes[0] != b'-') || bytes[3] != b':' {
+        return false;
+    }
+    if !bytes[1].is_ascii_digit()
+        || !bytes[2].is_ascii_digit()
+        || !bytes[4].is_ascii_digit()
+        || !bytes[5].is_ascii_digit()
+    {
+        return false;
+    }
+
+    let hour = value[1..3].parse::<u8>().ok();
+    let minute = value[4..6].parse::<u8>().ok();
+
+    match (hour, minute) {
+        (Some(h), Some(m)) => h <= 23 && m <= 59,
+        _ => false,
+    }
+}
+
+/// Normalize SQLite datetime timezone modifiers to PostgreSQL AT TIME ZONE
+/// literals.
+fn normalize_datetime_timezone_modifier(modifier: &str) -> Option<String> {
+    let trimmed = modifier.trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    match lower.as_str() {
+        "utc" | "gmt" | "z" => return Some("UTC".to_string()),
+        "local" | "localtime" => return Some("localtime".to_string()),
+        _ => {}
+    }
+
+    if is_fixed_utc_offset(trimmed) {
+        return Some(trimmed.to_string());
+    }
+
+    for prefix in ["utc", "gmt"] {
+        if let Some(rest) = lower.strip_prefix(prefix)
+            && is_fixed_utc_offset(rest)
+        {
+            return Some(rest.to_string());
+        }
+    }
+
+    None
+}
+
 /// Determine how to reverse a SQLite function to PostgreSQL.
 pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> FunctionReversal {
     let func_name = name.to_string().to_lowercase();
@@ -64,6 +116,15 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
                 && s == "now"
             {
                 return FunctionReversal::ToNow;
+            }
+            if let FunctionArguments::List(list) = args
+                && list.args.len() == 2
+                && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                    ValueWithSpan { value: Value::SingleQuotedString(modifier), .. },
+                )))) = list.args.get(1)
+                && let Some(zone) = normalize_datetime_timezone_modifier(modifier)
+            {
+                return FunctionReversal::ToAtTimeZone(zone);
             }
             FunctionReversal::PassThrough
         }
@@ -169,6 +230,29 @@ pub fn reverse_translate_function(
                 over: None,
                 within_group: vec![],
             }))
+        }
+        FunctionReversal::ToAtTimeZone(time_zone) => {
+            if let FunctionArguments::List(list) = &func.args
+                && list.args.len() == 2
+            {
+                let timestamp_expr = extract_expr_from_arg(&list.args[0])?;
+                let reversed_timestamp = crate::prelude::ReverseTranslator::reverse_translate(
+                    timestamp_expr,
+                    schema,
+                    options,
+                )?;
+
+                return Ok(Expr::AtTimeZone {
+                    timestamp: Box::new(reversed_timestamp),
+                    time_zone: Box::new(Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString(time_zone),
+                        span: sqlparser::tokenizer::Span::empty(),
+                    })),
+                });
+            }
+            Err(Error::UnsupportedSQLiteFeature(
+                "datetime AT TIME ZONE conversion requires exactly 2 arguments".to_string(),
+            ))
         }
         FunctionReversal::ToExtract(field) => {
             // strftime('%Y', expr) -> EXTRACT(YEAR FROM expr)

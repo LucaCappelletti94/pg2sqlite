@@ -150,6 +150,22 @@ fn reverse_datetime_now() {
     assert!(pg.contains("NOW()"), "Expected NOW(): {pg}");
 }
 
+#[test]
+fn reverse_datetime_utc_to_at_time_zone() {
+    let pg = reverse(EVENTS, "SELECT datetime(created_at, 'utc') FROM events;");
+    assert!(pg.contains("AT TIME ZONE"), "Expected AT TIME ZONE: {pg}");
+    assert!(pg.contains("'UTC'"), "Expected UTC literal: {pg}");
+    assert!(!pg.contains("datetime("), "Should not contain datetime call: {pg}");
+}
+
+#[test]
+fn reverse_datetime_fixed_offset_to_at_time_zone() {
+    let pg = reverse(EVENTS, "SELECT datetime(created_at, '+02:30') FROM events;");
+    assert!(pg.contains("AT TIME ZONE"), "Expected AT TIME ZONE: {pg}");
+    assert!(pg.contains("'+02:30'"), "Expected fixed offset literal: {pg}");
+    assert!(!pg.contains("datetime("), "Should not contain datetime call: {pg}");
+}
+
 // ==================== INSTR -> POSITION ====================
 
 #[test]
