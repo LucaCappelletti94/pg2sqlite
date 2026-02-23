@@ -197,3 +197,16 @@ fn multiple_session_variables() {
         Some("get_department")
     );
 }
+
+#[test]
+fn duplicate_session_variable_mapping_last_wins() {
+    let options = Pg2SqliteOptions::default()
+        .with_session_variable(SessionVariableMapping::current_user("old_user_func"))
+        .with_session_variable(SessionVariableMapping::current_user("new_user_func"));
+
+    assert_eq!(
+        options.find_session_variable_function(&SessionVariablePattern::CurrentUser),
+        Some("new_user_func"),
+        "latest mapping should override previous mapping for the same pattern"
+    );
+}

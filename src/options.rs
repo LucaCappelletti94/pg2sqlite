@@ -100,6 +100,7 @@ impl TranslationOptions for Pg2SqliteOptions {
     fn find_session_variable_function(&self, pattern: &SessionVariablePattern) -> Option<&str> {
         self.session_variables
             .iter()
+            .rev()
             .find(|m| &m.pg_pattern == pattern)
             .map(|m| m.sqlite_function.as_str())
     }
