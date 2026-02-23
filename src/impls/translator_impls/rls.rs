@@ -111,10 +111,14 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
-    table
-        .policies(schema)
-        .filter(|p| commands.contains(&p.command()) || p.command() == CreatePolicyCommand::All)
-        .collect()
+    let mut policies = Vec::new();
+    for policy in table.policies(schema) {
+        let command = policy.command();
+        if commands.contains(&command) || command == CreatePolicyCommand::All {
+            policies.push(policy);
+        }
+    }
+    policies
 }
 
 /// Context for RLS trigger generation, encapsulating common setup.
@@ -349,9 +353,6 @@ fn transform_expr_generic<O: TranslationOptions, DB: DatabaseLike>(
 where
     DB::Table: TableLike<DB = DB>,
 {
-    let recurse =
-        |e: &Expr| -> Expr { transform_expr_generic(e, options, table, schema, strategy) };
-
     match expr {
         // Handle current_setting('name')::type -> sqlite_func()
         Expr::Cast { expr: inner, .. } => {
@@ -360,7 +361,7 @@ where
             {
                 return transformed;
             }
-            recurse(inner)
+            transform_expr_generic(inner, options, table, schema, strategy)
         }
 
         // Handle current_setting('name') without cast, and current_user as a function
@@ -438,35 +439,49 @@ where
         // Recursively handle binary operations
         Expr::BinaryOp { left, op, right } => {
             Expr::BinaryOp {
-                left: Box::new(recurse(left)),
+                left: Box::new(transform_expr_generic(left, options, table, schema, strategy)),
                 op: op.clone(),
-                right: Box::new(recurse(right)),
+                right: Box::new(transform_expr_generic(right, options, table, schema, strategy)),
             }
         }
 
         Expr::UnaryOp { op, expr: inner } => {
-            Expr::UnaryOp { op: *op, expr: Box::new(recurse(inner)) }
+            Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
+            }
         }
 
-        Expr::Nested(inner) => Expr::Nested(Box::new(recurse(inner))),
+        Expr::Nested(inner) => {
+            Expr::Nested(Box::new(transform_expr_generic(inner, options, table, schema, strategy)))
+        }
 
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(recurse(inner))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(recurse(inner))),
+        Expr::IsNull(inner) => {
+            Expr::IsNull(Box::new(transform_expr_generic(inner, options, table, schema, strategy)))
+        }
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(transform_expr_generic(
+                inner, options, table, schema, strategy,
+            )))
+        }
 
         Expr::InList { expr: inner, list, negated } => {
             Expr::InList {
-                expr: Box::new(recurse(inner)),
-                list: list.iter().map(recurse).collect(),
+                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
+                list: list
+                    .iter()
+                    .map(|item| transform_expr_generic(item, options, table, schema, strategy))
+                    .collect(),
                 negated: *negated,
             }
         }
 
         Expr::Between { expr: inner, negated, low, high } => {
             Expr::Between {
-                expr: Box::new(recurse(inner)),
+                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
                 negated: *negated,
-                low: Box::new(recurse(low)),
-                high: Box::new(recurse(high)),
+                low: Box::new(transform_expr_generic(low, options, table, schema, strategy)),
+                high: Box::new(transform_expr_generic(high, options, table, schema, strategy)),
             }
         }
 
@@ -498,7 +513,7 @@ where
 
         Expr::InSubquery { expr: inner, subquery, negated } => {
             Expr::InSubquery {
-                expr: Box::new(recurse(inner)),
+                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
                 subquery: Box::new(transform_query(
                     subquery,
                     options,
@@ -611,7 +626,6 @@ where
 
     if let sqlparser::ast::SetExpr::Select(ref mut select) = *transformed.body {
         let mut subquery_table_renames: Vec<(String, String)> = Vec::new();
-
         for table_with_joins in &mut select.from {
             transform_table_with_joins_for_subquery(
                 table_with_joins,
@@ -620,71 +634,41 @@ where
             );
         }
 
-        if let Some(selection) = &mut select.selection {
-            *selection = transform_subquery_expression(
-                selection,
+        let rewrite_expr = |expr: &Expr| {
+            transform_subquery_expression(
+                expr,
                 options,
                 table,
                 schema,
                 prefix,
                 outer_table,
                 &subquery_table_renames,
-            );
+            )
+        };
+
+        if let Some(selection) = &mut select.selection {
+            *selection = rewrite_expr(selection);
         }
 
         for item in &mut select.projection {
-            match item {
-                sqlparser::ast::SelectItem::UnnamedExpr(expr)
-                | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
-                    *expr = transform_subquery_expression(
-                        expr,
-                        options,
-                        table,
-                        schema,
-                        prefix,
-                        outer_table,
-                        &subquery_table_renames,
-                    );
-                }
-                _ => {}
+            if let sqlparser::ast::SelectItem::UnnamedExpr(expr)
+            | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } = item
+            {
+                *expr = rewrite_expr(expr);
             }
         }
 
         if let Some(having) = &mut select.having {
-            *having = transform_subquery_expression(
-                having,
-                options,
-                table,
-                schema,
-                prefix,
-                outer_table,
-                &subquery_table_renames,
-            );
+            *having = rewrite_expr(having);
         }
 
         if let Some(qualify) = &mut select.qualify {
-            *qualify = transform_subquery_expression(
-                qualify,
-                options,
-                table,
-                schema,
-                prefix,
-                outer_table,
-                &subquery_table_renames,
-            );
+            *qualify = rewrite_expr(qualify);
         }
 
         if let sqlparser::ast::GroupByExpr::Expressions(group_exprs, _) = &mut select.group_by {
             for group_expr in group_exprs {
-                *group_expr = transform_subquery_expression(
-                    group_expr,
-                    options,
-                    table,
-                    schema,
-                    prefix,
-                    outer_table,
-                    &subquery_table_renames,
-                );
+                *group_expr = rewrite_expr(group_expr);
             }
         }
     }
@@ -815,6 +799,28 @@ fn transform_table_factor_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
     }
 }
 
+fn join_constraint_mut(join_operator: &mut JoinOperator) -> Option<&mut JoinConstraint> {
+    match join_operator {
+        JoinOperator::Join(constraint)
+        | JoinOperator::Inner(constraint)
+        | JoinOperator::Left(constraint)
+        | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::Right(constraint)
+        | JoinOperator::RightOuter(constraint)
+        | JoinOperator::FullOuter(constraint)
+        | JoinOperator::CrossJoin(constraint)
+        | JoinOperator::Semi(constraint)
+        | JoinOperator::LeftSemi(constraint)
+        | JoinOperator::RightSemi(constraint)
+        | JoinOperator::Anti(constraint)
+        | JoinOperator::LeftAnti(constraint)
+        | JoinOperator::RightAnti(constraint)
+        | JoinOperator::StraightJoin(constraint)
+        | JoinOperator::AsOf { constraint, .. } => Some(constraint),
+        JoinOperator::CrossApply | JoinOperator::OuterApply => None,
+    }
+}
+
 fn transform_join_operator_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
     join_operator: &mut JoinOperator,
     context: &SubqueryTransformContext<'_, O, DB>,
@@ -836,37 +842,20 @@ fn transform_join_operator_for_subquery<O: TranslationOptions, DB: DatabaseLike>
         }
     };
 
-    match join_operator {
-        JoinOperator::Join(constraint)
-        | JoinOperator::Inner(constraint)
-        | JoinOperator::Left(constraint)
-        | JoinOperator::LeftOuter(constraint)
-        | JoinOperator::Right(constraint)
-        | JoinOperator::RightOuter(constraint)
-        | JoinOperator::FullOuter(constraint)
-        | JoinOperator::CrossJoin(constraint)
-        | JoinOperator::Semi(constraint)
-        | JoinOperator::LeftSemi(constraint)
-        | JoinOperator::RightSemi(constraint)
-        | JoinOperator::Anti(constraint)
-        | JoinOperator::LeftAnti(constraint)
-        | JoinOperator::RightAnti(constraint)
-        | JoinOperator::StraightJoin(constraint) => {
-            rewrite_constraint(constraint);
-        }
-        JoinOperator::AsOf { constraint, match_condition } => {
-            rewrite_constraint(constraint);
-            *match_condition = transform_subquery_expression(
-                match_condition,
-                context.options,
-                context.table,
-                context.schema,
-                context.prefix,
-                context.outer_table,
-                subquery_table_renames,
-            );
-        }
-        JoinOperator::CrossApply | JoinOperator::OuterApply => {}
+    if let Some(constraint) = join_constraint_mut(join_operator) {
+        rewrite_constraint(constraint);
+    }
+
+    if let JoinOperator::AsOf { match_condition, .. } = join_operator {
+        *match_condition = transform_subquery_expression(
+            match_condition,
+            context.options,
+            context.table,
+            context.schema,
+            context.prefix,
+            context.outer_table,
+            subquery_table_renames,
+        );
     }
 }
 
@@ -1116,16 +1105,14 @@ where
     let value_list = columns.iter().map(|c| format!("NEW.{c}")).collect::<Vec<_>>().join(", ");
 
     // Build WITH CHECK expression - transform AST with NEW. prefix
-    let check_conditions: Vec<String> = insert_policies
-        .iter()
-        .filter_map(|policy| {
-            policy.check_expression(schema).map(|expr| {
-                let transformed =
-                    transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
-                format!("({transformed})")
-            })
-        })
-        .collect();
+    let mut check_conditions = Vec::new();
+    for policy in &insert_policies {
+        if let Some(expr) = policy.check_expression(schema) {
+            let transformed =
+                transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
+            check_conditions.push(format!("({transformed})"));
+        }
+    }
 
     let trigger_body = if check_conditions.is_empty() {
         format!(
@@ -1180,30 +1167,26 @@ where
     let pk_where = build_row_identity_clause(&columns, &pk_columns);
 
     // Build USING expression (filter which rows can be updated) - use OLD. prefix
-    let using_conditions: Vec<String> = update_policies
-        .iter()
-        .filter_map(|policy| {
-            policy.using_expression(schema).map(|expr| {
-                let transformed =
-                    transform_expr(expr, options, table, schema, Some("OLD"), table_rename);
-                format!("({transformed})")
-            })
-        })
-        .collect();
+    let mut using_conditions = Vec::new();
+    for policy in &update_policies {
+        if let Some(expr) = policy.using_expression(schema) {
+            let transformed =
+                transform_expr(expr, options, table, schema, Some("OLD"), table_rename);
+            using_conditions.push(format!("({transformed})"));
+        }
+    }
 
     // Build WITH CHECK expression - use COALESCE(NEW.col, OLD.col) for partial
     // updates In SQLite INSTEAD OF triggers, NEW.column is only defined for
     // columns in SET clause
-    let check_conditions: Vec<String> = update_policies
-        .iter()
-        .filter_map(|policy| {
-            policy.check_expression(schema).map(|expr| {
-                let transformed =
-                    transform_expr_for_update_check(expr, options, table, schema, table_rename);
-                format!("({transformed})")
-            })
-        })
-        .collect();
+    let mut check_conditions = Vec::new();
+    for policy in &update_policies {
+        if let Some(expr) = policy.check_expression(schema) {
+            let transformed =
+                transform_expr_for_update_check(expr, options, table, schema, table_rename);
+            check_conditions.push(format!("({transformed})"));
+        }
+    }
 
     // Combine WHERE clause
     let full_where = if using_conditions.is_empty() {
@@ -1255,16 +1238,14 @@ where
     let pk_where = build_row_identity_clause(&columns, &pk_columns);
 
     // Build USING expression - use OLD. prefix for delete
-    let using_conditions: Vec<String> = delete_policies
-        .iter()
-        .filter_map(|policy| {
-            policy.using_expression(schema).map(|expr| {
-                let transformed =
-                    transform_expr(expr, options, table, schema, Some("OLD"), table_rename);
-                format!("({transformed})")
-            })
-        })
-        .collect();
+    let mut using_conditions = Vec::new();
+    for policy in &delete_policies {
+        if let Some(expr) = policy.using_expression(schema) {
+            let transformed =
+                transform_expr(expr, options, table, schema, Some("OLD"), table_rename);
+            using_conditions.push(format!("({transformed})"));
+        }
+    }
 
     // Combine WHERE clause
     let full_where = if using_conditions.is_empty() {
@@ -1674,11 +1655,8 @@ where
             strict_mode,
             operation,
         );
-        let stmts = parse_generated_sql(
-            &dialect,
-            &monitor_sql,
-            &format!("Failed to parse generated RLS {operation} monitoring trigger"),
-        )?;
+        let error_context = format!("Failed to parse generated RLS {operation} monitoring trigger");
+        let stmts = parse_generated_sql(&dialect, &monitor_sql, &error_context)?;
         statements.extend(stmts);
     }
 
@@ -1730,10 +1708,17 @@ mod tests {
 
     use super::{
         SubqueryTransformContext, extract_current_setting_name, extract_string_literal,
-        generate_rls_view_sql, transform_expr, transform_expr_for_update_check,
+        filter_policies, generate_delete_trigger_sql, generate_insert_trigger_sql,
+        generate_readonly_rls_statements, generate_rls_audit_table, generate_rls_statements,
+        generate_rls_validation_statements, generate_rls_view_sql, generate_update_trigger_sql,
+        rename_table_for_rls, transform_expr, transform_expr_for_update_check,
         transform_join_operator_for_subquery, transform_query, transform_table_factor_for_subquery,
+        validate_session_variables, validate_table_policies,
     };
-    use crate::prelude::{Pg2SqliteOptions, TranslationOptions};
+    use crate::{
+        prelude::{Pg2SqliteOptions, TranslationOptions},
+        traits::translation_options::SessionVariableMapping,
+    };
 
     fn parse_statements(sql: &str) -> Vec<Statement> {
         Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
@@ -1999,5 +1984,247 @@ mod tests {
         let view_sql =
             generate_rls_view_sql(table, &schema, &options).expect("view sql should build");
         assert!(!view_sql.contains(" WHERE "));
+    }
+
+    #[test]
+    fn transform_expr_explicitly_covers_coalesce_and_rename_strategy_variants() {
+        let schema = schema_from_sql(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, body TEXT);",
+        );
+        let table = schema.table(None, "docs").expect("table should exist");
+        let options = Pg2SqliteOptions::default();
+
+        let coalesced_ident = transform_expr_for_update_check(
+            &parse_expr("owner_id"),
+            &options,
+            table,
+            &schema,
+            None,
+        );
+        assert!(coalesced_ident.to_string().starts_with("COALESCE("));
+
+        let renamed_compound = transform_expr(
+            &parse_expr("docs.owner_id"),
+            &options,
+            table,
+            &schema,
+            None,
+            Some(("docs", "docs_inner")),
+        );
+        assert_eq!(renamed_compound.to_string(), "docs_inner.owner_id");
+
+        let coalesced_compound = transform_expr_for_update_check(
+            &parse_expr("docs.owner_id"),
+            &options,
+            table,
+            &schema,
+            Some(("docs", "docs_inner")),
+        );
+        assert_eq!(coalesced_compound.to_string(), "COALESCE(NEW.owner_id, OLD.owner_id)");
+    }
+
+    #[test]
+    fn transform_expr_identifier_and_compound_strategy_branches_are_exercised() {
+        let schema = schema_from_sql(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, body TEXT);",
+        );
+        let table = schema.table(None, "docs").expect("table should exist");
+        let options = Pg2SqliteOptions::default();
+
+        let coalesced_identifier = transform_expr_for_update_check(
+            &Expr::Identifier(Ident::new("owner_id")),
+            &options,
+            table,
+            &schema,
+            None,
+        );
+        assert_eq!(coalesced_identifier.to_string(), "COALESCE(NEW.owner_id, OLD.owner_id)");
+
+        let renamed_compound = transform_expr(
+            &Expr::CompoundIdentifier(vec![Ident::new("docs"), Ident::new("owner_id")]),
+            &options,
+            table,
+            &schema,
+            None,
+            Some(("docs", "docs_inner")),
+        );
+        assert_eq!(renamed_compound.to_string(), "docs_inner.owner_id");
+
+        let coalesced_compound = transform_expr_for_update_check(
+            &Expr::CompoundIdentifier(vec![Ident::new("docs"), Ident::new("owner_id")]),
+            &options,
+            table,
+            &schema,
+            Some(("docs", "docs_inner")),
+        );
+        assert_eq!(coalesced_compound.to_string(), "COALESCE(NEW.owner_id, OLD.owner_id)");
+    }
+
+    #[test]
+    fn validate_session_variable_and_policy_paths_cover_error_and_success_cases() {
+        let schema = schema_from_sql(
+            r#"
+            CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER);
+            ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY docs_select ON docs FOR SELECT USING (owner_id = current_setting('app.user_id')::INT);
+            "#,
+        );
+        let table = schema.table(None, "docs").expect("table should exist");
+
+        let missing = Pg2SqliteOptions::default();
+        let err = validate_session_variables(
+            &parse_expr("owner_id = current_setting('app.user_id')::INT"),
+            &missing,
+            "docs",
+            "docs_select",
+        )
+        .expect_err("missing current_setting mapping should error");
+        assert!(err.to_string().contains("current_setting('app.user_id')"));
+
+        let err = validate_session_variables(
+            &parse_expr("current_user = 'alice'"),
+            &missing,
+            "docs",
+            "docs_select",
+        )
+        .expect_err("missing current_user mapping should error");
+        assert!(err.to_string().contains("current_user"));
+
+        let mapped = Pg2SqliteOptions::default()
+            .with_session_variable(SessionVariableMapping::current_setting(
+                "app.user_id",
+                "sqlite_user_id",
+            ))
+            .with_session_variable(SessionVariableMapping::current_user("sqlite_user"));
+        validate_session_variables(
+            &parse_expr("owner_id = current_setting('app.user_id')::INT"),
+            &mapped,
+            "docs",
+            "docs_select",
+        )
+        .expect("mapped current_setting should pass");
+        validate_session_variables(
+            &parse_expr("current_user = 'alice'"),
+            &mapped,
+            "docs",
+            "docs_select",
+        )
+        .expect("mapped current_user should pass");
+
+        validate_table_policies(table, &schema, &mapped).expect("policy validation should pass");
+    }
+
+    #[test]
+    fn query_and_trigger_generation_helpers_cover_policy_paths() {
+        let schema = schema_from_sql(
+            r#"
+            CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, body TEXT);
+            CREATE TABLE teams(id INTEGER PRIMARY KEY, owner_id INTEGER);
+            ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY docs_select ON docs FOR SELECT USING (owner_id > 0);
+            CREATE POLICY docs_insert ON docs FOR INSERT WITH CHECK (owner_id > 0);
+            CREATE POLICY docs_update ON docs FOR UPDATE USING (owner_id > 0) WITH CHECK (owner_id > 0);
+            CREATE POLICY docs_delete ON docs FOR DELETE USING (owner_id > 0);
+            "#,
+        );
+        let table = schema.table(None, "docs").expect("table should exist");
+        let options = Pg2SqliteOptions::default()
+            .with_rls_audit_table_name("rls_audit")
+            .with_strict_rls_validation();
+
+        let select_policies =
+            filter_policies(table, &schema, &[sqlparser::ast::CreatePolicyCommand::Select]);
+        assert_eq!(select_policies.len(), 1);
+
+        let transformed_query = transform_query(
+            &parse_query(
+                "SELECT docs.owner_id + 1 AS owner_plus \
+                 FROM docs INNER JOIN teams ON docs.owner_id = teams.owner_id \
+                 WHERE docs.owner_id > 0 \
+                 GROUP BY docs.owner_id \
+                 HAVING docs.owner_id > 1 \
+                 QUALIFY docs.owner_id > 2",
+            ),
+            &options,
+            table,
+            &schema,
+            Some("NEW"),
+            Some(("docs", "docs_rls")),
+        );
+        let transformed_sql = transformed_query.to_string();
+        assert!(transformed_sql.contains("NEW.owner_id"));
+        assert!(transformed_sql.contains("QUALIFY"));
+
+        let insert_trigger_sql = generate_insert_trigger_sql(table, &schema, &options);
+        assert!(insert_trigger_sql.contains("docs_insert_trigger"));
+        assert!(insert_trigger_sql.contains("RAISE(ABORT"));
+
+        let update_trigger_sql = generate_update_trigger_sql(table, &schema, &options);
+        assert!(update_trigger_sql.contains("docs_update_trigger"));
+        assert!(update_trigger_sql.contains("COALESCE(NEW.owner_id, OLD.owner_id)"));
+
+        let delete_trigger_sql = generate_delete_trigger_sql(table, &schema, &options);
+        assert!(delete_trigger_sql.contains("docs_delete_trigger"));
+    }
+
+    #[test]
+    fn rls_statement_generation_paths_cover_readonly_and_validation_helpers() {
+        let schema = schema_from_sql(
+            r#"
+            CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, body TEXT);
+            ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY docs_select ON docs FOR SELECT USING (owner_id > 0);
+            CREATE POLICY docs_insert ON docs FOR INSERT WITH CHECK (owner_id > 0);
+            CREATE POLICY docs_update ON docs FOR UPDATE USING (owner_id > 0) WITH CHECK (owner_id > 0);
+            CREATE POLICY docs_delete ON docs FOR DELETE USING (owner_id > 0);
+            "#,
+        );
+        let table = schema.table(None, "docs").expect("table should exist");
+
+        let missing_audit = Pg2SqliteOptions::default();
+        let err = generate_rls_statements(table, &schema, &missing_audit)
+            .expect_err("missing audit table should error");
+        assert!(err.to_string().contains("RLS audit table name"));
+        let err = generate_readonly_rls_statements(table, &schema, &missing_audit)
+            .expect_err("missing audit table should error");
+        assert!(err.to_string().contains("RLS audit table name"));
+
+        let options = Pg2SqliteOptions::default()
+            .with_rls_audit_table_name("rls_audit")
+            .with_strict_rls_validation();
+        let statements = generate_rls_statements(table, &schema, &options)
+            .expect("full RLS statements should build");
+        assert!(!statements.is_empty());
+        assert!(
+            statements
+                .iter()
+                .any(|stmt| stmt.to_string().contains("CREATE TRIGGER docs_insert_trigger"))
+        );
+
+        let readonly = generate_readonly_rls_statements(table, &schema, &options)
+            .expect("readonly RLS should build");
+        assert!(!readonly.is_empty());
+        assert!(!readonly.iter().any(|stmt| stmt.to_string().contains("docs_insert_trigger")));
+
+        let validation = generate_rls_validation_statements(table, &schema, &options, "rls_audit")
+            .expect("validation statements should build");
+        assert!(!validation.is_empty());
+        assert!(
+            validation
+                .iter()
+                .any(|stmt| stmt.to_string().contains("CREATE VIEW docs_rls_violations"))
+        );
+
+        let audit_table =
+            generate_rls_audit_table("rls_audit").expect("audit table SQL should parse");
+        assert!(audit_table.to_string().contains("CREATE TABLE"));
+
+        let create_table_stmt =
+            parse_statements("CREATE TABLE docs(id INTEGER PRIMARY KEY)").remove(0);
+        let Statement::CreateTable(create_table) = create_table_stmt else {
+            panic!("expected create table");
+        };
+        let renamed = rename_table_for_rls(&create_table, &options, &schema);
+        assert!(renamed.name.to_string().ends_with("_rls"));
     }
 }

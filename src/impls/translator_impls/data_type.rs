@@ -97,3 +97,24 @@ impl Translator for DataType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::ast::DataType;
+
+    use crate::prelude::{Pg2SqliteOptions, Translator};
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
+    }
+
+    #[test]
+    fn translate_reports_unsupported_for_unhandled_data_type_variants() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let err = DataType::Date.translate(&schema, &options).expect_err("DATE should be rejected");
+        assert!(err.to_string().contains("is not supported"));
+    }
+}

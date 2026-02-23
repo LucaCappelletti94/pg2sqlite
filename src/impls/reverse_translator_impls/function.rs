@@ -65,13 +65,10 @@ fn is_fixed_utc_offset(value: &str) -> bool {
         return false;
     }
 
-    let hour = value[1..3].parse::<u8>().ok();
-    let minute = value[4..6].parse::<u8>().ok();
+    let hour = (bytes[1] - b'0') * 10 + (bytes[2] - b'0');
+    let minute = (bytes[4] - b'0') * 10 + (bytes[5] - b'0');
 
-    match (hour, minute) {
-        (Some(h), Some(m)) => h <= 23 && m <= 59,
-        _ => false,
-    }
+    hour <= 23 && minute <= 59
 }
 
 /// Normalize SQLite datetime timezone modifiers to PostgreSQL AT TIME ZONE
@@ -232,27 +229,38 @@ pub fn reverse_translate_function(
             }))
         }
         FunctionReversal::ToAtTimeZone(time_zone) => {
-            if let FunctionArguments::List(list) = &func.args
-                && list.args.len() == 2
-            {
-                let timestamp_expr = extract_expr_from_arg(&list.args[0])?;
-                let reversed_timestamp = crate::prelude::ReverseTranslator::reverse_translate(
-                    timestamp_expr,
-                    schema,
-                    options,
-                )?;
+            let FunctionArguments::List(list) = &func.args else {
+                debug_assert!(
+                    false,
+                    "reverse_function classified datetime as ToAtTimeZone without list args"
+                );
+                unreachable!(
+                    "internal invariant violation in datetime AT TIME ZONE reverse translation"
+                );
+            };
+            debug_assert_eq!(
+                list.args.len(),
+                2,
+                "reverse_function classified datetime as ToAtTimeZone without exactly 2 args"
+            );
+            let timestamp_expr = extract_expr_from_arg(
+                list.args
+                    .first()
+                    .expect("reverse_function must provide datetime timestamp argument"),
+            )?;
+            let reversed_timestamp = crate::prelude::ReverseTranslator::reverse_translate(
+                timestamp_expr,
+                schema,
+                options,
+            )?;
 
-                return Ok(Expr::AtTimeZone {
-                    timestamp: Box::new(reversed_timestamp),
-                    time_zone: Box::new(Expr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(time_zone),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    })),
-                });
-            }
-            Err(Error::UnsupportedSQLiteFeature(
-                "datetime AT TIME ZONE conversion requires exactly 2 arguments".to_string(),
-            ))
+            Ok(Expr::AtTimeZone {
+                timestamp: Box::new(reversed_timestamp),
+                time_zone: Box::new(Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(time_zone),
+                    span: sqlparser::tokenizer::Span::empty(),
+                })),
+            })
         }
         FunctionReversal::ToExtract(field) => {
             // strftime('%Y', expr) -> EXTRACT(YEAR FROM expr)
@@ -442,4 +450,101 @@ fn reverse_translate_function_arg(
         // Pass through wildcards and other arg types
         other => other.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{
+            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
+            Ident, ObjectName, ObjectNamePart, ValueWithSpan,
+        },
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{extract_expr_from_arg, is_fixed_utc_offset, reverse_translate_function};
+    use crate::prelude::Pg2SqliteOptions;
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
+    }
+
+    fn parse_expr(sql: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(sql)
+            .expect("sql should parse")
+            .parse_expr()
+            .expect("expression should parse")
+    }
+
+    #[test]
+    fn fixed_offset_validator_rejects_non_digit_offsets() {
+        assert!(!is_fixed_utc_offset("+0x:00"));
+        assert!(!is_fixed_utc_offset("+24:00"));
+        assert!(is_fixed_utc_offset("+23:59"));
+    }
+
+    #[test]
+    fn extract_expr_and_datetime_reverse_translation_reject_wildcards() {
+        let wildcard = FunctionArg::Unnamed(FunctionArgExpr::Wildcard);
+        let err = extract_expr_from_arg(&wildcard).expect_err("wildcard should be rejected");
+        assert!(err.to_string().contains("Expected expression argument"));
+
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("datetime"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::Unnamed(FunctionArgExpr::Wildcard),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan::from(
+                        sqlparser::ast::Value::SingleQuotedString("utc".to_string()),
+                    )))),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let err = reverse_translate_function(&func, &schema, &options)
+            .expect_err("datetime wildcard argument should be rejected");
+        assert!(err.to_string().contains("Expected expression argument"));
+    }
+
+    #[test]
+    fn passthrough_reverse_translation_preserves_filter_expression() {
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("count"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Wildcard)],
+                clauses: vec![],
+            }),
+            filter: Some(Box::new(parse_expr("age > 18"))),
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let translated = reverse_translate_function(&func, &schema, &options)
+            .expect("count should pass through");
+        let Expr::Function(function) = translated else {
+            panic!("expected translated function");
+        };
+
+        assert_eq!(function.name.to_string(), "count");
+        assert_eq!(function.filter.as_ref().map(ToString::to_string), Some("age > 18".to_string()));
+    }
 }

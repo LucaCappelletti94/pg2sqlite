@@ -286,3 +286,70 @@ pub fn generate_vec0_statements(
 
     Ok(statements)
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{ColumnOption, Statement, TableConstraint},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{find_pk_column, generate_vec0_statements};
+    use crate::prelude::Pg2SqliteOptions;
+
+    fn parse_statements(sql: &str) -> Vec<Statement> {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
+    }
+
+    fn parse_create_table(sql: &str) -> sqlparser::ast::CreateTable {
+        let stmt = parse_statements(sql).remove(0);
+        let Statement::CreateTable(create_table) = stmt else {
+            panic!("expected create table");
+        };
+        create_table
+    }
+
+    #[test]
+    fn find_pk_column_falls_back_to_schema_metadata() {
+        let schema_sql = "CREATE TABLE docs(id INTEGER PRIMARY KEY, embedding vector(3));";
+        let schema = ParserDB::from_statements(parse_statements(schema_sql), "test".to_string())
+            .expect("schema should build");
+
+        let mut create_table = parse_create_table(schema_sql);
+        for col in &mut create_table.columns {
+            col.options.retain(|opt| !matches!(opt.option, ColumnOption::PrimaryKey(_)));
+        }
+        create_table.constraints.retain(|c| !matches!(c, TableConstraint::PrimaryKey(_)));
+
+        assert_eq!(find_pk_column(&create_table, &schema).as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn generate_vec0_statements_returns_empty_for_tables_without_vector_columns() {
+        let sql = "CREATE TABLE plain(id INTEGER PRIMARY KEY, name TEXT);";
+        let schema = ParserDB::from_statements(parse_statements(sql), "test".to_string())
+            .expect("schema should build");
+        let create_table = parse_create_table(sql);
+        let options = Pg2SqliteOptions::default();
+
+        let statements =
+            generate_vec0_statements(&create_table, &schema, &options).expect("should succeed");
+        assert!(statements.is_empty());
+    }
+
+    #[test]
+    fn generate_vec0_statements_errors_when_table_is_missing_from_schema() {
+        let create_table = parse_create_table(
+            "CREATE TABLE missing(id INTEGER PRIMARY KEY, embedding vector(3));",
+        );
+        let schema =
+            ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build");
+        let options = Pg2SqliteOptions::default();
+
+        let err = generate_vec0_statements(&create_table, &schema, &options)
+            .expect_err("missing table should error");
+        assert!(err.to_string().contains("not found in schema"));
+    }
+}

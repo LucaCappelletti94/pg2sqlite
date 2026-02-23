@@ -175,11 +175,12 @@ impl PlPgSqlTranslator {
                 .map_or_else(|| "TRUE".to_string(), ToString::to_string);
 
             // Build combined condition: NOT(prev conditions) AND this condition
-            let combined = if negated_conditions.is_empty() {
-                elseif_condition.clone()
-            } else {
-                format!("{} AND ({})", negated_conditions.join(" AND "), elseif_condition)
-            };
+            debug_assert!(
+                !negated_conditions.is_empty(),
+                "IF condition negation must be seeded before ELSIF translation"
+            );
+            let combined =
+                format!("{} AND ({})", negated_conditions.join(" AND "), elseif_condition);
 
             context.push_condition(combined);
             context.clear_scoped_bindings();
@@ -1843,9 +1844,25 @@ mod tests {
     }
 
     #[test]
-    fn transform_table_with_joins_handles_right_outer_and_full_outer_join_variants() {
+    fn transform_table_with_joins_handles_inner_left_right_and_full_outer_join_variants() {
         let options = Pg2SqliteOptions::default();
         let mut ctx = PlPgSqlContext::new();
+
+        let inner_query =
+            parse_query("SELECT u.id FROM users u INNER JOIN teams t ON u.team_id = t.id");
+        let SetExpr::Select(inner_select) = inner_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let mut inner_from = inner_select.from[0].clone();
+        PlPgSqlTranslator::transform_table_with_joins(&mut inner_from, &mut ctx, &options);
+
+        let left_query =
+            parse_query("SELECT u.id FROM users u LEFT OUTER JOIN teams t ON u.team_id = t.id");
+        let SetExpr::Select(left_select) = left_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let mut left_from = left_select.from[0].clone();
+        PlPgSqlTranslator::transform_table_with_joins(&mut left_from, &mut ctx, &options);
 
         let right_query =
             parse_query("SELECT u.id FROM users u RIGHT OUTER JOIN teams t ON u.team_id = t.id");
@@ -1866,7 +1883,7 @@ mod tests {
 
     #[test]
     fn parse_expression_reports_both_parser_entry_and_expr_errors() {
-        let entry_err = PlPgSqlTranslator::parse_expression("\u{0000}").unwrap_err();
+        let entry_err = PlPgSqlTranslator::parse_expression("'unterminated").unwrap_err();
         assert!(entry_err.to_string().contains("Failed to parse expression"));
 
         let expr_err = PlPgSqlTranslator::parse_expression("1 +").unwrap_err();

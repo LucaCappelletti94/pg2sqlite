@@ -528,13 +528,14 @@ impl ReverseTranslator for Statement {
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
-        ast::{Expr, LimitClause, Offset, Query, SetExpr, Statement},
+        ast::{Expr, LimitClause, Offset, Query, SetExpr, Statement, TableFactor},
         dialect::PostgreSqlDialect,
         parser::Parser,
     };
 
     use super::{
-        check_expr_for_rls, check_limit_clause_for_rls, check_query_for_rls, check_set_expr_for_rls,
+        check_expr_for_rls, check_limit_clause_for_rls, check_query_for_rls,
+        check_set_expr_for_rls, check_table_factor_for_rls,
     };
     use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
 
@@ -679,5 +680,23 @@ mod tests {
         let non_dml = Parser::parse_sql(&PostgreSqlDialect {}, "VACUUM").unwrap().remove(0);
         let err = non_dml.reverse_translate(&schema, &options).unwrap_err();
         assert!(err.to_string().contains("Reverse translation only supports DML statements"));
+    }
+
+    #[test]
+    fn check_table_factor_and_set_expr_cover_query_fallback_paths() {
+        let options = Pg2SqliteOptions::default();
+
+        let table_fn_query = parse_query("SELECT * FROM generate_series(1, 2)");
+        let sqlparser::ast::SetExpr::Select(select) = table_fn_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        check_table_factor_for_rls(&select.from[0].relation, &options).unwrap();
+
+        let manual_table_function =
+            TableFactor::TableFunction { expr: parse_expr("generate_series(1, 2)"), alias: None };
+        check_table_factor_for_rls(&manual_table_function, &options).unwrap();
+
+        let set_expr = SetExpr::Query(Box::new(parse_query("SELECT 1")));
+        check_set_expr_for_rls(&set_expr, &options).unwrap();
     }
 }

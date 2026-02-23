@@ -14,34 +14,6 @@ use sqlparser::ast::{
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
-/// Extract the table name from a to_tsvector expression by analyzing the
-/// columns. Returns the table name if we can infer it from the column
-/// references.
-fn extract_table_from_tsvector(func: &Function, schema: &ParserDB) -> Option<String> {
-    // Get columns from to_tsvector arguments
-    let columns = extract_columns_from_function(func);
-
-    if columns.is_empty() {
-        return None;
-    }
-
-    // Try to find which table contains these columns
-    // For simplicity, we look for a table that has a GIN/GiST index on these
-    // columns by checking which tables exist in the schema
-    for table in schema.tables() {
-        let table_name = table.table_name();
-        let table_columns: std::collections::HashSet<_> =
-            table.columns(schema).map(|c| c.column_name().to_lowercase()).collect();
-
-        // Check if all referenced columns belong to this table
-        if columns.iter().all(|col| table_columns.contains(&col.to_lowercase())) {
-            return Some(table_name.to_string());
-        }
-    }
-
-    None
-}
-
 /// Extract column names from a function's arguments (recursively).
 fn extract_columns_from_function(func: &Function) -> Vec<String> {
     if let FunctionArguments::List(list) = &func.args {
@@ -152,26 +124,31 @@ fn is_to_tsquery(func: &Function) -> bool {
 /// Translate a full-text search expression (to_tsvector @@ to_tsquery) to FTS5
 /// MATCH. Returns an expression like: pk_col IN (SELECT rowid FROM table_fts
 /// WHERE table_fts MATCH 'query')
+#[allow(clippy::too_many_lines)]
 fn translate_fts_expression(
     tsvector_func: &Function,
     tsquery_func: &Function,
     schema: &ParserDB,
 ) -> Result<Expr, crate::errors::Error> {
-    // Get the table name from the tsvector expression
-    let table_name = extract_table_from_tsvector(tsvector_func, schema).ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(
-            "Could not determine table name from to_tsvector expression. \
-             Ensure the columns referenced exist in a table with a GIN/GiST index."
-                .to_string(),
-        )
-    })?;
-
-    // Look up the table to get its primary key column
-    let table = schema.table(None, &table_name).ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(format!(
-            "Could not find table '{table_name}' in schema for FTS5 query translation"
-        ))
-    })?;
+    let columns = extract_columns_from_function(tsvector_func);
+    let table = schema
+        .tables()
+        .find(|table| {
+            if columns.is_empty() {
+                return false;
+            }
+            let table_columns: std::collections::HashSet<_> =
+                table.columns(schema).map(|c| c.column_name().to_lowercase()).collect();
+            columns.iter().all(|col| table_columns.contains(&col.to_lowercase()))
+        })
+        .ok_or_else(|| {
+            crate::errors::Error::UnsupportedSQLiteFeature(
+                "Could not determine table name from to_tsvector expression. \
+                 Ensure the columns referenced exist in a table with a GIN/GiST index."
+                    .to_string(),
+            )
+        })?;
+    let table_name = table.table_name().to_string();
 
     let pk_columns: Vec<_> = table.primary_key_columns(schema).collect();
     if pk_columns.len() != 1 {
@@ -709,13 +686,10 @@ fn is_sqlite_fixed_offset(value: &str) -> bool {
         return false;
     }
 
-    let hour = value[1..3].parse::<u8>().ok();
-    let minute = value[4..6].parse::<u8>().ok();
+    let hour = (bytes[1] - b'0') * 10 + (bytes[2] - b'0');
+    let minute = (bytes[4] - b'0') * 10 + (bytes[5] - b'0');
 
-    match (hour, minute) {
-        (Some(h), Some(m)) => h <= 23 && m <= 59,
-        _ => false,
-    }
+    hour <= 23 && minute <= 59
 }
 
 /// Normalize PostgreSQL AT TIME ZONE literal names to SQLite datetime

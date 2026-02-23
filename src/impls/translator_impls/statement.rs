@@ -85,12 +85,8 @@ fn inject_condition(stmt: &mut Statement, condition: Expr) -> Result<(), crate::
     Ok(())
 }
 
-/// Returns `true` for statement variants that have no SQLite equivalent
-/// and should be silently filtered out during translation.
-#[allow(clippy::too_many_lines)]
-fn is_unsupported_statement(stmt: &Statement) -> bool {
-    matches!(
-        stmt,
+macro_rules! unsupported_statement_patterns {
+    () => {
         // ALTER TABLE - no direct SQLite equivalent
         Statement::AlterTable(_)
         // Session/variable/maintenance/cursor statements
@@ -212,7 +208,7 @@ fn is_unsupported_statement(stmt: &Statement) -> bool {
         | Statement::CreateVirtualTable { .. }
         // Case statement (procedural, not supported)
         | Statement::Case(_)
-    )
+    };
 }
 
 fn translate_create_table(
@@ -304,10 +300,6 @@ impl Translator for Statement {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        if is_unsupported_statement(self) {
-            return Ok(Vec::new());
-        }
-
         Ok(match self {
             Self::CreateTable(create_table) => {
                 translate_create_table(create_table, schema, options)?
@@ -399,8 +391,7 @@ impl Translator for Statement {
                     option: None,     // SQLite doesn't support CASCADE/RESTRICT
                 })]
             }
-            // All unsupported variants are handled by the early return above
-            _ => Vec::new(),
+            unsupported_statement_patterns!() => Vec::new(),
         })
     }
 }
@@ -409,13 +400,25 @@ impl Translator for Statement {
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
-        ast::{Expr, Statement, Value, ValueWithSpan},
+        ast::{CreateTable, Expr, Statement, Value, ValueWithSpan},
         dialect::{PostgreSqlDialect, SQLiteDialect},
         parser::Parser,
     };
 
-    use super::inject_condition;
-    use crate::prelude::{Pg2SqliteOptions, Translator};
+    use super::{inject_condition, translate_create_table_for_role};
+    use crate::{
+        prelude::{Pg2SqliteOptions, Translator},
+        traits::TranslationOptions,
+    };
+
+    fn parse_create_table(sql: &str) -> CreateTable {
+        let stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse").remove(0);
+        let Statement::CreateTable(create_table) = stmt else {
+            panic!("expected create table");
+        };
+        create_table
+    }
 
     #[test]
     fn inject_condition_returns_error_for_unsupported_statement() {
@@ -511,5 +514,56 @@ mod tests {
             err.to_string().contains("IF statements with ELSE/ELSEIF not yet supported"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn translate_create_table_for_role_handles_missing_table_readonly_and_writable_paths() {
+        let missing_schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE ROLE app_user;")
+                .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let missing_table = parse_create_table("CREATE TABLE docs(id INTEGER PRIMARY KEY)");
+        let missing =
+            translate_create_table_for_role(&missing_table, &missing_schema, &options).unwrap();
+        assert!(missing.is_none());
+
+        let readonly_schema_sql = r#"
+            CREATE ROLE app_user;
+            CREATE TABLE readonly_docs(id INTEGER PRIMARY KEY);
+            GRANT SELECT ON readonly_docs TO app_user;
+        "#;
+        let readonly_schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, readonly_schema_sql)
+                .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+        let readonly_table =
+            parse_create_table("CREATE TABLE readonly_docs(id INTEGER PRIMARY KEY)");
+        let readonly =
+            translate_create_table_for_role(&readonly_table, &readonly_schema, &options).unwrap();
+        let readonly = readonly.expect("readonly path should return statements");
+        assert!(!readonly.is_empty());
+        assert!(matches!(readonly[0], Statement::CreateTable(_)));
+
+        let writable_schema_sql = r#"
+            CREATE ROLE app_user;
+            CREATE TABLE writable_docs(id INTEGER PRIMARY KEY);
+            GRANT ALL ON writable_docs TO app_user;
+        "#;
+        let writable_schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, writable_schema_sql)
+                .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+        let writable_table =
+            parse_create_table("CREATE TABLE writable_docs(id INTEGER PRIMARY KEY)");
+        let writable =
+            translate_create_table_for_role(&writable_table, &writable_schema, &options).unwrap();
+        assert!(writable.is_none());
     }
 }

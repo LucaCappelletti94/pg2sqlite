@@ -29,11 +29,10 @@ pub(crate) fn translate_table_with_joins<D: TranslationDirection>(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<TableWithJoins, Error> {
-    let translated_joins = table_with_joins
-        .joins
-        .iter()
-        .map(|join| translate_join::<D>(join, schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut translated_joins = Vec::with_capacity(table_with_joins.joins.len());
+    for join in &table_with_joins.joins {
+        translated_joins.push(translate_join::<D>(join, schema, options)?);
+    }
 
     Ok(TableWithJoins {
         relation: translate_table_factor::<D>(&table_with_joins.relation, schema, options)?,
@@ -183,14 +182,16 @@ pub(crate) fn translate_returning<D: TranslationDirection>(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<Vec<SelectItem>>, Error> {
-    returning
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| translate_select_item::<D>(item, schema, options))
-                .collect::<Result<Vec<_>, Error>>()
-        })
-        .transpose()
+    match returning {
+        Some(items) => {
+            let mut translated = Vec::with_capacity(items.len());
+            for item in items {
+                translated.push(translate_select_item::<D>(item, schema, options)?);
+            }
+            Ok(Some(translated))
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -198,7 +199,7 @@ mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
         ast::{
-            Expr, JoinConstraint, JoinOperator, Query, SelectItem, Statement, TableFactor,
+            Expr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, Statement, TableFactor,
             ValueWithSpan,
         },
         dialect::PostgreSqlDialect,
@@ -232,8 +233,32 @@ mod tests {
         }
     }
 
+    struct NestingDirection;
+
+    impl TranslationDirection for NestingDirection {
+        fn translate_expr(
+            expr: &Expr,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+        ) -> Result<Expr, Error> {
+            Ok(Expr::Nested(Box::new(expr.clone())))
+        }
+
+        fn translate_query(
+            query: &Query,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+        ) -> Result<Query, Error> {
+            Ok(query.clone())
+        }
+    }
+
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
+    }
+
+    fn parse_expr(sql: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {}).try_with_sql(sql).unwrap().parse_expr().unwrap()
     }
 
     fn parse_query(sql: &str) -> Query {
@@ -342,6 +367,18 @@ mod tests {
                 .unwrap();
         }
 
+        let joined_query = parse_query("SELECT * FROM t INNER JOIN u ON t.id = u.id");
+        let SetExpr::Select(joined_select) = joined_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let manual_nested = TableFactor::NestedJoin {
+            table_with_joins: Box::new(joined_select.from[0].clone()),
+            alias: None,
+        };
+        let translated_manual =
+            translate_table_factor::<IdentityDirection>(&manual_nested, &schema, &options).unwrap();
+        assert!(matches!(translated_manual, TableFactor::NestedJoin { .. }));
+
         let returning_items = vec![
             SelectItem::UnnamedExpr(Expr::Identifier(sqlparser::ast::Ident::new("id"))),
             SelectItem::ExprWithAlias {
@@ -373,5 +410,32 @@ mod tests {
         join.global = true;
         let translated = translate_join::<IdentityDirection>(&join, &schema, &options).unwrap();
         assert!(translated.global);
+    }
+
+    #[test]
+    fn asof_and_expr_alias_apply_expr_translation_direction() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let as_of = JoinOperator::AsOf {
+            constraint: JoinConstraint::On(parse_expr("t.id = u.id")),
+            match_condition: parse_expr("t.id > u.id"),
+        };
+        let translated_as_of =
+            translate_join_operator::<NestingDirection>(&as_of, &schema, &options).unwrap();
+        let JoinOperator::AsOf { match_condition, .. } = translated_as_of else {
+            panic!("expected AS OF join");
+        };
+        assert!(matches!(match_condition, Expr::Nested(_)));
+
+        let alias_item = SelectItem::ExprWithAlias {
+            expr: parse_expr("a"),
+            alias: sqlparser::ast::Ident::new("a1"),
+        };
+        let translated_alias =
+            translate_select_item::<NestingDirection>(&alias_item, &schema, &options).unwrap();
+        let SelectItem::ExprWithAlias { expr, .. } = translated_alias else {
+            panic!("expected alias expression");
+        };
+        assert!(matches!(expr, Expr::Nested(_)));
     }
 }

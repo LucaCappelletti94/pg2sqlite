@@ -85,3 +85,42 @@ impl Translator for Insert {
         Ok(insert)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{Insert, OnInsert, Statement},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use crate::prelude::{Pg2SqliteOptions, Translator};
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
+    }
+
+    fn parse_insert(sql: &str) -> Insert {
+        let stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse").remove(0);
+        let Statement::Insert(insert) = stmt else {
+            panic!("expected insert");
+        };
+        insert
+    }
+
+    #[test]
+    fn translate_rejects_non_on_conflict_insert_clause() {
+        let mut insert = parse_insert("INSERT INTO users(id) VALUES (1)");
+        insert.on = Some(OnInsert::DuplicateKeyUpdate(Vec::new()));
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let err = insert
+            .translate(&schema, &options)
+            .expect_err("non-on-conflict ON INSERT clause should fail");
+
+        assert!(err.to_string().contains("Unsupported ON INSERT clause"));
+    }
+}

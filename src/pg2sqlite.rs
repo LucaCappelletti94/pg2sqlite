@@ -163,25 +163,17 @@ impl Pg2Sqlite {
         up_sql_paths.sort();
 
         let stop_at = std::fs::canonicalize(stop_at)?;
-        let mut stop_found = false;
 
         // Process each up.sql file in sorted order
         for path in up_sql_paths {
             let canonical_path = std::fs::canonicalize(&path)?;
             translator = translator.file(&path)?;
             if canonical_path == stop_at {
-                stop_found = true;
-                break;
+                return Ok(translator);
             }
         }
 
-        if !stop_found {
-            return Err(crate::errors::Error::MigrationNotFound {
-                path: stop_at.display().to_string(),
-            });
-        }
-
-        Ok(translator)
+        Err(crate::errors::Error::MigrationNotFound { path: stop_at.display().to_string() })
     }
 
     fn collect_up_sql_paths(

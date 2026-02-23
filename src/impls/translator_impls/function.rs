@@ -104,20 +104,9 @@ fn build_concatenation(exprs: Vec<Expr>) -> Option<Expr> {
     }))
 }
 
-/// Build a concatenation expression with separator: a || sep || b || sep || c.
-fn build_concatenation_with_separator(separator: &Expr, exprs: Vec<Expr>) -> Option<Expr> {
-    if exprs.is_empty() {
-        return None;
-    }
-    if exprs.len() == 1 {
-        return Some(exprs.into_iter().next().unwrap());
-    }
-
-    let mut iter = exprs.into_iter();
-    let first = iter.next().unwrap();
-
-    Some(iter.fold(first, |acc, expr| {
-        // acc || separator || expr
+/// Build a concatenation expression with separator: first || sep || next...
+fn build_concatenation_with_separator(separator: &Expr, first: Expr, remaining: Vec<Expr>) -> Expr {
+    remaining.into_iter().fold(first, |acc, expr| {
         Expr::BinaryOp {
             left: Box::new(Expr::BinaryOp {
                 left: Box::new(acc),
@@ -127,7 +116,7 @@ fn build_concatenation_with_separator(separator: &Expr, exprs: Vec<Expr>) -> Opt
             op: BinaryOperator::StringConcat,
             right: Box::new(expr),
         }
-    }))
+    })
 }
 
 /// Wrap an aggregate function argument with CASE WHEN filter THEN value END.
@@ -280,11 +269,8 @@ impl Translator for Function {
                     ));
                 }
                 let separator = exprs.remove(0);
-                build_concatenation_with_separator(&separator, exprs).ok_or_else(|| {
-                    crate::errors::Error::UnsupportedSQLiteFeature(
-                        "CONCAT_WS requires at least one value argument".to_string(),
-                    )
-                })
+                let first_value = exprs.remove(0);
+                Ok(build_concatenation_with_separator(&separator, first_value, exprs))
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
@@ -319,10 +305,16 @@ mod tests {
     }
 
     #[test]
-    fn helper_functions_cover_none_args_passthrough_and_empty_separator_cases() {
+    fn helper_functions_cover_none_args_passthrough_and_separator_builder() {
         assert!(extract_arg_exprs(&FunctionArguments::None).is_empty());
 
-        assert!(build_concatenation_with_separator(&parse_expr("','"), Vec::new()).is_none());
+        let sep = parse_expr("','");
+        let concatenated = build_concatenation_with_separator(
+            &sep,
+            parse_expr("a"),
+            vec![parse_expr("b"), parse_expr("c")],
+        );
+        assert_eq!(concatenated.to_string(), "a || ',' || b || ',' || c");
 
         let wildcard_named = FunctionArg::Named {
             name: Ident::new("value"),

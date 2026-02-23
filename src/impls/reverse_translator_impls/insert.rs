@@ -219,3 +219,58 @@ impl ReverseTranslator for Insert {
         Ok(insert)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{
+            Assignment, AssignmentTarget, Expr, Ident, Insert, ObjectName, ObjectNamePart,
+            Statement,
+        },
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
+    }
+
+    fn parse_insert(sql: &str) -> Insert {
+        let stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse").remove(0);
+        let Statement::Insert(insert) = stmt else {
+            panic!("expected insert");
+        };
+        insert
+    }
+
+    fn parse_expr(expr: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(expr)
+            .expect("expr should parse")
+            .parse_expr()
+            .expect("expr should parse")
+    }
+
+    #[test]
+    fn reverse_translate_insert_translates_assignment_values() {
+        let mut insert = parse_insert("INSERT INTO users(id) VALUES (1)");
+        insert.assignments = vec![Assignment {
+            target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
+                Ident::new("name"),
+            )])),
+            value: parse_expr("char(65)"),
+        }];
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let reversed =
+            insert.reverse_translate(&schema, &options).expect("insert should reverse-translate");
+
+        assert_eq!(reversed.assignments.len(), 1);
+        assert_eq!(reversed.assignments[0].value.to_string(), "chr(65)");
+    }
+}

@@ -532,30 +532,30 @@ fn try_translate_grouping_query(
     }
 
     let mut prefix_group_keys = Vec::new();
-    let mut grouping_operator: Option<&Expr> = None;
+    let mut grouping_operator: Option<(GroupingRewriteKind, Vec<Vec<Expr>>)> = None;
     for expr in group_exprs {
-        if matches!(expr, Expr::GroupingSets(_) | Expr::Rollup(_) | Expr::Cube(_)) {
+        let grouped_sets = match expr {
+            Expr::GroupingSets(sets) => Some((GroupingRewriteKind::GroupingSets, sets.clone())),
+            Expr::Rollup(elements) => Some((GroupingRewriteKind::Rollup, expand_rollup(elements))),
+            Expr::Cube(elements) => Some((GroupingRewriteKind::Cube, expand_cube(elements)?)),
+            _ => None,
+        };
+
+        if let Some(grouped_sets) = grouped_sets {
             if grouping_operator.is_some() {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "GROUPING SETS/ROLLUP/CUBE rewrite supports at most one grouping operator per GROUP BY"
                         .to_string(),
                 ));
             }
-            grouping_operator = Some(expr);
+            grouping_operator = Some(grouped_sets);
         } else {
             prefix_group_keys.push(expr.clone());
         }
     }
 
-    let Some(grouping_operator) = grouping_operator else {
+    let Some((kind, raw_sets)) = grouping_operator else {
         return Ok(None);
-    };
-
-    let (kind, raw_sets) = match grouping_operator {
-        Expr::GroupingSets(sets) => (GroupingRewriteKind::GroupingSets, sets.clone()),
-        Expr::Rollup(elements) => (GroupingRewriteKind::Rollup, expand_rollup(elements)),
-        Expr::Cube(elements) => (GroupingRewriteKind::Cube, expand_cube(elements)?),
-        _ => return Ok(None),
     };
 
     let expanded_sets = raw_sets
@@ -1159,6 +1159,30 @@ mod tests {
             try_translate_grouping_query(&top_rollup, &schema, &options, None, None, None, None)
                 .unwrap_err();
         assert!(err.to_string().contains("TOP clauses"));
+    }
+
+    #[test]
+    fn grouping_rewrite_errors_include_grouping_sets_and_rollup_kind_names() {
+        let wildcard_projection =
+            vec![SelectItem::Wildcard(sqlparser::ast::WildcardAdditionalOptions::default())];
+        assert!(
+            rewrite_projection_for_grouping_set(
+                &wildcard_projection,
+                &[],
+                &[],
+                GroupingRewriteKind::GroupingSets
+            )
+            .is_err()
+        );
+        assert!(
+            rewrite_projection_for_grouping_set(
+                &wildcard_projection,
+                &[],
+                &[],
+                GroupingRewriteKind::Rollup
+            )
+            .is_err()
+        );
     }
 
     #[test]

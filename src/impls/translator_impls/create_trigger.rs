@@ -229,3 +229,59 @@ impl Translator for CreateTrigger {
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{CreateTrigger, Statement},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use crate::prelude::{Pg2SqliteOptions, Translator};
+
+    fn parse_statements(sql: &str) -> Vec<Statement> {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
+    }
+
+    fn parse_trigger(sql: &str) -> CreateTrigger {
+        let stmt = parse_statements(sql).remove(0);
+        let Statement::CreateTrigger(trigger) = stmt else {
+            panic!("expected create trigger");
+        };
+        trigger
+    }
+
+    fn schema_with_trigger_function_and_rls_table() -> ParserDB {
+        let schema_sql = r#"
+            CREATE TABLE docs(id INTEGER PRIMARY KEY);
+            ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+            CREATE FUNCTION docs_trigger_fn() RETURNS trigger AS $$
+            BEGIN
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+        "#;
+        ParserDB::from_statements(parse_statements(schema_sql), "test".to_string())
+            .expect("schema should build")
+    }
+
+    #[test]
+    fn instead_of_trigger_on_rls_table_keeps_original_table_name() {
+        let schema = schema_with_trigger_function_and_rls_table();
+        let options = Pg2SqliteOptions::default();
+        let trigger = parse_trigger(
+            "CREATE TRIGGER docs_instead INSTEAD OF INSERT ON docs \
+             FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn()",
+        );
+
+        let translated = trigger
+            .translate(&schema, &options)
+            .expect("trigger translation should succeed")
+            .expect("trigger should be translated");
+
+        let (_drop_stmt, create_trigger) = translated;
+        assert_eq!(create_trigger.table_name.to_string(), "docs");
+    }
+}
