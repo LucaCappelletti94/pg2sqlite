@@ -90,3 +90,26 @@ fn translate_filters_non_translatable_statements() {
     // filtered
     assert_eq!(result.len(), 1, "Expected 1 statement, got: {}", result.len());
 }
+
+#[test]
+fn translate_malformed_trigger_function_body_returns_error_not_panic() {
+    let sql = r#"
+        CREATE TABLE t (id INT PRIMARY KEY);
+        CREATE FUNCTION trg_fn() RETURNS trigger AS $$
+            RETURN NEW;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION trg_fn();
+    "#;
+    let translator = Pg2Sqlite::default().sql(sql).unwrap();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        translator.translate(&Pg2SqliteOptions::default())
+    }));
+    assert!(result.is_ok(), "translate should not panic on malformed function body");
+
+    let translation = result.unwrap();
+    assert!(
+        translation.is_err(),
+        "expected a translation error for malformed trigger function body"
+    );
+}

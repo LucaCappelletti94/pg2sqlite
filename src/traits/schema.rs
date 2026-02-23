@@ -11,7 +11,7 @@ use sqlparser::{
     tokenizer::{Token, TokenWithSpan, Tokenizer, Word},
 };
 
-use crate::impls::translator_impls::plpgsql::PlPgSqlPreprocessor;
+use crate::{errors::Error, impls::translator_impls::plpgsql::PlPgSqlPreprocessor};
 
 /// Trait to define a schema for the translation between `PostgreSQL` and
 /// `SQLite`.
@@ -22,9 +22,13 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
     /// # Arguments
     ///
     /// * `name` - The name of the function to be searched.
-    fn function_body(&self, name: &str) -> Option<BeginEndStatements> {
-        let function = self.function(name)?;
-        let function_body = function.body()?;
+    fn function_body(&self, name: &str) -> Result<Option<BeginEndStatements>, Error> {
+        let Some(function) = self.function(name) else {
+            return Ok(None);
+        };
+        let Some(function_body) = function.body() else {
+            return Ok(None);
+        };
 
         // We strip spaces and semicolons from the body.
         let maybe_body = function_body.trim().trim_end_matches(';').trim();
@@ -33,33 +37,41 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
         let (preprocessed_body, _context) = PlPgSqlPreprocessor::preprocess(maybe_body);
 
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
-        let tokens = Tokenizer::new(&dialect, &preprocessed_body).tokenize().unwrap_or_else(|e| {
-            panic!("Failed to tokenize function body: {preprocessed_body}. Error: {e:?}")
-        });
+        let tokens = Tokenizer::new(&dialect, &preprocessed_body).tokenize().map_err(|e| {
+            Error::UnknownPostgresFeature(format!(
+                "Failed to tokenize trigger function '{name}' body: {e}. Body: {preprocessed_body}",
+            ))
+        })?;
 
         let begin_idx = tokens
             .iter()
             .position(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::BEGIN))
-            .unwrap_or_else(|| {
-                panic!("Function body should start with BEGIN. Is: {preprocessed_body}")
-            });
+            .ok_or_else(|| {
+                Error::UnknownPostgresFeature(format!(
+                    "Trigger function '{name}' body must contain BEGIN...END block. Body: {preprocessed_body}",
+                ))
+            })?;
 
         // We look for the last END that is a keyword
         let end_idx = tokens
             .iter()
             .rposition(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::END))
-            .unwrap_or_else(|| {
-                panic!("Function body should end with END. Is: {preprocessed_body}")
-            });
+            .ok_or_else(|| {
+                Error::UnknownPostgresFeature(format!(
+                    "Trigger function '{name}' body must end with END. Body: {preprocessed_body}",
+                ))
+            })?;
 
         let body_tokens = tokens[begin_idx + 1..end_idx].to_vec();
 
         let mut statements = sqlparser::parser::Parser::new(&dialect)
             .with_tokens(body_tokens)
             .parse_statements()
-            .unwrap_or_else(|e| {
-                panic!("Failed to parse function body statements: {e:?}. Body: {preprocessed_body}")
-            });
+            .map_err(|e| {
+                Error::UnknownPostgresFeature(format!(
+                    "Failed to parse trigger function '{name}' body statements: {e}. Body: {preprocessed_body}",
+                ))
+            })?;
 
         // The function body may end with a `RETURN NEW;` or `RETURN OLD;` statement.
         // If that's the case, we remove it.
@@ -73,7 +85,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
             }
         }
 
-        Some(BeginEndStatements {
+        Ok(Some(BeginEndStatements {
             begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
                 value: "BEGIN".into(),
                 quote_style: None,
@@ -85,7 +97,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
                 quote_style: None,
                 keyword: Keyword::END,
             }))),
-        })
+        }))
     }
 }
 
