@@ -1173,3 +1173,467 @@ impl PlPgSqlTranslator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{Expr, Query, SetExpr, Statement, TableFactor},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::PlPgSqlTranslator;
+    use crate::{
+        impls::translator_impls::plpgsql::context::{PlPgSqlContext, VariableBinding},
+        prelude::Pg2SqliteOptions,
+        traits::TranslationOptions,
+    };
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
+    }
+
+    fn parse_statement(sql: &str) -> Statement {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().remove(0)
+    }
+
+    fn parse_query(sql: &str) -> Query {
+        match parse_statement(sql) {
+            Statement::Query(query) => *query,
+            other => panic!("expected query, got: {other:?}"),
+        }
+    }
+
+    fn parse_expr(expr: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {}).try_with_sql(expr).unwrap().parse_expr().unwrap()
+    }
+
+    #[test]
+    fn uuid_function_translation_and_expression_parsing_behave_as_expected() {
+        let options = Pg2SqliteOptions::default().with_uuid_function_name("uuid7".to_string());
+        let translated = PlPgSqlTranslator::translate_uuid_function(
+            "gen_random_uuid() + uuidv4() + uuidv7()",
+            &options,
+        );
+        assert_eq!(translated, "uuid7() + uuid7() + uuid7()");
+
+        let parsed = PlPgSqlTranslator::parse_expression("1 + 2").unwrap();
+        assert_eq!(parsed.to_string(), "1 + 2");
+
+        let err = PlPgSqlTranslator::parse_expression("THIS IS NOT SQL").unwrap_err();
+        assert!(err.to_string().contains("Failed to parse expression"));
+    }
+
+    #[test]
+    fn handle_set_statement_tracks_scoped_and_persistent_bindings() {
+        let mut ctx = PlPgSqlContext::new();
+
+        let scoped = parse_statement("SET v_id = 42");
+        if let Statement::Set(set) = scoped {
+            PlPgSqlTranslator::handle_set_statement(&set, &mut ctx);
+        } else {
+            panic!("expected SET statement");
+        }
+        assert_eq!(ctx.get_binding("v_id").map(|b| b.expression.as_str()), Some("42"));
+
+        let persistent = parse_statement("SET v_sub = (SELECT NEW.id)");
+        if let Statement::Set(set) = persistent {
+            PlPgSqlTranslator::handle_set_statement(&set, &mut ctx);
+        } else {
+            panic!("expected SET statement");
+        }
+        assert_eq!(
+            ctx.get_binding("v_sub").map(|b| b.expression.as_str()),
+            Some("(SELECT NEW.id)")
+        );
+    }
+
+    #[test]
+    fn transform_values_to_select_handles_empty_bindings_and_rejects_multi_row_values() {
+        let query = parse_query("VALUES (1)");
+        let SetExpr::Values(values) = query.body.as_ref() else {
+            panic!("expected values");
+        };
+
+        let transformed =
+            PlPgSqlTranslator::transform_values_to_select(values, &[], Some("TRUE")).unwrap();
+        let SetExpr::Select(select) = transformed else {
+            panic!("expected select output");
+        };
+        assert!(matches!(select.from[0].relation, TableFactor::Derived { .. }));
+        let selection = select.selection.as_ref().map(ToString::to_string).unwrap();
+        assert!(selection.eq_ignore_ascii_case("true"), "unexpected selection: {selection}");
+
+        let multi = parse_query("VALUES (1), (2)");
+        let SetExpr::Values(multi_values) = multi.body.as_ref() else {
+            panic!("expected values");
+        };
+        let err =
+            PlPgSqlTranslator::transform_values_to_select(multi_values, &[], None).unwrap_err();
+        assert!(err.to_string().contains("Multi-row VALUES in trigger not supported"));
+    }
+
+    #[test]
+    fn substitute_variables_and_reference_detection_cover_nested_shapes() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "42".to_string() }];
+        let expr = parse_expr("(v_id + 1) * 2");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert!(substituted.to_string().contains("v_id.val"));
+
+        assert!(PlPgSqlTranslator::expr_references_variable(&parse_expr("v_id"), "v_id"));
+        assert!(PlPgSqlTranslator::expr_references_variable(&parse_expr("t.v_id"), "v_id"));
+        assert!(!PlPgSqlTranslator::expr_references_variable(&parse_expr("other"), "v_id"));
+    }
+
+    #[test]
+    fn inject_condition_into_statement_updates_where_and_ignores_invalid_conditions() {
+        let mut update = parse_statement("UPDATE users SET active = TRUE");
+        PlPgSqlTranslator::inject_condition_into_statement(&mut update, "NEW.kind = 'x'");
+        assert!(update.to_string().contains("WHERE NEW.kind = 'x'"));
+
+        let mut delete = parse_statement("DELETE FROM users");
+        PlPgSqlTranslator::inject_condition_into_statement(&mut delete, "NEW.kind = 'x'");
+        assert!(delete.to_string().contains("WHERE NEW.kind = 'x'"));
+
+        let mut unchanged = parse_statement("DELETE FROM users");
+        let before = unchanged.to_string();
+        PlPgSqlTranslator::inject_condition_into_statement(&mut unchanged, "NOT (");
+        assert_eq!(unchanged.to_string(), before);
+    }
+
+    #[test]
+    fn transform_with_insert_to_subquery_rewrites_on_conflict_do_nothing() {
+        let query = parse_query(
+            r#"
+            WITH RECURSIVE cte AS (SELECT 1 AS id)
+            INSERT INTO users (id)
+            SELECT id FROM cte
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        );
+
+        let with = query.with.as_ref().unwrap().clone();
+        let SetExpr::Insert(Statement::Insert(insert)) = query.body.as_ref() else {
+            panic!("expected set-expr insert");
+        };
+
+        let mut ctx = PlPgSqlContext::new();
+        let options = Pg2SqliteOptions::default();
+        let statements =
+            PlPgSqlTranslator::transform_with_insert_to_subquery(&with, insert, &mut ctx, &options)
+                .unwrap();
+        let translated = match &statements[0] {
+            Statement::Insert(insert) => insert,
+            other => panic!("expected insert statement, got: {other:?}"),
+        };
+        assert!(translated.or.is_some(), "expected INSERT OR IGNORE rewrite");
+        assert!(translated.on.is_none(), "expected ON CONFLICT to be removed");
+    }
+
+    #[test]
+    fn transform_query_body_covers_set_operation_path() {
+        let query = parse_query("SELECT 1 UNION ALL SELECT 2");
+        let mut ctx = PlPgSqlContext::new();
+        let options = Pg2SqliteOptions::default();
+
+        let transformed =
+            PlPgSqlTranslator::transform_query_body(query.body.as_ref(), &mut ctx, &options)
+                .unwrap();
+        assert!(matches!(transformed, SetExpr::SetOperation { .. }));
+    }
+
+    #[test]
+    fn query_reference_detection_and_with_delete_transform_cover_branches() {
+        let query = parse_query("SELECT id FROM cte");
+        assert!(PlPgSqlTranslator::query_references_ctes(&query, &["cte".to_string()]));
+        assert!(!PlPgSqlTranslator::query_references_ctes(&query, &["other".to_string()]));
+
+        let with_delete = parse_query(
+            r#"
+            WITH RECURSIVE ids AS (SELECT 1 AS id)
+            DELETE FROM users
+            WHERE id IN (SELECT id FROM ids)
+            "#,
+        );
+        let with = with_delete.with.as_ref().unwrap().clone();
+        let SetExpr::Delete(Statement::Delete(delete)) = with_delete.body.as_ref() else {
+            panic!("expected set-expr delete");
+        };
+
+        let mut ctx = PlPgSqlContext::new();
+        let options = Pg2SqliteOptions::default();
+        let transformed =
+            PlPgSqlTranslator::transform_with_delete_to_subquery(&with, delete, &mut ctx, &options);
+        assert_eq!(transformed.len(), 1);
+        assert!(matches!(transformed[0], Statement::Delete(_)));
+    }
+
+    #[test]
+    fn translate_insert_statement_uses_fast_path_without_bindings() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let insert_stmt = parse_statement("INSERT INTO users(id) VALUES (1)");
+        let Statement::Insert(insert) = insert_stmt else {
+            panic!("expected insert");
+        };
+        let mut ctx = PlPgSqlContext::new();
+
+        let translated =
+            PlPgSqlTranslator::translate_insert_statement(&insert, &mut ctx, &schema, &options)
+                .unwrap();
+        assert!(!translated.is_empty());
+    }
+
+    #[test]
+    fn translate_query_statement_falls_back_for_non_insert_delete_with_bodies() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+
+        let query = parse_query(
+            r#"
+            WITH cte AS (SELECT 1 AS id)
+            SELECT id FROM cte WHERE id IN (SELECT id FROM cte)
+            "#,
+        );
+
+        let out = PlPgSqlTranslator::translate_query_statement(&query, &mut ctx, &schema, &options)
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], Statement::Query(_)));
+    }
+
+    #[test]
+    fn transform_with_insert_to_subquery_rejects_source_less_insert() {
+        let query = parse_query("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte");
+        let with = query.with.as_ref().unwrap().clone();
+        let Statement::Insert(mut insert) = parse_statement("INSERT INTO users(id) VALUES (1)")
+        else {
+            panic!("expected insert");
+        };
+        insert.source = None;
+
+        let mut ctx = PlPgSqlContext::new();
+        let options = Pg2SqliteOptions::default();
+        let err = PlPgSqlTranslator::transform_with_insert_to_subquery(
+            &with, &insert, &mut ctx, &options,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("without source SELECT"));
+    }
+
+    #[test]
+    fn transform_with_insert_to_subquery_handles_projection_shapes() {
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+
+        let q1 = parse_query(
+            r#"
+            WITH cte AS (SELECT 1 AS id)
+            INSERT INTO users (id) SELECT id FROM cte
+            "#,
+        );
+        let with1 = q1.with.as_ref().unwrap().clone();
+        let SetExpr::Insert(Statement::Insert(insert1)) = q1.body.as_ref() else {
+            panic!("expected set-expr insert");
+        };
+        let s1 = PlPgSqlTranslator::transform_with_insert_to_subquery(
+            &with1, insert1, &mut ctx, &options,
+        )
+        .unwrap();
+        assert!(s1[0].to_string().contains("recursive_cte_subquery.id"));
+
+        let q2 = parse_query(
+            r#"
+            WITH cte AS (SELECT 1 AS id)
+            INSERT INTO users (id) SELECT cte.id FROM cte
+            "#,
+        );
+        let with2 = q2.with.as_ref().unwrap().clone();
+        let SetExpr::Insert(Statement::Insert(insert2)) = q2.body.as_ref() else {
+            panic!("expected set-expr insert");
+        };
+        let s2 = PlPgSqlTranslator::transform_with_insert_to_subquery(
+            &with2, insert2, &mut ctx, &options,
+        )
+        .unwrap();
+        assert!(s2[0].to_string().contains("recursive_cte_subquery.id"));
+
+        let q3 = parse_query(
+            r#"
+            WITH cte AS (SELECT 1 AS id)
+            INSERT INTO users (id) SELECT id + 1 FROM cte
+            "#,
+        );
+        let with3 = q3.with.as_ref().unwrap().clone();
+        let SetExpr::Insert(Statement::Insert(insert3)) = q3.body.as_ref() else {
+            panic!("expected set-expr insert");
+        };
+        let s3 = PlPgSqlTranslator::transform_with_insert_to_subquery(
+            &with3, insert3, &mut ctx, &options,
+        )
+        .unwrap();
+        assert!(s3[0].to_string().contains("SELECT * FROM"), "unexpected SQL: {}", s3[0]);
+    }
+
+    #[test]
+    fn inject_with_into_subqueries_handles_binary_unary_and_nested_cases() {
+        let mut query = parse_query(
+            r#"
+            WITH ids AS (SELECT 1 AS id)
+            DELETE FROM users
+            WHERE (id IN (SELECT id FROM ids)) AND (NOT (id IN (SELECT id FROM ids)))
+            "#,
+        );
+        let with = query.with.clone().unwrap();
+        let SetExpr::Delete(Statement::Delete(delete)) = query.body.as_mut() else {
+            panic!("expected delete");
+        };
+        let selection = delete.selection.as_mut().unwrap();
+
+        let mut ctx = PlPgSqlContext::new();
+        let options = Pg2SqliteOptions::default();
+        PlPgSqlTranslator::inject_with_into_in_subqueries(selection, &with, &mut ctx, &options);
+
+        let selection_sql = selection.to_string();
+        assert!(selection_sql.contains("WITH ids AS"), "unexpected SQL: {selection_sql}");
+    }
+
+    #[test]
+    fn transform_query_body_and_set_expr_cover_insert_delete_select_and_other_paths() {
+        let mut ctx = PlPgSqlContext::new();
+        let options = Pg2SqliteOptions::default();
+
+        let Statement::Insert(insert) = parse_statement("INSERT INTO users(id) VALUES (1)") else {
+            panic!("expected insert");
+        };
+        let insert_set = SetExpr::Insert(Statement::Insert(insert));
+        assert!(matches!(
+            PlPgSqlTranslator::transform_query_body(&insert_set, &mut ctx, &options).unwrap(),
+            SetExpr::Insert(_)
+        ));
+
+        let Statement::Delete(delete) = parse_statement("DELETE FROM users WHERE id IN (SELECT 1)")
+        else {
+            panic!("expected delete");
+        };
+        let delete_set = SetExpr::Delete(Statement::Delete(delete));
+        assert!(matches!(
+            PlPgSqlTranslator::transform_query_body(&delete_set, &mut ctx, &options).unwrap(),
+            SetExpr::Delete(_)
+        ));
+
+        let select_query = parse_query("SELECT gen_random_uuid(), NEW.id FROM users");
+        assert!(matches!(
+            PlPgSqlTranslator::transform_query_body(select_query.body.as_ref(), &mut ctx, &options)
+                .unwrap(),
+            SetExpr::Select(_)
+        ));
+
+        let values_query = parse_query("VALUES (1)");
+        assert!(matches!(
+            PlPgSqlTranslator::transform_query_body(values_query.body.as_ref(), &mut ctx, &options)
+                .unwrap(),
+            SetExpr::Values(_)
+        ));
+
+        let mut set_expr = values_query.body.as_ref().clone();
+        PlPgSqlTranslator::transform_set_expr(&mut set_expr, &mut ctx, &options);
+        assert!(matches!(set_expr, SetExpr::Values(_)));
+    }
+
+    #[test]
+    fn transform_table_with_joins_and_expr_cover_recursive_paths() {
+        let mut ctx = PlPgSqlContext::new();
+        let options = Pg2SqliteOptions::default();
+
+        let query = parse_query(
+            "SELECT gen_random_uuid(), x FROM users u LEFT JOIN teams t ON u.team_id = t.id",
+        );
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let mut select = (**select).clone();
+        for from in &mut select.from {
+            PlPgSqlTranslator::transform_table_with_joins(from, &mut ctx, &options);
+        }
+        PlPgSqlTranslator::transform_selection(&mut select.selection, &mut ctx, &options);
+        for item in &mut select.projection {
+            if let sqlparser::ast::SelectItem::UnnamedExpr(expr) = item {
+                PlPgSqlTranslator::transform_expr(expr, &mut ctx, &options);
+            }
+        }
+        let projection_sql = select.projection[0].to_string();
+        assert!(projection_sql.contains("uuid"), "unexpected projection: {projection_sql}");
+
+        let mut in_subquery = parse_expr("x IN (SELECT y FROM t)");
+        PlPgSqlTranslator::transform_expr(&mut in_subquery, &mut ctx, &options);
+        assert!(in_subquery.to_string().contains("SELECT y FROM t"));
+    }
+
+    #[test]
+    fn translate_insert_statement_covers_uuid_tracking_and_select_source_paths() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                "CREATE TABLE users(id TEXT, name TEXT); CREATE TABLE audit(id TEXT);",
+            )
+            .unwrap(),
+            "test".to_string(),
+        )
+        .unwrap();
+        let options = Pg2SqliteOptions::default();
+
+        let mut ctx = PlPgSqlContext::new();
+        ctx.add_binding(VariableBinding {
+            name: "v_id".to_string(),
+            expression: "uuidv7()".to_string(),
+        });
+
+        let Statement::Insert(insert_values) =
+            parse_statement("INSERT INTO users (id, name) VALUES (v_id, 'a')")
+        else {
+            panic!("expected insert");
+        };
+        let translated_values = PlPgSqlTranslator::translate_insert_statement(
+            &insert_values,
+            &mut ctx,
+            &schema,
+            &options,
+        )
+        .unwrap();
+        assert!(!translated_values.is_empty());
+        assert!(ctx.get_uuid_first_use("v_id").is_some());
+
+        let Statement::Insert(insert_select) =
+            parse_statement("INSERT INTO users (id) SELECT v_id")
+        else {
+            panic!("expected insert");
+        };
+        ctx.push_condition("NEW.kind = 'a'".to_string());
+        let translated_select = PlPgSqlTranslator::translate_insert_statement(
+            &insert_select,
+            &mut ctx,
+            &schema,
+            &options,
+        )
+        .unwrap();
+        assert!(!translated_select.is_empty());
+
+        let mut table_fn_insert = insert_values.clone();
+        let Expr::Function(func) = parse_expr("remote()") else {
+            panic!("expected function expression");
+        };
+        table_fn_insert.table = sqlparser::ast::TableObject::TableFunction(func);
+        let err = PlPgSqlTranslator::translate_insert_statement(
+            &table_fn_insert,
+            &mut ctx,
+            &schema,
+            &options,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("table function not supported"));
+    }
+}

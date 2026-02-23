@@ -110,3 +110,33 @@ impl CteBuilder {
         Self::cte_column_reference(var_name, "val")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::ast::{Expr, Value, ValueWithSpan};
+
+    use super::{CteBuilder, VariableBinding};
+
+    #[test]
+    fn create_ctes_and_references_work() {
+        let binding =
+            VariableBinding { name: "v_id".to_string(), expression: "uuidv7()".to_string() };
+        let expr = Expr::Value(ValueWithSpan::from(Value::Number("1".to_string(), false)));
+
+        let cte = CteBuilder::create_variable_cte(&binding, expr.clone());
+        assert_eq!(cte.alias.name.value, "v_id");
+        assert_eq!(cte.alias.columns.len(), 1);
+
+        let simple = CteBuilder::create_simple_cte("v_simple", expr);
+        assert_eq!(simple.alias.name.value, "v_simple");
+
+        let with_none = CteBuilder::combine_ctes(Vec::new());
+        assert!(with_none.is_none());
+
+        let with_some = CteBuilder::combine_ctes(vec![cte, simple]).unwrap();
+        assert_eq!(with_some.cte_tables.len(), 2);
+
+        assert_eq!(CteBuilder::cte_column_reference("v_id", "val").to_string(), "v_id.val");
+        assert_eq!(CteBuilder::variable_reference("v_simple").to_string(), "v_simple.val");
+    }
+}

@@ -86,3 +86,57 @@ fn reverse_translate_from_table(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{FromTable, Statement},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::reverse_translate_from_table;
+    use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
+    }
+
+    fn parse_delete(sql: &str) -> sqlparser::ast::Delete {
+        let stmt = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().remove(0);
+        match stmt {
+            Statement::Delete(delete) => delete,
+            other => panic!("expected delete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reverse_translate_delete_handles_using_and_returning() {
+        let delete = parse_delete(
+            "DELETE FROM users USING accounts WHERE users.account_id = accounts.id RETURNING users.id",
+        );
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let translated = delete.reverse_translate(&schema, &options).unwrap();
+        assert!(translated.using.is_some());
+        assert!(translated.returning.is_some());
+    }
+
+    #[test]
+    fn reverse_translate_from_table_supports_without_keyword_variant() {
+        let mut delete = parse_delete("DELETE FROM users WHERE id = 1");
+        let tables = match delete.from {
+            FromTable::WithFromKeyword(ref tables) | FromTable::WithoutKeyword(ref tables) => {
+                tables.clone()
+            }
+        };
+        delete.from = FromTable::WithoutKeyword(tables);
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let translated = reverse_translate_from_table(&delete.from, &schema, &options).unwrap();
+        assert!(matches!(translated, FromTable::WithoutKeyword(_)));
+    }
+}

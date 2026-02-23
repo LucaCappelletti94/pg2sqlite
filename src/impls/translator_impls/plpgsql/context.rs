@@ -176,3 +176,73 @@ impl PlPgSqlContext {
         self.uuid_first_use.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{PlPgSqlContext, VariableBinding, VariableDeclaration};
+
+    #[test]
+    fn declarations_and_bindings_are_tracked() {
+        let mut ctx = PlPgSqlContext::new();
+
+        ctx.add_declaration(VariableDeclaration {
+            name: "v_id".to_string(),
+            data_type: "UUID".to_string(),
+            default_value: Some("uuidv7()".to_string()),
+        });
+        assert!(ctx.is_declared_variable("v_id"));
+        assert_eq!(ctx.get_declaration("v_id").map(|d| d.data_type.as_str()), Some("UUID"));
+
+        ctx.add_persistent_binding(VariableBinding {
+            name: "v_persist".to_string(),
+            expression: "(SELECT NEW.id)".to_string(),
+        });
+        ctx.add_binding(VariableBinding {
+            name: "v_scoped".to_string(),
+            expression: "42".to_string(),
+        });
+
+        assert_eq!(
+            ctx.get_binding("v_persist").map(|b| b.expression.as_str()),
+            Some("(SELECT NEW.id)")
+        );
+        assert_eq!(ctx.get_binding("v_scoped").map(|b| b.expression.as_str()), Some("42"));
+
+        let binding_names = ctx.bindings().map(|b| b.name.clone()).collect::<Vec<_>>();
+        assert!(binding_names.iter().any(|n| n == "v_persist"));
+        assert!(binding_names.iter().any(|n| n == "v_scoped"));
+
+        ctx.clear_scoped_bindings();
+        assert!(ctx.get_binding("v_scoped").is_none());
+        assert!(ctx.get_binding("v_persist").is_some());
+    }
+
+    #[test]
+    fn conditions_and_uuid_tracking_are_scoped() {
+        let mut ctx = PlPgSqlContext::new();
+
+        assert!(ctx.current_condition().is_none());
+        ctx.push_condition("NEW.kind = 'a'".to_string());
+        ctx.push_condition("NEW.active = true".to_string());
+        assert_eq!(
+            ctx.current_condition().as_deref(),
+            Some("(NEW.kind = 'a') AND (NEW.active = true)")
+        );
+        assert_eq!(ctx.pop_condition().as_deref(), Some("NEW.active = true"));
+        assert_eq!(ctx.current_condition().as_deref(), Some("(NEW.kind = 'a')"));
+
+        ctx.add_binding(VariableBinding {
+            name: "v_uuid".to_string(),
+            expression: "gen_random_uuid()".to_string(),
+        });
+        assert!(ctx.is_uuid_generation("v_uuid"));
+
+        ctx.record_uuid_first_use("v_uuid", "items", "id");
+        let first_use = ctx.get_uuid_first_use("v_uuid").unwrap();
+        assert_eq!(first_use.table_name, "items");
+        assert_eq!(first_use.column_name, "id");
+
+        ctx.clear_uuid_first_use();
+        assert!(ctx.get_uuid_first_use("v_uuid").is_none());
+    }
+}

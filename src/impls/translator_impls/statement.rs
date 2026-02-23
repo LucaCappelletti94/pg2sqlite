@@ -407,13 +407,15 @@ impl Translator for Statement {
 
 #[cfg(test)]
 mod tests {
+    use sql_traits::structs::ParserDB;
     use sqlparser::{
-        ast::{Expr, Value, ValueWithSpan},
-        dialect::SQLiteDialect,
+        ast::{Expr, Statement, Value, ValueWithSpan},
+        dialect::{PostgreSqlDialect, SQLiteDialect},
         parser::Parser,
     };
 
     use super::inject_condition;
+    use crate::prelude::{Pg2SqliteOptions, Translator};
 
     #[test]
     fn inject_condition_returns_error_for_unsupported_statement() {
@@ -427,5 +429,87 @@ mod tests {
 
         let result = inject_condition(&mut stmt, condition);
         assert!(result.is_err(), "Expected unsupported statement to return an error");
+    }
+
+    #[test]
+    fn inject_condition_updates_insert_update_and_delete_statements() {
+        let condition = Expr::Value(ValueWithSpan {
+            value: Value::Boolean(true),
+            span: sqlparser::tokenizer::Span::empty(),
+        });
+
+        let mut insert = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "INSERT INTO logs(id) SELECT id FROM users WHERE active = 1",
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        inject_condition(&mut insert, condition.clone()).unwrap();
+        assert!(insert.to_string().to_uppercase().contains("AND TRUE"), "unexpected SQL: {insert}");
+
+        let mut update =
+            Parser::parse_sql(&PostgreSqlDialect {}, "UPDATE users SET active = 0 WHERE id = 1")
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+        inject_condition(&mut update, condition.clone()).unwrap();
+        assert!(update.to_string().to_uppercase().contains("AND TRUE"), "unexpected SQL: {update}");
+
+        let mut delete = Parser::parse_sql(&PostgreSqlDialect {}, "DELETE FROM users WHERE id = 1")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        inject_condition(&mut delete, condition).unwrap();
+        assert!(delete.to_string().to_uppercase().contains("AND TRUE"), "unexpected SQL: {delete}");
+    }
+
+    #[test]
+    fn inject_condition_rejects_insert_without_select_source() {
+        let condition = Expr::Value(ValueWithSpan {
+            value: Value::Boolean(true),
+            span: sqlparser::tokenizer::Span::empty(),
+        });
+
+        let mut values_insert =
+            Parser::parse_sql(&PostgreSqlDialect {}, "INSERT INTO t(id) VALUES (1)")
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+        let err = inject_condition(&mut values_insert, condition.clone()).unwrap_err();
+        assert!(err.to_string().contains("non-SELECT source"), "unexpected error: {err}");
+
+        let mut source_less_insert = values_insert.clone();
+        if let Statement::Insert(insert) = &mut source_less_insert {
+            insert.source = None;
+        } else {
+            panic!("expected insert statement");
+        }
+        let err = inject_condition(&mut source_less_insert, condition).unwrap_err();
+        assert!(err.to_string().contains("without source"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn statement_if_with_else_is_rejected() {
+        let if_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "IF TRUE THEN DELETE FROM users; ELSE DELETE FROM users; END IF;",
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let schema = ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap();
+        let options = Pg2SqliteOptions::default();
+        let err = if_stmt.translate(&schema, &options).unwrap_err();
+        assert!(
+            err.to_string().contains("IF statements with ELSE/ELSEIF not yet supported"),
+            "unexpected error: {err}"
+        );
     }
 }

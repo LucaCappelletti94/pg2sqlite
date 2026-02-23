@@ -904,3 +904,369 @@ fn translate_values(
         value_keyword: values.value_keyword,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{Distinct, GroupByExpr, Query, SelectItem, SetExpr, Statement},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{
+        GroupingRewriteKind, ensure_distinct_on_projection_is_rewriteable, expand_cube,
+        is_aggregate_expression, projection_aliases, rewrite_projection_for_grouping_set,
+        translate_distinct, translate_fetch, translate_limit_clause, translate_named_window,
+        translate_order_by, try_translate_distinct_on_query, try_translate_grouping_query,
+    };
+    use crate::prelude::{Pg2SqliteOptions, Translator};
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
+    }
+
+    fn parse_query(sql: &str) -> Query {
+        let stmt = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().remove(0);
+        match stmt {
+            Statement::Query(query) => *query,
+            other => panic!("expected query, got: {other:?}"),
+        }
+    }
+
+    fn parse_expr(expr: &str) -> sqlparser::ast::Expr {
+        Parser::new(&PostgreSqlDialect {}).try_with_sql(expr).unwrap().parse_expr().unwrap()
+    }
+
+    #[test]
+    fn distinct_on_projection_rewrite_validates_inputs() {
+        let valid = vec![SelectItem::ExprWithAlias {
+            expr: parse_expr("user_id"),
+            alias: sqlparser::ast::Ident::new("user_id"),
+        }];
+        assert!(ensure_distinct_on_projection_is_rewriteable(&valid).is_ok());
+
+        let wildcard =
+            vec![SelectItem::Wildcard(sqlparser::ast::WildcardAdditionalOptions::default())];
+        assert!(ensure_distinct_on_projection_is_rewriteable(&wildcard).is_err());
+
+        let duplicated = vec![
+            SelectItem::ExprWithAlias {
+                expr: parse_expr("user_id"),
+                alias: sqlparser::ast::Ident::new("x"),
+            },
+            SelectItem::ExprWithAlias {
+                expr: parse_expr("tenant_id"),
+                alias: sqlparser::ast::Ident::new("x"),
+            },
+        ];
+        assert!(ensure_distinct_on_projection_is_rewriteable(&duplicated).is_err());
+    }
+
+    #[test]
+    fn query_translation_rejects_distinct_on_order_by_all_and_grouping_edge_cases() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let mut distinct_on_order_all =
+            parse_query("SELECT DISTINCT ON (user_id) user_id, ts FROM events ORDER BY user_id");
+        distinct_on_order_all.order_by = Some(sqlparser::ast::OrderBy {
+            kind: sqlparser::ast::OrderByKind::All(sqlparser::ast::OrderByOptions {
+                asc: None,
+                nulls_first: None,
+            }),
+            interpolate: None,
+        });
+        let err = distinct_on_order_all.translate(&schema, &options).unwrap_err();
+        assert!(err.to_string().contains("ORDER BY ALL"), "unexpected error: {err}");
+
+        let multiple_grouping_ops =
+            parse_query("SELECT a, SUM(v) FROM t GROUP BY ROLLUP(a), CUBE(a)");
+        let err = multiple_grouping_ops.translate(&schema, &options).unwrap_err();
+        assert!(
+            err.to_string().contains("at most one grouping operator"),
+            "unexpected error: {err}"
+        );
+
+        let grouping_with_distinct =
+            parse_query("SELECT DISTINCT a, SUM(v) FROM t GROUP BY GROUPING SETS ((a), ())");
+        let err = grouping_with_distinct.translate(&schema, &options).unwrap_err();
+        assert!(err.to_string().contains("does not support DISTINCT"), "unexpected error: {err}");
+
+        let grouping_with_having =
+            parse_query("SELECT a, SUM(v) FROM t GROUP BY ROLLUP(a) HAVING SUM(v) > 0");
+        let err = grouping_with_having.translate(&schema, &options).unwrap_err();
+        assert!(err.to_string().contains("HAVING"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn grouping_helpers_cover_cube_limit_and_projection_rewrite_paths() {
+        let too_many = vec![vec![parse_expr("a")]; 9];
+        let err = expand_cube(&too_many).unwrap_err();
+        assert!(err.to_string().contains("limited to 8"), "unexpected error: {err}");
+
+        let projection = vec![
+            SelectItem::ExprWithAlias {
+                expr: parse_expr("region"),
+                alias: sqlparser::ast::Ident::new("region"),
+            },
+            SelectItem::ExprWithAlias {
+                expr: parse_expr("product"),
+                alias: sqlparser::ast::Ident::new("product"),
+            },
+            SelectItem::ExprWithAlias {
+                expr: parse_expr("SUM(amount)"),
+                alias: sqlparser::ast::Ident::new("total"),
+            },
+        ];
+        let active = vec![parse_expr("region")];
+        let all = vec![parse_expr("region"), parse_expr("product")];
+        let rewritten = rewrite_projection_for_grouping_set(
+            &projection,
+            &active,
+            &all,
+            GroupingRewriteKind::Rollup,
+        )
+        .unwrap();
+        assert_eq!(rewritten.len(), 3);
+        assert!(
+            rewritten[1].to_string().to_uppercase().contains("NULL"),
+            "expected inactive grouping key to be rewritten to NULL"
+        );
+    }
+
+    #[test]
+    fn low_level_translation_helpers_cover_remaining_variants() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let order_by_all = Some(sqlparser::ast::OrderBy {
+            kind: sqlparser::ast::OrderByKind::All(sqlparser::ast::OrderByOptions {
+                asc: Some(true),
+                nulls_first: Some(false),
+            }),
+            interpolate: None,
+        });
+        let _ = translate_order_by(order_by_all.as_ref(), &schema, &options).unwrap();
+
+        let offset_comma_limit = Some(sqlparser::ast::LimitClause::OffsetCommaLimit {
+            offset: parse_expr("5"),
+            limit: parse_expr("10"),
+        });
+        let _ = translate_limit_clause(offset_comma_limit.as_ref(), &schema, &options).unwrap();
+
+        let distinct_on = Some(Distinct::On(vec![parse_expr("a")]));
+        let err = translate_distinct(distinct_on.as_ref(), &schema, &options).unwrap_err();
+        assert!(err.to_string().contains("DISTINCT ON"), "unexpected error: {err}");
+
+        let group_by_all = GroupByExpr::All(vec![]);
+        let translated = super::translate_group_by(&group_by_all, &schema, &options).unwrap();
+        assert!(matches!(translated, GroupByExpr::All(_)));
+    }
+
+    #[test]
+    fn additional_query_helpers_cover_error_paths_for_distinct_and_grouping() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let empty_compound =
+            vec![SelectItem::UnnamedExpr(sqlparser::ast::Expr::CompoundIdentifier(Vec::new()))];
+        assert!(ensure_distinct_on_projection_is_rewriteable(&empty_compound).is_err());
+
+        let unsupported_item = vec![SelectItem::UnnamedExpr(parse_expr("a + 1"))];
+        assert!(ensure_distinct_on_projection_is_rewriteable(&unsupported_item).is_err());
+        assert!(projection_aliases(&unsupported_item).is_err());
+
+        let wildcard_projection =
+            vec![SelectItem::Wildcard(sqlparser::ast::WildcardAdditionalOptions::default())];
+        assert!(
+            rewrite_projection_for_grouping_set(
+                &wildcard_projection,
+                &[],
+                &[],
+                GroupingRewriteKind::Cube
+            )
+            .is_err()
+        );
+
+        let mut distinct_query = parse_query("SELECT DISTINCT ON (id) id FROM users ORDER BY id");
+        if let SetExpr::Select(select) = distinct_query.body.as_mut() {
+            select.top = Some(sqlparser::ast::Top {
+                with_ties: false,
+                percent: false,
+                quantity: Some(sqlparser::ast::TopQuantity::Constant(1)),
+            });
+        }
+        let err = try_translate_distinct_on_query(
+            &distinct_query,
+            &schema,
+            &options,
+            distinct_query.with.clone(),
+            distinct_query.order_by.clone(),
+            distinct_query.limit_clause.clone(),
+            distinct_query.fetch.clone(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("TOP clauses"));
+
+        let mut group_all_mod_query = parse_query("SELECT id FROM users");
+        if let SetExpr::Select(select) = group_all_mod_query.body.as_mut() {
+            select.group_by = GroupByExpr::All(vec![sqlparser::ast::GroupByWithModifier::Rollup]);
+        }
+        let err = try_translate_grouping_query(
+            &group_all_mod_query,
+            &schema,
+            &options,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("GROUP BY ALL with modifiers"));
+
+        let mut group_mod_query = parse_query("SELECT id FROM users GROUP BY id");
+        if let SetExpr::Select(select) = group_mod_query.body.as_mut() {
+            select.group_by = GroupByExpr::Expressions(
+                vec![parse_expr("id")],
+                vec![sqlparser::ast::GroupByWithModifier::Rollup],
+            );
+        }
+        let err = try_translate_grouping_query(
+            &group_mod_query,
+            &schema,
+            &options,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("WITH ROLLUP/CUBE/GROUPING SETS"));
+
+        let mut top_rollup = parse_query("SELECT id, SUM(v) FROM t GROUP BY ROLLUP(id)");
+        if let SetExpr::Select(select) = top_rollup.body.as_mut() {
+            select.top = Some(sqlparser::ast::Top {
+                with_ties: false,
+                percent: false,
+                quantity: Some(sqlparser::ast::TopQuantity::Constant(1)),
+            });
+        }
+        let err =
+            try_translate_grouping_query(&top_rollup, &schema, &options, None, None, None, None)
+                .unwrap_err();
+        assert!(err.to_string().contains("TOP clauses"));
+    }
+
+    #[test]
+    fn additional_query_helpers_cover_modifier_and_named_window_paths() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        assert!(!is_aggregate_expression(&parse_expr("sum(v) OVER (PARTITION BY id)")));
+        assert!(is_aggregate_expression(&parse_expr("bool_and(active)")));
+        assert!(is_aggregate_expression(&parse_expr("CASE WHEN 1=1 THEN avg(v) ELSE 0 END")));
+
+        let limit_offset = Some(sqlparser::ast::LimitClause::LimitOffset {
+            limit: Some(parse_expr("10")),
+            offset: Some(sqlparser::ast::Offset {
+                value: parse_expr("1"),
+                rows: sqlparser::ast::OffsetRows::None,
+            }),
+            limit_by: vec![parse_expr("2")],
+        });
+        let _ = translate_limit_clause(limit_offset.as_ref(), &schema, &options).unwrap();
+
+        let fetch = Some(sqlparser::ast::Fetch {
+            with_ties: false,
+            percent: false,
+            quantity: Some(parse_expr("3")),
+        });
+        let _ = translate_fetch(fetch.as_ref(), &schema, &options).unwrap();
+
+        let _ = translate_distinct(Some(&Distinct::All), &schema, &options).unwrap();
+
+        let named_window_query =
+            parse_query("SELECT sum(v) OVER w FROM t WINDOW w AS (PARTITION BY id)");
+        let SetExpr::Select(select) = named_window_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let translated_named =
+            translate_named_window(&select.named_window, &schema, &options).unwrap();
+        assert_eq!(translated_named.len(), 1);
+    }
+
+    #[test]
+    fn additional_query_helpers_cover_remaining_non_error_paths() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let compound_projection =
+            vec![SelectItem::UnnamedExpr(sqlparser::ast::Expr::CompoundIdentifier(vec![
+                sqlparser::ast::Ident::new("t"),
+                sqlparser::ast::Ident::new("id"),
+            ]))];
+        let rewritten = ensure_distinct_on_projection_is_rewriteable(&compound_projection).unwrap();
+        assert!(matches!(rewritten[0], SelectItem::ExprWithAlias { .. }));
+
+        let distinct_no_order = parse_query("SELECT DISTINCT ON (id) id FROM users");
+        let rewritten = try_translate_distinct_on_query(
+            &distinct_no_order,
+            &schema,
+            &options,
+            distinct_no_order.with.clone(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(rewritten.is_some());
+
+        let mut group_by_all = parse_query("SELECT id FROM users");
+        if let SetExpr::Select(select) = group_by_all.body.as_mut() {
+            select.group_by = GroupByExpr::All(Vec::new());
+        }
+        let result =
+            try_translate_grouping_query(&group_by_all, &schema, &options, None, None, None, None)
+                .unwrap();
+        assert!(result.is_none());
+
+        let mut group_with_totals = parse_query("SELECT id FROM users GROUP BY id");
+        if let SetExpr::Select(select) = group_with_totals.body.as_mut() {
+            select.group_by = GroupByExpr::Expressions(
+                vec![parse_expr("id")],
+                vec![sqlparser::ast::GroupByWithModifier::Totals],
+            );
+        }
+        let result = try_translate_grouping_query(
+            &group_with_totals,
+            &schema,
+            &options,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(result.is_none());
+
+        let set_query = SetExpr::Query(Box::new(parse_query("SELECT 1")));
+        assert!(matches!(set_query.translate(&schema, &options).unwrap(), SetExpr::Query(_)));
+
+        let set_table = SetExpr::Table(Box::new(sqlparser::ast::Table {
+            table_name: Some("users".to_string()),
+            schema_name: None,
+        }));
+        assert!(matches!(set_table.translate(&schema, &options).unwrap(), SetExpr::Table(_)));
+
+        let _ = translate_distinct(Some(&Distinct::Distinct), &schema, &options).unwrap();
+
+        let named_ref_query =
+            parse_query("SELECT sum(v) OVER w2 FROM t WINDOW w1 AS (PARTITION BY id), w2 AS (w1)");
+        let SetExpr::Select(select) = named_ref_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let translated = translate_named_window(&select.named_window, &schema, &options).unwrap();
+        assert_eq!(translated.len(), 2);
+    }
+}

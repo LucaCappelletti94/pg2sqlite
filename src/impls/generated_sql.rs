@@ -30,9 +30,46 @@ pub(crate) fn parse_single_generated_sql(
             parsed.len()
         )));
     }
-    parsed.pop().ok_or_else(|| {
-        Error::UnknownPostgresFeature(format!(
-            "{context}: parser returned no statements. SQL: {sql}"
-        ))
-    })
+    Ok(parsed.remove(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::{ast::Statement, dialect::PostgreSqlDialect};
+
+    use super::{parse_generated_sql, parse_single_generated_sql};
+
+    #[test]
+    fn parse_generated_sql_parses_multiple_statements() {
+        let dialect = PostgreSqlDialect {};
+        let parsed = parse_generated_sql(&dialect, "SELECT 1; SELECT 2;", "unit-test").unwrap();
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn parse_generated_sql_returns_context_in_error_message() {
+        let dialect = PostgreSqlDialect {};
+        let err = parse_generated_sql(&dialect, "SELEC FROM", "cte translation").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cte translation"), "unexpected error: {msg}");
+        assert!(msg.contains("SELEC FROM"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn parse_single_generated_sql_parses_exactly_one_statement() {
+        let dialect = PostgreSqlDialect {};
+        let parsed = parse_single_generated_sql(&dialect, "SELECT 1;", "single").unwrap();
+        assert!(matches!(parsed, Statement::Query(_)));
+    }
+
+    #[test]
+    fn parse_single_generated_sql_rejects_zero_or_multiple_statements() {
+        let dialect = PostgreSqlDialect {};
+
+        let zero = parse_single_generated_sql(&dialect, "   ", "zero");
+        assert!(zero.is_err(), "expected empty SQL to fail");
+
+        let many = parse_single_generated_sql(&dialect, "SELECT 1; SELECT 2;", "many");
+        assert!(many.is_err(), "expected multiple statements to fail");
+    }
 }

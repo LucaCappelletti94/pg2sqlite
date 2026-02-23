@@ -375,3 +375,103 @@ fn reverse_translate_group_by(
         sqlparser::ast::GroupByExpr::All(all) => sqlparser::ast::GroupByExpr::All(all.clone()),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{Distinct, LimitClause, Offset, Statement},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{
+        reverse_translate_distinct, reverse_translate_fetch, reverse_translate_group_by,
+        reverse_translate_limit_clause,
+    };
+    use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
+    }
+
+    fn parse_query(sql: &str) -> sqlparser::ast::Query {
+        let stmt = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().remove(0);
+        match stmt {
+            Statement::Query(query) => *query,
+            other => panic!("expected query, got: {other:?}"),
+        }
+    }
+
+    fn parse_expr(expr: &str) -> sqlparser::ast::Expr {
+        Parser::new(&PostgreSqlDialect {}).try_with_sql(expr).unwrap().parse_expr().unwrap()
+    }
+
+    #[test]
+    fn reverse_translate_query_preserves_complex_clauses() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let query = parse_query(
+            r#"
+            WITH c AS (SELECT 1 AS id)
+            SELECT DISTINCT id,
+                   SUM(id) OVER (PARTITION BY id ORDER BY id) AS s
+            FROM c
+            GROUP BY id
+            ORDER BY id
+            LIMIT 10 OFFSET 1
+            FETCH FIRST 3 ROWS ONLY
+            "#,
+        );
+
+        let translated = query.reverse_translate(&schema, &options).unwrap();
+        assert!(translated.with.is_some());
+        assert!(translated.order_by.is_some());
+        assert!(translated.limit_clause.is_some());
+        assert!(translated.fetch.is_some());
+    }
+
+    #[test]
+    fn reverse_translate_limit_clause_covers_both_variants() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let limit_offset = LimitClause::LimitOffset {
+            limit: Some(parse_expr("10")),
+            offset: Some(Offset { value: parse_expr("1"), rows: sqlparser::ast::OffsetRows::None }),
+            limit_by: vec![parse_expr("2")],
+        };
+        let translated =
+            reverse_translate_limit_clause(Some(&limit_offset), &schema, &options).unwrap();
+        assert!(matches!(translated, Some(LimitClause::LimitOffset { .. })));
+
+        let offset_comma =
+            LimitClause::OffsetCommaLimit { offset: parse_expr("1"), limit: parse_expr("10") };
+        let translated =
+            reverse_translate_limit_clause(Some(&offset_comma), &schema, &options).unwrap();
+        assert!(matches!(translated, Some(LimitClause::OffsetCommaLimit { .. })));
+    }
+
+    #[test]
+    fn reverse_translate_fetch_distinct_and_group_by_cover_variants() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let query = parse_query("SELECT DISTINCT ON (id) id FROM users GROUP BY id");
+        let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected select");
+        };
+
+        let distinct =
+            reverse_translate_distinct(select.distinct.as_ref(), &schema, &options).unwrap();
+        assert!(matches!(distinct, Some(Distinct::On(_))));
+
+        let group_by = reverse_translate_group_by(&select.group_by, &schema, &options).unwrap();
+        assert!(matches!(group_by, sqlparser::ast::GroupByExpr::Expressions(_, _)));
+
+        let fetch_query = parse_query("SELECT 1 FETCH FIRST 2 ROWS ONLY");
+        let fetch = reverse_translate_fetch(fetch_query.fetch.as_ref(), &schema, &options).unwrap();
+        assert!(fetch.is_some());
+    }
+}

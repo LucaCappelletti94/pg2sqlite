@@ -523,3 +523,161 @@ impl ReverseTranslator for Statement {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{Expr, LimitClause, Offset, Query, SetExpr, Statement},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{
+        check_expr_for_rls, check_limit_clause_for_rls, check_query_for_rls, check_set_expr_for_rls,
+    };
+    use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
+    }
+
+    fn parse_expr(expr: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {}).try_with_sql(expr).unwrap().parse_expr().unwrap()
+    }
+
+    fn parse_query(sql: &str) -> Query {
+        let stmt = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().remove(0);
+        match stmt {
+            Statement::Query(query) => *query,
+            other => panic!("expected query, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_expr_for_rls_accepts_many_expression_variants() {
+        let options = Pg2SqliteOptions::default();
+        let expressions = vec![
+            "a = ANY(b)",
+            "a = ALL(b)",
+            "CASE WHEN x > 0 THEN y ELSE z END",
+            "TRIM(BOTH 'x' FROM col)",
+            "SUBSTRING(col FROM 1 FOR 2)",
+            "OVERLAY(col PLACING 'x' FROM 1 FOR 1)",
+            "POSITION('x' IN col)",
+            "a AT TIME ZONE 'UTC'",
+            "a LIKE b",
+            "a ILIKE b",
+            "a SIMILAR TO b",
+            "a RLIKE b",
+            "ARRAY[1,2]",
+            "(SELECT 1)",
+            "EXISTS (SELECT 1)",
+            "x IN (SELECT 1)",
+            "(1, 2)",
+            "INTERVAL '1 day'",
+            "'abc' COLLATE \"C\"",
+            "foo[0]",
+        ];
+
+        for raw in expressions {
+            let expr = parse_expr(raw);
+            check_expr_for_rls(&expr, &options).unwrap();
+        }
+    }
+
+    #[test]
+    fn check_query_for_rls_covers_with_order_by_limit_fetch_and_function_shapes() {
+        let options = Pg2SqliteOptions::default();
+        let query = parse_query(
+            r#"
+            WITH c AS (SELECT 1 AS id)
+            SELECT
+                id,
+                percentile_disc(0.5) WITHIN GROUP (ORDER BY id),
+                sum(id) FILTER (WHERE id > 0) OVER (PARTITION BY id ORDER BY id)
+            FROM c
+            WHERE id IN (SELECT id FROM c)
+            GROUP BY id
+            HAVING id > 0
+            ORDER BY id
+            LIMIT 10 OFFSET 1
+            FETCH FIRST 5 ROWS ONLY
+            "#,
+        );
+
+        check_query_for_rls(&query, &options).unwrap();
+    }
+
+    #[test]
+    fn check_set_expr_for_rls_handles_insert_update_delete_values_and_table_variants() {
+        let options = Pg2SqliteOptions::default();
+
+        let insert_stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, "INSERT INTO users(id) VALUES (1)")
+                .unwrap()
+                .remove(0);
+        if let Statement::Insert(insert) = insert_stmt {
+            check_set_expr_for_rls(&SetExpr::Insert(Statement::Insert(insert)), &options).unwrap();
+        } else {
+            panic!("expected insert");
+        }
+
+        let update_stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, "UPDATE users SET id = 1").unwrap().remove(0);
+        if let Statement::Update(update) = update_stmt {
+            check_set_expr_for_rls(&SetExpr::Update(Statement::Update(update)), &options).unwrap();
+        } else {
+            panic!("expected update");
+        }
+
+        let delete_stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, "DELETE FROM users WHERE id = 1")
+                .unwrap()
+                .remove(0);
+        if let Statement::Delete(delete) = delete_stmt {
+            check_set_expr_for_rls(&SetExpr::Delete(Statement::Delete(delete)), &options).unwrap();
+        } else {
+            panic!("expected delete");
+        }
+
+        let values_query = parse_query("VALUES (1), (2)");
+        check_set_expr_for_rls(values_query.body.as_ref(), &options).unwrap();
+
+        let table_expr = SetExpr::Table(Box::new(sqlparser::ast::Table {
+            table_name: Some("users".to_string()),
+            schema_name: None,
+        }));
+        check_set_expr_for_rls(&table_expr, &options).unwrap();
+    }
+
+    #[test]
+    fn check_limit_clause_for_rls_handles_offset_comma_limit_variant() {
+        let options = Pg2SqliteOptions::default();
+        let offset_comma =
+            LimitClause::OffsetCommaLimit { offset: parse_expr("1"), limit: parse_expr("10") };
+        check_limit_clause_for_rls(&offset_comma, &options).unwrap();
+
+        let limit_offset = LimitClause::LimitOffset {
+            limit: Some(parse_expr("10")),
+            offset: Some(Offset { value: parse_expr("1"), rows: sqlparser::ast::OffsetRows::None }),
+            limit_by: vec![parse_expr("2")],
+        };
+        check_limit_clause_for_rls(&limit_offset, &options).unwrap();
+    }
+
+    #[test]
+    fn reverse_translate_rejects_rls_backing_tables_and_non_dml_statements() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let query_stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, "SELECT * FROM users_rls").unwrap().remove(0);
+        let err = query_stmt.reverse_translate(&schema, &options).unwrap_err();
+        assert!(err.to_string().contains("Direct access to RLS backing table"));
+
+        let non_dml = Parser::parse_sql(&PostgreSqlDialect {}, "VACUUM").unwrap().remove(0);
+        let err = non_dml.reverse_translate(&schema, &options).unwrap_err();
+        assert!(err.to_string().contains("Reverse translation only supports DML statements"));
+    }
+}

@@ -192,3 +192,186 @@ pub(crate) fn translate_returning<D: TranslationDirection>(
         })
         .transpose()
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{
+            Expr, JoinConstraint, JoinOperator, Query, SelectItem, Statement, TableFactor,
+            ValueWithSpan,
+        },
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{
+        TranslationDirection, translate_join, translate_join_constraint, translate_join_operator,
+        translate_returning, translate_select_item, translate_table_factor,
+        translate_table_with_joins,
+    };
+    use crate::{errors::Error, prelude::Pg2SqliteOptions};
+
+    struct IdentityDirection;
+
+    impl TranslationDirection for IdentityDirection {
+        fn translate_expr(
+            expr: &Expr,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+        ) -> Result<Expr, Error> {
+            Ok(expr.clone())
+        }
+
+        fn translate_query(
+            query: &Query,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+        ) -> Result<Query, Error> {
+            Ok(query.clone())
+        }
+    }
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
+    }
+
+    fn parse_query(sql: &str) -> Query {
+        let stmts = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
+        match stmts.into_iter().next().unwrap() {
+            Statement::Query(query) => *query,
+            other => panic!("expected query statement, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_join_structures_and_select_items() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let query = parse_query(
+            "SELECT t.a AS a1 FROM t INNER JOIN u ON t.id = u.id LEFT JOIN v ON u.id = v.uid",
+        );
+        let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected select");
+        };
+
+        let translated = translate_table_with_joins::<IdentityDirection>(
+            select.from.first().unwrap(),
+            &schema,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(translated.joins.len(), 2);
+
+        let unnamed = SelectItem::UnnamedExpr(Expr::Identifier(sqlparser::ast::Ident::new("a")));
+        let named = SelectItem::ExprWithAlias {
+            expr: Expr::Identifier(sqlparser::ast::Ident::new("b")),
+            alias: sqlparser::ast::Ident::new("b1"),
+        };
+        assert!(matches!(
+            translate_select_item::<IdentityDirection>(&unnamed, &schema, &options).unwrap(),
+            SelectItem::UnnamedExpr(_)
+        ));
+        assert!(matches!(
+            translate_select_item::<IdentityDirection>(&named, &schema, &options).unwrap(),
+            SelectItem::ExprWithAlias { .. }
+        ));
+    }
+
+    #[test]
+    fn translates_all_join_operator_variants() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let on = JoinConstraint::On(Expr::Value(ValueWithSpan::from(
+            sqlparser::ast::Value::Boolean(true),
+        )));
+
+        let operators = vec![
+            JoinOperator::Join(on.clone()),
+            JoinOperator::Inner(on.clone()),
+            JoinOperator::Left(on.clone()),
+            JoinOperator::LeftOuter(on.clone()),
+            JoinOperator::Right(on.clone()),
+            JoinOperator::RightOuter(on.clone()),
+            JoinOperator::FullOuter(on.clone()),
+            JoinOperator::CrossJoin(on.clone()),
+            JoinOperator::Semi(on.clone()),
+            JoinOperator::LeftSemi(on.clone()),
+            JoinOperator::RightSemi(on.clone()),
+            JoinOperator::Anti(on.clone()),
+            JoinOperator::LeftAnti(on.clone()),
+            JoinOperator::RightAnti(on.clone()),
+            JoinOperator::AsOf {
+                constraint: on.clone(),
+                match_condition: Expr::Value(ValueWithSpan::from(sqlparser::ast::Value::Number(
+                    "1".to_string(),
+                    false,
+                ))),
+            },
+            JoinOperator::StraightJoin(on.clone()),
+            JoinOperator::CrossApply,
+            JoinOperator::OuterApply,
+        ];
+
+        for op in &operators {
+            let _ = translate_join_operator::<IdentityDirection>(op, &schema, &options).unwrap();
+        }
+
+        let _ = translate_join_constraint::<IdentityDirection>(&on, &schema, &options).unwrap();
+    }
+
+    #[test]
+    fn translates_table_factor_and_returning() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let query = parse_query("SELECT * FROM (SELECT 1) AS q");
+        let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected select");
+        };
+
+        let derived = &select.from[0].relation;
+        let _ = translate_table_factor::<IdentityDirection>(derived, &schema, &options).unwrap();
+
+        let nested_query = parse_query("SELECT * FROM (t JOIN u ON t.id = u.id) AS z");
+        let sqlparser::ast::SetExpr::Select(nested_select) = nested_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let nested_factor = &nested_select.from[0].relation;
+        if let TableFactor::NestedJoin { .. } = nested_factor {
+            let _ = translate_table_factor::<IdentityDirection>(nested_factor, &schema, &options)
+                .unwrap();
+        }
+
+        let returning_items = vec![
+            SelectItem::UnnamedExpr(Expr::Identifier(sqlparser::ast::Ident::new("id"))),
+            SelectItem::ExprWithAlias {
+                expr: Expr::Identifier(sqlparser::ast::Ident::new("name")),
+                alias: sqlparser::ast::Ident::new("n"),
+            },
+        ];
+        assert_eq!(
+            translate_returning::<IdentityDirection>(Some(&returning_items), &schema, &options)
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            translate_returning::<IdentityDirection>(None, &schema, &options).unwrap().is_none()
+        );
+    }
+
+    #[test]
+    fn translate_join_preserves_global_flag() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let query = parse_query("SELECT * FROM t INNER JOIN u ON t.id = u.id");
+        let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let mut join = select.from[0].joins[0].clone();
+        join.global = true;
+        let translated = translate_join::<IdentityDirection>(&join, &schema, &options).unwrap();
+        assert!(translated.global);
+    }
+}
