@@ -22,6 +22,11 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
     /// # Arguments
     ///
     /// * `name` - The name of the function to be searched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownPostgresFeature`] if the function body cannot be
+    /// tokenized, parsed, or does not contain a valid `BEGIN ... END` block.
     fn function_body(&self, name: &str) -> Result<Option<BeginEndStatements>, Error> {
         let Some(function) = self.function(name) else {
             return Ok(None);

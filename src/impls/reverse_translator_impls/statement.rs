@@ -97,6 +97,102 @@ fn check_table_factor_for_rls(
     }
 }
 
+fn check_expr_pair_for_rls(
+    left: &Expr,
+    right: &Expr,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    check_expr_for_rls(left, options)?;
+    check_expr_for_rls(right, options)
+}
+
+fn check_expr_slice_for_rls(exprs: &[Expr], options: &Pg2SqliteOptions) -> Result<(), Error> {
+    for expr in exprs {
+        check_expr_for_rls(expr, options)?;
+    }
+    Ok(())
+}
+
+fn check_case_expr_for_rls(
+    operand: Option<&Expr>,
+    conditions: &[sqlparser::ast::CaseWhen],
+    else_result: Option<&Expr>,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    if let Some(operand) = operand {
+        check_expr_for_rls(operand, options)?;
+    }
+    for condition in conditions {
+        check_expr_pair_for_rls(&condition.condition, &condition.result, options)?;
+    }
+    if let Some(else_result) = else_result {
+        check_expr_for_rls(else_result, options)?;
+    }
+    Ok(())
+}
+
+fn check_trim_expr_for_rls(
+    expr: &Expr,
+    trim_what: Option<&Expr>,
+    trim_characters: Option<&[Expr]>,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    check_expr_for_rls(expr, options)?;
+    if let Some(trim_what) = trim_what {
+        check_expr_for_rls(trim_what, options)?;
+    }
+    if let Some(trim_characters) = trim_characters {
+        check_expr_slice_for_rls(trim_characters, options)?;
+    }
+    Ok(())
+}
+
+fn check_substring_expr_for_rls(
+    expr: &Expr,
+    substring_from: Option<&Expr>,
+    substring_for: Option<&Expr>,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    check_expr_for_rls(expr, options)?;
+    if let Some(substring_from) = substring_from {
+        check_expr_for_rls(substring_from, options)?;
+    }
+    if let Some(substring_for) = substring_for {
+        check_expr_for_rls(substring_for, options)?;
+    }
+    Ok(())
+}
+
+fn check_overlay_expr_for_rls(
+    expr: &Expr,
+    overlay_what: &Expr,
+    overlay_from: &Expr,
+    overlay_for: Option<&Expr>,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    check_expr_for_rls(expr, options)?;
+    check_expr_for_rls(overlay_what, options)?;
+    check_expr_for_rls(overlay_from, options)?;
+    if let Some(overlay_for) = overlay_for {
+        check_expr_for_rls(overlay_for, options)?;
+    }
+    Ok(())
+}
+
+fn check_compound_access_for_rls(
+    root: &Expr,
+    access_chain: &[AccessExpr],
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    check_expr_for_rls(root, options)?;
+    for access in access_chain {
+        if let AccessExpr::Dot(nested) = access {
+            check_expr_for_rls(nested, options)?;
+        }
+    }
+    Ok(())
+}
+
 /// Check an expression tree for RLS table references in subqueries.
 fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Error> {
     match expr {
@@ -106,115 +202,63 @@ fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Err
             check_expr_for_rls(expr, options)?;
             check_query_for_rls(subquery, options)
         }
-        Expr::BinaryOp { left, right, .. } => {
-            check_expr_for_rls(left, options)?;
-            check_expr_for_rls(right, options)
-        }
-        Expr::UnaryOp { expr, .. } => check_expr_for_rls(expr, options),
-        Expr::Nested(inner) => check_expr_for_rls(inner, options),
+        Expr::BinaryOp { left, right, .. }
+        | Expr::AnyOp { left, right, .. }
+        | Expr::AllOp { left, right, .. } => check_expr_pair_for_rls(left, right, options),
         Expr::Function(func) => check_function_for_rls(func, options),
-        Expr::Cast { expr, .. } => check_expr_for_rls(expr, options),
+        Expr::UnaryOp { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Extract { expr, .. }
+        | Expr::Ceil { expr, .. }
+        | Expr::Floor { expr, .. } => check_expr_for_rls(expr, options),
+        Expr::Nested(inner) => check_expr_for_rls(inner, options),
         Expr::AtTimeZone { timestamp, time_zone } => {
-            check_expr_for_rls(timestamp, options)?;
-            check_expr_for_rls(time_zone, options)
+            check_expr_pair_for_rls(timestamp, time_zone, options)
         }
-        Expr::Extract { expr, .. } => check_expr_for_rls(expr, options),
         Expr::Like { expr, pattern, .. }
         | Expr::ILike { expr, pattern, .. }
         | Expr::SimilarTo { expr, pattern, .. }
-        | Expr::RLike { expr, pattern, .. } => {
-            check_expr_for_rls(expr, options)?;
-            check_expr_for_rls(pattern, options)
-        }
-        Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
-            check_expr_for_rls(left, options)?;
-            check_expr_for_rls(right, options)
-        }
-        Expr::Tuple(exprs) => {
-            for nested in exprs {
-                check_expr_for_rls(nested, options)?;
-            }
-            Ok(())
-        }
-        Expr::Array(array) => {
-            for nested in &array.elem {
-                check_expr_for_rls(nested, options)?;
-            }
-            Ok(())
-        }
+        | Expr::RLike { expr, pattern, .. } => check_expr_pair_for_rls(expr, pattern, options),
+        Expr::Tuple(exprs) => check_expr_slice_for_rls(exprs, options),
+        Expr::Array(array) => check_expr_slice_for_rls(&array.elem, options),
         Expr::Case { operand, conditions, else_result, .. } => {
-            if let Some(op) = operand {
-                check_expr_for_rls(op, options)?;
-            }
-            for cw in conditions {
-                check_expr_for_rls(&cw.condition, options)?;
-                check_expr_for_rls(&cw.result, options)?;
-            }
-            if let Some(el) = else_result {
-                check_expr_for_rls(el, options)?;
-            }
-            Ok(())
+            check_case_expr_for_rls(operand.as_deref(), conditions, else_result.as_deref(), options)
         }
         Expr::Between { expr, low, high, .. } => {
             check_expr_for_rls(expr, options)?;
-            check_expr_for_rls(low, options)?;
-            check_expr_for_rls(high, options)
+            check_expr_pair_for_rls(low, high, options)
         }
         Expr::InList { expr, list, .. } => {
             check_expr_for_rls(expr, options)?;
-            for item in list {
-                check_expr_for_rls(item, options)?;
-            }
-            Ok(())
+            check_expr_slice_for_rls(list, options)
         }
         Expr::Trim { expr, trim_what, trim_characters, .. } => {
-            check_expr_for_rls(expr, options)?;
-            if let Some(trim_what) = trim_what {
-                check_expr_for_rls(trim_what, options)?;
-            }
-            if let Some(trim_chars) = trim_characters {
-                for nested in trim_chars {
-                    check_expr_for_rls(nested, options)?;
-                }
-            }
-            Ok(())
+            check_trim_expr_for_rls(expr, trim_what.as_deref(), trim_characters.as_deref(), options)
         }
-        Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => check_expr_for_rls(expr, options),
-        Expr::Position { expr, r#in } => {
-            check_expr_for_rls(expr, options)?;
-            check_expr_for_rls(r#in, options)
-        }
+        Expr::Position { expr, r#in } => check_expr_pair_for_rls(expr, r#in, options),
         Expr::Substring { expr, substring_from, substring_for, .. } => {
-            check_expr_for_rls(expr, options)?;
-            if let Some(from) = substring_from {
-                check_expr_for_rls(from, options)?;
-            }
-            if let Some(for_expr) = substring_for {
-                check_expr_for_rls(for_expr, options)?;
-            }
-            Ok(())
+            check_substring_expr_for_rls(
+                expr,
+                substring_from.as_deref(),
+                substring_for.as_deref(),
+                options,
+            )
         }
         Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
-            check_expr_for_rls(expr, options)?;
-            check_expr_for_rls(overlay_what, options)?;
-            check_expr_for_rls(overlay_from, options)?;
-            if let Some(overlay_for) = overlay_for {
-                check_expr_for_rls(overlay_for, options)?;
-            }
-            Ok(())
+            check_overlay_expr_for_rls(
+                expr,
+                overlay_what,
+                overlay_from,
+                overlay_for.as_deref(),
+                options,
+            )
         }
         Expr::Prefixed { value, .. } | Expr::Collate { expr: value, .. } => {
             check_expr_for_rls(value, options)
         }
         Expr::Interval(interval) => check_expr_for_rls(&interval.value, options),
         Expr::CompoundFieldAccess { root, access_chain } => {
-            check_expr_for_rls(root, options)?;
-            for access in access_chain {
-                if let AccessExpr::Dot(nested) = access {
-                    check_expr_for_rls(nested, options)?;
-                }
-            }
-            Ok(())
+            check_compound_access_for_rls(root, access_chain, options)
         }
         _ => Ok(()),
     }
@@ -359,10 +403,8 @@ fn check_function_for_rls(
         for arg in &arg_list.args {
             match arg {
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. } => {
-                    check_expr_for_rls(expr, options)?;
-                }
-                FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(expr), .. } => {
+                | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. }
+                | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(expr), .. } => {
                     check_expr_for_rls(expr, options)?;
                 }
                 _ => {}
