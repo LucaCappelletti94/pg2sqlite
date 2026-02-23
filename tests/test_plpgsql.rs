@@ -70,6 +70,37 @@ fn set_variable_binding_in_trigger() {
     assert!(output.contains("INSERT"), "Expected INSERT statements from trigger: {output}");
 }
 
+#[test]
+fn select_into_with_comma_expression_produces_valid_sqlite_trigger_sql() {
+    let sql = r#"
+        CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);
+        CREATE TABLE logs (v INT);
+
+        CREATE OR REPLACE FUNCTION trg_fn() RETURNS TRIGGER AS $$
+        DECLARE
+            v INT;
+        BEGIN
+            SELECT COALESCE(NEW.a, NEW.b) INTO v FROM t LIMIT 1;
+            INSERT INTO logs(v) VALUES (v);
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION trg_fn();
+    "#;
+
+    let translated =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let sqlite_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join(";\n");
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let exec_result = conn.execute_batch(&sqlite_sql);
+    assert!(
+        exec_result.is_ok(),
+        "Translated SQL should execute in SQLite, got error: {exec_result:?}\nSQL:\n{sqlite_sql}"
+    );
+}
+
 // ==================== WITH RECURSIVE ... INSERT pattern ====================
 
 #[test]

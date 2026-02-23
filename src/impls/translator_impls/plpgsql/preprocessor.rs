@@ -273,12 +273,10 @@ impl PlPgSqlPreprocessor {
                 let from_part = &stmt[f..];
 
                 // Parse column names
-                let columns: Vec<&str> =
-                    columns_part.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                let columns = Self::split_top_level_csv(columns_part);
 
                 // Parse variable names
-                let vars: Vec<&str> =
-                    vars_part.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                let vars = Self::split_top_level_csv(vars_part);
 
                 if columns.len() != vars.len() || columns.is_empty() {
                     // Can't transform, return as-is
@@ -319,6 +317,61 @@ impl PlPgSqlPreprocessor {
             }
             _ => stmt.to_string(),
         }
+    }
+
+    /// Splits a comma-separated SQL fragment on top-level commas only.
+    ///
+    /// Commas inside parentheses or quoted strings are ignored.
+    fn split_top_level_csv(input: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut start = 0usize;
+        let mut paren_depth = 0usize;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut chars = input.char_indices().peekable();
+
+        while let Some((idx, ch)) = chars.next() {
+            if in_single_quote {
+                if ch == '\'' {
+                    if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                        // Escaped quote in SQL string literal ('')
+                        chars.next();
+                    } else {
+                        in_single_quote = false;
+                    }
+                }
+                continue;
+            }
+
+            if in_double_quote {
+                if ch == '"' {
+                    in_double_quote = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '\'' => in_single_quote = true,
+                '"' => in_double_quote = true,
+                '(' => paren_depth += 1,
+                ')' => paren_depth = paren_depth.saturating_sub(1),
+                ',' if paren_depth == 0 => {
+                    let part = input[start..idx].trim();
+                    if !part.is_empty() {
+                        parts.push(part);
+                    }
+                    start = idx + 1;
+                }
+                _ => {}
+            }
+        }
+
+        let tail = input[start..].trim();
+        if !tail.is_empty() {
+            parts.push(tail);
+        }
+
+        parts
     }
 
     /// Transforms variable assignments from := to SET syntax.
@@ -449,5 +502,24 @@ END";
         assert!(transformed.contains("SET v_owner_id ="), "Should transform v_owner_id");
         assert!(transformed.contains("SET v_creator_id ="), "Should transform v_creator_id");
         assert!(!transformed.contains("INTO v_owner_id"), "Should remove INTO clause");
+    }
+
+    #[test]
+    fn test_transform_select_into_with_comma_in_expression() {
+        let body = r"BEGIN
+    SELECT COALESCE(NEW.a, NEW.b)
+    INTO v_value
+    FROM t
+    LIMIT 1;
+END";
+
+        let (transformed, _context) = PlPgSqlPreprocessor::preprocess(body);
+
+        assert!(transformed.contains("SET v_value ="), "Should transform INTO target");
+        assert!(
+            transformed.contains("COALESCE(NEW.a, NEW.b)"),
+            "Should preserve expression with comma"
+        );
+        assert!(!transformed.contains(" INTO "), "Should remove INTO clause");
     }
 }
