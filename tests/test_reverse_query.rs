@@ -349,3 +349,16 @@ fn reverse_insert_from_join() {
     assert!(pg.contains("INSERT"), "Expected INSERT: {pg}");
     assert!(pg.contains("JOIN"), "Expected JOIN: {pg}");
 }
+
+#[test]
+fn reverse_named_window_spec_and_reference() {
+    let pg = reverse(
+        TWO_TABLES,
+        "SELECT SUM(u.id) OVER w2
+         FROM users u
+         WINDOW w1 AS (PARTITION BY u.id ORDER BY u.id),
+                w2 AS (w1);",
+    );
+    assert!(pg.contains("WINDOW"), "Expected WINDOW clause: {pg}");
+    assert!(pg.contains("w1") && pg.contains("w2"), "Expected named windows: {pg}");
+}

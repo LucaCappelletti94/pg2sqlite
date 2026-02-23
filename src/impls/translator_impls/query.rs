@@ -1165,7 +1165,18 @@ mod tests {
 
         assert!(!is_aggregate_expression(&parse_expr("sum(v) OVER (PARTITION BY id)")));
         assert!(is_aggregate_expression(&parse_expr("bool_and(active)")));
+        assert!(is_aggregate_expression(&parse_expr("bool_or(active)")));
+        assert!(is_aggregate_expression(&parse_expr("every(active)")));
         assert!(is_aggregate_expression(&parse_expr("CASE WHEN 1=1 THEN avg(v) ELSE 0 END")));
+        assert!(is_aggregate_expression(&parse_expr("NOT max(v)")));
+        assert!(is_aggregate_expression(&parse_expr("(max(v))")));
+        assert!(is_aggregate_expression(&parse_expr("max(v)::INT")));
+        assert!(is_aggregate_expression(&parse_expr("max(v) IS NULL")));
+        assert!(is_aggregate_expression(&parse_expr("max(v) IS NOT NULL")));
+        assert!(is_aggregate_expression(&parse_expr("max(v) IS TRUE")));
+        assert!(is_aggregate_expression(&parse_expr("max(v) IS NOT TRUE")));
+        assert!(is_aggregate_expression(&parse_expr("max(v) IS FALSE")));
+        assert!(is_aggregate_expression(&parse_expr("max(v) IS NOT FALSE")));
 
         let limit_offset = Some(sqlparser::ast::LimitClause::LimitOffset {
             limit: Some(parse_expr("10")),

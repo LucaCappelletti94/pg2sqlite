@@ -6,7 +6,9 @@
 //! InList, InSubquery, Between, Case, Subquery, Extract, Tuple, Trim, Ceil,
 //! Floor, Position, Substring, Collate, and the fallback error.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, ReverseTranslator};
+use sql_traits::structs::ParserDB;
+use sqlparser::ast::{AccessExpr, Expr, Ident, ObjectName, ObjectNamePart, Subscript};
 
 /// Helper to set up translator with a simple schema and reverse translate
 /// SQLite SQL.
@@ -17,6 +19,10 @@ fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
     let stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
     assert!(!stmts.is_empty(), "Expected at least one statement");
     stmts[0].to_string()
+}
+
+fn empty_schema() -> ParserDB {
+    ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
 }
 
 const SCHEMA: &str = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT, score REAL);";
@@ -419,4 +425,81 @@ fn reverse_deeply_nested() {
     );
     assert!(pg.contains("AND"), "Expected AND: {pg}");
     assert!(pg.contains("OR"), "Expected OR: {pg}");
+}
+
+#[test]
+fn reverse_manual_expr_variants_cover_prefixed_trim_chars_and_compound_access() {
+    let schema = empty_schema();
+    let options = Pg2SqliteOptions::default();
+
+    let trim_with_characters = Expr::Trim {
+        expr: Box::new(Expr::Identifier(Ident::new("name"))),
+        trim_where: None,
+        trim_what: None,
+        trim_characters: Some(vec![Expr::Value(sqlparser::ast::ValueWithSpan::from(
+            sqlparser::ast::Value::SingleQuotedString("x".to_string()),
+        ))]),
+    };
+    let trimmed =
+        trim_with_characters.reverse_translate(&schema, &options).expect("trim should reverse");
+    assert!(trimmed.to_string().contains("TRIM"));
+
+    let prefixed = Expr::Prefixed {
+        prefix: Ident::new("N"),
+        value: Box::new(Expr::Value(sqlparser::ast::ValueWithSpan::from(
+            sqlparser::ast::Value::SingleQuotedString("abc".to_string()),
+        ))),
+    };
+    let prefixed_out =
+        prefixed.reverse_translate(&schema, &options).expect("prefixed should reverse");
+    assert!(prefixed_out.to_string().contains('N'));
+
+    let qualified_wildcard = Expr::QualifiedWildcard(
+        ObjectName(vec![ObjectNamePart::Identifier(Ident::new("users"))]),
+        sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+    );
+    let wildcard_out = qualified_wildcard
+        .reverse_translate(&schema, &options)
+        .expect("qualified wildcard should reverse");
+    assert_eq!(wildcard_out.to_string(), "users.*");
+
+    let regexp_expr = Expr::RLike {
+        negated: false,
+        expr: Box::new(Expr::Identifier(Ident::new("name"))),
+        pattern: Box::new(Expr::Value(sqlparser::ast::ValueWithSpan::from(
+            sqlparser::ast::Value::SingleQuotedString("^[A-Z]".to_string()),
+        ))),
+        regexp: true,
+    };
+    let regexp_out =
+        regexp_expr.reverse_translate(&schema, &options).expect("regexp should reverse");
+    assert!(regexp_out.to_string().contains("REGEXP"));
+
+    let compound_access = Expr::CompoundFieldAccess {
+        root: Box::new(Expr::Identifier(Ident::new("payload"))),
+        access_chain: vec![
+            AccessExpr::Subscript(Subscript::Index {
+                index: Expr::Value(sqlparser::ast::ValueWithSpan::from(
+                    sqlparser::ast::Value::Number("1".to_string(), false),
+                )),
+            }),
+            AccessExpr::Dot(Expr::Identifier(Ident::new("field"))),
+        ],
+    };
+    let compound_out = compound_access
+        .reverse_translate(&schema, &options)
+        .expect("compound field access should reverse");
+    assert!(compound_out.to_string().contains("payload[1].field"));
+}
+
+#[test]
+fn reverse_manual_expr_unsupported_variant_returns_error() {
+    let schema = empty_schema();
+    let options = Pg2SqliteOptions::default();
+    let unsupported =
+        Expr::Wildcard(sqlparser::ast::helpers::attached_token::AttachedToken::empty());
+    let err = unsupported
+        .reverse_translate(&schema, &options)
+        .expect_err("wildcard expr should be unsupported");
+    assert!(err.to_string().contains("not yet implemented"));
 }
