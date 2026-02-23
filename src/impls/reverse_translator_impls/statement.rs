@@ -3,8 +3,9 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Delete, Expr, FromTable, Insert, ObjectName, Query, Select, SelectItem, SetExpr, Statement,
-    TableFactor, TableObject, TableWithJoins, Update, UpdateTableFromKind,
+    AccessExpr, Delete, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
+    GroupByExpr, Insert, LimitClause, ObjectName, Query, Select, SelectItem, SetExpr, Statement,
+    TableFactor, TableObject, TableWithJoins, Update, UpdateTableFromKind, Values, WindowType,
 };
 
 use crate::{
@@ -111,6 +112,36 @@ fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Err
         }
         Expr::UnaryOp { expr, .. } => check_expr_for_rls(expr, options),
         Expr::Nested(inner) => check_expr_for_rls(inner, options),
+        Expr::Function(func) => check_function_for_rls(func, options),
+        Expr::Cast { expr, .. } => check_expr_for_rls(expr, options),
+        Expr::AtTimeZone { timestamp, time_zone } => {
+            check_expr_for_rls(timestamp, options)?;
+            check_expr_for_rls(time_zone, options)
+        }
+        Expr::Extract { expr, .. } => check_expr_for_rls(expr, options),
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::SimilarTo { expr, pattern, .. }
+        | Expr::RLike { expr, pattern, .. } => {
+            check_expr_for_rls(expr, options)?;
+            check_expr_for_rls(pattern, options)
+        }
+        Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
+            check_expr_for_rls(left, options)?;
+            check_expr_for_rls(right, options)
+        }
+        Expr::Tuple(exprs) => {
+            for nested in exprs {
+                check_expr_for_rls(nested, options)?;
+            }
+            Ok(())
+        }
+        Expr::Array(array) => {
+            for nested in &array.elem {
+                check_expr_for_rls(nested, options)?;
+            }
+            Ok(())
+        }
         Expr::Case { operand, conditions, else_result, .. } => {
             if let Some(op) = operand {
                 check_expr_for_rls(op, options)?;
@@ -133,6 +164,55 @@ fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Err
             check_expr_for_rls(expr, options)?;
             for item in list {
                 check_expr_for_rls(item, options)?;
+            }
+            Ok(())
+        }
+        Expr::Trim { expr, trim_what, trim_characters, .. } => {
+            check_expr_for_rls(expr, options)?;
+            if let Some(trim_what) = trim_what {
+                check_expr_for_rls(trim_what, options)?;
+            }
+            if let Some(trim_chars) = trim_characters {
+                for nested in trim_chars {
+                    check_expr_for_rls(nested, options)?;
+                }
+            }
+            Ok(())
+        }
+        Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => check_expr_for_rls(expr, options),
+        Expr::Position { expr, r#in } => {
+            check_expr_for_rls(expr, options)?;
+            check_expr_for_rls(r#in, options)
+        }
+        Expr::Substring { expr, substring_from, substring_for, .. } => {
+            check_expr_for_rls(expr, options)?;
+            if let Some(from) = substring_from {
+                check_expr_for_rls(from, options)?;
+            }
+            if let Some(for_expr) = substring_for {
+                check_expr_for_rls(for_expr, options)?;
+            }
+            Ok(())
+        }
+        Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
+            check_expr_for_rls(expr, options)?;
+            check_expr_for_rls(overlay_what, options)?;
+            check_expr_for_rls(overlay_from, options)?;
+            if let Some(overlay_for) = overlay_for {
+                check_expr_for_rls(overlay_for, options)?;
+            }
+            Ok(())
+        }
+        Expr::Prefixed { value, .. } | Expr::Collate { expr: value, .. } => {
+            check_expr_for_rls(value, options)
+        }
+        Expr::Interval(interval) => check_expr_for_rls(&interval.value, options),
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            check_expr_for_rls(root, options)?;
+            for access in access_chain {
+                if let AccessExpr::Dot(nested) = access {
+                    check_expr_for_rls(nested, options)?;
+                }
             }
             Ok(())
         }
@@ -165,6 +245,25 @@ fn check_select_for_rls(select: &Select, options: &Pg2SqliteOptions) -> Result<(
         check_select_item_for_rls(item, options)?;
     }
 
+    if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
+        for expr in exprs {
+            check_expr_for_rls(expr, options)?;
+        }
+    }
+
+    if let Some(qualify) = &select.qualify {
+        check_expr_for_rls(qualify, options)?;
+    }
+
+    Ok(())
+}
+
+fn check_values_for_rls(values: &Values, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    for row in &values.rows {
+        for expr in row {
+            check_expr_for_rls(expr, options)?;
+        }
+    }
     Ok(())
 }
 
@@ -194,7 +293,32 @@ fn check_set_expr_for_rls(set_expr: &SetExpr, options: &Pg2SqliteOptions) -> Res
             }
             Ok(())
         }
-        SetExpr::Values(_) | SetExpr::Table(_) | SetExpr::Merge(_) => Ok(()),
+        SetExpr::Values(values) => check_values_for_rls(values, options),
+        SetExpr::Table(_) | SetExpr::Merge(_) => Ok(()),
+    }
+}
+
+fn check_limit_clause_for_rls(
+    limit_clause: &LimitClause,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    match limit_clause {
+        LimitClause::LimitOffset { limit, offset, limit_by } => {
+            if let Some(limit) = limit {
+                check_expr_for_rls(limit, options)?;
+            }
+            if let Some(offset) = offset {
+                check_expr_for_rls(&offset.value, options)?;
+            }
+            for expr in limit_by {
+                check_expr_for_rls(expr, options)?;
+            }
+            Ok(())
+        }
+        LimitClause::OffsetCommaLimit { offset, limit } => {
+            check_expr_for_rls(offset, options)?;
+            check_expr_for_rls(limit, options)
+        }
     }
 }
 
@@ -204,7 +328,68 @@ fn check_query_for_rls(query: &Query, options: &Pg2SqliteOptions) -> Result<(), 
             check_query_for_rls(&cte.query, options)?;
         }
     }
-    check_set_expr_for_rls(query.body.as_ref(), options)
+    check_set_expr_for_rls(query.body.as_ref(), options)?;
+
+    if let Some(order_by) = &query.order_by
+        && let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind
+    {
+        for order_expr in exprs {
+            check_expr_for_rls(&order_expr.expr, options)?;
+        }
+    }
+
+    if let Some(limit_clause) = &query.limit_clause {
+        check_limit_clause_for_rls(limit_clause, options)?;
+    }
+
+    if let Some(fetch) = &query.fetch
+        && let Some(quantity) = &fetch.quantity
+    {
+        check_expr_for_rls(quantity, options)?;
+    }
+
+    Ok(())
+}
+
+fn check_function_for_rls(
+    function: &sqlparser::ast::Function,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    if let FunctionArguments::List(arg_list) = &function.args {
+        for arg in &arg_list.args {
+            match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. } => {
+                    check_expr_for_rls(expr, options)?;
+                }
+                FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(expr), .. } => {
+                    check_expr_for_rls(expr, options)?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(filter) = &function.filter {
+        check_expr_for_rls(filter, options)?;
+    }
+
+    if let Some(over) = &function.over
+        && let WindowType::WindowSpec(window_spec) = over
+    {
+        for expr in &window_spec.partition_by {
+            check_expr_for_rls(expr, options)?;
+        }
+        for order_by_expr in &window_spec.order_by {
+            check_expr_for_rls(&order_by_expr.expr, options)?;
+        }
+    }
+
+    for order_by_expr in &function.within_group {
+        check_expr_for_rls(&order_by_expr.expr, options)?;
+    }
+
+    Ok(())
 }
 
 fn check_insert_for_rls(insert: &Insert, options: &Pg2SqliteOptions) -> Result<(), Error> {
@@ -227,6 +412,14 @@ fn check_update_for_rls(update: &Update, options: &Pg2SqliteOptions) -> Result<(
         check_update_from_for_rls(from, options)?;
     }
 
+    if let Some(selection) = &update.selection {
+        check_expr_for_rls(selection, options)?;
+    }
+
+    for assignment in &update.assignments {
+        check_expr_for_rls(&assignment.value, options)?;
+    }
+
     Ok(())
 }
 
@@ -239,6 +432,10 @@ fn check_delete_for_rls(delete: &Delete, options: &Pg2SqliteOptions) -> Result<(
 
     if let Some(using) = &delete.using {
         check_from_clause_for_rls(using, options)?;
+    }
+
+    if let Some(selection) = &delete.selection {
+        check_expr_for_rls(selection, options)?;
     }
 
     Ok(())
