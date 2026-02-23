@@ -299,3 +299,75 @@ impl Translator for CreateIndex {
         })])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::{
+        ast::{
+            Expr, FunctionArg, FunctionArgExpr, FunctionArgOperator, FunctionArgumentList,
+            FunctionArguments, Ident, Statement,
+        },
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{analyze_fts_expression, analyze_fts_index, extract_columns_from_expr};
+
+    fn parse_create_index(sql: &str) -> sqlparser::ast::CreateIndex {
+        let stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse").remove(0);
+        let Statement::CreateIndex(create_index) = stmt else {
+            panic!("expected create index");
+        };
+        create_index
+    }
+
+    #[test]
+    fn create_index_helpers_cover_named_wildcard_and_non_tsvector_paths() {
+        let mut idx =
+            parse_create_index("CREATE INDEX idx_docs ON docs USING GIN (to_tsvector(title))");
+        let Expr::Function(func) = &mut idx.columns[0].column.expr else {
+            panic!("expected function expression");
+        };
+        func.args = FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::Named {
+                    name: Ident::new("doc"),
+                    arg: FunctionArgExpr::Expr(Expr::CompoundIdentifier(vec![
+                        Ident::new("docs"),
+                        Ident::new("title"),
+                    ])),
+                    operator: FunctionArgOperator::RightArrow,
+                },
+                FunctionArg::Unnamed(FunctionArgExpr::Wildcard),
+            ],
+            clauses: vec![],
+        });
+
+        let columns = extract_columns_from_expr(&idx.columns[0].column.expr);
+        assert_eq!(columns, vec!["title".to_string()]);
+
+        let nested = Expr::Nested(Box::new(idx.columns[0].column.expr.clone()));
+        assert!(analyze_fts_expression(&nested).is_some());
+
+        if let Expr::Function(func) = &mut idx.columns[0].column.expr {
+            func.args = FunctionArguments::None;
+        }
+        assert!(extract_columns_from_expr(&idx.columns[0].column.expr).is_empty());
+
+        let mut idx_non_tsvector =
+            parse_create_index("CREATE INDEX idx_docs2 ON docs USING GIN (to_tsvector(title))");
+        if let Expr::Function(func) = &mut idx_non_tsvector.columns[0].column.expr {
+            func.name =
+                sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                    Ident::new("lower"),
+                )]);
+        }
+        assert!(analyze_fts_expression(&idx_non_tsvector.columns[0].column.expr).is_none());
+
+        let regular = parse_create_index("CREATE INDEX idx_plain ON docs (title)");
+        let analysis = analyze_fts_index(&regular);
+        assert!(matches!(analysis, super::FtsTranslation::Unsupported(_)));
+    }
+}

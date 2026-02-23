@@ -1636,4 +1636,240 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("table function not supported"));
     }
+
+    #[test]
+    fn translate_statement_other_variant_and_inject_noop_paths_are_covered() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+
+        let drop_stmt = parse_statement("DROP TABLE IF EXISTS users");
+        let translated =
+            PlPgSqlTranslator::translate_statement(&drop_stmt, &mut ctx, &schema, &options)
+                .expect("fallback statement translation should work");
+        assert_eq!(translated.len(), 1);
+
+        let mut insert = parse_statement("INSERT INTO users(id) VALUES (1)");
+        let before = insert.to_string();
+        PlPgSqlTranslator::inject_condition_into_statement(&mut insert, "id > 0");
+        assert_eq!(insert.to_string(), before);
+    }
+
+    #[test]
+    fn transform_set_expr_and_transform_expr_cover_remaining_select_and_default_paths() {
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+
+        let query = parse_query(
+            "SELECT u.id AS uid FROM users u RIGHT JOIN teams t ON u.team_id = t.id \
+             WHERE NOT (u.id IN (1, 2))",
+        );
+        let mut set_expr = query.body.as_ref().clone();
+        PlPgSqlTranslator::transform_set_expr(&mut set_expr, &mut ctx, &options);
+        let SetExpr::Select(select) = set_expr else {
+            panic!("expected transformed select");
+        };
+        assert!(select.selection.is_some());
+        assert_eq!(select.projection.len(), 1);
+
+        let mut in_subquery = parse_expr("id IN (SELECT id FROM teams)");
+        PlPgSqlTranslator::transform_expr(&mut in_subquery, &mut ctx, &options);
+        assert!(in_subquery.to_string().contains("SELECT id FROM teams"));
+
+        let mut scalar_subquery = parse_expr("(SELECT id FROM teams)");
+        PlPgSqlTranslator::transform_expr(&mut scalar_subquery, &mut ctx, &options);
+        assert!(scalar_subquery.to_string().contains("SELECT id FROM teams"));
+
+        let mut unary = parse_expr("NOT flag");
+        PlPgSqlTranslator::transform_expr(&mut unary, &mut ctx, &options);
+        assert!(unary.to_string().contains("NOT"));
+
+        let mut table_set_expr = SetExpr::Table(Box::new(sqlparser::ast::Table {
+            table_name: Some("users".to_string()),
+            schema_name: None,
+        }));
+        PlPgSqlTranslator::transform_set_expr(&mut table_set_expr, &mut ctx, &options);
+        assert!(matches!(table_set_expr, SetExpr::Table(_)));
+    }
+
+    #[test]
+    fn transform_delete_and_insert_statement_cover_function_name_and_non_select_source_paths() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+        ctx.add_binding(VariableBinding { name: "v_id".to_string(), expression: "1".to_string() });
+
+        let Statement::Delete(mut delete_stmt) = parse_statement("DELETE FROM users WHERE id = 1")
+        else {
+            panic!("expected delete");
+        };
+        let sqlparser::ast::FromTable::WithFromKeyword(tables) = delete_stmt.from.clone() else {
+            panic!("expected WITH FROM variant");
+        };
+        delete_stmt.from = sqlparser::ast::FromTable::WithoutKeyword(tables);
+        let transformed_delete =
+            PlPgSqlTranslator::transform_delete_for_sqlite(&delete_stmt, &mut ctx, &options);
+        assert!(matches!(transformed_delete.from, sqlparser::ast::FromTable::WithoutKeyword(_)));
+
+        let Statement::Insert(mut insert_fn_table) =
+            parse_statement("INSERT INTO users(id) VALUES (v_id)")
+        else {
+            panic!("expected insert");
+        };
+        insert_fn_table.table =
+            sqlparser::ast::TableObject::TableName(sqlparser::ast::ObjectName(vec![
+                sqlparser::ast::ObjectNamePart::Function(sqlparser::ast::ObjectNamePartFunction {
+                    name: sqlparser::ast::Ident::new("remote"),
+                    args: vec![],
+                }),
+            ]));
+        let translated = PlPgSqlTranslator::translate_insert_statement(
+            &insert_fn_table,
+            &mut ctx,
+            &schema,
+            &options,
+        )
+        .expect("function-style table object should still translate");
+        assert!(!translated.is_empty());
+
+        let Statement::Insert(mut insert_table_source) =
+            parse_statement("INSERT INTO users(id) VALUES (v_id)")
+        else {
+            panic!("expected insert");
+        };
+        insert_table_source.source = Some(Box::new(Query {
+            with: None,
+            body: Box::new(SetExpr::Table(Box::new(sqlparser::ast::Table {
+                table_name: Some("users".to_string()),
+                schema_name: None,
+            }))),
+            order_by: None,
+            limit_clause: None,
+            fetch: None,
+            locks: vec![],
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: vec![],
+        }));
+        let translated = PlPgSqlTranslator::translate_insert_statement(
+            &insert_table_source,
+            &mut ctx,
+            &schema,
+            &options,
+        )
+        .expect("non-select/value source should use fallback translation");
+        assert!(!translated.is_empty());
+    }
+
+    #[test]
+    fn translate_insert_statement_merges_condition_with_existing_selection() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+        ctx.add_binding(VariableBinding { name: "v_id".to_string(), expression: "1".to_string() });
+        ctx.push_condition("NEW.kind = 'a'".to_string());
+
+        let Statement::Insert(insert_stmt) =
+            parse_statement("INSERT INTO users(id) SELECT v_id WHERE id > 0")
+        else {
+            panic!("expected insert");
+        };
+        let translated = PlPgSqlTranslator::translate_insert_statement(
+            &insert_stmt,
+            &mut ctx,
+            &schema,
+            &options,
+        )
+        .expect("insert-select should translate");
+        let sql = translated[0].to_string();
+        assert!(sql.contains("id > 0"));
+        assert!(sql.contains("NEW.kind = 'a'"));
+    }
+
+    #[test]
+    fn substitute_variables_leaves_unbound_identifiers_and_handles_unary_ops() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
+        let expr = parse_expr("-other");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert_eq!(substituted.to_string(), "-other");
+    }
+
+    #[test]
+    fn transform_with_insert_to_subquery_covers_values_and_projection_alias_edges() {
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+
+        let values_query =
+            parse_query("WITH cte AS (SELECT 1 AS id) INSERT INTO users(id) VALUES (1)");
+        let with_values = values_query.with.as_ref().expect("with should exist").clone();
+        let SetExpr::Insert(Statement::Insert(values_insert)) = values_query.body.as_ref() else {
+            panic!("expected set-expr insert");
+        };
+        let transformed = PlPgSqlTranslator::transform_with_insert_to_subquery(
+            &with_values,
+            values_insert,
+            &mut ctx,
+            &options,
+        )
+        .expect("values source should be rewritten");
+        assert!(transformed[0].to_string().contains("SELECT * FROM"));
+
+        let alias_query = parse_query(
+            "WITH cte AS (SELECT 1 AS id) INSERT INTO users(id) SELECT id AS out_id FROM cte",
+        );
+        let with_alias = alias_query.with.as_ref().expect("with should exist").clone();
+        let SetExpr::Insert(Statement::Insert(mut alias_insert)) =
+            alias_query.body.as_ref().clone()
+        else {
+            panic!("expected set-expr insert");
+        };
+        if let Some(source) = &mut alias_insert.source
+            && let SetExpr::Select(select) = source.body.as_mut()
+        {
+            select.projection.push(sqlparser::ast::SelectItem::UnnamedExpr(
+                Expr::CompoundIdentifier(Vec::new()),
+            ));
+        }
+        let transformed = PlPgSqlTranslator::transform_with_insert_to_subquery(
+            &with_alias,
+            &alias_insert,
+            &mut ctx,
+            &options,
+        )
+        .expect("alias/empty-compound projection should rewrite");
+        assert!(!transformed.is_empty());
+    }
+
+    #[test]
+    fn transform_table_with_joins_handles_right_outer_and_full_outer_join_variants() {
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+
+        let right_query =
+            parse_query("SELECT u.id FROM users u RIGHT OUTER JOIN teams t ON u.team_id = t.id");
+        let SetExpr::Select(right_select) = right_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let mut right_from = right_select.from[0].clone();
+        PlPgSqlTranslator::transform_table_with_joins(&mut right_from, &mut ctx, &options);
+
+        let full_query =
+            parse_query("SELECT u.id FROM users u FULL OUTER JOIN teams t ON u.team_id = t.id");
+        let SetExpr::Select(full_select) = full_query.body.as_ref() else {
+            panic!("expected select");
+        };
+        let mut full_from = full_select.from[0].clone();
+        PlPgSqlTranslator::transform_table_with_joins(&mut full_from, &mut ctx, &options);
+    }
+
+    #[test]
+    fn parse_expression_reports_both_parser_entry_and_expr_errors() {
+        let entry_err = PlPgSqlTranslator::parse_expression("\u{0000}").unwrap_err();
+        assert!(entry_err.to_string().contains("Failed to parse expression"));
+
+        let expr_err = PlPgSqlTranslator::parse_expression("1 +").unwrap_err();
+        assert!(expr_err.to_string().contains("Failed to parse expression"));
+    }
 }

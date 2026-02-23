@@ -1714,3 +1714,290 @@ pub fn generate_rls_audit_table(audit_table_name: &str) -> Result<Statement, Err
 
     parse_single_generated_sql(&dialect, &sql, "Failed to parse generated RLS audit table SQL")
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::{structs::ParserDB, traits::DatabaseLike};
+    use sqlparser::{
+        ast::{
+            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgOperator,
+            FunctionArgumentList, FunctionArguments, Ident, JoinConstraint, JoinOperator,
+            ObjectName, ObjectNamePart, Query, SetExpr, Statement, TableFactor,
+        },
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{
+        SubqueryTransformContext, extract_current_setting_name, extract_string_literal,
+        generate_rls_view_sql, transform_expr, transform_expr_for_update_check,
+        transform_join_operator_for_subquery, transform_query, transform_table_factor_for_subquery,
+    };
+    use crate::prelude::{Pg2SqliteOptions, TranslationOptions};
+
+    fn parse_statements(sql: &str) -> Vec<Statement> {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
+    }
+
+    fn parse_query(sql: &str) -> Query {
+        let stmt = parse_statements(sql).remove(0);
+        let Statement::Query(query) = stmt else {
+            panic!("expected query");
+        };
+        *query
+    }
+
+    fn parse_expr(sql: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(sql)
+            .expect("sql should parse")
+            .parse_expr()
+            .expect("expression should parse")
+    }
+
+    fn schema_from_sql(sql: &str) -> ParserDB {
+        ParserDB::from_statements(parse_statements(sql), "test".to_string())
+            .expect("schema should build")
+    }
+
+    #[test]
+    fn extract_helpers_cover_string_literal_and_current_setting_edge_paths() {
+        assert_eq!(
+            extract_string_literal(&Expr::Value(sqlparser::ast::ValueWithSpan::from(
+                sqlparser::ast::Value::SingleQuotedString("x".to_string()),
+            )))
+            .as_deref(),
+            Some("x")
+        );
+        assert!(
+            extract_string_literal(&Expr::Value(sqlparser::ast::ValueWithSpan::from(
+                sqlparser::ast::Value::Boolean(true),
+            )))
+            .is_none()
+        );
+        assert!(extract_string_literal(&parse_expr("other_col")).is_none());
+
+        let not_setting = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("other"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::None,
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        assert!(extract_current_setting_name(&not_setting).is_none());
+
+        let invalid_arg = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("current_setting"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::Named {
+                    name: Ident::new("x"),
+                    arg: FunctionArgExpr::Wildcard,
+                    operator: FunctionArgOperator::RightArrow,
+                }],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        assert!(extract_current_setting_name(&invalid_arg).is_none());
+
+        let named_expr = Function {
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::Named {
+                    name: Ident::new("setting"),
+                    arg: FunctionArgExpr::Expr(Expr::Value(sqlparser::ast::ValueWithSpan::from(
+                        sqlparser::ast::Value::SingleQuotedString("app.user_id".to_string()),
+                    ))),
+                    operator: FunctionArgOperator::RightArrow,
+                }],
+                clauses: vec![],
+            }),
+            ..invalid_arg
+        };
+        assert_eq!(extract_current_setting_name(&named_expr).as_deref(), Some("app.user_id"));
+
+        let current_setting_no_args = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("current_setting"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::None,
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        assert!(extract_current_setting_name(&current_setting_no_args).is_none());
+    }
+
+    #[test]
+    fn transform_expr_covers_current_user_cast_and_coalesce_paths() {
+        let schema = schema_from_sql(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, title TEXT);",
+        );
+        let table = schema.table(None, "docs").expect("table should exist");
+        let options = Pg2SqliteOptions::default().with_session_variable(
+            crate::traits::translation_options::SessionVariableMapping::current_user("sqlite_user"),
+        );
+
+        let transformed_current_user = transform_expr(
+            &Expr::Identifier(Ident::new("current_user")),
+            &options,
+            table,
+            &schema,
+            Some("NEW"),
+            None,
+        );
+        assert_eq!(transformed_current_user.to_string(), "sqlite_user()");
+
+        let transformed_cast = transform_expr(
+            &parse_expr("owner_id::INT"),
+            &options,
+            table,
+            &schema,
+            Some("NEW"),
+            None,
+        );
+        assert!(transformed_cast.to_string().contains("NEW.owner_id"));
+
+        let renamed = transform_expr(
+            &parse_expr("docs.owner_id"),
+            &options,
+            table,
+            &schema,
+            None,
+            Some(("docs", "docs_rls")),
+        );
+        assert_eq!(renamed.to_string(), "docs_rls.owner_id");
+
+        let coalesced = transform_expr_for_update_check(
+            &parse_expr("docs.owner_id"),
+            &options,
+            table,
+            &schema,
+            Some(("docs", "docs_rls")),
+        );
+        assert!(coalesced.to_string().contains("COALESCE"));
+
+        let coalesced_identifier = transform_expr_for_update_check(
+            &parse_expr("owner_id"),
+            &options,
+            table,
+            &schema,
+            None,
+        );
+        assert!(coalesced_identifier.to_string().contains("COALESCE"));
+    }
+
+    #[test]
+    fn transform_query_and_subquery_helpers_cover_projection_and_join_paths() {
+        let schema = schema_from_sql(
+            r#"
+            CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER);
+            ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY docs_select ON docs FOR SELECT USING (owner_id > 0);
+            CREATE TABLE teams(id INTEGER PRIMARY KEY, owner_id INTEGER);
+            "#,
+        );
+        let table = schema.table(None, "docs").expect("table should exist");
+        let options = Pg2SqliteOptions::default();
+
+        let mut wildcard_query = parse_query("SELECT * FROM docs");
+        let SetExpr::Select(select) = wildcard_query.body.as_mut() else {
+            panic!("expected select");
+        };
+        select.qualify = Some(parse_expr("id > 0"));
+        let transformed = transform_query(
+            &wildcard_query,
+            &options,
+            table,
+            &schema,
+            Some("NEW"),
+            Some(("docs", "docs_rls")),
+        );
+        assert!(transformed.to_string().contains("QUALIFY"));
+
+        let context = SubqueryTransformContext {
+            options: &options,
+            table,
+            schema: &schema,
+            prefix: Some("NEW"),
+            outer_table: Some(("docs", "docs_rls")),
+            rls_suffix: options.get_rls_table_suffix(),
+        };
+
+        let mut rename_pairs = Vec::new();
+        let mut already_suffixed = TableFactor::Table {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("docs_rls"))]),
+            alias: None,
+            args: None,
+            with_hints: vec![],
+            version: None,
+            with_ordinality: false,
+            partitions: vec![],
+            json_path: None,
+            sample: None,
+            index_hints: vec![],
+        };
+        transform_table_factor_for_subquery(&mut already_suffixed, &context, &mut rename_pairs);
+        assert_eq!(rename_pairs, vec![("docs_rls".to_string(), "docs_rls".to_string())]);
+
+        let mut table_function =
+            TableFactor::TableFunction { expr: parse_expr("generate_series(1, 2)"), alias: None };
+        transform_table_factor_for_subquery(&mut table_function, &context, &mut rename_pairs);
+        assert!(matches!(table_function, TableFactor::TableFunction { .. }));
+
+        let on_constraint = JoinConstraint::On(parse_expr("docs.id = teams.id"));
+        let mut join_variants = vec![
+            JoinOperator::Join(on_constraint.clone()),
+            JoinOperator::Inner(on_constraint.clone()),
+            JoinOperator::Left(on_constraint.clone()),
+            JoinOperator::LeftOuter(on_constraint.clone()),
+            JoinOperator::Right(on_constraint.clone()),
+            JoinOperator::RightOuter(on_constraint.clone()),
+            JoinOperator::FullOuter(on_constraint.clone()),
+            JoinOperator::CrossJoin(on_constraint.clone()),
+            JoinOperator::Semi(on_constraint.clone()),
+            JoinOperator::LeftSemi(on_constraint.clone()),
+            JoinOperator::RightSemi(on_constraint.clone()),
+            JoinOperator::Anti(on_constraint.clone()),
+            JoinOperator::LeftAnti(on_constraint.clone()),
+            JoinOperator::RightAnti(on_constraint.clone()),
+            JoinOperator::StraightJoin(on_constraint.clone()),
+        ];
+        for join_op in &mut join_variants {
+            transform_join_operator_for_subquery(join_op, &context, &rename_pairs);
+        }
+
+        let mut as_of = JoinOperator::AsOf {
+            constraint: on_constraint.clone(),
+            match_condition: parse_expr("docs.id > teams.id"),
+        };
+        transform_join_operator_for_subquery(&mut as_of, &context, &rename_pairs);
+        assert!(matches!(as_of, JoinOperator::AsOf { .. }));
+
+        let mut cross_apply = JoinOperator::CrossApply;
+        transform_join_operator_for_subquery(&mut cross_apply, &context, &rename_pairs);
+        let mut outer_apply = JoinOperator::OuterApply;
+        transform_join_operator_for_subquery(&mut outer_apply, &context, &rename_pairs);
+    }
+
+    #[test]
+    fn generate_rls_view_sql_without_select_policies_omits_where_clause() {
+        let schema =
+            schema_from_sql("CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER);");
+        let table = schema.table(None, "docs").expect("table should exist");
+        let options = Pg2SqliteOptions::default();
+        let view_sql =
+            generate_rls_view_sql(table, &schema, &options).expect("view sql should build");
+        assert!(!view_sql.contains(" WHERE "));
+    }
+}

@@ -293,3 +293,59 @@ impl Translator for Function {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::{
+        ast::{
+            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgOperator,
+            FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart,
+        },
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{
+        build_concatenation_with_separator, extract_arg_exprs, transform_filter_to_case,
+        wrap_arg_with_case_filter,
+    };
+
+    fn parse_expr(sql: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(sql)
+            .expect("sql should parse")
+            .parse_expr()
+            .expect("expression should parse")
+    }
+
+    #[test]
+    fn helper_functions_cover_none_args_passthrough_and_empty_separator_cases() {
+        assert!(extract_arg_exprs(&FunctionArguments::None).is_empty());
+
+        assert!(build_concatenation_with_separator(&parse_expr("','"), Vec::new()).is_none());
+
+        let wildcard_named = FunctionArg::Named {
+            name: Ident::new("value"),
+            arg: FunctionArgExpr::Wildcard,
+            operator: FunctionArgOperator::RightArrow,
+        };
+        let wrapped = wrap_arg_with_case_filter(&wildcard_named, &parse_expr("1 = 1"));
+        assert_eq!(wrapped, wildcard_named);
+
+        let passthrough = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("sum"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("value")))],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        assert_eq!(transform_filter_to_case(&passthrough), passthrough);
+    }
+}

@@ -1289,3 +1289,218 @@ impl Translator for Expr {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{
+            AccessExpr, BinaryOperator, DateTimeField, Expr, Function, FunctionArg,
+            FunctionArgExpr, FunctionArgOperator, FunctionArgumentList, FunctionArguments, Ident,
+            ObjectName, ObjectNamePart, Subscript,
+        },
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{
+        extract_columns_from_expr, extract_columns_from_function, extract_query_from_tsquery,
+        is_sqlite_fixed_offset, normalize_at_time_zone_modifier, translate_any_all_to_in,
+        translate_extract, translate_trim,
+    };
+    use crate::prelude::{Pg2SqliteOptions, Translator};
+
+    fn empty_schema() -> ParserDB {
+        ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
+    }
+
+    fn parse_expr(sql: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(sql)
+            .expect("sql should parse")
+            .parse_expr()
+            .expect("expression should parse")
+    }
+
+    #[test]
+    fn extract_helpers_cover_named_and_non_expr_argument_shapes() {
+        let named_func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("f"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::Named {
+                        name: Ident::new("x"),
+                        arg: FunctionArgExpr::Expr(parse_expr("tbl.col")),
+                        operator: FunctionArgOperator::RightArrow,
+                    },
+                    FunctionArg::Unnamed(FunctionArgExpr::Wildcard),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        let cols = extract_columns_from_function(&named_func);
+        assert_eq!(cols, vec!["col".to_string()]);
+
+        let none_args_func = Function { args: FunctionArguments::None, ..named_func.clone() };
+        assert!(extract_columns_from_function(&none_args_func).is_empty());
+
+        assert!(extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new())).is_empty());
+        assert_eq!(
+            extract_columns_from_expr(&Expr::Nested(Box::new(parse_expr("a + b")))),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            extract_columns_from_expr(&Expr::Cast {
+                expr: Box::new(parse_expr("payload")),
+                data_type: sqlparser::ast::DataType::Text,
+                format: None,
+                kind: sqlparser::ast::CastKind::Cast,
+                array: false,
+            }),
+            vec!["payload".to_string()]
+        );
+        assert_eq!(extract_columns_from_expr(&Expr::Function(named_func)), vec!["col".to_string()]);
+    }
+
+    #[test]
+    fn tsquery_extract_and_timezone_helpers_cover_literal_and_invalid_paths() {
+        let tsquery = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("to_tsquery"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::Named {
+                    name: Ident::new("query"),
+                    arg: FunctionArgExpr::Expr(Expr::Value(sqlparser::ast::ValueWithSpan::from(
+                        sqlparser::ast::Value::SingleQuotedString("a & b".to_string()),
+                    ))),
+                    operator: FunctionArgOperator::RightArrow,
+                }],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        assert_eq!(extract_query_from_tsquery(&tsquery).as_deref(), Some("a & b"));
+
+        let non_literal = Function {
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::Named {
+                    name: Ident::new("query"),
+                    arg: FunctionArgExpr::Expr(parse_expr("param")),
+                    operator: FunctionArgOperator::RightArrow,
+                }],
+                clauses: vec![],
+            }),
+            ..tsquery.clone()
+        };
+        assert!(extract_query_from_tsquery(&non_literal).is_none());
+
+        assert!(!is_sqlite_fixed_offset("+0x:00"));
+        assert_eq!(normalize_at_time_zone_modifier("utc+05:30").as_deref(), Some("+05:30"));
+    }
+
+    #[test]
+    fn translate_extract_trim_any_and_unimplemented_branches() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let extracted_week = translate_extract(
+            &DateTimeField::Week(None),
+            &parse_expr("created_at"),
+            &schema,
+            &options,
+        )
+        .expect("week extract should translate");
+        assert!(extracted_week.to_string().contains("strftime('%W'"));
+
+        let extracted_day_of_year = translate_extract(
+            &DateTimeField::DayOfYear,
+            &parse_expr("created_at"),
+            &schema,
+            &options,
+        )
+        .expect("doy extract should translate");
+        assert!(extracted_day_of_year.to_string().contains("strftime('%j'"));
+
+        let extracted_day_of_week = translate_extract(
+            &DateTimeField::DayOfWeek,
+            &parse_expr("created_at"),
+            &schema,
+            &options,
+        )
+        .expect("dow extract should translate");
+        assert!(extracted_day_of_week.to_string().contains("strftime('%w'"));
+
+        let trimmed = translate_trim(
+            &parse_expr("body"),
+            None,
+            None,
+            Some(&[parse_expr("'x'"), parse_expr("'y'")]),
+            &schema,
+            &options,
+        )
+        .expect("trim should translate");
+        assert!(trimmed.to_string().contains("TRIM"));
+
+        let in_tuple = translate_any_all_to_in(
+            &parse_expr("id"),
+            &Expr::Tuple(vec![parse_expr("1"), parse_expr("2")]),
+            false,
+            &schema,
+            &options,
+        )
+        .expect("ANY tuple should become IN list");
+        assert!(matches!(in_tuple, Expr::InList { .. }));
+
+        let err = translate_any_all_to_in(
+            &parse_expr("id"),
+            &parse_expr("other_col"),
+            false,
+            &schema,
+            &options,
+        )
+        .expect_err("unsupported ANY right expression should error");
+        assert!(err.to_string().contains("ANY/ALL operator"));
+
+        let access = Expr::CompoundFieldAccess {
+            root: Box::new(parse_expr("payload")),
+            access_chain: vec![
+                AccessExpr::Subscript(Subscript::Index { index: parse_expr("1") }),
+                AccessExpr::Dot(parse_expr("value")),
+            ],
+        };
+        let translated_access =
+            access.translate(&schema, &options).expect("access should translate");
+        assert!(translated_access.to_string().contains("[1]"));
+
+        let unsupported = Expr::InUnnest {
+            expr: Box::new(parse_expr("id")),
+            array_expr: Box::new(parse_expr("arr")),
+            negated: false,
+        };
+        let err =
+            unsupported.translate(&schema, &options).expect_err("unsupported expr should error");
+        assert!(err.to_string().contains("not yet implemented"));
+
+        let any_expr = Expr::AnyOp {
+            left: Box::new(parse_expr("id")),
+            compare_op: BinaryOperator::Eq,
+            right: Box::new(Expr::Tuple(vec![parse_expr("1"), parse_expr("2")])),
+            is_some: true,
+        };
+        let translated_any = any_expr.translate(&schema, &options).expect("ANY should translate");
+        assert!(matches!(translated_any, Expr::InList { .. }));
+    }
+}

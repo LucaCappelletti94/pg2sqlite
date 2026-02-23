@@ -522,4 +522,45 @@ END";
         );
         assert!(!transformed.contains(" INTO "), "Should remove INTO clause");
     }
+
+    #[test]
+    fn test_parse_declaration_and_assignment_edge_cases() {
+        assert!(PlPgSqlPreprocessor::parse_single_declaration("").is_none());
+        assert!(PlPgSqlPreprocessor::parse_single_declaration("only_name").is_none());
+
+        let decl = PlPgSqlPreprocessor::parse_single_declaration("v_now TIMESTAMP := now()");
+        assert!(decl.is_some());
+        let decl = decl.unwrap();
+        assert_eq!(decl.name, "v_now");
+        assert_eq!(decl.data_type, "TIMESTAMP");
+        assert_eq!(decl.default_value.as_deref(), Some("now()"));
+
+        let context = PlPgSqlContext::new();
+        assert!(PlPgSqlPreprocessor::parse_assignment_line("1bad := 1;", &context).is_none());
+        assert!(PlPgSqlPreprocessor::parse_assignment_line("v_ok := ;", &context).is_none());
+    }
+
+    #[test]
+    fn test_transform_elsif_handles_partial_and_identifier_suffix_inputs() {
+        let single = PlPgSqlPreprocessor::transform_elsif("E");
+        assert_eq!(single, "E");
+
+        let transformed = PlPgSqlPreprocessor::transform_elsif("E\nELS\nELSIFX\nELSIF\n");
+        assert!(transformed.contains("E\n"));
+        assert!(transformed.contains("ELS\n"));
+        assert!(transformed.contains("ELSIFX\n"));
+        assert!(transformed.contains("ELSEIF\n"));
+    }
+
+    #[test]
+    fn test_split_top_level_csv_handles_escaped_single_and_double_quotes() {
+        let parts = PlPgSqlPreprocessor::split_top_level_csv(
+            "'a''b', \"x,y\", COALESCE(a, b), plain_value",
+        );
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "'a''b'");
+        assert_eq!(parts[1], "\"x,y\"");
+        assert_eq!(parts[2], "COALESCE(a, b)");
+        assert_eq!(parts[3], "plain_value");
+    }
 }

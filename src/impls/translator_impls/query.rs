@@ -909,7 +909,10 @@ fn translate_values(
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
-        ast::{Distinct, GroupByExpr, Query, SelectItem, SetExpr, Statement},
+        ast::{
+            Distinct, GroupByExpr, NamedWindowDefinition, NamedWindowExpr, Query, SelectItem,
+            SetExpr, Statement,
+        },
         dialect::PostgreSqlDialect,
         parser::Parser,
     };
@@ -1279,5 +1282,18 @@ mod tests {
         };
         let translated = translate_named_window(&select.named_window, &schema, &options).unwrap();
         assert_eq!(translated.len(), 2);
+    }
+
+    #[test]
+    fn named_window_translation_supports_named_window_expr_variant_directly() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let windows = vec![NamedWindowDefinition(
+            sqlparser::ast::Ident::new("w2"),
+            NamedWindowExpr::NamedWindow(sqlparser::ast::Ident::new("w1")),
+        )];
+        let translated = translate_named_window(&windows, &schema, &options).unwrap();
+        assert_eq!(translated.len(), 1);
+        assert!(matches!(translated[0].1, NamedWindowExpr::NamedWindow(_)));
     }
 }
