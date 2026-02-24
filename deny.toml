@@ -2,7 +2,10 @@
 # See https://embarkstudios.github.io/cargo-deny/
 
 [licenses]
-# Allow common permissive licenses used by the Rust ecosystem
+# Allow common permissive licenses used by the Rust ecosystem.
+# Unicode-3.0 is used by ICU crates (transitive via git2 → url → idna).
+# GPL-3.0-only covers sql_docs (transitive via sql-traits), which uses the
+# deprecated "GPL-3.0" SPDX identifier (normalises to GPL-3.0-only).
 allow = [
     "MIT",
     "Apache-2.0",
@@ -11,21 +14,25 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
     "CC0-1.0",
     "Zlib",
+    "GPL-3.0-only",
+    "GPL-3.0",      # deprecated SPDX form used by sql_docs (transitive via sql-traits)
 ]
 
 [bans]
-# Warn on multiple versions of the same crate
+# Warn on multiple versions of the same crate rather than blocking CI.
 multiple-versions = "warn"
-# Deny wildcard dependencies
-wildcards = "deny"
+# Git dependencies without a version specifier are intentionally used in this
+# project (sqlparser and sql-traits are pinned via git rev / branch).
+wildcards = "allow"
 
 [advisories]
-# Check for known security vulnerabilities
+# Check for known security vulnerabilities.
 ignore = []
 
 [sources]
-# Allow git sources since the project uses git dependencies for sqlparser and sql-traits
+# Allow git sources since the project uses git dependencies for sqlparser and sql-traits.
 unknown-registry = "warn"
 unknown-git = "allow"
