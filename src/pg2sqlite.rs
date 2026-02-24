@@ -1,12 +1,16 @@
 //! Submodule defining the main translator struct.
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use git2::Repository;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Statement;
 use tempfile::TempDir;
 
+pub use crate::translation_report::{TranslationReport, TranslationWarning};
 use crate::{
     impls::translator_impls::rls::generate_rls_audit_table,
     options::Pg2SqliteOptions,
@@ -231,6 +235,36 @@ impl Pg2Sqlite {
         Self::ups(temp_dir.path())
     }
 
+    fn translate_internal(
+        self,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<Statement>, crate::errors::Error> {
+        use sql_traits::traits::{DatabaseLike, TableLike};
+
+        let schema =
+            ParserDB::from_statements(self.pg_statements.clone(), "translation_db".to_owned())?;
+
+        let mut result: Vec<Statement> = self
+            .pg_statements
+            .iter()
+            .map(|statement| statement.translate(&schema, options))
+            .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // If any table has RLS enabled and audit table name is configured,
+        // prepend the audit table creation statement
+        let has_rls_tables = schema.tables().any(|table| table.has_row_level_security(&schema));
+
+        if has_rls_tables && let Some(audit_table_name) = options.get_rls_audit_table_name() {
+            let audit_table_stmt = generate_rls_audit_table(audit_table_name)?;
+            result.insert(0, audit_table_stmt);
+        }
+
+        Ok(result)
+    }
+
     /// Translates the set of `PostgreSQL` statements to `SQLite` statements.
     ///
     /// # Returns
@@ -259,30 +293,27 @@ impl Pg2Sqlite {
         self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
-        use sql_traits::traits::{DatabaseLike, TableLike};
+        self.translate_internal(options)
+    }
 
-        let schema =
-            ParserDB::from_statements(self.pg_statements.clone(), "translation_db".to_owned())?;
-
-        let mut result: Vec<Statement> = self
-            .pg_statements
-            .iter()
-            .map(|statement| statement.translate(&schema, options))
-            .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-
-        // If any table has RLS enabled and audit table name is configured,
-        // prepend the audit table creation statement
-        let has_rls_tables = schema.tables().any(|table| table.has_row_level_security(&schema));
-
-        if has_rls_tables && let Some(audit_table_name) = options.get_rls_audit_table_name() {
-            let audit_table_stmt = generate_rls_audit_table(audit_table_name)?;
-            result.insert(0, audit_table_stmt);
-        }
-
-        Ok(result)
+    /// Translates PostgreSQL statements and returns translated SQL plus
+    /// warnings.
+    ///
+    /// This is useful in non-strict mode where unsupported statements are
+    /// skipped instead of raising an error.
+    ///
+    /// # Errors
+    ///
+    /// * If parsing or translation fails.
+    pub fn translate_with_report(
+        self,
+        options: &Pg2SqliteOptions,
+    ) -> Result<TranslationReport, crate::errors::Error> {
+        let collector = Arc::new(Mutex::new(Vec::<TranslationWarning>::new()));
+        let options_with_warnings = options.clone().with_warning_collector(Arc::clone(&collector));
+        let statements = self.translate_internal(&options_with_warnings)?;
+        let warnings = collector.lock().map(|w| w.clone()).unwrap_or_default();
+        Ok(TranslationReport { statements, warnings })
     }
 
     /// Builds the schema from the loaded PostgreSQL statements.

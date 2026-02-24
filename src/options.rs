@@ -1,7 +1,12 @@
 //! Submodule defining a struct providing options for the translation.
 
-use crate::traits::{
-    SessionVariableMapping, SessionVariablePattern, TranslationOptions, UuidRepresentation,
+use std::sync::{Arc, Mutex};
+
+use crate::{
+    traits::{
+        SessionVariableMapping, SessionVariablePattern, TranslationOptions, UuidRepresentation,
+    },
+    translation_report::TranslationWarning,
 };
 
 /// Struct to hold options for the translation.
@@ -25,6 +30,8 @@ pub struct Pg2SqliteOptions {
     strict_rls_validation: bool,
     /// Whether unsupported statements should fail translation.
     fail_on_unsupported_statement: bool,
+    /// Optional collector for non-fatal translation warnings.
+    warning_collector: Option<Arc<Mutex<Vec<TranslationWarning>>>>,
 }
 
 impl Default for Pg2SqliteOptions {
@@ -39,6 +46,25 @@ impl Default for Pg2SqliteOptions {
             rls_audit_table_name: None,
             strict_rls_validation: false,
             fail_on_unsupported_statement: false,
+            warning_collector: None,
+        }
+    }
+}
+
+impl Pg2SqliteOptions {
+    pub(crate) fn with_warning_collector(
+        mut self,
+        collector: Arc<Mutex<Vec<TranslationWarning>>>,
+    ) -> Self {
+        self.warning_collector = Some(collector);
+        self
+    }
+
+    pub(crate) fn push_warning(&self, warning: TranslationWarning) {
+        if let Some(collector) = &self.warning_collector
+            && let Ok(mut warnings) = collector.lock()
+        {
+            warnings.push(warning);
         }
     }
 }

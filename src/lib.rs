@@ -5,6 +5,7 @@ pub mod impls;
 pub mod options;
 pub mod pg2sqlite;
 pub mod traits;
+pub mod translation_report;
 
 /// Prelude module for the library.
 pub mod prelude {
@@ -15,5 +16,6 @@ pub mod prelude {
             ReverseTranslator, Schema, SessionVariableMapping, SessionVariablePattern,
             TranslationOptions, Translator, UuidRepresentation, UuidVersion,
         },
+        translation_report::{TranslationReport, TranslationWarning},
     };
 }
