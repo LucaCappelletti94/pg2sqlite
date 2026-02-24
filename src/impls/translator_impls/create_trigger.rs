@@ -152,7 +152,15 @@ impl Translator for CreateTrigger {
         } else {
             match generate_standard_trigger_body(&exec_body, schema, options)? {
                 Some(body) => body,
-                None => return Ok(None),
+                None => {
+                    if options.should_fail_on_unsupported_statement() {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                            "Trigger function '{}' is missing or has no body",
+                            exec_body.func_desc.name
+                        )));
+                    }
+                    return Ok(None);
+                }
             }
         };
 
@@ -239,7 +247,7 @@ mod tests {
         parser::Parser,
     };
 
-    use crate::prelude::{Pg2SqliteOptions, Translator};
+    use crate::prelude::{Pg2SqliteOptions, TranslationOptions, Translator};
 
     fn parse_statements(sql: &str) -> Vec<Statement> {
         Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
@@ -283,5 +291,22 @@ mod tests {
 
         let (_drop_stmt, create_trigger) = translated;
         assert_eq!(create_trigger.table_name.to_string(), "docs");
+    }
+
+    #[test]
+    fn missing_trigger_function_body_errors_in_strict_mode() {
+        let schema = ParserDB::from_statements(
+            parse_statements("CREATE TABLE docs(id INTEGER PRIMARY KEY);"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+        let options = Pg2SqliteOptions::default().with_fail_on_unsupported_statement();
+        let trigger = parse_trigger(
+            "CREATE TRIGGER docs_ai AFTER INSERT ON docs \
+             FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn()",
+        );
+
+        let err = trigger.translate(&schema, &options).expect_err("strict mode should fail");
+        assert!(err.to_string().contains("Trigger function"), "unexpected error: {err}");
     }
 }

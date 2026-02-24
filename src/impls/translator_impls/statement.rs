@@ -10,6 +10,7 @@ use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement};
 use crate::{
     errors::Error,
     impls::{
+        object_name::schema_and_table_for_lookup,
         shared_helpers::statement_variant_name,
         translator_impls::{
             rls::{
@@ -299,6 +300,29 @@ fn append_vec0_statements_if_needed(
     Ok(())
 }
 
+fn role_can_select_table_for_object_name(
+    table_name: &sqlparser::ast::ObjectName,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> bool {
+    let Some(role_name) = options.get_session_user_role() else {
+        return true;
+    };
+    let Some(role) = schema.role(role_name) else {
+        return true;
+    };
+
+    let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(table_name);
+    let Some(table_name_for_lookup) = table_name_for_lookup else {
+        return true;
+    };
+    let Some(table) = schema.table(table_schema, table_name_for_lookup) else {
+        return true;
+    };
+
+    table.can_select(role, schema)
+}
+
 impl Translator for Statement {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -313,9 +337,20 @@ impl Translator for Statement {
             Self::CreateTable(create_table) => {
                 translate_create_table(create_table, schema, options)?
             }
-            Self::CreateIndex(create_index) => create_index.translate(schema, options)?,
+            Self::CreateIndex(create_index) => {
+                if role_can_select_table_for_object_name(&create_index.table_name, schema, options) {
+                    create_index.translate(schema, options)?
+                } else {
+                    Vec::new()
+                }
+            }
 
             Self::CreateTrigger(create_trigger) => {
+                if !role_can_select_table_for_object_name(&create_trigger.table_name, schema, options)
+                {
+                    return Ok(Vec::new());
+                }
+
                 let maybe_translated = create_trigger.translate(schema, options)?;
                 let mut statements = vec![];
                 if let Some((maybe_drop_trigger, create_trigger)) = maybe_translated {
@@ -586,5 +621,71 @@ mod tests {
         let writable =
             translate_create_table_for_role(&writable_table, &writable_schema, &options).unwrap();
         assert!(writable.is_none());
+    }
+
+    #[test]
+    fn role_filtered_create_index_is_skipped_for_non_selectable_table() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                r#"
+                CREATE ROLE app_user;
+                CREATE TABLE private_docs(id INTEGER PRIMARY KEY, title TEXT);
+                CREATE INDEX private_docs_title_idx ON private_docs(title);
+                "#,
+            )
+            .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let index_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "CREATE INDEX private_docs_title_idx ON private_docs(title);",
+        )
+        .expect("index SQL should parse")
+        .remove(0);
+
+        let translated =
+            index_stmt.translate(&schema, &options).expect("translation should succeed");
+        assert!(translated.is_empty(), "non-selectable table index should be filtered out");
+    }
+
+    #[test]
+    fn role_filtered_create_trigger_is_skipped_for_non_selectable_table() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                r#"
+                CREATE ROLE app_user;
+                CREATE TABLE private_docs(id INTEGER PRIMARY KEY, title TEXT);
+                CREATE FUNCTION private_docs_trigger_fn() RETURNS trigger AS $$
+                BEGIN
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+                CREATE TRIGGER private_docs_ai
+                AFTER INSERT ON private_docs
+                FOR EACH ROW
+                EXECUTE FUNCTION private_docs_trigger_fn();
+                "#,
+            )
+            .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let trigger_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "CREATE TRIGGER private_docs_ai AFTER INSERT ON private_docs FOR EACH ROW EXECUTE FUNCTION private_docs_trigger_fn();",
+        )
+        .expect("trigger SQL should parse")
+        .remove(0);
+
+        let translated =
+            trigger_stmt.translate(&schema, &options).expect("translation should succeed");
+        assert!(translated.is_empty(), "non-selectable table trigger should be filtered out");
     }
 }
