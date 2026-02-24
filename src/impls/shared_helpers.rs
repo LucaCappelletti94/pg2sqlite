@@ -3,12 +3,12 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Expr, ExprWithAlias, FunctionArg, FunctionArgExpr, FunctionArguments, Join, JoinConstraint,
-    JoinOperator, Measure, OrderByExpr, PivotValueSource, Query, SelectItem, Setting, Statement,
-    SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
-    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, WithFill,
-    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
-    XmlTableColumnOption,
+    Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, FunctionArg,
+    FunctionArgExpr, FunctionArguments, Join, JoinConstraint, JoinOperator, Measure, OrderByExpr,
+    PipeOperator, PivotValueSource, Query, SelectItem, Setting, Statement, SymbolDefinition,
+    TableFactor, TableFunctionArgs, TableSample, TableSampleBucket, TableSampleKind,
+    TableSampleQuantity, TableVersion, TableWithJoins, WithFill, XmlNamespaceDefinition,
+    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
 };
 
 use crate::{errors::Error, prelude::Pg2SqliteOptions};
@@ -110,7 +110,7 @@ fn translate_function_arg<D: TranslationDirection>(
     })
 }
 
-fn translate_setting<D: TranslationDirection>(
+pub(crate) fn translate_setting<D: TranslationDirection>(
     setting: &Setting,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
@@ -260,7 +260,7 @@ fn translate_with_fill<D: TranslationDirection>(
     })
 }
 
-fn translate_order_by_expr<D: TranslationDirection>(
+pub(crate) fn translate_order_by_expr<D: TranslationDirection>(
     order_by_expr: &OrderByExpr,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
@@ -315,6 +315,227 @@ fn translate_pivot_value_source<D: TranslationDirection>(
             PivotValueSource::Subquery(Box::new(D::translate_query(query, schema, options)?))
         }
     })
+}
+
+fn translate_expr_with_alias_and_order_by<D: TranslationDirection>(
+    expr_with_alias_and_order_by: &ExprWithAliasAndOrderBy,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<ExprWithAliasAndOrderBy, Error> {
+    Ok(ExprWithAliasAndOrderBy {
+        expr: translate_expr_with_alias::<D>(&expr_with_alias_and_order_by.expr, schema, options)?,
+        order_by: expr_with_alias_and_order_by.order_by,
+    })
+}
+
+fn translate_assignment<D: TranslationDirection>(
+    assignment: &Assignment,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Assignment, Error> {
+    Ok(Assignment {
+        target: assignment.target.clone(),
+        value: D::translate_expr(&assignment.value, schema, options)?,
+    })
+}
+
+fn translate_pipe_operator<D: TranslationDirection>(
+    pipe_operator: &PipeOperator,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<PipeOperator, Error> {
+    Ok(match pipe_operator {
+        PipeOperator::Limit { expr, offset } => PipeOperator::Limit {
+            expr: D::translate_expr(expr, schema, options)?,
+            offset: offset
+                .as_ref()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .transpose()?,
+        },
+        PipeOperator::Where { expr } => {
+            PipeOperator::Where { expr: D::translate_expr(expr, schema, options)? }
+        }
+        PipeOperator::OrderBy { exprs } => PipeOperator::OrderBy {
+            exprs: exprs
+                .iter()
+                .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        PipeOperator::Select { exprs } => PipeOperator::Select {
+            exprs: exprs
+                .iter()
+                .map(|expr| translate_select_item::<D>(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        PipeOperator::Extend { exprs } => PipeOperator::Extend {
+            exprs: exprs
+                .iter()
+                .map(|expr| translate_select_item::<D>(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        PipeOperator::Set { assignments } => PipeOperator::Set {
+            assignments: assignments
+                .iter()
+                .map(|assignment| translate_assignment::<D>(assignment, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        PipeOperator::Drop { columns } => PipeOperator::Drop {
+            columns: columns.clone(),
+        },
+        PipeOperator::As { alias } => PipeOperator::As { alias: alias.clone() },
+        PipeOperator::Aggregate {
+            full_table_exprs,
+            group_by_expr,
+        } => PipeOperator::Aggregate {
+            full_table_exprs: full_table_exprs
+                .iter()
+                .map(|expr| {
+                    translate_expr_with_alias_and_order_by::<D>(expr, schema, options)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            group_by_expr: group_by_expr
+                .iter()
+                .map(|expr| {
+                    translate_expr_with_alias_and_order_by::<D>(expr, schema, options)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        PipeOperator::TableSample { sample } => PipeOperator::TableSample {
+            sample: Box::new(translate_table_sample::<D>(sample.as_ref(), schema, options)?),
+        },
+        PipeOperator::Rename { mappings } => PipeOperator::Rename {
+            mappings: mappings.clone(),
+        },
+        PipeOperator::Union {
+            set_quantifier,
+            queries,
+        } => PipeOperator::Union {
+            set_quantifier: *set_quantifier,
+            queries: queries
+                .iter()
+                .map(|query| D::translate_query(query, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        PipeOperator::Intersect {
+            set_quantifier,
+            queries,
+        } => PipeOperator::Intersect {
+            set_quantifier: *set_quantifier,
+            queries: queries
+                .iter()
+                .map(|query| D::translate_query(query, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        PipeOperator::Except {
+            set_quantifier,
+            queries,
+        } => PipeOperator::Except {
+            set_quantifier: *set_quantifier,
+            queries: queries
+                .iter()
+                .map(|query| D::translate_query(query, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        PipeOperator::Call { function, alias } => {
+            let translated_expr =
+                D::translate_expr(&Expr::Function(function.clone()), schema, options)?;
+            let Expr::Function(translated_function) = translated_expr else {
+                return Err(Error::UnsupportedSQLiteFeature(format!(
+                    "Pipe CALL translation expected function expression, got {}",
+                    expr_variant_name(&translated_expr)
+                )));
+            };
+            PipeOperator::Call {
+                function: translated_function,
+                alias: alias.clone(),
+            }
+        }
+        PipeOperator::Pivot {
+            aggregate_functions,
+            value_column,
+            value_source,
+            alias,
+        } => PipeOperator::Pivot {
+            aggregate_functions: aggregate_functions
+                .iter()
+                .map(|expr| translate_expr_with_alias::<D>(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            value_column: value_column.clone(),
+            value_source: translate_pivot_value_source::<D>(value_source, schema, options)?,
+            alias: alias.clone(),
+        },
+        PipeOperator::Unpivot {
+            value_column,
+            name_column,
+            unpivot_columns,
+            alias,
+        } => PipeOperator::Unpivot {
+            value_column: value_column.clone(),
+            name_column: name_column.clone(),
+            unpivot_columns: unpivot_columns.clone(),
+            alias: alias.clone(),
+        },
+        PipeOperator::Join(join) => PipeOperator::Join(translate_join::<D>(join, schema, options)?),
+    })
+}
+
+pub(crate) fn translate_connect_by_kinds<D: TranslationDirection>(
+    connect_by_kinds: &[ConnectByKind],
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<ConnectByKind>, Error> {
+    connect_by_kinds
+        .iter()
+        .map(|connect_by| {
+            Ok(match connect_by {
+                ConnectByKind::ConnectBy {
+                    connect_token,
+                    nocycle,
+                    relationships,
+                } => ConnectByKind::ConnectBy {
+                    connect_token: connect_token.clone(),
+                    nocycle: *nocycle,
+                    relationships: relationships
+                        .iter()
+                        .map(|expr| D::translate_expr(expr, schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+                ConnectByKind::StartWith {
+                    start_token,
+                    condition,
+                } => ConnectByKind::StartWith {
+                    start_token: start_token.clone(),
+                    condition: Box::new(D::translate_expr(condition, schema, options)?),
+                },
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn translate_query_settings<D: TranslationDirection>(
+    settings: Option<&Vec<Setting>>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<Vec<Setting>>, Error> {
+    settings
+        .map(|settings| {
+            settings
+                .iter()
+                .map(|setting| translate_setting::<D>(setting, schema, options))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+}
+
+pub(crate) fn translate_pipe_operators<D: TranslationDirection>(
+    pipe_operators: &[PipeOperator],
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<PipeOperator>, Error> {
+    pipe_operators
+        .iter()
+        .map(|pipe_operator| translate_pipe_operator::<D>(pipe_operator, schema, options))
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn translate_measure<D: TranslationDirection>(
