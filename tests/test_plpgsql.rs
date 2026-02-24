@@ -289,6 +289,36 @@ fn uuid_function_in_trigger() {
     );
 }
 
+#[test]
+fn schema_qualified_uuid_function_in_trigger() {
+    let sql = r#"
+        CREATE TABLE source_docs (id INT PRIMARY KEY);
+        CREATE TABLE outbox (id TEXT PRIMARY KEY, source_id INT NOT NULL);
+
+        CREATE OR REPLACE FUNCTION copy_doc() RETURNS TRIGGER AS $$
+        BEGIN
+            INSERT INTO outbox (id, source_id)
+            VALUES (public.gen_random_uuid(), NEW.id);
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER copy_doc_trigger
+        AFTER INSERT ON source_docs
+        FOR EACH ROW EXECUTE FUNCTION copy_doc();
+    "#;
+
+    let output = translate(sql);
+    assert!(
+        output.contains("uuid()"),
+        "Expected schema-qualified UUID function to be rewritten: {output}"
+    );
+    assert!(
+        !output.contains("public.gen_random_uuid"),
+        "Schema-qualified UUID function should not remain in output: {output}"
+    );
+}
+
 // ==================== IF with INSERT and condition injection
 // ====================
 

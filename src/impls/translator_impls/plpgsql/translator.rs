@@ -6,9 +6,10 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
-        BeginEndStatements, BinaryOperator, Expr, GroupByExpr, Ident, ObjectName, ObjectNamePart,
-        Query, Select, SelectFlavor, SelectItem, Set, SetExpr, Statement, TableAlias, TableFactor,
-        TableWithJoins, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+        BeginEndStatements, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+        GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select, SelectFlavor, SelectItem,
+        Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value, ValueWithSpan,
+        helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
@@ -698,8 +699,18 @@ impl PlPgSqlTranslator {
             }
             Expr::Function(func) => {
                 // Transform UUID function names
-                let func_name = func.name.to_string().to_lowercase();
-                if func_name == "gen_random_uuid" || func_name == "uuid_generate_v4" {
+                let func_name = func
+                    .name
+                    .0
+                    .last()
+                    .and_then(|part| part.as_ident())
+                    .map_or_else(|| func.name.to_string().to_ascii_lowercase(), |ident| {
+                        ident.value.to_ascii_lowercase()
+                    });
+                if matches!(
+                    func_name.as_str(),
+                    "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7"
+                ) {
                     let new_name = options.get_uuid_function_name();
                     func.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(new_name))]);
                 }
@@ -799,6 +810,7 @@ impl PlPgSqlTranslator {
                 let expr_lower = binding.expression.to_lowercase();
                 expr_lower.contains("uuidv7()")
                     || expr_lower.contains("uuidv4()")
+                    || expr_lower.contains("uuid_generate_v4()")
                     || expr_lower.contains("gen_random_uuid()")
             };
 
@@ -928,15 +940,260 @@ impl PlPgSqlTranslator {
         Statement::Insert(new_insert).translate(schema, options)
     }
 
+    fn function_arg_references_variable(arg: &FunctionArg, var_name: &str) -> bool {
+        match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(inner))
+            | FunctionArg::Named { arg: FunctionArgExpr::Expr(inner), .. }
+            | FunctionArg::ExprNamed {
+                arg: FunctionArgExpr::Expr(inner), ..
+            } => Self::expr_references_variable(inner, var_name),
+            _ => false,
+        }
+    }
+
+    fn function_references_variable(func: &sqlparser::ast::Function, var_name: &str) -> bool {
+        let args_have_var = match &func.args {
+            FunctionArguments::List(arg_list) => arg_list
+                .args
+                .iter()
+                .any(|arg| Self::function_arg_references_variable(arg, var_name)),
+            _ => false,
+        };
+        let filter_has_var =
+            func.filter.as_ref().is_some_and(|filter| Self::expr_references_variable(filter, var_name));
+        let over_has_var = matches!(&func.over, Some(sqlparser::ast::WindowType::WindowSpec(window_spec))
+            if window_spec
+                .partition_by
+                .iter()
+                .any(|expr| Self::expr_references_variable(expr, var_name))
+                || window_spec
+                    .order_by
+                    .iter()
+                    .any(|order| Self::expr_references_variable(&order.expr, var_name)));
+        let within_group_has_var = func
+            .within_group
+            .iter()
+            .any(|order| Self::expr_references_variable(&order.expr, var_name));
+
+        args_have_var || filter_has_var || over_has_var || within_group_has_var
+    }
+
+    fn case_references_variable(
+        operand: Option<&Expr>,
+        conditions: &[sqlparser::ast::CaseWhen],
+        else_result: Option<&Expr>,
+        var_name: &str,
+    ) -> bool {
+        operand.is_some_and(|inner| Self::expr_references_variable(inner, var_name))
+            || conditions.iter().any(|when| {
+                Self::expr_references_variable(&when.condition, var_name)
+                    || Self::expr_references_variable(&when.result, var_name)
+            })
+            || else_result.is_some_and(|inner| Self::expr_references_variable(inner, var_name))
+    }
+
+    fn expr_list_references_variable(exprs: &[Expr], var_name: &str) -> bool {
+        exprs.iter().any(|expr| Self::expr_references_variable(expr, var_name))
+    }
+
     /// Checks if an expression references a specific variable name.
     fn expr_references_variable(expr: &Expr, var_name: &str) -> bool {
         match expr {
             Expr::Identifier(ident) => ident.value == var_name,
             Expr::CompoundIdentifier(idents) => idents.iter().any(|i| i.value == var_name),
-            _ => {
-                // For now, check string representation
-                expr.to_string().contains(var_name)
+            Expr::BinaryOp { left, right, .. }
+            | Expr::IsDistinctFrom(left, right)
+            | Expr::IsNotDistinctFrom(left, right) => {
+                Self::expr_references_variable(left, var_name)
+                    || Self::expr_references_variable(right, var_name)
             }
+            Expr::UnaryOp { expr: inner, .. }
+            | Expr::Cast { expr: inner, .. }
+            | Expr::IsNull(inner)
+            | Expr::IsNotNull(inner)
+            | Expr::IsUnknown(inner)
+            | Expr::IsNotUnknown(inner)
+            | Expr::IsTrue(inner)
+            | Expr::IsNotTrue(inner)
+            | Expr::IsFalse(inner)
+            | Expr::IsNotFalse(inner)
+            | Expr::Nested(inner) => Self::expr_references_variable(inner, var_name),
+            Expr::Function(func) => Self::function_references_variable(func, var_name),
+            Expr::AtTimeZone { timestamp, time_zone } => {
+                Self::expr_references_variable(timestamp, var_name)
+                    || Self::expr_references_variable(time_zone, var_name)
+            }
+            Expr::InList { expr: inner, list, .. } => {
+                Self::expr_references_variable(inner, var_name)
+                    || Self::expr_list_references_variable(list, var_name)
+            }
+            Expr::InSubquery { expr: inner, subquery, .. } => {
+                Self::expr_references_variable(inner, var_name)
+                    || Self::query_references_variable_expr(subquery, var_name)
+            }
+            Expr::InUnnest { expr: inner, array_expr, .. } => {
+                Self::expr_references_variable(inner, var_name)
+                    || Self::expr_references_variable(array_expr, var_name)
+            }
+            Expr::Between { expr: inner, low, high, .. } => {
+                Self::expr_references_variable(inner, var_name)
+                    || Self::expr_references_variable(low, var_name)
+                    || Self::expr_references_variable(high, var_name)
+            }
+            Expr::Case { operand, conditions, else_result, .. } => {
+                Self::case_references_variable(
+                    operand.as_deref(),
+                    conditions,
+                    else_result.as_deref(),
+                    var_name,
+                )
+            }
+            Expr::Tuple(items) => Self::expr_list_references_variable(items, var_name),
+            Expr::Array(array) => Self::expr_list_references_variable(&array.elem, var_name),
+            Expr::Subquery(subquery) | Expr::Exists { subquery, .. } => {
+                Self::query_references_variable_expr(subquery, var_name)
+            }
+            _ => false,
+        }
+    }
+
+    /// Checks whether a query expression references a specific variable.
+    fn query_references_variable_expr(query: &Query, var_name: &str) -> bool {
+        let body_has_var = Self::set_expr_references_variable_expr(&query.body, var_name);
+        let order_by_has_var = query.order_by.as_ref().is_some_and(|order_by| {
+            let kind_has_var = match &order_by.kind {
+                sqlparser::ast::OrderByKind::Expressions(exprs) => exprs.iter().any(|order_expr| {
+                    Self::expr_references_variable(&order_expr.expr, var_name)
+                        || order_expr.with_fill.as_ref().is_some_and(|with_fill| {
+                            with_fill
+                                .from
+                                .as_ref()
+                                .is_some_and(|expr| {
+                                    Self::expr_references_variable(expr, var_name)
+                                })
+                                || with_fill.to.as_ref().is_some_and(|expr| {
+                                    Self::expr_references_variable(expr, var_name)
+                                })
+                                || with_fill.step.as_ref().is_some_and(|expr| {
+                                    Self::expr_references_variable(expr, var_name)
+                                })
+                        })
+                }),
+                sqlparser::ast::OrderByKind::All(_) => false,
+            };
+            let interpolate_has_var = order_by.interpolate.as_ref().is_some_and(|interpolate| {
+                interpolate.exprs.as_ref().is_some_and(|exprs| {
+                    exprs.iter().any(|interpolate_expr| {
+                        interpolate_expr.expr.as_ref().is_some_and(|expr| {
+                            Self::expr_references_variable(expr, var_name)
+                        })
+                    })
+                })
+            });
+
+            kind_has_var || interpolate_has_var
+        });
+        let limit_has_var = query.limit_clause.as_ref().is_some_and(|limit_clause| match limit_clause {
+            sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by } => {
+                limit.as_ref().is_some_and(|expr| Self::expr_references_variable(expr, var_name))
+                    || offset.as_ref().is_some_and(|offset_expr| {
+                        Self::expr_references_variable(&offset_expr.value, var_name)
+                    })
+                    || limit_by
+                        .iter()
+                        .any(|expr| Self::expr_references_variable(expr, var_name))
+            }
+            sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
+                Self::expr_references_variable(offset, var_name)
+                    || Self::expr_references_variable(limit, var_name)
+            }
+        });
+        let fetch_has_var = query.fetch.as_ref().is_some_and(|fetch| {
+            fetch
+                .quantity
+                .as_ref()
+                .is_some_and(|expr| Self::expr_references_variable(expr, var_name))
+        });
+
+        body_has_var || order_by_has_var || limit_has_var || fetch_has_var
+    }
+
+    /// Checks whether a `SetExpr` references a specific variable.
+    fn set_expr_references_variable_expr(set_expr: &SetExpr, var_name: &str) -> bool {
+        match set_expr {
+            SetExpr::Select(select) => {
+                let projection_has_var = select.projection.iter().any(|item| match item {
+                    SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                        Self::expr_references_variable(expr, var_name)
+                    }
+                    _ => false,
+                });
+                let selection_has_var = select
+                    .selection
+                    .as_ref()
+                    .is_some_and(|expr| Self::expr_references_variable(expr, var_name));
+                let having_has_var = select
+                    .having
+                    .as_ref()
+                    .is_some_and(|expr| Self::expr_references_variable(expr, var_name));
+                let group_by_has_var = match &select.group_by {
+                    GroupByExpr::All(_) => false,
+                    GroupByExpr::Expressions(exprs, _) => {
+                        exprs.iter().any(|expr| Self::expr_references_variable(expr, var_name))
+                    }
+                };
+                let from_has_var = select
+                    .from
+                    .iter()
+                    .any(|table| Self::table_with_joins_references_variable(table, var_name));
+
+                projection_has_var
+                    || selection_has_var
+                    || having_has_var
+                    || group_by_has_var
+                    || from_has_var
+            }
+            SetExpr::Values(values) => values.rows.iter().any(|row| {
+                row.iter().any(|expr| Self::expr_references_variable(expr, var_name))
+            }),
+            SetExpr::SetOperation { left, right, .. } => {
+                Self::set_expr_references_variable_expr(left, var_name)
+                    || Self::set_expr_references_variable_expr(right, var_name)
+            }
+            SetExpr::Query(query) => Self::query_references_variable_expr(query, var_name),
+            _ => false,
+        }
+    }
+
+    /// Checks whether a table reference with joins references a specific variable.
+    fn table_with_joins_references_variable(table: &TableWithJoins, var_name: &str) -> bool {
+        Self::table_factor_references_variable(&table.relation, var_name)
+            || table.joins.iter().any(|join| {
+                Self::table_factor_references_variable(&join.relation, var_name)
+                    || match &join.join_operator {
+                        sqlparser::ast::JoinOperator::Join(constraint)
+                        | sqlparser::ast::JoinOperator::Inner(constraint)
+                        | sqlparser::ast::JoinOperator::LeftOuter(constraint)
+                        | sqlparser::ast::JoinOperator::RightOuter(constraint)
+                        | sqlparser::ast::JoinOperator::FullOuter(constraint) => {
+                            if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
+                                Self::expr_references_variable(expr, var_name)
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    }
+            })
+    }
+
+    /// Checks whether a table factor references a specific variable.
+    fn table_factor_references_variable(factor: &TableFactor, var_name: &str) -> bool {
+        match factor {
+            TableFactor::Derived { subquery, .. } => {
+                Self::query_references_variable_expr(subquery, var_name)
+            }
+            _ => false,
         }
     }
 
@@ -1072,38 +1329,295 @@ impl PlPgSqlTranslator {
         })))
     }
 
+    fn substitute_bound_variable(name: &str, bindings: &[VariableBinding]) -> Option<Expr> {
+        bindings
+            .iter()
+            .any(|binding| name == binding.name)
+            .then(|| CteBuilder::variable_reference(name))
+    }
+
+    fn substitute_function(func: &sqlparser::ast::Function, bindings: &[VariableBinding]) -> Expr {
+        let mut rewritten = func.clone();
+        if let FunctionArguments::List(arg_list) = &mut rewritten.args {
+            for arg in &mut arg_list.args {
+                match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(inner))
+                    | FunctionArg::Named { arg: FunctionArgExpr::Expr(inner), .. }
+                    | FunctionArg::ExprNamed {
+                        arg: FunctionArgExpr::Expr(inner), ..
+                    } => {
+                        *inner = Self::substitute_variables(inner, bindings);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(filter) = &mut rewritten.filter {
+            **filter = Self::substitute_variables(filter, bindings);
+        }
+        if let Some(over) = &mut rewritten.over
+            && let sqlparser::ast::WindowType::WindowSpec(window_spec) = over
+        {
+            for partition_expr in &mut window_spec.partition_by {
+                *partition_expr = Self::substitute_variables(partition_expr, bindings);
+            }
+            for order_by_expr in &mut window_spec.order_by {
+                order_by_expr.expr = Self::substitute_variables(&order_by_expr.expr, bindings);
+            }
+        }
+        for order_by_expr in &mut rewritten.within_group {
+            order_by_expr.expr = Self::substitute_variables(&order_by_expr.expr, bindings);
+        }
+        Expr::Function(rewritten)
+    }
+
+    fn substitute_case_expr(
+        case_token: &AttachedToken,
+        end_token: &AttachedToken,
+        operand: Option<&Expr>,
+        conditions: &[sqlparser::ast::CaseWhen],
+        else_result: Option<&Expr>,
+        bindings: &[VariableBinding],
+    ) -> Expr {
+        Expr::Case {
+            case_token: case_token.clone(),
+            end_token: end_token.clone(),
+            operand: operand.map(|inner| Box::new(Self::substitute_variables(inner, bindings))),
+            conditions: conditions
+                .iter()
+                .map(|when| sqlparser::ast::CaseWhen {
+                    condition: Self::substitute_variables(&when.condition, bindings),
+                    result: Self::substitute_variables(&when.result, bindings),
+                })
+                .collect(),
+            else_result: else_result.map(|inner| Box::new(Self::substitute_variables(inner, bindings))),
+        }
+    }
+
+    fn rebuild_unary_wrapper(expr: &Expr, rewritten: Expr) -> Expr {
+        match expr {
+            Expr::IsNull(_) => Expr::IsNull(Box::new(rewritten)),
+            Expr::IsNotNull(_) => Expr::IsNotNull(Box::new(rewritten)),
+            Expr::IsUnknown(_) => Expr::IsUnknown(Box::new(rewritten)),
+            Expr::IsNotUnknown(_) => Expr::IsNotUnknown(Box::new(rewritten)),
+            Expr::IsTrue(_) => Expr::IsTrue(Box::new(rewritten)),
+            Expr::IsNotTrue(_) => Expr::IsNotTrue(Box::new(rewritten)),
+            Expr::IsFalse(_) => Expr::IsFalse(Box::new(rewritten)),
+            Expr::IsNotFalse(_) => Expr::IsNotFalse(Box::new(rewritten)),
+            Expr::Nested(_) => Expr::Nested(Box::new(rewritten)),
+            _ => unreachable!("match arm should cover only unary wrapper variants"),
+        }
+    }
+
     /// Substitutes variable references in an expression with CTE column
     /// references.
     fn substitute_variables(expr: &Expr, bindings: &[VariableBinding]) -> Expr {
         match expr {
             Expr::Identifier(ident) => {
-                let name = &ident.value;
-                // Check if it's a bound variable
-                for binding in bindings {
-                    if name == &binding.name {
-                        return CteBuilder::variable_reference(name);
+                Self::substitute_bound_variable(&ident.value, bindings).unwrap_or_else(|| expr.clone())
+            }
+            Expr::CompoundIdentifier(idents) if idents.len() == 1 => Self::substitute_bound_variable(
+                &idents[0].value,
+                bindings,
+            )
+            .unwrap_or_else(|| expr.clone()),
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(Self::substitute_variables(left, bindings)),
+                op: op.clone(),
+                right: Box::new(Self::substitute_variables(right, bindings)),
+            },
+            Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(Self::substitute_variables(inner, bindings)),
+            },
+            Expr::Cast { expr: inner, data_type, format, kind, array } => Expr::Cast {
+                expr: Box::new(Self::substitute_variables(inner, bindings)),
+                data_type: data_type.clone(),
+                format: format.clone(),
+                kind: kind.clone(),
+                array: *array,
+            },
+            Expr::Function(func) => Self::substitute_function(func, bindings),
+            Expr::AtTimeZone { timestamp, time_zone } => Expr::AtTimeZone {
+                timestamp: Box::new(Self::substitute_variables(timestamp, bindings)),
+                time_zone: Box::new(Self::substitute_variables(time_zone, bindings)),
+            },
+            Expr::InList { expr: inner, list, negated } => Expr::InList {
+                expr: Box::new(Self::substitute_variables(inner, bindings)),
+                list: list.iter().map(|item| Self::substitute_variables(item, bindings)).collect(),
+                negated: *negated,
+            },
+            Expr::InSubquery { expr: inner, subquery, negated } => Expr::InSubquery {
+                expr: Box::new(Self::substitute_variables(inner, bindings)),
+                subquery: Box::new(Self::substitute_variables_in_query(subquery, bindings)),
+                negated: *negated,
+            },
+            Expr::InUnnest { expr: inner, array_expr, negated } => Expr::InUnnest {
+                expr: Box::new(Self::substitute_variables(inner, bindings)),
+                array_expr: Box::new(Self::substitute_variables(array_expr, bindings)),
+                negated: *negated,
+            },
+            Expr::Between { expr: inner, negated, low, high } => Expr::Between {
+                expr: Box::new(Self::substitute_variables(inner, bindings)),
+                negated: *negated,
+                low: Box::new(Self::substitute_variables(low, bindings)),
+                high: Box::new(Self::substitute_variables(high, bindings)),
+            },
+            Expr::Case { case_token, end_token, operand, conditions, else_result } => {
+                Self::substitute_case_expr(
+                    case_token,
+                    end_token,
+                    operand.as_deref(),
+                    conditions,
+                    else_result.as_deref(),
+                    bindings,
+                )
+            }
+            Expr::Tuple(items) => {
+                Expr::Tuple(items.iter().map(|item| Self::substitute_variables(item, bindings)).collect())
+            }
+            Expr::Array(array) => {
+                let mut rewritten = array.clone();
+                rewritten.elem = rewritten
+                    .elem
+                    .iter()
+                    .map(|item| Self::substitute_variables(item, bindings))
+                    .collect();
+                Expr::Array(rewritten)
+            }
+            Expr::IsNull(inner)
+            | Expr::IsNotNull(inner)
+            | Expr::IsUnknown(inner)
+            | Expr::IsNotUnknown(inner)
+            | Expr::IsTrue(inner)
+            | Expr::IsNotTrue(inner)
+            | Expr::IsFalse(inner)
+            | Expr::IsNotFalse(inner)
+            | Expr::Nested(inner) => {
+                Self::rebuild_unary_wrapper(expr, Self::substitute_variables(inner, bindings))
+            }
+            Expr::Subquery(subquery) => {
+                Expr::Subquery(Box::new(Self::substitute_variables_in_query(subquery, bindings)))
+            }
+            Expr::Exists { subquery, negated } => Expr::Exists {
+                subquery: Box::new(Self::substitute_variables_in_query(subquery, bindings)),
+                negated: *negated,
+            },
+            _ => expr.clone(),
+        }
+    }
+
+    /// Rewrites bound variable references recursively within a query.
+    fn substitute_variables_in_query(query: &Query, bindings: &[VariableBinding]) -> Query {
+        let mut rewritten = query.clone();
+        rewritten.body = Box::new(Self::substitute_variables_in_set_expr(&query.body, bindings));
+        if let Some(order_by) = &mut rewritten.order_by {
+            match &mut order_by.kind {
+                sqlparser::ast::OrderByKind::Expressions(exprs) => {
+                    for order_expr in exprs {
+                        order_expr.expr = Self::substitute_variables(&order_expr.expr, bindings);
+                        if let Some(with_fill) = &mut order_expr.with_fill {
+                            if let Some(from) = &mut with_fill.from {
+                                *from = Self::substitute_variables(from, bindings);
+                            }
+                            if let Some(to) = &mut with_fill.to {
+                                *to = Self::substitute_variables(to, bindings);
+                            }
+                            if let Some(step) = &mut with_fill.step {
+                                *step = Self::substitute_variables(step, bindings);
+                            }
+                        }
                     }
                 }
-                expr.clone()
+                sqlparser::ast::OrderByKind::All(_) => {}
             }
-            Expr::BinaryOp { left, op, right } => {
-                Expr::BinaryOp {
-                    left: Box::new(Self::substitute_variables(left, bindings)),
-                    op: op.clone(),
-                    right: Box::new(Self::substitute_variables(right, bindings)),
+            if let Some(interpolate) = &mut order_by.interpolate
+                && let Some(exprs) = &mut interpolate.exprs
+            {
+                for interpolate_expr in exprs {
+                    if let Some(expr) = &mut interpolate_expr.expr {
+                        *expr = Self::substitute_variables(expr, bindings);
+                    }
                 }
             }
-            Expr::UnaryOp { op, expr: inner } => {
-                Expr::UnaryOp {
-                    op: *op,
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+        }
+        if let Some(limit_clause) = &mut rewritten.limit_clause {
+            match limit_clause {
+                sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by } => {
+                    if let Some(limit_expr) = limit {
+                        *limit_expr = Self::substitute_variables(limit_expr, bindings);
+                    }
+                    if let Some(offset_expr) = offset {
+                        offset_expr.value = Self::substitute_variables(&offset_expr.value, bindings);
+                    }
+                    for expr in limit_by {
+                        *expr = Self::substitute_variables(expr, bindings);
+                    }
+                }
+                sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
+                    *offset = Self::substitute_variables(offset, bindings);
+                    *limit = Self::substitute_variables(limit, bindings);
                 }
             }
-            Expr::Nested(inner) => {
-                Expr::Nested(Box::new(Self::substitute_variables(inner, bindings)))
+        }
+        if let Some(fetch) = &mut rewritten.fetch
+            && let Some(quantity) = &mut fetch.quantity
+        {
+            *quantity = Self::substitute_variables(quantity, bindings);
+        }
+        rewritten
+    }
+
+    /// Rewrites bound variable references recursively within a `SetExpr`.
+    fn substitute_variables_in_set_expr(
+        set_expr: &SetExpr,
+        bindings: &[VariableBinding],
+    ) -> SetExpr {
+        match set_expr {
+            SetExpr::Select(select) => {
+                let mut rewritten = (**select).clone();
+                for item in &mut rewritten.projection {
+                    if let SelectItem::UnnamedExpr(inner)
+                    | SelectItem::ExprWithAlias { expr: inner, .. } = item
+                    {
+                        *inner = Self::substitute_variables(inner, bindings);
+                    }
+                }
+                if let Some(selection) = &mut rewritten.selection {
+                    *selection = Self::substitute_variables(selection, bindings);
+                }
+                if let Some(having) = &mut rewritten.having {
+                    *having = Self::substitute_variables(having, bindings);
+                }
+                match &mut rewritten.group_by {
+                    GroupByExpr::All(_) => {}
+                    GroupByExpr::Expressions(exprs, _) => {
+                        for expr in exprs {
+                            *expr = Self::substitute_variables(expr, bindings);
+                        }
+                    }
+                }
+                SetExpr::Select(Box::new(rewritten))
             }
-            // For other expression types, return as-is
-            _ => expr.clone(),
+            SetExpr::Values(values) => {
+                let mut rewritten = values.clone();
+                for row in &mut rewritten.rows {
+                    for expr in row {
+                        *expr = Self::substitute_variables(expr, bindings);
+                    }
+                }
+                SetExpr::Values(rewritten)
+            }
+            SetExpr::SetOperation { op, set_quantifier, left, right } => SetExpr::SetOperation {
+                op: *op,
+                set_quantifier: *set_quantifier,
+                left: Box::new(Self::substitute_variables_in_set_expr(left, bindings)),
+                right: Box::new(Self::substitute_variables_in_set_expr(right, bindings)),
+            },
+            SetExpr::Query(query) => {
+                SetExpr::Query(Box::new(Self::substitute_variables_in_query(query, bindings)))
+            }
+            other => other.clone(),
         }
     }
 
@@ -1114,12 +1628,20 @@ impl PlPgSqlTranslator {
     /// configured UUID function name from options.
     fn translate_uuid_function(expr_str: &str, options: &Pg2SqliteOptions) -> String {
         use crate::traits::TranslationOptions;
+        if let Ok(mut parsed_expr) = Self::parse_expression(expr_str) {
+            let mut context = PlPgSqlContext::new();
+            Self::transform_expr(&mut parsed_expr, &mut context, options);
+            return parsed_expr.to_string();
+        }
+
         let target_func = options.get_uuid_function_name();
 
         // Replace common PostgreSQL UUID function names
         expr_str
             .replace("gen_random_uuid()", &format!("{target_func}()"))
             .replace("GEN_RANDOM_UUID()", &format!("{target_func}()"))
+            .replace("uuid_generate_v4()", &format!("{target_func}()"))
+            .replace("UUID_GENERATE_V4()", &format!("{target_func}()"))
             .replace("uuidv4()", &format!("{target_func}()"))
             .replace("UUIDV4()", &format!("{target_func}()"))
             .replace("uuidv7()", &format!("{target_func}()"))
@@ -1219,6 +1741,12 @@ mod tests {
         );
         assert_eq!(translated, "uuid7() + uuid7() + uuid7()");
 
+        let qualified = PlPgSqlTranslator::translate_uuid_function(
+            "public.gen_random_uuid() + pg_catalog.uuid_generate_v4()",
+            &options,
+        );
+        assert_eq!(qualified, "uuid7() + uuid7()");
+
         let parsed = PlPgSqlTranslator::parse_expression("1 + 2").unwrap();
         assert_eq!(parsed.to_string(), "1 + 2");
 
@@ -1286,6 +1814,14 @@ mod tests {
         assert!(PlPgSqlTranslator::expr_references_variable(&parse_expr("v_id"), "v_id"));
         assert!(PlPgSqlTranslator::expr_references_variable(&parse_expr("t.v_id"), "v_id"));
         assert!(!PlPgSqlTranslator::expr_references_variable(&parse_expr("other"), "v_id"));
+    }
+
+    #[test]
+    fn expr_references_variable_does_not_match_identifier_substrings() {
+        assert!(!PlPgSqlTranslator::expr_references_variable(
+            &parse_expr("other_id + 1"),
+            "id"
+        ));
     }
 
     #[test]
@@ -1639,6 +2175,44 @@ mod tests {
     }
 
     #[test]
+    fn translate_insert_statement_tracks_schema_qualified_uuid_generate_v4_bindings() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                "CREATE TABLE users(id TEXT, name TEXT);",
+            )
+            .unwrap(),
+            "test".to_string(),
+        )
+        .unwrap();
+        let options = Pg2SqliteOptions::default();
+        let mut ctx = PlPgSqlContext::new();
+        ctx.add_binding(VariableBinding {
+            name: "v_id".to_string(),
+            expression: "pg_catalog.uuid_generate_v4()".to_string(),
+        });
+
+        let Statement::Insert(insert_values) =
+            parse_statement("INSERT INTO users (id, name) VALUES (v_id, 'a')")
+        else {
+            panic!("expected insert");
+        };
+
+        let translated = PlPgSqlTranslator::translate_insert_statement(
+            &insert_values,
+            &mut ctx,
+            &schema,
+            &options,
+        )
+        .expect("values insert should translate");
+        assert!(!translated.is_empty());
+        assert!(
+            ctx.get_uuid_first_use("v_id").is_some(),
+            "schema-qualified uuid_generate_v4() should be tracked for last_insert_rowid pattern"
+        );
+    }
+
+    #[test]
     fn translate_statement_other_variant_and_inject_noop_paths_are_covered() {
         let schema = empty_schema();
         let options = Pg2SqliteOptions::default();
@@ -1795,6 +2369,90 @@ mod tests {
         let expr = parse_expr("-other");
         let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
         assert_eq!(substituted.to_string(), "-other");
+    }
+
+    #[test]
+    fn substitute_variables_rewrites_function_arguments() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
+        let expr = parse_expr("COALESCE(v_id, 0)");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert!(
+            substituted.to_string().contains("v_id.val"),
+            "Expected bound variable inside function args to be rewritten: {substituted}"
+        );
+    }
+
+    #[test]
+    fn substitute_variables_rewrites_case_expressions() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
+        let expr = parse_expr("CASE WHEN v_id > 0 THEN v_id ELSE 0 END");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert!(
+            substituted.to_string().contains("v_id.val"),
+            "Expected bound variable inside CASE to be rewritten: {substituted}"
+        );
+    }
+
+    #[test]
+    fn substitute_variables_rewrites_subquery_projections() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
+        let expr = parse_expr("(SELECT v_id)");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert!(
+            substituted.to_string().contains("v_id.val"),
+            "Expected bound variable inside subquery projection to be rewritten: {substituted}"
+        );
+    }
+
+    #[test]
+    fn substitute_variables_rewrites_tuple_items() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
+        let expr = parse_expr("(v_id, 1)");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert!(
+            substituted.to_string().contains("v_id.val"),
+            "Expected bound variable inside tuple to be rewritten: {substituted}"
+        );
+    }
+
+    #[test]
+    fn substitute_variables_rewrites_array_items() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
+        let expr = parse_expr("ARRAY[v_id, 1]");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert!(
+            substituted.to_string().contains("v_id.val"),
+            "Expected bound variable inside array literal to be rewritten: {substituted}"
+        );
+    }
+
+    #[test]
+    fn substitute_variables_rewrites_exists_subqueries() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
+        let expr = parse_expr("EXISTS (SELECT v_id)");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert!(
+            substituted.to_string().contains("v_id.val"),
+            "Expected bound variable inside EXISTS subquery to be rewritten: {substituted}"
+        );
+    }
+
+    #[test]
+    fn substitute_variables_rewrites_subquery_order_by_expressions() {
+        let bindings =
+            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
+        let expr = parse_expr("(SELECT 1 ORDER BY v_id)");
+        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
+        assert!(
+            substituted.to_string().contains("v_id.val"),
+            "Expected bound variable inside subquery ORDER BY to be rewritten: {substituted}"
+        );
     }
 
     #[test]

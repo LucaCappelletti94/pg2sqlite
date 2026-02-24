@@ -148,6 +148,7 @@ impl PlPgSqlContext {
             let expr_lower = binding.expression.to_lowercase();
             expr_lower.contains("uuidv7()")
                 || expr_lower.contains("uuidv4()")
+                || expr_lower.contains("uuid_generate_v4()")
                 || expr_lower.contains("gen_random_uuid()")
         })
     }
