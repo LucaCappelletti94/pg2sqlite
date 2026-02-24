@@ -34,11 +34,48 @@ pub(crate) fn schema_and_table_for_lookup(name: &ObjectName) -> (Option<&str>, O
     }
 }
 
+/// Quotes an SQL identifier with double quotes, escaping interior quotes.
+#[must_use]
+pub(crate) fn quote_identifier(name: &str) -> String {
+    let is_simple = match name.chars().next() {
+        Some(first) => {
+            (first == '_' || first.is_ascii_alphabetic())
+                && name.chars().skip(1).all(|c| c == '_' || c.is_ascii_alphanumeric())
+        }
+        None => false,
+    };
+
+    if is_simple {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
+/// Builds a quoted qualified reference such as `NEW."column"`.
+#[must_use]
+pub(crate) fn prefixed_quoted_identifier(prefix: &str, name: &str) -> String {
+    format!("{prefix}.{}", quote_identifier(name))
+}
+
+/// Creates an identifier that keeps double-quote style when formatted.
+#[must_use]
+pub(crate) fn quoted_ident(name: &str) -> Ident {
+    if quote_identifier(name) == name {
+        Ident::new(name)
+    } else {
+        Ident::with_quote('"', name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
 
-    use super::{append_suffix, last_ident, schema_and_table_for_lookup};
+    use super::{
+        append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
+        schema_and_table_for_lookup,
+    };
 
     fn name(parts: &[&str]) -> ObjectName {
         ObjectName(
@@ -65,5 +102,17 @@ mod tests {
 
         let three = name(&["catalog", "public", "users"]);
         assert_eq!(schema_and_table_for_lookup(&three), (None, Some("users")));
+    }
+
+    #[test]
+    fn identifier_quoting_helpers_escape_and_prefix_names() {
+        assert_eq!(quote_identifier("simple_name"), "simple_name");
+        assert_eq!(quote_identifier("a b"), "\"a b\"");
+        assert_eq!(quote_identifier("a\"b"), "\"a\"\"b\"");
+        assert_eq!(prefixed_quoted_identifier("NEW", "a b"), "NEW.\"a b\"");
+
+        let ident = quoted_ident("spaced ident");
+        assert_eq!(ident.to_string(), "\"spaced ident\"");
+        assert_eq!(quoted_ident("simple_name").to_string(), "simple_name");
     }
 }

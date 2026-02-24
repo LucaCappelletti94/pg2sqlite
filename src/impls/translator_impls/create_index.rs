@@ -13,7 +13,10 @@ use crate::{
     errors::Error,
     impls::{
         generated_sql::parse_generated_sql,
-        object_name::{last_ident, schema_and_table_for_lookup},
+        object_name::{
+            last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
+            schema_and_table_for_lookup,
+        },
         translator_impls::rls::resolve_trigger_table_name,
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -158,12 +161,13 @@ fn analyze_fts_index(create_index: &CreateIndex) -> FtsTranslation {
 /// of the indexed content. This allows triggers to properly manage
 /// insert/update/delete synchronization using standard DELETE statements.
 fn create_fts5_virtual_table(base_name: &str, columns: &[String]) -> Statement {
-    let fts_name =
-        ObjectName(vec![ObjectNamePart::Identifier(Ident::new(format!("{base_name}_fts")))]);
+    let fts_name = ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(&format!(
+        "{base_name}_fts"
+    )))]);
 
     // Build the module arguments: just column names
     // Using regular FTS5 (no content option) so triggers can use DELETE statements
-    let module_args: Vec<Ident> = columns.iter().map(|c| Ident::new(c.clone())).collect();
+    let module_args: Vec<Ident> = columns.iter().map(|c| quoted_ident(c)).collect();
 
     Statement::CreateVirtualTable {
         name: fts_name,
@@ -184,27 +188,42 @@ fn create_fts5_triggers(
     columns: &[String],
 ) -> Vec<String> {
     let fts_name = format!("{fts_table_base}_fts");
-    let columns_list = columns.join(", ");
-    let new_values = columns.iter().map(|c| format!("new.{c}")).collect::<Vec<_>>().join(", ");
+    let trigger_table_quoted = quote_identifier(trigger_table);
+    let fts_name_quoted = quote_identifier(&fts_name);
+    let columns_list = columns
+        .iter()
+        .map(|c| quote_identifier(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let new_values = columns
+        .iter()
+        .map(|c| prefixed_quoted_identifier("new", c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let new_pk = prefixed_quoted_identifier("new", pk_column);
+    let old_pk = prefixed_quoted_identifier("old", pk_column);
+    let insert_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ai"));
+    let delete_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ad"));
+    let update_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_au"));
 
     vec![
         // AFTER INSERT trigger - attached to the actual table (may be RLS backing table)
         format!(
-            "CREATE TRIGGER {fts_table_base}_fts_ai AFTER INSERT ON {trigger_table} BEGIN \
-             INSERT INTO {fts_name}(rowid, {columns_list}) VALUES (new.{pk_column}, {new_values}); \
+            "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON {trigger_table_quoted} BEGIN \
+             INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
              END"
         ),
         // AFTER DELETE trigger
         format!(
-            "CREATE TRIGGER {fts_table_base}_fts_ad AFTER DELETE ON {trigger_table} BEGIN \
-             DELETE FROM {fts_name} WHERE rowid = old.{pk_column}; \
+            "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON {trigger_table_quoted} BEGIN \
+             DELETE FROM {fts_name_quoted} WHERE rowid = {old_pk}; \
              END"
         ),
         // AFTER UPDATE trigger
         format!(
-            "CREATE TRIGGER {fts_table_base}_fts_au AFTER UPDATE ON {trigger_table} BEGIN \
-             DELETE FROM {fts_name} WHERE rowid = old.{pk_column}; \
-             INSERT INTO {fts_name}(rowid, {columns_list}) VALUES (new.{pk_column}, {new_values}); \
+            "CREATE TRIGGER {update_trigger_name} AFTER UPDATE ON {trigger_table_quoted} BEGIN \
+             DELETE FROM {fts_name_quoted} WHERE rowid = {old_pk}; \
+             INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
              END"
         ),
     ]
@@ -302,6 +321,7 @@ impl Translator for CreateIndex {
 
 #[cfg(test)]
 mod tests {
+    use sql_traits::structs::ParserDB;
     use sqlparser::{
         ast::{
             Expr, FunctionArg, FunctionArgExpr, FunctionArgOperator, FunctionArgumentList,
@@ -312,6 +332,7 @@ mod tests {
     };
 
     use super::{analyze_fts_expression, analyze_fts_index, extract_columns_from_expr};
+    use crate::prelude::{Pg2SqliteOptions, Translator};
 
     fn parse_create_index(sql: &str) -> sqlparser::ast::CreateIndex {
         let stmt =
@@ -369,5 +390,29 @@ mod tests {
         let regular = parse_create_index("CREATE INDEX idx_plain ON docs (title)");
         let analysis = analyze_fts_index(&regular);
         assert!(matches!(analysis, super::FtsTranslation::Unsupported(_)));
+    }
+
+    #[test]
+    fn fts_generation_handles_quoted_table_identifiers() {
+        let schema_sql =
+            r#"CREATE TABLE "Order Items" ("id" INTEGER PRIMARY KEY, "body text" TEXT);"#;
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, schema_sql).expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+
+        let index = parse_create_index(
+            r#"CREATE INDEX order_body_fts ON "Order Items" USING GIN (to_tsvector("body text"))"#,
+        );
+        let translated =
+            index.translate(&schema, &Pg2SqliteOptions::default()).expect("index should translate");
+
+        assert!(
+            translated
+                .iter()
+                .any(|stmt| stmt.to_string().contains("CREATE TRIGGER")),
+            "expected generated FTS synchronization triggers"
+        );
     }
 }

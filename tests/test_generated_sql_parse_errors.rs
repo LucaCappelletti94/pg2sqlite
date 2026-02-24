@@ -1,13 +1,13 @@
-//! Regression tests for generated SQL parse failures.
+//! Regression tests for generated SQL snippet handling.
 //!
-//! Translators that synthesize SQL snippets (FTS5/vec0 triggers) must return
-//! explicit errors when those snippets are invalid instead of silently dropping
-//! statements.
+//! Translators that synthesize SQL snippets (FTS5/vec0 triggers) must either
+//! fail loudly on invalid SQL or produce valid SQL for quoted/problematic
+//! identifiers.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 #[test]
-fn fts5_generated_trigger_parse_failure_returns_error() {
+fn fts5_generated_trigger_sql_handles_quoted_identifiers() {
     let sql = r#"
         CREATE TABLE docs (
             id INTEGER PRIMARY KEY,
@@ -20,17 +20,17 @@ fn fts5_generated_trigger_parse_failure_returns_error() {
     "#;
 
     let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
-    assert!(result.is_err(), "Translation should fail when generated FTS5 trigger SQL is invalid");
+    assert!(result.is_ok(), "Translation should succeed for quoted FTS5 identifiers");
 
-    let error_msg = result.unwrap_err().to_string();
+    let translated = result.unwrap().into_iter().map(|stmt| stmt.to_string()).collect::<Vec<_>>();
     assert!(
-        error_msg.contains("Failed to parse generated FTS5 trigger SQL"),
-        "Expected explicit FTS5 generated-SQL parse error, got: {error_msg}"
+        translated.iter().any(|sql| sql.contains("CREATE TRIGGER docs_fts_ai")),
+        "Expected generated FTS5 trigger in translated SQL"
     );
 }
 
 #[test]
-fn vec0_generated_trigger_parse_failure_returns_error() {
+fn vec0_generated_trigger_sql_handles_quoted_identifiers() {
     let sql = r#"
         CREATE TABLE "embeddings-bad" (
             id INTEGER PRIMARY KEY,
@@ -39,11 +39,13 @@ fn vec0_generated_trigger_parse_failure_returns_error() {
     "#;
 
     let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
-    assert!(result.is_err(), "Translation should fail when generated vec0 trigger SQL is invalid");
+    assert!(result.is_ok(), "Translation should succeed for quoted vec0 identifiers");
 
-    let error_msg = result.unwrap_err().to_string();
+    let translated = result.unwrap().into_iter().map(|stmt| stmt.to_string()).collect::<Vec<_>>();
     assert!(
-        error_msg.contains("Failed to parse generated vec0 synchronization trigger SQL"),
-        "Expected explicit vec0 generated-SQL parse error, got: {error_msg}"
+        translated
+            .iter()
+            .any(|sql| sql.contains("CREATE TRIGGER \"embeddings-bad_embedding_vec_ai\"")),
+        "Expected generated vec0 trigger in translated SQL"
     );
 }

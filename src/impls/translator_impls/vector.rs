@@ -33,7 +33,10 @@ use crate::{
     errors::Error,
     impls::{
         generated_sql::parse_generated_sql,
-        object_name::{last_ident, schema_and_table_for_lookup},
+        object_name::{
+            last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
+            schema_and_table_for_lookup,
+        },
         translator_impls::rls::resolve_trigger_table_name,
     },
     prelude::Pg2SqliteOptions,
@@ -136,13 +139,16 @@ fn create_vec0_virtual_table(
     pk_column: &str,
     vec_col: &VectorColumnInfo,
 ) -> Statement {
-    let name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(vec_table_name.to_string()))]);
+    let name = ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(vec_table_name))]);
 
     // Build the module arguments for vec0:
     // vec0(pk_id INTEGER PRIMARY KEY, column_name float[N])
-    let pk_arg = format!("{pk_column}_id INTEGER PRIMARY KEY");
+    let pk_arg = format!(
+        "{} INTEGER PRIMARY KEY",
+        quote_identifier(&format!("{pk_column}_id"))
+    );
     let dim_spec = vec_col.dimensions.map_or_else(String::new, |d| format!("[{d}]"));
-    let vec_arg = format!("{} float{dim_spec}", vec_col.column_name);
+    let vec_arg = format!("{} float{dim_spec}", quote_identifier(&vec_col.column_name));
 
     let module_args = vec![Ident::new(pk_arg), Ident::new(vec_arg)];
 
@@ -161,26 +167,40 @@ fn create_vec0_triggers(
     pk_column: &str,
     column_name: &str,
 ) -> Vec<String> {
+    let trigger_table_quoted = quote_identifier(table_name);
+    let vec_table_quoted = quote_identifier(vec_table_name);
+    let vec_pk_column = format!("{pk_column}_id");
+    let vec_pk_column_quoted = quote_identifier(&vec_pk_column);
+    let column_name_quoted = quote_identifier(column_name);
+    let new_pk = prefixed_quoted_identifier("NEW", pk_column);
+    let old_pk = prefixed_quoted_identifier("OLD", pk_column);
+    let new_vec_col = prefixed_quoted_identifier("NEW", column_name);
+    let insert_trigger_name = quote_identifier(&format!("{vec_table_name}_ai"));
+    let delete_trigger_name = quote_identifier(&format!("{vec_table_name}_ad"));
+    let update_trigger_name = quote_identifier(&format!("{vec_table_name}_au"));
+
     vec![
         // AFTER INSERT trigger
         format!(
-            "CREATE TRIGGER {vec_table_name}_ai AFTER INSERT ON {table_name} BEGIN \
-             INSERT INTO {vec_table_name} ({pk_column}_id, {column_name}) \
-             VALUES (NEW.{pk_column}, NEW.{column_name}); \
+            "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON {trigger_table_quoted} BEGIN \
+             INSERT INTO {vec_table_quoted} ({vec_pk_column_quoted}, {column_name_quoted}) \
+             VALUES ({new_pk}, {new_vec_col}); \
              END"
         ),
         // AFTER DELETE trigger
         format!(
-            "CREATE TRIGGER {vec_table_name}_ad AFTER DELETE ON {table_name} BEGIN \
-             DELETE FROM {vec_table_name} WHERE {pk_column}_id = OLD.{pk_column}; \
+            "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON {trigger_table_quoted} BEGIN \
+             DELETE FROM {vec_table_quoted} WHERE {vec_pk_column_quoted} = {old_pk}; \
              END"
         ),
-        // AFTER UPDATE trigger
+        // Update vector sync on vector value or PK changes.
         format!(
-            "CREATE TRIGGER {vec_table_name}_au AFTER UPDATE OF {column_name} ON {table_name} BEGIN \
-             UPDATE {vec_table_name} SET {column_name} = NEW.{column_name} \
-             WHERE {pk_column}_id = NEW.{pk_column}; \
+            "CREATE TRIGGER {update_trigger_name} AFTER UPDATE OF {column_name_quoted}, {} ON {trigger_table_quoted} BEGIN \
+             UPDATE {vec_table_quoted} SET {column_name_quoted} = {new_vec_col}, {vec_pk_column_quoted} = {new_pk} \
+             WHERE {vec_pk_column_quoted} = {old_pk}; \
              END"
+            ,
+            quote_identifier(pk_column)
         ),
     ]
 }
@@ -351,5 +371,51 @@ mod tests {
         let err = generate_vec0_statements(&create_table, &schema, &options)
             .expect_err("missing table should error");
         assert!(err.to_string().contains("not found in schema"));
+    }
+
+    #[test]
+    fn generate_vec0_statements_supports_quoted_identifiers() {
+        let sql = r#"CREATE TABLE "Vector Docs" ("doc id" INTEGER PRIMARY KEY, "embedding vec" vector(3));"#;
+        let schema = ParserDB::from_statements(parse_statements(sql), "test".to_string())
+            .expect("schema should build");
+        let create_table = parse_create_table(sql);
+        let options = Pg2SqliteOptions::default();
+
+        let statements = generate_vec0_statements(&create_table, &schema, &options)
+            .expect("quoted identifiers should translate");
+        assert!(
+            statements.iter().any(|stmt| stmt.to_string().contains("CREATE TRIGGER")),
+            "expected vec synchronization triggers"
+        );
+    }
+
+    #[test]
+    fn generate_vec0_update_trigger_tracks_primary_key_changes() {
+        let sql = "CREATE TABLE docs(id INTEGER PRIMARY KEY, embedding vector(3));";
+        let schema = ParserDB::from_statements(parse_statements(sql), "test".to_string())
+            .expect("schema should build");
+        let create_table = parse_create_table(sql);
+        let options = Pg2SqliteOptions::default();
+
+        let statements =
+            generate_vec0_statements(&create_table, &schema, &options).expect("should succeed");
+        let update_trigger_sql = statements
+            .iter()
+            .map(ToString::to_string)
+            .find(|sql| sql.contains("_au"))
+            .expect("update trigger should be generated");
+
+        assert!(
+            update_trigger_sql.contains("AFTER UPDATE OF embedding, id"),
+            "update trigger should fire on vector or PK updates: {update_trigger_sql}"
+        );
+        assert!(
+            update_trigger_sql.contains("id_id = NEW.id"),
+            "update trigger should update vector row identity: {update_trigger_sql}"
+        );
+        assert!(
+            update_trigger_sql.contains("WHERE id_id = OLD.id"),
+            "update trigger should match previous PK value: {update_trigger_sql}"
+        );
     }
 }

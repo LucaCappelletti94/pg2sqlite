@@ -17,7 +17,10 @@ use crate::{
     errors::Error,
     impls::{
         generated_sql::{parse_generated_sql, parse_single_generated_sql},
-        object_name::{append_suffix, last_ident, schema_and_table_for_lookup},
+        object_name::{
+            append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier,
+            schema_and_table_for_lookup,
+        },
     },
     traits::{SessionVariablePattern, TranslationOptions},
 };
@@ -97,7 +100,15 @@ where
 /// available, otherwise falls back to all columns.
 fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> String {
     let identity_cols = if pk_columns.is_empty() { columns } else { pk_columns };
-    identity_cols.iter().map(|c| format!("{c} = OLD.{c}")).collect::<Vec<_>>().join(" AND ")
+    identity_cols
+        .iter()
+        .map(|c| {
+            let col = quote_identifier(c);
+            let old_col = prefixed_quoted_identifier("OLD", c);
+            format!("{col} = {old_col}")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 /// Filters policies for a table by the specified commands.
@@ -125,6 +136,10 @@ where
 struct RlsTriggerContext<'a> {
     table_name: &'a str,
     inner_table_name: String,
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 impl<'a> RlsTriggerContext<'a> {
@@ -494,12 +509,14 @@ fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVari
             collect_session_variable_patterns(expr, patterns);
             collect_patterns_from_expr_pair(low, high, patterns);
         }
-        Expr::Case { operand, conditions, else_result, .. } => collect_patterns_from_case_expr(
-            operand.as_deref(),
-            conditions,
-            else_result.as_deref(),
-            patterns,
-        ),
+        Expr::Case { operand, conditions, else_result, .. } => {
+            collect_patterns_from_case_expr(
+                operand.as_deref(),
+                conditions,
+                else_result.as_deref(),
+                patterns,
+            )
+        }
         Expr::Trim { expr, trim_what, trim_characters, .. } => {
             collect_patterns_from_trim_expr(
                 expr,
@@ -1375,13 +1392,16 @@ where
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
     let table_rename = Some(ctx.as_rename_tuple());
+    let table_name_quoted = quote_identifier(table_name);
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
 
     // Collect SELECT policies for this table
     let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select]);
 
     // Get all column names from the table for the SELECT clause
     let columns = collect_column_names(table, schema);
-    let column_list = columns.join(", ");
+    let column_list =
+        columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
     // Build the WHERE clause by combining all USING expressions
     let where_clause = if select_policies.is_empty() {
@@ -1404,7 +1424,7 @@ where
     };
 
     Ok(format!(
-        "CREATE VIEW {table_name} AS SELECT {column_list} FROM {inner_table_name}{where_clause}"
+        "CREATE VIEW {table_name_quoted} AS SELECT {column_list} FROM {inner_table_name_quoted}{where_clause}"
     ))
 }
 
@@ -1422,14 +1442,21 @@ where
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
     let table_rename = Some(ctx.as_rename_tuple());
+    let table_name_quoted = quote_identifier(table_name);
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
+    let trigger_name = quote_identifier(&format!("{table_name}_insert_trigger"));
 
     // Find INSERT policies
     let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert]);
 
     // Get all column names for the INSERT statement
     let columns = collect_column_names(table, schema);
-    let column_list = columns.join(", ");
-    let value_list = columns.iter().map(|c| format!("NEW.{c}")).collect::<Vec<_>>().join(", ");
+    let column_list = columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
+    let value_list = columns
+        .iter()
+        .map(|column| prefixed_quoted_identifier("NEW", column))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     // Build WITH CHECK expression - transform AST with NEW. prefix
     let mut check_conditions = Vec::new();
@@ -1443,17 +1470,17 @@ where
 
     let trigger_body = if check_conditions.is_empty() {
         format!(
-            "BEGIN\n    INSERT INTO {inner_table_name} ({column_list}) VALUES ({value_list});\nEND"
+            "BEGIN\n    INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});\nEND"
         )
     } else {
         let check = check_conditions.join(" OR ");
         format!(
-            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({check});\n    INSERT INTO {inner_table_name} ({column_list}) VALUES ({value_list});\nEND"
+            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({check});\n    INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});\nEND"
         )
     };
 
     format!(
-        "CREATE TRIGGER {table_name}_insert_trigger INSTEAD OF INSERT ON {table_name} FOR EACH ROW {trigger_body}"
+        "CREATE TRIGGER {trigger_name} INSTEAD OF INSERT ON {table_name_quoted} FOR EACH ROW {trigger_body}"
     )
 }
 
@@ -1471,6 +1498,9 @@ where
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
     let table_rename = Some(ctx.as_rename_tuple());
+    let table_name_quoted = quote_identifier(table_name);
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
+    let trigger_name = quote_identifier(&format!("{table_name}_update_trigger"));
 
     // Find UPDATE policies
     let update_policies = filter_policies(table, schema, &[CreatePolicyCommand::Update]);
@@ -1486,7 +1516,12 @@ where
     // SET clause
     let set_clause = columns
         .iter()
-        .map(|c| format!("{c} = COALESCE(NEW.{c}, OLD.{c})"))
+        .map(|column| {
+            let quoted_column = quote_identifier(column);
+            let new_column = prefixed_quoted_identifier("NEW", column);
+            let old_column = prefixed_quoted_identifier("OLD", column);
+            format!("{quoted_column} = COALESCE({new_column}, {old_column})")
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -1524,7 +1559,9 @@ where
     };
 
     let trigger_body = if check_conditions.is_empty() {
-        format!("BEGIN\n    UPDATE {inner_table_name} SET {set_clause} WHERE {full_where};\nEND")
+        format!(
+            "BEGIN\n    UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {full_where};\nEND"
+        )
     } else {
         let check = check_conditions.join(" OR ");
         format!(
@@ -1533,7 +1570,7 @@ where
     };
 
     format!(
-        "CREATE TRIGGER {table_name}_update_trigger INSTEAD OF UPDATE ON {table_name} FOR EACH ROW {trigger_body}"
+        "CREATE TRIGGER {trigger_name} INSTEAD OF UPDATE ON {table_name_quoted} FOR EACH ROW {trigger_body}"
     )
 }
 
@@ -1551,6 +1588,9 @@ where
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
     let table_rename = Some(ctx.as_rename_tuple());
+    let table_name_quoted = quote_identifier(table_name);
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
+    let trigger_name = quote_identifier(&format!("{table_name}_delete_trigger"));
 
     // Find DELETE policies
     let delete_policies = filter_policies(table, schema, &[CreatePolicyCommand::Delete]);
@@ -1583,10 +1623,10 @@ where
     };
 
     let trigger_body =
-        format!("BEGIN\n    DELETE FROM {inner_table_name} WHERE {full_where};\nEND");
+        format!("BEGIN\n    DELETE FROM {inner_table_name_quoted} WHERE {full_where};\nEND");
 
     format!(
-        "CREATE TRIGGER {table_name}_delete_trigger INSTEAD OF DELETE ON {table_name} FOR EACH ROW {trigger_body}"
+        "CREATE TRIGGER {trigger_name} INSTEAD OF DELETE ON {table_name_quoted} FOR EACH ROW {trigger_body}"
     )
 }
 
@@ -1744,8 +1784,9 @@ const RLS_VALIDATION_ERROR: &str = "RLS validation";
 /// safety.
 #[must_use]
 pub fn generate_audit_table_sql(audit_table_name: &str) -> String {
+    let audit_table_name_quoted = quote_identifier(audit_table_name);
     format!(
-        r"CREATE TABLE IF NOT EXISTS {audit_table_name} (
+        r"CREATE TABLE IF NOT EXISTS {audit_table_name_quoted} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     table_name TEXT NOT NULL,
     violation_type TEXT NOT NULL,
@@ -1778,7 +1819,13 @@ fn build_row_identifier_expr(pk_columns: &[String], prefix: &str) -> String {
 
     pk_columns
         .iter()
-        .map(|col| format!("'{col}=' || quote({prefix}.{col})"))
+        .map(|col| {
+            format!(
+                "{} || quote({})",
+                sql_string_literal(&format!("{col}=")),
+                prefixed_quoted_identifier(prefix, col)
+            )
+        })
         .collect::<Vec<_>>()
         .join(" || ', ' || ")
 }
@@ -1797,18 +1844,25 @@ fn build_row_identifier_expr(pk_columns: &[String], prefix: &str) -> String {
 /// # Returns
 /// SQL expression: `EXISTS (SELECT 1 FROM view WHERE pk_match)`
 fn generate_row_visibility_check(table_name: &str, pk_columns: &[String], prefix: &str) -> String {
+    let table_name_quoted = quote_identifier(table_name);
     let where_clause = if pk_columns.is_empty() {
         // No PK - check all rows (will be slow but correct)
         "1=1".to_string()
     } else {
         pk_columns
             .iter()
-            .map(|col| format!("{table_name}.{col} = {prefix}.{col}"))
+            .map(|col| {
+                format!(
+                    "{table_name_quoted}.{} = {}",
+                    quote_identifier(col),
+                    prefixed_quoted_identifier(prefix, col)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" AND ")
     };
 
-    format!("EXISTS (SELECT 1 FROM {table_name} WHERE {where_clause})")
+    format!("EXISTS (SELECT 1 FROM {table_name_quoted} WHERE {where_clause})")
 }
 
 /// Generates an AFTER INSERT or AFTER UPDATE trigger that monitors for RLS
@@ -1844,23 +1898,35 @@ fn generate_monitoring_trigger_sql(
     let severity = if strict_mode { "error" } else { "warning" };
     let op_upper = operation.to_uppercase();
     let past_participle = if operation == "insert" { "inserted into" } else { "updated in" };
+    let trigger_name = quote_identifier(&format!("{inner_table_name}_rls_monitor_{operation}"));
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
+    let audit_table_name_quoted = quote_identifier(audit_table_name);
+    let table_name_literal = sql_string_literal(table_name);
+    let policy_name_literal = sql_string_literal(&format!("{op_upper} policy"));
+    let severity_literal = sql_string_literal(severity);
+    let details_literal =
+        sql_string_literal(&format!("Row {past_participle} backing table but not visible through RLS view"));
 
     let abort_clause = if strict_mode {
+        let message = format!(
+            "{RLS_VALIDATION_ERROR}: row violates row-level security policy for table '{table_name}'"
+        );
         format!(
             r"
-        SELECT RAISE(ABORT, '{RLS_VALIDATION_ERROR}: row violates row-level security policy for table ''{table_name}''');"
+        SELECT RAISE(ABORT, {});",
+            sql_string_literal(&message)
         )
     } else {
         String::new()
     };
 
     format!(
-        r"CREATE TRIGGER {inner_table_name}_rls_monitor_{operation}
-AFTER {op_upper} ON {inner_table_name}
+        r"CREATE TRIGGER {trigger_name}
+AFTER {op_upper} ON {inner_table_name_quoted}
 FOR EACH ROW
 BEGIN
     -- Check if {operation}d row is visible through RLS view
-    INSERT INTO {audit_table_name} (
+    INSERT INTO {audit_table_name_quoted} (
         table_name,
         violation_type,
         row_identifier,
@@ -1871,13 +1937,13 @@ BEGIN
         reported_at
     )
     SELECT
-        '{table_name}',
+        {table_name_literal},
         'rls_policy_violation',
         {row_identifier},
-        '{op_upper} policy',
+        {policy_name_literal},
         datetime('now'),
-        '{severity}',
-        'Row {past_participle} backing table but not visible through RLS view',
+        {severity_literal},
+        {details_literal},
         NULL
     WHERE NOT ({visibility_check});{abort_clause}
 END"
@@ -1904,31 +1970,41 @@ fn generate_validation_view_sql(
     columns: &[String],
     pk_columns: &[String],
 ) -> String {
-    let column_list = columns.join(", ");
+    let table_name_quoted = quote_identifier(table_name);
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
+    let validation_view_name = quote_identifier(&format!("{inner_table_name}_violations"));
+    let column_list =
+        columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
     // Build the WHERE clause to match rows by primary key
     let pk_match = if pk_columns.is_empty() {
         // No PK - this is rare but we'll use all columns (inefficient but correct)
         columns
             .iter()
-            .map(|col| format!("{inner_table_name}.{col} = {table_name}.{col}"))
+            .map(|col| {
+                let col_quoted = quote_identifier(col);
+                format!("{inner_table_name_quoted}.{col_quoted} = {table_name_quoted}.{col_quoted}")
+            })
             .collect::<Vec<_>>()
             .join(" AND ")
     } else {
         pk_columns
             .iter()
-            .map(|col| format!("{inner_table_name}.{col} = {table_name}.{col}"))
+            .map(|col| {
+                let col_quoted = quote_identifier(col);
+                format!("{inner_table_name_quoted}.{col_quoted} = {table_name_quoted}.{col_quoted}")
+            })
             .collect::<Vec<_>>()
             .join(" AND ")
     };
 
     format!(
-        r"CREATE VIEW {inner_table_name}_violations AS
+        r"CREATE VIEW {validation_view_name} AS
 SELECT {column_list}
-FROM {inner_table_name}
+FROM {inner_table_name_quoted}
 WHERE NOT EXISTS (
     SELECT 1
-    FROM {table_name}
+    FROM {table_name_quoted}
     WHERE {pk_match}
 )"
     )
@@ -2553,5 +2629,28 @@ mod tests {
         };
         let renamed = rename_table_for_rls(&create_table, &options, &schema);
         assert!(renamed.name.to_string().ends_with("_rls"));
+    }
+
+    #[test]
+    fn rls_generation_supports_quoted_identifiers() {
+        let schema = schema_from_sql(
+            r#"
+            CREATE TABLE "Order Items"("doc id" INTEGER PRIMARY KEY, "owner id" INTEGER, "body text" TEXT);
+            ALTER TABLE "Order Items" ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY order_items_select ON "Order Items" FOR SELECT USING ("owner id" > 0);
+            CREATE POLICY order_items_insert ON "Order Items" FOR INSERT WITH CHECK ("owner id" > 0);
+            CREATE POLICY order_items_update ON "Order Items" FOR UPDATE USING ("owner id" > 0) WITH CHECK ("owner id" > 0);
+            CREATE POLICY order_items_delete ON "Order Items" FOR DELETE USING ("owner id" > 0);
+            "#,
+        );
+        let table = schema.table(None, "Order Items").expect("quoted table should exist");
+        let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+
+        let statements = generate_rls_statements(table, &schema, &options)
+            .expect("quoted identifiers in RLS SQL should translate");
+        assert!(
+            statements.iter().any(|stmt| stmt.to_string().contains("CREATE VIEW")),
+            "expected generated RLS view"
+        );
     }
 }
