@@ -5,7 +5,7 @@ use sql_traits::{
     structs::ParserDB,
     traits::{DatabaseLike, TableLike},
 };
-use sqlparser::ast::{Expr, ObjectType, Statement};
+use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement, UnaryOperator};
 
 use crate::{
     errors::Error,
@@ -28,6 +28,35 @@ use crate::{
 
 fn inject_condition(stmt: &mut Statement, condition: Expr) -> Result<(), crate::errors::Error> {
     inject_condition_into_dml_statement(stmt, condition)
+}
+
+fn or_chain(expressions: &[Expr]) -> Option<Expr> {
+    let mut iter = expressions.iter().cloned();
+    let first = iter.next()?;
+    Some(iter.fold(first, |acc, expr| {
+        Expr::BinaryOp { left: Box::new(acc), op: BinaryOperator::Or, right: Box::new(expr) }
+    }))
+}
+
+fn negate(expr: Expr) -> Expr {
+    Expr::UnaryOp { op: UnaryOperator::Not, expr: Box::new(Expr::Nested(Box::new(expr))) }
+}
+
+fn append_guarded_statements(
+    output: &mut Vec<Statement>,
+    branch_statements: &[Statement],
+    guard: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    for stmt in branch_statements {
+        let mut translated_stmts = stmt.translate(schema, options)?;
+        for translated_stmt in &mut translated_stmts {
+            inject_condition(translated_stmt, guard.clone())?;
+            output.push(translated_stmt.clone());
+        }
+    }
+    Ok(())
 }
 
 fn unsupported_statement_error(stmt: &Statement) -> crate::errors::Error {
@@ -349,26 +378,59 @@ impl Translator for Statement {
                 vec![Statement::Query(Box::new(query.translate(schema, options)?))]
             }
             Self::If(if_stmt) => {
-                if !if_stmt.elseif_blocks.is_empty() || if_stmt.else_block.is_some() {
-                    return Err(crate::errors::Error::UnknownPostgresFeature(
-                        "IF statements with ELSE/ELSEIF not yet supported".into(),
-                    ));
-                }
-
-                let condition = if let Some(cond) = &if_stmt.if_block.condition {
-                    cond.translate(schema, options)?
-                } else {
+                let Some(if_condition) = &if_stmt.if_block.condition else {
                     return Ok(Vec::new());
                 };
 
+                let translated_if_condition = if_condition.translate(schema, options)?;
                 let mut statements = Vec::new();
-                for stmt in if_stmt.if_block.statements() {
-                    let mut translated_stmts = stmt.translate(schema, options)?;
-                    for translated_stmt in &mut translated_stmts {
-                        inject_condition(translated_stmt, condition.clone())?;
-                        statements.push(translated_stmt.clone());
-                    }
+                append_guarded_statements(
+                    &mut statements,
+                    if_stmt.if_block.statements(),
+                    &translated_if_condition,
+                    schema,
+                    options,
+                )?;
+
+                let mut prior_conditions = vec![translated_if_condition];
+
+                for elseif_block in &if_stmt.elseif_blocks {
+                    let Some(elseif_condition) = &elseif_block.condition else {
+                        continue;
+                    };
+                    let translated_elseif_condition = elseif_condition.translate(schema, options)?;
+                    let guard = if let Some(prior_any) = or_chain(&prior_conditions) {
+                        Expr::BinaryOp {
+                            left: Box::new(negate(prior_any)),
+                            op: BinaryOperator::And,
+                            right: Box::new(translated_elseif_condition.clone()),
+                        }
+                    } else {
+                        translated_elseif_condition.clone()
+                    };
+
+                    append_guarded_statements(
+                        &mut statements,
+                        elseif_block.statements(),
+                        &guard,
+                        schema,
+                        options,
+                    )?;
+                    prior_conditions.push(translated_elseif_condition);
                 }
+
+                if let Some(else_block) = &if_stmt.else_block
+                    && let Some(prior_any) = or_chain(&prior_conditions)
+                {
+                    append_guarded_statements(
+                        &mut statements,
+                        else_block.statements(),
+                        &negate(prior_any),
+                        schema,
+                        options,
+                    )?;
+                }
+
                 statements
             }
             // VACUUM is supported by SQLite - pass through
@@ -539,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn statement_if_with_else_is_rejected() {
+    fn statement_if_with_else_translates_into_guarded_statements() {
         let if_stmt = Parser::parse_sql(
             &PostgreSqlDialect {},
             "IF TRUE THEN DELETE FROM users; ELSE DELETE FROM users; END IF;",
@@ -551,10 +613,43 @@ mod tests {
 
         let schema = ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap();
         let options = Pg2SqliteOptions::default();
-        let err = if_stmt.translate(&schema, &options).unwrap_err();
+        let translated = if_stmt.translate(&schema, &options).expect("IF/ELSE should translate");
+        assert_eq!(translated.len(), 2, "expected two statements for IF/ELSE");
+
+        let rendered = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        let upper = rendered.to_uppercase();
+        assert!(upper.contains("DELETE"), "expected DELETE output, got: {rendered}");
+        assert!(upper.contains("TRUE"), "expected IF guard, got: {rendered}");
+        assert!(upper.contains("NOT"), "expected negated ELSE guard, got: {rendered}");
+    }
+
+    #[test]
+    fn statement_if_with_elseif_and_else_translates_all_branches() {
+        let if_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "IF FALSE THEN DELETE FROM users WHERE id = 1; \
+             ELSEIF TRUE THEN DELETE FROM users WHERE id = 2; \
+             ELSE DELETE FROM users WHERE id = 3; END IF;",
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let schema = ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap();
+        let options = Pg2SqliteOptions::default();
+        let translated =
+            if_stmt.translate(&schema, &options).expect("IF/ELSIF/ELSE should translate");
+        assert_eq!(translated.len(), 3, "expected one statement per branch");
+
+        let rendered = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        let upper = rendered.to_uppercase();
+        assert!(rendered.contains("id = 1"), "missing IF branch statement: {rendered}");
+        assert!(rendered.contains("id = 2"), "missing ELSIF branch statement: {rendered}");
+        assert!(rendered.contains("id = 3"), "missing ELSE branch statement: {rendered}");
         assert!(
-            err.to_string().contains("IF statements with ELSE/ELSEIF not yet supported"),
-            "unexpected error: {err}"
+            upper.contains("NOT FALSE") || upper.contains("NOT (FALSE)"),
+            "missing branch exclusivity guard for ELSIF/ELSE: {rendered}"
         );
     }
 
