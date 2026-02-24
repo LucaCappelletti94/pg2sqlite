@@ -5,7 +5,7 @@ use sql_traits::{
     structs::ParserDB,
     traits::{DatabaseLike, TableLike},
 };
-use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement};
+use sqlparser::ast::{Expr, ObjectType, Statement};
 
 use crate::{
     errors::Error,
@@ -13,6 +13,7 @@ use crate::{
         object_name::schema_and_table_for_lookup,
         shared_helpers::statement_variant_name,
         translator_impls::{
+            condition_injection::inject_condition_into_dml_statement,
             rls::{
                 generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
                 validate_table_policies,
@@ -26,67 +27,7 @@ use crate::{
 };
 
 fn inject_condition(stmt: &mut Statement, condition: Expr) -> Result<(), crate::errors::Error> {
-    match stmt {
-        Statement::Insert(insert) => {
-            if let Some(source) = &mut insert.source {
-                match &mut *source.body {
-                    sqlparser::ast::SetExpr::Select(select) => {
-                        let new_selection = if let Some(existing) = &select.selection {
-                            Expr::BinaryOp {
-                                left: Box::new(existing.clone()),
-                                op: BinaryOperator::And,
-                                right: Box::new(condition),
-                            }
-                        } else {
-                            condition
-                        };
-                        select.selection = Some(new_selection);
-                    }
-                    _ => {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                            "Cannot inject IF condition into INSERT with non-SELECT source"
-                                .to_string(),
-                        ));
-                    }
-                }
-            } else {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                    "Cannot inject IF condition into INSERT without source".to_string(),
-                ));
-            }
-        }
-        Statement::Update(update) => {
-            let new_selection = if let Some(existing) = &update.selection {
-                Expr::BinaryOp {
-                    left: Box::new(existing.clone()),
-                    op: BinaryOperator::And,
-                    right: Box::new(condition),
-                }
-            } else {
-                condition
-            };
-            update.selection = Some(new_selection);
-        }
-        Statement::Delete(delete) => {
-            let new_selection = if let Some(existing) = &delete.selection {
-                Expr::BinaryOp {
-                    left: Box::new(existing.clone()),
-                    op: BinaryOperator::And,
-                    right: Box::new(condition),
-                }
-            } else {
-                condition
-            };
-            delete.selection = Some(new_selection);
-        }
-        _ => {
-            let variant_name = statement_variant_name(stmt);
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                "Cannot inject IF condition into statement variant `{variant_name}`",
-            )));
-        }
-    }
-    Ok(())
+    inject_condition_into_dml_statement(stmt, condition)
 }
 
 fn unsupported_statement_error(stmt: &Statement) -> crate::errors::Error {

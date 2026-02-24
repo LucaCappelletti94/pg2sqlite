@@ -20,6 +20,7 @@ use super::{
 };
 use crate::{
     errors::Error,
+    impls::translator_impls::condition_injection::inject_condition_into_dml_statement,
     options::Pg2SqliteOptions,
     traits::{TranslationOptions, Translator},
 };
@@ -1702,33 +1703,7 @@ impl PlPgSqlTranslator {
             return;
         };
 
-        match stmt {
-            Statement::Update(update) => {
-                update.selection = match &update.selection {
-                    Some(existing) => {
-                        Some(Expr::BinaryOp {
-                            left: Box::new(existing.clone()),
-                            op: BinaryOperator::And,
-                            right: Box::new(cond_expr),
-                        })
-                    }
-                    None => Some(cond_expr),
-                };
-            }
-            Statement::Delete(delete) => {
-                delete.selection = match &delete.selection {
-                    Some(existing) => {
-                        Some(Expr::BinaryOp {
-                            left: Box::new(existing.clone()),
-                            op: BinaryOperator::And,
-                            right: Box::new(cond_expr),
-                        })
-                    }
-                    None => Some(cond_expr),
-                };
-            }
-            _ => {}
-        }
+        let _ = inject_condition_into_dml_statement(stmt, cond_expr);
     }
 }
 
@@ -1870,6 +1845,25 @@ mod tests {
         let before = unchanged.to_string();
         PlPgSqlTranslator::inject_condition_into_statement(&mut unchanged, "NOT (");
         assert_eq!(unchanged.to_string(), before);
+    }
+
+    #[test]
+    fn inject_condition_into_statement_injects_insert_select_and_skips_insert_values() {
+        let mut insert_select = parse_statement("INSERT INTO users(id) SELECT id FROM users");
+        PlPgSqlTranslator::inject_condition_into_statement(&mut insert_select, "NEW.kind = 'x'");
+        assert!(
+            insert_select.to_string().contains("WHERE NEW.kind = 'x'"),
+            "INSERT ... SELECT should receive IF condition injection"
+        );
+
+        let mut insert_values = parse_statement("INSERT INTO users(id) VALUES (1)");
+        let before = insert_values.to_string();
+        PlPgSqlTranslator::inject_condition_into_statement(&mut insert_values, "NEW.kind = 'x'");
+        assert_eq!(
+            insert_values.to_string(),
+            before,
+            "INSERT ... VALUES should remain unchanged when condition injection is unsupported"
+        );
     }
 
     #[test]
