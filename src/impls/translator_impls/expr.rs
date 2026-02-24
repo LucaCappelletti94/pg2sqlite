@@ -8,8 +8,8 @@ use sql_traits::{
 use sqlparser::ast::{
     AccessExpr, Array, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function,
     FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName,
-    ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, TableFactor, TableWithJoins,
-    Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, Subscript, TableFactor,
+    TableWithJoins, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::prelude::{Pg2SqliteOptions, Translator};
@@ -964,6 +964,35 @@ fn translate_binary_op(
     })
 }
 
+fn translate_access_expr(
+    access: &AccessExpr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<AccessExpr, crate::errors::Error> {
+    Ok(match access {
+        AccessExpr::Dot(expr) => AccessExpr::Dot(expr.translate(schema, options)?),
+        AccessExpr::Subscript(subscript) => AccessExpr::Subscript(match subscript {
+            Subscript::Index { index } => {
+                Subscript::Index { index: index.translate(schema, options)? }
+            }
+            Subscript::Slice { lower_bound, upper_bound, stride } => Subscript::Slice {
+                lower_bound: lower_bound
+                    .as_ref()
+                    .map(|expr| expr.translate(schema, options))
+                    .transpose()?,
+                upper_bound: upper_bound
+                    .as_ref()
+                    .map(|expr| expr.translate(schema, options))
+                    .transpose()?,
+                stride: stride
+                    .as_ref()
+                    .map(|expr| expr.translate(schema, options))
+                    .transpose()?,
+            },
+        }),
+    })
+}
+
 impl Translator for Expr {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -1197,16 +1226,7 @@ impl Translator for Expr {
             Expr::CompoundFieldAccess { root, access_chain } => {
                 let translated_chain = access_chain
                     .iter()
-                    .map(|access| {
-                        match access {
-                            AccessExpr::Dot(expr) => {
-                                Ok::<_, crate::errors::Error>(AccessExpr::Dot(
-                                    expr.translate(schema, options)?,
-                                ))
-                            }
-                            AccessExpr::Subscript(s) => Ok(AccessExpr::Subscript(s.clone())),
-                        }
-                    })
+                    .map(|access| translate_access_expr(access, schema, options))
                     .collect::<Result<Vec<_>, _>>()?;
                 Expr::CompoundFieldAccess {
                     root: Box::new(root.translate(schema, options)?),

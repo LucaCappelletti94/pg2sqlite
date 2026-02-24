@@ -2,13 +2,66 @@
 //! `Expr` type.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{AccessExpr, Array, Expr};
+use sqlparser::ast::{AccessExpr, Array, Expr, JsonPathElem, Subscript};
 
 use super::function::reverse_translate_function;
 use crate::{
     errors::Error,
+    impls::shared_helpers::expr_variant_name,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
+
+fn reverse_translate_access_expr(
+    access: &AccessExpr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<AccessExpr, Error> {
+    Ok(match access {
+        AccessExpr::Dot(expr) => AccessExpr::Dot(expr.reverse_translate(schema, options)?),
+        AccessExpr::Subscript(subscript) => AccessExpr::Subscript(match subscript {
+            Subscript::Index { index } => {
+                Subscript::Index { index: index.reverse_translate(schema, options)? }
+            }
+            Subscript::Slice { lower_bound, upper_bound, stride } => Subscript::Slice {
+                lower_bound: lower_bound
+                    .as_ref()
+                    .map(|expr| expr.reverse_translate(schema, options))
+                    .transpose()?,
+                upper_bound: upper_bound
+                    .as_ref()
+                    .map(|expr| expr.reverse_translate(schema, options))
+                    .transpose()?,
+                stride: stride
+                    .as_ref()
+                    .map(|expr| expr.reverse_translate(schema, options))
+                    .transpose()?,
+            },
+        }),
+    })
+}
+
+fn reverse_translate_json_path(
+    path: &sqlparser::ast::JsonPath,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<sqlparser::ast::JsonPath, Error> {
+    Ok(sqlparser::ast::JsonPath {
+        path: path
+            .path
+            .iter()
+            .map(|elem| {
+                Ok(match elem {
+                    JsonPathElem::Dot { key, quoted } => {
+                        JsonPathElem::Dot { key: key.clone(), quoted: *quoted }
+                    }
+                    JsonPathElem::Bracket { key } => {
+                        JsonPathElem::Bracket { key: key.reverse_translate(schema, options)? }
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?,
+    })
+}
 
 impl ReverseTranslator for Expr {
     type Schema = ParserDB;
@@ -56,12 +109,29 @@ impl ReverseTranslator for Expr {
                     array: *array,
                 }
             }
+            Expr::Convert { is_try, expr, data_type, charset, target_before_value, styles } => {
+                Expr::Convert {
+                    is_try: *is_try,
+                    expr: Box::new(expr.reverse_translate(schema, options)?),
+                    data_type: data_type.clone(),
+                    charset: charset.clone(),
+                    target_before_value: *target_before_value,
+                    styles: styles
+                        .iter()
+                        .map(|style| style.reverse_translate(schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                }
+            }
             Expr::AtTimeZone { timestamp, time_zone } => {
                 Expr::AtTimeZone {
                     timestamp: Box::new(timestamp.reverse_translate(schema, options)?),
                     time_zone: Box::new(time_zone.reverse_translate(schema, options)?),
                 }
             }
+            Expr::JsonAccess { value, path } => Expr::JsonAccess {
+                value: Box::new(value.reverse_translate(schema, options)?),
+                path: reverse_translate_json_path(path, schema, options)?,
+            },
 
             // Handle NULL checks
             Expr::IsNull(inner) => {
@@ -183,6 +253,11 @@ impl ReverseTranslator for Expr {
                     negated: *negated,
                 }
             }
+            Expr::InUnnest { expr, array_expr, negated } => Expr::InUnnest {
+                expr: Box::new(expr.reverse_translate(schema, options)?),
+                array_expr: Box::new(array_expr.reverse_translate(schema, options)?),
+                negated: *negated,
+            },
 
             // Handle BETWEEN
             Expr::Between { expr, negated, low, high } => {
@@ -253,6 +328,40 @@ impl ReverseTranslator for Expr {
                     named: *named,
                 })
             }
+            Expr::Struct { values, fields } => Expr::Struct {
+                values: values
+                    .iter()
+                    .map(|value| value.reverse_translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                fields: fields.clone(),
+            },
+            Expr::Named { expr, name } => Expr::Named {
+                expr: Box::new(expr.reverse_translate(schema, options)?),
+                name: name.clone(),
+            },
+            Expr::Dictionary(fields) => Expr::Dictionary(
+                fields
+                    .iter()
+                    .map(|field| {
+                        Ok(sqlparser::ast::DictionaryField {
+                            key: field.key.clone(),
+                            value: Box::new(field.value.reverse_translate(schema, options)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?,
+            ),
+            Expr::Map(map) => Expr::Map(sqlparser::ast::Map {
+                entries: map
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        Ok(sqlparser::ast::MapEntry {
+                            key: Box::new(entry.key.reverse_translate(schema, options)?),
+                            value: Box::new(entry.value.reverse_translate(schema, options)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?,
+            }),
 
             // Handle TRIM
             Expr::Trim { expr, trim_where, trim_what, trim_characters } => {
@@ -374,28 +483,31 @@ impl ReverseTranslator for Expr {
             Expr::CompoundFieldAccess { root, access_chain } => {
                 let translated_chain = access_chain
                     .iter()
-                    .map(|access| {
-                        match access {
-                            AccessExpr::Dot(expr) => {
-                                Ok::<_, Error>(AccessExpr::Dot(
-                                    expr.reverse_translate(schema, options)?,
-                                ))
-                            }
-                            AccessExpr::Subscript(s) => Ok(AccessExpr::Subscript(s.clone())),
-                        }
-                    })
+                    .map(|access| reverse_translate_access_expr(access, schema, options))
                     .collect::<Result<Vec<_>, _>>()?;
                 Expr::CompoundFieldAccess {
                     root: Box::new(root.reverse_translate(schema, options)?),
                     access_chain: translated_chain,
                 }
             }
+            Expr::OuterJoin(inner) => {
+                Expr::OuterJoin(Box::new(inner.reverse_translate(schema, options)?))
+            }
+            Expr::Prior(inner) => Expr::Prior(Box::new(inner.reverse_translate(schema, options)?)),
+            Expr::Lambda(lambda) => Expr::Lambda(sqlparser::ast::LambdaFunction {
+                params: lambda.params.clone(),
+                body: Box::new(lambda.body.reverse_translate(schema, options)?),
+                syntax: lambda.syntax,
+            }),
+            Expr::MemberOf(member) => Expr::MemberOf(sqlparser::ast::MemberOf {
+                value: Box::new(member.value.reverse_translate(schema, options)?),
+                array: Box::new(member.array.reverse_translate(schema, options)?),
+            }),
 
             _ => {
-                let debug = format!("{self:?}");
-                let variant_name = debug.split(['(', '{', ' ']).next().unwrap_or("Unknown");
+                let variant_name = expr_variant_name(self);
                 return Err(Error::UnsupportedSQLiteFeature(format!(
-                    "Reverse translation for expression type {variant_name} is not yet implemented",
+                    "Reverse translation for expression variant `{variant_name}` is not yet implemented",
                 )));
             }
         })
