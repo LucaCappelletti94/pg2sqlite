@@ -14,6 +14,11 @@ use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     traits::TranslationOptions,
 };
+use sqlparser::{
+    ast::{SetExpr, Statement, Table},
+    dialect::PostgreSqlDialect,
+    parser::Parser,
+};
 
 // ==================== RLS table detection ====================
 
@@ -171,6 +176,58 @@ fn rls_table_in_set_operation_produces_error() {
     assert!(
         err.contains("users_rls") && err.contains("RLS"),
         "Expected RLS table detected in set operation, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_in_table_statement_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let mut stmt = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT 1;").unwrap().remove(0);
+    if let Statement::Query(query) = &mut stmt {
+        *query.body = SetExpr::Table(Box::new(Table {
+            table_name: Some("users_rls".to_string()),
+            schema_name: None,
+        }));
+    } else {
+        panic!("expected query statement");
+    }
+
+    let result = translator.reverse_translate(&stmt, &schema, &options);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in TABLE statement, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_in_quoted_table_statement_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let mut stmt = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT 1;").unwrap().remove(0);
+    if let Statement::Query(query) = &mut stmt {
+        *query.body = SetExpr::Table(Box::new(Table {
+            table_name: Some("\"users_rls\"".to_string()),
+            schema_name: Some("\"public\"".to_string()),
+        }));
+    } else {
+        panic!("expected query statement");
+    }
+
+    let result = translator.reverse_translate(&stmt, &schema, &options);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("\"public\".\"users_rls\"") && err.contains("RLS"),
+        "Expected quoted RLS table detected in TABLE statement, got: {err}"
     );
 }
 
@@ -355,6 +412,26 @@ fn rls_table_in_projection_subquery_produces_error() {
     );
 }
 
+#[test]
+fn rls_table_in_is_distinct_from_subquery_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "SELECT (SELECT id FROM users_rls LIMIT 1) IS DISTINCT FROM 1;",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in IS DISTINCT FROM subquery, got: {err}"
+    );
+}
+
 // ==================== Custom RLS suffix ====================
 
 #[test]
@@ -372,6 +449,83 @@ fn rls_table_with_custom_suffix_produces_error() {
         "Expected RLS table detected with custom suffix, got: {err}"
     );
 }
+
+#[test]
+fn rls_table_with_quoted_identifier_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(r#"SELECT * FROM "users_rls";"#, &schema, &options);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("_rls"),
+        "Expected quoted RLS table to be detected, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_with_quoted_custom_suffix_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default().with_rls_table_suffix("_backing");
+
+    let result = translator.reverse_sql(r#"SELECT * FROM "users_backing";"#, &schema, &options);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_backing") && err.contains("_backing"),
+        "Expected quoted custom-suffix RLS table to be detected, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_in_join_condition_subquery_produces_error() {
+    let translator = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+             CREATE TABLE posts (id INT PRIMARY KEY, author_id INT REFERENCES users(id), title TEXT);",
+        )
+        .unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "SELECT * FROM users u JOIN posts p ON p.author_id = (SELECT id FROM users_rls LIMIT 1);",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in JOIN condition subquery, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_in_table_function_argument_subquery_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "SELECT * FROM generate_series(1, (SELECT id FROM users_rls LIMIT 1));",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in table function argument subquery, got: {err}"
+    );
+}
+
 
 // ==================== Multiple statements ====================
 
