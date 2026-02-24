@@ -644,7 +644,7 @@ pub(crate) fn translate_group_by_expr<D: TranslationDirection>(
     })
 }
 
-fn translate_window_spec<D: TranslationDirection>(
+pub(crate) fn translate_window_spec<D: TranslationDirection>(
     spec: &WindowSpec,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,

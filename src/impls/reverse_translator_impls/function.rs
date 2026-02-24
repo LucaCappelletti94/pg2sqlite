@@ -11,6 +11,7 @@ use sqlparser::ast::{
     ValueWithSpan,
 };
 
+use super::helpers::reverse_translate_window_type;
 use crate::{errors::Error, prelude::Pg2SqliteOptions};
 
 /// Represents a function reversal result.
@@ -145,6 +146,10 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
         "instr" => FunctionReversal::ToPosition,
         // group_concat -> string_agg
         "group_concat" => FunctionReversal::Rename("string_agg".to_string()),
+        // json_group_array -> json_agg
+        "json_group_array" => FunctionReversal::Rename("json_agg".to_string()),
+        // json_group_object -> json_object_agg
+        "json_group_object" => FunctionReversal::Rename("json_object_agg".to_string()),
         // min(a, b, ...) -> LEAST(a, b, ...)
         // Keep aggregate MIN(x) unchanged (single-arg form).
         "min" => {
@@ -210,7 +215,7 @@ pub fn reverse_translate_function(
                     .transpose()?
                     .map(Box::new),
                 null_treatment: func.null_treatment,
-                over: func.over.clone(),
+                over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
                 within_group: func.within_group.clone(),
             }))
         }
@@ -363,7 +368,7 @@ pub fn reverse_translate_function(
                 args: reverse_translate_function_args(&func.args, schema, options)?,
                 filter: None,
                 null_treatment: func.null_treatment,
-                over: func.over.clone(),
+                over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
                 within_group: func.within_group.clone(),
             }))
         }
@@ -386,7 +391,7 @@ pub fn reverse_translate_function(
                     .transpose()?
                     .map(Box::new),
                 null_treatment: func.null_treatment,
-                over: func.over.clone(),
+                over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
                 within_group: func.within_group.clone(),
             }))
         }

@@ -4,7 +4,8 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     ConnectByKind, Expr, Fetch, GroupByExpr, LimitClause, NamedWindowDefinition, OrderBy,
-    OrderByExpr, PipeOperator, Query, SelectItem, Setting, TableWithJoins, Values, With,
+    OrderByExpr, PipeOperator, Query, SelectItem, Setting, TableWithJoins, Values, WindowType,
+    With,
 };
 
 use crate::{
@@ -136,4 +137,20 @@ pub(super) fn reverse_translate_values_rows(
     options: &Pg2SqliteOptions,
 ) -> Result<Values, Error> {
     shared_helpers::translate_values_rows::<Reverse>(values, schema, options)
+}
+
+pub(super) fn reverse_translate_window_type(
+    over: Option<&WindowType>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<WindowType>, Error> {
+    match over {
+        None => Ok(None),
+        Some(WindowType::NamedWindow(name)) => Ok(Some(WindowType::NamedWindow(name.clone()))),
+        Some(WindowType::WindowSpec(spec)) => {
+            Ok(Some(WindowType::WindowSpec(shared_helpers::translate_window_spec::<Reverse>(
+                spec, schema, options,
+            )?)))
+        }
+    }
 }

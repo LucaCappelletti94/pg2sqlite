@@ -7,6 +7,7 @@ use sqlparser::ast::{
     FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
 };
 
+use super::helpers::translate_window_type;
 use crate::{
     impls::shared_helpers::function_argument_exprs,
     prelude::{Pg2SqliteOptions, Translator},
@@ -31,6 +32,7 @@ enum FunctionTranslation {
     PassThrough,
 }
 
+#[allow(clippy::too_many_lines)]
 fn translate_function(
     name: &ObjectName,
     _args: &FunctionArguments,
@@ -87,6 +89,96 @@ fn translate_function(
              Use group_concat() instead: GROUP_CONCAT(column, ',')"
                 .to_string(),
         ),
+        // bool_and / every: no built-in SQLite equivalent
+        "bool_and" | "every" => FunctionTranslation::Unsupported(
+            "bool_and/every is not supported in SQLite. \
+             Use MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1 to check whether all rows are true."
+                .to_string(),
+        ),
+        // bool_or: no built-in SQLite equivalent
+        "bool_or" => FunctionTranslation::Unsupported(
+            "bool_or is not supported in SQLite. \
+             Use MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1 to check whether any row is true."
+                .to_string(),
+        ),
+        // json_agg / jsonb_agg -> json_group_array (SQLite JSON extension)
+        "json_agg" | "jsonb_agg" => FunctionTranslation::Rename("json_group_array".to_string()),
+        // json_object_agg / jsonb_object_agg -> json_group_object
+        "json_object_agg" | "jsonb_object_agg" => {
+            FunctionTranslation::Rename("json_group_object".to_string())
+        }
+        // bit_and / bit_or: no built-in SQLite aggregate equivalent
+        "bit_and" => FunctionTranslation::Unsupported(
+            "bit_and is not supported as an aggregate in SQLite. \
+             Consider loading a custom extension or rewriting with bitwise expressions."
+                .to_string(),
+        ),
+        "bit_or" => FunctionTranslation::Unsupported(
+            "bit_or is not supported as an aggregate in SQLite. \
+             Consider loading a custom extension or rewriting with bitwise expressions."
+                .to_string(),
+        ),
+        // Statistical aggregates: not available in SQLite without an extension
+        "stddev" | "stddev_pop" | "stddev_samp" => FunctionTranslation::Unsupported(
+            "stddev/stddev_pop/stddev_samp are not supported in SQLite. \
+             Consider loading the statistics1 extension or computing manually."
+                .to_string(),
+        ),
+        "variance" | "var_pop" | "var_samp" => FunctionTranslation::Unsupported(
+            "variance/var_pop/var_samp are not supported in SQLite. \
+             Consider loading the statistics1 extension or computing manually."
+                .to_string(),
+        ),
+        "corr" => FunctionTranslation::Unsupported(
+            "corr (correlation) is not supported in SQLite. \
+             Consider loading the statistics1 extension or computing manually."
+                .to_string(),
+        ),
+        "covar_pop" | "covar_samp" => FunctionTranslation::Unsupported(
+            "covar_pop/covar_samp are not supported in SQLite. \
+             Consider loading the statistics1 extension or computing manually."
+                .to_string(),
+        ),
+        // Regression aggregate functions: no SQLite equivalent
+        "regr_slope"
+        | "regr_intercept"
+        | "regr_r2"
+        | "regr_avgx"
+        | "regr_avgy"
+        | "regr_sxx"
+        | "regr_syy"
+        | "regr_sxy"
+        | "regr_count" => FunctionTranslation::Unsupported(
+            "regr_* regression aggregate functions are not supported in SQLite. \
+             Consider loading a custom extension or computing regression manually."
+                .to_string(),
+        ),
+        // xmlagg: no XML support in SQLite
+        "xmlagg" => FunctionTranslation::Unsupported(
+            "xmlagg is not supported in SQLite, which has no native XML type."
+                .to_string(),
+        ),
+        // range_agg / multirange_agg: no range type in SQLite
+        "range_agg" => FunctionTranslation::Unsupported(
+            "range_agg is not supported in SQLite, which has no range types."
+                .to_string(),
+        ),
+        "multirange_agg" => FunctionTranslation::Unsupported(
+            "multirange_agg is not supported in SQLite, which has no range types."
+                .to_string(),
+        ),
+        // Ordered-set aggregates (WITHIN GROUP): handled by the WITHIN GROUP guard in translate()
+        // but also listed here so they get a clear error even without WITHIN GROUP syntax.
+        "percentile_cont" | "percentile_disc" => FunctionTranslation::Unsupported(
+            "percentile_cont/percentile_disc are not supported in SQLite. \
+             They use WITHIN GROUP (ORDER BY ...) syntax which has no SQLite equivalent."
+                .to_string(),
+        ),
+        "mode" => FunctionTranslation::Unsupported(
+            "mode() WITHIN GROUP (ORDER BY ...) is not supported in SQLite. \
+             There is no built-in equivalent; consider computing the mode manually."
+                .to_string(),
+        ),
         // split_part has no direct SQLite equivalent
         "split_part" => FunctionTranslation::Unsupported(
             "split_part is not supported in SQLite. \
@@ -116,6 +208,62 @@ fn translate_function(
 /// Extract expressions from function arguments.
 fn extract_arg_exprs(args: &FunctionArguments) -> Vec<&Expr> {
     function_argument_exprs(args)
+}
+
+/// Recursively translate all expressions inside [`FunctionArguments`].
+///
+/// This ensures that PostgreSQL-specific constructs nested inside function
+/// arguments (e.g., `NOW()` inside `string_agg`) are properly translated.
+/// `FunctionArguments::Subquery` is passed through as-is to avoid pulling in
+/// the heavier query-translation logic here.
+fn translate_function_args(
+    args: &FunctionArguments,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<FunctionArguments, crate::errors::Error> {
+    match args {
+        FunctionArguments::None | FunctionArguments::Subquery(_) => Ok(args.clone()),
+        FunctionArguments::List(list) => {
+            let translated = list
+                .args
+                .iter()
+                .map(|arg| translate_function_arg(arg, schema, options))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: list.duplicate_treatment,
+                args: translated,
+                clauses: list.clauses.clone(),
+            }))
+        }
+    }
+}
+
+/// Recursively translate a single [`FunctionArg`].
+fn translate_function_arg(
+    arg: &FunctionArg,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<FunctionArg, crate::errors::Error> {
+    Ok(match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e.translate(schema, options)?))
+        }
+        FunctionArg::Named { name, arg: FunctionArgExpr::Expr(e), operator } => {
+            FunctionArg::Named {
+                name: name.clone(),
+                arg: FunctionArgExpr::Expr(e.translate(schema, options)?),
+                operator: operator.clone(),
+            }
+        }
+        FunctionArg::ExprNamed { name, arg: FunctionArgExpr::Expr(e), operator } => {
+            FunctionArg::ExprNamed {
+                name: name.translate(schema, options)?,
+                arg: FunctionArgExpr::Expr(e.translate(schema, options)?),
+                operator: operator.clone(),
+            }
+        }
+        other => other.clone(),
+    })
 }
 
 /// Wrap an expression with COALESCE(expr, '') to handle NULL semantics.
@@ -283,17 +431,26 @@ impl Translator for Function {
         let func =
             if self.filter.is_some() { transform_filter_to_case(self) } else { self.clone() };
 
+        // WITHIN GROUP is ordered-set aggregate syntax (percentile_cont, mode, …).
+        // SQLite has no equivalent; reject early with a clear error.
+        if !func.within_group.is_empty() {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "{} with WITHIN GROUP (ORDER BY …) is not supported in SQLite. \
+                 Ordered-set aggregates have no SQLite equivalent.",
+                func.name
+            )));
+        }
+
         match translate_function(&func.name, &func.args, options) {
             FunctionTranslation::Rename(new_name) => {
+                let translated_args = translate_function_args(&func.args, schema, options)?;
+                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
                 Ok(Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new(new_name)]),
-                    uses_odbc_syntax: func.uses_odbc_syntax,
-                    parameters: func.parameters.clone(),
-                    args: func.args.clone(),
+                    args: translated_args,
+                    over: translated_over,
                     filter: None,
-                    null_treatment: func.null_treatment,
-                    over: func.over.clone(),
-                    within_group: func.within_group.clone(),
+                    ..func
                 }))
             }
             FunctionTranslation::WithArgs { name, args } => {
@@ -317,7 +474,9 @@ impl Translator for Function {
                 // PostgreSQL's CONCAT ignores NULLs; SQLite's || propagates them.
                 let exprs: Vec<Expr> = extract_arg_exprs(&func.args)
                     .into_iter()
-                    .cloned()
+                    .map(|e| e.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
                     .map(wrap_with_coalesce)
                     .collect();
                 build_concatenation(exprs).ok_or_else(|| {
@@ -330,8 +489,10 @@ impl Translator for Function {
                 // CONCAT_WS(sep, a, b, c) -> COALESCE(a, '') || sep || COALESCE(b, '') || sep
                 // || COALESCE(c, '') The separator is not COALESCE-wrapped: if
                 // sep is NULL, the result is NULL.
-                let mut exprs: Vec<Expr> =
-                    extract_arg_exprs(&func.args).into_iter().cloned().collect();
+                let mut exprs: Vec<Expr> = extract_arg_exprs(&func.args)
+                    .into_iter()
+                    .map(|e| e.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?;
                 if exprs.len() < 2 {
                     return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                         "CONCAT_WS requires at least two arguments (separator and one value)"
@@ -415,7 +576,15 @@ impl Translator for Function {
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
             }
-            FunctionTranslation::PassThrough => Ok(Expr::Function(func)),
+            FunctionTranslation::PassThrough => {
+                let translated_args = translate_function_args(&func.args, schema, options)?;
+                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+                Ok(Expr::Function(Function {
+                    args: translated_args,
+                    over: translated_over,
+                    ..func
+                }))
+            }
         }
     }
 }

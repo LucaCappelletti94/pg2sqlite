@@ -1181,7 +1181,7 @@ impl Translator for Expr {
             Expr::TypedString(typed_string) => {
                 Expr::Cast {
                     expr: Box::new(Expr::Value(typed_string.value.clone())),
-                    data_type: typed_string.data_type.clone(),
+                    data_type: typed_string.data_type.translate(schema, options)?,
                     format: None,
                     kind: sqlparser::ast::CastKind::Cast,
                     array: false,
