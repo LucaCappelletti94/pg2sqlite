@@ -6,18 +6,17 @@ use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Fetch, Function, FunctionArgumentList, FunctionArguments,
     GroupByExpr, GroupByWithModifier, Ident, LimitClause, NamedWindowDefinition, ObjectName,
     ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query, Select, SelectItem,
-    SetExpr, SetOperator, SetQuantifier, Setting, TableAlias,
-    TableFactor, TableWithJoins, Value, ValueWithSpan, Values, WindowSpec, WindowType,
-    helpers::attached_token::AttachedToken,
+    SetExpr, SetOperator, SetQuantifier, Setting, TableAlias, TableFactor, TableWithJoins, Value,
+    ValueWithSpan, Values, WindowSpec, WindowType, helpers::attached_token::AttachedToken,
 };
 
 use super::helpers::{
     translate_connect_by_kinds, translate_fetch_clause, translate_group_by_expr,
     translate_limit_clause as translate_limit_clause_shared,
-    translate_named_windows as translate_named_window_shared,
-    translate_order_by_clause, translate_order_by_expr, translate_pipe_operators,
-    translate_query_settings, translate_select_item, translate_table_with_joins,
-    translate_values_rows, translate_with_clause,
+    translate_named_windows as translate_named_window_shared, translate_order_by_clause,
+    translate_order_by_expr, translate_pipe_operators, translate_query_settings,
+    translate_select_item, translate_table_with_joins, translate_values_rows,
+    translate_with_clause,
 };
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
@@ -1274,10 +1273,7 @@ mod tests {
         select.distribute_by = vec![parse_expr("now()")];
         select.sort_by = vec![sqlparser::ast::OrderByExpr {
             expr: parse_expr("now()"),
-            options: sqlparser::ast::OrderByOptions {
-                asc: Some(true),
-                nulls_first: Some(false),
-            },
+            options: sqlparser::ast::OrderByOptions { asc: Some(true), nulls_first: Some(false) },
             with_fill: None,
         }];
         select.connect_by = vec![
@@ -1336,10 +1332,12 @@ mod tests {
             }
         }
 
-        assert!(translated
-            .settings
-            .as_ref()
-            .is_some_and(|settings| settings[0].value.to_string().contains("datetime('now')")));
+        assert!(
+            translated
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings[0].value.to_string().contains("datetime('now')"))
+        );
 
         match &translated.pipe_operators[0] {
             sqlparser::ast::PipeOperator::Where { expr } => {

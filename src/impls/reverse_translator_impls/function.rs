@@ -428,7 +428,11 @@ fn reverse_translate_function_args(
         }
         FunctionArguments::Subquery(query) => {
             Ok(FunctionArguments::Subquery(Box::new(
-                crate::prelude::ReverseTranslator::reverse_translate(query.as_ref(), schema, options)?,
+                crate::prelude::ReverseTranslator::reverse_translate(
+                    query.as_ref(),
+                    schema,
+                    options,
+                )?,
             )))
         }
         FunctionArguments::None => Ok(FunctionArguments::None),

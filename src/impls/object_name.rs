@@ -45,11 +45,7 @@ pub(crate) fn quote_identifier(name: &str) -> String {
         None => false,
     };
 
-    if is_simple {
-        name.to_string()
-    } else {
-        format!("\"{}\"", name.replace('"', "\"\""))
-    }
+    if is_simple { name.to_string() } else { format!("\"{}\"", name.replace('"', "\"\"")) }
 }
 
 /// Builds a quoted qualified reference such as `NEW."column"`.
@@ -61,11 +57,7 @@ pub(crate) fn prefixed_quoted_identifier(prefix: &str, name: &str) -> String {
 /// Creates an identifier that keeps double-quote style when formatted.
 #[must_use]
 pub(crate) fn quoted_ident(name: &str) -> Ident {
-    if quote_identifier(name) == name {
-        Ident::new(name)
-    } else {
-        Ident::with_quote('"', name)
-    }
+    if quote_identifier(name) == name { Ident::new(name) } else { Ident::with_quote('"', name) }
 }
 
 #[cfg(test)]

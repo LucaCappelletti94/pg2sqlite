@@ -9,8 +9,7 @@ use sqlparser::ast::{
     OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting, Statement,
     SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
     TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, Values, WindowSpec, With,
-    WithFill,
-    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
+    WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
     XmlTableColumnOption,
 };
 
@@ -349,97 +348,97 @@ fn translate_pipe_operator<D: TranslationDirection>(
     options: &Pg2SqliteOptions,
 ) -> Result<PipeOperator, Error> {
     Ok(match pipe_operator {
-        PipeOperator::Limit { expr, offset } => PipeOperator::Limit {
-            expr: D::translate_expr(expr, schema, options)?,
-            offset: offset
-                .as_ref()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .transpose()?,
-        },
+        PipeOperator::Limit { expr, offset } => {
+            PipeOperator::Limit {
+                expr: D::translate_expr(expr, schema, options)?,
+                offset: offset
+                    .as_ref()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .transpose()?,
+            }
+        }
         PipeOperator::Where { expr } => {
             PipeOperator::Where { expr: D::translate_expr(expr, schema, options)? }
         }
-        PipeOperator::OrderBy { exprs } => PipeOperator::OrderBy {
-            exprs: exprs
-                .iter()
-                .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        PipeOperator::Select { exprs } => PipeOperator::Select {
-            exprs: exprs
-                .iter()
-                .map(|expr| translate_select_item::<D>(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        PipeOperator::Extend { exprs } => PipeOperator::Extend {
-            exprs: exprs
-                .iter()
-                .map(|expr| translate_select_item::<D>(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        PipeOperator::Set { assignments } => PipeOperator::Set {
-            assignments: assignments
-                .iter()
-                .map(|assignment| translate_assignment::<D>(assignment, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        PipeOperator::Drop { columns } => PipeOperator::Drop {
-            columns: columns.clone(),
-        },
+        PipeOperator::OrderBy { exprs } => {
+            PipeOperator::OrderBy {
+                exprs: exprs
+                    .iter()
+                    .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        }
+        PipeOperator::Select { exprs } => {
+            PipeOperator::Select {
+                exprs: exprs
+                    .iter()
+                    .map(|expr| translate_select_item::<D>(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        }
+        PipeOperator::Extend { exprs } => {
+            PipeOperator::Extend {
+                exprs: exprs
+                    .iter()
+                    .map(|expr| translate_select_item::<D>(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        }
+        PipeOperator::Set { assignments } => {
+            PipeOperator::Set {
+                assignments: assignments
+                    .iter()
+                    .map(|assignment| translate_assignment::<D>(assignment, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        }
+        PipeOperator::Drop { columns } => PipeOperator::Drop { columns: columns.clone() },
         PipeOperator::As { alias } => PipeOperator::As { alias: alias.clone() },
-        PipeOperator::Aggregate {
-            full_table_exprs,
-            group_by_expr,
-        } => PipeOperator::Aggregate {
-            full_table_exprs: full_table_exprs
-                .iter()
-                .map(|expr| {
-                    translate_expr_with_alias_and_order_by::<D>(expr, schema, options)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            group_by_expr: group_by_expr
-                .iter()
-                .map(|expr| {
-                    translate_expr_with_alias_and_order_by::<D>(expr, schema, options)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        PipeOperator::TableSample { sample } => PipeOperator::TableSample {
-            sample: Box::new(translate_table_sample::<D>(sample.as_ref(), schema, options)?),
-        },
-        PipeOperator::Rename { mappings } => PipeOperator::Rename {
-            mappings: mappings.clone(),
-        },
-        PipeOperator::Union {
-            set_quantifier,
-            queries,
-        } => PipeOperator::Union {
-            set_quantifier: *set_quantifier,
-            queries: queries
-                .iter()
-                .map(|query| D::translate_query(query, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        PipeOperator::Intersect {
-            set_quantifier,
-            queries,
-        } => PipeOperator::Intersect {
-            set_quantifier: *set_quantifier,
-            queries: queries
-                .iter()
-                .map(|query| D::translate_query(query, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        PipeOperator::Except {
-            set_quantifier,
-            queries,
-        } => PipeOperator::Except {
-            set_quantifier: *set_quantifier,
-            queries: queries
-                .iter()
-                .map(|query| D::translate_query(query, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
+        PipeOperator::Aggregate { full_table_exprs, group_by_expr } => {
+            PipeOperator::Aggregate {
+                full_table_exprs: full_table_exprs
+                    .iter()
+                    .map(|expr| translate_expr_with_alias_and_order_by::<D>(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                group_by_expr: group_by_expr
+                    .iter()
+                    .map(|expr| translate_expr_with_alias_and_order_by::<D>(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        }
+        PipeOperator::TableSample { sample } => {
+            PipeOperator::TableSample {
+                sample: Box::new(translate_table_sample::<D>(sample.as_ref(), schema, options)?),
+            }
+        }
+        PipeOperator::Rename { mappings } => PipeOperator::Rename { mappings: mappings.clone() },
+        PipeOperator::Union { set_quantifier, queries } => {
+            PipeOperator::Union {
+                set_quantifier: *set_quantifier,
+                queries: queries
+                    .iter()
+                    .map(|query| D::translate_query(query, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        }
+        PipeOperator::Intersect { set_quantifier, queries } => {
+            PipeOperator::Intersect {
+                set_quantifier: *set_quantifier,
+                queries: queries
+                    .iter()
+                    .map(|query| D::translate_query(query, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        }
+        PipeOperator::Except { set_quantifier, queries } => {
+            PipeOperator::Except {
+                set_quantifier: *set_quantifier,
+                queries: queries
+                    .iter()
+                    .map(|query| D::translate_query(query, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        }
         PipeOperator::Call { function, alias } => {
             let translated_expr =
                 D::translate_expr(&Expr::Function(function.clone()), schema, options)?;
@@ -449,36 +448,27 @@ fn translate_pipe_operator<D: TranslationDirection>(
                     expr_variant_name(&translated_expr)
                 )));
             };
-            PipeOperator::Call {
-                function: translated_function,
+            PipeOperator::Call { function: translated_function, alias: alias.clone() }
+        }
+        PipeOperator::Pivot { aggregate_functions, value_column, value_source, alias } => {
+            PipeOperator::Pivot {
+                aggregate_functions: aggregate_functions
+                    .iter()
+                    .map(|expr| translate_expr_with_alias::<D>(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                value_column: value_column.clone(),
+                value_source: translate_pivot_value_source::<D>(value_source, schema, options)?,
                 alias: alias.clone(),
             }
         }
-        PipeOperator::Pivot {
-            aggregate_functions,
-            value_column,
-            value_source,
-            alias,
-        } => PipeOperator::Pivot {
-            aggregate_functions: aggregate_functions
-                .iter()
-                .map(|expr| translate_expr_with_alias::<D>(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            value_column: value_column.clone(),
-            value_source: translate_pivot_value_source::<D>(value_source, schema, options)?,
-            alias: alias.clone(),
-        },
-        PipeOperator::Unpivot {
-            value_column,
-            name_column,
-            unpivot_columns,
-            alias,
-        } => PipeOperator::Unpivot {
-            value_column: value_column.clone(),
-            name_column: name_column.clone(),
-            unpivot_columns: unpivot_columns.clone(),
-            alias: alias.clone(),
-        },
+        PipeOperator::Unpivot { value_column, name_column, unpivot_columns, alias } => {
+            PipeOperator::Unpivot {
+                value_column: value_column.clone(),
+                name_column: name_column.clone(),
+                unpivot_columns: unpivot_columns.clone(),
+                alias: alias.clone(),
+            }
+        }
         PipeOperator::Join(join) => PipeOperator::Join(translate_join::<D>(join, schema, options)?),
     })
 }
@@ -492,25 +482,22 @@ pub(crate) fn translate_connect_by_kinds<D: TranslationDirection>(
         .iter()
         .map(|connect_by| {
             Ok(match connect_by {
-                ConnectByKind::ConnectBy {
-                    connect_token,
-                    nocycle,
-                    relationships,
-                } => ConnectByKind::ConnectBy {
-                    connect_token: connect_token.clone(),
-                    nocycle: *nocycle,
-                    relationships: relationships
-                        .iter()
-                        .map(|expr| D::translate_expr(expr, schema, options))
-                        .collect::<Result<Vec<_>, _>>()?,
-                },
-                ConnectByKind::StartWith {
-                    start_token,
-                    condition,
-                } => ConnectByKind::StartWith {
-                    start_token: start_token.clone(),
-                    condition: Box::new(D::translate_expr(condition, schema, options)?),
-                },
+                ConnectByKind::ConnectBy { connect_token, nocycle, relationships } => {
+                    ConnectByKind::ConnectBy {
+                        connect_token: connect_token.clone(),
+                        nocycle: *nocycle,
+                        relationships: relationships
+                            .iter()
+                            .map(|expr| D::translate_expr(expr, schema, options))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    }
+                }
+                ConnectByKind::StartWith { start_token, condition } => {
+                    ConnectByKind::StartWith {
+                        start_token: start_token.clone(),
+                        condition: Box::new(D::translate_expr(condition, schema, options)?),
+                    }
+                }
             })
         })
         .collect()
@@ -550,11 +537,7 @@ pub(crate) fn translate_with_clause<D: TranslationDirection>(
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(With {
-            with_token: w.with_token.clone(),
-            recursive: w.recursive,
-            cte_tables,
-        })
+        Ok(With { with_token: w.with_token.clone(), recursive: w.recursive, cte_tables })
     })
     .transpose()
 }
@@ -567,12 +550,14 @@ pub(crate) fn translate_order_by_clause<D: TranslationDirection>(
     order_by
         .map(|ob| -> Result<OrderBy, Error> {
             let kind = match &ob.kind {
-                OrderByKind::Expressions(exprs) => OrderByKind::Expressions(
-                    exprs
-                        .iter()
-                        .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
-                        .collect::<Result<Vec<_>, _>>()?,
-                ),
+                OrderByKind::Expressions(exprs) => {
+                    OrderByKind::Expressions(
+                        exprs
+                            .iter()
+                            .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                }
                 OrderByKind::All(all) => OrderByKind::All(*all),
             };
             Ok(OrderBy { kind, interpolate: ob.interpolate.clone() })
@@ -588,26 +573,33 @@ pub(crate) fn translate_limit_clause<D: TranslationDirection>(
     limit_clause
         .map(|lc| {
             Ok(match lc {
-                LimitClause::LimitOffset { limit, offset, limit_by } => LimitClause::LimitOffset {
-                    limit: limit.as_ref().map(|e| D::translate_expr(e, schema, options)).transpose()?,
-                    offset: offset
-                        .as_ref()
-                        .map(|o| {
-                            Ok::<_, Error>(sqlparser::ast::Offset {
-                                value: D::translate_expr(&o.value, schema, options)?,
-                                rows: o.rows,
+                LimitClause::LimitOffset { limit, offset, limit_by } => {
+                    LimitClause::LimitOffset {
+                        limit: limit
+                            .as_ref()
+                            .map(|e| D::translate_expr(e, schema, options))
+                            .transpose()?,
+                        offset: offset
+                            .as_ref()
+                            .map(|o| {
+                                Ok::<_, Error>(sqlparser::ast::Offset {
+                                    value: D::translate_expr(&o.value, schema, options)?,
+                                    rows: o.rows,
+                                })
                             })
-                        })
-                        .transpose()?,
-                    limit_by: limit_by
-                        .iter()
-                        .map(|e| D::translate_expr(e, schema, options))
-                        .collect::<Result<Vec<_>, _>>()?,
-                },
-                LimitClause::OffsetCommaLimit { offset, limit } => LimitClause::OffsetCommaLimit {
-                    offset: D::translate_expr(offset, schema, options)?,
-                    limit: D::translate_expr(limit, schema, options)?,
-                },
+                            .transpose()?,
+                        limit_by: limit_by
+                            .iter()
+                            .map(|e| D::translate_expr(e, schema, options))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    }
+                }
+                LimitClause::OffsetCommaLimit { offset, limit } => {
+                    LimitClause::OffsetCommaLimit {
+                        offset: D::translate_expr(offset, schema, options)?,
+                        limit: D::translate_expr(limit, schema, options)?,
+                    }
+                }
             })
         })
         .transpose()
@@ -639,13 +631,15 @@ pub(crate) fn translate_group_by_expr<D: TranslationDirection>(
     options: &Pg2SqliteOptions,
 ) -> Result<GroupByExpr, Error> {
     Ok(match group_by {
-        GroupByExpr::Expressions(exprs, modifiers) => GroupByExpr::Expressions(
-            exprs
-                .iter()
-                .map(|e| D::translate_expr(e, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            modifiers.clone(),
-        ),
+        GroupByExpr::Expressions(exprs, modifiers) => {
+            GroupByExpr::Expressions(
+                exprs
+                    .iter()
+                    .map(|e| D::translate_expr(e, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                modifiers.clone(),
+            )
+        }
         GroupByExpr::All(all) => GroupByExpr::All(all.clone()),
     })
 }

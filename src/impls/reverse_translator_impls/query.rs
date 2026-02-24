@@ -2,16 +2,16 @@
 //! `Query`, `SetExpr`, and `Select` types.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{
-    Distinct, NamedWindowDefinition, Query, Select, SetExpr, Values,
-};
+use sqlparser::ast::{Distinct, NamedWindowDefinition, Query, Select, SetExpr, Values};
 
 use super::helpers::{
     reverse_translate_connect_by_kinds, reverse_translate_fetch_clause,
-    reverse_translate_group_by_expr, reverse_translate_limit_clause as reverse_translate_limit_clause_shared,
-    reverse_translate_named_windows, reverse_translate_order_by_clause, reverse_translate_order_by_expr,
-    reverse_translate_pipe_operators, reverse_translate_query_settings,
-    reverse_translate_select_item, reverse_translate_table_with_joins, reverse_translate_values_rows,
+    reverse_translate_group_by_expr,
+    reverse_translate_limit_clause as reverse_translate_limit_clause_shared,
+    reverse_translate_named_windows, reverse_translate_order_by_clause,
+    reverse_translate_order_by_expr, reverse_translate_pipe_operators,
+    reverse_translate_query_settings, reverse_translate_select_item,
+    reverse_translate_table_with_joins, reverse_translate_values_rows,
     reverse_translate_with_clause,
 };
 use crate::{
@@ -31,13 +31,18 @@ impl ReverseTranslator for Query {
     ) -> Result<Self::PostgresEntry, Error> {
         let order_by = reverse_translate_order_by_clause(self.order_by.as_ref(), schema, options)?;
         let settings = reverse_translate_query_settings(self.settings.as_ref(), schema, options)?;
-        let pipe_operators = reverse_translate_pipe_operators(&self.pipe_operators, schema, options)?;
+        let pipe_operators =
+            reverse_translate_pipe_operators(&self.pipe_operators, schema, options)?;
 
         Ok(Query {
             with: reverse_translate_with_clause(self.with.as_ref(), schema, options)?,
             body: Box::new(self.body.reverse_translate(schema, options)?),
             order_by,
-            limit_clause: reverse_translate_limit_clause_shared(self.limit_clause.as_ref(), schema, options)?,
+            limit_clause: reverse_translate_limit_clause_shared(
+                self.limit_clause.as_ref(),
+                schema,
+                options,
+            )?,
             fetch: reverse_translate_fetch_clause(self.fetch.as_ref(), schema, options)?,
             locks: self.locks.clone(),
             for_clause: self.for_clause.clone(),
@@ -357,10 +362,7 @@ mod tests {
         select.distribute_by = vec![parse_expr("datetime('now')")];
         select.sort_by = vec![sqlparser::ast::OrderByExpr {
             expr: parse_expr("datetime('now')"),
-            options: sqlparser::ast::OrderByOptions {
-                asc: Some(true),
-                nulls_first: Some(false),
-            },
+            options: sqlparser::ast::OrderByOptions { asc: Some(true), nulls_first: Some(false) },
             with_fill: None,
         }];
         select.connect_by = vec![
@@ -419,10 +421,9 @@ mod tests {
             }
         }
 
-        assert!(translated
-            .settings
-            .as_ref()
-            .is_some_and(|settings| settings[0].value.to_string().to_lowercase().contains("now()")));
+        assert!(translated.settings.as_ref().is_some_and(|settings| {
+            settings[0].value.to_string().to_lowercase().contains("now()")
+        }));
 
         match &translated.pipe_operators[0] {
             sqlparser::ast::PipeOperator::Where { expr } => {

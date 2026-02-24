@@ -16,7 +16,10 @@ use sqlparser::ast::{
 
 use crate::{
     errors::Error,
-    impls::{object_name::last_ident, shared_helpers::{expr_variant_name, statement_variant_name}},
+    impls::{
+        object_name::last_ident,
+        shared_helpers::{expr_variant_name, statement_variant_name},
+    },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
     traits::TranslationOptions,
 };
@@ -520,10 +523,7 @@ fn check_expr_slice_for_rls(exprs: &[Expr], options: &Pg2SqliteOptions) -> Resul
     Ok(())
 }
 
-fn check_expr_matrix_for_rls(
-    exprs: &[Vec<Expr>],
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
+fn check_expr_matrix_for_rls(exprs: &[Vec<Expr>], options: &Pg2SqliteOptions) -> Result<(), Error> {
     for group in exprs {
         check_expr_slice_for_rls(group, options)?;
     }
@@ -764,10 +764,12 @@ fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Err
         }
         Expr::Lambda(lambda) => check_expr_for_rls(&lambda.body, options),
         Expr::MemberOf(member) => check_expr_pair_for_rls(&member.value, &member.array, options),
-        other @ Expr::MatchAgainst { .. } => Err(Error::UnsupportedRlsExpressionVariant {
-            expr_variant: expr_variant_name(other),
-            expression: other.to_string(),
-        }),
+        other @ Expr::MatchAgainst { .. } => {
+            Err(Error::UnsupportedRlsExpressionVariant {
+                expr_variant: expr_variant_name(other),
+                expression: other.to_string(),
+            })
+        }
     }
 }
 
@@ -1058,11 +1060,7 @@ fn check_pipe_operator_for_rls(
         PipeOperator::Call { function, .. } => {
             check_function_for_rls(function, options)?;
         }
-        PipeOperator::Pivot {
-            aggregate_functions,
-            value_source,
-            ..
-        } => {
+        PipeOperator::Pivot { aggregate_functions, value_source, .. } => {
             for expr_with_alias in aggregate_functions {
                 check_expr_with_alias_for_rls(expr_with_alias, options)?;
             }
@@ -1186,8 +1184,10 @@ mod tests {
         check_expr_for_rls, check_limit_clause_for_rls, check_query_for_rls,
         check_set_expr_for_rls, check_table_factor_for_rls,
     };
-    use crate::errors::Error;
-    use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
+    use crate::{
+        errors::Error,
+        prelude::{Pg2SqliteOptions, ReverseTranslator},
+    };
 
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
@@ -1384,9 +1384,8 @@ mod tests {
             "SELECT id FROM users_rls LIMIT 1",
         )))]]);
 
-        let err = check_expr_for_rls(&expr, &options).expect_err(
-            "GROUPING SETS expressions with RLS-backed subqueries should be rejected",
-        );
+        let err = check_expr_for_rls(&expr, &options)
+            .expect_err("GROUPING SETS expressions with RLS-backed subqueries should be rejected");
         assert!(err.to_string().contains("users_rls"));
     }
 
@@ -1398,21 +1397,15 @@ mod tests {
             panic!("expected select");
         };
 
-        select.prewhere = Some(Expr::Subquery(Box::new(parse_query(
-            "SELECT id FROM users_rls LIMIT 1",
-        ))));
-        select.cluster_by = vec![Expr::Subquery(Box::new(parse_query(
-            "SELECT id FROM users_rls LIMIT 1",
-        )))];
-        select.distribute_by = vec![Expr::Subquery(Box::new(parse_query(
-            "SELECT id FROM users_rls LIMIT 1",
-        )))];
+        select.prewhere =
+            Some(Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1"))));
+        select.cluster_by =
+            vec![Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1")))];
+        select.distribute_by =
+            vec![Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1")))];
         select.sort_by = vec![sqlparser::ast::OrderByExpr {
             expr: Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1"))),
-            options: sqlparser::ast::OrderByOptions {
-                asc: None,
-                nulls_first: None,
-            },
+            options: sqlparser::ast::OrderByOptions { asc: None, nulls_first: None },
             with_fill: None,
         }];
 
