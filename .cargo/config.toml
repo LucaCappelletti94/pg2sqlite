@@ -1,0 +1,12 @@
+# Increase the default stack size on Windows (MSVC) to match Linux (8 MiB).
+# The recursive AST-traversal code (e.g. collect_session_variable_patterns,
+# Expr::translate, transform_expr) can exceed Windows' 1 MiB default when
+# processing large SQL files such as the 21 KB rls_grants fixture.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
