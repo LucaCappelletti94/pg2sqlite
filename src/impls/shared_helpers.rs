@@ -3,7 +3,11 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Expr, Join, JoinConstraint, JoinOperator, Query, SelectItem, TableFactor, TableWithJoins,
+    Expr, ExprWithAlias, FunctionArg, FunctionArgExpr, Join, JoinConstraint, JoinOperator, Measure,
+    OrderByExpr, PivotValueSource, Query, SelectItem, Setting, Statement, SymbolDefinition,
+    TableFactor, TableFunctionArgs, TableSample, TableSampleBucket, TableSampleKind,
+    TableSampleQuantity, TableVersion, TableWithJoins, WithFill, XmlNamespaceDefinition,
+    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
 };
 
 use crate::{errors::Error, prelude::Pg2SqliteOptions};
@@ -22,6 +26,377 @@ pub(crate) trait TranslationDirection {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Query, Error>;
+}
+
+/// Extracts a stable-ish variant name from debug output.
+#[must_use]
+pub(crate) fn debug_variant_name(value: &impl std::fmt::Debug) -> String {
+    let debug = format!("{value:?}");
+    debug.split(['(', '{', ' ']).next().unwrap_or("Unknown").to_string()
+}
+
+/// Returns a normalized statement variant name for user-facing errors.
+#[must_use]
+pub(crate) fn statement_variant_name(statement: &Statement) -> String {
+    debug_variant_name(statement)
+}
+
+/// Returns a normalized expression variant name for user-facing errors.
+#[must_use]
+pub(crate) fn expr_variant_name(expr: &Expr) -> String {
+    debug_variant_name(expr)
+}
+
+fn translate_function_arg_expr<D: TranslationDirection>(
+    arg: &FunctionArgExpr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<FunctionArgExpr, Error> {
+    Ok(match arg {
+        FunctionArgExpr::Expr(expr) => FunctionArgExpr::Expr(D::translate_expr(expr, schema, options)?),
+        FunctionArgExpr::QualifiedWildcard(name) => FunctionArgExpr::QualifiedWildcard(name.clone()),
+        FunctionArgExpr::Wildcard => FunctionArgExpr::Wildcard,
+    })
+}
+
+fn translate_function_arg<D: TranslationDirection>(
+    arg: &FunctionArg,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<FunctionArg, Error> {
+    Ok(match arg {
+        FunctionArg::Named { name, arg, operator } => FunctionArg::Named {
+            name: name.clone(),
+            arg: translate_function_arg_expr::<D>(arg, schema, options)?,
+            operator: operator.clone(),
+        },
+        FunctionArg::ExprNamed { name, arg, operator } => FunctionArg::ExprNamed {
+            name: D::translate_expr(name, schema, options)?,
+            arg: translate_function_arg_expr::<D>(arg, schema, options)?,
+            operator: operator.clone(),
+        },
+        FunctionArg::Unnamed(arg) => {
+            FunctionArg::Unnamed(translate_function_arg_expr::<D>(arg, schema, options)?)
+        }
+    })
+}
+
+fn translate_setting<D: TranslationDirection>(
+    setting: &Setting,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Setting, Error> {
+    Ok(Setting {
+        key: setting.key.clone(),
+        value: D::translate_expr(&setting.value, schema, options)?,
+    })
+}
+
+fn translate_table_function_args<D: TranslationDirection>(
+    args: &TableFunctionArgs,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<TableFunctionArgs, Error> {
+    Ok(TableFunctionArgs {
+        args: args
+            .args
+            .iter()
+            .map(|arg| translate_function_arg::<D>(arg, schema, options))
+            .collect::<Result<Vec<_>, _>>()?,
+        settings: args
+            .settings
+            .as_ref()
+            .map(|settings| {
+                settings
+                    .iter()
+                    .map(|setting| translate_setting::<D>(setting, schema, options))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?,
+    })
+}
+
+fn translate_table_version<D: TranslationDirection>(
+    version: &TableVersion,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<TableVersion, Error> {
+    Ok(match version {
+        TableVersion::ForSystemTimeAsOf(expr) => {
+            TableVersion::ForSystemTimeAsOf(D::translate_expr(expr, schema, options)?)
+        }
+        TableVersion::TimestampAsOf(expr) => {
+            TableVersion::TimestampAsOf(D::translate_expr(expr, schema, options)?)
+        }
+        TableVersion::VersionAsOf(expr) => {
+            TableVersion::VersionAsOf(D::translate_expr(expr, schema, options)?)
+        }
+        TableVersion::Function(expr) => TableVersion::Function(D::translate_expr(expr, schema, options)?),
+    })
+}
+
+fn translate_table_sample_quantity<D: TranslationDirection>(
+    quantity: &TableSampleQuantity,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<TableSampleQuantity, Error> {
+    Ok(TableSampleQuantity {
+        parenthesized: quantity.parenthesized,
+        value: D::translate_expr(&quantity.value, schema, options)?,
+        unit: quantity.unit,
+    })
+}
+
+fn translate_table_sample_bucket<D: TranslationDirection>(
+    bucket: &TableSampleBucket,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<TableSampleBucket, Error> {
+    Ok(TableSampleBucket {
+        bucket: bucket.bucket.clone(),
+        total: bucket.total.clone(),
+        on: bucket
+            .on
+            .as_ref()
+            .map(|expr| D::translate_expr(expr, schema, options))
+            .transpose()?,
+    })
+}
+
+fn translate_table_sample<D: TranslationDirection>(
+    sample: &TableSample,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<TableSample, Error> {
+    Ok(TableSample {
+        modifier: sample.modifier,
+        name: sample.name,
+        quantity: sample
+            .quantity
+            .as_ref()
+            .map(|quantity| translate_table_sample_quantity::<D>(quantity, schema, options))
+            .transpose()?,
+        seed: sample.seed.clone(),
+        bucket: sample
+            .bucket
+            .as_ref()
+            .map(|bucket| translate_table_sample_bucket::<D>(bucket, schema, options))
+            .transpose()?,
+        offset: sample
+            .offset
+            .as_ref()
+            .map(|expr| D::translate_expr(expr, schema, options))
+            .transpose()?,
+    })
+}
+
+fn translate_table_sample_kind<D: TranslationDirection>(
+    sample: &TableSampleKind,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<TableSampleKind, Error> {
+    Ok(match sample {
+        TableSampleKind::BeforeTableAlias(sample) => {
+            TableSampleKind::BeforeTableAlias(Box::new(translate_table_sample::<D>(
+                sample, schema, options,
+            )?))
+        }
+        TableSampleKind::AfterTableAlias(sample) => TableSampleKind::AfterTableAlias(Box::new(
+            translate_table_sample::<D>(sample, schema, options)?,
+        )),
+    })
+}
+
+fn translate_with_fill<D: TranslationDirection>(
+    with_fill: &WithFill,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<WithFill, Error> {
+    Ok(WithFill {
+        from: with_fill
+            .from
+            .as_ref()
+            .map(|expr| D::translate_expr(expr, schema, options))
+            .transpose()?,
+        to: with_fill
+            .to
+            .as_ref()
+            .map(|expr| D::translate_expr(expr, schema, options))
+            .transpose()?,
+        step: with_fill
+            .step
+            .as_ref()
+            .map(|expr| D::translate_expr(expr, schema, options))
+            .transpose()?,
+    })
+}
+
+fn translate_order_by_expr<D: TranslationDirection>(
+    order_by_expr: &OrderByExpr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<OrderByExpr, Error> {
+    Ok(OrderByExpr {
+        expr: D::translate_expr(&order_by_expr.expr, schema, options)?,
+        options: order_by_expr.options,
+        with_fill: order_by_expr
+            .with_fill
+            .as_ref()
+            .map(|with_fill| translate_with_fill::<D>(with_fill, schema, options))
+            .transpose()?,
+    })
+}
+
+fn translate_expr_with_alias<D: TranslationDirection>(
+    expr_with_alias: &ExprWithAlias,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<ExprWithAlias, Error> {
+    Ok(ExprWithAlias {
+        expr: D::translate_expr(&expr_with_alias.expr, schema, options)?,
+        alias: expr_with_alias.alias.clone(),
+    })
+}
+
+fn translate_pivot_value_source<D: TranslationDirection>(
+    value_source: &PivotValueSource,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<PivotValueSource, Error> {
+    Ok(match value_source {
+        PivotValueSource::List(values) => PivotValueSource::List(
+            values
+                .iter()
+                .map(|value| translate_expr_with_alias::<D>(value, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        PivotValueSource::Any(order_by) => PivotValueSource::Any(
+            order_by
+                .iter()
+                .map(|order_by_expr| translate_order_by_expr::<D>(order_by_expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        PivotValueSource::Subquery(query) => {
+            PivotValueSource::Subquery(Box::new(D::translate_query(query, schema, options)?))
+        }
+    })
+}
+
+fn translate_measure<D: TranslationDirection>(
+    measure: &Measure,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Measure, Error> {
+    Ok(Measure { expr: D::translate_expr(&measure.expr, schema, options)?, alias: measure.alias.clone() })
+}
+
+fn translate_symbol_definition<D: TranslationDirection>(
+    symbol: &SymbolDefinition,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<SymbolDefinition, Error> {
+    Ok(SymbolDefinition {
+        symbol: symbol.symbol.clone(),
+        definition: D::translate_expr(&symbol.definition, schema, options)?,
+    })
+}
+
+#[allow(clippy::only_used_in_recursion)]
+fn translate_json_table_column<D: TranslationDirection>(
+    column: &sqlparser::ast::JsonTableColumn,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<sqlparser::ast::JsonTableColumn, Error> {
+    Ok(match column {
+        sqlparser::ast::JsonTableColumn::Named(named) => {
+            sqlparser::ast::JsonTableColumn::Named(named.clone())
+        }
+        sqlparser::ast::JsonTableColumn::ForOrdinality(ident) => {
+            sqlparser::ast::JsonTableColumn::ForOrdinality(ident.clone())
+        }
+        sqlparser::ast::JsonTableColumn::Nested(nested) => {
+            sqlparser::ast::JsonTableColumn::Nested(sqlparser::ast::JsonTableNestedColumn {
+                path: nested.path.clone(),
+                columns: nested
+                    .columns
+                    .iter()
+                    .map(|column| translate_json_table_column::<D>(column, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        }
+    })
+}
+
+fn translate_xml_passing_argument<D: TranslationDirection>(
+    argument: &XmlPassingArgument,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<XmlPassingArgument, Error> {
+    Ok(XmlPassingArgument {
+        expr: D::translate_expr(&argument.expr, schema, options)?,
+        alias: argument.alias.clone(),
+        by_value: argument.by_value,
+    })
+}
+
+fn translate_xml_passing_clause<D: TranslationDirection>(
+    passing: &XmlPassingClause,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<XmlPassingClause, Error> {
+    Ok(XmlPassingClause {
+        arguments: passing
+            .arguments
+            .iter()
+            .map(|argument| translate_xml_passing_argument::<D>(argument, schema, options))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn translate_xml_table_column_option<D: TranslationDirection>(
+    option: &XmlTableColumnOption,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<XmlTableColumnOption, Error> {
+    Ok(match option {
+        XmlTableColumnOption::NamedInfo { r#type, path, default, nullable } => {
+            XmlTableColumnOption::NamedInfo {
+                r#type: r#type.clone(),
+                path: path
+                    .as_ref()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .transpose()?,
+                default: default
+                    .as_ref()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .transpose()?,
+                nullable: *nullable,
+            }
+        }
+        XmlTableColumnOption::ForOrdinality => XmlTableColumnOption::ForOrdinality,
+    })
+}
+
+fn translate_xml_table_column<D: TranslationDirection>(
+    column: &XmlTableColumn,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<XmlTableColumn, Error> {
+    Ok(XmlTableColumn {
+        name: column.name.clone(),
+        option: translate_xml_table_column_option::<D>(&column.option, schema, options)?,
+    })
+}
+
+fn translate_xml_namespace_definition<D: TranslationDirection>(
+    namespace: &XmlNamespaceDefinition,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<XmlNamespaceDefinition, Error> {
+    Ok(XmlNamespaceDefinition {
+        uri: D::translate_expr(&namespace.uri, schema, options)?,
+        name: namespace.name.clone(),
+    })
 }
 
 pub(crate) fn translate_table_with_joins<D: TranslationDirection>(
@@ -128,20 +503,113 @@ pub(crate) fn translate_join_constraint<D: TranslationDirection>(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn translate_table_factor<D: TranslationDirection>(
     table_factor: &TableFactor,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<TableFactor, Error> {
     Ok(match table_factor {
+        TableFactor::Table {
+            name,
+            alias,
+            args,
+            with_hints,
+            version,
+            with_ordinality,
+            partitions,
+            json_path,
+            sample,
+            index_hints,
+        } => TableFactor::Table {
+            name: name.clone(),
+            alias: alias.clone(),
+            args: args
+                .as_ref()
+                .map(|args| translate_table_function_args::<D>(args, schema, options))
+                .transpose()?,
+            with_hints: with_hints
+                .iter()
+                .map(|hint| D::translate_expr(hint, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            version: version
+                .as_ref()
+                .map(|version| translate_table_version::<D>(version, schema, options))
+                .transpose()?,
+            with_ordinality: *with_ordinality,
+            partitions: partitions.clone(),
+            json_path: json_path.clone(),
+            sample: sample
+                .as_ref()
+                .map(|sample| translate_table_sample_kind::<D>(sample, schema, options))
+                .transpose()?,
+            index_hints: index_hints.clone(),
+        },
         TableFactor::Derived { subquery, lateral, alias, sample } => {
             TableFactor::Derived {
                 subquery: Box::new(D::translate_query(subquery, schema, options)?),
                 lateral: *lateral,
                 alias: alias.clone(),
-                sample: sample.clone(),
+                sample: sample
+                    .as_ref()
+                    .map(|sample| translate_table_sample_kind::<D>(sample, schema, options))
+                    .transpose()?,
             }
         }
+        TableFactor::TableFunction { expr, alias } => TableFactor::TableFunction {
+            expr: D::translate_expr(expr, schema, options)?,
+            alias: alias.clone(),
+        },
+        TableFactor::Function { lateral, name, args, alias } => TableFactor::Function {
+            lateral: *lateral,
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| translate_function_arg::<D>(arg, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            alias: alias.clone(),
+        },
+        TableFactor::UNNEST {
+            alias,
+            array_exprs,
+            with_offset,
+            with_offset_alias,
+            with_ordinality,
+        } => TableFactor::UNNEST {
+            alias: alias.clone(),
+            array_exprs: array_exprs
+                .iter()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            with_offset: *with_offset,
+            with_offset_alias: with_offset_alias.clone(),
+            with_ordinality: *with_ordinality,
+        },
+        TableFactor::JsonTable {
+            json_expr,
+            json_path,
+            columns,
+            alias,
+        } => TableFactor::JsonTable {
+            json_expr: D::translate_expr(json_expr, schema, options)?,
+            json_path: json_path.clone(),
+            columns: columns
+                .iter()
+                .map(|column| translate_json_table_column::<D>(column, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            alias: alias.clone(),
+        },
+        TableFactor::OpenJsonTable {
+            json_expr,
+            json_path,
+            columns,
+            alias,
+        } => TableFactor::OpenJsonTable {
+            json_expr: D::translate_expr(json_expr, schema, options)?,
+            json_path: json_path.clone(),
+            columns: columns.clone(),
+            alias: alias.clone(),
+        },
         TableFactor::NestedJoin { table_with_joins, alias } => {
             TableFactor::NestedJoin {
                 table_with_joins: Box::new(translate_table_with_joins::<D>(
@@ -152,8 +620,124 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 alias: alias.clone(),
             }
         }
-        // Pass through other table factors unchanged
-        other => other.clone(),
+        TableFactor::Pivot {
+            table,
+            aggregate_functions,
+            value_column,
+            value_source,
+            default_on_null,
+            alias,
+        } => TableFactor::Pivot {
+            table: Box::new(translate_table_factor::<D>(table, schema, options)?),
+            aggregate_functions: aggregate_functions
+                .iter()
+                .map(|expr_with_alias| translate_expr_with_alias::<D>(expr_with_alias, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            value_column: value_column
+                .iter()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            value_source: translate_pivot_value_source::<D>(value_source, schema, options)?,
+            default_on_null: default_on_null
+                .as_ref()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .transpose()?,
+            alias: alias.clone(),
+        },
+        TableFactor::Unpivot { table, value, name, columns, null_inclusion, alias } => {
+            TableFactor::Unpivot {
+                table: Box::new(translate_table_factor::<D>(table, schema, options)?),
+                value: D::translate_expr(value, schema, options)?,
+                name: name.clone(),
+                columns: columns
+                    .iter()
+                    .map(|expr_with_alias| {
+                        translate_expr_with_alias::<D>(expr_with_alias, schema, options)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                null_inclusion: null_inclusion.clone(),
+                alias: alias.clone(),
+            }
+        }
+        TableFactor::MatchRecognize {
+            table,
+            partition_by,
+            order_by,
+            measures,
+            rows_per_match,
+            after_match_skip,
+            pattern,
+            symbols,
+            alias,
+        } => TableFactor::MatchRecognize {
+            table: Box::new(translate_table_factor::<D>(table, schema, options)?),
+            partition_by: partition_by
+                .iter()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            order_by: order_by
+                .iter()
+                .map(|order_by_expr| translate_order_by_expr::<D>(order_by_expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            measures: measures
+                .iter()
+                .map(|measure| translate_measure::<D>(measure, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            rows_per_match: rows_per_match.clone(),
+            after_match_skip: after_match_skip.clone(),
+            pattern: pattern.clone(),
+            symbols: symbols
+                .iter()
+                .map(|symbol| translate_symbol_definition::<D>(symbol, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            alias: alias.clone(),
+        },
+        TableFactor::XmlTable {
+            namespaces,
+            row_expression,
+            passing,
+            columns,
+            alias,
+        } => TableFactor::XmlTable {
+            namespaces: namespaces
+                .iter()
+                .map(|namespace| translate_xml_namespace_definition::<D>(namespace, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            row_expression: D::translate_expr(row_expression, schema, options)?,
+            passing: translate_xml_passing_clause::<D>(passing, schema, options)?,
+            columns: columns
+                .iter()
+                .map(|column| translate_xml_table_column::<D>(column, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            alias: alias.clone(),
+        },
+        TableFactor::SemanticView {
+            name,
+            dimensions,
+            metrics,
+            facts,
+            where_clause,
+            alias,
+        } => TableFactor::SemanticView {
+            name: name.clone(),
+            dimensions: dimensions
+                .iter()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            metrics: metrics
+                .iter()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            facts: facts
+                .iter()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            where_clause: where_clause
+                .as_ref()
+                .map(|expr| D::translate_expr(expr, schema, options))
+                .transpose()?,
+            alias: alias.clone(),
+        },
     })
 }
 
