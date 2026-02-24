@@ -18,25 +18,29 @@ fn reverse_translate_access_expr(
 ) -> Result<AccessExpr, Error> {
     Ok(match access {
         AccessExpr::Dot(expr) => AccessExpr::Dot(expr.reverse_translate(schema, options)?),
-        AccessExpr::Subscript(subscript) => AccessExpr::Subscript(match subscript {
-            Subscript::Index { index } => {
-                Subscript::Index { index: index.reverse_translate(schema, options)? }
-            }
-            Subscript::Slice { lower_bound, upper_bound, stride } => Subscript::Slice {
-                lower_bound: lower_bound
-                    .as_ref()
-                    .map(|expr| expr.reverse_translate(schema, options))
-                    .transpose()?,
-                upper_bound: upper_bound
-                    .as_ref()
-                    .map(|expr| expr.reverse_translate(schema, options))
-                    .transpose()?,
-                stride: stride
-                    .as_ref()
-                    .map(|expr| expr.reverse_translate(schema, options))
-                    .transpose()?,
-            },
-        }),
+        AccessExpr::Subscript(subscript) => {
+            AccessExpr::Subscript(match subscript {
+                Subscript::Index { index } => {
+                    Subscript::Index { index: index.reverse_translate(schema, options)? }
+                }
+                Subscript::Slice { lower_bound, upper_bound, stride } => {
+                    Subscript::Slice {
+                        lower_bound: lower_bound
+                            .as_ref()
+                            .map(|expr| expr.reverse_translate(schema, options))
+                            .transpose()?,
+                        upper_bound: upper_bound
+                            .as_ref()
+                            .map(|expr| expr.reverse_translate(schema, options))
+                            .transpose()?,
+                        stride: stride
+                            .as_ref()
+                            .map(|expr| expr.reverse_translate(schema, options))
+                            .transpose()?,
+                    }
+                }
+            })
+        }
     })
 }
 
@@ -128,10 +132,12 @@ impl ReverseTranslator for Expr {
                     time_zone: Box::new(time_zone.reverse_translate(schema, options)?),
                 }
             }
-            Expr::JsonAccess { value, path } => Expr::JsonAccess {
-                value: Box::new(value.reverse_translate(schema, options)?),
-                path: reverse_translate_json_path(path, schema, options)?,
-            },
+            Expr::JsonAccess { value, path } => {
+                Expr::JsonAccess {
+                    value: Box::new(value.reverse_translate(schema, options)?),
+                    path: reverse_translate_json_path(path, schema, options)?,
+                }
+            }
 
             // Handle NULL checks
             Expr::IsNull(inner) => {
@@ -253,11 +259,13 @@ impl ReverseTranslator for Expr {
                     negated: *negated,
                 }
             }
-            Expr::InUnnest { expr, array_expr, negated } => Expr::InUnnest {
-                expr: Box::new(expr.reverse_translate(schema, options)?),
-                array_expr: Box::new(array_expr.reverse_translate(schema, options)?),
-                negated: *negated,
-            },
+            Expr::InUnnest { expr, array_expr, negated } => {
+                Expr::InUnnest {
+                    expr: Box::new(expr.reverse_translate(schema, options)?),
+                    array_expr: Box::new(array_expr.reverse_translate(schema, options)?),
+                    negated: *negated,
+                }
+            }
 
             // Handle BETWEEN
             Expr::Between { expr, negated, low, high } => {
@@ -328,40 +336,48 @@ impl ReverseTranslator for Expr {
                     named: *named,
                 })
             }
-            Expr::Struct { values, fields } => Expr::Struct {
-                values: values
-                    .iter()
-                    .map(|value| value.reverse_translate(schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-                fields: fields.clone(),
-            },
-            Expr::Named { expr, name } => Expr::Named {
-                expr: Box::new(expr.reverse_translate(schema, options)?),
-                name: name.clone(),
-            },
-            Expr::Dictionary(fields) => Expr::Dictionary(
-                fields
-                    .iter()
-                    .map(|field| {
-                        Ok(sqlparser::ast::DictionaryField {
-                            key: field.key.clone(),
-                            value: Box::new(field.value.reverse_translate(schema, options)?),
+            Expr::Struct { values, fields } => {
+                Expr::Struct {
+                    values: values
+                        .iter()
+                        .map(|value| value.reverse_translate(schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    fields: fields.clone(),
+                }
+            }
+            Expr::Named { expr, name } => {
+                Expr::Named {
+                    expr: Box::new(expr.reverse_translate(schema, options)?),
+                    name: name.clone(),
+                }
+            }
+            Expr::Dictionary(fields) => {
+                Expr::Dictionary(
+                    fields
+                        .iter()
+                        .map(|field| {
+                            Ok(sqlparser::ast::DictionaryField {
+                                key: field.key.clone(),
+                                value: Box::new(field.value.reverse_translate(schema, options)?),
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?,
-            ),
-            Expr::Map(map) => Expr::Map(sqlparser::ast::Map {
-                entries: map
-                    .entries
-                    .iter()
-                    .map(|entry| {
-                        Ok(sqlparser::ast::MapEntry {
-                            key: Box::new(entry.key.reverse_translate(schema, options)?),
-                            value: Box::new(entry.value.reverse_translate(schema, options)?),
+                        .collect::<Result<Vec<_>, Error>>()?,
+                )
+            }
+            Expr::Map(map) => {
+                Expr::Map(sqlparser::ast::Map {
+                    entries: map
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            Ok(sqlparser::ast::MapEntry {
+                                key: Box::new(entry.key.reverse_translate(schema, options)?),
+                                value: Box::new(entry.value.reverse_translate(schema, options)?),
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?,
-            }),
+                        .collect::<Result<Vec<_>, Error>>()?,
+                })
+            }
 
             // Handle TRIM
             Expr::Trim { expr, trim_where, trim_what, trim_characters } => {
@@ -494,15 +510,19 @@ impl ReverseTranslator for Expr {
                 Expr::OuterJoin(Box::new(inner.reverse_translate(schema, options)?))
             }
             Expr::Prior(inner) => Expr::Prior(Box::new(inner.reverse_translate(schema, options)?)),
-            Expr::Lambda(lambda) => Expr::Lambda(sqlparser::ast::LambdaFunction {
-                params: lambda.params.clone(),
-                body: Box::new(lambda.body.reverse_translate(schema, options)?),
-                syntax: lambda.syntax,
-            }),
-            Expr::MemberOf(member) => Expr::MemberOf(sqlparser::ast::MemberOf {
-                value: Box::new(member.value.reverse_translate(schema, options)?),
-                array: Box::new(member.array.reverse_translate(schema, options)?),
-            }),
+            Expr::Lambda(lambda) => {
+                Expr::Lambda(sqlparser::ast::LambdaFunction {
+                    params: lambda.params.clone(),
+                    body: Box::new(lambda.body.reverse_translate(schema, options)?),
+                    syntax: lambda.syntax,
+                })
+            }
+            Expr::MemberOf(member) => {
+                Expr::MemberOf(sqlparser::ast::MemberOf {
+                    value: Box::new(member.value.reverse_translate(schema, options)?),
+                    array: Box::new(member.array.reverse_translate(schema, options)?),
+                })
+            }
 
             _ => {
                 let variant_name = expr_variant_name(self);

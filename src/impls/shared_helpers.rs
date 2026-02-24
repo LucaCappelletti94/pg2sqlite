@@ -53,8 +53,12 @@ fn translate_function_arg_expr<D: TranslationDirection>(
     options: &Pg2SqliteOptions,
 ) -> Result<FunctionArgExpr, Error> {
     Ok(match arg {
-        FunctionArgExpr::Expr(expr) => FunctionArgExpr::Expr(D::translate_expr(expr, schema, options)?),
-        FunctionArgExpr::QualifiedWildcard(name) => FunctionArgExpr::QualifiedWildcard(name.clone()),
+        FunctionArgExpr::Expr(expr) => {
+            FunctionArgExpr::Expr(D::translate_expr(expr, schema, options)?)
+        }
+        FunctionArgExpr::QualifiedWildcard(name) => {
+            FunctionArgExpr::QualifiedWildcard(name.clone())
+        }
         FunctionArgExpr::Wildcard => FunctionArgExpr::Wildcard,
     })
 }
@@ -65,16 +69,20 @@ fn translate_function_arg<D: TranslationDirection>(
     options: &Pg2SqliteOptions,
 ) -> Result<FunctionArg, Error> {
     Ok(match arg {
-        FunctionArg::Named { name, arg, operator } => FunctionArg::Named {
-            name: name.clone(),
-            arg: translate_function_arg_expr::<D>(arg, schema, options)?,
-            operator: operator.clone(),
-        },
-        FunctionArg::ExprNamed { name, arg, operator } => FunctionArg::ExprNamed {
-            name: D::translate_expr(name, schema, options)?,
-            arg: translate_function_arg_expr::<D>(arg, schema, options)?,
-            operator: operator.clone(),
-        },
+        FunctionArg::Named { name, arg, operator } => {
+            FunctionArg::Named {
+                name: name.clone(),
+                arg: translate_function_arg_expr::<D>(arg, schema, options)?,
+                operator: operator.clone(),
+            }
+        }
+        FunctionArg::ExprNamed { name, arg, operator } => {
+            FunctionArg::ExprNamed {
+                name: D::translate_expr(name, schema, options)?,
+                arg: translate_function_arg_expr::<D>(arg, schema, options)?,
+                operator: operator.clone(),
+            }
+        }
         FunctionArg::Unnamed(arg) => {
             FunctionArg::Unnamed(translate_function_arg_expr::<D>(arg, schema, options)?)
         }
@@ -131,7 +139,9 @@ fn translate_table_version<D: TranslationDirection>(
         TableVersion::VersionAsOf(expr) => {
             TableVersion::VersionAsOf(D::translate_expr(expr, schema, options)?)
         }
-        TableVersion::Function(expr) => TableVersion::Function(D::translate_expr(expr, schema, options)?),
+        TableVersion::Function(expr) => {
+            TableVersion::Function(D::translate_expr(expr, schema, options)?)
+        }
     })
 }
 
@@ -155,11 +165,7 @@ fn translate_table_sample_bucket<D: TranslationDirection>(
     Ok(TableSampleBucket {
         bucket: bucket.bucket.clone(),
         total: bucket.total.clone(),
-        on: bucket
-            .on
-            .as_ref()
-            .map(|expr| D::translate_expr(expr, schema, options))
-            .transpose()?,
+        on: bucket.on.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?,
     })
 }
 
@@ -201,9 +207,11 @@ fn translate_table_sample_kind<D: TranslationDirection>(
                 sample, schema, options,
             )?))
         }
-        TableSampleKind::AfterTableAlias(sample) => TableSampleKind::AfterTableAlias(Box::new(
-            translate_table_sample::<D>(sample, schema, options)?,
-        )),
+        TableSampleKind::AfterTableAlias(sample) => {
+            TableSampleKind::AfterTableAlias(Box::new(translate_table_sample::<D>(
+                sample, schema, options,
+            )?))
+        }
     })
 }
 
@@ -264,18 +272,24 @@ fn translate_pivot_value_source<D: TranslationDirection>(
     options: &Pg2SqliteOptions,
 ) -> Result<PivotValueSource, Error> {
     Ok(match value_source {
-        PivotValueSource::List(values) => PivotValueSource::List(
-            values
-                .iter()
-                .map(|value| translate_expr_with_alias::<D>(value, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        PivotValueSource::Any(order_by) => PivotValueSource::Any(
-            order_by
-                .iter()
-                .map(|order_by_expr| translate_order_by_expr::<D>(order_by_expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
+        PivotValueSource::List(values) => {
+            PivotValueSource::List(
+                values
+                    .iter()
+                    .map(|value| translate_expr_with_alias::<D>(value, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        PivotValueSource::Any(order_by) => {
+            PivotValueSource::Any(
+                order_by
+                    .iter()
+                    .map(|order_by_expr| {
+                        translate_order_by_expr::<D>(order_by_expr, schema, options)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
         PivotValueSource::Subquery(query) => {
             PivotValueSource::Subquery(Box::new(D::translate_query(query, schema, options)?))
         }
@@ -287,7 +301,10 @@ fn translate_measure<D: TranslationDirection>(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Measure, Error> {
-    Ok(Measure { expr: D::translate_expr(&measure.expr, schema, options)?, alias: measure.alias.clone() })
+    Ok(Measure {
+        expr: D::translate_expr(&measure.expr, schema, options)?,
+        alias: measure.alias.clone(),
+    })
 }
 
 fn translate_symbol_definition<D: TranslationDirection>(
@@ -521,30 +538,32 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             json_path,
             sample,
             index_hints,
-        } => TableFactor::Table {
-            name: name.clone(),
-            alias: alias.clone(),
-            args: args
-                .as_ref()
-                .map(|args| translate_table_function_args::<D>(args, schema, options))
-                .transpose()?,
-            with_hints: with_hints
-                .iter()
-                .map(|hint| D::translate_expr(hint, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            version: version
-                .as_ref()
-                .map(|version| translate_table_version::<D>(version, schema, options))
-                .transpose()?,
-            with_ordinality: *with_ordinality,
-            partitions: partitions.clone(),
-            json_path: json_path.clone(),
-            sample: sample
-                .as_ref()
-                .map(|sample| translate_table_sample_kind::<D>(sample, schema, options))
-                .transpose()?,
-            index_hints: index_hints.clone(),
-        },
+        } => {
+            TableFactor::Table {
+                name: name.clone(),
+                alias: alias.clone(),
+                args: args
+                    .as_ref()
+                    .map(|args| translate_table_function_args::<D>(args, schema, options))
+                    .transpose()?,
+                with_hints: with_hints
+                    .iter()
+                    .map(|hint| D::translate_expr(hint, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                version: version
+                    .as_ref()
+                    .map(|version| translate_table_version::<D>(version, schema, options))
+                    .transpose()?,
+                with_ordinality: *with_ordinality,
+                partitions: partitions.clone(),
+                json_path: json_path.clone(),
+                sample: sample
+                    .as_ref()
+                    .map(|sample| translate_table_sample_kind::<D>(sample, schema, options))
+                    .transpose()?,
+                index_hints: index_hints.clone(),
+            }
+        }
         TableFactor::Derived { subquery, lateral, alias, sample } => {
             TableFactor::Derived {
                 subquery: Box::new(D::translate_query(subquery, schema, options)?),
@@ -556,60 +575,60 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                     .transpose()?,
             }
         }
-        TableFactor::TableFunction { expr, alias } => TableFactor::TableFunction {
-            expr: D::translate_expr(expr, schema, options)?,
-            alias: alias.clone(),
-        },
-        TableFactor::Function { lateral, name, args, alias } => TableFactor::Function {
-            lateral: *lateral,
-            name: name.clone(),
-            args: args
-                .iter()
-                .map(|arg| translate_function_arg::<D>(arg, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            alias: alias.clone(),
-        },
+        TableFactor::TableFunction { expr, alias } => {
+            TableFactor::TableFunction {
+                expr: D::translate_expr(expr, schema, options)?,
+                alias: alias.clone(),
+            }
+        }
+        TableFactor::Function { lateral, name, args, alias } => {
+            TableFactor::Function {
+                lateral: *lateral,
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| translate_function_arg::<D>(arg, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                alias: alias.clone(),
+            }
+        }
         TableFactor::UNNEST {
             alias,
             array_exprs,
             with_offset,
             with_offset_alias,
             with_ordinality,
-        } => TableFactor::UNNEST {
-            alias: alias.clone(),
-            array_exprs: array_exprs
-                .iter()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            with_offset: *with_offset,
-            with_offset_alias: with_offset_alias.clone(),
-            with_ordinality: *with_ordinality,
-        },
-        TableFactor::JsonTable {
-            json_expr,
-            json_path,
-            columns,
-            alias,
-        } => TableFactor::JsonTable {
-            json_expr: D::translate_expr(json_expr, schema, options)?,
-            json_path: json_path.clone(),
-            columns: columns
-                .iter()
-                .map(|column| translate_json_table_column::<D>(column, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            alias: alias.clone(),
-        },
-        TableFactor::OpenJsonTable {
-            json_expr,
-            json_path,
-            columns,
-            alias,
-        } => TableFactor::OpenJsonTable {
-            json_expr: D::translate_expr(json_expr, schema, options)?,
-            json_path: json_path.clone(),
-            columns: columns.clone(),
-            alias: alias.clone(),
-        },
+        } => {
+            TableFactor::UNNEST {
+                alias: alias.clone(),
+                array_exprs: array_exprs
+                    .iter()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                with_offset: *with_offset,
+                with_offset_alias: with_offset_alias.clone(),
+                with_ordinality: *with_ordinality,
+            }
+        }
+        TableFactor::JsonTable { json_expr, json_path, columns, alias } => {
+            TableFactor::JsonTable {
+                json_expr: D::translate_expr(json_expr, schema, options)?,
+                json_path: json_path.clone(),
+                columns: columns
+                    .iter()
+                    .map(|column| translate_json_table_column::<D>(column, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                alias: alias.clone(),
+            }
+        }
+        TableFactor::OpenJsonTable { json_expr, json_path, columns, alias } => {
+            TableFactor::OpenJsonTable {
+                json_expr: D::translate_expr(json_expr, schema, options)?,
+                json_path: json_path.clone(),
+                columns: columns.clone(),
+                alias: alias.clone(),
+            }
+        }
         TableFactor::NestedJoin { table_with_joins, alias } => {
             TableFactor::NestedJoin {
                 table_with_joins: Box::new(translate_table_with_joins::<D>(
@@ -627,23 +646,27 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             value_source,
             default_on_null,
             alias,
-        } => TableFactor::Pivot {
-            table: Box::new(translate_table_factor::<D>(table, schema, options)?),
-            aggregate_functions: aggregate_functions
-                .iter()
-                .map(|expr_with_alias| translate_expr_with_alias::<D>(expr_with_alias, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            value_column: value_column
-                .iter()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            value_source: translate_pivot_value_source::<D>(value_source, schema, options)?,
-            default_on_null: default_on_null
-                .as_ref()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .transpose()?,
-            alias: alias.clone(),
-        },
+        } => {
+            TableFactor::Pivot {
+                table: Box::new(translate_table_factor::<D>(table, schema, options)?),
+                aggregate_functions: aggregate_functions
+                    .iter()
+                    .map(|expr_with_alias| {
+                        translate_expr_with_alias::<D>(expr_with_alias, schema, options)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                value_column: value_column
+                    .iter()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                value_source: translate_pivot_value_source::<D>(value_source, schema, options)?,
+                default_on_null: default_on_null
+                    .as_ref()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .transpose()?,
+                alias: alias.clone(),
+            }
+        }
         TableFactor::Unpivot { table, value, name, columns, null_inclusion, alias } => {
             TableFactor::Unpivot {
                 table: Box::new(translate_table_factor::<D>(table, schema, options)?),
@@ -669,75 +692,72 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             pattern,
             symbols,
             alias,
-        } => TableFactor::MatchRecognize {
-            table: Box::new(translate_table_factor::<D>(table, schema, options)?),
-            partition_by: partition_by
-                .iter()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            order_by: order_by
-                .iter()
-                .map(|order_by_expr| translate_order_by_expr::<D>(order_by_expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            measures: measures
-                .iter()
-                .map(|measure| translate_measure::<D>(measure, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            rows_per_match: rows_per_match.clone(),
-            after_match_skip: after_match_skip.clone(),
-            pattern: pattern.clone(),
-            symbols: symbols
-                .iter()
-                .map(|symbol| translate_symbol_definition::<D>(symbol, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            alias: alias.clone(),
-        },
-        TableFactor::XmlTable {
-            namespaces,
-            row_expression,
-            passing,
-            columns,
-            alias,
-        } => TableFactor::XmlTable {
-            namespaces: namespaces
-                .iter()
-                .map(|namespace| translate_xml_namespace_definition::<D>(namespace, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            row_expression: D::translate_expr(row_expression, schema, options)?,
-            passing: translate_xml_passing_clause::<D>(passing, schema, options)?,
-            columns: columns
-                .iter()
-                .map(|column| translate_xml_table_column::<D>(column, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            alias: alias.clone(),
-        },
-        TableFactor::SemanticView {
-            name,
-            dimensions,
-            metrics,
-            facts,
-            where_clause,
-            alias,
-        } => TableFactor::SemanticView {
-            name: name.clone(),
-            dimensions: dimensions
-                .iter()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            metrics: metrics
-                .iter()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            facts: facts
-                .iter()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            where_clause: where_clause
-                .as_ref()
-                .map(|expr| D::translate_expr(expr, schema, options))
-                .transpose()?,
-            alias: alias.clone(),
-        },
+        } => {
+            TableFactor::MatchRecognize {
+                table: Box::new(translate_table_factor::<D>(table, schema, options)?),
+                partition_by: partition_by
+                    .iter()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                order_by: order_by
+                    .iter()
+                    .map(|order_by_expr| {
+                        translate_order_by_expr::<D>(order_by_expr, schema, options)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                measures: measures
+                    .iter()
+                    .map(|measure| translate_measure::<D>(measure, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                rows_per_match: rows_per_match.clone(),
+                after_match_skip: after_match_skip.clone(),
+                pattern: pattern.clone(),
+                symbols: symbols
+                    .iter()
+                    .map(|symbol| translate_symbol_definition::<D>(symbol, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                alias: alias.clone(),
+            }
+        }
+        TableFactor::XmlTable { namespaces, row_expression, passing, columns, alias } => {
+            TableFactor::XmlTable {
+                namespaces: namespaces
+                    .iter()
+                    .map(|namespace| {
+                        translate_xml_namespace_definition::<D>(namespace, schema, options)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                row_expression: D::translate_expr(row_expression, schema, options)?,
+                passing: translate_xml_passing_clause::<D>(passing, schema, options)?,
+                columns: columns
+                    .iter()
+                    .map(|column| translate_xml_table_column::<D>(column, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                alias: alias.clone(),
+            }
+        }
+        TableFactor::SemanticView { name, dimensions, metrics, facts, where_clause, alias } => {
+            TableFactor::SemanticView {
+                name: name.clone(),
+                dimensions: dimensions
+                    .iter()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                metrics: metrics
+                    .iter()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                facts: facts
+                    .iter()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .transpose()?,
+                alias: alias.clone(),
+            }
+        }
     })
 }
 

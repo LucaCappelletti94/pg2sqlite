@@ -971,25 +971,29 @@ fn translate_access_expr(
 ) -> Result<AccessExpr, crate::errors::Error> {
     Ok(match access {
         AccessExpr::Dot(expr) => AccessExpr::Dot(expr.translate(schema, options)?),
-        AccessExpr::Subscript(subscript) => AccessExpr::Subscript(match subscript {
-            Subscript::Index { index } => {
-                Subscript::Index { index: index.translate(schema, options)? }
-            }
-            Subscript::Slice { lower_bound, upper_bound, stride } => Subscript::Slice {
-                lower_bound: lower_bound
-                    .as_ref()
-                    .map(|expr| expr.translate(schema, options))
-                    .transpose()?,
-                upper_bound: upper_bound
-                    .as_ref()
-                    .map(|expr| expr.translate(schema, options))
-                    .transpose()?,
-                stride: stride
-                    .as_ref()
-                    .map(|expr| expr.translate(schema, options))
-                    .transpose()?,
-            },
-        }),
+        AccessExpr::Subscript(subscript) => {
+            AccessExpr::Subscript(match subscript {
+                Subscript::Index { index } => {
+                    Subscript::Index { index: index.translate(schema, options)? }
+                }
+                Subscript::Slice { lower_bound, upper_bound, stride } => {
+                    Subscript::Slice {
+                        lower_bound: lower_bound
+                            .as_ref()
+                            .map(|expr| expr.translate(schema, options))
+                            .transpose()?,
+                        upper_bound: upper_bound
+                            .as_ref()
+                            .map(|expr| expr.translate(schema, options))
+                            .transpose()?,
+                        stride: stride
+                            .as_ref()
+                            .map(|expr| expr.translate(schema, options))
+                            .transpose()?,
+                    }
+                }
+            })
+        }
     })
 }
 

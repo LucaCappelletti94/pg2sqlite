@@ -37,9 +37,7 @@ fn translate_function(
         .0
         .last()
         .and_then(|part| part.as_ident())
-        .map_or_else(|| name.to_string().to_lowercase(), |ident| {
-            ident.value.to_ascii_lowercase()
-        });
+        .map_or_else(|| name.to_string().to_lowercase(), |ident| ident.value.to_ascii_lowercase());
 
     match original_name.as_str() {
         "least" => FunctionTranslation::Rename("MIN".to_string()),

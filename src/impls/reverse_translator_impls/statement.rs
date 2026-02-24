@@ -7,10 +7,10 @@ use sqlparser::ast::{
     FunctionArguments, GroupByExpr, Insert, JoinConstraint, JoinOperator, JsonPathElem,
     JsonTableColumn, LimitClause, Measure, ObjectName, OrderByExpr, PivotValueSource, Query,
     Select, SelectItem, SetExpr, Setting, Statement, Subscript, SymbolDefinition, Table,
-    TableFactor, TableFunctionArgs, TableObject, TableSample, TableSampleBucket,
-    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, Update,
-    UpdateTableFromKind, Values, WindowType, WithFill, XmlNamespaceDefinition,
-    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
+    TableFactor, TableFunctionArgs, TableObject, TableSample, TableSampleBucket, TableSampleKind,
+    TableSampleQuantity, TableVersion, TableWithJoins, Update, UpdateTableFromKind, Values,
+    WindowType, WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause,
+    XmlTableColumn, XmlTableColumnOption,
 };
 
 use crate::{
@@ -32,7 +32,8 @@ fn strip_identifier_quotes(name: &str) -> &str {
     name
 }
 
-/// Checks whether an identifier string ends with a suffix, ignoring outer quotes.
+/// Checks whether an identifier string ends with a suffix, ignoring outer
+/// quotes.
 fn identifier_has_suffix(name: &str, suffix: &str) -> bool {
     strip_identifier_quotes(name).ends_with(suffix)
 }
@@ -73,7 +74,10 @@ fn check_table_command_for_rls(table: &Table, options: &Pg2SqliteOptions) -> Res
             .map_or_else(|| table_name.clone(), |schema| format!("{schema}.{table_name}"));
         let suffix = options.get_rls_table_suffix();
         if identifier_has_suffix(table_name, suffix) {
-            return Err(Error::RlsTableDetected { table_name: full_name, suffix: suffix.to_string() });
+            return Err(Error::RlsTableDetected {
+                table_name: full_name,
+                suffix: suffix.to_string(),
+            });
         }
     }
     Ok(())
@@ -145,7 +149,10 @@ fn check_table_sample_bucket_for_rls(
     Ok(())
 }
 
-fn check_table_sample_for_rls(sample: &TableSample, options: &Pg2SqliteOptions) -> Result<(), Error> {
+fn check_table_sample_for_rls(
+    sample: &TableSample,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
     if let Some(quantity) = &sample.quantity {
         check_table_sample_quantity_for_rls(quantity, options)?;
     }
@@ -326,7 +333,9 @@ fn check_join_operator_for_rls(
         | JoinOperator::Anti(constraint)
         | JoinOperator::LeftAnti(constraint)
         | JoinOperator::RightAnti(constraint)
-        | JoinOperator::StraightJoin(constraint) => check_join_constraint_for_rls(constraint, options),
+        | JoinOperator::StraightJoin(constraint) => {
+            check_join_constraint_for_rls(constraint, options)
+        }
         JoinOperator::AsOf { constraint, match_condition } => {
             check_join_constraint_for_rls(constraint, options)?;
             check_expr_for_rls(match_condition, options)
@@ -456,12 +465,7 @@ fn check_table_factor_for_rls(
             Ok(())
         }
         TableFactor::MatchRecognize {
-            table,
-            partition_by,
-            order_by,
-            measures,
-            symbols,
-            ..
+            table, partition_by, order_by, measures, symbols, ..
         } => {
             check_table_factor_for_rls(table, options)?;
             check_expr_slice_for_rls(partition_by, options)?;
@@ -596,21 +600,23 @@ fn check_compound_access_for_rls(
 fn check_access_expr_for_rls(access: &AccessExpr, options: &Pg2SqliteOptions) -> Result<(), Error> {
     match access {
         AccessExpr::Dot(expr) => check_expr_for_rls(expr, options),
-        AccessExpr::Subscript(subscript) => match subscript {
-            Subscript::Index { index } => check_expr_for_rls(index, options),
-            Subscript::Slice { lower_bound, upper_bound, stride } => {
-                if let Some(lower_bound) = lower_bound {
-                    check_expr_for_rls(lower_bound, options)?;
+        AccessExpr::Subscript(subscript) => {
+            match subscript {
+                Subscript::Index { index } => check_expr_for_rls(index, options),
+                Subscript::Slice { lower_bound, upper_bound, stride } => {
+                    if let Some(lower_bound) = lower_bound {
+                        check_expr_for_rls(lower_bound, options)?;
+                    }
+                    if let Some(upper_bound) = upper_bound {
+                        check_expr_for_rls(upper_bound, options)?;
+                    }
+                    if let Some(stride) = stride {
+                        check_expr_for_rls(stride, options)?;
+                    }
+                    Ok(())
                 }
-                if let Some(upper_bound) = upper_bound {
-                    check_expr_for_rls(upper_bound, options)?;
-                }
-                if let Some(stride) = stride {
-                    check_expr_for_rls(stride, options)?;
-                }
-                Ok(())
             }
-        },
+        }
     }
 }
 
@@ -720,7 +726,9 @@ fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Err
         Expr::CompoundFieldAccess { root, access_chain } => {
             check_compound_access_for_rls(root, access_chain, options)
         }
-        Expr::InUnnest { expr, array_expr, .. } => check_expr_pair_for_rls(expr, array_expr, options),
+        Expr::InUnnest { expr, array_expr, .. } => {
+            check_expr_pair_for_rls(expr, array_expr, options)
+        }
         Expr::Struct { values, .. } => check_expr_slice_for_rls(values, options),
         Expr::Dictionary(fields) => {
             for field in fields {
@@ -1004,7 +1012,10 @@ impl ReverseTranslator for Statement {
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
-        ast::{AccessExpr, Expr, LimitClause, Offset, Query, SetExpr, Statement, Subscript, TableFactor},
+        ast::{
+            AccessExpr, Expr, LimitClause, Offset, Query, SetExpr, Statement, Subscript,
+            TableFactor,
+        },
         dialect::PostgreSqlDialect,
         parser::Parser,
     };

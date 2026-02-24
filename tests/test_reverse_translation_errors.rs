@@ -526,7 +526,6 @@ fn rls_table_in_table_function_argument_subquery_produces_error() {
     );
 }
 
-
 // ==================== Multiple statements ====================
 
 #[test]
