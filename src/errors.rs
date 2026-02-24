@@ -28,6 +28,18 @@ pub enum Error {
     /// Error when a feature is not supported in `SQLite`.
     #[error("Unsupported SQLite feature: {0}")]
     UnsupportedSQLiteFeature(String),
+    /// Error when reverse RLS scanning encounters an expression variant that is
+    /// not explicitly handled.
+    #[error(
+        "Reverse RLS scanner encountered unsupported expression variant '{expr_variant}'. \
+         Refusing to continue to avoid fail-open behavior. Expression: {expression}"
+    )]
+    UnsupportedRlsExpressionVariant {
+        /// Expression variant name.
+        expr_variant: String,
+        /// SQL rendering of the expression.
+        expression: String,
+    },
     /// Error when a session variable pattern is encountered but no mapping is
     /// configured.
     #[error(

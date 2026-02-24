@@ -16,7 +16,7 @@ use sqlparser::ast::{
 
 use crate::{
     errors::Error,
-    impls::{object_name::last_ident, shared_helpers::statement_variant_name},
+    impls::{object_name::last_ident, shared_helpers::{expr_variant_name, statement_variant_name}},
     prelude::{Pg2SqliteOptions, ReverseTranslator},
     traits::TranslationOptions,
 };
@@ -647,6 +647,12 @@ fn check_json_path_for_rls(
 #[allow(clippy::too_many_lines)]
 fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Error> {
     match expr {
+        Expr::Identifier(_)
+        | Expr::CompoundIdentifier(_)
+        | Expr::Value(_)
+        | Expr::TypedString(_)
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(_, _) => Ok(()),
         Expr::Subquery(query) => check_query_for_rls(query, options),
         Expr::Exists { subquery, .. } => check_query_for_rls(subquery, options),
         Expr::InSubquery { expr, subquery, .. } => {
@@ -758,7 +764,10 @@ fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Err
         }
         Expr::Lambda(lambda) => check_expr_for_rls(&lambda.body, options),
         Expr::MemberOf(member) => check_expr_pair_for_rls(&member.value, &member.array, options),
-        _ => Ok(()),
+        other @ Expr::MatchAgainst { .. } => Err(Error::UnsupportedRlsExpressionVariant {
+            expr_variant: expr_variant_name(other),
+            expression: other.to_string(),
+        }),
     }
 }
 
@@ -1177,6 +1186,7 @@ mod tests {
         check_expr_for_rls, check_limit_clause_for_rls, check_query_for_rls,
         check_set_expr_for_rls, check_table_factor_for_rls,
     };
+    use crate::errors::Error;
     use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
 
     fn empty_schema() -> ParserDB {
@@ -1449,5 +1459,22 @@ mod tests {
         let err = check_expr_for_rls(&expr, &options)
             .expect_err("Function subquery arguments should be checked for RLS-backed tables");
         assert!(err.to_string().contains("users_rls"));
+    }
+
+    #[test]
+    fn check_expr_for_rls_rejects_unhandled_match_against_variant() {
+        let options = Pg2SqliteOptions::default();
+        let expr = Expr::MatchAgainst {
+            columns: vec![sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new(
+                "body",
+            )])],
+            match_value: sqlparser::ast::Value::SingleQuotedString("term".to_string()),
+            opt_search_modifier: None,
+        };
+
+        let err = check_expr_for_rls(&expr, &options)
+            .expect_err("unhandled expression variants must fail closed in RLS checks");
+        assert!(matches!(err, Error::UnsupportedRlsExpressionVariant { .. }));
+        assert!(err.to_string().contains("MatchAgainst"));
     }
 }
