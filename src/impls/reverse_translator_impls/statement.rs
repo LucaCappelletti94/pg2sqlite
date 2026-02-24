@@ -3,14 +3,15 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    AccessExpr, Delete, Expr, ExprWithAlias, FromTable, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Insert, JoinConstraint, JoinOperator, JsonPathElem,
-    JsonTableColumn, LimitClause, Measure, ObjectName, OrderByExpr, PivotValueSource, Query,
-    Select, SelectItem, SetExpr, Setting, Statement, Subscript, SymbolDefinition, Table,
-    TableFactor, TableFunctionArgs, TableObject, TableSample, TableSampleBucket, TableSampleKind,
-    TableSampleQuantity, TableVersion, TableWithJoins, Update, UpdateTableFromKind, Values,
-    WindowType, WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause,
-    XmlTableColumn, XmlTableColumnOption,
+    AccessExpr, Assignment, ConnectByKind, Delete, Expr, ExprWithAlias, ExprWithAliasAndOrderBy,
+    FromTable, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Insert,
+    JoinConstraint, JoinOperator, JsonPathElem, JsonTableColumn, LimitClause, Measure, ObjectName,
+    OrderByExpr, PipeOperator, PivotValueSource, Query, Select, SelectItem, SetExpr, Setting,
+    Statement, Subscript, SymbolDefinition, Table, TableFactor, TableFunctionArgs, TableObject,
+    TableSample, TableSampleBucket, TableSampleKind, TableSampleQuantity, TableVersion,
+    TableWithJoins, Update, UpdateTableFromKind, Values, WindowType, WithFill,
+    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
+    XmlTableColumnOption,
 };
 
 use crate::{
@@ -519,6 +520,16 @@ fn check_expr_slice_for_rls(exprs: &[Expr], options: &Pg2SqliteOptions) -> Resul
     Ok(())
 }
 
+fn check_expr_matrix_for_rls(
+    exprs: &[Vec<Expr>],
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    for group in exprs {
+        check_expr_slice_for_rls(group, options)?;
+    }
+    Ok(())
+}
+
 fn check_case_expr_for_rls(
     operand: Option<&Expr>,
     conditions: &[sqlparser::ast::CaseWhen],
@@ -683,6 +694,9 @@ fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Err
         | Expr::RLike { expr, pattern, .. } => check_expr_pair_for_rls(expr, pattern, options),
         Expr::Tuple(exprs) => check_expr_slice_for_rls(exprs, options),
         Expr::Array(array) => check_expr_slice_for_rls(&array.elem, options),
+        Expr::GroupingSets(exprs) | Expr::Cube(exprs) | Expr::Rollup(exprs) => {
+            check_expr_matrix_for_rls(exprs, options)
+        }
         Expr::Case { operand, conditions, else_result, .. } => {
             check_case_expr_for_rls(operand.as_deref(), conditions, else_result.as_deref(), options)
         }
@@ -761,6 +775,10 @@ fn check_select_item_for_rls(item: &SelectItem, options: &Pg2SqliteOptions) -> R
 fn check_select_for_rls(select: &Select, options: &Pg2SqliteOptions) -> Result<(), Error> {
     check_from_clause_for_rls(&select.from, options)?;
 
+    if let Some(prewhere) = &select.prewhere {
+        check_expr_for_rls(prewhere, options)?;
+    }
+
     if let Some(selection) = &select.selection {
         check_expr_for_rls(selection, options)?;
     }
@@ -777,6 +795,19 @@ fn check_select_for_rls(select: &Select, options: &Pg2SqliteOptions) -> Result<(
         for expr in exprs {
             check_expr_for_rls(expr, options)?;
         }
+    }
+
+    for expr in &select.cluster_by {
+        check_expr_for_rls(expr, options)?;
+    }
+    for expr in &select.distribute_by {
+        check_expr_for_rls(expr, options)?;
+    }
+    for order_by_expr in &select.sort_by {
+        check_order_by_expr_for_rls(order_by_expr, options)?;
+    }
+    for connect_by in &select.connect_by {
+        check_connect_by_for_rls(connect_by, options)?;
     }
 
     if let Some(qualify) = &select.qualify {
@@ -875,10 +906,20 @@ fn check_query_for_rls(query: &Query, options: &Pg2SqliteOptions) -> Result<(), 
         check_limit_clause_for_rls(limit_clause, options)?;
     }
 
+    if let Some(settings) = &query.settings {
+        for setting in settings {
+            check_setting_for_rls(setting, options)?;
+        }
+    }
+
     if let Some(fetch) = &query.fetch
         && let Some(quantity) = &fetch.quantity
     {
         check_expr_for_rls(quantity, options)?;
+    }
+
+    for pipe_operator in &query.pipe_operators {
+        check_pipe_operator_for_rls(pipe_operator, options)?;
     }
 
     Ok(())
@@ -888,17 +929,21 @@ fn check_function_for_rls(
     function: &sqlparser::ast::Function,
     options: &Pg2SqliteOptions,
 ) -> Result<(), Error> {
-    if let FunctionArguments::List(arg_list) = &function.args {
-        for arg in &arg_list.args {
-            match arg {
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. }
-                | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(expr), .. } => {
-                    check_expr_for_rls(expr, options)?;
+    match &function.args {
+        FunctionArguments::List(arg_list) => {
+            for arg in &arg_list.args {
+                match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                    | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. }
+                    | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(expr), .. } => {
+                        check_expr_for_rls(expr, options)?;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
+        FunctionArguments::Subquery(query) => check_query_for_rls(query, options)?,
+        FunctionArguments::None => {}
     }
 
     if let Some(filter) = &function.filter {
@@ -918,6 +963,110 @@ fn check_function_for_rls(
 
     for order_by_expr in &function.within_group {
         check_expr_for_rls(&order_by_expr.expr, options)?;
+    }
+
+    Ok(())
+}
+
+fn check_connect_by_for_rls(
+    connect_by: &ConnectByKind,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    match connect_by {
+        ConnectByKind::ConnectBy { relationships, .. } => {
+            for relationship in relationships {
+                check_expr_for_rls(relationship, options)?;
+            }
+        }
+        ConnectByKind::StartWith { condition, .. } => {
+            check_expr_for_rls(condition, options)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_expr_with_alias_and_order_by_for_rls(
+    expr_with_alias: &ExprWithAliasAndOrderBy,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    check_expr_with_alias_for_rls(&expr_with_alias.expr, options)
+}
+
+fn check_assignment_for_rls(
+    assignment: &Assignment,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    check_expr_for_rls(&assignment.value, options)
+}
+
+fn check_pipe_operator_for_rls(
+    pipe_operator: &PipeOperator,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    match pipe_operator {
+        PipeOperator::Limit { expr, offset } => {
+            check_expr_for_rls(expr, options)?;
+            if let Some(offset) = offset {
+                check_expr_for_rls(offset, options)?;
+            }
+        }
+        PipeOperator::Where { expr } => {
+            check_expr_for_rls(expr, options)?;
+        }
+        PipeOperator::OrderBy { exprs } => {
+            for expr in exprs {
+                check_order_by_expr_for_rls(expr, options)?;
+            }
+        }
+        PipeOperator::Select { exprs } | PipeOperator::Extend { exprs } => {
+            for expr in exprs {
+                check_select_item_for_rls(expr, options)?;
+            }
+        }
+        PipeOperator::Set { assignments } => {
+            for assignment in assignments {
+                check_assignment_for_rls(assignment, options)?;
+            }
+        }
+        PipeOperator::Aggregate { full_table_exprs, group_by_expr } => {
+            for expr in full_table_exprs {
+                check_expr_with_alias_and_order_by_for_rls(expr, options)?;
+            }
+            for expr in group_by_expr {
+                check_expr_with_alias_and_order_by_for_rls(expr, options)?;
+            }
+        }
+        PipeOperator::TableSample { sample } => {
+            check_table_sample_for_rls(sample, options)?;
+        }
+        PipeOperator::Union { queries, .. }
+        | PipeOperator::Intersect { queries, .. }
+        | PipeOperator::Except { queries, .. } => {
+            for query in queries {
+                check_query_for_rls(query, options)?;
+            }
+        }
+        PipeOperator::Call { function, .. } => {
+            check_function_for_rls(function, options)?;
+        }
+        PipeOperator::Pivot {
+            aggregate_functions,
+            value_source,
+            ..
+        } => {
+            for expr_with_alias in aggregate_functions {
+                check_expr_with_alias_for_rls(expr_with_alias, options)?;
+            }
+            check_pivot_value_source_for_rls(value_source, options)?;
+        }
+        PipeOperator::Join(join) => {
+            check_table_factor_for_rls(&join.relation, options)?;
+            check_join_operator_for_rls(&join.join_operator, options)?;
+        }
+        PipeOperator::Drop { .. }
+        | PipeOperator::As { .. }
+        | PipeOperator::Rename { .. }
+        | PipeOperator::Unpivot { .. } => {}
     }
 
     Ok(())
@@ -1216,5 +1365,89 @@ mod tests {
 
         let set_expr = SetExpr::Query(Box::new(parse_query("SELECT 1")));
         check_set_expr_for_rls(&set_expr, &options).unwrap();
+    }
+
+    #[test]
+    fn check_expr_for_rls_rejects_grouping_sets_with_rls_subquery() {
+        let options = Pg2SqliteOptions::default();
+        let expr = Expr::GroupingSets(vec![vec![Expr::Subquery(Box::new(parse_query(
+            "SELECT id FROM users_rls LIMIT 1",
+        )))]]);
+
+        let err = check_expr_for_rls(&expr, &options).expect_err(
+            "GROUPING SETS expressions with RLS-backed subqueries should be rejected",
+        );
+        assert!(err.to_string().contains("users_rls"));
+    }
+
+    #[test]
+    fn check_query_for_rls_rejects_select_side_paths_with_rls_subqueries() {
+        let options = Pg2SqliteOptions::default();
+        let mut query = parse_query("SELECT id FROM users");
+        let SetExpr::Select(select) = query.body.as_mut() else {
+            panic!("expected select");
+        };
+
+        select.prewhere = Some(Expr::Subquery(Box::new(parse_query(
+            "SELECT id FROM users_rls LIMIT 1",
+        ))));
+        select.cluster_by = vec![Expr::Subquery(Box::new(parse_query(
+            "SELECT id FROM users_rls LIMIT 1",
+        )))];
+        select.distribute_by = vec![Expr::Subquery(Box::new(parse_query(
+            "SELECT id FROM users_rls LIMIT 1",
+        )))];
+        select.sort_by = vec![sqlparser::ast::OrderByExpr {
+            expr: Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1"))),
+            options: sqlparser::ast::OrderByOptions {
+                asc: None,
+                nulls_first: None,
+            },
+            with_fill: None,
+        }];
+
+        let err = check_query_for_rls(&query, &options).expect_err(
+            "Select-side expression vectors should be traversed for RLS-backed subqueries",
+        );
+        assert!(err.to_string().contains("users_rls"));
+    }
+
+    #[test]
+    fn check_query_for_rls_rejects_query_settings_and_pipe_exprs() {
+        let options = Pg2SqliteOptions::default();
+        let mut query = parse_query("SELECT id FROM users");
+        query.settings = Some(vec![sqlparser::ast::Setting {
+            key: sqlparser::ast::Ident::new("x"),
+            value: Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1"))),
+        }]);
+        query.pipe_operators = vec![sqlparser::ast::PipeOperator::Where {
+            expr: Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1"))),
+        }];
+
+        let err = check_query_for_rls(&query, &options).expect_err(
+            "Query settings and pipe operators should be traversed for RLS-backed subqueries",
+        );
+        assert!(err.to_string().contains("users_rls"));
+    }
+
+    #[test]
+    fn check_expr_for_rls_rejects_function_subquery_arguments() {
+        let options = Pg2SqliteOptions::default();
+        let expr = Expr::Function(sqlparser::ast::Function {
+            name: sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new("array")]),
+            uses_odbc_syntax: false,
+            parameters: sqlparser::ast::FunctionArguments::None,
+            args: sqlparser::ast::FunctionArguments::Subquery(Box::new(parse_query(
+                "SELECT id FROM users_rls LIMIT 1",
+            ))),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: Vec::new(),
+        });
+
+        let err = check_expr_for_rls(&expr, &options)
+            .expect_err("Function subquery arguments should be checked for RLS-backed tables");
+        assert!(err.to_string().contains("users_rls"));
     }
 }
