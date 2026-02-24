@@ -36,6 +36,27 @@ fn get_primary_key_columns(schema: &ParserDB, table_name: &str) -> Result<Vec<St
         .ok_or_else(|| Error::TableNotFoundInSchema { table_name: table_name.to_string() })
 }
 
+/// Resolve the INSERT column list.
+///
+/// SQLite allows `INSERT ... VALUES (...)` without an explicit column list.
+/// For upsert reconstruction, we treat that form as "all table columns in
+/// schema order".
+fn resolve_insert_columns(
+    schema: &ParserDB,
+    table_name: &str,
+    explicit_columns: &[Ident],
+) -> Result<Vec<Ident>, Error> {
+    if !explicit_columns.is_empty() {
+        return Ok(explicit_columns.to_vec());
+    }
+
+    let table = schema
+        .table(None, table_name)
+        .ok_or_else(|| Error::TableNotFoundInSchema { table_name: table_name.to_string() })?;
+
+    Ok(table.columns(schema).map(|column| Ident::new(column.column_name().to_string())).collect())
+}
+
 /// Build ON CONFLICT DO UPDATE SET clause for all non-PK columns.
 /// Returns an error if the insert columns don't include all PK columns.
 fn build_upsert_on_conflict(
@@ -173,8 +194,10 @@ impl ReverseTranslator for Insert {
                         )
                     })?;
                     let pk_columns = get_primary_key_columns(schema, &table_name)?;
+                    let insert_columns =
+                        resolve_insert_columns(schema, &table_name, &self.columns)?;
                     insert.on =
-                        Some(build_upsert_on_conflict(&table_name, &pk_columns, &self.columns)?);
+                        Some(build_upsert_on_conflict(&table_name, &pk_columns, &insert_columns)?);
                 }
                 SqliteOnConflict::Rollback | SqliteOnConflict::Abort | SqliteOnConflict::Fail => {
                     // These don't have direct PostgreSQL equivalents

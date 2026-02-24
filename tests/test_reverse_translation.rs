@@ -371,6 +371,26 @@ mod errors {
     }
 
     #[test]
+    fn test_or_replace_without_column_list_uses_table_columns() {
+        let pg_ddl = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, email TEXT);";
+        let translator = setup_translator(pg_ddl);
+        let schema = translator.build_schema().unwrap();
+        let options = Pg2SqliteOptions::default();
+
+        // No explicit insert column list should still be reversible for OR REPLACE.
+        let sqlite_sql = "INSERT OR REPLACE INTO users VALUES ('abc', 'Alice', 'a@b.com')";
+        let result = translator.reverse_sql(sqlite_sql, &schema, &options);
+
+        assert!(
+            result.is_ok(),
+            "Expected OR REPLACE without column list to reverse, got: {result:?}"
+        );
+        let stmt = &result.unwrap()[0];
+        let output = stmt.to_string();
+        assert!(output.contains("ON CONFLICT"), "Expected ON CONFLICT in reversed SQL: {output}");
+    }
+
+    #[test]
     fn test_rls_table_detected_in_select() {
         let pg_ddl = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);";
         let translator = setup_translator(pg_ddl);
