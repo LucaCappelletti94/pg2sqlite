@@ -4,7 +4,7 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, Ident, ObjectName, Value, ValueWithSpan,
+    FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
 };
 
 use crate::{
@@ -23,6 +23,8 @@ enum FunctionTranslation {
     ToConcatenation,
     /// Transform to concatenation with separator (CONCAT_WS)
     ToConcatenationWithSeparator,
+    /// Transform date_trunc to strftime equivalent
+    DateTrunc,
     /// Unsupported function with error message
     Unsupported(String),
     /// No translation needed
@@ -67,14 +69,46 @@ fn translate_function(
              SELECT *, bm25(table_fts) AS rank FROM table_fts WHERE table_fts MATCH 'query' ORDER BY rank"
                 .to_string(),
         ),
-        // CONCAT(a, b, c) -> a || b || c
+        // CONCAT(a, b, c) -> COALESCE(a, '') || COALESCE(b, '') || COALESCE(c, '')
         "concat" => FunctionTranslation::ToConcatenation,
-        // CONCAT_WS(sep, a, b, c) -> a || sep || b || sep || c
+        // CONCAT_WS(sep, a, b, c) -> COALESCE(a, '') || sep || COALESCE(b, '') || sep || COALESCE(c, '')
         "concat_ws" => FunctionTranslation::ToConcatenationWithSeparator,
         // strpos(string, substring) -> INSTR(string, substring)
         "strpos" => FunctionTranslation::Rename("INSTR".to_string()),
         // chr(n) -> char(n)
         "chr" => FunctionTranslation::Rename("char".to_string()),
+        // char_length / character_length -> length (SQLite counts characters)
+        "char_length" | "character_length" => FunctionTranslation::Rename("length".to_string()),
+        // date_trunc(field, ts) -> strftime(format, ts)
+        "date_trunc" => FunctionTranslation::DateTrunc,
+        // array_agg has no SQLite equivalent (no native arrays)
+        "array_agg" => FunctionTranslation::Unsupported(
+            "array_agg is not supported in SQLite because arrays are not a native type. \
+             Use group_concat() instead: GROUP_CONCAT(column, ',')"
+                .to_string(),
+        ),
+        // split_part has no direct SQLite equivalent
+        "split_part" => FunctionTranslation::Unsupported(
+            "split_part is not supported in SQLite. \
+             Consider using INSTR() and SUBSTR() to manually split strings, \
+             or restructure the query to avoid string splitting."
+                .to_string(),
+        ),
+        // regexp_replace requires PCRE extension in SQLite
+        "regexp_replace" => FunctionTranslation::Unsupported(
+            "regexp_replace is not supported in SQLite without a PCRE extension. \
+             For literal string replacement, use REPLACE(string, pattern, replacement). \
+             For regex support, load the SQLite REGEXP extension."
+                .to_string(),
+        ),
+        // to_char has no direct SQLite equivalent
+        "to_char" => FunctionTranslation::Unsupported(
+            "to_char is not supported in SQLite. \
+             For timestamp formatting, use strftime() instead: \
+             strftime('%Y-%m-%d %H:%M:%S', column). \
+             For number formatting, use printf() or CAST."
+                .to_string(),
+        ),
         _ => FunctionTranslation::PassThrough,
     }
 }
@@ -82,6 +116,33 @@ fn translate_function(
 /// Extract expressions from function arguments.
 fn extract_arg_exprs(args: &FunctionArguments) -> Vec<&Expr> {
     function_argument_exprs(args)
+}
+
+/// Wrap an expression with COALESCE(expr, '') to handle NULL semantics.
+///
+/// PostgreSQL's CONCAT ignores NULL arguments; SQLite's `||` propagates them.
+/// Wrapping with COALESCE ensures consistent behaviour.
+fn wrap_with_coalesce(expr: Expr) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("COALESCE"))]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(String::new()),
+                    span: sqlparser::tokenizer::Span::empty(),
+                }))),
+            ],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+    })
 }
 
 /// Build a concatenation expression from a list of expressions using ||.
@@ -212,9 +273,10 @@ impl Translator for Function {
     type Options = Pg2SqliteOptions;
     type SQLiteEntry = Expr;
 
+    #[allow(clippy::too_many_lines)]
     fn translate(
         &self,
-        _schema: &Self::Schema,
+        schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         // Transform FILTER clause to CASE expression
@@ -251,8 +313,13 @@ impl Translator for Function {
                 }))
             }
             FunctionTranslation::ToConcatenation => {
-                // CONCAT(a, b, c) -> a || b || c
-                let exprs: Vec<Expr> = extract_arg_exprs(&func.args).into_iter().cloned().collect();
+                // CONCAT(a, b, c) -> COALESCE(a, '') || COALESCE(b, '') || COALESCE(c, '')
+                // PostgreSQL's CONCAT ignores NULLs; SQLite's || propagates them.
+                let exprs: Vec<Expr> = extract_arg_exprs(&func.args)
+                    .into_iter()
+                    .cloned()
+                    .map(wrap_with_coalesce)
+                    .collect();
                 build_concatenation(exprs).ok_or_else(|| {
                     crate::errors::Error::UnsupportedSQLiteFeature(
                         "CONCAT requires at least one argument".to_string(),
@@ -260,7 +327,9 @@ impl Translator for Function {
                 })
             }
             FunctionTranslation::ToConcatenationWithSeparator => {
-                // CONCAT_WS(sep, a, b, c) -> a || sep || b || sep || c
+                // CONCAT_WS(sep, a, b, c) -> COALESCE(a, '') || sep || COALESCE(b, '') || sep
+                // || COALESCE(c, '') The separator is not COALESCE-wrapped: if
+                // sep is NULL, the result is NULL.
                 let mut exprs: Vec<Expr> =
                     extract_arg_exprs(&func.args).into_iter().cloned().collect();
                 if exprs.len() < 2 {
@@ -270,8 +339,78 @@ impl Translator for Function {
                     ));
                 }
                 let separator = exprs.remove(0);
-                let first_value = exprs.remove(0);
-                Ok(build_concatenation_with_separator(&separator, first_value, exprs))
+                let first_value = wrap_with_coalesce(exprs.remove(0));
+                let remaining: Vec<Expr> = exprs.into_iter().map(wrap_with_coalesce).collect();
+                Ok(build_concatenation_with_separator(&separator, first_value, remaining))
+            }
+            FunctionTranslation::DateTrunc => {
+                // date_trunc(field, timestamp) -> strftime(format, timestamp)
+                let exprs = extract_arg_exprs(&func.args);
+                if exprs.len() != 2 {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "date_trunc requires exactly 2 arguments: date_trunc(field, timestamp)"
+                            .to_string(),
+                    ));
+                }
+                let field_expr = exprs[0];
+                let ts_expr = exprs[1].clone();
+
+                let field_str = match field_expr {
+                    Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
+                        s.to_lowercase()
+                    }
+                    _ => {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                            "date_trunc: the field argument must be a string literal \
+                             (e.g., date_trunc('day', timestamp))"
+                                .to_string(),
+                        ));
+                    }
+                };
+
+                // Map PostgreSQL truncation granularities to strftime format strings.
+                // The format string zeros out the sub-granularity components.
+                let format_str = match field_str.as_str() {
+                    "second" | "seconds" => "%Y-%m-%d %H:%M:%S",
+                    "minute" | "minutes" => "%Y-%m-%d %H:%M:00",
+                    "hour" | "hours" => "%Y-%m-%d %H:00:00",
+                    "day" | "days" => "%Y-%m-%d",
+                    "month" | "months" => "%Y-%m-01",
+                    "year" | "years" => "%Y-01-01",
+                    other => {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                            "date_trunc('{other}', ...) is not supported in SQLite. \
+                             Supported granularities: second, minute, hour, day, month, year. \
+                             Unsupported granularities (quarter, decade, century, millennium) \
+                             have no strftime equivalent."
+                        )));
+                    }
+                };
+
+                let translated_ts = ts_expr.translate(schema, options)?;
+
+                Ok(Expr::Function(Function {
+                    name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
+                    uses_odbc_syntax: false,
+                    parameters: FunctionArguments::None,
+                    args: FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args: vec![
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                                ValueWithSpan {
+                                    value: Value::SingleQuotedString(format_str.to_string()),
+                                    span: sqlparser::tokenizer::Span::empty(),
+                                },
+                            ))),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_ts)),
+                        ],
+                        clauses: vec![],
+                    }),
+                    filter: None,
+                    null_treatment: None,
+                    over: None,
+                    within_group: vec![],
+                }))
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
@@ -295,7 +434,7 @@ mod tests {
 
     use super::{
         build_concatenation_with_separator, extract_arg_exprs, transform_filter_to_case,
-        wrap_arg_with_case_filter,
+        wrap_arg_with_case_filter, wrap_with_coalesce,
     };
     use crate::prelude::{Pg2SqliteOptions, Translator};
 
@@ -381,6 +520,24 @@ mod tests {
         };
 
         let translated = func.translate(&schema, &options).expect("concat_ws should translate");
-        assert_eq!(translated.to_string(), "first_name || ',' || last_name");
+        // With COALESCE wrapping: COALESCE(first_name, '') || ',' ||
+        // COALESCE(last_name, '')
+        assert!(
+            translated.to_string().contains("COALESCE"),
+            "concat_ws should wrap values with COALESCE: {}",
+            translated
+        );
+        assert!(
+            translated.to_string().contains("first_name"),
+            "concat_ws should preserve column names: {}",
+            translated
+        );
+    }
+
+    #[test]
+    fn wrap_with_coalesce_wraps_expr_with_empty_string_default() {
+        let expr = parse_expr("col");
+        let wrapped = wrap_with_coalesce(expr);
+        assert_eq!(wrapped.to_string(), "COALESCE(col, '')");
     }
 }
