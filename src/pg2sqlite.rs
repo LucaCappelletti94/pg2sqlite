@@ -114,20 +114,8 @@ impl Pg2Sqlite {
     /// * If the SQL files could not be read.
     /// * If the SQL files could not be parsed.
     pub fn ups<P: AsRef<std::path::Path>>(directory: P) -> Result<Self, crate::errors::Error> {
-        let mut translator = Self::default();
-        // Collect all up.sql paths recursively
-        let mut up_sql_paths = Vec::new();
-        Self::collect_up_sql_paths(directory.as_ref(), &mut up_sql_paths)?;
-
-        // Sort the paths alphabetically
-        up_sql_paths.sort();
-
-        // Process each up.sql file in sorted order
-        for path in up_sql_paths {
-            translator = translator.file(path)?;
-        }
-
-        Ok(translator)
+        let up_sql_paths = Self::sorted_up_sql_paths(directory.as_ref())?;
+        Self::from_migration_paths(up_sql_paths)
     }
 
     /// Adds all of the `up.sql` migrations found under the given directory to
@@ -154,26 +142,45 @@ impl Pg2Sqlite {
         directory: P,
         stop_at: P,
     ) -> Result<Self, crate::errors::Error> {
-        let mut translator = Self::default();
-        // Collect all up.sql paths recursively
+        let up_sql_paths = Self::sorted_up_sql_paths(directory.as_ref())?;
+        let stop_index = Self::find_stop_migration_index(&up_sql_paths, stop_at.as_ref())?;
+        Self::from_migration_paths(up_sql_paths.iter().take(stop_index + 1))
+    }
+
+    fn sorted_up_sql_paths(
+        directory: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, crate::errors::Error> {
         let mut up_sql_paths = Vec::new();
-        Self::collect_up_sql_paths(directory.as_ref(), &mut up_sql_paths)?;
-
-        // Sort the paths alphabetically
+        Self::collect_up_sql_paths(directory, &mut up_sql_paths)?;
         up_sql_paths.sort();
+        Ok(up_sql_paths)
+    }
 
+    fn find_stop_migration_index(
+        up_sql_paths: &[PathBuf],
+        stop_at: &std::path::Path,
+    ) -> Result<usize, crate::errors::Error> {
         let stop_at = std::fs::canonicalize(stop_at)?;
 
-        // Process each up.sql file in sorted order
-        for path in up_sql_paths {
-            let canonical_path = std::fs::canonicalize(&path)?;
-            translator = translator.file(&path)?;
-            if canonical_path == stop_at {
-                return Ok(translator);
+        for (index, path) in up_sql_paths.iter().enumerate() {
+            if std::fs::canonicalize(path)? == stop_at {
+                return Ok(index);
             }
         }
 
         Err(crate::errors::Error::MigrationNotFound { path: stop_at.display().to_string() })
+    }
+
+    fn from_migration_paths<I, P>(paths: I) -> Result<Self, crate::errors::Error>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<std::path::Path>,
+    {
+        let mut translator = Self::default();
+        for path in paths {
+            translator = translator.file(path)?;
+        }
+        Ok(translator)
     }
 
     fn collect_up_sql_paths(

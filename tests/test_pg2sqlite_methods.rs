@@ -132,6 +132,36 @@ fn test_ups_until_stop_not_found() {
 }
 
 #[test]
+fn test_ups_until_last_migration_matches_ups() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    let dir1 = root.join("01");
+    std::fs::create_dir(&dir1).unwrap();
+    std::fs::write(dir1.join("up.sql"), "CREATE TABLE t1 (id INT);").unwrap();
+
+    let dir2 = root.join("02");
+    std::fs::create_dir(&dir2).unwrap();
+    std::fs::write(dir2.join("up.sql"), "CREATE TABLE t2 (id INT);").unwrap();
+
+    let dir3 = root.join("03");
+    std::fs::create_dir(&dir3).unwrap();
+    let last_path = dir3.join("up.sql");
+    std::fs::write(&last_path, "CREATE TABLE t3 (id INT);").unwrap();
+
+    let all =
+        Pg2Sqlite::ups(root).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let until_last = Pg2Sqlite::ups_until(root, &last_path)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap();
+
+    let all_sql = all.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let until_last_sql = until_last.iter().map(ToString::to_string).collect::<Vec<_>>();
+    assert_eq!(all_sql, until_last_sql);
+}
+
+#[test]
 fn test_translate() {
     // Basic test of translate flow, more detailed translation tests are elsewhere
     let translator = Pg2Sqlite::default().sql("CREATE TABLE test_trans (id INT);").unwrap();
