@@ -17,6 +17,7 @@ use crate::{
     impls::object_name::{append_suffix, schema_and_table_for_lookup},
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
+    translation_report::TranslationWarning,
 };
 
 fn generate_maintenance_trigger_body(
@@ -149,19 +150,20 @@ impl Translator for CreateTrigger {
 
         let function_body = if self.is_maintenance_trigger(schema) {
             generate_maintenance_trigger_body(self, schema)
+        } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
+            body
         } else {
-            match generate_standard_trigger_body(&exec_body, schema, options)? {
-                Some(body) => body,
-                None => {
-                    if options.should_fail_on_unsupported_statement() {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                            "Trigger function '{}' is missing or has no body",
-                            exec_body.func_desc.name
-                        )));
-                    }
-                    return Ok(None);
-                }
+            if options.should_fail_on_unsupported_statement() {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "Trigger function '{}' is missing or has no body",
+                    exec_body.func_desc.name
+                )));
             }
+            options.push_warning(TranslationWarning::MissingTriggerBody {
+                trigger_name: name.to_string(),
+                function_name: exec_body.func_desc.name.to_string(),
+            });
+            return Ok(None);
         };
 
         let maybe_drop_trigger = or_replace.then(|| {

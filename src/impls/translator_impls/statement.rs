@@ -22,6 +22,7 @@ use crate::{
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
+    translation_report::TranslationWarning,
 };
 
 fn inject_condition(stmt: &mut Statement, condition: Expr) -> Result<(), crate::errors::Error> {
@@ -300,27 +301,50 @@ fn append_vec0_statements_if_needed(
     Ok(())
 }
 
-fn role_can_select_table_for_object_name(
+enum RoleTableAccess {
+    Allow,
+    Deny { reason: String },
+}
+
+fn role_access_for_object_name(
     table_name: &sqlparser::ast::ObjectName,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
-) -> bool {
+) -> RoleTableAccess {
     let Some(role_name) = options.get_session_user_role() else {
-        return true;
+        return RoleTableAccess::Allow;
     };
     let Some(role) = schema.role(role_name) else {
-        return true;
+        return RoleTableAccess::Deny {
+            reason: format!("session role '{role_name}' was not found in schema"),
+        };
     };
 
     let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(table_name);
     let Some(table_name_for_lookup) = table_name_for_lookup else {
-        return true;
+        return RoleTableAccess::Deny {
+            reason: format!("could not resolve table name '{}'", table_name),
+        };
     };
     let Some(table) = schema.table(table_schema, table_name_for_lookup) else {
-        return true;
+        return RoleTableAccess::Deny {
+            reason: format!(
+                "table '{}' was not found in schema for role-filtered translation",
+                table_name_for_lookup
+            ),
+        };
     };
 
-    table.can_select(role, schema)
+    if table.can_select(role, schema) {
+        RoleTableAccess::Allow
+    } else {
+        RoleTableAccess::Deny {
+            reason: format!(
+                "role '{role_name}' has no SELECT permission on table '{}'",
+                table_name_for_lookup
+            ),
+        }
+    }
 }
 
 impl Translator for Statement {
@@ -328,6 +352,7 @@ impl Translator for Statement {
     type Options = Pg2SqliteOptions;
     type SQLiteEntry = Vec<Statement>;
 
+    #[allow(clippy::too_many_lines)]
     fn translate(
         &self,
         schema: &Self::Schema,
@@ -338,16 +363,28 @@ impl Translator for Statement {
                 translate_create_table(create_table, schema, options)?
             }
             Self::CreateIndex(create_index) => {
-                if role_can_select_table_for_object_name(&create_index.table_name, schema, options) {
-                    create_index.translate(schema, options)?
-                } else {
-                    Vec::new()
+                match role_access_for_object_name(&create_index.table_name, schema, options) {
+                    RoleTableAccess::Allow => create_index.translate(schema, options)?,
+                    RoleTableAccess::Deny { reason } => {
+                        options.push_warning(TranslationWarning::SkippedObjectForRole {
+                            object_kind: "CREATE INDEX".to_string(),
+                            object_name: create_index.table_name.to_string(),
+                            reason,
+                        });
+                        Vec::new()
+                    }
                 }
             }
 
             Self::CreateTrigger(create_trigger) => {
-                if !role_can_select_table_for_object_name(&create_trigger.table_name, schema, options)
+                if let RoleTableAccess::Deny { reason } =
+                    role_access_for_object_name(&create_trigger.table_name, schema, options)
                 {
+                    options.push_warning(TranslationWarning::SkippedObjectForRole {
+                        object_kind: "CREATE TRIGGER".to_string(),
+                        object_name: create_trigger.table_name.to_string(),
+                        reason,
+                    });
                     return Ok(Vec::new());
                 }
 
@@ -429,6 +466,10 @@ impl Translator for Statement {
                                 "Unsupported PostgreSQL DROP object type encountered: {object_type:?}"
                             )));
                         }
+                        options.push_warning(TranslationWarning::UnsupportedStatement {
+                            statement_variant: statement_variant_name(self),
+                            sql: self.to_string(),
+                        });
                         Vec::new()
                     }
                 }
@@ -446,6 +487,10 @@ impl Translator for Statement {
                 if options.should_fail_on_unsupported_statement() {
                     return Err(unsupported_statement_error(stmt));
                 }
+                options.push_warning(TranslationWarning::UnsupportedStatement {
+                    statement_variant: statement_variant_name(stmt),
+                    sql: stmt.to_string(),
+                });
                 Vec::new()
             }
         })
@@ -687,5 +732,27 @@ mod tests {
         let translated =
             trigger_stmt.translate(&schema, &options).expect("translation should succeed");
         assert!(translated.is_empty(), "non-selectable table trigger should be filtered out");
+    }
+
+    #[test]
+    fn role_filtered_create_index_is_skipped_when_table_lookup_fails() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE ROLE app_user;")
+                .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let index_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "CREATE INDEX missing_docs_title_idx ON missing_docs(title);",
+        )
+        .expect("index SQL should parse")
+        .remove(0);
+
+        let translated =
+            index_stmt.translate(&schema, &options).expect("translation should not error");
+        assert!(translated.is_empty(), "missing table should be treated as non-selectable");
     }
 }
