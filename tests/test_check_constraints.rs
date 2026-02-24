@@ -67,6 +67,39 @@ fn test_valid_check_constraint_passes_through() {
     );
 }
 
+/// A table-level CHECK with a nested function call should fail translation
+/// when removal is disabled.
+#[test]
+fn test_nested_function_check_constraint_causes_error() {
+    let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (col IS NULL OR array_length(col) > 0));";
+    let options = Pg2SqliteOptions::default();
+
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+
+    assert!(result.is_err(), "Expected translation error for nested function in CHECK");
+    let error_msg = result.unwrap_err().to_string();
+    assert!(
+        error_msg.contains("array_length") || error_msg.to_lowercase().contains("undefined"),
+        "Error should mention the nested function name, got: {error_msg}"
+    );
+}
+
+/// With `remove_unsupported_check_constraints()` nested function calls in
+/// CHECK constraints are removed as well.
+#[test]
+fn test_nested_function_check_constraint_removed_with_option() {
+    let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (col IS NULL OR array_length(col) > 0));";
+    let options = Pg2SqliteOptions::default().remove_unsupported_check_constraints();
+
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+
+    assert!(
+        !sql_output.contains("CHECK"),
+        "Nested function CHECK constraint should be removed when option is set, got: {sql_output}"
+    );
+}
+
 /// Column-level CHECK constraints are always silently dropped (regardless of
 /// the option), because they are handled at the column option level, not the
 /// table constraint level.

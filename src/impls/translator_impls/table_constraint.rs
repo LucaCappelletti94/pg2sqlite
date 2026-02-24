@@ -5,13 +5,104 @@ use sql_traits::{
     structs::ParserDB,
     traits::{DatabaseLike, TableLike},
 };
-use sqlparser::ast::{Function, TableConstraint};
+use sqlparser::ast::{AccessExpr, Array, Expr, Function, TableConstraint};
 
 use crate::{
     impls::object_name::{append_suffix, schema_and_table_for_lookup},
     options::Pg2SqliteOptions,
     prelude::{TranslationOptions, Translator},
 };
+
+fn first_function_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Function(Function { name, .. }) => Some(name.to_string()),
+        Expr::UnaryOp { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Extract { expr, .. }
+        | Expr::Ceil { expr, .. }
+        | Expr::Floor { expr, .. }
+        | Expr::Nested(expr)
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsUnknown(expr)
+        | Expr::IsNotUnknown(expr)
+        | Expr::IsTrue(expr)
+        | Expr::IsNotTrue(expr)
+        | Expr::IsFalse(expr)
+        | Expr::IsNotFalse(expr)
+        | Expr::Prefixed { value: expr, .. }
+        | Expr::Collate { expr, .. } => first_function_name(expr),
+        Expr::BinaryOp { left, right, .. }
+        | Expr::AnyOp { left, right, .. }
+        | Expr::AllOp { left, right, .. }
+        | Expr::Like { expr: left, pattern: right, .. }
+        | Expr::ILike { expr: left, pattern: right, .. }
+        | Expr::SimilarTo { expr: left, pattern: right, .. }
+        | Expr::RLike { expr: left, pattern: right, .. }
+        | Expr::Position { expr: left, r#in: right }
+        | Expr::AtTimeZone { timestamp: left, time_zone: right }
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            first_function_name(left).or_else(|| first_function_name(right))
+        }
+        Expr::Tuple(exprs) | Expr::Array(Array { elem: exprs, .. }) => {
+            exprs.iter().find_map(first_function_name)
+        }
+        Expr::InList { expr, list, .. } => {
+            first_function_name(expr).or_else(|| list.iter().find_map(first_function_name))
+        }
+        Expr::Between { expr, low, high, .. } => {
+            first_function_name(expr)
+                .or_else(|| first_function_name(low))
+                .or_else(|| first_function_name(high))
+        }
+        Expr::Case { operand, conditions, else_result, .. } => {
+            operand
+                .as_deref()
+                .and_then(first_function_name)
+                .or_else(|| {
+                    conditions.iter().find_map(|case_when| {
+                        first_function_name(&case_when.condition)
+                            .or_else(|| first_function_name(&case_when.result))
+                    })
+                })
+                .or_else(|| else_result.as_deref().and_then(first_function_name))
+        }
+        Expr::Trim { expr, trim_what, trim_characters, .. } => {
+            first_function_name(expr)
+                .or_else(|| trim_what.as_deref().and_then(first_function_name))
+                .or_else(|| {
+                    trim_characters
+                        .as_deref()
+                        .and_then(|chars| chars.iter().find_map(first_function_name))
+                })
+        }
+        Expr::Substring { expr, substring_from, substring_for, .. } => {
+            first_function_name(expr)
+                .or_else(|| substring_from.as_deref().and_then(first_function_name))
+                .or_else(|| substring_for.as_deref().and_then(first_function_name))
+        }
+        Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
+            first_function_name(expr)
+                .or_else(|| first_function_name(overlay_what))
+                .or_else(|| first_function_name(overlay_from))
+                .or_else(|| overlay_for.as_deref().and_then(first_function_name))
+        }
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            first_function_name(root).or_else(|| {
+                access_chain.iter().find_map(|access| {
+                    if let AccessExpr::Dot(expr) = access {
+                        first_function_name(expr)
+                    } else {
+                        None
+                    }
+                })
+            })
+        }
+        Expr::Interval(interval) => first_function_name(&interval.value),
+        _ => None,
+    }
+}
 
 impl Translator for TableConstraint {
     type Schema = ParserDB;
@@ -25,16 +116,14 @@ impl Translator for TableConstraint {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match self {
             Self::Check(check_constraint) => {
-                match check_constraint.expr.as_ref() {
-                    sqlparser::ast::Expr::Function(Function { name, .. }) => {
-                        let function_name = name.to_string();
-                        if options.should_remove_unsupported_check_constraints() {
-                            Ok(None)
-                        } else {
-                            Err(crate::errors::Error::UndefinedFunction(function_name))
-                        }
+                if let Some(function_name) = first_function_name(check_constraint.expr.as_ref()) {
+                    if options.should_remove_unsupported_check_constraints() {
+                        Ok(None)
+                    } else {
+                        Err(crate::errors::Error::UndefinedFunction(function_name))
                     }
-                    _ => Ok(Some(self.clone())),
+                } else {
+                    Ok(Some(self.clone()))
                 }
             }
             Self::ForeignKey(fk_constraint) => {
