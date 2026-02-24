@@ -171,3 +171,18 @@ fn now_becomes_datetime_now() {
     let output = translate(sql).unwrap();
     assert!(output.contains("datetime"), "NOW() should become datetime('now'), got: {output}");
 }
+
+#[test]
+fn schema_qualified_now_becomes_datetime_now() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY);
+               SELECT pg_catalog.now();";
+    let output = translate(sql).unwrap();
+    assert!(
+        output.contains("datetime"),
+        "pg_catalog.now() should become datetime('now'), got: {output}"
+    );
+    assert!(
+        !output.to_lowercase().contains("pg_catalog.now"),
+        "schema-qualified NOW should be rewritten, got: {output}"
+    );
+}

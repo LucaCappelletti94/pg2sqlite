@@ -51,9 +51,9 @@ pub struct VectorColumnInfo {
 /// Check if a data type is a pgvector type (vector or halfvec).
 fn is_vector_data_type(data_type: &DataType) -> bool {
     if let DataType::Custom(name, _) = data_type
-        && let Some(ident) = name.0.first().and_then(|p| p.as_ident())
+        && let Some(ident) = last_ident(name)
     {
-        let type_name = ident.value.to_lowercase();
+        let type_name = ident.value.to_ascii_lowercase();
         return type_name == "vector" || type_name == "halfvec";
     }
     false

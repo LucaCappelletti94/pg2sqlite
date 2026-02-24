@@ -34,35 +34,34 @@ impl Translator for ColumnOptionDef {
             ColumnOption::Default(expr) => {
                 match expr {
                     Expr::Function(func) => {
-                        if func.name.0.first().and_then(|s| Some(s.as_ident()?.value.as_str()))
-                            == Some("CURRENT_TIMESTAMP")
-                        {
+                        let function_name = func
+                            .name
+                            .0
+                            .last()
+                            .and_then(|part| part.as_ident())
+                            .map(|ident| ident.value.to_ascii_lowercase());
+
+                        if function_name.as_deref() == Some("current_timestamp") {
                             return Ok(Some(ColumnOptionDef {
                                 name: self.name.clone(),
                                 option: ColumnOption::Default(Expr::Function(func.clone())),
                             }));
                         }
                         // Translate UUID functions to use the configured function name
-                        let func_name =
-                            func.name.0.first().and_then(|s| Some(s.as_ident()?.value.as_str()));
-                        if let Some(name) = func_name {
-                            let is_uuid_func = matches!(
-                                name.to_lowercase().as_str(),
-                                "gen_random_uuid" | "uuidv4" | "uuidv7"
-                            );
-
-                            if is_uuid_func {
-                                let mut new_func = func.clone();
-                                new_func.name.0 = vec![sqlparser::ast::ObjectNamePart::Identifier(
-                                    sqlparser::ast::Ident::new(options.get_uuid_function_name()),
-                                )];
-                                return Ok(Some(ColumnOptionDef {
-                                    name: self.name.clone(),
-                                    option: ColumnOption::Default(Expr::Nested(Box::new(
-                                        Expr::Function(new_func),
-                                    ))),
-                                }));
-                            }
+                        if matches!(
+                            function_name.as_deref(),
+                            Some("gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7")
+                        ) {
+                            let mut new_func = func.clone();
+                            new_func.name.0 = vec![sqlparser::ast::ObjectNamePart::Identifier(
+                                sqlparser::ast::Ident::new(options.get_uuid_function_name()),
+                            )];
+                            return Ok(Some(ColumnOptionDef {
+                                name: self.name.clone(),
+                                option: ColumnOption::Default(Expr::Nested(Box::new(
+                                    Expr::Function(new_func),
+                                ))),
+                            }));
                         }
                         Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                             "Unsupported default expression function: {func}"

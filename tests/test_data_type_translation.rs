@@ -135,6 +135,13 @@ fn halfvec_to_blob() {
     assert!(output.contains("BLOB"), "halfvec should map to BLOB, got: {output}");
 }
 
+#[test]
+fn schema_qualified_vector_to_blob() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, embedding public.vector(384));";
+    let output = translate(sql, &Pg2SqliteOptions::default()).unwrap();
+    assert!(output.contains("BLOB"), "public.vector should map to BLOB, got: {output}");
+}
+
 // ==================== Standard mappings ====================
 
 #[test]

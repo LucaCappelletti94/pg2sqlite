@@ -247,6 +247,31 @@ fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// Test that schema-qualified vector type still generates vec0 artifacts.
+#[test]
+fn test_schema_qualified_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE TABLE items (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            embedding public.vector(384)
+        );
+    ";
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
+
+    let has_vec0 =
+        translated_sql.iter().any(|s| s.contains("CREATE VIRTUAL TABLE") && s.contains("vec0"));
+    assert!(
+        has_vec0,
+        "Schema-qualified vector type should still produce vec0 virtual table, got: {translated_sql:?}"
+    );
+
+    Ok(())
+}
+
 /// Test that multiple vector columns generate multiple vec0 tables.
 #[test]
 fn test_multiple_vector_columns() -> Result<(), Box<dyn std::error::Error>> {

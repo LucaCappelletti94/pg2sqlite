@@ -97,6 +97,22 @@ fn default_uuid_function() {
     assert!(output.contains("uuid"), "Expected uuid function: {output}");
 }
 
+#[test]
+fn default_schema_qualified_uuid_function() {
+    let output = translate("CREATE TABLE t (id TEXT DEFAULT public.gen_random_uuid());");
+    assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
+    assert!(output.contains("uuid"), "Expected translated uuid function: {output}");
+}
+
+#[test]
+fn default_uuid_generate_v4_function() {
+    let result = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id TEXT DEFAULT uuid_generate_v4());")
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default());
+    assert!(result.is_ok(), "uuid_generate_v4() default should be supported: {result:?}");
+}
+
 // ==================== Generated column (ALWAYS) ====================
 
 #[test]

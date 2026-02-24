@@ -7,7 +7,10 @@ use sqlparser::ast::{
     FunctionArguments, Ident, ObjectName, Value, ValueWithSpan,
 };
 
-use crate::prelude::{Pg2SqliteOptions, Translator};
+use crate::{
+    prelude::{Pg2SqliteOptions, Translator},
+    traits::TranslationOptions,
+};
 
 /// Represents a function translation result.
 enum FunctionTranslation {
@@ -25,12 +28,25 @@ enum FunctionTranslation {
     PassThrough,
 }
 
-fn translate_function(name: &ObjectName, _args: &FunctionArguments) -> FunctionTranslation {
-    let original_name = name.to_string().to_lowercase();
+fn translate_function(
+    name: &ObjectName,
+    _args: &FunctionArguments,
+    options: &Pg2SqliteOptions,
+) -> FunctionTranslation {
+    let original_name = name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .map_or_else(|| name.to_string().to_lowercase(), |ident| {
+            ident.value.to_ascii_lowercase()
+        });
 
     match original_name.as_str() {
         "least" => FunctionTranslation::Rename("MIN".to_string()),
         "greatest" => FunctionTranslation::Rename("MAX".to_string()),
+        "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7" => {
+            FunctionTranslation::Rename(options.get_uuid_function_name().to_string())
+        }
         "now" => {
             // NOW() -> datetime('now')
             FunctionTranslation::WithArgs {
@@ -214,13 +230,13 @@ impl Translator for Function {
     fn translate(
         &self,
         _schema: &Self::Schema,
-        _options: &Self::Options,
+        options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         // Transform FILTER clause to CASE expression
         let func =
             if self.filter.is_some() { transform_filter_to_case(self) } else { self.clone() };
 
-        match translate_function(&func.name, &func.args) {
+        match translate_function(&func.name, &func.args, options) {
             FunctionTranslation::Rename(new_name) => {
                 Ok(Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new(new_name)]),

@@ -62,26 +62,32 @@ impl Translator for DataType {
                 Ok(DataType::Text)
             }
             DataType::Custom(name, ..) => {
-                match name.0.first().and_then(|s| Some(s.as_ident()?.value.as_str())) {
-                    Some("SERIAL" | "SMALLSERIAL") => Ok(DataType::Integer(None)),
-                    Some("GEOGRAPHY") => {
+                let custom_type_name = name
+                    .0
+                    .last()
+                    .and_then(|part| part.as_ident())
+                    .map(|ident| ident.value.to_ascii_lowercase());
+
+                match custom_type_name.as_deref() {
+                    Some("serial" | "smallserial") => Ok(DataType::Integer(None)),
+                    Some("geography") => {
                         // SQLite does not have postgis support, but we have implemented
                         // support in the `postgis-diesel` crate for the `geometry` and
                         // `geography` types, both of which use `BLOB` in SQLite.
                         Ok(DataType::Blob(None))
                     }
-                    Some("countrycode" | "CountryCode") => {
+                    Some("countrycode") => {
                         // SQLite does not have a country code type, so we use TEXT instead.
                         Ok(DataType::Text)
                     }
-                    Some("cas" | "CAS" | "MolecularFormula" | "molecularformula" | "MediaType") => {
+                    Some("cas" | "molecularformula" | "mediatype") => {
                         // SQLite does not have a CAS type, so we use BLOB instead.
                         Ok(DataType::Binary(None))
                     }
                     // pgvector types: vector(N) and halfvec(N) -> BLOB for sqlite-vec
                     // The vector data is stored as BLOB in the main table, with a companion
                     // vec0 virtual table for indexed KNN search.
-                    Some("vector" | "VECTOR" | "halfvec" | "HALFVEC") => Ok(DataType::Blob(None)),
+                    Some("vector" | "halfvec") => Ok(DataType::Blob(None)),
                     unknown => {
                         Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                             "Unknown PostgreSQL custom type {unknown:?}"

@@ -151,6 +151,12 @@ fn reverse_datetime_now() {
 }
 
 #[test]
+fn reverse_schema_qualified_datetime_now() {
+    let pg = reverse(EVENTS, "SELECT * FROM events WHERE created_at > main.datetime('now');");
+    assert!(pg.contains("NOW()"), "Expected NOW() from schema-qualified datetime: {pg}");
+}
+
+#[test]
 fn reverse_datetime_utc_to_at_time_zone() {
     let pg = reverse(EVENTS, "SELECT datetime(created_at, 'utc') FROM events;");
     assert!(pg.contains("AT TIME ZONE"), "Expected AT TIME ZONE: {pg}");

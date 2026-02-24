@@ -100,7 +100,13 @@ fn normalize_datetime_timezone_modifier(modifier: &str) -> Option<String> {
 
 /// Determine how to reverse a SQLite function to PostgreSQL.
 pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> FunctionReversal {
-    let func_name = name.to_string().to_lowercase();
+    let func_name = name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .map_or_else(|| name.to_string().to_ascii_lowercase(), |ident| {
+            ident.value.to_ascii_lowercase()
+        });
 
     match func_name.as_str() {
         // datetime('now') -> NOW()
