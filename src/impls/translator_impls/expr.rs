@@ -7,9 +7,10 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     AccessExpr, Array, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function,
-    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName,
-    ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, Subscript, TableFactor,
-    TableWithJoins, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
+    JsonPathElem, ObjectName, ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr,
+    Subscript, TableAlias, TableAliasColumnDef, TableFactor, TableWithJoins, UnaryOperator, Value,
+    ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::{
@@ -872,6 +873,198 @@ fn translate_any_all_to_in(
     }
 }
 
+fn negate_predicate(expr: Expr) -> Expr {
+    Expr::UnaryOp { op: UnaryOperator::Not, expr: Box::new(Expr::Nested(Box::new(expr))) }
+}
+
+fn fold_predicates(predicates: Vec<Expr>, op: &BinaryOperator, empty_value: bool) -> Expr {
+    let mut iter = predicates.into_iter();
+    let Some(first) = iter.next() else {
+        return boolean_literal(empty_value);
+    };
+    iter.fold(first, |acc, expr| {
+        Expr::BinaryOp { left: Box::new(acc), op: op.clone(), right: Box::new(expr) }
+    })
+}
+
+fn build_exists_over_subquery(
+    translated_left: &Expr,
+    compare_op: &BinaryOperator,
+    translated_subquery: Query,
+    negate_comparison: bool,
+    negate_exists: bool,
+) -> Expr {
+    const DERIVED_ALIAS: &str = "__pg2sqlite_quantifier";
+    const ITEM_ALIAS: &str = "__pg2sqlite_item";
+
+    let derived_alias = Ident::new(DERIVED_ALIAS);
+    let item_alias = Ident::new(ITEM_ALIAS);
+    let item_ref = Expr::CompoundIdentifier(vec![derived_alias.clone(), item_alias.clone()]);
+    let mut comparison = Expr::BinaryOp {
+        left: Box::new(translated_left.clone()),
+        op: compare_op.clone(),
+        right: Box::new(item_ref),
+    };
+    if negate_comparison {
+        comparison = negate_predicate(comparison);
+    }
+
+    Expr::Exists {
+        subquery: Box::new(Query {
+            with: None,
+            body: Box::new(SetExpr::Select(Box::new(Select {
+                select_token: AttachedToken::empty(),
+                distinct: None,
+                top: None,
+                top_before_distinct: false,
+                projection: vec![SelectItem::UnnamedExpr(integer_literal(1))],
+                into: None,
+                from: vec![TableWithJoins {
+                    relation: TableFactor::Derived {
+                        lateral: false,
+                        subquery: Box::new(translated_subquery),
+                        alias: Some(TableAlias {
+                            explicit: false,
+                            name: derived_alias,
+                            columns: vec![TableAliasColumnDef::from_name(ITEM_ALIAS)],
+                        }),
+                        sample: None,
+                    },
+                    joins: Vec::new(),
+                }],
+                lateral_views: Vec::new(),
+                prewhere: None,
+                selection: Some(comparison),
+                group_by: GroupByExpr::Expressions(Vec::new(), Vec::new()),
+                cluster_by: Vec::new(),
+                distribute_by: Vec::new(),
+                sort_by: Vec::new(),
+                having: None,
+                named_window: Vec::new(),
+                qualify: None,
+                window_before_qualify: false,
+                value_table_mode: None,
+                connect_by: Vec::new(),
+                flavor: SelectFlavor::Standard,
+                exclude: None,
+                optimizer_hint: None,
+                select_modifiers: None,
+            }))),
+            order_by: None,
+            limit_clause: None,
+            fetch: None,
+            locks: Vec::new(),
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: Vec::new(),
+        }),
+        negated: negate_exists,
+    }
+}
+
+fn translate_any_operation(
+    left: &Expr,
+    compare_op: &BinaryOperator,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_left = left.translate(schema, options)?;
+    match right {
+        Expr::Subquery(q) => {
+            Ok(build_exists_over_subquery(
+                &translated_left,
+                compare_op,
+                q.translate(schema, options)?,
+                false,
+                false,
+            ))
+        }
+        Expr::Array(Array { elem, .. }) => {
+            let predicates = elem
+                .iter()
+                .map(|expr| {
+                    Ok(Expr::BinaryOp {
+                        left: Box::new(translated_left.clone()),
+                        op: compare_op.clone(),
+                        right: Box::new(expr.translate(schema, options)?),
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
+            Ok(fold_predicates(predicates, &BinaryOperator::Or, false))
+        }
+        Expr::Tuple(exprs) => {
+            let predicates = exprs
+                .iter()
+                .map(|expr| {
+                    Ok(Expr::BinaryOp {
+                        left: Box::new(translated_left.clone()),
+                        op: compare_op.clone(),
+                        right: Box::new(expr.translate(schema, options)?),
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
+            Ok(fold_predicates(predicates, &BinaryOperator::Or, false))
+        }
+        _ => Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            "ANY/SOME operator with non-subquery/non-array expressions is not supported in SQLite."
+                .to_string(),
+        )),
+    }
+}
+
+fn translate_all_operation(
+    left: &Expr,
+    compare_op: &BinaryOperator,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let translated_left = left.translate(schema, options)?;
+    match right {
+        Expr::Subquery(q) => {
+            Ok(build_exists_over_subquery(
+                &translated_left,
+                compare_op,
+                q.translate(schema, options)?,
+                true,
+                true,
+            ))
+        }
+        Expr::Array(Array { elem, .. }) => {
+            let predicates = elem
+                .iter()
+                .map(|expr| {
+                    Ok(Expr::BinaryOp {
+                        left: Box::new(translated_left.clone()),
+                        op: compare_op.clone(),
+                        right: Box::new(expr.translate(schema, options)?),
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
+            Ok(fold_predicates(predicates, &BinaryOperator::And, true))
+        }
+        Expr::Tuple(exprs) => {
+            let predicates = exprs
+                .iter()
+                .map(|expr| {
+                    Ok(Expr::BinaryOp {
+                        left: Box::new(translated_left.clone()),
+                        op: compare_op.clone(),
+                        right: Box::new(expr.translate(schema, options)?),
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
+            Ok(fold_predicates(predicates, &BinaryOperator::And, true))
+        }
+        _ => Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            "ANY/ALL operator with non-subquery/non-array expressions is not supported in SQLite."
+                .to_string(),
+        )),
+    }
+}
+
 /// Translate a binary operation expression.
 fn translate_binary_op(
     left: &Expr,
@@ -986,6 +1179,29 @@ fn translate_access_expr(
                 }
             })
         }
+    })
+}
+
+fn translate_json_path(
+    path: &sqlparser::ast::JsonPath,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<sqlparser::ast::JsonPath, crate::errors::Error> {
+    Ok(sqlparser::ast::JsonPath {
+        path: path
+            .path
+            .iter()
+            .map(|elem| {
+                Ok(match elem {
+                    JsonPathElem::Dot { key, quoted } => {
+                        JsonPathElem::Dot { key: key.clone(), quoted: *quoted }
+                    }
+                    JsonPathElem::Bracket { key } => {
+                        JsonPathElem::Bracket { key: key.translate(schema, options)? }
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, crate::errors::Error>>()?,
     })
 }
 
@@ -1246,10 +1462,7 @@ impl Translator for Expr {
                 if matches!(compare_op, BinaryOperator::Eq) {
                     return translate_any_all_to_in(left, right, false, schema, options);
                 }
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                    "The ANY/SOME operator with {compare_op} is not supported in SQLite. \
-                     Only '= ANY(subquery)' and '= ANY(ARRAY[...])' can be converted to IN."
-                )));
+                translate_any_operation(left, compare_op, right, schema, options)?
             }
             // ALL operations: x op ALL(subquery)
             // SQLite doesn't support ALL directly, but some cases can be converted
@@ -1258,10 +1471,7 @@ impl Translator for Expr {
                 if matches!(compare_op, BinaryOperator::NotEq) {
                     return translate_any_all_to_in(left, right, true, schema, options);
                 }
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                    "The ALL operator with {compare_op} is not supported in SQLite. \
-                     Only '<> ALL(subquery)' and '<> ALL(ARRAY[...])' can be converted to NOT IN."
-                )));
+                translate_all_operation(left, compare_op, right, schema, options)?
             }
             // SIMILAR TO - SQL standard regex-like pattern matching
             // SQLite doesn't support SIMILAR TO; it only has LIKE and GLOB
@@ -1304,13 +1514,13 @@ impl Translator for Expr {
                         .to_string(),
                 ));
             }
-            // JSON path operators (->, ->>) are not yet translated
-            Expr::JsonAccess { .. } => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                    "JSON path operators (->, ->>) are not yet translated. \
-                     Use SQLite's json_extract(column, '$.field') instead."
-                        .to_string(),
-                ));
+            // JSON path operators (->, ->>) - translate child expressions and keep
+            // path operators intact in the AST.
+            Expr::JsonAccess { value, path } => {
+                Expr::JsonAccess {
+                    value: Box::new(value.translate(schema, options)?),
+                    path: translate_json_path(path, schema, options)?,
+                }
             }
             // Lambda expressions are not supported in SQLite
             Expr::Lambda(_) => {
@@ -1358,7 +1568,7 @@ mod tests {
         ast::{
             AccessExpr, BinaryOperator, DateTimeField, Expr, Function, FunctionArg,
             FunctionArgExpr, FunctionArgOperator, FunctionArgumentList, FunctionArguments, Ident,
-            ObjectName, ObjectNamePart, Subscript,
+            JsonPathElem, ObjectName, ObjectNamePart, Subscript,
         },
         dialect::PostgreSqlDialect,
         parser::Parser,
@@ -1566,5 +1776,29 @@ mod tests {
         };
         let translated_any = any_expr.translate(&schema, &options).expect("ANY should translate");
         assert!(matches!(translated_any, Expr::InList { .. }));
+    }
+
+    #[test]
+    fn translate_json_access_expression() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let json_access = Expr::JsonAccess {
+            value: Box::new(parse_expr("payload")),
+            path: sqlparser::ast::JsonPath {
+                path: vec![
+                    JsonPathElem::Dot { key: "author".to_string(), quoted: false },
+                    JsonPathElem::Bracket { key: parse_expr("'name'") },
+                ],
+            },
+        };
+
+        let translated =
+            json_access.translate(&schema, &options).expect("json access should translate");
+        let rendered = translated.to_string();
+        assert!(
+            rendered.contains("payload"),
+            "expected translated value expression, got: {rendered}"
+        );
+        assert!(rendered.contains("author"), "expected translated JSON path, got: {rendered}");
     }
 }

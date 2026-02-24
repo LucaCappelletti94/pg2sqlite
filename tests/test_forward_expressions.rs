@@ -168,3 +168,43 @@ fn view_with_not_exists() {
     let output = translate(sql);
     assert!(output.contains("NOT EXISTS"), "Expected NOT EXISTS: {output}");
 }
+
+#[test]
+fn view_with_json_access_operator_arrow() {
+    let sql = "
+        CREATE TABLE docs (id INT PRIMARY KEY, payload JSONB);
+        CREATE VIEW doc_keys AS
+        SELECT payload->'author' AS author_json
+        FROM docs;
+    ";
+    let output = translate(sql);
+    assert!(output.contains("->"), "Expected JSON access operator in output: {output}");
+}
+
+#[test]
+fn view_with_json_access_operator_arrow_text() {
+    let sql = "
+        CREATE TABLE docs (id INT PRIMARY KEY, payload JSONB);
+        CREATE VIEW doc_authors AS
+        SELECT payload->>'author' AS author_text
+        FROM docs;
+    ";
+    let output = translate(sql);
+    assert!(output.contains("->>"), "Expected JSON text access operator in output: {output}");
+}
+
+#[test]
+fn view_with_chained_json_access_operators() {
+    let sql = "
+        CREATE TABLE docs (id INT PRIMARY KEY, payload JSONB);
+        CREATE VIEW doc_author_names AS
+        SELECT payload->'author'->>'name' AS author_name
+        FROM docs;
+    ";
+    let output = translate(sql);
+    assert!(
+        output.contains("->'author'") || output.contains("-> 'author'"),
+        "Expected chained JSON access output: {output}"
+    );
+    assert!(output.contains("->>"), "Expected chained JSON text access output: {output}");
+}

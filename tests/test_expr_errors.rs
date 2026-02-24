@@ -45,13 +45,23 @@ fn any_eq_array_literal_translates_to_in_list() {
 }
 
 #[test]
-fn any_gt_produces_error() {
+fn any_gt_subquery_translates_to_exists() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val > ANY(SELECT id FROM t);";
-    let result = translate(sql);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("ANY/SOME"), "Expected ANY/SOME error, got: {err}");
+    let output = translate(sql).unwrap();
+    assert!(
+        output.contains("EXISTS"),
+        "> ANY(subquery) should translate via EXISTS, got: {output}"
+    );
+}
+
+#[test]
+fn any_gt_array_literal_translates_to_or_chain() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
+               SELECT * FROM t WHERE val > ANY(ARRAY[1, 2, 3]);";
+    let output = translate(sql).unwrap();
+    assert!(output.contains(" OR "), "> ANY(array) should translate to OR chain, got: {output}");
+    assert!(!output.contains(" ANY"), "ANY keyword should be removed, got: {output}");
 }
 
 #[test]
@@ -77,13 +87,23 @@ fn all_neq_array_literal_translates_to_not_in_list() {
 }
 
 #[test]
-fn all_gt_produces_error() {
+fn all_gt_subquery_translates_to_not_exists() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val > ALL(SELECT id FROM t);";
-    let result = translate(sql);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("ALL operator"), "Expected ALL error, got: {err}");
+    let output = translate(sql).unwrap();
+    assert!(
+        output.contains("NOT EXISTS"),
+        "> ALL(subquery) should translate via NOT EXISTS, got: {output}"
+    );
+}
+
+#[test]
+fn all_gt_array_literal_translates_to_and_chain() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
+               SELECT * FROM t WHERE val > ALL(ARRAY[1, 2, 3]);";
+    let output = translate(sql).unwrap();
+    assert!(output.contains(" AND "), "> ALL(array) should translate to AND chain, got: {output}");
+    assert!(!output.contains(" ALL"), "ALL keyword should be removed, got: {output}");
 }
 
 // ==================== SIMILAR TO ====================
