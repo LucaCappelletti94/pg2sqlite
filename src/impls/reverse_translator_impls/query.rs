@@ -7,7 +7,11 @@ use sqlparser::ast::{
     SetExpr, Values,
 };
 
-use super::helpers::{reverse_translate_select_item, reverse_translate_table_with_joins};
+use super::helpers::{
+    reverse_translate_connect_by_kinds, reverse_translate_order_by_expr,
+    reverse_translate_pipe_operators, reverse_translate_query_settings,
+    reverse_translate_select_item, reverse_translate_table_with_joins,
+};
 use crate::{
     errors::Error,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
@@ -41,6 +45,8 @@ impl ReverseTranslator for Query {
                 Ok(sqlparser::ast::OrderBy { kind, interpolate: ob.interpolate.clone() })
             })
             .transpose()?;
+        let settings = reverse_translate_query_settings(self.settings.as_ref(), schema, options)?;
+        let pipe_operators = reverse_translate_pipe_operators(&self.pipe_operators, schema, options)?;
 
         Ok(Query {
             with: reverse_translate_with(self.with.as_ref(), schema, options)?,
@@ -54,9 +60,9 @@ impl ReverseTranslator for Query {
             fetch: reverse_translate_fetch(self.fetch.as_ref(), schema, options)?,
             locks: self.locks.clone(),
             for_clause: self.for_clause.clone(),
-            settings: self.settings.clone(),
+            settings,
             format_clause: self.format_clause.clone(),
-            pipe_operators: self.pipe_operators.clone(),
+            pipe_operators,
         })
     }
 }
@@ -134,6 +140,27 @@ impl ReverseTranslator for Select {
             .iter()
             .map(|item| reverse_translate_select_item(item, schema, options))
             .collect::<Result<Vec<_>, _>>()?;
+        let prewhere = self
+            .prewhere
+            .as_ref()
+            .map(|expr| expr.reverse_translate(schema, options))
+            .transpose()?;
+        let cluster_by = self
+            .cluster_by
+            .iter()
+            .map(|expr| expr.reverse_translate(schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+        let distribute_by = self
+            .distribute_by
+            .iter()
+            .map(|expr| expr.reverse_translate(schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sort_by = self
+            .sort_by
+            .iter()
+            .map(|expr| reverse_translate_order_by_expr(expr, schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+        let connect_by = reverse_translate_connect_by_kinds(&self.connect_by, schema, options)?;
 
         // Reverse translate GROUP BY expressions
         let group_by = reverse_translate_group_by(&self.group_by, schema, options)?;
@@ -147,12 +174,12 @@ impl ReverseTranslator for Select {
             into: self.into.clone(),
             from,
             lateral_views: self.lateral_views.clone(),
-            prewhere: self.prewhere.clone(),
+            prewhere,
             selection,
             group_by,
-            cluster_by: self.cluster_by.clone(),
-            distribute_by: self.distribute_by.clone(),
-            sort_by: self.sort_by.clone(),
+            cluster_by,
+            distribute_by,
+            sort_by,
             having,
             named_window: reverse_translate_named_window(&self.named_window, schema, options)?,
             qualify: self
@@ -162,7 +189,7 @@ impl ReverseTranslator for Select {
                 .transpose()?,
             window_before_qualify: self.window_before_qualify,
             value_table_mode: self.value_table_mode,
-            connect_by: self.connect_by.clone(),
+            connect_by,
             flavor: self.flavor,
             exclude: self.exclude.clone(),
             optimizer_hint: self.optimizer_hint.clone(),
@@ -190,18 +217,6 @@ fn reverse_translate_values(
         explicit_row: values.explicit_row,
         rows: translated_rows,
         value_keyword: values.value_keyword,
-    })
-}
-
-fn reverse_translate_order_by_expr(
-    expr: &sqlparser::ast::OrderByExpr,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::OrderByExpr, Error> {
-    Ok(sqlparser::ast::OrderByExpr {
-        expr: expr.expr.reverse_translate(schema, options)?,
-        options: expr.options,
-        with_fill: expr.with_fill.clone(),
     })
 }
 
@@ -473,5 +488,97 @@ mod tests {
         let fetch_query = parse_query("SELECT 1 FETCH FIRST 2 ROWS ONLY");
         let fetch = reverse_translate_fetch(fetch_query.fetch.as_ref(), &schema, &options).unwrap();
         assert!(fetch.is_some());
+    }
+
+    #[test]
+    fn reverse_translate_query_translates_select_side_and_query_level_expression_paths() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let mut query = parse_query("SELECT id FROM users");
+        let sqlparser::ast::SetExpr::Select(select) = query.body.as_mut() else {
+            panic!("expected select");
+        };
+
+        select.prewhere = Some(parse_expr("datetime('now')"));
+        select.cluster_by = vec![parse_expr("datetime('now')")];
+        select.distribute_by = vec![parse_expr("datetime('now')")];
+        select.sort_by = vec![sqlparser::ast::OrderByExpr {
+            expr: parse_expr("datetime('now')"),
+            options: sqlparser::ast::OrderByOptions {
+                asc: Some(true),
+                nulls_first: Some(false),
+            },
+            with_fill: None,
+        }];
+        select.connect_by = vec![
+            sqlparser::ast::ConnectByKind::ConnectBy {
+                connect_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                nocycle: false,
+                relationships: vec![parse_expr("datetime('now')")],
+            },
+            sqlparser::ast::ConnectByKind::StartWith {
+                start_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                condition: Box::new(parse_expr("datetime('now')")),
+            },
+        ];
+
+        query.settings = Some(vec![sqlparser::ast::Setting {
+            key: sqlparser::ast::Ident::new("x"),
+            value: parse_expr("datetime('now')"),
+        }]);
+        query.pipe_operators = vec![
+            sqlparser::ast::PipeOperator::Where { expr: parse_expr("datetime('now')") },
+            sqlparser::ast::PipeOperator::Union {
+                set_quantifier: sqlparser::ast::SetQuantifier::All,
+                queries: vec![parse_query("SELECT datetime('now') AS x")],
+            },
+        ];
+
+        let translated = query.reverse_translate(&schema, &options).unwrap();
+        let sqlparser::ast::SetExpr::Select(select) = translated.body.as_ref() else {
+            panic!("expected translated select");
+        };
+
+        assert!(
+            select
+                .prewhere
+                .as_ref()
+                .is_some_and(|expr| expr.to_string().to_lowercase().contains("now()"))
+        );
+        assert!(select.cluster_by[0].to_string().to_lowercase().contains("now()"));
+        assert!(select.distribute_by[0].to_string().to_lowercase().contains("now()"));
+        assert!(select.sort_by[0].expr.to_string().to_lowercase().contains("now()"));
+
+        match &select.connect_by[0] {
+            sqlparser::ast::ConnectByKind::ConnectBy { relationships, .. } => {
+                assert!(relationships[0].to_string().to_lowercase().contains("now()"));
+            }
+            other => panic!("unexpected connect by variant: {other:?}"),
+        }
+        match &select.connect_by[1] {
+            sqlparser::ast::ConnectByKind::StartWith { condition, .. } => {
+                assert!(condition.to_string().to_lowercase().contains("now()"));
+            }
+            other => panic!("unexpected connect by variant: {other:?}"),
+        }
+
+        assert!(translated
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings[0].value.to_string().to_lowercase().contains("now()")));
+
+        match &translated.pipe_operators[0] {
+            sqlparser::ast::PipeOperator::Where { expr } => {
+                assert!(expr.to_string().to_lowercase().contains("now()"));
+            }
+            other => panic!("unexpected first pipe operator variant: {other:?}"),
+        }
+        match &translated.pipe_operators[1] {
+            sqlparser::ast::PipeOperator::Union { queries, .. } => {
+                assert!(queries[0].to_string().to_lowercase().contains("now()"));
+            }
+            other => panic!("unexpected second pipe operator variant: {other:?}"),
+        }
     }
 }

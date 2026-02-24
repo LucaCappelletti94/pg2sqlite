@@ -6,11 +6,15 @@ use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Fetch, Function, FunctionArgumentList, FunctionArguments,
     GroupByExpr, GroupByWithModifier, Ident, LimitClause, NamedWindowDefinition, NamedWindowExpr,
     ObjectName, ObjectNamePart, Offset, OrderBy, OrderByExpr, OrderByKind, Query, Select,
-    SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor, TableWithJoins,
-    Value, ValueWithSpan, Values, WindowSpec, WindowType, helpers::attached_token::AttachedToken,
+    SelectItem, SetExpr, SetOperator, SetQuantifier, Setting, PipeOperator, TableAlias,
+    TableFactor, TableWithJoins, Value, ValueWithSpan, Values, WindowSpec, WindowType,
+    helpers::attached_token::AttachedToken,
 };
 
-use super::helpers::{translate_select_item, translate_table_with_joins};
+use super::helpers::{
+    translate_connect_by_kinds, translate_order_by_expr, translate_pipe_operators,
+    translate_query_settings, translate_select_item, translate_table_with_joins,
+};
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
 const DISTINCT_ON_DERIVED_ALIAS: &str = "__pg2sqlite_distinct_on";
@@ -30,6 +34,8 @@ impl Translator for Query {
         let order_by = translate_order_by(self.order_by.as_ref(), schema, options)?;
         let limit_clause = translate_limit_clause(self.limit_clause.as_ref(), schema, options)?;
         let fetch = translate_fetch(self.fetch.as_ref(), schema, options)?;
+        let settings = translate_query_settings(self.settings.as_ref(), schema, options)?;
+        let pipe_operators = translate_pipe_operators(&self.pipe_operators, schema, options)?;
 
         if let Some(rewritten) = try_translate_distinct_on_query(
             self,
@@ -39,6 +45,8 @@ impl Translator for Query {
             order_by.clone(),
             limit_clause.clone(),
             fetch.clone(),
+            settings.clone(),
+            pipe_operators.clone(),
         )? {
             return Ok(rewritten);
         }
@@ -51,6 +59,8 @@ impl Translator for Query {
             order_by.clone(),
             limit_clause.clone(),
             fetch.clone(),
+            settings.clone(),
+            pipe_operators.clone(),
         )? {
             return Ok(rewritten);
         }
@@ -63,9 +73,9 @@ impl Translator for Query {
             fetch,
             locks: self.locks.clone(),
             for_clause: self.for_clause.clone(),
-            settings: self.settings.clone(),
+            settings,
             format_clause: self.format_clause.clone(),
-            pipe_operators: self.pipe_operators.clone(),
+            pipe_operators,
         })
     }
 }
@@ -197,6 +207,8 @@ fn try_translate_distinct_on_query(
     order_by: Option<OrderBy>,
     limit_clause: Option<LimitClause>,
     fetch: Option<Fetch>,
+    settings: Option<Vec<Setting>>,
+    pipe_operators: Vec<PipeOperator>,
 ) -> Result<Option<Query>, crate::errors::Error> {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Ok(None);
@@ -323,9 +335,9 @@ fn try_translate_distinct_on_query(
         fetch,
         locks: query.locks.clone(),
         for_clause: query.for_clause.clone(),
-        settings: query.settings.clone(),
+        settings,
         format_clause: query.format_clause.clone(),
-        pipe_operators: query.pipe_operators.clone(),
+        pipe_operators,
     }))
 }
 
@@ -500,6 +512,8 @@ fn try_translate_grouping_query(
     order_by: Option<OrderBy>,
     limit_clause: Option<LimitClause>,
     fetch: Option<Fetch>,
+    settings: Option<Vec<Setting>>,
+    pipe_operators: Vec<PipeOperator>,
 ) -> Result<Option<Query>, crate::errors::Error> {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Ok(None);
@@ -629,9 +643,9 @@ fn try_translate_grouping_query(
         fetch,
         locks: query.locks.clone(),
         for_clause: query.for_clause.clone(),
-        settings: query.settings.clone(),
+        settings,
         format_clause: query.format_clause.clone(),
-        pipe_operators: query.pipe_operators.clone(),
+        pipe_operators,
     }))
 }
 
@@ -695,6 +709,24 @@ impl Translator for Select {
             .iter()
             .map(|item| translate_select_item(item, schema, options))
             .collect::<Result<Vec<_>, _>>()?;
+        let prewhere =
+            self.prewhere.as_ref().map(|expr| expr.translate(schema, options)).transpose()?;
+        let cluster_by = self
+            .cluster_by
+            .iter()
+            .map(|expr| expr.translate(schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+        let distribute_by = self
+            .distribute_by
+            .iter()
+            .map(|expr| expr.translate(schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sort_by = self
+            .sort_by
+            .iter()
+            .map(|expr| translate_order_by_expr(expr, schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+        let connect_by = translate_connect_by_kinds(&self.connect_by, schema, options)?;
 
         Ok(Select {
             select_token: self.select_token.clone(),
@@ -705,18 +737,18 @@ impl Translator for Select {
             into: self.into.clone(),
             from,
             lateral_views: self.lateral_views.clone(),
-            prewhere: self.prewhere.clone(),
+            prewhere,
             selection,
             group_by: translate_group_by(&self.group_by, schema, options)?,
-            cluster_by: self.cluster_by.clone(),
-            distribute_by: self.distribute_by.clone(),
-            sort_by: self.sort_by.clone(),
+            cluster_by,
+            distribute_by,
+            sort_by,
             having: self.having.as_ref().map(|expr| expr.translate(schema, options)).transpose()?,
             named_window: translate_named_window(&self.named_window, schema, options)?,
             qualify: self.qualify.as_ref().map(|e| e.translate(schema, options)).transpose()?,
             window_before_qualify: self.window_before_qualify,
             value_table_mode: self.value_table_mode,
-            connect_by: self.connect_by.clone(),
+            connect_by,
             flavor: self.flavor,
             exclude: self.exclude.clone(),
             optimizer_hint: self.optimizer_hint.clone(),
@@ -1108,6 +1140,8 @@ mod tests {
             distinct_query.order_by.clone(),
             distinct_query.limit_clause.clone(),
             distinct_query.fetch.clone(),
+            distinct_query.settings.clone(),
+            distinct_query.pipe_operators.clone(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("TOP clauses"));
@@ -1124,6 +1158,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            Vec::new(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("GROUP BY ALL with modifiers"));
@@ -1143,6 +1179,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            Vec::new(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("WITH ROLLUP/CUBE/GROUPING SETS"));
@@ -1155,9 +1193,18 @@ mod tests {
                 quantity: Some(sqlparser::ast::TopQuantity::Constant(1)),
             });
         }
-        let err =
-            try_translate_grouping_query(&top_rollup, &schema, &options, None, None, None, None)
-                .unwrap_err();
+        let err = try_translate_grouping_query(
+            &top_rollup,
+            &schema,
+            &options,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("TOP clauses"));
     }
 
@@ -1256,6 +1303,8 @@ mod tests {
             None,
             None,
             None,
+            distinct_no_order.settings.clone(),
+            distinct_no_order.pipe_operators.clone(),
         )
         .unwrap();
         assert!(rewritten.is_some());
@@ -1264,9 +1313,18 @@ mod tests {
         if let SetExpr::Select(select) = group_by_all.body.as_mut() {
             select.group_by = GroupByExpr::All(Vec::new());
         }
-        let result =
-            try_translate_grouping_query(&group_by_all, &schema, &options, None, None, None, None)
-                .unwrap();
+        let result = try_translate_grouping_query(
+            &group_by_all,
+            &schema,
+            &options,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
         assert!(result.is_none());
 
         let mut group_with_totals = parse_query("SELECT id FROM users GROUP BY id");
@@ -1284,6 +1342,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            Vec::new(),
         )
         .unwrap();
         assert!(result.is_none());
@@ -1319,5 +1379,97 @@ mod tests {
         let translated = translate_named_window(&windows, &schema, &options).unwrap();
         assert_eq!(translated.len(), 1);
         assert!(matches!(translated[0].1, NamedWindowExpr::NamedWindow(_)));
+    }
+
+    #[test]
+    fn query_translation_translates_select_side_and_query_level_expression_paths() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let mut query = parse_query("SELECT id FROM users");
+        let SetExpr::Select(select) = query.body.as_mut() else {
+            panic!("expected select");
+        };
+
+        select.prewhere = Some(parse_expr("now()"));
+        select.cluster_by = vec![parse_expr("now()")];
+        select.distribute_by = vec![parse_expr("now()")];
+        select.sort_by = vec![sqlparser::ast::OrderByExpr {
+            expr: parse_expr("now()"),
+            options: sqlparser::ast::OrderByOptions {
+                asc: Some(true),
+                nulls_first: Some(false),
+            },
+            with_fill: None,
+        }];
+        select.connect_by = vec![
+            sqlparser::ast::ConnectByKind::ConnectBy {
+                connect_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                nocycle: false,
+                relationships: vec![parse_expr("now()")],
+            },
+            sqlparser::ast::ConnectByKind::StartWith {
+                start_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                condition: Box::new(parse_expr("now()")),
+            },
+        ];
+
+        query.settings = Some(vec![sqlparser::ast::Setting {
+            key: sqlparser::ast::Ident::new("x"),
+            value: parse_expr("now()"),
+        }]);
+        query.pipe_operators = vec![
+            sqlparser::ast::PipeOperator::Where { expr: parse_expr("now()") },
+            sqlparser::ast::PipeOperator::Union {
+                set_quantifier: sqlparser::ast::SetQuantifier::All,
+                queries: vec![parse_query("SELECT now() AS x")],
+            },
+        ];
+
+        let translated = query.translate(&schema, &options).unwrap();
+        let SetExpr::Select(select) = translated.body.as_ref() else {
+            panic!("expected translated select");
+        };
+
+        assert!(
+            select
+                .prewhere
+                .as_ref()
+                .is_some_and(|expr| expr.to_string().contains("datetime('now')"))
+        );
+        assert!(select.cluster_by[0].to_string().contains("datetime('now')"));
+        assert!(select.distribute_by[0].to_string().contains("datetime('now')"));
+        assert!(select.sort_by[0].expr.to_string().contains("datetime('now')"));
+
+        match &select.connect_by[0] {
+            sqlparser::ast::ConnectByKind::ConnectBy { relationships, .. } => {
+                assert!(relationships[0].to_string().contains("datetime('now')"));
+            }
+            other => panic!("unexpected connect by variant: {other:?}"),
+        }
+        match &select.connect_by[1] {
+            sqlparser::ast::ConnectByKind::StartWith { condition, .. } => {
+                assert!(condition.to_string().contains("datetime('now')"));
+            }
+            other => panic!("unexpected connect by variant: {other:?}"),
+        }
+
+        assert!(translated
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings[0].value.to_string().contains("datetime('now')")));
+
+        match &translated.pipe_operators[0] {
+            sqlparser::ast::PipeOperator::Where { expr } => {
+                assert!(expr.to_string().contains("datetime('now')"));
+            }
+            other => panic!("unexpected first pipe operator variant: {other:?}"),
+        }
+        match &translated.pipe_operators[1] {
+            sqlparser::ast::PipeOperator::Union { queries, .. } => {
+                assert!(queries[0].to_string().contains("datetime('now')"));
+            }
+            other => panic!("unexpected second pipe operator variant: {other:?}"),
+        }
     }
 }
