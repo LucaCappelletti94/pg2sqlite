@@ -493,15 +493,81 @@ impl PlPgSqlTranslator {
             Expr::UnaryOp { expr: inner, .. } | Expr::Nested(inner) => {
                 Self::inject_with_into_in_subqueries(inner, with, context, options);
             }
+            Expr::Exists { subquery, .. } => {
+                let cte_names: Vec<String> =
+                    with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
+                if Self::query_references_ctes(subquery, &cte_names) {
+                    let mut new_with = with.clone();
+                    for cte in &mut new_with.cte_tables {
+                        Self::transform_cte_query(&mut cte.query, context, options);
+                    }
+                    subquery.with = Some(new_with);
+                }
+            }
+            Expr::Subquery(subquery) => {
+                let cte_names: Vec<String> =
+                    with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
+                if Self::query_references_ctes(subquery, &cte_names) {
+                    let mut new_with = with.clone();
+                    for cte in &mut new_with.cte_tables {
+                        Self::transform_cte_query(&mut cte.query, context, options);
+                    }
+                    subquery.with = Some(new_with);
+                }
+            }
             _ => {}
         }
     }
 
-    /// Checks if a query references any of the given CTE names.
+    /// Checks if a query references any of the given CTE names via AST
+    /// traversal.
+    ///
+    /// This walks the FROM clauses and subqueries at the AST level to avoid
+    /// false positives from string-contains matching (e.g., a column name that
+    /// is a substring of a CTE name).
     fn query_references_ctes(query: &Query, cte_names: &[String]) -> bool {
-        // Simple check: see if any CTE name appears in the query string
-        let query_str = query.to_string().to_lowercase();
-        cte_names.iter().any(|name| query_str.contains(&name.to_lowercase()))
+        let normalized: Vec<String> = cte_names.iter().map(|n| n.to_lowercase()).collect();
+        Self::set_expr_references_ctes(&query.body, &normalized)
+    }
+
+    /// Recursively checks if a `SetExpr` references any of the CTE names.
+    fn set_expr_references_ctes(body: &SetExpr, cte_names: &[String]) -> bool {
+        match body {
+            SetExpr::Select(select) => Self::select_references_ctes(select, cte_names),
+            SetExpr::SetOperation { left, right, .. } => {
+                Self::set_expr_references_ctes(left, cte_names)
+                    || Self::set_expr_references_ctes(right, cte_names)
+            }
+            _ => false,
+        }
+    }
+
+    /// Checks if a `Select` references any CTE by looking at FROM clauses.
+    fn select_references_ctes(select: &Select, cte_names: &[String]) -> bool {
+        select.from.iter().any(|from| Self::table_with_joins_references_ctes(from, cte_names))
+    }
+
+    /// Checks if a `TableWithJoins` references any CTE.
+    fn table_with_joins_references_ctes(twj: &TableWithJoins, cte_names: &[String]) -> bool {
+        Self::table_factor_references_ctes(&twj.relation, cte_names)
+            || twj.joins.iter().any(|j| Self::table_factor_references_ctes(&j.relation, cte_names))
+    }
+
+    /// Checks if a `TableFactor` references any CTE.
+    fn table_factor_references_ctes(tf: &TableFactor, cte_names: &[String]) -> bool {
+        match tf {
+            TableFactor::Table { name, .. } => {
+                if let Some(last) = name.0.last().and_then(|p| p.as_ident()) {
+                    cte_names.contains(&last.value.to_lowercase())
+                } else {
+                    false
+                }
+            }
+            TableFactor::Derived { subquery, .. } => {
+                Self::set_expr_references_ctes(&subquery.body, cte_names)
+            }
+            _ => false,
+        }
     }
 
     /// Transforms the body of a Query (INSERT, DELETE, SELECT, etc.).
@@ -719,7 +785,8 @@ impl PlPgSqlTranslator {
             Expr::UnaryOp { expr: inner, .. }
             | Expr::Nested(inner)
             | Expr::IsNotNull(inner)
-            | Expr::IsNull(inner) => {
+            | Expr::IsNull(inner)
+            | Expr::Cast { expr: inner, .. } => {
                 Self::transform_expr(inner, context, options);
             }
             Expr::InList { expr: inner, list, .. } => {
@@ -743,6 +810,23 @@ impl PlPgSqlTranslator {
                 {
                     *subquery.body = transformed;
                 }
+            }
+            Expr::Case { operand, conditions, else_result, .. } => {
+                if let Some(op) = operand {
+                    Self::transform_expr(op, context, options);
+                }
+                for when in conditions {
+                    Self::transform_expr(&mut when.condition, context, options);
+                    Self::transform_expr(&mut when.result, context, options);
+                }
+                if let Some(else_expr) = else_result {
+                    Self::transform_expr(else_expr, context, options);
+                }
+            }
+            Expr::Between { expr: inner, low, high, .. } => {
+                Self::transform_expr(inner, context, options);
+                Self::transform_expr(low, context, options);
+                Self::transform_expr(high, context, options);
             }
             _ => {}
         }
