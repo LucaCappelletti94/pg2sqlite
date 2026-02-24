@@ -426,7 +426,12 @@ fn reverse_translate_function_args(
                 clauses: list.clauses.clone(),
             }))
         }
-        FunctionArguments::None | FunctionArguments::Subquery(_) => Ok(args.clone()),
+        FunctionArguments::Subquery(query) => {
+            Ok(FunctionArguments::Subquery(Box::new(
+                crate::prelude::ReverseTranslator::reverse_translate(query.as_ref(), schema, options)?,
+            )))
+        }
+        FunctionArguments::None => Ok(FunctionArguments::None),
     }
 }
 
@@ -491,6 +496,15 @@ mod tests {
             .expect("sql should parse")
             .parse_expr()
             .expect("expression should parse")
+    }
+
+    fn parse_query(sql: &str) -> sqlparser::ast::Query {
+        let stmt = Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("query SQL should parse");
+        let stmt = stmt.into_iter().next().expect("query SQL should produce one statement");
+        match stmt {
+            sqlparser::ast::Statement::Query(query) => *query,
+            other => panic!("expected query, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -604,5 +618,33 @@ mod tests {
 
         let arg = function.args.to_string();
         assert!(arg.contains("NOW()"), "expected expr-named arg to be reverse translated: {arg}");
+    }
+
+    #[test]
+    fn passthrough_reverse_translation_translates_subquery_arguments() {
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("custom_fn"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::Subquery(Box::new(parse_query("SELECT datetime('now')"))),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let translated = reverse_translate_function(&func, &schema, &options)
+            .expect("custom function with subquery args should reverse-translate");
+        let Expr::Function(function) = translated else {
+            panic!("expected translated function");
+        };
+
+        let arg = function.args.to_string();
+        assert!(
+            arg.contains("NOW()"),
+            "expected subquery argument to be recursively reverse translated: {arg}"
+        );
     }
 }
