@@ -2,6 +2,11 @@
 //! in `src/impls/translator_impls/delete.rs`.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use sqlparser::{
+    ast::{Expr, Statement},
+    dialect::PostgreSqlDialect,
+    parser::Parser,
+};
 
 fn translate(sql: &str) -> String {
     Pg2Sqlite::default()
@@ -13,6 +18,24 @@ fn translate(sql: &str) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn parse_expr(sql: &str) -> Expr {
+    Parser::new(&PostgreSqlDialect {}).try_with_sql(sql).unwrap().parse_expr().unwrap()
+}
+
+fn parse_order_by_expr(sql: &str) -> sqlparser::ast::OrderByExpr {
+    let stmt = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().remove(0);
+    let Statement::Query(query) = stmt else {
+        panic!("Expected query statement");
+    };
+    let Some(order_by) = query.order_by else {
+        panic!("Expected ORDER BY clause");
+    };
+    let sqlparser::ast::OrderByKind::Expressions(mut exprs) = order_by.kind else {
+        panic!("Expected ORDER BY expressions");
+    };
+    exprs.remove(0)
 }
 
 // ==================== DELETE with USING ====================
@@ -93,5 +116,38 @@ fn delete_returning_translates_expressions() {
     assert!(
         output.contains("datetime('now')"),
         "Expected datetime('now') in DELETE RETURNING: {output}"
+    );
+}
+
+#[test]
+fn delete_order_by_and_limit_translate_expressions() {
+    let schema_sql = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);";
+    let mut delete_stmt =
+        Parser::parse_sql(&PostgreSqlDialect {}, "DELETE FROM users WHERE id > 0;")
+            .unwrap()
+            .remove(0);
+
+    let Statement::Delete(delete) = &mut delete_stmt else {
+        panic!("Expected DELETE statement");
+    };
+    delete.order_by = vec![parse_order_by_expr("SELECT 1 ORDER BY NOW();")];
+    delete.limit = Some(parse_expr("NOW()"));
+
+    let output = Pg2Sqlite::default()
+        .sql(schema_sql)
+        .unwrap()
+        .statement(delete_stmt)
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        output.contains("ORDER BY")
+            && output.contains("LIMIT")
+            && output.contains("datetime('now')"),
+        "Expected translated ORDER BY/LIMIT expressions in DELETE: {output}"
     );
 }

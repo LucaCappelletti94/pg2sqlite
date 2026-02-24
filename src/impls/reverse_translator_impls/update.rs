@@ -49,6 +49,8 @@ impl ReverseTranslator for Update {
 
         // Reverse translate RETURNING clause if present
         let returning = translate_returning::<Reverse>(self.returning.as_ref(), schema, options)?;
+        let limit =
+            self.limit.as_ref().map(|expr| expr.reverse_translate(schema, options)).transpose()?;
 
         // Reverse translate the table
         let table = reverse_translate_table_with_joins(&self.table, schema, options)?;
@@ -62,7 +64,7 @@ impl ReverseTranslator for Update {
             selection,
             returning,
             or: self.or,
-            limit: self.limit.clone(),
+            limit,
         })
     }
 }

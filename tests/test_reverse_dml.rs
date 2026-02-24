@@ -234,6 +234,19 @@ fn reverse_delete_with_returning_alias() {
     assert!(pg.contains("deleted_id"), "Expected alias: {pg}");
 }
 
+#[test]
+fn reverse_delete_order_by_and_limit_translate_expressions() {
+    let pg = reverse(
+        SCHEMA,
+        "DELETE FROM users WHERE id > 0 ORDER BY datetime('now') LIMIT datetime('now');",
+    );
+    assert!(
+        pg.contains("ORDER BY NOW()"),
+        "Expected ORDER BY expression reverse translation: {pg}"
+    );
+    assert!(pg.contains("LIMIT NOW()"), "Expected LIMIT expression reverse translation: {pg}");
+}
+
 // =============================================================================
 // UPDATE with RETURNING
 // =============================================================================
@@ -253,6 +266,12 @@ fn reverse_update_with_returning_alias() {
     );
     assert!(pg.contains("RETURNING"), "Expected RETURNING: {pg}");
     assert!(pg.contains("updated_name"), "Expected alias: {pg}");
+}
+
+#[test]
+fn reverse_update_limit_translate_expression() {
+    let pg = reverse(SCHEMA, "UPDATE users SET name = 'test' WHERE id > 0 LIMIT datetime('now');");
+    assert!(pg.contains("LIMIT NOW()"), "Expected LIMIT expression reverse translation: {pg}");
 }
 
 // =============================================================================

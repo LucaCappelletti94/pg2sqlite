@@ -48,6 +48,7 @@ impl Translator for Update {
             self.from.as_ref().map(|f| translate_update_from(f, schema, options)).transpose()?;
 
         let returning = translate_returning::<Forward>(self.returning.as_ref(), schema, options)?;
+        let limit = self.limit.as_ref().map(|expr| expr.translate(schema, options)).transpose()?;
 
         Ok(Update {
             update_token: self.update_token.clone(),
@@ -58,7 +59,7 @@ impl Translator for Update {
             selection,
             returning,
             or: self.or,
-            limit: self.limit.clone(),
+            limit,
         })
     }
 }

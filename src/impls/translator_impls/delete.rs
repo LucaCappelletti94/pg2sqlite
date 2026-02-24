@@ -10,7 +10,7 @@ use sqlparser::{
     tokenizer::Span,
 };
 
-use super::helpers::{Forward, translate_table_with_joins};
+use super::helpers::{Forward, translate_order_by_expr, translate_table_with_joins};
 use crate::{
     impls::{
         object_name::{append_suffix, schema_and_table_for_lookup},
@@ -39,8 +39,14 @@ impl Translator for Delete {
 
         // Translate RETURNING expressions
         let returning = translate_returning::<Forward>(self.returning.as_ref(), schema, options)?;
+        let order_by = self
+            .order_by
+            .iter()
+            .map(|expr| translate_order_by_expr(expr, schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+        let limit = self.limit.as_ref().map(|expr| expr.translate(schema, options)).transpose()?;
 
-        let mut delete = Delete { selection, from, returning, ..self.clone() };
+        let mut delete = Delete { selection, from, returning, order_by, limit, ..self.clone() };
 
         if let Some(using) = delete.using.take().filter(|u| !u.is_empty()) {
             // Convert DELETE FROM T USING U WHERE cond

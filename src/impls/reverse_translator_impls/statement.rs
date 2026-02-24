@@ -1106,6 +1106,9 @@ fn check_update_for_rls(update: &Update, options: &Pg2SqliteOptions) -> Result<(
     for assignment in &update.assignments {
         check_expr_for_rls(&assignment.value, options)?;
     }
+    if let Some(limit) = &update.limit {
+        check_expr_for_rls(limit, options)?;
+    }
 
     Ok(())
 }
@@ -1123,6 +1126,12 @@ fn check_delete_for_rls(delete: &Delete, options: &Pg2SqliteOptions) -> Result<(
 
     if let Some(selection) = &delete.selection {
         check_expr_for_rls(selection, options)?;
+    }
+    for order_by_expr in &delete.order_by {
+        check_order_by_expr_for_rls(order_by_expr, options)?;
+    }
+    if let Some(limit) = &delete.limit {
+        check_expr_for_rls(limit, options)?;
     }
 
     Ok(())

@@ -4,7 +4,9 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Delete, FromTable};
 
-use super::helpers::{Reverse, reverse_translate_table_with_joins};
+use super::helpers::{
+    Reverse, reverse_translate_order_by_expr, reverse_translate_table_with_joins,
+};
 use crate::{
     errors::Error,
     impls::shared_helpers::translate_returning,
@@ -47,6 +49,13 @@ impl ReverseTranslator for Delete {
 
         // Reverse translate RETURNING clause if present
         let returning = translate_returning::<Reverse>(self.returning.as_ref(), schema, options)?;
+        let order_by = self
+            .order_by
+            .iter()
+            .map(|expr| reverse_translate_order_by_expr(expr, schema, options))
+            .collect::<Result<Vec<_>, _>>()?;
+        let limit =
+            self.limit.as_ref().map(|expr| expr.reverse_translate(schema, options)).transpose()?;
 
         Ok(Delete {
             delete_token: self.delete_token.clone(),
@@ -56,8 +65,8 @@ impl ReverseTranslator for Delete {
             using,
             selection,
             returning,
-            order_by: self.order_by.clone(),
-            limit: self.limit.clone(),
+            order_by,
+            limit,
         })
     }
 }

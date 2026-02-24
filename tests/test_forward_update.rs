@@ -23,6 +23,10 @@ fn translate(sql: &str) -> String {
         .join("\n")
 }
 
+fn parse_expr(sql: &str) -> Expr {
+    Parser::new(&PostgreSqlDialect {}).try_with_sql(sql).unwrap().parse_expr().unwrap()
+}
+
 #[test]
 fn forward_update_basic() {
     let sql = "
@@ -113,5 +117,35 @@ fn update_with_joined_target_table_is_rejected() {
     assert!(
         err.contains("UPDATE with joins on the target table"),
         "Expected target-table-join error, got: {err}"
+    );
+}
+
+#[test]
+fn forward_update_limit_translates_expressions() {
+    let schema_sql = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);";
+    let mut update_stmt =
+        Parser::parse_sql(&PostgreSqlDialect {}, "UPDATE users SET name = 'x' WHERE id = 1;")
+            .unwrap()
+            .remove(0);
+
+    let Statement::Update(update) = &mut update_stmt else {
+        panic!("Expected UPDATE statement");
+    };
+    update.limit = Some(parse_expr("NOW()"));
+
+    let output = Pg2Sqlite::default()
+        .sql(schema_sql)
+        .unwrap()
+        .statement(update_stmt)
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        output.contains("LIMIT") && output.contains("datetime('now')"),
+        "Expected translated LIMIT expression in UPDATE: {output}"
     );
 }

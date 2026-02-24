@@ -305,6 +305,26 @@ fn rls_table_in_update_where_subquery_produces_error() {
 }
 
 #[test]
+fn rls_table_in_update_limit_subquery_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "UPDATE users SET name = 'x' WHERE id = 1 LIMIT (SELECT id FROM users_rls LIMIT 1);",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in UPDATE LIMIT subquery, got: {err}"
+    );
+}
+
+#[test]
 fn rls_table_in_delete_where_subquery_produces_error() {
     let translator =
         Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
@@ -321,6 +341,26 @@ fn rls_table_in_delete_where_subquery_produces_error() {
     assert!(
         err.contains("users_rls") && err.contains("RLS"),
         "Expected RLS table detected in DELETE WHERE subquery, got: {err}"
+    );
+}
+
+#[test]
+fn rls_table_in_delete_order_by_subquery_produces_error() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "DELETE FROM users WHERE id > 0 ORDER BY (SELECT id FROM users_rls LIMIT 1) LIMIT 1;",
+        &schema,
+        &options,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("users_rls") && err.contains("RLS"),
+        "Expected RLS table detected in DELETE ORDER BY subquery, got: {err}"
     );
 }
 
