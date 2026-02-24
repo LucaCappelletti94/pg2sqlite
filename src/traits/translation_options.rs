@@ -175,4 +175,16 @@ pub trait TranslationOptions {
 
     /// Returns whether strict RLS validation is enabled.
     fn is_strict_rls_validation(&self) -> bool;
+
+    // ==================== Unsupported Statement Handling ====================
+
+    #[must_use]
+    /// Enables strict handling of unsupported PostgreSQL statements.
+    ///
+    /// When enabled, statements that would otherwise be silently filtered out
+    /// will return an error during translation.
+    fn with_fail_on_unsupported_statement(self) -> Self;
+
+    /// Returns whether unsupported statements should fail translation.
+    fn should_fail_on_unsupported_statement(&self) -> bool;
 }

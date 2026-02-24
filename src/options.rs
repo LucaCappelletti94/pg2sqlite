@@ -23,6 +23,8 @@ pub struct Pg2SqliteOptions {
     rls_audit_table_name: Option<String>,
     /// Whether to enable strict RLS validation (abort on violations).
     strict_rls_validation: bool,
+    /// Whether unsupported statements should fail translation.
+    fail_on_unsupported_statement: bool,
 }
 
 impl Default for Pg2SqliteOptions {
@@ -36,6 +38,7 @@ impl Default for Pg2SqliteOptions {
             session_variables: Vec::new(),
             rls_audit_table_name: None,
             strict_rls_validation: false,
+            fail_on_unsupported_statement: false,
         }
     }
 }
@@ -136,5 +139,14 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn is_strict_rls_validation(&self) -> bool {
         self.strict_rls_validation
+    }
+
+    fn with_fail_on_unsupported_statement(mut self) -> Self {
+        self.fail_on_unsupported_statement = true;
+        self
+    }
+
+    fn should_fail_on_unsupported_statement(&self) -> bool {
+        self.fail_on_unsupported_statement
     }
 }
