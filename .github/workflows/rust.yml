@@ -22,6 +22,8 @@ jobs:
         include:
           - os: ubuntu-latest
             rust: nightly
+          - os: windows-latest
+            rust: stable
     steps:
       - uses: actions/checkout@v4
 
@@ -92,6 +94,12 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Run cargo-deny
+        run: cargo deny check
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest
@@ -116,6 +124,31 @@ jobs:
         run: cargo doc --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: Minimum Supported Rust Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-
+
+      - name: Check MSRV build
+        run: cargo test --all-targets
 
   coverage:
     name: Code Coverage
@@ -150,4 +183,4 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true

@@ -2,6 +2,7 @@
 name = "pg2sqlite"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
 sqlparser = { version = "0.61", git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
