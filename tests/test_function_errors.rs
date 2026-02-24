@@ -6,6 +6,23 @@
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
+const SIMPLE_TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, val INT, flag BOOLEAN);";
+
+fn translate_err(sql: &str) -> String {
+    Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap_err()
+        .to_string()
+}
+
+fn translate_ok(sql: &str) -> String {
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    stmts.iter().find(|s| matches!(s, sqlparser::ast::Statement::Query(_))).unwrap().to_string()
+}
+
 // ---------------------------------------------------------------------------
 // ts_rank / ts_rank_cd
 // ---------------------------------------------------------------------------
@@ -63,4 +80,147 @@ fn test_generated_by_default_as_identity_causes_error() {
         error_msg.to_lowercase().contains("generated"),
         "Error should mention GENERATED, got: {error_msg}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// bool_and / bool_or / every
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bool_and_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bool_and(flag) FROM t;"));
+    assert!(err.contains("bool_and"), "Error should mention bool_and: {err}");
+    assert!(err.to_lowercase().contains("min"), "Error should suggest MIN workaround: {err}");
+}
+
+#[test]
+fn bool_or_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bool_or(flag) FROM t;"));
+    assert!(err.contains("bool_or"), "Error should mention bool_or: {err}");
+    assert!(err.to_lowercase().contains("max"), "Error should suggest MAX workaround: {err}");
+}
+
+#[test]
+fn every_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT every(flag) FROM t;"));
+    assert!(
+        err.contains("bool_and") || err.contains("every"),
+        "Error should mention bool_and/every: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Statistical aggregates
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stddev_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT stddev(val) FROM t;"));
+    assert!(err.to_lowercase().contains("stddev"), "Error should mention stddev: {err}");
+}
+
+#[test]
+fn stddev_pop_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT stddev_pop(val) FROM t;"));
+    assert!(err.to_lowercase().contains("stddev"), "Error should mention stddev: {err}");
+}
+
+#[test]
+fn stddev_samp_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT stddev_samp(val) FROM t;"));
+    assert!(err.to_lowercase().contains("stddev"), "Error should mention stddev: {err}");
+}
+
+#[test]
+fn variance_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT variance(val) FROM t;"));
+    assert!(err.to_lowercase().contains("variance"), "Error should mention variance: {err}");
+}
+
+#[test]
+fn var_pop_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT var_pop(val) FROM t;"));
+    assert!(err.to_lowercase().contains("variance"), "Error should mention variance: {err}");
+}
+
+#[test]
+fn var_samp_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT var_samp(val) FROM t;"));
+    assert!(err.to_lowercase().contains("variance"), "Error should mention variance: {err}");
+}
+
+#[test]
+fn corr_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT corr(id, val) FROM t;"));
+    assert!(err.to_lowercase().contains("corr"), "Error should mention corr: {err}");
+}
+
+#[test]
+fn covar_pop_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT covar_pop(id, val) FROM t;"));
+    assert!(err.to_lowercase().contains("covar"), "Error should mention covar: {err}");
+}
+
+#[test]
+fn covar_samp_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT covar_samp(id, val) FROM t;"));
+    assert!(err.to_lowercase().contains("covar"), "Error should mention covar: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// bit_and / bit_or
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bit_and_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bit_and(val) FROM t;"));
+    assert!(err.to_lowercase().contains("bit_and"), "Error should mention bit_and: {err}");
+}
+
+#[test]
+fn bit_or_causes_error() {
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bit_or(val) FROM t;"));
+    assert!(err.to_lowercase().contains("bit_or"), "Error should mention bit_or: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// json_agg / jsonb_agg -> json_group_array (forward)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_agg_translates_to_json_group_array() {
+    let sql = format!("{SIMPLE_TABLE} SELECT json_agg(val) FROM t;");
+    let out = translate_ok(&sql);
+    assert!(out.contains("json_group_array"), "json_agg should become json_group_array: {out}");
+    assert!(!out.contains("json_agg"), "Should not contain json_agg: {out}");
+}
+
+#[test]
+fn jsonb_agg_translates_to_json_group_array() {
+    let sql = format!("{SIMPLE_TABLE} SELECT jsonb_agg(val) FROM t;");
+    let out = translate_ok(&sql);
+    assert!(out.contains("json_group_array"), "jsonb_agg should become json_group_array: {out}");
+    assert!(!out.contains("jsonb_agg"), "Should not contain jsonb_agg: {out}");
+}
+
+#[test]
+fn json_object_agg_translates_to_json_group_object() {
+    let sql = format!("{SIMPLE_TABLE} SELECT json_object_agg(id, val) FROM t;");
+    let out = translate_ok(&sql);
+    assert!(
+        out.contains("json_group_object"),
+        "json_object_agg should become json_group_object: {out}"
+    );
+    assert!(!out.contains("json_object_agg"), "Should not contain json_object_agg: {out}");
+}
+
+#[test]
+fn jsonb_object_agg_translates_to_json_group_object() {
+    let sql = format!("{SIMPLE_TABLE} SELECT jsonb_object_agg(id, val) FROM t;");
+    let out = translate_ok(&sql);
+    assert!(
+        out.contains("json_group_object"),
+        "jsonb_object_agg should become json_group_object: {out}"
+    );
+    assert!(!out.contains("jsonb_object_agg"), "Should not contain jsonb_object_agg: {out}");
 }

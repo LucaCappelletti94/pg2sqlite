@@ -239,3 +239,22 @@ fn reverse_vec_distance_hamming_columns() {
     let pg = reverse(VECTORS, "SELECT vec_distance_hamming(vec, vec) FROM embeddings;");
     assert!(pg.contains("<~>"), "Expected <~> operator: {pg}");
 }
+
+// ==================== json_group_array -> json_agg ====================
+
+#[test]
+fn reverse_json_group_array_to_json_agg() {
+    let pg = reverse(SCHEMA, "SELECT json_group_array(name) FROM users;");
+    assert!(pg.contains("json_agg"), "Expected json_agg: {pg}");
+    assert!(!pg.contains("json_group_array"), "Should not contain json_group_array: {pg}");
+}
+
+// ==================== json_group_object -> json_object_agg
+// ====================
+
+#[test]
+fn reverse_json_group_object_to_json_object_agg() {
+    let pg = reverse(SCHEMA, "SELECT json_group_object(name, age) FROM users;");
+    assert!(pg.contains("json_object_agg"), "Expected json_object_agg: {pg}");
+    assert!(!pg.contains("json_group_object"), "Should not contain json_group_object: {pg}");
+}
