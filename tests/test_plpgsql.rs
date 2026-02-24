@@ -6,13 +6,28 @@
 //! DELETE, SetOperation in query body, inject_condition_into_statement
 //! (UPDATE/DELETE).
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::{
+    prelude::{Pg2Sqlite, Pg2SqliteOptions},
+    traits::TranslationOptions,
+};
 
 fn translate(sql: &str) -> String {
     Pg2Sqlite::default()
         .sql(sql)
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
+    Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(options)
         .unwrap()
         .iter()
         .map(ToString::to_string)
@@ -68,6 +83,66 @@ fn set_variable_binding_in_trigger() {
     let output = translate(sql);
     // Should produce INSERT statements with proper variable substitution
     assert!(output.contains("INSERT"), "Expected INSERT statements from trigger: {output}");
+}
+
+#[test]
+fn declare_default_values_are_available_without_assignment() {
+    let sql = r#"
+        CREATE TABLE items (id INT PRIMARY KEY, kind TEXT);
+        CREATE TABLE audit (log_id TEXT, msg TEXT);
+
+        CREATE OR REPLACE FUNCTION audit_insert() RETURNS TRIGGER AS $$
+        DECLARE
+            v_log_id UUID := gen_random_uuid();
+            v_msg TEXT := 'created';
+        BEGIN
+            INSERT INTO audit (log_id, msg) VALUES (v_log_id, v_msg);
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER audit_insert_trigger
+        AFTER INSERT ON items
+        FOR EACH ROW EXECUTE FUNCTION audit_insert();
+    "#;
+
+    let output = translate(sql);
+    assert!(
+        output.contains("v_log_id.val") && output.contains("v_msg.val"),
+        "DECLARE defaults should be bound through generated CTE values: {output}"
+    );
+    assert!(
+        !output.contains("VALUES (v_log_id, v_msg)"),
+        "Raw undeclared variable references should not remain in trigger SQL: {output}"
+    );
+}
+
+#[test]
+fn declare_default_uuid_uses_configured_uuid_function() {
+    let sql = r#"
+        CREATE TABLE items (id INT PRIMARY KEY, kind TEXT);
+        CREATE TABLE audit (log_id TEXT);
+
+        CREATE OR REPLACE FUNCTION audit_insert() RETURNS TRIGGER AS $$
+        DECLARE
+            v_log_id UUID := gen_random_uuid();
+        BEGIN
+            INSERT INTO audit (log_id) VALUES (v_log_id);
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER audit_insert_trigger
+        AFTER INSERT ON items
+        FOR EACH ROW EXECUTE FUNCTION audit_insert();
+    "#;
+
+    let options = Pg2SqliteOptions::default().with_uuid_function_name("uuid7".to_string());
+    let output = translate_with_options(sql, &options);
+    assert!(
+        output.contains("uuid7()"),
+        "DECLARE UUID default should honor configured uuid function name: {output}"
+    );
 }
 
 #[test]
@@ -274,6 +349,30 @@ fn trigger_with_multiple_statements() {
     "#;
     let output = translate(sql);
     assert!(output.contains("INSERT"), "Expected INSERT in trigger: {output}");
+}
+
+#[test]
+fn query_statement_runs_standard_translation_pipeline() {
+    let sql = r#"
+        CREATE TABLE events (id INT PRIMARY KEY, created_at TEXT);
+
+        CREATE OR REPLACE FUNCTION query_probe() RETURNS TRIGGER AS $$
+        BEGIN
+            SELECT NOW() ORDER BY NOW() LIMIT NOW();
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER query_probe_trigger
+        AFTER INSERT ON events
+        FOR EACH ROW EXECUTE FUNCTION query_probe();
+    "#;
+
+    let output = translate(sql);
+    assert!(
+        output.contains("datetime('now')"),
+        "Expected query statement expressions to be translated through standard pipeline: {output}"
+    );
 }
 
 // ==================== UUID function in trigger ====================

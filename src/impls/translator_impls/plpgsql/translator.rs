@@ -51,8 +51,25 @@ impl PlPgSqlTranslator {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, Error> {
+        Self::translate_with_context(body, PlPgSqlContext::new(), schema, options)
+    }
+
+    /// Translates a PL/pgSQL function body using a pre-seeded context.
+    ///
+    /// This is used when DECLARE defaults were parsed before statement parsing
+    /// and need to be available during translation.
+    ///
+    /// # Errors
+    /// Returns an error if translation fails for any statement.
+    pub fn translate_with_context(
+        body: &BeginEndStatements,
+        mut context: PlPgSqlContext,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<Statement>, Error> {
         let mut result = Vec::new();
-        let mut context = PlPgSqlContext::new();
+
+        context.seed_default_bindings();
 
         // Process each statement in the body
         for stmt in &body.statements {
@@ -235,44 +252,85 @@ impl PlPgSqlTranslator {
     fn translate_query_statement(
         query: &Query,
         context: &mut PlPgSqlContext,
-        _schema: &ParserDB,
+        schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, Error> {
-        // Check if this is a WITH ... INSERT pattern that needs transformation
-        if let Some(with) = &query.with {
+        let transformed_statements = if let Some(with) = &query.with {
+            // Check if this is a WITH ... INSERT pattern that needs transformation
             if let SetExpr::Insert(Statement::Insert(insert)) = &*query.body {
-                return Self::transform_with_insert_to_subquery(with, insert, context, options);
-            }
-            if let SetExpr::Delete(Statement::Delete(delete)) = &*query.body {
-                return Ok(Self::transform_with_delete_to_subquery(with, delete, context, options));
-            }
-        }
+                Self::transform_with_insert_to_subquery(with, insert, context, options)?
+            } else if let SetExpr::Delete(Statement::Delete(delete)) = &*query.body {
+                Self::transform_with_delete_to_subquery(with, delete, context, options)
+            } else {
+                let transformed_body = Self::transform_query_body(&query.body, context, options)?;
 
-        // For other patterns, transform normally
-        let transformed_body = Self::transform_query_body(&query.body, context, options)?;
+                let transformed_with = query.with.as_ref().map(|with| {
+                    let mut new_with = with.clone();
+                    for cte in &mut new_with.cte_tables {
+                        Self::transform_cte_query(&mut cte.query, context, options);
+                    }
+                    new_with
+                });
 
-        let transformed_with = query.with.as_ref().map(|with| {
-            let mut new_with = with.clone();
-            for cte in &mut new_with.cte_tables {
-                Self::transform_cte_query(&mut cte.query, context, options);
+                let transformed_query = Query {
+                    with: transformed_with,
+                    body: Box::new(transformed_body),
+                    order_by: query.order_by.clone(),
+                    limit_clause: query.limit_clause.clone(),
+                    fetch: query.fetch.clone(),
+                    locks: query.locks.clone(),
+                    for_clause: query.for_clause.clone(),
+                    settings: query.settings.clone(),
+                    format_clause: query.format_clause.clone(),
+                    pipe_operators: query.pipe_operators.clone(),
+                };
+
+                vec![Statement::Query(Box::new(transformed_query))]
             }
-            new_with
-        });
+        } else {
+            // For non-WITH query statements, transform normally
+            let transformed_body = Self::transform_query_body(&query.body, context, options)?;
+            let transformed_query = Query {
+                with: None,
+                body: Box::new(transformed_body),
+                order_by: query.order_by.clone(),
+                limit_clause: query.limit_clause.clone(),
+                fetch: query.fetch.clone(),
+                locks: query.locks.clone(),
+                for_clause: query.for_clause.clone(),
+                settings: query.settings.clone(),
+                format_clause: query.format_clause.clone(),
+                pipe_operators: query.pipe_operators.clone(),
+            };
 
-        let translated_query = Query {
-            with: transformed_with,
-            body: Box::new(transformed_body),
-            order_by: query.order_by.clone(),
-            limit_clause: query.limit_clause.clone(),
-            fetch: query.fetch.clone(),
-            locks: query.locks.clone(),
-            for_clause: query.for_clause.clone(),
-            settings: query.settings.clone(),
-            format_clause: query.format_clause.clone(),
-            pipe_operators: query.pipe_operators.clone(),
+            vec![Statement::Query(Box::new(transformed_query))]
         };
 
-        Ok(vec![Statement::Query(Box::new(translated_query))])
+        Self::finalize_query_statements(transformed_statements, context, schema, options)
+    }
+
+    fn finalize_query_statements(
+        statements: Vec<Statement>,
+        context: &PlPgSqlContext,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<Statement>, Error> {
+        let mut finalized = Vec::new();
+        let condition = context.current_condition();
+
+        for statement in statements {
+            let mut translated_statements = statement.translate(schema, options)?;
+
+            if let Some(condition) = &condition {
+                for translated in &mut translated_statements {
+                    Self::inject_condition_into_statement(translated, condition);
+                }
+            }
+
+            finalized.extend(translated_statements);
+        }
+
+        Ok(finalized)
     }
 
     /// Transforms `WITH RECURSIVE cte AS (...) INSERT INTO t SELECT ... FROM

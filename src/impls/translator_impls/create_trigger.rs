@@ -91,8 +91,12 @@ fn generate_standard_trigger_body(
     options: &Pg2SqliteOptions,
 ) -> Result<Option<sqlparser::ast::BeginEndStatements>, crate::errors::Error> {
     let function_name = exec_body.func_desc.name.clone();
-    if let Some(mut body) = schema.function_body(&function_name.to_string())? {
-        body.statements = super::plpgsql::PlPgSqlTranslator::translate(&body, schema, options)?;
+    if let Some((mut body, context)) =
+        schema.function_body_with_context(&function_name.to_string())?
+    {
+        body.statements = super::plpgsql::PlPgSqlTranslator::translate_with_context(
+            &body, context, schema, options,
+        )?;
         Ok(Some(body))
     } else {
         Ok(None)

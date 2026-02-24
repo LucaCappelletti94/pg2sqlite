@@ -176,6 +176,26 @@ impl PlPgSqlContext {
     pub fn clear_uuid_first_use(&mut self) {
         self.uuid_first_use.clear();
     }
+
+    /// Seeds persistent bindings from declaration defaults.
+    ///
+    /// Declarations are function-scoped and should remain visible across IF
+    /// block boundaries, so defaults are initialized as persistent bindings.
+    pub fn seed_default_bindings(&mut self) {
+        let defaults = self
+            .declarations
+            .values()
+            .filter_map(|decl| {
+                decl.default_value.as_ref().map(|default_value| {
+                    VariableBinding { name: decl.name.clone(), expression: default_value.clone() }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for binding in defaults {
+            self.persistent_bindings.entry(binding.name.clone()).or_insert(binding);
+        }
+    }
 }
 
 #[cfg(test)]

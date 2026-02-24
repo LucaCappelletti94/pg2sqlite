@@ -11,7 +11,10 @@ use sqlparser::{
     tokenizer::{Token, TokenWithSpan, Tokenizer, Word},
 };
 
-use crate::{errors::Error, impls::translator_impls::plpgsql::PlPgSqlPreprocessor};
+use crate::{
+    errors::Error,
+    impls::translator_impls::plpgsql::{PlPgSqlContext, PlPgSqlPreprocessor},
+};
 
 /// Trait to define a schema for the translation between `PostgreSQL` and
 /// `SQLite`.
@@ -28,6 +31,19 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
     /// Returns [`Error::UnknownPostgresFeature`] if the function body cannot be
     /// tokenized, parsed, or does not contain a valid `BEGIN ... END` block.
     fn function_body(&self, name: &str) -> Result<Option<BeginEndStatements>, Error> {
+        Ok(self.function_body_with_context(name)?.map(|(body, _context)| body))
+    }
+
+    /// Returns a function body plus preprocessed PL/pgSQL declaration context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownPostgresFeature`] if the function body cannot be
+    /// tokenized, parsed, or does not contain a valid `BEGIN ... END` block.
+    fn function_body_with_context(
+        &self,
+        name: &str,
+    ) -> Result<Option<(BeginEndStatements, PlPgSqlContext)>, Error> {
         let Some(function) = self.function(name) else {
             return Ok(None);
         };
@@ -39,7 +55,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
         let maybe_body = function_body.trim().trim_end_matches(';').trim();
 
         // Preprocess the PL/pgSQL body to handle syntax like `variable := expr`
-        let (preprocessed_body, _context) = PlPgSqlPreprocessor::preprocess(maybe_body);
+        let (preprocessed_body, context) = PlPgSqlPreprocessor::preprocess(maybe_body);
 
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let tokens = Tokenizer::new(&dialect, &preprocessed_body).tokenize().map_err(|e| {
@@ -90,19 +106,22 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
             }
         }
 
-        Ok(Some(BeginEndStatements {
-            begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-                value: "BEGIN".into(),
-                quote_style: None,
-                keyword: Keyword::BEGIN,
-            }))),
-            statements,
-            end_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-                value: "END".into(),
-                quote_style: None,
-                keyword: Keyword::END,
-            }))),
-        }))
+        Ok(Some((
+            BeginEndStatements {
+                begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
+                    value: "BEGIN".into(),
+                    quote_style: None,
+                    keyword: Keyword::BEGIN,
+                }))),
+                statements,
+                end_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
+                    value: "END".into(),
+                    quote_style: None,
+                    keyword: Keyword::END,
+                }))),
+            },
+            context,
+        )))
     }
 }
 
