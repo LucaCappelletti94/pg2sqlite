@@ -8,6 +8,7 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    impls::shared_helpers::function_argument_exprs,
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
 };
@@ -80,21 +81,7 @@ fn translate_function(
 
 /// Extract expressions from function arguments.
 fn extract_arg_exprs(args: &FunctionArguments) -> Vec<&Expr> {
-    match args {
-        FunctionArguments::List(list) => {
-            list.args
-                .iter()
-                .filter_map(|arg| {
-                    match arg {
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
-                        | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. } => Some(e),
-                        _ => None,
-                    }
-                })
-                .collect()
-        }
-        _ => Vec::new(),
-    }
+    function_argument_exprs(args)
 }
 
 /// Build a concatenation expression from a list of expressions using ||.
@@ -296,6 +283,7 @@ impl Translator for Function {
 
 #[cfg(test)]
 mod tests {
+    use sql_traits::structs::ParserDB;
     use sqlparser::{
         ast::{
             Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgOperator,
@@ -309,6 +297,7 @@ mod tests {
         build_concatenation_with_separator, extract_arg_exprs, transform_filter_to_case,
         wrap_arg_with_case_filter,
     };
+    use crate::prelude::{Pg2SqliteOptions, Translator};
 
     fn parse_expr(sql: &str) -> Expr {
         Parser::new(&PostgreSqlDialect {})
@@ -353,5 +342,45 @@ mod tests {
             parameters: FunctionArguments::None,
         };
         assert_eq!(transform_filter_to_case(&passthrough), passthrough);
+    }
+
+    #[test]
+    fn concat_ws_supports_expr_named_arguments() {
+        let schema =
+            ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build");
+        let options = Pg2SqliteOptions::default();
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("concat_ws"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::ExprNamed {
+                        name: parse_expr("sep"),
+                        arg: FunctionArgExpr::Expr(parse_expr("','")),
+                        operator: FunctionArgOperator::Equals,
+                    },
+                    FunctionArg::ExprNamed {
+                        name: parse_expr("lhs"),
+                        arg: FunctionArgExpr::Expr(parse_expr("first_name")),
+                        operator: FunctionArgOperator::Equals,
+                    },
+                    FunctionArg::ExprNamed {
+                        name: parse_expr("rhs"),
+                        arg: FunctionArgExpr::Expr(parse_expr("last_name")),
+                        operator: FunctionArgOperator::Equals,
+                    },
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+
+        let translated = func.translate(&schema, &options).expect("concat_ws should translate");
+        assert_eq!(translated.to_string(), "first_name || ',' || last_name");
     }
 }

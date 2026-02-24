@@ -3,11 +3,12 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Expr, ExprWithAlias, FunctionArg, FunctionArgExpr, Join, JoinConstraint, JoinOperator, Measure,
-    OrderByExpr, PivotValueSource, Query, SelectItem, Setting, Statement, SymbolDefinition,
-    TableFactor, TableFunctionArgs, TableSample, TableSampleBucket, TableSampleKind,
-    TableSampleQuantity, TableVersion, TableWithJoins, WithFill, XmlNamespaceDefinition,
-    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
+    Expr, ExprWithAlias, FunctionArg, FunctionArgExpr, FunctionArguments, Join, JoinConstraint,
+    JoinOperator, Measure, OrderByExpr, PivotValueSource, Query, SelectItem, Setting, Statement,
+    SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
+    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, WithFill,
+    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
+    XmlTableColumnOption,
 };
 
 use crate::{errors::Error, prelude::Pg2SqliteOptions};
@@ -45,6 +46,26 @@ pub(crate) fn statement_variant_name(statement: &Statement) -> String {
 #[must_use]
 pub(crate) fn expr_variant_name(expr: &Expr) -> String {
     debug_variant_name(expr)
+}
+
+/// Returns the expression for argument variants that carry one.
+#[must_use]
+pub(crate) fn function_arg_expr(arg: &FunctionArg) -> Option<&Expr> {
+    match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. }
+        | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(expr), .. } => Some(expr),
+        _ => None,
+    }
+}
+
+/// Collects expression payloads from function arguments.
+#[must_use]
+pub(crate) fn function_argument_exprs(args: &FunctionArguments) -> Vec<&Expr> {
+    match args {
+        FunctionArguments::List(list) => list.args.iter().filter_map(function_arg_expr).collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn translate_function_arg_expr<D: TranslationDirection>(

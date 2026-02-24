@@ -12,29 +12,14 @@ use sqlparser::ast::{
     TableWithJoins, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
-use crate::prelude::{Pg2SqliteOptions, Translator};
+use crate::{
+    impls::shared_helpers::function_argument_exprs,
+    prelude::{Pg2SqliteOptions, Translator},
+};
 
 /// Extract column names from a function's arguments (recursively).
 fn extract_columns_from_function(func: &Function) -> Vec<String> {
-    if let FunctionArguments::List(list) = &func.args {
-        list.args
-            .iter()
-            .flat_map(|arg| {
-                match arg {
-                    sqlparser::ast::FunctionArg::Unnamed(
-                        sqlparser::ast::FunctionArgExpr::Expr(e),
-                    )
-                    | sqlparser::ast::FunctionArg::Named {
-                        arg: sqlparser::ast::FunctionArgExpr::Expr(e),
-                        ..
-                    } => extract_columns_from_expr(e),
-                    _ => Vec::new(),
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    }
+    function_argument_exprs(&func.args).into_iter().flat_map(extract_columns_from_expr).collect()
 }
 
 /// Extract column identifiers from an expression.
@@ -58,24 +43,11 @@ fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
 
 /// Extract the search query string from a to_tsquery expression.
 fn extract_query_from_tsquery(func: &Function) -> Option<String> {
-    if let FunctionArguments::List(list) = &func.args {
-        // to_tsquery can have 1 or 2 args: to_tsquery('query') or to_tsquery('config',
-        // 'query') The query is always the last argument
-        for arg in list.args.iter().rev() {
-            if let sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
-                Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }),
-            ))
-            | sqlparser::ast::FunctionArg::Named {
-                arg:
-                    sqlparser::ast::FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(s),
-                        ..
-                    })),
-                ..
-            } = arg
-            {
-                return Some(s.clone());
-            }
+    // to_tsquery can have 1 or 2 args: to_tsquery('query') or to_tsquery('config',
+    // 'query'). The query is always the last expression argument.
+    for expr in function_argument_exprs(&func.args).into_iter().rev() {
+        if let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) = expr {
+            return Some(s.clone());
         }
     }
     None

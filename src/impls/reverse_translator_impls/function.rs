@@ -397,7 +397,8 @@ pub fn reverse_translate_function(
 fn extract_expr_from_arg(arg: &FunctionArg) -> Result<&Expr, Error> {
     match arg {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
-        | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. } => Ok(e),
+        | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
+        | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => Ok(e),
         _ => {
             Err(Error::UnsupportedSQLiteFeature(
                 "Expected expression argument in function".to_string(),
@@ -450,6 +451,15 @@ fn reverse_translate_function_arg(
                 operator: operator.clone(),
             }
         }
+        FunctionArg::ExprNamed { name, arg: FunctionArgExpr::Expr(e), operator } => {
+            FunctionArg::ExprNamed {
+                name: crate::prelude::ReverseTranslator::reverse_translate(name, schema, options)?,
+                arg: FunctionArgExpr::Expr(crate::prelude::ReverseTranslator::reverse_translate(
+                    e, schema, options,
+                )?),
+                operator: operator.clone(),
+            }
+        }
         // Pass through wildcards and other arg types
         other => other.clone(),
     })
@@ -460,8 +470,9 @@ mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
         ast::{
-            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
-            Ident, ObjectName, ObjectNamePart, ValueWithSpan,
+            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgOperator,
+            FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart,
+            ValueWithSpan,
         },
         dialect::PostgreSqlDialect,
         parser::Parser,
@@ -549,5 +560,49 @@ mod tests {
 
         assert_eq!(function.name.to_string(), "count");
         assert_eq!(function.filter.as_ref().map(ToString::to_string), Some("age > 18".to_string()));
+    }
+
+    #[test]
+    fn extract_expr_from_arg_accepts_expr_named() {
+        let arg = FunctionArg::ExprNamed {
+            name: parse_expr("param"),
+            arg: FunctionArgExpr::Expr(parse_expr("value")),
+            operator: FunctionArgOperator::Equals,
+        };
+        let extracted = extract_expr_from_arg(&arg).expect("expr-named args should be supported");
+        assert_eq!(extracted.to_string(), "value");
+    }
+
+    #[test]
+    fn passthrough_reverse_translation_translates_expr_named_argument_expression() {
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("custom_fn"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::ExprNamed {
+                    name: parse_expr("tz"),
+                    arg: FunctionArgExpr::Expr(parse_expr("datetime('now')")),
+                    operator: FunctionArgOperator::Equals,
+                }],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let translated = reverse_translate_function(&func, &schema, &options)
+            .expect("custom function should pass through with translated args");
+        let Expr::Function(function) = translated else {
+            panic!("expected translated function");
+        };
+
+        let arg = function.args.to_string();
+        assert!(arg.contains("NOW()"), "expected expr-named arg to be reverse translated: {arg}");
     }
 }

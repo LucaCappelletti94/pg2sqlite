@@ -5,9 +5,7 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
-use sqlparser::ast::{
-    CreateIndex, Expr, FunctionArguments, Ident, IndexType, ObjectName, ObjectNamePart, Statement,
-};
+use sqlparser::ast::{CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement};
 
 use crate::{
     errors::Error,
@@ -17,6 +15,7 @@ use crate::{
             last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
             schema_and_table_for_lookup,
         },
+        shared_helpers::function_argument_exprs,
         translator_impls::rls::resolve_trigger_table_name,
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -48,25 +47,10 @@ fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
         Expr::Nested(inner) => extract_columns_from_expr(inner),
         Expr::Function(func) => {
             // Extract columns from function arguments
-            if let FunctionArguments::List(list) = &func.args {
-                list.args
-                    .iter()
-                    .flat_map(|arg| {
-                        match arg {
-                            sqlparser::ast::FunctionArg::Unnamed(
-                                sqlparser::ast::FunctionArgExpr::Expr(e),
-                            )
-                            | sqlparser::ast::FunctionArg::Named {
-                                arg: sqlparser::ast::FunctionArgExpr::Expr(e),
-                                ..
-                            } => extract_columns_from_expr(e),
-                            _ => Vec::new(),
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            }
+            function_argument_exprs(&func.args)
+                .into_iter()
+                .flat_map(extract_columns_from_expr)
+                .collect()
         }
         Expr::Cast { expr, .. } => extract_columns_from_expr(expr),
         // For other expression types (values, literals, etc.), return empty
@@ -86,25 +70,10 @@ fn analyze_fts_expression(expr: &Expr) -> Option<Vec<String>> {
                 // to_tsvector can have 1 or 2 arguments:
                 // to_tsvector(text) or to_tsvector('config', text)
                 // We need to extract columns from the text argument(s)
-                let columns: Vec<String> = if let FunctionArguments::List(list) = &func.args {
-                    list.args
-                        .iter()
-                        .flat_map(|arg| {
-                            match arg {
-                                sqlparser::ast::FunctionArg::Unnamed(
-                                    sqlparser::ast::FunctionArgExpr::Expr(e),
-                                )
-                                | sqlparser::ast::FunctionArg::Named {
-                                    arg: sqlparser::ast::FunctionArgExpr::Expr(e),
-                                    ..
-                                } => extract_columns_from_expr(e),
-                                _ => Vec::new(),
-                            }
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let columns: Vec<String> = function_argument_exprs(&func.args)
+                    .into_iter()
+                    .flat_map(extract_columns_from_expr)
+                    .collect();
 
                 if columns.is_empty() { None } else { Some(columns) }
             } else {
@@ -161,9 +130,8 @@ fn analyze_fts_index(create_index: &CreateIndex) -> FtsTranslation {
 /// of the indexed content. This allows triggers to properly manage
 /// insert/update/delete synchronization using standard DELETE statements.
 fn create_fts5_virtual_table(base_name: &str, columns: &[String]) -> Statement {
-    let fts_name = ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(&format!(
-        "{base_name}_fts"
-    )))]);
+    let fts_name =
+        ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(&format!("{base_name}_fts")))]);
 
     // Build the module arguments: just column names
     // Using regular FTS5 (no content option) so triggers can use DELETE statements
@@ -190,16 +158,9 @@ fn create_fts5_triggers(
     let fts_name = format!("{fts_table_base}_fts");
     let trigger_table_quoted = quote_identifier(trigger_table);
     let fts_name_quoted = quote_identifier(&fts_name);
-    let columns_list = columns
-        .iter()
-        .map(|c| quote_identifier(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let new_values = columns
-        .iter()
-        .map(|c| prefixed_quoted_identifier("new", c))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let columns_list = columns.iter().map(|c| quote_identifier(c)).collect::<Vec<_>>().join(", ");
+    let new_values =
+        columns.iter().map(|c| prefixed_quoted_identifier("new", c)).collect::<Vec<_>>().join(", ");
     let new_pk = prefixed_quoted_identifier("new", pk_column);
     let old_pk = prefixed_quoted_identifier("old", pk_column);
     let insert_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ai"));
@@ -409,10 +370,40 @@ mod tests {
             index.translate(&schema, &Pg2SqliteOptions::default()).expect("index should translate");
 
         assert!(
-            translated
-                .iter()
-                .any(|stmt| stmt.to_string().contains("CREATE TRIGGER")),
+            translated.iter().any(|stmt| stmt.to_string().contains("CREATE TRIGGER")),
             "expected generated FTS synchronization triggers"
         );
+    }
+
+    #[test]
+    fn analyze_fts_expression_supports_expr_named_arguments() {
+        let mut idx =
+            parse_create_index("CREATE INDEX idx_docs ON docs USING GIN (to_tsvector(title))");
+        let Expr::Function(func) = &mut idx.columns[0].column.expr else {
+            panic!("expected function expression");
+        };
+        func.args = FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::ExprNamed {
+                    name: Expr::Identifier(Ident::new("doc")),
+                    arg: FunctionArgExpr::Expr(Expr::CompoundIdentifier(vec![
+                        Ident::new("docs"),
+                        Ident::new("title"),
+                    ])),
+                    operator: FunctionArgOperator::Equals,
+                },
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                    sqlparser::ast::ValueWithSpan::from(sqlparser::ast::Value::SingleQuotedString(
+                        "english".to_string(),
+                    )),
+                ))),
+            ],
+            clauses: vec![],
+        });
+
+        let cols =
+            analyze_fts_expression(&idx.columns[0].column.expr).expect("should extract cols");
+        assert_eq!(cols, vec!["title".to_string()]);
     }
 }
