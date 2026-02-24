@@ -9,12 +9,15 @@ use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement};
 
 use crate::{
     errors::Error,
-    impls::translator_impls::{
-        rls::{
-            generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
-            validate_table_policies,
+    impls::{
+        shared_helpers::statement_variant_name,
+        translator_impls::{
+            rls::{
+                generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
+                validate_table_policies,
+            },
+            vector::{generate_vec0_statements, has_vector_columns},
         },
-        vector::{generate_vec0_statements, has_vector_columns},
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
@@ -75,14 +78,20 @@ fn inject_condition(stmt: &mut Statement, condition: Expr) -> Result<(), crate::
             delete.selection = Some(new_selection);
         }
         _ => {
-            let debug = format!("{stmt:?}");
-            let variant_name = debug.split(['(', '{', ' ']).next().unwrap_or("Unknown");
+            let variant_name = statement_variant_name(stmt);
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                "Cannot inject IF condition into statement type: {variant_name}",
+                "Cannot inject IF condition into statement variant `{variant_name}`",
             )));
         }
     }
     Ok(())
+}
+
+fn unsupported_statement_error(stmt: &Statement) -> crate::errors::Error {
+    let variant_name = statement_variant_name(stmt);
+    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "Unsupported PostgreSQL statement variant `{variant_name}`"
+    ))
 }
 
 macro_rules! unsupported_statement_patterns {
@@ -379,7 +388,14 @@ impl Translator for Statement {
                         }]
                     }
                     // Other object types are PostgreSQL-specific, ignore them
-                    _ => Vec::new(),
+                    _ => {
+                        if options.should_fail_on_unsupported_statement() {
+                            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                                "Unsupported PostgreSQL DROP object type encountered: {object_type:?}"
+                            )));
+                        }
+                        Vec::new()
+                    }
                 }
             }
             // DROP TRIGGER - translate to SQLite (strip table name and CASCADE/RESTRICT)
@@ -391,7 +407,12 @@ impl Translator for Statement {
                     option: None,     // SQLite doesn't support CASCADE/RESTRICT
                 })]
             }
-            unsupported_statement_patterns!() => Vec::new(),
+            stmt @ unsupported_statement_patterns!() => {
+                if options.should_fail_on_unsupported_statement() {
+                    return Err(unsupported_statement_error(stmt));
+                }
+                Vec::new()
+            }
         })
     }
 }
