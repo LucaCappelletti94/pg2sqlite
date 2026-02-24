@@ -823,7 +823,11 @@ fn check_set_expr_for_rls(set_expr: &SetExpr, options: &Pg2SqliteOptions) -> Res
         }
         SetExpr::Values(values) => check_values_for_rls(values, options),
         SetExpr::Table(table) => check_table_command_for_rls(table, options),
-        SetExpr::Merge(_) => Ok(()),
+        SetExpr::Merge(_) => {
+            Err(Error::UnsupportedSQLiteFeature(
+                "MERGE set expressions are not supported in reverse translation".to_string(),
+            ))
+        }
     }
 }
 
@@ -1158,6 +1162,12 @@ mod tests {
         }));
         let err = check_set_expr_for_rls(&rls_table_expr, &options).unwrap_err();
         assert!(err.to_string().contains("users_rls"));
+
+        let merge_stmt = Parser::parse_sql(&PostgreSqlDialect {}, "COMMIT;").unwrap().remove(0);
+        let merge_expr = SetExpr::Merge(merge_stmt);
+        let err = check_set_expr_for_rls(&merge_expr, &options)
+            .expect_err("merge set expr should be rejected");
+        assert!(err.to_string().contains("MERGE set expressions"));
     }
 
     #[test]

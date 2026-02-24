@@ -1419,6 +1419,7 @@ impl PlPgSqlTranslator {
 
     /// Substitutes variable references in an expression with CTE column
     /// references.
+    #[allow(clippy::too_many_lines)]
     fn substitute_variables(expr: &Expr, bindings: &[VariableBinding]) -> Expr {
         match expr {
             Expr::Identifier(ident) => {

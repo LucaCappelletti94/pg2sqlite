@@ -515,7 +515,7 @@ fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVari
                 conditions,
                 else_result.as_deref(),
                 patterns,
-            )
+            );
         }
         Expr::Trim { expr, trim_what, trim_characters, .. } => {
             collect_patterns_from_trim_expr(
@@ -1451,7 +1451,8 @@ where
 
     // Get all column names for the INSERT statement
     let columns = collect_column_names(table, schema);
-    let column_list = columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
+    let column_list =
+        columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
     let value_list = columns
         .iter()
         .map(|column| prefixed_quoted_identifier("NEW", column))
@@ -1904,8 +1905,9 @@ fn generate_monitoring_trigger_sql(
     let table_name_literal = sql_string_literal(table_name);
     let policy_name_literal = sql_string_literal(&format!("{op_upper} policy"));
     let severity_literal = sql_string_literal(severity);
-    let details_literal =
-        sql_string_literal(&format!("Row {past_participle} backing table but not visible through RLS view"));
+    let details_literal = sql_string_literal(&format!(
+        "Row {past_participle} backing table but not visible through RLS view"
+    ));
 
     let abort_clause = if strict_mode {
         let message = format!(
