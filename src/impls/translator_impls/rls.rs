@@ -142,65 +142,394 @@ impl<'a> RlsTriggerContext<'a> {
     }
 }
 
-/// Checks if an expression contains a `current_setting('name')` call and
-/// returns the setting name if found.
-fn find_current_setting_call(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Function(func) => {
-            let func_name = func.name.to_string().to_lowercase();
-            if func_name == "current_setting"
-                && let FunctionArguments::List(FunctionArgumentList { args, .. }) = &func.args
-                && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))) =
-                    args.first()
-            {
-                // Handle both old and new sqlparser Value types
-                let value_str = value.to_string();
-                // Remove quotes from the string value
-                let trimmed = value_str.trim_matches('\'');
-                return Some(trimmed.to_string());
-            }
-            None
-        }
-        Expr::BinaryOp { left, right, .. } => {
-            find_current_setting_call(left).or_else(|| find_current_setting_call(right))
-        }
-        Expr::UnaryOp { expr, .. } | Expr::Cast { expr, .. } => find_current_setting_call(expr),
-        Expr::Nested(inner) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            find_current_setting_call(inner)
-        }
-        Expr::InList { expr, list, .. } => {
-            find_current_setting_call(expr)
-                .or_else(|| list.iter().find_map(find_current_setting_call))
-        }
-        Expr::Between { expr, low, high, .. } => {
-            find_current_setting_call(expr)
-                .or_else(|| find_current_setting_call(low))
-                .or_else(|| find_current_setting_call(high))
-        }
-        _ => None,
+fn push_pattern_unique(
+    patterns: &mut Vec<SessionVariablePattern>,
+    pattern: SessionVariablePattern,
+) {
+    if !patterns.contains(&pattern) {
+        patterns.push(pattern);
     }
 }
 
-/// Checks if an expression contains `current_user`.
-fn contains_current_user(expr: &Expr) -> bool {
-    match expr {
-        Expr::Identifier(ident) => ident.value.to_lowercase() == "current_user",
-        // In PostgreSQL, current_user is parsed as a no-argument function
-        Expr::Function(func) => func.name.to_string().to_lowercase() == "current_user",
-        Expr::BinaryOp { left, right, .. } => {
-            contains_current_user(left) || contains_current_user(right)
+fn collect_patterns_from_function(func: &Function, patterns: &mut Vec<SessionVariablePattern>) {
+    let func_name = function_name_lower(func);
+    if func_name == "current_user" {
+        push_pattern_unique(patterns, SessionVariablePattern::CurrentUser);
+    }
+    if let Some(setting_name) = extract_current_setting_name(func) {
+        push_pattern_unique(
+            patterns,
+            SessionVariablePattern::CurrentSetting { name: setting_name },
+        );
+    }
+
+    if let FunctionArguments::List(arg_list) = &func.args {
+        for arg in &arg_list.args {
+            match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. }
+                | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(expr), .. } => {
+                    collect_session_variable_patterns(expr, patterns);
+                }
+                _ => {}
+            }
         }
-        Expr::UnaryOp { expr, .. } | Expr::Cast { expr, .. } => contains_current_user(expr),
-        Expr::Nested(inner) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            contains_current_user(inner)
+    }
+
+    if let Some(filter) = &func.filter {
+        collect_session_variable_patterns(filter, patterns);
+    }
+
+    if let Some(over) = &func.over
+        && let sqlparser::ast::WindowType::WindowSpec(window_spec) = over
+    {
+        for expr in &window_spec.partition_by {
+            collect_session_variable_patterns(expr, patterns);
+        }
+        for order_by_expr in &window_spec.order_by {
+            collect_session_variable_patterns(&order_by_expr.expr, patterns);
+        }
+    }
+
+    for order_by_expr in &func.within_group {
+        collect_session_variable_patterns(&order_by_expr.expr, patterns);
+    }
+}
+
+fn collect_patterns_from_table_factor(
+    factor: &TableFactor,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    match factor {
+        TableFactor::Derived { subquery, .. } => {
+            collect_patterns_from_query(subquery, patterns);
+        }
+        TableFactor::NestedJoin { table_with_joins, .. } => {
+            collect_patterns_from_table_factor(&table_with_joins.relation, patterns);
+            for join in &table_with_joins.joins {
+                collect_patterns_from_table_factor(&join.relation, patterns);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_patterns_from_select(
+    select: &sqlparser::ast::Select,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    for table_with_joins in &select.from {
+        collect_patterns_from_table_factor(&table_with_joins.relation, patterns);
+        for join in &table_with_joins.joins {
+            collect_patterns_from_table_factor(&join.relation, patterns);
+            match &join.join_operator {
+                JoinOperator::Join(JoinConstraint::On(expr))
+                | JoinOperator::Inner(JoinConstraint::On(expr))
+                | JoinOperator::Left(JoinConstraint::On(expr))
+                | JoinOperator::LeftOuter(JoinConstraint::On(expr))
+                | JoinOperator::Right(JoinConstraint::On(expr))
+                | JoinOperator::RightOuter(JoinConstraint::On(expr))
+                | JoinOperator::FullOuter(JoinConstraint::On(expr))
+                | JoinOperator::CrossJoin(JoinConstraint::On(expr))
+                | JoinOperator::Semi(JoinConstraint::On(expr))
+                | JoinOperator::LeftSemi(JoinConstraint::On(expr))
+                | JoinOperator::RightSemi(JoinConstraint::On(expr))
+                | JoinOperator::Anti(JoinConstraint::On(expr))
+                | JoinOperator::LeftAnti(JoinConstraint::On(expr))
+                | JoinOperator::RightAnti(JoinConstraint::On(expr))
+                | JoinOperator::StraightJoin(JoinConstraint::On(expr)) => {
+                    collect_session_variable_patterns(expr, patterns);
+                }
+                JoinOperator::AsOf { constraint: JoinConstraint::On(expr), match_condition } => {
+                    collect_session_variable_patterns(expr, patterns);
+                    collect_session_variable_patterns(match_condition, patterns);
+                }
+                JoinOperator::AsOf { match_condition, .. } => {
+                    collect_session_variable_patterns(match_condition, patterns);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(selection) = &select.selection {
+        collect_session_variable_patterns(selection, patterns);
+    }
+    if let Some(having) = &select.having {
+        collect_session_variable_patterns(having, patterns);
+    }
+    if let Some(qualify) = &select.qualify {
+        collect_session_variable_patterns(qualify, patterns);
+    }
+
+    for item in &select.projection {
+        if let sqlparser::ast::SelectItem::UnnamedExpr(expr)
+        | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } = item
+        {
+            collect_session_variable_patterns(expr, patterns);
+        }
+    }
+
+    if let sqlparser::ast::GroupByExpr::Expressions(exprs, _) = &select.group_by {
+        for expr in exprs {
+            collect_session_variable_patterns(expr, patterns);
+        }
+    }
+}
+
+fn collect_patterns_from_set_expr(
+    set_expr: &sqlparser::ast::SetExpr,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    match set_expr {
+        sqlparser::ast::SetExpr::Select(select) => collect_patterns_from_select(select, patterns),
+        sqlparser::ast::SetExpr::Query(query) => collect_patterns_from_query(query, patterns),
+        sqlparser::ast::SetExpr::SetOperation { left, right, .. } => {
+            collect_patterns_from_set_expr(left, patterns);
+            collect_patterns_from_set_expr(right, patterns);
+        }
+        sqlparser::ast::SetExpr::Values(values) => {
+            for row in &values.rows {
+                for expr in row {
+                    collect_session_variable_patterns(expr, patterns);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_patterns_from_query(
+    query: &sqlparser::ast::Query,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            collect_patterns_from_query(&cte.query, patterns);
+        }
+    }
+    collect_patterns_from_set_expr(query.body.as_ref(), patterns);
+
+    if let Some(order_by) = &query.order_by
+        && let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind
+    {
+        for order_expr in exprs {
+            collect_session_variable_patterns(&order_expr.expr, patterns);
+        }
+    }
+
+    if let Some(limit_clause) = &query.limit_clause {
+        match limit_clause {
+            sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by } => {
+                if let Some(limit) = limit {
+                    collect_session_variable_patterns(limit, patterns);
+                }
+                if let Some(offset) = offset {
+                    collect_session_variable_patterns(&offset.value, patterns);
+                }
+                for expr in limit_by {
+                    collect_session_variable_patterns(expr, patterns);
+                }
+            }
+            sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
+                collect_session_variable_patterns(offset, patterns);
+                collect_session_variable_patterns(limit, patterns);
+            }
+        }
+    }
+
+    if let Some(fetch) = &query.fetch
+        && let Some(quantity) = &fetch.quantity
+    {
+        collect_session_variable_patterns(quantity, patterns);
+    }
+}
+
+fn collect_patterns_from_expr_pair(
+    left: &Expr,
+    right: &Expr,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    collect_session_variable_patterns(left, patterns);
+    collect_session_variable_patterns(right, patterns);
+}
+
+fn collect_patterns_from_expr_slice(exprs: &[Expr], patterns: &mut Vec<SessionVariablePattern>) {
+    for expr in exprs {
+        collect_session_variable_patterns(expr, patterns);
+    }
+}
+
+fn collect_patterns_from_case_expr(
+    operand: Option<&Expr>,
+    conditions: &[sqlparser::ast::CaseWhen],
+    else_result: Option<&Expr>,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    if let Some(operand) = operand {
+        collect_session_variable_patterns(operand, patterns);
+    }
+    for case_when in conditions {
+        collect_session_variable_patterns(&case_when.condition, patterns);
+        collect_session_variable_patterns(&case_when.result, patterns);
+    }
+    if let Some(else_result) = else_result {
+        collect_session_variable_patterns(else_result, patterns);
+    }
+}
+
+fn collect_patterns_from_trim_expr(
+    expr: &Expr,
+    trim_what: Option<&Expr>,
+    trim_characters: Option<&[Expr]>,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    collect_session_variable_patterns(expr, patterns);
+    if let Some(trim_what) = trim_what {
+        collect_session_variable_patterns(trim_what, patterns);
+    }
+    if let Some(trim_characters) = trim_characters {
+        collect_patterns_from_expr_slice(trim_characters, patterns);
+    }
+}
+
+fn collect_patterns_from_substring_expr(
+    expr: &Expr,
+    substring_from: Option<&Expr>,
+    substring_for: Option<&Expr>,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    collect_session_variable_patterns(expr, patterns);
+    if let Some(substring_from) = substring_from {
+        collect_session_variable_patterns(substring_from, patterns);
+    }
+    if let Some(substring_for) = substring_for {
+        collect_session_variable_patterns(substring_for, patterns);
+    }
+}
+
+fn collect_patterns_from_overlay_expr(
+    expr: &Expr,
+    overlay_what: &Expr,
+    overlay_from: &Expr,
+    overlay_for: Option<&Expr>,
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    collect_session_variable_patterns(expr, patterns);
+    collect_session_variable_patterns(overlay_what, patterns);
+    collect_session_variable_patterns(overlay_from, patterns);
+    if let Some(overlay_for) = overlay_for {
+        collect_session_variable_patterns(overlay_for, patterns);
+    }
+}
+
+fn collect_patterns_from_compound_access(
+    root: &Expr,
+    access_chain: &[sqlparser::ast::AccessExpr],
+    patterns: &mut Vec<SessionVariablePattern>,
+) {
+    collect_session_variable_patterns(root, patterns);
+    for access in access_chain {
+        if let sqlparser::ast::AccessExpr::Dot(expr) = access {
+            collect_session_variable_patterns(expr, patterns);
+        }
+    }
+}
+
+/// Collect all session variable patterns used by an expression tree.
+fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVariablePattern>) {
+    match expr {
+        Expr::Identifier(ident) => {
+            if ident.value.eq_ignore_ascii_case("current_user") {
+                push_pattern_unique(patterns, SessionVariablePattern::CurrentUser);
+            }
+        }
+        Expr::Function(func) => collect_patterns_from_function(func, patterns),
+        Expr::Subquery(query) => collect_patterns_from_query(query, patterns),
+        Expr::Exists { subquery, .. } => collect_patterns_from_query(subquery, patterns),
+        Expr::InSubquery { expr, subquery, .. } => {
+            collect_session_variable_patterns(expr, patterns);
+            collect_patterns_from_query(subquery, patterns);
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::AnyOp { left, right, .. }
+        | Expr::AllOp { left, right, .. } => {
+            collect_patterns_from_expr_pair(left, right, patterns);
+        }
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::SimilarTo { expr, pattern, .. }
+        | Expr::RLike { expr, pattern, .. }
+        | Expr::Position { expr, r#in: pattern }
+        | Expr::AtTimeZone { timestamp: expr, time_zone: pattern }
+        | Expr::IsDistinctFrom(expr, pattern)
+        | Expr::IsNotDistinctFrom(expr, pattern) => {
+            collect_patterns_from_expr_pair(expr, pattern, patterns);
+        }
+        Expr::UnaryOp { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Extract { expr, .. }
+        | Expr::Ceil { expr, .. }
+        | Expr::Floor { expr, .. }
+        | Expr::Nested(expr)
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsUnknown(expr)
+        | Expr::IsNotUnknown(expr)
+        | Expr::IsTrue(expr)
+        | Expr::IsNotTrue(expr)
+        | Expr::IsFalse(expr)
+        | Expr::IsNotFalse(expr)
+        | Expr::Prefixed { value: expr, .. }
+        | Expr::Collate { expr, .. }
+        | Expr::IsNormalized { expr, .. } => collect_session_variable_patterns(expr, patterns),
+        Expr::Tuple(exprs) | Expr::Array(sqlparser::ast::Array { elem: exprs, .. }) => {
+            collect_patterns_from_expr_slice(exprs, patterns);
         }
         Expr::InList { expr, list, .. } => {
-            contains_current_user(expr) || list.iter().any(contains_current_user)
+            collect_session_variable_patterns(expr, patterns);
+            collect_patterns_from_expr_slice(list, patterns);
         }
         Expr::Between { expr, low, high, .. } => {
-            contains_current_user(expr) || contains_current_user(low) || contains_current_user(high)
+            collect_session_variable_patterns(expr, patterns);
+            collect_patterns_from_expr_pair(low, high, patterns);
         }
-        _ => false,
+        Expr::Case { operand, conditions, else_result, .. } => collect_patterns_from_case_expr(
+            operand.as_deref(),
+            conditions,
+            else_result.as_deref(),
+            patterns,
+        ),
+        Expr::Trim { expr, trim_what, trim_characters, .. } => {
+            collect_patterns_from_trim_expr(
+                expr,
+                trim_what.as_deref(),
+                trim_characters.as_deref(),
+                patterns,
+            );
+        }
+        Expr::Substring { expr, substring_from, substring_for, .. } => {
+            collect_patterns_from_substring_expr(
+                expr,
+                substring_from.as_deref(),
+                substring_for.as_deref(),
+                patterns,
+            );
+        }
+        Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
+            collect_patterns_from_overlay_expr(
+                expr,
+                overlay_what,
+                overlay_from,
+                overlay_for.as_deref(),
+                patterns,
+            );
+        }
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            collect_patterns_from_compound_access(root, access_chain, patterns);
+        }
+        Expr::Interval(interval) => collect_session_variable_patterns(&interval.value, patterns),
+        _ => {}
     }
 }
 
@@ -255,24 +584,22 @@ pub fn validate_session_variables<O: TranslationOptions>(
     table_name: &str,
     policy_name: &str,
 ) -> Result<(), Error> {
-    // Check for current_setting calls
-    if let Some(setting_name) = find_current_setting_call(expr) {
-        let pattern = SessionVariablePattern::CurrentSetting { name: setting_name.clone() };
-        if options.find_session_variable_function(&pattern).is_none() {
-            return Err(Error::SessionVariableMappingNotFound {
-                pattern: format!(
-                    "current_setting('{setting_name}') in table '{table_name}', policy '{policy_name}'"
-                ),
-            });
-        }
-    }
+    let mut patterns = Vec::new();
+    collect_session_variable_patterns(expr, &mut patterns);
 
-    // Check for current_user
-    if contains_current_user(expr) {
-        let pattern = SessionVariablePattern::CurrentUser;
+    for pattern in patterns {
         if options.find_session_variable_function(&pattern).is_none() {
             return Err(Error::SessionVariableMappingNotFound {
-                pattern: format!("current_user in table '{table_name}', policy '{policy_name}'"),
+                pattern: match pattern {
+                    SessionVariablePattern::CurrentUser => {
+                        format!("current_user in table '{table_name}', policy '{policy_name}'")
+                    }
+                    SessionVariablePattern::CurrentSetting { name } => {
+                        format!(
+                            "current_setting('{name}') in table '{table_name}', policy '{policy_name}'"
+                        )
+                    }
+                },
             });
         }
     }

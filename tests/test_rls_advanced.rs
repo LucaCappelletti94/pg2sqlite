@@ -263,6 +263,43 @@ fn missing_session_variable_mapping_error() {
     );
 }
 
+#[test]
+fn missing_one_of_multiple_current_setting_mappings_errors() {
+    let sql = r#"
+        CREATE TABLE scoped_secrets (
+            id INT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            org_id TEXT NOT NULL
+        );
+        ALTER TABLE scoped_secrets ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY scoped_secrets_select ON scoped_secrets
+            FOR SELECT TO authenticated
+            USING (
+                user_id = current_setting('app.user_id')::text
+                OR org_id = current_setting('app.org_id')::text
+            );
+    "#;
+    // Only app.user_id is mapped; app.org_id is missing and should error.
+    let options = Pg2SqliteOptions::default()
+        .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
+        .with_session_variable(SessionVariableMapping::current_setting(
+            "app.user_id",
+            "current_app_user",
+        ));
+
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    assert!(
+        result.is_err(),
+        "Expected missing mapping error when one of multiple current_setting calls is unmapped"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("app.org_id"),
+        "Expected error to reference missing app.org_id mapping: {err}"
+    );
+}
+
 // ==================== generate_readonly_rls_statements ====================
 
 #[test]
@@ -1364,6 +1401,32 @@ fn missing_current_user_mapping_error() {
     assert!(
         err.contains("session variable mapping"),
         "Expected session variable mapping error: {err}"
+    );
+}
+
+#[test]
+fn missing_schema_qualified_current_setting_mapping_error() {
+    let sql = r#"
+        CREATE TABLE scoped_docs (
+            id INT PRIMARY KEY,
+            owner_id INT NOT NULL
+        );
+        ALTER TABLE scoped_docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY sd_select ON scoped_docs
+            FOR SELECT TO authenticated
+            USING (owner_id = CAST(pg_catalog.current_setting('app.user_id') AS INT));
+    "#;
+    // Options intentionally omit current_setting mapping.
+    let options = Pg2SqliteOptions::default()
+        .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string());
+
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    assert!(result.is_err(), "Expected error for missing session variable mapping");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("session variable mapping") || err.contains("current_setting"),
+        "Expected missing mapping error mentioning current_setting: {err}"
     );
 }
 
