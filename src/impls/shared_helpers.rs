@@ -3,12 +3,15 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, FunctionArg,
-    FunctionArgExpr, FunctionArguments, Join, JoinConstraint, JoinOperator, Measure, OrderByExpr,
-    PipeOperator, PivotValueSource, Query, SelectItem, Setting, Statement, SymbolDefinition,
-    TableFactor, TableFunctionArgs, TableSample, TableSampleBucket, TableSampleKind,
-    TableSampleQuantity, TableVersion, TableWithJoins, WithFill, XmlNamespaceDefinition,
-    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
+    Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FunctionArg,
+    FunctionArgExpr, FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator,
+    LimitClause, Measure, NamedWindowDefinition, NamedWindowExpr, OrderBy, OrderByExpr,
+    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting, Statement,
+    SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
+    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, Values, WindowSpec, With,
+    WithFill,
+    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
+    XmlTableColumnOption,
 };
 
 use crate::{errors::Error, prelude::Pg2SqliteOptions};
@@ -339,6 +342,7 @@ fn translate_assignment<D: TranslationDirection>(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn translate_pipe_operator<D: TranslationDirection>(
     pipe_operator: &PipeOperator,
     schema: &ParserDB,
@@ -525,6 +529,185 @@ pub(crate) fn translate_query_settings<D: TranslationDirection>(
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()
+}
+
+pub(crate) fn translate_with_clause<D: TranslationDirection>(
+    with: Option<&With>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<With>, Error> {
+    with.map(|w| {
+        let cte_tables = w
+            .cte_tables
+            .iter()
+            .map(|cte| {
+                Ok(sqlparser::ast::Cte {
+                    alias: cte.alias.clone(),
+                    query: Box::new(D::translate_query(&cte.query, schema, options)?),
+                    from: cte.from.clone(),
+                    materialized: cte.materialized,
+                    closing_paren_token: cte.closing_paren_token.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(With {
+            with_token: w.with_token.clone(),
+            recursive: w.recursive,
+            cte_tables,
+        })
+    })
+    .transpose()
+}
+
+pub(crate) fn translate_order_by_clause<D: TranslationDirection>(
+    order_by: Option<&OrderBy>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<OrderBy>, Error> {
+    order_by
+        .map(|ob| -> Result<OrderBy, Error> {
+            let kind = match &ob.kind {
+                OrderByKind::Expressions(exprs) => OrderByKind::Expressions(
+                    exprs
+                        .iter()
+                        .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                OrderByKind::All(all) => OrderByKind::All(*all),
+            };
+            Ok(OrderBy { kind, interpolate: ob.interpolate.clone() })
+        })
+        .transpose()
+}
+
+pub(crate) fn translate_limit_clause<D: TranslationDirection>(
+    limit_clause: Option<&LimitClause>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<LimitClause>, Error> {
+    limit_clause
+        .map(|lc| {
+            Ok(match lc {
+                LimitClause::LimitOffset { limit, offset, limit_by } => LimitClause::LimitOffset {
+                    limit: limit.as_ref().map(|e| D::translate_expr(e, schema, options)).transpose()?,
+                    offset: offset
+                        .as_ref()
+                        .map(|o| {
+                            Ok::<_, Error>(sqlparser::ast::Offset {
+                                value: D::translate_expr(&o.value, schema, options)?,
+                                rows: o.rows,
+                            })
+                        })
+                        .transpose()?,
+                    limit_by: limit_by
+                        .iter()
+                        .map(|e| D::translate_expr(e, schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+                LimitClause::OffsetCommaLimit { offset, limit } => LimitClause::OffsetCommaLimit {
+                    offset: D::translate_expr(offset, schema, options)?,
+                    limit: D::translate_expr(limit, schema, options)?,
+                },
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn translate_fetch_clause<D: TranslationDirection>(
+    fetch: Option<&Fetch>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<Fetch>, Error> {
+    fetch
+        .map(|f| {
+            Ok(Fetch {
+                with_ties: f.with_ties,
+                percent: f.percent,
+                quantity: f
+                    .quantity
+                    .as_ref()
+                    .map(|e| D::translate_expr(e, schema, options))
+                    .transpose()?,
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn translate_group_by_expr<D: TranslationDirection>(
+    group_by: &GroupByExpr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<GroupByExpr, Error> {
+    Ok(match group_by {
+        GroupByExpr::Expressions(exprs, modifiers) => GroupByExpr::Expressions(
+            exprs
+                .iter()
+                .map(|e| D::translate_expr(e, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            modifiers.clone(),
+        ),
+        GroupByExpr::All(all) => GroupByExpr::All(all.clone()),
+    })
+}
+
+fn translate_window_spec<D: TranslationDirection>(
+    spec: &WindowSpec,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<WindowSpec, Error> {
+    Ok(WindowSpec {
+        window_name: spec.window_name.clone(),
+        partition_by: spec
+            .partition_by
+            .iter()
+            .map(|e| D::translate_expr(e, schema, options))
+            .collect::<Result<Vec<_>, _>>()?,
+        order_by: spec
+            .order_by
+            .iter()
+            .map(|e| translate_order_by_expr::<D>(e, schema, options))
+            .collect::<Result<Vec<_>, _>>()?,
+        window_frame: spec.window_frame.clone(),
+    })
+}
+
+pub(crate) fn translate_named_windows<D: TranslationDirection>(
+    named_windows: &[NamedWindowDefinition],
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<NamedWindowDefinition>, Error> {
+    named_windows
+        .iter()
+        .map(|nwd| {
+            let translated_expr = match &nwd.1 {
+                NamedWindowExpr::NamedWindow(ident) => NamedWindowExpr::NamedWindow(ident.clone()),
+                NamedWindowExpr::WindowSpec(spec) => {
+                    NamedWindowExpr::WindowSpec(translate_window_spec::<D>(spec, schema, options)?)
+                }
+            };
+            Ok(NamedWindowDefinition(nwd.0.clone(), translated_expr))
+        })
+        .collect()
+}
+
+pub(crate) fn translate_values_rows<D: TranslationDirection>(
+    values: &Values,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Values, Error> {
+    Ok(Values {
+        explicit_row: values.explicit_row,
+        rows: values
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        value_keyword: values.value_keyword,
+    })
 }
 
 pub(crate) fn translate_pipe_operators<D: TranslationDirection>(

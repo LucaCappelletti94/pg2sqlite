@@ -4,16 +4,20 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Fetch, Function, FunctionArgumentList, FunctionArguments,
-    GroupByExpr, GroupByWithModifier, Ident, LimitClause, NamedWindowDefinition, NamedWindowExpr,
-    ObjectName, ObjectNamePart, Offset, OrderBy, OrderByExpr, OrderByKind, Query, Select,
-    SelectItem, SetExpr, SetOperator, SetQuantifier, Setting, PipeOperator, TableAlias,
+    GroupByExpr, GroupByWithModifier, Ident, LimitClause, NamedWindowDefinition, ObjectName,
+    ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query, Select, SelectItem,
+    SetExpr, SetOperator, SetQuantifier, Setting, TableAlias,
     TableFactor, TableWithJoins, Value, ValueWithSpan, Values, WindowSpec, WindowType,
     helpers::attached_token::AttachedToken,
 };
 
 use super::helpers::{
-    translate_connect_by_kinds, translate_order_by_expr, translate_pipe_operators,
+    translate_connect_by_kinds, translate_fetch_clause, translate_group_by_expr,
+    translate_limit_clause as translate_limit_clause_shared,
+    translate_named_windows as translate_named_window_shared,
+    translate_order_by_clause, translate_order_by_expr, translate_pipe_operators,
     translate_query_settings, translate_select_item, translate_table_with_joins,
+    translate_values_rows, translate_with_clause,
 };
 use crate::prelude::{Pg2SqliteOptions, Translator};
 
@@ -85,21 +89,7 @@ fn translate_order_by(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<OrderBy>, crate::errors::Error> {
-    order_by
-        .map(|ob| -> Result<OrderBy, crate::errors::Error> {
-            let kind = match &ob.kind {
-                OrderByKind::Expressions(exprs) => {
-                    let translated_exprs = exprs
-                        .iter()
-                        .map(|expr| expr.translate(schema, options))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    OrderByKind::Expressions(translated_exprs)
-                }
-                OrderByKind::All(all) => OrderByKind::All(*all),
-            };
-            Ok(OrderBy { kind, interpolate: ob.interpolate.clone() })
-        })
-        .transpose()
+    translate_order_by_clause(order_by, schema, options)
 }
 
 fn ensure_distinct_on_projection_is_rewriteable(
@@ -198,7 +188,7 @@ fn null_literal() -> Expr {
     Expr::Value(ValueWithSpan { value: Value::Null, span: sqlparser::tokenizer::Span::empty() })
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn try_translate_distinct_on_query(
     query: &Query,
     schema: &ParserDB,
@@ -503,7 +493,7 @@ fn union_all(set_exprs: Vec<SetExpr>) -> SetExpr {
     })
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn try_translate_grouping_query(
     query: &Query,
     schema: &ParserDB,
@@ -762,27 +752,7 @@ fn translate_with(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<sqlparser::ast::With>, crate::errors::Error> {
-    with.map(|w| {
-        let cte_tables = w
-            .cte_tables
-            .iter()
-            .map(|cte| {
-                Ok(sqlparser::ast::Cte {
-                    alias: cte.alias.clone(),
-                    query: Box::new(cte.query.translate(schema, options)?),
-                    from: cte.from.clone(),
-                    materialized: cte.materialized,
-                    closing_paren_token: cte.closing_paren_token.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, crate::errors::Error>>()?;
-        Ok(sqlparser::ast::With {
-            with_token: w.with_token.clone(),
-            recursive: w.recursive,
-            cte_tables,
-        })
-    })
-    .transpose()
+    translate_with_clause(with, schema, options)
 }
 
 fn translate_group_by(
@@ -790,16 +760,7 @@ fn translate_group_by(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<sqlparser::ast::GroupByExpr, crate::errors::Error> {
-    Ok(match group_by {
-        sqlparser::ast::GroupByExpr::Expressions(exprs, modifiers) => {
-            let translated = exprs
-                .iter()
-                .map(|e| e.translate(schema, options))
-                .collect::<Result<Vec<_>, _>>()?;
-            sqlparser::ast::GroupByExpr::Expressions(translated, modifiers.clone())
-        }
-        sqlparser::ast::GroupByExpr::All(all) => sqlparser::ast::GroupByExpr::All(all.clone()),
-    })
+    translate_group_by_expr(group_by, schema, options)
 }
 
 fn translate_limit_clause(
@@ -807,36 +768,7 @@ fn translate_limit_clause(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<LimitClause>, crate::errors::Error> {
-    limit_clause
-        .map(|lc| {
-            Ok(match lc {
-                LimitClause::LimitOffset { limit, offset, limit_by } => {
-                    LimitClause::LimitOffset {
-                        limit: limit.as_ref().map(|e| e.translate(schema, options)).transpose()?,
-                        offset: offset
-                            .as_ref()
-                            .map(|o| {
-                                Ok::<_, crate::errors::Error>(Offset {
-                                    value: o.value.translate(schema, options)?,
-                                    rows: o.rows,
-                                })
-                            })
-                            .transpose()?,
-                        limit_by: limit_by
-                            .iter()
-                            .map(|e| e.translate(schema, options))
-                            .collect::<Result<Vec<_>, _>>()?,
-                    }
-                }
-                LimitClause::OffsetCommaLimit { offset, limit } => {
-                    LimitClause::OffsetCommaLimit {
-                        offset: offset.translate(schema, options)?,
-                        limit: limit.translate(schema, options)?,
-                    }
-                }
-            })
-        })
-        .transpose()
+    translate_limit_clause_shared(limit_clause, schema, options)
 }
 
 fn translate_fetch(
@@ -844,15 +776,7 @@ fn translate_fetch(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<Fetch>, crate::errors::Error> {
-    fetch
-        .map(|f| {
-            Ok(Fetch {
-                with_ties: f.with_ties,
-                percent: f.percent,
-                quantity: f.quantity.as_ref().map(|e| e.translate(schema, options)).transpose()?,
-            })
-        })
-        .transpose()
+    translate_fetch_clause(fetch, schema, options)
 }
 
 fn translate_distinct(
@@ -880,41 +804,7 @@ fn translate_named_window(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Vec<NamedWindowDefinition>, crate::errors::Error> {
-    named_windows
-        .iter()
-        .map(|nwd| {
-            let translated_expr = match &nwd.1 {
-                NamedWindowExpr::NamedWindow(ident) => NamedWindowExpr::NamedWindow(ident.clone()),
-                NamedWindowExpr::WindowSpec(spec) => {
-                    NamedWindowExpr::WindowSpec(translate_window_spec(spec, schema, options)?)
-                }
-            };
-            Ok(NamedWindowDefinition(nwd.0.clone(), translated_expr))
-        })
-        .collect()
-}
-
-fn translate_window_spec(
-    spec: &sqlparser::ast::WindowSpec,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::WindowSpec, crate::errors::Error> {
-    let partition_by = spec
-        .partition_by
-        .iter()
-        .map(|e| e.translate(schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
-    let order_by = spec
-        .order_by
-        .iter()
-        .map(|e| e.translate(schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(sqlparser::ast::WindowSpec {
-        window_name: spec.window_name.clone(),
-        partition_by,
-        order_by,
-        window_frame: spec.window_frame.clone(),
-    })
+    translate_named_window_shared(named_windows, schema, options)
 }
 
 fn translate_values(
@@ -922,19 +812,7 @@ fn translate_values(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Values, crate::errors::Error> {
-    let translated_rows = values
-        .rows
-        .iter()
-        .map(|row| {
-            row.iter().map(|expr| expr.translate(schema, options)).collect::<Result<Vec<_>, _>>()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(Values {
-        explicit_row: values.explicit_row,
-        rows: translated_rows,
-        value_keyword: values.value_keyword,
-    })
+    translate_values_rows(values, schema, options)
 }
 
 #[cfg(test)]
@@ -1445,13 +1323,17 @@ mod tests {
             sqlparser::ast::ConnectByKind::ConnectBy { relationships, .. } => {
                 assert!(relationships[0].to_string().contains("datetime('now')"));
             }
-            other => panic!("unexpected connect by variant: {other:?}"),
+            sqlparser::ast::ConnectByKind::StartWith { .. } => {
+                panic!("unexpected connect by variant: {:?}", &select.connect_by[0]);
+            }
         }
         match &select.connect_by[1] {
             sqlparser::ast::ConnectByKind::StartWith { condition, .. } => {
                 assert!(condition.to_string().contains("datetime('now')"));
             }
-            other => panic!("unexpected connect by variant: {other:?}"),
+            sqlparser::ast::ConnectByKind::ConnectBy { .. } => {
+                panic!("unexpected connect by variant: {:?}", &select.connect_by[1]);
+            }
         }
 
         assert!(translated

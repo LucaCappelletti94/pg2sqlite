@@ -3,14 +3,16 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Distinct, Fetch, LimitClause, NamedWindowDefinition, NamedWindowExpr, Offset, Query, Select,
-    SetExpr, Values,
+    Distinct, NamedWindowDefinition, Query, Select, SetExpr, Values,
 };
 
 use super::helpers::{
-    reverse_translate_connect_by_kinds, reverse_translate_order_by_expr,
+    reverse_translate_connect_by_kinds, reverse_translate_fetch_clause,
+    reverse_translate_group_by_expr, reverse_translate_limit_clause as reverse_translate_limit_clause_shared,
+    reverse_translate_named_windows, reverse_translate_order_by_clause, reverse_translate_order_by_expr,
     reverse_translate_pipe_operators, reverse_translate_query_settings,
-    reverse_translate_select_item, reverse_translate_table_with_joins,
+    reverse_translate_select_item, reverse_translate_table_with_joins, reverse_translate_values_rows,
+    reverse_translate_with_clause,
 };
 use crate::{
     errors::Error,
@@ -27,37 +29,16 @@ impl ReverseTranslator for Query {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        // Reverse translate ORDER BY expressions
-        let order_by = self
-            .order_by
-            .as_ref()
-            .map(|ob| -> Result<sqlparser::ast::OrderBy, Error> {
-                let kind = match &ob.kind {
-                    sqlparser::ast::OrderByKind::Expressions(exprs) => {
-                        let translated_exprs = exprs
-                            .iter()
-                            .map(|expr| reverse_translate_order_by_expr(expr, schema, options))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        sqlparser::ast::OrderByKind::Expressions(translated_exprs)
-                    }
-                    sqlparser::ast::OrderByKind::All(all) => sqlparser::ast::OrderByKind::All(*all),
-                };
-                Ok(sqlparser::ast::OrderBy { kind, interpolate: ob.interpolate.clone() })
-            })
-            .transpose()?;
+        let order_by = reverse_translate_order_by_clause(self.order_by.as_ref(), schema, options)?;
         let settings = reverse_translate_query_settings(self.settings.as_ref(), schema, options)?;
         let pipe_operators = reverse_translate_pipe_operators(&self.pipe_operators, schema, options)?;
 
         Ok(Query {
-            with: reverse_translate_with(self.with.as_ref(), schema, options)?,
+            with: reverse_translate_with_clause(self.with.as_ref(), schema, options)?,
             body: Box::new(self.body.reverse_translate(schema, options)?),
             order_by,
-            limit_clause: reverse_translate_limit_clause(
-                self.limit_clause.as_ref(),
-                schema,
-                options,
-            )?,
-            fetch: reverse_translate_fetch(self.fetch.as_ref(), schema, options)?,
+            limit_clause: reverse_translate_limit_clause_shared(self.limit_clause.as_ref(), schema, options)?,
+            fetch: reverse_translate_fetch_clause(self.fetch.as_ref(), schema, options)?,
             locks: self.locks.clone(),
             for_clause: self.for_clause.clone(),
             settings,
@@ -203,109 +184,25 @@ fn reverse_translate_values(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Values, Error> {
-    let translated_rows = values
-        .rows
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|expr| expr.reverse_translate(schema, options))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(Values {
-        explicit_row: values.explicit_row,
-        rows: translated_rows,
-        value_keyword: values.value_keyword,
-    })
+    reverse_translate_values_rows(values, schema, options)
 }
 
-fn reverse_translate_with(
-    with: Option<&sqlparser::ast::With>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<sqlparser::ast::With>, Error> {
-    with.map(|w| {
-        let cte_tables = w
-            .cte_tables
-            .iter()
-            .map(|cte| {
-                Ok(sqlparser::ast::Cte {
-                    alias: cte.alias.clone(),
-                    query: Box::new(cte.query.reverse_translate(schema, options)?),
-                    from: cte.from.clone(),
-                    materialized: cte.materialized,
-                    closing_paren_token: cte.closing_paren_token.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(sqlparser::ast::With {
-            with_token: w.with_token.clone(),
-            recursive: w.recursive,
-            cte_tables,
-        })
-    })
-    .transpose()
-}
-
+#[cfg(test)]
 fn reverse_translate_limit_clause(
-    limit_clause: Option<&LimitClause>,
+    limit_clause: Option<&sqlparser::ast::LimitClause>,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
-) -> Result<Option<LimitClause>, Error> {
-    limit_clause
-        .map(|lc| {
-            Ok(match lc {
-                LimitClause::LimitOffset { limit, offset, limit_by } => {
-                    LimitClause::LimitOffset {
-                        limit: limit
-                            .as_ref()
-                            .map(|e| e.reverse_translate(schema, options))
-                            .transpose()?,
-                        offset: offset
-                            .as_ref()
-                            .map(|o| {
-                                Ok::<_, Error>(Offset {
-                                    value: o.value.reverse_translate(schema, options)?,
-                                    rows: o.rows,
-                                })
-                            })
-                            .transpose()?,
-                        limit_by: limit_by
-                            .iter()
-                            .map(|e| e.reverse_translate(schema, options))
-                            .collect::<Result<Vec<_>, _>>()?,
-                    }
-                }
-                LimitClause::OffsetCommaLimit { offset, limit } => {
-                    LimitClause::OffsetCommaLimit {
-                        offset: offset.reverse_translate(schema, options)?,
-                        limit: limit.reverse_translate(schema, options)?,
-                    }
-                }
-            })
-        })
-        .transpose()
+) -> Result<Option<sqlparser::ast::LimitClause>, Error> {
+    reverse_translate_limit_clause_shared(limit_clause, schema, options)
 }
 
+#[cfg(test)]
 fn reverse_translate_fetch(
-    fetch: Option<&Fetch>,
+    fetch: Option<&sqlparser::ast::Fetch>,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
-) -> Result<Option<Fetch>, Error> {
-    fetch
-        .map(|f| {
-            Ok(Fetch {
-                with_ties: f.with_ties,
-                percent: f.percent,
-                quantity: f
-                    .quantity
-                    .as_ref()
-                    .map(|e| e.reverse_translate(schema, options))
-                    .transpose()?,
-            })
-        })
-        .transpose()
+) -> Result<Option<sqlparser::ast::Fetch>, Error> {
+    reverse_translate_fetch_clause(fetch, schema, options)
 }
 
 fn reverse_translate_distinct(
@@ -335,43 +232,7 @@ fn reverse_translate_named_window(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Vec<NamedWindowDefinition>, Error> {
-    named_windows
-        .iter()
-        .map(|nwd| {
-            let translated_expr = match &nwd.1 {
-                NamedWindowExpr::NamedWindow(ident) => NamedWindowExpr::NamedWindow(ident.clone()),
-                NamedWindowExpr::WindowSpec(spec) => {
-                    NamedWindowExpr::WindowSpec(reverse_translate_window_spec(
-                        spec, schema, options,
-                    )?)
-                }
-            };
-            Ok(NamedWindowDefinition(nwd.0.clone(), translated_expr))
-        })
-        .collect()
-}
-
-fn reverse_translate_window_spec(
-    spec: &sqlparser::ast::WindowSpec,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::WindowSpec, Error> {
-    let partition_by = spec
-        .partition_by
-        .iter()
-        .map(|e| e.reverse_translate(schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
-    let order_by = spec
-        .order_by
-        .iter()
-        .map(|e| reverse_translate_order_by_expr(e, schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(sqlparser::ast::WindowSpec {
-        window_name: spec.window_name.clone(),
-        partition_by,
-        order_by,
-        window_frame: spec.window_frame.clone(),
-    })
+    reverse_translate_named_windows(named_windows, schema, options)
 }
 
 fn reverse_translate_group_by(
@@ -379,16 +240,7 @@ fn reverse_translate_group_by(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<sqlparser::ast::GroupByExpr, Error> {
-    Ok(match group_by {
-        sqlparser::ast::GroupByExpr::Expressions(exprs, modifiers) => {
-            let translated_exprs = exprs
-                .iter()
-                .map(|e| e.reverse_translate(schema, options))
-                .collect::<Result<Vec<_>, _>>()?;
-            sqlparser::ast::GroupByExpr::Expressions(translated_exprs, modifiers.clone())
-        }
-        sqlparser::ast::GroupByExpr::All(all) => sqlparser::ast::GroupByExpr::All(all.clone()),
-    })
+    reverse_translate_group_by_expr(group_by, schema, options)
 }
 
 #[cfg(test)]
@@ -554,13 +406,17 @@ mod tests {
             sqlparser::ast::ConnectByKind::ConnectBy { relationships, .. } => {
                 assert!(relationships[0].to_string().to_lowercase().contains("now()"));
             }
-            other => panic!("unexpected connect by variant: {other:?}"),
+            sqlparser::ast::ConnectByKind::StartWith { .. } => {
+                panic!("unexpected connect by variant: {:?}", &select.connect_by[0]);
+            }
         }
         match &select.connect_by[1] {
             sqlparser::ast::ConnectByKind::StartWith { condition, .. } => {
                 assert!(condition.to_string().to_lowercase().contains("now()"));
             }
-            other => panic!("unexpected connect by variant: {other:?}"),
+            sqlparser::ast::ConnectByKind::ConnectBy { .. } => {
+                panic!("unexpected connect by variant: {:?}", &select.connect_by[1]);
+            }
         }
 
         assert!(translated

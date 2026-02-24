@@ -3,7 +3,8 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    ConnectByKind, Expr, OrderByExpr, PipeOperator, Query, SelectItem, Setting, TableWithJoins,
+    ConnectByKind, Expr, Fetch, GroupByExpr, LimitClause, NamedWindowDefinition, OrderBy,
+    OrderByExpr, PipeOperator, Query, SelectItem, Setting, TableWithJoins, Values, With,
 };
 
 use crate::{
@@ -79,4 +80,60 @@ pub(super) fn reverse_translate_pipe_operators(
     options: &Pg2SqliteOptions,
 ) -> Result<Vec<PipeOperator>, Error> {
     shared_helpers::translate_pipe_operators::<Reverse>(pipe_operators, schema, options)
+}
+
+pub(super) fn reverse_translate_with_clause(
+    with: Option<&With>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<With>, Error> {
+    shared_helpers::translate_with_clause::<Reverse>(with, schema, options)
+}
+
+pub(super) fn reverse_translate_order_by_clause(
+    order_by: Option<&OrderBy>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<OrderBy>, Error> {
+    shared_helpers::translate_order_by_clause::<Reverse>(order_by, schema, options)
+}
+
+pub(super) fn reverse_translate_limit_clause(
+    limit_clause: Option<&LimitClause>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<LimitClause>, Error> {
+    shared_helpers::translate_limit_clause::<Reverse>(limit_clause, schema, options)
+}
+
+pub(super) fn reverse_translate_fetch_clause(
+    fetch: Option<&Fetch>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<Fetch>, Error> {
+    shared_helpers::translate_fetch_clause::<Reverse>(fetch, schema, options)
+}
+
+pub(super) fn reverse_translate_group_by_expr(
+    group_by: &GroupByExpr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<GroupByExpr, Error> {
+    shared_helpers::translate_group_by_expr::<Reverse>(group_by, schema, options)
+}
+
+pub(super) fn reverse_translate_named_windows(
+    named_windows: &[NamedWindowDefinition],
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<NamedWindowDefinition>, Error> {
+    shared_helpers::translate_named_windows::<Reverse>(named_windows, schema, options)
+}
+
+pub(super) fn reverse_translate_values_rows(
+    values: &Values,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Values, Error> {
+    shared_helpers::translate_values_rows::<Reverse>(values, schema, options)
 }
