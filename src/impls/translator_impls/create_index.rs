@@ -13,7 +13,7 @@ use crate::{
         generated_sql::parse_generated_sql,
         object_name::{
             last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
-            schema_and_table_for_lookup,
+            schema_and_table_for_lookup, sqlite_unqualified_object_name,
         },
         shared_helpers::function_argument_exprs,
         translator_impls::rls::resolve_trigger_table_name,
@@ -265,6 +265,7 @@ impl Translator for CreateIndex {
 
         // Regular index - translate normally
         Ok(vec![Statement::CreateIndex(CreateIndex {
+            table_name: sqlite_unqualified_object_name(&self.table_name),
             columns: self
                 .columns
                 .iter()

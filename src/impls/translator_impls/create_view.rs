@@ -6,6 +6,7 @@ use sqlparser::ast::{CreateTableOptions, CreateView};
 
 use crate::{
     errors::Error,
+    impls::object_name::sqlite_unqualified_object_name,
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -75,7 +76,7 @@ impl Translator for CreateView {
             or_replace: false,
             materialized: false,
             secure: false,
-            name: self.name.clone(),
+            name: sqlite_unqualified_object_name(&self.name),
             name_before_not_exists: self.name_before_not_exists,
             columns: self.columns.clone(),
             query: Box::new(self.query.translate(schema, options)?),

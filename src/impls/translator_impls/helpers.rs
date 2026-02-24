@@ -10,7 +10,10 @@ use sqlparser::ast::{
 
 use crate::{
     errors::Error,
-    impls::shared_helpers::{self, TranslationDirection},
+    impls::{
+        object_name::sqlite_unqualified_object_name,
+        shared_helpers::{self, TranslationDirection},
+    },
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -32,6 +35,14 @@ impl TranslationDirection for Forward {
         options: &Pg2SqliteOptions,
     ) -> Result<Query, Error> {
         query.translate(schema, options)
+    }
+
+    fn translate_object_name(
+        name: &sqlparser::ast::ObjectName,
+        _schema: &ParserDB,
+        _options: &Pg2SqliteOptions,
+    ) -> Result<sqlparser::ast::ObjectName, Error> {
+        Ok(sqlite_unqualified_object_name(name))
     }
 }
 

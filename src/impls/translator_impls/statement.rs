@@ -10,7 +10,7 @@ use sqlparser::ast::{Expr, ObjectType, Statement};
 use crate::{
     errors::Error,
     impls::{
-        object_name::schema_and_table_for_lookup,
+        object_name::{schema_and_table_for_lookup, sqlite_unqualified_object_name},
         shared_helpers::statement_variant_name,
         translator_impls::{
             condition_injection::inject_condition_into_dml_statement,
@@ -392,7 +392,7 @@ impl Translator for Statement {
                         vec![Statement::Drop {
                             object_type: *object_type,
                             if_exists: *if_exists,
-                            names: names.clone(),
+                            names: names.iter().map(sqlite_unqualified_object_name).collect(),
                             cascade: false,  // SQLite doesn't support CASCADE
                             restrict: false, // SQLite doesn't support RESTRICT
                             purge: false,
@@ -419,7 +419,7 @@ impl Translator for Statement {
             Self::DropTrigger(drop_trigger) => {
                 vec![Statement::DropTrigger(sqlparser::ast::DropTrigger {
                     if_exists: drop_trigger.if_exists,
-                    trigger_name: drop_trigger.trigger_name.clone(),
+                    trigger_name: sqlite_unqualified_object_name(&drop_trigger.trigger_name),
                     table_name: None, // SQLite doesn't use ON table_name
                     option: None,     // SQLite doesn't support CASCADE/RESTRICT
                 })]

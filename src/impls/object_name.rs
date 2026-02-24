@@ -16,6 +16,13 @@ pub(crate) fn append_suffix(name: &ObjectName, suffix: &str) -> ObjectName {
     updated
 }
 
+/// Returns an object name normalized for SQLite by keeping only the terminal
+/// identifier part.
+#[must_use]
+pub(crate) fn sqlite_unqualified_object_name(name: &ObjectName) -> ObjectName {
+    name.0.last().cloned().map_or_else(|| name.clone(), |last| ObjectName(vec![last]))
+}
+
 /// Returns the schema and table components used for schema lookup.
 ///
 /// Supported forms:
@@ -66,7 +73,7 @@ mod tests {
 
     use super::{
         append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
-        schema_and_table_for_lookup,
+        schema_and_table_for_lookup, sqlite_unqualified_object_name,
     };
 
     fn name(parts: &[&str]) -> ObjectName {
@@ -106,5 +113,18 @@ mod tests {
         let ident = quoted_ident("spaced ident");
         assert_eq!(ident.to_string(), "\"spaced ident\"");
         assert_eq!(quoted_ident("simple_name").to_string(), "simple_name");
+    }
+
+    #[test]
+    fn sqlite_name_normalization_keeps_only_terminal_segment() {
+        assert_eq!(sqlite_unqualified_object_name(&name(&["users"])).to_string(), "users");
+        assert_eq!(
+            sqlite_unqualified_object_name(&name(&["public", "users"])).to_string(),
+            "users"
+        );
+        assert_eq!(
+            sqlite_unqualified_object_name(&name(&["catalog", "public", "users"])).to_string(),
+            "users"
+        );
     }
 }

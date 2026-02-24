@@ -6,7 +6,10 @@ use std::collections::HashSet;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, CreateTable, TableConstraint};
 
-use crate::prelude::{Pg2SqliteOptions, Translator};
+use crate::{
+    impls::object_name::sqlite_unqualified_object_name,
+    prelude::{Pg2SqliteOptions, Translator},
+};
 
 impl Translator for CreateTable {
     type Schema = ParserDB;
@@ -19,6 +22,7 @@ impl Translator for CreateTable {
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         let mut created_table = Self {
+            name: sqlite_unqualified_object_name(&self.name),
             columns: self
                 .columns
                 .iter()

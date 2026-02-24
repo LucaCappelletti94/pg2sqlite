@@ -5,7 +5,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FunctionArg,
     FunctionArgExpr, FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator,
-    LimitClause, Measure, NamedWindowDefinition, NamedWindowExpr, OrderBy, OrderByExpr,
+    LimitClause, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, OrderBy, OrderByExpr,
     OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting, Statement,
     SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
     TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, Values, WindowSpec, With,
@@ -29,6 +29,14 @@ pub(crate) trait TranslationDirection {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Query, Error>;
+
+    fn translate_object_name(
+        name: &ObjectName,
+        _schema: &ParserDB,
+        _options: &Pg2SqliteOptions,
+    ) -> Result<ObjectName, Error> {
+        Ok(name.clone())
+    }
 }
 
 /// Extracts a stable-ish variant name from debug output.
@@ -959,7 +967,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             index_hints,
         } => {
             TableFactor::Table {
-                name: name.clone(),
+                name: D::translate_object_name(name, schema, options)?,
                 alias: alias.clone(),
                 args: args
                     .as_ref()
