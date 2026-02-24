@@ -224,26 +224,33 @@ fn translate_extract(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
-    // Map PostgreSQL date/time fields to strftime format strings
-    let format_str = match field {
-        DateTimeField::Year | DateTimeField::Years => "%Y",
-        DateTimeField::Month | DateTimeField::Months => "%m",
-        DateTimeField::Day | DateTimeField::Days => "%d",
-        DateTimeField::Hour | DateTimeField::Hours => "%H",
-        DateTimeField::Minute | DateTimeField::Minutes => "%M",
-        DateTimeField::Second | DateTimeField::Seconds => "%S",
-        DateTimeField::Week(_) | DateTimeField::Weeks => "%W",
-        DateTimeField::DayOfWeek => "%w",
-        DateTimeField::DayOfYear => "%j",
+    // Map PostgreSQL date/time fields to (strftime format, cast type).
+    // SECOND uses %f (includes fractional seconds: "SS.SSS") and casts to REAL.
+    // EPOCH uses %s (Unix timestamp seconds) and casts to REAL for PG
+    // compatibility. All other fields return integer values.
+    let (format_str, cast_type) = match field {
+        DateTimeField::Year | DateTimeField::Years => ("%Y", DataType::Integer(None)),
+        DateTimeField::Month | DateTimeField::Months => ("%m", DataType::Integer(None)),
+        DateTimeField::Day | DateTimeField::Days => ("%d", DataType::Integer(None)),
+        DateTimeField::Hour | DateTimeField::Hours => ("%H", DataType::Integer(None)),
+        DateTimeField::Minute | DateTimeField::Minutes => ("%M", DataType::Integer(None)),
+        // %f returns "SS.SSS" preserving fractional seconds
+        DateTimeField::Second | DateTimeField::Seconds => ("%f", DataType::Real),
+        DateTimeField::Week(_) | DateTimeField::Weeks => ("%W", DataType::Integer(None)),
+        DateTimeField::DayOfWeek => ("%w", DataType::Integer(None)),
+        DateTimeField::DayOfYear => ("%j", DataType::Integer(None)),
+        // EPOCH: strftime('%s') gives integer seconds since Unix epoch.
+        // Cast to REAL for consistency with PostgreSQL's float return type.
+        DateTimeField::Epoch => ("%s", DataType::Real),
         other => {
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                 "EXTRACT({other}) is not supported in SQLite. Supported fields: \
-                 YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, WEEK, DOW, DOY."
+                 YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, WEEK, DOW, DOY, EPOCH."
             )));
         }
     };
 
-    // Build: CAST(strftime('format', expr) AS INTEGER)
+    // Build: CAST(strftime('format', expr) AS cast_type)
     let translated_expr = expr.translate(schema, options)?;
 
     let strftime_call = Expr::Function(Function {
@@ -267,10 +274,9 @@ fn translate_extract(
         parameters: FunctionArguments::None,
     });
 
-    // Wrap in CAST(... AS INTEGER) to match PostgreSQL's numeric return type
     Ok(Expr::Cast {
         expr: Box::new(strftime_call),
-        data_type: DataType::Integer(None),
+        data_type: cast_type,
         format: None,
         kind: CastKind::Cast,
         array: false,
@@ -737,17 +743,31 @@ fn is_vector_type(data_type: &DataType) -> bool {
     false
 }
 
-/// Translate a vector type cast (e.g., `'[1,2,3]'::vector`) to
-/// `vec_f32('[1,2,3]')`.
+/// Check if a data type is the halfvec (16-bit float vector) type specifically.
+fn is_halfvec_type(data_type: &DataType) -> bool {
+    if let DataType::Custom(name, _) = data_type
+        && let Some(ident) = name.0.first().and_then(|p| p.as_ident())
+    {
+        return ident.value.to_lowercase() == "halfvec";
+    }
+    false
+}
+
+/// Translate a vector type cast to the appropriate sqlite-vec function.
+///
+/// - `'[1,2,3]'::vector` → `vec_f32('[1,2,3]')` (32-bit float)
+/// - `'[1,2,3]'::halfvec` → `vec_f16('[1,2,3]')` (16-bit float)
 fn translate_vector_cast(
     expr: &Expr,
+    data_type: &DataType,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
     let translated_expr = expr.translate(schema, options)?;
+    let func_name = if is_halfvec_type(data_type) { "vec_f16" } else { "vec_f32" };
 
     Ok(Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("vec_f32"))]),
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(func_name))]),
         uses_odbc_syntax: false,
         args: FunctionArguments::List(FunctionArgumentList {
             duplicate_treatment: None,
@@ -996,9 +1016,10 @@ impl Translator for Expr {
             }
             // Handle type casts (e.g., value::text)
             Expr::Cast { expr, data_type, format, kind, array } => {
-                // pgvector casts: '[1,2,3]'::vector -> vec_f32('[1,2,3]')
+                // pgvector casts: '[1,2,3]'::vector -> vec_f32('[1,2,3]'),
+                //                 '[1,2,3]'::halfvec -> vec_f16('[1,2,3]')
                 if is_vector_type(data_type) {
-                    return translate_vector_cast(expr, schema, options);
+                    return translate_vector_cast(expr, data_type, schema, options);
                 }
                 Expr::Cast {
                     expr: Box::new(expr.translate(schema, options)?),
@@ -1251,6 +1272,76 @@ impl Translator for Expr {
                         .to_string(),
                 ));
             }
+            // ROLLUP is not supported in SQLite
+            Expr::Rollup(_) => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "ROLLUP is not supported in SQLite. \
+                     Restructure as separate GROUP BY queries and UNION ALL the results."
+                        .to_string(),
+                ));
+            }
+            // CUBE is not supported in SQLite
+            Expr::Cube(_) => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "CUBE is not supported in SQLite. \
+                     Restructure as separate GROUP BY queries and UNION ALL the results."
+                        .to_string(),
+                ));
+            }
+            // GROUPING SETS are not supported in SQLite
+            Expr::GroupingSets(_) => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "GROUPING SETS are not supported in SQLite. \
+                     Restructure as separate GROUP BY queries and UNION ALL the results."
+                        .to_string(),
+                ));
+            }
+            // IN UNNEST (PostgreSQL array unnesting) has no SQLite equivalent
+            Expr::InUnnest { .. } => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "IN UNNEST (array unnesting) is not supported in SQLite. \
+                     Use a subquery with a VALUES clause or a temporary table instead."
+                        .to_string(),
+                ));
+            }
+            // JSON path operators (->, ->>) are not yet translated
+            Expr::JsonAccess { .. } => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "JSON path operators (->, ->>) are not yet translated. \
+                     Use SQLite's json_extract(column, '$.field') instead."
+                        .to_string(),
+                ));
+            }
+            // Lambda expressions are not supported in SQLite
+            Expr::Lambda(_) => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "Lambda expressions are not supported in SQLite.".to_string(),
+                ));
+            }
+            // MATCH...AGAINST is MySQL syntax, not PostgreSQL
+            Expr::MatchAgainst { .. } => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "MATCH...AGAINST is MySQL-specific syntax and is not supported in SQLite. \
+                     Use SQLite FTS5: table MATCH 'query'."
+                        .to_string(),
+                ));
+            }
+            // Oracle OUTER JOIN (+) syntax
+            Expr::OuterJoin(_) => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "Oracle outer join syntax (+) is not supported in SQLite. \
+                     Use standard SQL LEFT JOIN / RIGHT JOIN syntax."
+                        .to_string(),
+                ));
+            }
+            // Oracle PRIOR expression (hierarchical queries)
+            Expr::Prior(_) => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "PRIOR (Oracle hierarchical query syntax) is not supported in SQLite. \
+                     Use recursive CTEs (WITH RECURSIVE) for hierarchical queries."
+                        .to_string(),
+                ));
+            }
             _ => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                     "Expression translation not yet implemented: {self}"
@@ -1462,7 +1553,10 @@ mod tests {
         };
         let err =
             unsupported.translate(&schema, &options).expect_err("unsupported expr should error");
-        assert!(err.to_string().contains("not yet implemented"));
+        assert!(
+            err.to_string().contains("not supported")
+                || err.to_string().contains("not yet implemented")
+        );
 
         let any_expr = Expr::AnyOp {
             left: Box::new(parse_expr("id")),

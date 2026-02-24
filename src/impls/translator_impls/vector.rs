@@ -49,6 +49,9 @@ pub struct VectorColumnInfo {
     pub column_name: String,
     /// The number of dimensions (e.g., 384 for vector(384)).
     pub dimensions: Option<u32>,
+    /// Whether this is a half-precision (16-bit float) vector column.
+    /// `true` for `halfvec`, `false` for `vector`.
+    pub is_halfvec: bool,
 }
 
 /// Check if a data type is a pgvector type (vector or halfvec).
@@ -58,6 +61,16 @@ fn is_vector_data_type(data_type: &DataType) -> bool {
     {
         let type_name = ident.value.to_ascii_lowercase();
         return type_name == "vector" || type_name == "halfvec";
+    }
+    false
+}
+
+/// Check if a data type is the halfvec (16-bit float) type.
+fn is_halfvec_data_type(data_type: &DataType) -> bool {
+    if let DataType::Custom(name, _) = data_type
+        && let Some(ident) = last_ident(name)
+    {
+        return ident.value.eq_ignore_ascii_case("halfvec");
     }
     false
 }
@@ -93,6 +106,7 @@ pub fn extract_vector_columns(create_table: &CreateTable) -> Vec<VectorColumnInf
             VectorColumnInfo {
                 column_name: col.name.value.clone(),
                 dimensions: extract_dimensions(&col.data_type),
+                is_halfvec: is_halfvec_data_type(&col.data_type),
             }
         })
         .collect()
@@ -143,12 +157,11 @@ fn create_vec0_virtual_table(
 
     // Build the module arguments for vec0:
     // vec0(pk_id INTEGER PRIMARY KEY, column_name float[N])
-    let pk_arg = format!(
-        "{} INTEGER PRIMARY KEY",
-        quote_identifier(&format!("{pk_column}_id"))
-    );
+    let pk_arg = format!("{} INTEGER PRIMARY KEY", quote_identifier(&format!("{pk_column}_id")));
     let dim_spec = vec_col.dimensions.map_or_else(String::new, |d| format!("[{d}]"));
-    let vec_arg = format!("{} float{dim_spec}", quote_identifier(&vec_col.column_name));
+    // halfvec uses 16-bit floats (float16); vector uses 32-bit floats (float)
+    let vec_type = if vec_col.is_halfvec { "float16" } else { "float" };
+    let vec_arg = format!("{} {vec_type}{dim_spec}", quote_identifier(&vec_col.column_name));
 
     let module_args = vec![Ident::new(pk_arg), Ident::new(vec_arg)];
 
@@ -198,8 +211,7 @@ fn create_vec0_triggers(
             "CREATE TRIGGER {update_trigger_name} AFTER UPDATE OF {column_name_quoted}, {} ON {trigger_table_quoted} BEGIN \
              UPDATE {vec_table_quoted} SET {column_name_quoted} = {new_vec_col}, {vec_pk_column_quoted} = {new_pk} \
              WHERE {vec_pk_column_quoted} = {old_pk}; \
-             END"
-            ,
+             END",
             quote_identifier(pk_column)
         ),
     ]

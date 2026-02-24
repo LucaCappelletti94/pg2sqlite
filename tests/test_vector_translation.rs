@@ -167,9 +167,10 @@ fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that ::halfvec cast is also translated to vec_f32().
+/// Test that ::halfvec cast is translated to vec_f16() (16-bit float, distinct
+/// from vec_f32).
 #[test]
-fn test_halfvec_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
+fn test_halfvec_cast_to_vec_f16() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
@@ -188,8 +189,12 @@ fn test_halfvec_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
 
     assert!(
-        select_stmt.contains("vec_f32"),
-        "::halfvec cast should translate to vec_f32(), got: {select_stmt}"
+        select_stmt.contains("vec_f16"),
+        "::halfvec cast should translate to vec_f16(), got: {select_stmt}"
+    );
+    assert!(
+        !select_stmt.contains("vec_f32"),
+        "::halfvec cast should not translate to vec_f32(), got: {select_stmt}"
     );
 
     Ok(())

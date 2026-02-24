@@ -594,11 +594,11 @@ fn forward_expr_translation_covers_remaining_fts_extract_and_timezone_paths() {
     assert!(err_msg.contains("to_tsquery"), "unexpected error: {err_msg}");
 
     let extract_epoch = parse_expr("EXTRACT(EPOCH FROM created_at)");
-    let err = extract_epoch.translate(&schema, &options).unwrap_err();
-    let err_msg = unsupported_message(err);
+    let translated_epoch =
+        extract_epoch.translate(&schema, &options).expect("EXTRACT(EPOCH) should now be supported");
     assert!(
-        err_msg.contains("EXTRACT(") && err_msg.contains("not supported"),
-        "unexpected error: {err_msg}"
+        translated_epoch.to_string().contains("strftime('%s'"),
+        "EXTRACT(EPOCH) should use strftime('%s', ...), got: {translated_epoch}"
     );
 
     let at_tz_prefixed = parse_expr("created_at AT TIME ZONE 'utc+02:30'");
