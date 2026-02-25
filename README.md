@@ -5,9 +5,18 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Codecov](https://codecov.io/gh/LucaCappelletti94/pg2sqlite/branch/main/graph/badge.svg)](https://codecov.io/gh/LucaCappelletti94/pg2sqlite)
 
-A Rust library that translates PostgreSQL SQL into SQLite-compatible SQL.
+A Rust library that translates PostgreSQL SQL into valid, runnable SQLite SQL.
 
-It parses PostgreSQL-dialect statements using [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and emits semantically equivalent SQLite SQL, handling data type conversions, syntax differences, and advanced features like Row-Level Security, text search, pgvector, and PL/pgSQL triggers.
+It parses PostgreSQL-dialect statements using [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and emits semantically equivalent SQLite SQL. Beyond basic type and syntax rewriting it handles complex PostgreSQL features that have no direct SQLite counterpart:
+
+- **Row-Level Security** — `CREATE POLICY` / `ALTER TABLE … ENABLE ROW LEVEL SECURITY` is translated to a renamed backing table, a view that enforces the `USING` clause, and `INSTEAD OF` triggers.
+- **Full-text search** — `CREATE INDEX … USING GIN (to_tsvector(…))` becomes an FTS5 virtual table with `AFTER INSERT / DELETE / UPDATE` sync triggers.
+- **Vector search** — pgvector types (`vector`, `halfvec`) and distance operators (`<->`, `<=>`) are translated to [sqlite-vec](https://github.com/asg017/sqlite-vec) equivalents, including a `vec0` virtual table and sync triggers.
+- **PL/pgSQL triggers** — trigger function bodies are parsed and rewritten to SQLite trigger syntax, including `IF / ELSIF / ELSE`, `SELECT INTO`, `RAISE EXCEPTION`, and `NEW` / `OLD` references.
+- **Grant-based filtering** — when a session role is configured, tables and indices the role cannot access are omitted from the output entirely.
+- **Reverse translation** — SQLite DML (`INSERT`, `UPDATE`, `DELETE`, `SELECT`) can be translated back to PostgreSQL for syncing client-side replicas to a PostgreSQL server.
+
+**Every output statement is valid SQLite.** pg2sqlite does not pass PostgreSQL syntax through to the output: if a construct can be translated, it is; if it cannot, the call returns an explicit `Err`. There are no silent pass-throughs, no silently dropped arguments, and no output that looks valid but fails when you run it.
 
 ## Quick start
 
@@ -41,36 +50,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Performance
+
+Measured with Criterion on an optimized release build (`cargo bench -- vs_polyglot`).
+pg2sqlite performs full semantic translation; polyglot-sql performs syntactic rewriting.
+
+| Input                 | pg2sqlite | polyglot-sql | speedup  |
+| --------------------- | --------: | -----------: | -------: |
+| `select_simple`       |  19.6 µs  |   56.7 µs    | **2.9×** |
+| `select_join`         |  37.5 µs  |   69.5 µs    | **1.9×** |
+| `select_subquery`     |  28.3 µs  |   62.9 µs    | **2.2×** |
+| `select_cte`          |  33.8 µs  |   67.7 µs    | **2.0×** |
+| `insert_simple`       |  16.0 µs  |   54.4 µs    | **3.4×** |
+| `insert_on_conflict`  |  27.2 µs  |   65.6 µs    | **2.4×** |
+| `update_multi_column` |  19.3 µs  |   60.9 µs    | **3.2×** |
+| `delete_subquery`     |  25.4 µs  |   60.3 µs    | **2.4×** |
+| `create_table_ddl`    |  24.3 µs  |   57.8 µs    | **2.4×** |
+
+## Why pg2sqlite?
+
+Most PostgreSQL-to-SQLite translators are best-effort: they pass unknown constructs through unchanged, silently drop arguments, or emit SQL that fails at runtime.  pg2sqlite takes the opposite stance:
+
+| Behaviour                                           | pg2sqlite | polyglot-sql          | sqlglot               |
+| --------------------------------------------------- | :-------: | :-------------------: | :-------------------: |
+| Explicit `Err` for untranslatable constructs        | ✓         | ✗                     | partial               |
+| PL/pgSQL trigger body translation                   | ✓         | ✗                     | ✗                     |
+| Row-Level Security → view + triggers                | ✓         | ✗                     | ✗                     |
+| GIN / GiST index → FTS5 virtual table               | ✓         | ✗                     | ✗                     |
+| pgvector → sqlite-vec                               | ✓         | ✗                     | ✗                     |
+| Reverse translation (SQLite → PostgreSQL)           | Only DML  | partial               | partial               |
+| `GRANT` / `REVOKE` / `CREATE ROLE` silently skipped | ✓         | ✗ (emits invalid SQL) | ✗ (emits invalid SQL) |
+
+See [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs) for a full side-by-side comparison across 80+ test cases including runtime execution checks.
+
 ## Features
 
 ### Statement translation
 
-| PostgreSQL                                             | SQLite                                                                                  |
-| ------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| `CREATE TABLE`                                         | Translated with `STRICT` mode and automatic type mapping                                |
-| `CREATE INDEX`                                         | Translated (including `CREATE INDEX IF NOT EXISTS`)                                     |
-| `CREATE TRIGGER`                                       | PL/pgSQL function bodies are translated to SQLite trigger syntax                        |
-| `CREATE VIEW`                                          | Pass-through                                                                            |
-| `INSERT`                                               | `ON CONFLICT DO NOTHING` becomes `OR IGNORE`                                            |
-| `UPDATE` / `DELETE`                                    | Including `DELETE ... USING` syntax                                                     |
-| `DROP TABLE` / `DROP VIEW` / `DROP INDEX`              | Strips `CASCADE` / `RESTRICT`                                                           |
-| `ALTER TABLE ENABLE ROW LEVEL SECURITY`                | Translated to views + `INSTEAD OF` triggers (see [RLS](#row-level-security))            |
-| `CREATE POLICY` / `CREATE ROLE` / `GRANT` / `REVOKE`   | Consumed for RLS and grant-based filtering                                              |
+| PostgreSQL                                             | SQLite                                                                             |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `CREATE TABLE`                                         | Translated with `STRICT` mode and automatic type mapping                            |
+| `CREATE INDEX`                                         | Translated (including `CREATE INDEX IF NOT EXISTS`)                                 |
+| `CREATE TRIGGER`                                       | PL/pgSQL function bodies translated to SQLite trigger syntax                        |
+| `CREATE VIEW`                                          | Translated; `CREATE OR REPLACE VIEW` becomes `DROP VIEW IF EXISTS` + `CREATE VIEW`  |
+| `INSERT`                                               | `ON CONFLICT DO NOTHING` → `OR IGNORE`; `ON CONFLICT DO UPDATE` → `OR REPLACE`     |
+| `UPDATE` / `DELETE`                                    | Including `DELETE ... USING` syntax                                                 |
+| `DROP TABLE` / `DROP VIEW` / `DROP INDEX`              | Strips `CASCADE` / `RESTRICT`                                                       |
+| `ALTER TABLE ENABLE ROW LEVEL SECURITY`                | Translated to views + `INSTEAD OF` triggers (see [RLS](#row-level-security))        |
+| `CREATE POLICY` / `CREATE ROLE` / `GRANT` / `REVOKE`   | Consumed for RLS and grant-based filtering; no invalid output emitted               |
 
-Statements without a SQLite equivalent (`CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `ALTER ROLE`, `COPY`, etc.) are silently skipped.
+Statements with no SQLite equivalent (`CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `ALTER ROLE`, `COPY`, etc.) are silently skipped — they carry no information that can be represented in SQLite.
+
+Statements that *do* have a SQLite equivalent but that pg2sqlite does not yet translate (`STDDEV`, `PERCENTILE_CONT`, `ARRAY_AGG`, `REGEXP_REPLACE`, …) return an explicit `Err` with a descriptive message. A clear error is always better than output that silently computes the wrong result or fails at runtime.
 
 ### Type mapping
 
-| PostgreSQL                                                  | SQLite                                         |
-| ----------------------------------------------------------- | ---------------------------------------------- |
-| `SERIAL` / `SMALLSERIAL` / `SMALLINT` / `INT` / `BOOLEAN`   | `INTEGER`                                      |
-| `FLOAT` / `DOUBLE PRECISION`                                | `REAL`                                         |
-| `VARCHAR` / `JSON` / `JSONB` / `TIMESTAMP` / `TIMESTAMPTZ`  | `TEXT`                                         |
-| `UUID`                                                      | `BLOB` or `TEXT` (configurable)                |
-| `BYTEA` / `GEOGRAPHY`                                       | `BLOB`                                         |
-| `vector(N)` / `halfvec(N)`                                  | `BLOB` (see [Vector search](#vector-search))   |
+| PostgreSQL                                                   | SQLite                                        |
+| ------------------------------------------------------------ | --------------------------------------------- |
+| `SERIAL` / `SMALLSERIAL` / `SMALLINT` / `INT` / `BOOLEAN`    | `INTEGER`                                     |
+| `BIGINT` / `INT8` / `INT4` / `INT2`                          | `INTEGER`                                     |
+| `FLOAT` / `DOUBLE PRECISION` / `FLOAT8` / `FLOAT4`           | `REAL`                                        |
+| `NUMERIC` / `DECIMAL`                                        | `REAL` (lossy — precision not enforced)       |
+| `VARCHAR` / `CHAR` / `TEXT` / `CLOB` / `NVARCHAR`            | `TEXT`                                        |
+| `JSON` / `JSONB` / `TSVECTOR` / `TSQUERY`                    | `TEXT`                                        |
+| `TIMESTAMP` / `TIMESTAMPTZ` / `DATE` / `TIME` / `INTERVAL`   | `TEXT`                                        |
+| `UUID`                                                       | `BLOB` or `TEXT` (configurable)               |
+| `BYTEA` / `BINARY` / `VARBINARY` / `GEOGRAPHY`               | `BLOB`                                        |
+| `BIT` / `BIT VARYING`                                        | `INTEGER`                                     |
+| `vector(N)` / `halfvec(N)`                                   | `BLOB` (see [Vector search](#vector-search))  |
 
 All `CREATE TABLE` output uses SQLite `STRICT` mode, and `NOT NULL` is automatically added to primary key columns.
+
+### Function translation
+
+| PostgreSQL                         | SQLite                                                   |
+| ---------------------------------- | -------------------------------------------------------- |
+| `NOW()` / `CURRENT_TIMESTAMP`      | `datetime('now')`                                        |
+| `EXTRACT(YEAR FROM x)`             | `CAST(strftime('%Y', x) AS INTEGER)`                     |
+| `EXTRACT(EPOCH FROM x)`            | `CAST(strftime('%s', x) AS REAL)`                        |
+| `DATE_TRUNC('month', x)`           | `strftime('%Y-%m-01', x)`                                |
+| `CONCAT(a, b, c)`                  | `COALESCE(a,'') \|\| COALESCE(b,'') \|\| COALESCE(c,'')` |
+| `STRING_AGG(x, sep)`               | `GROUP_CONCAT(x, sep)`                                   |
+| `JSON_AGG(x)` / `JSONB_AGG(x)`     | `json_group_array(x)`                                    |
+| `JSON_OBJECT_AGG(k, v)`            | `json_group_object(k, v)`                                |
+| `CHAR_LENGTH(x)`                   | `length(x)`                                              |
+| `STRPOS(s, sub)`                   | `instr(s, sub)`                                          |
+| `POSITION(sub IN s)`               | `instr(s, sub)`                                          |
+| `SUBSTRING(s FROM n FOR l)`        | `substr(s, n, l)`                                        |
+| `ILIKE`                            | `lower(x) LIKE lower(pattern)`                           |
+| `data->'field'` / `data->>'field'` | `json_extract(data, '$.field')`                          |
+| `x IS DISTINCT FROM y`             | `NOT (x IS y)`                                           |
+| `x IS NOT DISTINCT FROM y`         | `x IS y`                                                 |
 
 ### UUID generation
 
@@ -155,6 +225,23 @@ Translates [pgvector](https://github.com/pgvector/pgvector) types and operators 
 
 For tables with vector columns, pg2sqlite additionally generates a `vec0` virtual table and sync triggers (`INSERT`, `UPDATE`, `DELETE`) to keep it synchronized with the main table.
 
+### Full-text search
+
+`CREATE INDEX … USING GIN (to_tsvector('english', body))` is translated to an FTS5 virtual table plus three sync triggers that keep it current:
+
+```sql
+-- Input (PostgreSQL)
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);
+CREATE INDEX docs_fts ON docs USING GIN (to_tsvector('english', body));
+
+-- Output (SQLite)
+CREATE VIRTUAL TABLE docs_fts USING fts5(body, content=docs, content_rowid=id);
+CREATE TRIGGER docs_fts_ai AFTER INSERT ON docs BEGIN
+    INSERT INTO docs_fts(rowid, body) VALUES (new.id, new.body);
+END;
+-- ... UPDATE and DELETE triggers
+```
+
 ### PL/pgSQL trigger translation
 
 PL/pgSQL trigger function bodies are translated to SQLite trigger syntax, supporting:
@@ -163,7 +250,7 @@ PL/pgSQL trigger function bodies are translated to SQLite trigger syntax, suppor
 - `IF` / `ELSIF` / `ELSE` conditionals
 - `SELECT INTO` variable binding
 - `NEW` / `OLD` record references
-- `RAISE EXCEPTION` to `SELECT RAISE(ABORT, ...)`
+- `RAISE EXCEPTION` → `SELECT RAISE(ABORT, ...)`
 
 ### Reverse translation
 
