@@ -467,7 +467,18 @@ fn translate_position(
     }))
 }
 
-/// Translate a TRIM expression, recursively translating all sub-expressions.
+/// Translate a TRIM expression to SQLite.
+///
+/// PostgreSQL supports `TRIM(LEADING 'x' FROM str)`, `TRIM(TRAILING 'x' FROM
+/// str)`, and `TRIM(BOTH 'x' FROM str)`.  SQLite has no such syntax; the
+/// equivalents are `LTRIM(str, 'x')`, `RTRIM(str, 'x')`, and `TRIM(str,
+/// 'x')` respectively.
+///
+/// When no `trim_what` character is given the directional variants still map
+/// to `LTRIM(str)` / `RTRIM(str)` / `TRIM(str)` (SQLite's built-ins trim
+/// whitespace when called with one argument).
+///
+/// Plain `TRIM(str)` with no direction or character passes through unchanged.
 fn translate_trim(
     expr: &Expr,
     trim_where: Option<sqlparser::ast::TrimWhereField>,
@@ -476,6 +487,55 @@ fn translate_trim(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
+    use sqlparser::ast::TrimWhereField;
+
+    let func_name = match trim_where {
+        Some(TrimWhereField::Leading) => Some("LTRIM"),
+        Some(TrimWhereField::Trailing) => Some("RTRIM"),
+        Some(TrimWhereField::Both) => Some("TRIM"),
+        None => None,
+    };
+
+    if let Some(name) = func_name {
+        let translated_expr = expr.translate(schema, options)?;
+        let char_arg = match trim_what {
+            Some(e) => Some(e.translate(schema, options)?),
+            // trim_characters is the pg-dialect "TRIM(LEADING FROM str USING chars)" form;
+            // treat the first character expression as the trim set when present.
+            None => {
+                trim_characters
+                    .and_then(|c| c.first())
+                    .map(|e| e.translate(schema, options))
+                    .transpose()?
+            }
+        };
+
+        let args = if let Some(char_expr) = char_arg {
+            vec![
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_expr)),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(char_expr)),
+            ]
+        } else {
+            vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_expr))]
+        };
+
+        return Ok(Expr::Function(Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args,
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        }));
+    }
+
+    // Plain TRIM(str) or TRIM(str, chars) — pass through with translated parts.
     Ok(Expr::Trim {
         expr: Box::new(expr.translate(schema, options)?),
         trim_where,
@@ -1279,14 +1339,26 @@ impl Translator for Expr {
                     negated: *negated,
                 }
             }
-            // ILIKE translates to LIKE (SQLite LIKE is case-insensitive for ASCII)
-            Expr::ILike { negated, any, expr, pattern, escape_char }
-            | Expr::Like { negated, any, expr, pattern, escape_char } => {
+            // LIKE passes through as-is
+            Expr::Like { negated, any, expr, pattern, escape_char } => {
                 Expr::Like {
                     negated: *negated,
                     any: *any,
                     expr: Box::new(expr.translate(schema, options)?),
                     pattern: Box::new(pattern.translate(schema, options)?),
+                    escape_char: escape_char.clone(),
+                }
+            }
+            // ILIKE → lower(expr) LIKE lower(pattern) — correct regardless of case_sensitive_like
+            // pragma
+            Expr::ILike { negated, any, expr, pattern, escape_char } => {
+                let translated_expr = expr.translate(schema, options)?;
+                let translated_pattern = pattern.translate(schema, options)?;
+                Expr::Like {
+                    negated: *negated,
+                    any: *any,
+                    expr: Box::new(wrap_with_lower(translated_expr)),
+                    pattern: Box::new(wrap_with_lower(translated_pattern)),
                     escape_char: escape_char.clone(),
                 }
             }
@@ -1561,6 +1633,25 @@ impl Translator for Expr {
     }
 }
 
+/// Wraps `expr` in a SQLite `lower()` call: `lower(expr)`.
+/// Used to implement ILIKE → `lower(expr) LIKE lower(pattern)`.
+fn wrap_with_lower(expr: Expr) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("lower"))]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use sql_traits::structs::ParserDB;
@@ -1683,6 +1774,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn translate_extract_trim_any_and_unimplemented_branches() {
         let schema = empty_schema();
         let options = Pg2SqliteOptions::default();
@@ -1724,6 +1816,54 @@ mod tests {
         )
         .expect("trim should translate");
         assert!(trimmed.to_string().contains("TRIM"));
+
+        // TRIM(LEADING 'x' FROM str) → LTRIM(str, 'x')
+        let ltrimmed = translate_trim(
+            &parse_expr("str"),
+            Some(sqlparser::ast::TrimWhereField::Leading),
+            Some(&parse_expr("'x'")),
+            None,
+            &schema,
+            &options,
+        )
+        .expect("leading trim should translate");
+        assert_eq!(ltrimmed.to_string(), "LTRIM(str, 'x')");
+
+        // TRIM(TRAILING 'x' FROM str) → RTRIM(str, 'x')
+        let rtrimmed = translate_trim(
+            &parse_expr("str"),
+            Some(sqlparser::ast::TrimWhereField::Trailing),
+            Some(&parse_expr("'x'")),
+            None,
+            &schema,
+            &options,
+        )
+        .expect("trailing trim should translate");
+        assert_eq!(rtrimmed.to_string(), "RTRIM(str, 'x')");
+
+        // TRIM(BOTH 'x' FROM str) → TRIM(str, 'x')
+        let btrimmed = translate_trim(
+            &parse_expr("str"),
+            Some(sqlparser::ast::TrimWhereField::Both),
+            Some(&parse_expr("'x'")),
+            None,
+            &schema,
+            &options,
+        )
+        .expect("both trim should translate");
+        assert_eq!(btrimmed.to_string(), "TRIM(str, 'x')");
+
+        // TRIM(LEADING FROM str) — no char → LTRIM(str)
+        let ltrim_no_char = translate_trim(
+            &parse_expr("str"),
+            Some(sqlparser::ast::TrimWhereField::Leading),
+            None,
+            None,
+            &schema,
+            &options,
+        )
+        .expect("leading trim without char should translate");
+        assert_eq!(ltrim_no_char.to_string(), "LTRIM(str)");
 
         let in_tuple = translate_any_all_to_in(
             &parse_expr("id"),

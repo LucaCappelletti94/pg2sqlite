@@ -5,9 +5,9 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FunctionArg,
     FunctionArgExpr, FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator,
-    LimitClause, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, OrderBy, OrderByExpr,
-    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting, Statement,
-    SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
+    LimitClause, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart,
+    OrderBy, OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting,
+    Statement, SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
     TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, Values, WindowSpec, With,
     WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
     XmlTableColumnOption,
@@ -19,6 +19,10 @@ use crate::{errors::Error, prelude::Pg2SqliteOptions};
 /// can work for both forward (`Translator`) and reverse (`ReverseTranslator`)
 /// translation.
 pub(crate) trait TranslationDirection {
+    /// `true` for forward (PostgreSQL → SQLite) translation, `false` for
+    /// reverse.
+    const IS_FORWARD: bool = false;
+
     fn translate_expr(
         expr: &Expr,
         schema: &ParserDB,
@@ -966,6 +970,30 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             sample,
             index_hints,
         } => {
+            // Detect PostgreSQL table-valued functions called with arguments.
+            // These appear as TableFactor::Table with args: Some(...).
+            if D::IS_FORWARD && args.is_some() {
+                let fn_name = name
+                    .0
+                    .last()
+                    .and_then(|p| {
+                        if let ObjectNamePart::Identifier(id) = p {
+                            Some(id.value.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if fn_name == "generate_series" {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        "generate_series() is not available in standard SQLite. \
+                         Use a recursive CTE instead: \
+                         WITH RECURSIVE s(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM s WHERE n < N) SELECT n FROM s"
+                            .to_string(),
+                    ));
+                }
+            }
             TableFactor::Table {
                 name: D::translate_object_name(name, schema, options)?,
                 alias: alias.clone(),
@@ -1009,6 +1037,29 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             }
         }
         TableFactor::Function { lateral, name, args, alias } => {
+            // Detect PostgreSQL table-valued functions that have no SQLite equivalent
+            if D::IS_FORWARD {
+                let fn_name = name
+                    .0
+                    .last()
+                    .and_then(|p| {
+                        if let ObjectNamePart::Identifier(id) = p {
+                            Some(id.value.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if fn_name == "generate_series" {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        "generate_series() is not available in standard SQLite. \
+                         Use a recursive CTE instead: \
+                         WITH RECURSIVE s(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM s WHERE n < N) SELECT n FROM s"
+                            .to_string(),
+                    ));
+                }
+            }
             TableFactor::Function {
                 lateral: *lateral,
                 name: name.clone(),

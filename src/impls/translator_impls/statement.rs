@@ -370,7 +370,22 @@ impl Translator for Statement {
             }
             Self::Insert(insert) => vec![insert.translate(schema, options)?.into()],
             Self::CreateView(create_view) => {
-                vec![create_view.translate(schema, options)?.into()]
+                let mut stmts: Vec<Statement> = Vec::new();
+                if create_view.or_replace {
+                    // SQLite has no CREATE OR REPLACE VIEW, so emit DROP VIEW IF EXISTS first
+                    stmts.push(Statement::Drop {
+                        object_type: ObjectType::View,
+                        if_exists: true,
+                        names: vec![sqlite_unqualified_object_name(&create_view.name)],
+                        cascade: false,
+                        restrict: false,
+                        purge: false,
+                        temporary: false,
+                        table: None,
+                    });
+                }
+                stmts.push(create_view.translate(schema, options)?.into());
+                stmts
             }
             Self::Update(update) => vec![Statement::Update(update.translate(schema, options)?)],
             Self::Delete(delete) => vec![delete.translate(schema, options)?],

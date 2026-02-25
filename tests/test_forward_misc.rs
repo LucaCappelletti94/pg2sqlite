@@ -734,16 +734,29 @@ fn check_constraint_with_function_removed() {
     assert!(output.contains("items"), "Expected items table: {output}");
 }
 
-// ==================== CREATE OR REPLACE VIEW error ====================
+// ==================== CREATE OR REPLACE VIEW → DROP + CREATE
+// ====================
 
 #[test]
-fn create_or_replace_view_error() {
+fn create_or_replace_view_emits_drop_then_create() {
     let sql = "
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
         CREATE OR REPLACE VIEW active AS SELECT * FROM users;
     ";
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
-    assert!(result.is_err(), "Expected error for OR REPLACE VIEW");
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    // table + DROP VIEW IF EXISTS + CREATE VIEW
+    assert_eq!(stmts.len(), 3, "Expected 3 statements, got {stmts:?}");
+    assert!(
+        stmts[1].to_string().to_uppercase().contains("DROP VIEW IF EXISTS"),
+        "Expected DROP VIEW IF EXISTS: {}",
+        stmts[1]
+    );
+    assert!(
+        stmts[2].to_string().to_uppercase().contains("CREATE VIEW"),
+        "Expected CREATE VIEW: {}",
+        stmts[2]
+    );
 }
 
 // ==================== MATERIALIZED VIEW error ====================

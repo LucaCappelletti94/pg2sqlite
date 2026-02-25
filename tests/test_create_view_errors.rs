@@ -1,17 +1,22 @@
 //! Tests for CREATE VIEW error branches in
 //! `src/impls/translator_impls/create_view.rs`.
 //!
-//! Covers: MATERIALIZED VIEW error, OR REPLACE error, basic view passthrough.
+//! Covers: MATERIALIZED VIEW error, OR REPLACE → DROP+CREATE, basic view
+//! passthrough.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-fn translate(sql: &str) -> Result<String, String> {
+fn translate(sql: &str) -> Result<Vec<String>, String> {
     Pg2Sqlite::default()
         .sql(sql)
         .map_err(|e| e.to_string())?
         .translate(&Pg2SqliteOptions::default())
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
+        .map(|stmts| stmts.iter().map(ToString::to_string).collect())
         .map_err(|e| e.to_string())
+}
+
+fn translate_joined(sql: &str) -> Result<String, String> {
+    translate(sql).map(|v| v.join("\n"))
 }
 
 // ==================== Basic view ====================
@@ -20,7 +25,7 @@ fn translate(sql: &str) -> Result<String, String> {
 fn basic_view_translates() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
                CREATE VIEW v AS SELECT * FROM t;";
-    let output = translate(sql).unwrap();
+    let output = translate_joined(sql).unwrap();
     assert!(output.contains("CREATE VIEW v"), "Expected CREATE VIEW: {output}");
 }
 
@@ -28,7 +33,7 @@ fn basic_view_translates() {
 fn view_if_not_exists() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
                CREATE VIEW IF NOT EXISTS v AS SELECT * FROM t;";
-    let output = translate(sql).unwrap();
+    let output = translate_joined(sql).unwrap();
     assert!(output.contains("IF NOT EXISTS"), "Expected IF NOT EXISTS: {output}");
 }
 
@@ -36,7 +41,7 @@ fn view_if_not_exists() {
 fn temporary_view() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
                CREATE TEMPORARY VIEW v AS SELECT * FROM t;";
-    let output = translate(sql).unwrap();
+    let output = translate_joined(sql).unwrap();
     assert!(output.contains("VIEW"), "Expected VIEW: {output}");
 }
 
@@ -50,14 +55,27 @@ fn materialized_view_produces_error() {
     assert!(err.contains("MATERIALIZED"), "Expected MATERIALIZED in error: {err}");
 }
 
-// ==================== OR REPLACE error ====================
+// ==================== OR REPLACE → DROP + CREATE ====================
 
 #[test]
-fn or_replace_view_produces_error() {
+fn or_replace_view_emits_drop_then_create() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY);
                CREATE OR REPLACE VIEW v AS SELECT * FROM t;";
-    let result = translate(sql);
-    assert!(result.is_err(), "Expected error for OR REPLACE VIEW");
-    let err = result.unwrap_err();
-    assert!(err.contains("OR REPLACE"), "Expected OR REPLACE in error: {err}");
+    let stmts = translate(sql).unwrap();
+    // Table DDL + DROP VIEW IF EXISTS + CREATE VIEW = 3 statements
+    assert_eq!(stmts.len(), 3, "Expected 3 statements, got {}: {stmts:?}", stmts.len());
+    let drop = &stmts[1];
+    let create = &stmts[2];
+    assert!(
+        drop.to_uppercase().contains("DROP VIEW IF EXISTS"),
+        "Second statement should be DROP VIEW IF EXISTS, got: {drop}"
+    );
+    assert!(
+        create.to_uppercase().contains("CREATE VIEW"),
+        "Third statement should be CREATE VIEW, got: {create}"
+    );
+    assert!(
+        !create.to_uppercase().contains("OR REPLACE"),
+        "CREATE VIEW should not contain OR REPLACE: {create}"
+    );
 }

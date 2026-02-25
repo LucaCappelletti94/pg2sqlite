@@ -136,7 +136,127 @@ impl PlPgSqlPreprocessor {
         // Transform SELECT INTO statements to extract variable bindings
         result = Self::transform_select_into(&result, context);
 
+        // Transform RAISE EXCEPTION/NOTICE/… → SELECT RAISE(ABORT, …) or drop
+        result = Self::transform_raise_statements(&result);
+
         result
+    }
+
+    /// Transforms PL/pgSQL `RAISE` statements into SQLite-compatible form.
+    ///
+    /// Scans the body text directly (not statement-by-statement) so that RAISE
+    /// inside IF/THEN blocks is also rewritten.
+    ///
+    /// - `RAISE EXCEPTION 'msg'` → `SELECT RAISE(ABORT, 'msg')`
+    /// - `RAISE EXCEPTION 'fmt %', arg` → `SELECT RAISE(ABORT, 'fmt %')`
+    ///   (format args dropped)
+    /// - `RAISE NOTICE/INFO/WARNING/DEBUG/LOG …` → removed (no SQLite
+    ///   equivalent)
+    fn transform_raise_statements(body: &str) -> String {
+        let mut result = String::new();
+        let mut search_from = 0;
+        let upper_body = body.to_uppercase();
+
+        while let Some(raise_rel) = upper_body[search_from..].find("RAISE ") {
+            let raise_pos = search_from + raise_rel;
+
+            // Append everything up to and including the RAISE keyword
+            // (we'll decide below whether to keep or replace it)
+            let after_raise_start = raise_pos + 6; // byte offset after "RAISE "
+
+            let rest_upper = &upper_body[after_raise_start..];
+
+            let (level_bytes, is_exception) = if rest_upper.starts_with("EXCEPTION") {
+                (9usize, true)
+            } else if rest_upper.starts_with("NOTICE")
+                || rest_upper.starts_with("WARNING")
+                || rest_upper.starts_with("INFO   ")
+                || rest_upper.starts_with("INFO\n")
+                || rest_upper.starts_with("INFO;")
+                || rest_upper.starts_with("DEBUG")
+                || rest_upper.starts_with("LOG")
+            {
+                let len = rest_upper
+                    .find(|c: char| c.is_whitespace() || c == ';')
+                    .unwrap_or(rest_upper.len());
+                (len, false)
+            } else {
+                // Not a recognized RAISE level — pass through unchanged
+                result.push_str(&body[search_from..after_raise_start]);
+                search_from = after_raise_start;
+                continue;
+            };
+
+            // Emit everything before this RAISE
+            result.push_str(&body[search_from..raise_pos]);
+
+            // Find the semicolon that ends this RAISE statement
+            let after_level = after_raise_start + level_bytes;
+            let stmt_end = Self::find_unquoted_semicolon(&body[after_level..])
+                .map_or(body.len().saturating_sub(1), |p| after_level + p);
+
+            if is_exception {
+                let message_content = body[after_level..stmt_end].trim();
+                let msg = Self::extract_first_string_literal(message_content);
+                result.push_str("SELECT RAISE(ABORT, ");
+                result.push_str(msg);
+                result.push(')');
+                // Keep the semicolon
+                result.push(';');
+            }
+            // else: informational — drop entirely (emit nothing)
+
+            search_from = stmt_end + 1; // skip past the semicolon
+        }
+
+        result.push_str(&body[search_from..]);
+        result
+    }
+
+    /// Returns the byte offset of the first unquoted semicolon in `s`.
+    fn find_unquoted_semicolon(s: &str) -> Option<usize> {
+        let mut in_string = false;
+        let mut string_char = ' ';
+        for (i, c) in s.char_indices() {
+            if in_string {
+                if c == string_char {
+                    in_string = false;
+                }
+            } else if c == '\'' || c == '"' {
+                in_string = true;
+                string_char = c;
+            } else if c == ';' {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Extracts the first string literal from a comma-separated argument list.
+    ///
+    /// For `'hello', arg1, arg2` returns `'hello'`.
+    /// If the first argument is not a string literal, returns `'error'` as a
+    /// safe fallback.
+    fn extract_first_string_literal(args: &str) -> &str {
+        let trimmed = args.trim();
+        if let Some(stripped) = trimmed.strip_prefix('\'') {
+            // Find the closing quote, respecting escaped '' pairs
+            let mut chars = stripped.char_indices();
+            while let Some((i, c)) = chars.next() {
+                if c == '\'' {
+                    // Check for '' escape
+                    match chars.next() {
+                        Some((_, '\'')) => {}          // escaped quote, keep going
+                        _ => return &trimmed[..i + 2], // +1 for opening quote, +1 for closing
+                    }
+                }
+            }
+        }
+        // Fallback: take up to first comma (or whole thing)
+        match args.find(',') {
+            Some(p) => args[..p].trim(),
+            None => args.trim(),
+        }
     }
 
     /// Transforms PostgreSQL ELSIF keyword to ELSEIF (which sqlparser expects).
@@ -550,6 +670,37 @@ END";
         assert!(transformed.contains("ELS\n"));
         assert!(transformed.contains("ELSIFX\n"));
         assert!(transformed.contains("ELSEIF\n"));
+    }
+
+    #[test]
+    fn test_transform_raise_exception_simple() {
+        let body = "BEGIN\n  RAISE EXCEPTION 'val must be non-negative';\n  RETURN NEW;\nEND";
+        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body);
+        assert!(
+            transformed.contains("SELECT RAISE(ABORT, 'val must be non-negative')"),
+            "RAISE EXCEPTION should become SELECT RAISE(ABORT, …), got: {transformed}"
+        );
+        assert!(!transformed.contains("RAISE EXCEPTION"), "Original form should be removed");
+    }
+
+    #[test]
+    fn test_transform_raise_exception_with_format_args() {
+        let body = "BEGIN\n  RAISE EXCEPTION 'bad value: %', NEW.val;\n  RETURN NEW;\nEND";
+        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body);
+        assert!(
+            transformed.contains("SELECT RAISE(ABORT, 'bad value: %')"),
+            "Format args should be dropped, got: {transformed}"
+        );
+    }
+
+    #[test]
+    fn test_transform_raise_notice_dropped() {
+        let body = "BEGIN\n  RAISE NOTICE 'debug info';\n  RETURN NEW;\nEND";
+        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body);
+        assert!(
+            !transformed.contains("RAISE NOTICE"),
+            "RAISE NOTICE should be dropped, got: {transformed}"
+        );
     }
 
     #[test]

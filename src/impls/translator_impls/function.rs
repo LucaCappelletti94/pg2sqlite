@@ -3,8 +3,9 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
+    BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
+    ValueWithSpan,
 };
 
 use super::helpers::translate_window_type;
@@ -26,6 +27,11 @@ enum FunctionTranslation {
     ToConcatenationWithSeparator,
     /// Transform date_trunc to strftime equivalent
     DateTrunc,
+    /// Transform date_part('field', expr) to CAST(strftime(format, expr) AS
+    /// type)
+    DatePart,
+    /// Transform to_char(expr, format) to strftime(mapped_format, expr)
+    ToChar,
     /// Unsupported function with error message
     Unsupported(String),
     /// No translation needed
@@ -45,8 +51,9 @@ fn translate_function(
         .map_or_else(|| name.to_string().to_lowercase(), |ident| ident.value.to_ascii_lowercase());
 
     match original_name.as_str() {
-        "least" => FunctionTranslation::Rename("MIN".to_string()),
-        "greatest" => FunctionTranslation::Rename("MAX".to_string()),
+        // MIN/MAX mappings
+        "least" | "bool_and" | "every" => FunctionTranslation::Rename("MIN".to_string()),
+        "greatest" | "bool_or" => FunctionTranslation::Rename("MAX".to_string()),
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7" => {
             FunctionTranslation::Rename(options.get_uuid_function_name().to_string())
         }
@@ -87,18 +94,6 @@ fn translate_function(
         "array_agg" => FunctionTranslation::Unsupported(
             "array_agg is not supported in SQLite because arrays are not a native type. \
              Use group_concat() instead: GROUP_CONCAT(column, ',')"
-                .to_string(),
-        ),
-        // bool_and / every: no built-in SQLite equivalent
-        "bool_and" | "every" => FunctionTranslation::Unsupported(
-            "bool_and/every is not supported in SQLite. \
-             Use MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1 to check whether all rows are true."
-                .to_string(),
-        ),
-        // bool_or: no built-in SQLite equivalent
-        "bool_or" => FunctionTranslation::Unsupported(
-            "bool_or is not supported in SQLite. \
-             Use MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1 to check whether any row is true."
                 .to_string(),
         ),
         // json_agg / jsonb_agg -> json_group_array (SQLite JSON extension)
@@ -193,12 +188,39 @@ fn translate_function(
              For regex support, load the SQLite REGEXP extension."
                 .to_string(),
         ),
-        // to_char has no direct SQLite equivalent
-        "to_char" => FunctionTranslation::Unsupported(
-            "to_char is not supported in SQLite. \
-             For timestamp formatting, use strftime() instead: \
-             strftime('%Y-%m-%d %H:%M:%S', column). \
-             For number formatting, use printf() or CAST."
+        // to_char(expr, format) -> strftime(mapped_format, expr) for timestamp formats
+        "to_char" => FunctionTranslation::ToChar,
+        // json_build_object(k, v, ...) -> json_object(k, v, ...) (SQLite JSON1 built-in)
+        "json_build_object" => FunctionTranslation::Rename("json_object".to_string()),
+        // json_build_array(v, ...) -> json_array(v, ...) (SQLite JSON1 built-in)
+        "json_build_array" | "jsonb_build_array" | "jsonb_build_object" => {
+            let target = if original_name.contains("array") { "json_array" } else { "json_object" };
+            FunctionTranslation::Rename(target.to_string())
+        }
+        // date_part('field', expr) -> CAST(strftime(format, expr) AS type)
+        "date_part" => FunctionTranslation::DatePart,
+        // lpad / rpad: not in standard SQLite
+        "lpad" | "rpad" => FunctionTranslation::Unsupported(
+            "lpad/rpad are not available in standard SQLite. \
+             Consider using the printf() function or application-side string formatting."
+                .to_string(),
+        ),
+        // initcap: not in standard SQLite
+        "initcap" => FunctionTranslation::Unsupported(
+            "initcap is not available in standard SQLite. \
+             Consider using application-level capitalization or the ICU extension."
+                .to_string(),
+        ),
+        // nextval: PostgreSQL sequence function, not available in SQLite
+        "nextval" => FunctionTranslation::Unsupported(
+            "nextval() is a PostgreSQL sequence function and is not available in SQLite. \
+             Use INTEGER PRIMARY KEY (ROWID alias) or a trigger-based sequence instead."
+                .to_string(),
+        ),
+        // generate_series: not in standard SQLite (available via an extension or recursive CTE)
+        "generate_series" => FunctionTranslation::Unsupported(
+            "generate_series() is not available in standard SQLite. \
+             Use a recursive CTE instead: WITH RECURSIVE s(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM s WHERE n < N) SELECT n FROM s"
                 .to_string(),
         ),
         _ => FunctionTranslation::PassThrough,
@@ -208,6 +230,61 @@ fn translate_function(
 /// Extract expressions from function arguments.
 fn extract_arg_exprs(args: &FunctionArguments) -> Vec<&Expr> {
     function_argument_exprs(args)
+}
+
+/// Convert a PostgreSQL `TO_CHAR` timestamp format string to a SQLite
+/// `strftime` format.
+///
+/// Applies longest-first substitutions to avoid partial matches (`YYYY` before
+/// `YY`, `HH24`/`HH12` before `HH`), then validates that only known strftime
+/// specifiers and safe separator characters remain.
+fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::errors::Error> {
+    const REPLACEMENTS: &[(&str, &str)] = &[
+        ("YYYY", "%Y"),
+        ("HH24", "%H"),
+        ("HH12", "%I"),
+        ("YY", "%y"),
+        ("MM", "%m"),
+        ("DD", "%d"),
+        ("HH", "%I"),
+        ("MI", "%M"),
+        ("SS", "%S"),
+    ];
+    let mut result = pg_format.to_string();
+    for (pg_code, strftime_code) in REPLACEMENTS {
+        result = result.replace(pg_code, strftime_code);
+    }
+    // Validate: every % must be followed by a known specifier letter;
+    // all other characters must be safe separators.
+    let safe_specs: &[u8] = b"YymMdHIMS";
+    let is_safe_sep = |c: char| matches!(c, '-' | ':' | '.' | '/' | ',' | '_' | ' ' | 'T');
+    let mut chars = result.char_indices().peekable();
+    while let Some((_i, c)) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some((_, spec)) if safe_specs.contains(&(spec as u8)) => {}
+                Some((_, spec)) => {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "to_char format '{pg_format}' produces unsupported strftime specifier \
+                         '%{spec}'. Supported PG codes: YYYY, YY, MM, DD, HH24, HH12, HH, \
+                         MI, SS. For number formatting use printf() or CAST."
+                    )));
+                }
+                None => {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "to_char format '{pg_format}' ends with a bare '%'"
+                    )));
+                }
+            }
+        } else if !is_safe_sep(c) {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "to_char format '{pg_format}' contains unsupported character '{c}'. \
+                 Supported separators: - : . / , _ (space) T. \
+                 For number formatting codes (9, 0, FM, L, …) use printf() or CAST."
+            )));
+        }
+    }
+    Ok(result)
 }
 
 /// Recursively translate all expressions inside [`FunctionArguments`].
@@ -560,6 +637,141 @@ impl Translator for Function {
                             FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
                                 ValueWithSpan {
                                     value: Value::SingleQuotedString(format_str.to_string()),
+                                    span: sqlparser::tokenizer::Span::empty(),
+                                },
+                            ))),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_ts)),
+                        ],
+                        clauses: vec![],
+                    }),
+                    filter: None,
+                    null_treatment: None,
+                    over: None,
+                    within_group: vec![],
+                }))
+            }
+            FunctionTranslation::DatePart => {
+                // date_part('field', expr) -> CAST(strftime(format, expr) AS INTEGER/REAL)
+                // Semantics mirror EXTRACT(field FROM expr).
+                let exprs = extract_arg_exprs(&func.args);
+                if exprs.len() != 2 {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "date_part requires exactly 2 arguments: date_part('field', expression)"
+                            .to_string(),
+                    ));
+                }
+                let field_expr = exprs[0];
+                let ts_expr = exprs[1].clone();
+
+                let field_str = match field_expr {
+                    Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
+                        s.to_lowercase()
+                    }
+                    _ => {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                            "date_part: the field argument must be a string literal \
+                             (e.g., date_part('year', timestamp))"
+                                .to_string(),
+                        ));
+                    }
+                };
+
+                let (format_str, cast_type) = match field_str.as_str() {
+                    "year" | "years" => ("%Y", DataType::Integer(None)),
+                    "month" | "months" => ("%m", DataType::Integer(None)),
+                    "day" | "days" => ("%d", DataType::Integer(None)),
+                    "hour" | "hours" => ("%H", DataType::Integer(None)),
+                    "minute" | "minutes" => ("%M", DataType::Integer(None)),
+                    "second" | "seconds" => ("%f", DataType::Real),
+                    "week" | "weeks" => ("%W", DataType::Integer(None)),
+                    "dow" | "weekday" => ("%w", DataType::Integer(None)),
+                    "doy" => ("%j", DataType::Integer(None)),
+                    "epoch" => ("%s", DataType::Real),
+                    other => {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                            "date_part('{other}', ...) is not supported in SQLite. \
+                             Supported fields: year, month, day, hour, minute, second, \
+                             week, dow, doy, epoch."
+                        )));
+                    }
+                };
+
+                let translated_ts = ts_expr.translate(schema, options)?;
+
+                let strftime_call = Expr::Function(Function {
+                    name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
+                    uses_odbc_syntax: false,
+                    parameters: FunctionArguments::None,
+                    args: FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args: vec![
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                                ValueWithSpan {
+                                    value: Value::SingleQuotedString(format_str.to_string()),
+                                    span: sqlparser::tokenizer::Span::empty(),
+                                },
+                            ))),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_ts)),
+                        ],
+                        clauses: vec![],
+                    }),
+                    filter: None,
+                    null_treatment: None,
+                    over: func
+                        .over
+                        .as_ref()
+                        .map(|w| translate_window_type(Some(w), schema, options))
+                        .transpose()?
+                        .flatten(),
+                    within_group: vec![],
+                });
+
+                Ok(Expr::Cast {
+                    expr: Box::new(strftime_call),
+                    data_type: cast_type,
+                    format: None,
+                    kind: CastKind::Cast,
+                    array: false,
+                })
+            }
+            FunctionTranslation::ToChar => {
+                // to_char(expr, format) -> strftime(mapped_format, expr)
+                // Note: PG arg order is (expr, format); SQLite strftime arg order is (format,
+                // expr).
+                let exprs = extract_arg_exprs(&func.args);
+                if exprs.len() != 2 {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "to_char requires exactly 2 arguments: to_char(expression, format)"
+                            .to_string(),
+                    ));
+                }
+                let ts_expr = exprs[0].clone();
+                let format_expr = exprs[1];
+                let format_str = match format_expr {
+                    Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
+                        s.clone()
+                    }
+                    _ => {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                            "to_char: format argument must be a string literal known at \
+                             translation time (e.g., to_char(col, 'YYYY-MM-DD')). Dynamic \
+                             formats cannot be translated."
+                                .to_string(),
+                        ));
+                    }
+                };
+                let mapped_format = pg_timestamp_format_to_strftime(&format_str)?;
+                let translated_ts = ts_expr.translate(schema, options)?;
+                Ok(Expr::Function(Function {
+                    name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
+                    uses_odbc_syntax: false,
+                    parameters: FunctionArguments::None,
+                    args: FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args: vec![
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                                ValueWithSpan {
+                                    value: Value::SingleQuotedString(mapped_format),
                                     span: sqlparser::tokenizer::Span::empty(),
                                 },
                             ))),

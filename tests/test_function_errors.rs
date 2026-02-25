@@ -87,26 +87,24 @@ fn test_generated_by_default_as_identity_causes_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn bool_and_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bool_and(flag) FROM t;"));
-    assert!(err.contains("bool_and"), "Error should mention bool_and: {err}");
-    assert!(err.to_lowercase().contains("min"), "Error should suggest MIN workaround: {err}");
+fn bool_and_translates_to_min() {
+    let out = translate_ok(&format!("{SIMPLE_TABLE} SELECT bool_and(flag) FROM t;"));
+    assert!(out.to_uppercase().contains("MIN("), "bool_and should become MIN: {out}");
+    assert!(!out.to_lowercase().contains("bool_and"), "Should not contain bool_and: {out}");
 }
 
 #[test]
-fn bool_or_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bool_or(flag) FROM t;"));
-    assert!(err.contains("bool_or"), "Error should mention bool_or: {err}");
-    assert!(err.to_lowercase().contains("max"), "Error should suggest MAX workaround: {err}");
+fn bool_or_translates_to_max() {
+    let out = translate_ok(&format!("{SIMPLE_TABLE} SELECT bool_or(flag) FROM t;"));
+    assert!(out.to_uppercase().contains("MAX("), "bool_or should become MAX: {out}");
+    assert!(!out.to_lowercase().contains("bool_or"), "Should not contain bool_or: {out}");
 }
 
 #[test]
-fn every_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT every(flag) FROM t;"));
-    assert!(
-        err.contains("bool_and") || err.contains("every"),
-        "Error should mention bool_and/every: {err}"
-    );
+fn every_translates_to_min() {
+    let out = translate_ok(&format!("{SIMPLE_TABLE} SELECT every(flag) FROM t;"));
+    assert!(out.to_uppercase().contains("MIN("), "every should become MIN: {out}");
+    assert!(!out.to_lowercase().contains("every"), "Should not contain every: {out}");
 }
 
 // ---------------------------------------------------------------------------

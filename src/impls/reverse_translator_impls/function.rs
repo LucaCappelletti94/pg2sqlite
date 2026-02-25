@@ -7,8 +7,8 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
-    ValueWithSpan,
+    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, TrimWhereField,
+    Value, ValueWithSpan,
 };
 
 use super::helpers::reverse_translate_window_type;
@@ -32,6 +32,9 @@ pub enum FunctionReversal {
     ToVectorCast,
     /// Transform char to chr
     ToChr,
+    /// Transform LTRIM/RTRIM/TRIM(str, chars) to TRIM(LEADING|TRAILING|BOTH
+    /// chars FROM str)
+    ToTrimDirectional(TrimWhereField),
     /// No translation needed
     PassThrough,
 }
@@ -167,6 +170,35 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
                 && list.args.len() > 1
             {
                 return FunctionReversal::Rename("GREATEST".to_string());
+            }
+            FunctionReversal::PassThrough
+        }
+        // LTRIM(str, chars) -> TRIM(LEADING chars FROM str)
+        // Single-arg LTRIM(str) is valid PG; pass through.
+        "ltrim" => {
+            if let FunctionArguments::List(list) = args
+                && list.args.len() == 2
+            {
+                return FunctionReversal::ToTrimDirectional(TrimWhereField::Leading);
+            }
+            FunctionReversal::PassThrough
+        }
+        // RTRIM(str, chars) -> TRIM(TRAILING chars FROM str)
+        "rtrim" => {
+            if let FunctionArguments::List(list) = args
+                && list.args.len() == 2
+            {
+                return FunctionReversal::ToTrimDirectional(TrimWhereField::Trailing);
+            }
+            FunctionReversal::PassThrough
+        }
+        // TRIM(str, chars) -> TRIM(BOTH chars FROM str)
+        // Single-arg TRIM(str) is identical in PG; pass through.
+        "trim" => {
+            if let FunctionArguments::List(list) = args
+                && list.args.len() == 2
+            {
+                return FunctionReversal::ToTrimDirectional(TrimWhereField::Both);
             }
             FunctionReversal::PassThrough
         }
@@ -371,6 +403,26 @@ pub fn reverse_translate_function(
                 over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
                 within_group: func.within_group.clone(),
             }))
+        }
+        FunctionReversal::ToTrimDirectional(field) => {
+            // LTRIM/RTRIM(str, chars) or TRIM(str, chars)
+            // -> TRIM(LEADING|TRAILING|BOTH chars FROM str)
+            let FunctionArguments::List(list) = &func.args else {
+                unreachable!("reverse_function only returns ToTrimDirectional for List args");
+            };
+            debug_assert_eq!(list.args.len(), 2, "ToTrimDirectional requires exactly 2 args");
+            let str_expr = extract_expr_from_arg(&list.args[0])?;
+            let char_expr = extract_expr_from_arg(&list.args[1])?;
+            let reversed_str =
+                crate::prelude::ReverseTranslator::reverse_translate(str_expr, schema, options)?;
+            let reversed_char =
+                crate::prelude::ReverseTranslator::reverse_translate(char_expr, schema, options)?;
+            Ok(Expr::Trim {
+                expr: Box::new(reversed_str),
+                trim_where: Some(field),
+                trim_what: Some(Box::new(reversed_char)),
+                trim_characters: None,
+            })
         }
         FunctionReversal::PassThrough => {
             Ok(Expr::Function(Function {
@@ -627,6 +679,107 @@ mod tests {
 
         let arg = function.args.to_string();
         assert!(arg.contains("NOW()"), "expected expr-named arg to be reverse translated: {arg}");
+    }
+
+    #[test]
+    fn ltrim_two_arg_reverses_to_trim_leading() {
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("LTRIM"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("str"))),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("'x'"))),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let result = reverse_translate_function(&func, &schema, &options)
+            .expect("LTRIM(str, 'x') should reverse-translate");
+        assert_eq!(result.to_string(), "TRIM(LEADING 'x' FROM str)");
+    }
+
+    #[test]
+    fn rtrim_two_arg_reverses_to_trim_trailing() {
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("RTRIM"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("str"))),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("'x'"))),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let result = reverse_translate_function(&func, &schema, &options)
+            .expect("RTRIM(str, 'x') should reverse-translate");
+        assert_eq!(result.to_string(), "TRIM(TRAILING 'x' FROM str)");
+    }
+
+    #[test]
+    fn trim_two_arg_reverses_to_trim_both() {
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("TRIM"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("str"))),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("'x'"))),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let result = reverse_translate_function(&func, &schema, &options)
+            .expect("TRIM(str, 'x') should reverse-translate");
+        assert_eq!(result.to_string(), "TRIM(BOTH 'x' FROM str)");
+    }
+
+    #[test]
+    fn ltrim_one_arg_passes_through() {
+        let func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("LTRIM"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("str")))],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let result = reverse_translate_function(&func, &schema, &options)
+            .expect("LTRIM(str) should pass through");
+        assert_eq!(result.to_string(), "LTRIM(str)");
     }
 
     #[test]

@@ -21,6 +21,8 @@ use crate::{
 pub(crate) struct Forward;
 
 impl TranslationDirection for Forward {
+    const IS_FORWARD: bool = true;
+
     fn translate_expr(
         expr: &Expr,
         schema: &ParserDB,

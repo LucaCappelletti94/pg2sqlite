@@ -27,12 +27,6 @@ impl Translator for CreateView {
             ));
         }
 
-        if self.or_replace {
-            return Err(Error::UnsupportedSQLiteFeature(
-                "CREATE OR REPLACE VIEW is not supported in SQLite".into(),
-            ));
-        }
-
         if self.or_alter {
             return Err(Error::UnsupportedSQLiteFeature(
                 "CREATE OR ALTER VIEW is not supported in SQLite".into(),

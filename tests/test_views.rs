@@ -281,20 +281,50 @@ fn test_materialized_view_error() {
     );
 }
 
-/// Test that OR REPLACE VIEW causes an error.
+/// Test that OR REPLACE VIEW emits DROP VIEW IF EXISTS + CREATE VIEW.
 #[test]
-fn test_or_replace_view_error() {
+fn test_or_replace_view_emits_drop_then_create() {
     let sql = "CREATE OR REPLACE VIEW my_view AS SELECT 1;";
 
     let options = Pg2SqliteOptions::default();
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    assert_eq!(stmts.len(), 2, "Expected DROP + CREATE, got {stmts:?}");
+    let drop = stmts[0].to_string();
+    let create = stmts[1].to_string();
     assert!(
-        err.to_string().contains("OR REPLACE VIEW"),
-        "Error should mention OR REPLACE VIEW: {}",
-        err
+        drop.to_uppercase().contains("DROP VIEW IF EXISTS"),
+        "First statement should be DROP VIEW IF EXISTS, got: {drop}"
     );
+    assert!(
+        create.to_uppercase().contains("CREATE VIEW"),
+        "Second statement should be CREATE VIEW, got: {create}"
+    );
+}
+
+/// Test that OR REPLACE VIEW executes cleanly against a real SQLite database.
+#[test]
+fn test_or_replace_view_diesel_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    let setup_sql = "
+        CREATE TABLE items (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
+        CREATE VIEW item_names AS SELECT id, name FROM items;
+    ";
+    let replace_sql = "CREATE OR REPLACE VIEW item_names AS SELECT id, name FROM items;";
+
+    let options = Pg2SqliteOptions::default();
+    let setup_stmts = Pg2Sqlite::default().sql(setup_sql)?.translate(&options)?;
+    let replace_stmts = Pg2Sqlite::default().sql(replace_sql)?.translate(&options)?;
+
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+
+    for stmt in &setup_stmts {
+        diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
+    }
+    // DROP VIEW IF EXISTS + CREATE VIEW should both succeed
+    for stmt in &replace_stmts {
+        diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
+    }
+
+    Ok(())
 }
