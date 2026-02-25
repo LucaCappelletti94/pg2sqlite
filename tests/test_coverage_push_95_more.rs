@@ -170,8 +170,15 @@ fn column_option_translation_covers_unhandled_default_and_option_branches() {
     let err = unsupported_default_expr.translate(&schema, &options).unwrap_err();
     assert!(unsupported_message(err).contains("Unsupported default expression"));
 
-    let unsupported_option =
+    // COMMENT is now silently dropped (returns Ok(None)) rather than an error
+    let comment_option =
         ColumnOptionDef { name: None, option: ColumnOption::Comment("column comment".to_string()) };
+    let result = comment_option.translate(&schema, &options).expect("comment should not error");
+    assert!(result.is_none(), "comment column option should be dropped (None)");
+
+    // Verify that a genuinely unsupported option still errors (Invisible is
+    // MySQL-specific)
+    let unsupported_option = ColumnOptionDef { name: None, option: ColumnOption::Invisible };
     let err = unsupported_option.translate(&schema, &options).unwrap_err();
     assert!(unsupported_message(err).contains("Unsupported column option"));
 }

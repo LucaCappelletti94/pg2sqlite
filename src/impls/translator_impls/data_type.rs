@@ -23,13 +23,52 @@ impl Translator for DataType {
             DataType::Text | DataType::Integer(None) | DataType::Real | DataType::Blob(None) => {
                 Ok(self.clone())
             }
-            DataType::SmallInt(None) | DataType::Int(None) | DataType::Boolean | DataType::Bool => {
+            // BLOB with a precision (e.g. BLOB(50)) → drop the precision, map to plain BLOB.
+            // Bytea and binary aliases use the same storage class.
+            DataType::Blob(Some(_))
+            | DataType::Bytea
+            | DataType::Binary(_)
+            | DataType::Varbinary(_) => Ok(DataType::Blob(None)),
+            DataType::SmallInt(None)
+            | DataType::Int(None)
+            | DataType::Boolean
+            | DataType::Bool
+            | DataType::BigInt(_)
+            | DataType::Int8(_)
+            | DataType::Int4(_)
+            | DataType::Int2(_)
+            | DataType::TinyInt(_)
+            // INT64 is a BigQuery-specific alias for 64-bit integer
+            | DataType::Int64 => Ok(DataType::Integer(None)),
+            DataType::Float(ExactNumberInfo::None)
+            // Float aliases
+            | DataType::Double(_)
+            | DataType::DoublePrecision
+            | DataType::Float8
+            | DataType::Float4
+            // Numeric/Decimal: mapping is intentionally lossy — SQLite has no fixed-precision type
+            | DataType::Numeric(_)
+            | DataType::Decimal(_) => Ok(DataType::Real),
+            // JSON/JSONB, text aliases, and temporal types are stored as TEXT in SQLite.
+            DataType::Varchar(_)
+            | DataType::JSON
+            | DataType::JSONB
+            | DataType::Clob(_)
+            | DataType::Nvarchar(_)
+            | DataType::Enum(_, _)
+            | DataType::TsVector
+            | DataType::TsQuery
+            // All TIMESTAMP variants (with/without TZ, with/without precision).
+            | DataType::Timestamp(_, _)
+            // Other temporal types.
+            | DataType::Date
+            | DataType::Datetime(_)
+            | DataType::Time(_, _)
+            | DataType::Interval { .. } => Ok(DataType::Text),
+            // Bit types map to INTEGER (SQLite has no native bit type)
+            DataType::Bit(_) | DataType::BitVarying(_) | DataType::VarBit(_) => {
                 Ok(DataType::Integer(None))
             }
-            DataType::Float(ExactNumberInfo::None) => Ok(DataType::Real),
-            DataType::Bytea => Ok(DataType::Blob(None)),
-            // JSON/JSONB are stored as TEXT in SQLite
-            DataType::Varchar(_) | DataType::JSON | DataType::JSONB => Ok(DataType::Text),
             // Arrays are not yet supported - they could map to JSON or vector extensions
             // depending on use case (regular arrays vs embeddings)
             DataType::Array(inner) => {
@@ -49,17 +88,6 @@ impl Translator for DataType {
                         ))
                     }
                 }
-            }
-            DataType::Timestamp(None, sqlparser::ast::TimezoneInfo::WithTimeZone) => {
-                // SQLite does not support timezone information, and these type of
-                // fields are commonly converted to TEXT.
-                Ok(DataType::Text)
-            }
-            DataType::Timestamp(None, sqlparser::ast::TimezoneInfo::None) => {
-                // SQLite does not support actually support timestamp, but emulates it
-                // with several different types. Since in the `diesel` library the backend
-                // type is `Text`, we will use that as well.
-                Ok(DataType::Text)
             }
             DataType::Custom(name, ..) => {
                 let custom_type_name = name
@@ -117,10 +145,16 @@ mod tests {
 
     #[test]
     fn translate_reports_unsupported_for_unhandled_data_type_variants() {
+        use sqlparser::ast::ArrayElemTypeDef;
+
         let schema = empty_schema();
         let options = Pg2SqliteOptions::default();
 
-        let err = DataType::Date.translate(&schema, &options).expect_err("DATE should be rejected");
-        assert!(err.to_string().contains("is not supported"));
+        // Array types are still unsupported — use one as a representative unsupported
+        // variant
+        let err = DataType::Array(ArrayElemTypeDef::None)
+            .translate(&schema, &options)
+            .expect_err("Array type should be rejected");
+        assert!(err.to_string().contains("Array type"));
     }
 }

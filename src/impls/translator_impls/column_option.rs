@@ -134,7 +134,13 @@ impl Translator for ColumnOptionDef {
                 }
             }
             ColumnOption::NotNull | ColumnOption::PrimaryKey(_) => Ok(Some(self.clone())),
-            ColumnOption::Check(_) => Ok(None),
+            // Silently drop options that are either SQLite defaults or have no
+            // SQLite equivalent and no runtime semantic effect.
+            ColumnOption::Check(_)
+            | ColumnOption::Null
+            | ColumnOption::Collation(_)
+            | ColumnOption::CharacterSet(_)
+            | ColumnOption::Comment(_) => Ok(None),
             // Generated columns: GENERATED ALWAYS AS (expr) [STORED | VIRTUAL]
             // SQLite supports this syntax since version 3.31.0
             ColumnOption::Generated {
