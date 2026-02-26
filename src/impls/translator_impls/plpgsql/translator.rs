@@ -848,15 +848,14 @@ impl PlPgSqlTranslator {
     #[allow(clippy::too_many_lines)]
     fn transform_expr(expr: &mut Expr, context: &mut PlPgSqlContext, options: &Pg2SqliteOptions) {
         match expr {
-            Expr::CompoundIdentifier(parts) => {
+            Expr::CompoundIdentifier(parts)
                 // Check if this is a NEW.col or OLD.col reference - keep it as is for SQLite
                 // triggers SQLite supports NEW and OLD directly in triggers
-                if parts.len() == 2 {
-                    let first = parts[0].value.to_uppercase();
-                    if first == "NEW" || first == "OLD" {
-                        // Keep as-is, SQLite supports NEW.col and OLD.col
-                    }
-                }
+                if parts.len() == 2
+                    && (parts[0].value.eq_ignore_ascii_case("NEW")
+                        || parts[0].value.eq_ignore_ascii_case("OLD")) =>
+            {
+                // Keep as-is, SQLite supports NEW.col and OLD.col
             }
             Expr::Function(func) => {
                 // Transform UUID function names
