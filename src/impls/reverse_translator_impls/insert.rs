@@ -95,6 +95,15 @@ fn build_upsert_on_conflict(
         })
         .collect();
 
+    // PK-only tables have no non-PK columns to update; fall back to DO NOTHING
+    // to avoid generating an empty (invalid) DO UPDATE SET clause.
+    if assignments.is_empty() {
+        return Ok(OnInsert::OnConflict(OnConflict {
+            conflict_target: Some(conflict_target),
+            action: OnConflictAction::DoNothing,
+        }));
+    }
+
     Ok(OnInsert::OnConflict(OnConflict {
         conflict_target: Some(conflict_target),
         action: OnConflictAction::DoUpdate(DoUpdate { assignments, selection: None }),

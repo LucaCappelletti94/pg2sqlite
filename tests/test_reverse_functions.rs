@@ -258,3 +258,40 @@ fn reverse_json_group_object_to_json_object_agg() {
     assert!(pg.contains("json_object_agg"), "Expected json_object_agg: {pg}");
     assert!(!pg.contains("json_group_object"), "Should not contain json_group_object: {pg}");
 }
+
+// ==================== strftime('%f') -> EXTRACT(SECOND) (Bug 4)
+// ====================
+
+#[test]
+fn reverse_strftime_fractional_second() {
+    // The forward translator emits strftime('%f', expr) for EXTRACT(SECOND FROM
+    // expr). The reverse parser must recognise %f (not just %S) to complete the
+    // round-trip.
+    let pg = reverse(EVENTS, "SELECT strftime('%f', created_at) FROM events;");
+    assert!(pg.contains("EXTRACT(SECOND"), "Expected EXTRACT(SECOND) from %f: {pg}");
+    assert!(!pg.contains("strftime"), "Should not contain strftime after round-trip: {pg}");
+}
+
+// ==================== strftime('%s') -> EXTRACT(EPOCH) (Bug 4)
+// ====================
+
+#[test]
+fn reverse_strftime_epoch() {
+    // The forward translator emits strftime('%s', expr) for EXTRACT(EPOCH FROM
+    // expr).
+    let pg = reverse(EVENTS, "SELECT strftime('%s', created_at) FROM events;");
+    assert!(pg.contains("EXTRACT(EPOCH"), "Expected EXTRACT(EPOCH) from %s: {pg}");
+    assert!(!pg.contains("strftime"), "Should not contain strftime after round-trip: {pg}");
+}
+
+// ==================== vec_f16 -> halfvec cast (Bug 3) ====================
+
+#[test]
+fn reverse_vec_f16_to_halfvec_cast() {
+    // Forward translates halfvec casts to vec_f16(); the reverse must restore
+    // ::halfvec.
+    let schema_sql = "CREATE TABLE embeddings (id INT PRIMARY KEY, vec halfvec(3));";
+    let pg = reverse(schema_sql, "SELECT vec_f16('[1,2,3]') FROM embeddings;");
+    assert!(pg.contains("::halfvec"), "Expected ::halfvec cast: {pg}");
+    assert!(!pg.contains("vec_f16"), "Should not contain vec_f16 after round-trip: {pg}");
+}

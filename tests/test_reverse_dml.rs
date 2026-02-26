@@ -461,3 +461,28 @@ fn reverse_insert_returning_expression() {
     assert!(pg.contains("RETURNING"), "Expected RETURNING: {pg}");
     assert!(pg.contains("inserted_name"), "Expected alias: {pg}");
 }
+
+// =============================================================================
+// Bug 5: INSERT OR REPLACE on PK-only table must not produce empty DO UPDATE
+// SET
+// =============================================================================
+
+#[test]
+fn reverse_insert_or_replace_pk_only_table_falls_back_to_do_nothing() {
+    // A table with only a primary key column has no non-PK columns, so there is
+    // nothing to UPDATE.  The upsert must degrade to DO NOTHING rather than
+    // emitting an empty (invalid) DO UPDATE SET clause.
+    let schema = "CREATE TABLE tags (id INT PRIMARY KEY);";
+    let pg = reverse(schema, "INSERT OR REPLACE INTO tags (id) VALUES (1);");
+    assert!(pg.contains("ON CONFLICT"), "Expected ON CONFLICT: {pg}");
+    assert!(pg.contains("DO NOTHING"), "PK-only upsert must fall back to DO NOTHING: {pg}");
+    assert!(!pg.contains("DO UPDATE SET"), "Empty DO UPDATE SET must not be emitted: {pg}");
+}
+
+#[test]
+fn reverse_insert_or_replace_multi_column_still_uses_do_update_set() {
+    // Normal table with non-PK columns should still produce DO UPDATE SET.
+    let pg =
+        reverse(SCHEMA, "INSERT OR REPLACE INTO users (id, name, age) VALUES (1, 'Alice', 30);");
+    assert!(pg.contains("DO UPDATE SET"), "Multi-column table should use DO UPDATE SET: {pg}");
+}

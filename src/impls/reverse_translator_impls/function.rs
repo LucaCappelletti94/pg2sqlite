@@ -34,6 +34,8 @@ pub enum FunctionReversal {
     ToOperator(BinaryOperator),
     /// Transform vec_f32 to vector cast
     ToVectorCast,
+    /// Transform vec_f16 to halfvec cast
+    ToHalfvecCast,
     /// Transform char to chr
     ToChr,
     /// Transform LTRIM/RTRIM/TRIM(str, chars) to TRIM(LEADING|TRAILING|BOTH
@@ -51,7 +53,11 @@ fn parse_strftime_format(format: &str) -> Option<DateTimeField> {
         "%d" => Some(DateTimeField::Day),
         "%H" => Some(DateTimeField::Hour),
         "%M" => Some(DateTimeField::Minute),
-        "%S" => Some(DateTimeField::Second),
+        // %S is standard strftime; %f is used by the forward translator for
+        // fractional seconds (EXTRACT(SECOND)) — both round-trip to SECOND.
+        "%S" | "%f" => Some(DateTimeField::Second),
+        // forward translator emits %s for EXTRACT(EPOCH)
+        "%s" => Some(DateTimeField::Epoch),
         "%W" => Some(DateTimeField::Week(None)),
         "%w" => Some(DateTimeField::DayOfWeek),
         "%j" => Some(DateTimeField::DayOfYear),
@@ -219,6 +225,8 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
         }
         // vec_f32(expr) -> expr::vector
         "vec_f32" => FunctionReversal::ToVectorCast,
+        // vec_f16(expr) -> expr::halfvec
+        "vec_f16" => FunctionReversal::ToHalfvecCast,
 
         _ => FunctionReversal::PassThrough,
     }
@@ -394,6 +402,28 @@ pub fn reverse_translate_function(
                 });
             }
             Err(Error::UnsupportedSQLiteFeature("vec_f32 requires exactly 1 argument".to_string()))
+        }
+        FunctionReversal::ToHalfvecCast => {
+            // vec_f16(expr) -> expr::halfvec
+            if let FunctionArguments::List(list) = &func.args
+                && list.args.len() == 1
+            {
+                let expr = extract_expr_from_arg(&list.args[0])?;
+                let reversed_expr =
+                    crate::prelude::ReverseTranslator::reverse_translate(expr, schema, options)?;
+
+                return Ok(Expr::Cast {
+                    expr: Box::new(reversed_expr),
+                    data_type: sqlparser::ast::DataType::Custom(
+                        ObjectName(vec![ObjectNamePart::Identifier(Ident::new("halfvec"))]),
+                        vec![],
+                    ),
+                    format: None,
+                    kind: sqlparser::ast::CastKind::DoubleColon,
+                    array: false,
+                });
+            }
+            Err(Error::UnsupportedSQLiteFeature("vec_f16 requires exactly 1 argument".to_string()))
         }
         FunctionReversal::ToChr => {
             // char(n) -> chr(n)
