@@ -4,4 +4,5 @@ pub(crate) mod generated_sql;
 pub(crate) mod object_name;
 pub mod reverse_translator_impls;
 pub(crate) mod shared_helpers;
+pub(crate) mod timezone;
 pub mod translator_impls;

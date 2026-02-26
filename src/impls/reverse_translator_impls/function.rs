@@ -12,9 +12,14 @@ use sqlparser::ast::{
 };
 
 use super::helpers::{Reverse, reverse_translate_window_type};
+#[cfg(test)]
+use crate::impls::timezone::is_fixed_utc_offset as shared_is_fixed_utc_offset;
 use crate::{
     errors::Error,
-    impls::shared_helpers::{translate_function_argument_clauses, translate_order_by_expr},
+    impls::{
+        shared_helpers::{translate_function_argument_clauses, translate_order_by_expr},
+        timezone::normalize_timezone_modifier_for_postgres,
+    },
     prelude::Pg2SqliteOptions,
 };
 
@@ -66,50 +71,15 @@ fn parse_strftime_format(format: &str) -> Option<DateTimeField> {
 }
 
 /// Return true when value is a fixed UTC offset in `+HH:MM` / `-HH:MM` format.
+#[cfg(test)]
 fn is_fixed_utc_offset(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 6 || (bytes[0] != b'+' && bytes[0] != b'-') || bytes[3] != b':' {
-        return false;
-    }
-    if !bytes[1].is_ascii_digit()
-        || !bytes[2].is_ascii_digit()
-        || !bytes[4].is_ascii_digit()
-        || !bytes[5].is_ascii_digit()
-    {
-        return false;
-    }
-
-    let hour = (bytes[1] - b'0') * 10 + (bytes[2] - b'0');
-    let minute = (bytes[4] - b'0') * 10 + (bytes[5] - b'0');
-
-    hour <= 23 && minute <= 59
+    shared_is_fixed_utc_offset(value)
 }
 
 /// Normalize SQLite datetime timezone modifiers to PostgreSQL AT TIME ZONE
 /// literals.
 fn normalize_datetime_timezone_modifier(modifier: &str) -> Option<String> {
-    let trimmed = modifier.trim();
-    let lower = trimmed.to_ascii_lowercase();
-
-    match lower.as_str() {
-        "utc" | "gmt" | "z" => return Some("UTC".to_string()),
-        "local" | "localtime" => return Some("localtime".to_string()),
-        _ => {}
-    }
-
-    if is_fixed_utc_offset(trimmed) {
-        return Some(trimmed.to_string());
-    }
-
-    for prefix in ["utc", "gmt"] {
-        if let Some(rest) = lower.strip_prefix(prefix)
-            && is_fixed_utc_offset(rest)
-        {
-            return Some(rest.to_string());
-        }
-    }
-
-    None
+    normalize_timezone_modifier_for_postgres(modifier)
 }
 
 /// Determine how to reverse a SQLite function to PostgreSQL.

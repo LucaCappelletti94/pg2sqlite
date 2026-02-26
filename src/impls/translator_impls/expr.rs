@@ -13,8 +13,12 @@ use sqlparser::ast::{
     ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
+#[cfg(test)]
+use crate::impls::timezone::is_fixed_utc_offset;
 use crate::{
-    impls::shared_helpers::function_argument_exprs,
+    impls::{
+        shared_helpers::function_argument_exprs, timezone::normalize_timezone_modifier_for_sqlite,
+    },
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -707,50 +711,15 @@ fn translate_overlay(
 
 /// Return true when value is a SQLite-supported fixed UTC offset (`+HH:MM`,
 /// `-HH:MM`).
+#[cfg(test)]
 fn is_sqlite_fixed_offset(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 6 || (bytes[0] != b'+' && bytes[0] != b'-') || bytes[3] != b':' {
-        return false;
-    }
-    if !bytes[1].is_ascii_digit()
-        || !bytes[2].is_ascii_digit()
-        || !bytes[4].is_ascii_digit()
-        || !bytes[5].is_ascii_digit()
-    {
-        return false;
-    }
-
-    let hour = (bytes[1] - b'0') * 10 + (bytes[2] - b'0');
-    let minute = (bytes[4] - b'0') * 10 + (bytes[5] - b'0');
-
-    hour <= 23 && minute <= 59
+    is_fixed_utc_offset(value)
 }
 
 /// Normalize PostgreSQL AT TIME ZONE literal names to SQLite datetime
 /// modifiers.
 fn normalize_at_time_zone_modifier(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    let lower = trimmed.to_ascii_lowercase();
-
-    match lower.as_str() {
-        "utc" | "gmt" | "z" => return Some("utc".to_string()),
-        "local" | "localtime" => return Some("localtime".to_string()),
-        _ => {}
-    }
-
-    if is_sqlite_fixed_offset(trimmed) {
-        return Some(trimmed.to_string());
-    }
-
-    for prefix in ["utc", "gmt"] {
-        if let Some(rest) = lower.strip_prefix(prefix)
-            && is_sqlite_fixed_offset(rest)
-        {
-            return Some(rest.to_string());
-        }
-    }
-
-    None
+    normalize_timezone_modifier_for_sqlite(value)
 }
 
 /// Translate PostgreSQL `expr AT TIME ZONE '...'` to SQLite
@@ -1508,10 +1477,8 @@ impl Translator for Expr {
             // SQLite uses date modifier strings like date('now', '-7 days') instead.
             // Passing INTERVAL through would produce SQL that errors at runtime in SQLite.
             Expr::Interval(interval) => {
-                let field_str = interval
-                    .leading_field
-                    .as_ref()
-                    .map_or(String::new(), |f| format!(" {f}"));
+                let field_str =
+                    interval.leading_field.as_ref().map_or(String::new(), |f| format!(" {f}"));
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                     "INTERVAL{field_str} expressions are not supported in SQLite. \
                      Use SQLite date modifiers instead: \
