@@ -16,7 +16,8 @@ It parses PostgreSQL-dialect statements using [`sqlparser`](https://github.com/a
 - **Grant-based filtering** — when a session role is configured, tables and indices the role cannot access are omitted from the output entirely.
 - **Reverse translation** — SQLite DML (`INSERT`, `UPDATE`, `DELETE`, `SELECT`) can be translated back to PostgreSQL for syncing client-side replicas to a PostgreSQL server.
 
-**Every output statement is valid SQLite.** pg2sqlite does not pass PostgreSQL syntax through to the output: if a construct can be translated, it is; if it cannot, the call returns an explicit `Err`. There are no silent pass-throughs, no silently dropped arguments, and no output that looks valid but fails when you run it.
+> [!IMPORTANT]
+> **Translation guarantees:** every output statement is valid SQLite. If a construct can be translated, it is; if it cannot, the call returns an explicit `Err`. *Silently skipped* statements (`CREATE FUNCTION`, `GRANT`, `CREATE ROLE`, …) carry no SQLite-representable information; *silently dropped* column options (`COLLATION`, `CHARACTER SET`, `COMMENT`) have no SQLite equivalent. Everything else either translates or errors — there are no silent pass-throughs that look valid but fail at runtime.
 
 ## Quick start
 
@@ -50,39 +51,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Performance
-
-Measured with Criterion on an optimized release build (`cargo bench -- vs_polyglot`).
-pg2sqlite performs full semantic translation; polyglot-sql performs syntactic rewriting.
-
-| Input                 | pg2sqlite | polyglot-sql | speedup  |
-| --------------------- | --------: | -----------: | -------: |
-| `select_simple`       |  19.6 µs  |   56.7 µs    | **2.9×** |
-| `select_join`         |  37.5 µs  |   69.5 µs    | **1.9×** |
-| `select_subquery`     |  28.3 µs  |   62.9 µs    | **2.2×** |
-| `select_cte`          |  33.8 µs  |   67.7 µs    | **2.0×** |
-| `insert_simple`       |  16.0 µs  |   54.4 µs    | **3.4×** |
-| `insert_on_conflict`  |  27.2 µs  |   65.6 µs    | **2.4×** |
-| `update_multi_column` |  19.3 µs  |   60.9 µs    | **3.2×** |
-| `delete_subquery`     |  25.4 µs  |   60.3 µs    | **2.4×** |
-| `create_table_ddl`    |  24.3 µs  |   57.8 µs    | **2.4×** |
-
-## Why pg2sqlite?
-
-Most PostgreSQL-to-SQLite translators are best-effort: they pass unknown constructs through unchanged, silently drop arguments, or emit SQL that fails at runtime.  pg2sqlite takes the opposite stance:
-
-| Behaviour                                           | pg2sqlite | polyglot-sql          | sqlglot               |
-| --------------------------------------------------- | :-------: | :-------------------: | :-------------------: |
-| Explicit `Err` for untranslatable constructs        | ✓         | ✗                     | partial               |
-| PL/pgSQL trigger body translation                   | ✓         | ✗                     | ✗                     |
-| Row-Level Security → view + triggers                | ✓         | ✗                     | ✗                     |
-| GIN / GiST index → FTS5 virtual table               | ✓         | ✗                     | ✗                     |
-| pgvector → sqlite-vec                               | ✓         | ✗                     | ✗                     |
-| Reverse translation (SQLite → PostgreSQL)           | Only DML  | partial               | partial               |
-| `GRANT` / `REVOKE` / `CREATE ROLE` silently skipped | ✓         | ✗ (emits invalid SQL) | ✗ (emits invalid SQL) |
-
-See [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs) for a full side-by-side comparison across 80+ test cases including runtime execution checks.
-
 ## Features
 
 ### Statement translation
@@ -93,7 +61,7 @@ See [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs) for a
 | `CREATE INDEX`                                         | Translated (including `CREATE INDEX IF NOT EXISTS`)                                 |
 | `CREATE TRIGGER`                                       | PL/pgSQL function bodies translated to SQLite trigger syntax                        |
 | `CREATE VIEW`                                          | Translated; `CREATE OR REPLACE VIEW` becomes `DROP VIEW IF EXISTS` + `CREATE VIEW`  |
-| `INSERT`                                               | `ON CONFLICT DO NOTHING` → `OR IGNORE`; `ON CONFLICT DO UPDATE` → `OR REPLACE`     |
+| `INSERT`                                               | `ON CONFLICT DO NOTHING` → `OR IGNORE`; `ON CONFLICT DO UPDATE SET …` preserved as SQLite upsert (SQLite ≥ 3.24) |
 | `UPDATE` / `DELETE`                                    | Including `DELETE ... USING` syntax                                                 |
 | `DROP TABLE` / `DROP VIEW` / `DROP INDEX`              | Strips `CASCADE` / `RESTRICT`                                                       |
 | `ALTER TABLE ENABLE ROW LEVEL SECURITY`                | Translated to views + `INSTEAD OF` triggers (see [RLS](#row-level-security))        |
@@ -125,7 +93,8 @@ All `CREATE TABLE` output uses SQLite `STRICT` mode, and `NOT NULL` is automatic
 
 | PostgreSQL                         | SQLite                                                   |
 | ---------------------------------- | -------------------------------------------------------- |
-| `NOW()` / `CURRENT_TIMESTAMP`      | `datetime('now')`                                        |
+| `NOW()`                            | `datetime('now')`                                        |
+| `CURRENT_TIMESTAMP`                | `CURRENT_TIMESTAMP` (SQLite keyword, preserved as-is)    |
 | `EXTRACT(YEAR FROM x)`             | `CAST(strftime('%Y', x) AS INTEGER)`                     |
 | `EXTRACT(EPOCH FROM x)`            | `CAST(strftime('%s', x) AS REAL)`                        |
 | `DATE_TRUNC('month', x)`           | `strftime('%Y-%m-01', x)`                                |
@@ -138,16 +107,26 @@ All `CREATE TABLE` output uses SQLite `STRICT` mode, and `NOT NULL` is automatic
 | `POSITION(sub IN s)`               | `instr(s, sub)`                                          |
 | `SUBSTRING(s FROM n FOR l)`        | `substr(s, n, l)`                                        |
 | `ILIKE`                            | `lower(x) LIKE lower(pattern)`                           |
-| `data->'field'` / `data->>'field'` | `json_extract(data, '$.field')`                          |
+| `data->'field'` / `data->>'field'` | Preserved as-is (SQLite ≥ 3.38 native JSON operators)    |
 | `x IS DISTINCT FROM y`             | `NOT (x IS y)`                                           |
 | `x IS NOT DISTINCT FROM y`         | `x IS y`                                                 |
 
+### Limitations
+
+| Category                        | Examples                                                                         | Behavior                                             |
+| ------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Untranslatable SQL              | `STDDEV`, `PERCENTILE_CONT`, `ARRAY_AGG`, `REGEXP_REPLACE`, `#>`, `#>>`         | Returns `Err` with a descriptive message             |
+| Silently skipped statements     | `CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `GRANT`, `REVOKE`, `CREATE ROLE`, `COPY` | Silently omitted — carry no SQLite-representable information |
+| Silently dropped column options | `COLLATION`, `CHARACTER SET`, `COMMENT`                                          | Dropped — no SQLite equivalent                       |
+
 ### UUID generation
+
+**UUID translation requires explicit configuration.** Without `.with_uuid_representation()`, UUID columns default to `BLOB` (16 bytes); use `UuidRepresentation::Text` for 36-character strings. UUID default functions (`gen_random_uuid()`, `uuidv7()`, …) are renamed to the function configured via `.with_uuid_function_name()`.
 
 PostgreSQL UUID defaults (`gen_random_uuid()`, `uuidv4()`, `uuidv7()`) are translated to a configurable SQLite function call. Both `BLOB` (16 bytes) and `TEXT` (36 chars) representations are supported.
 
 ```rust
-# use pg2sqlite::prelude::*;
+use pg2sqlite::prelude::*;
 let options = Pg2SqliteOptions::default()
     .with_uuid_representation(UuidRepresentation::Blob)
     .with_uuid_function_name("uuidv7".to_string());
@@ -186,7 +165,7 @@ PostgreSQL session variables are mapped to SQLite function calls:
 | `current_user`                   | `current_app_user()` (configurable) |
 
 ```rust
-# use pg2sqlite::prelude::*;
+use pg2sqlite::prelude::*;
 let options = Pg2SqliteOptions::default()
     .with_session_variable(SessionVariableMapping::current_setting(
         "app.user_id",
@@ -206,7 +185,7 @@ When `with_session_user_role` is set, the translation output is tailored to that
 | Full CRUD      | Table + view + `INSTEAD OF` triggers        |
 
 ```rust
-# use pg2sqlite::prelude::*;
+use pg2sqlite::prelude::*;
 let options = Pg2SqliteOptions::default()
     .with_session_user_role("app_user");
 ```
@@ -257,8 +236,8 @@ PL/pgSQL trigger function bodies are translated to SQLite trigger syntax, suppor
 pg2sqlite can also translate SQLite DML statements (`INSERT`, `UPDATE`, `DELETE`, `SELECT`) back to PostgreSQL, which is useful for client-side replicas that need to sync changes back to a PostgreSQL server.
 
 ```rust
-# use pg2sqlite::prelude::*;
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use pg2sqlite::prelude::*;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
 let translator = Pg2Sqlite::default()
     .sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")?;
 let schema = translator.build_schema()?;
@@ -270,8 +249,8 @@ let pg_stmts = translator.reverse_sql(
     &options,
 )?;
 assert_eq!(pg_stmts.len(), 2);
-# Ok(())
-# }
+Ok(())
+}
 ```
 
 ### Migration loading
@@ -327,6 +306,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Performance
+
+Measured with Criterion on an optimized release build (`cargo bench -- vs_polyglot`).
+pg2sqlite performs full semantic translation; polyglot-sql performs syntactic rewriting.
+
+| Input                 | pg2sqlite | polyglot-sql | speedup  |
+| --------------------- | --------: | -----------: | -------: |
+| `select_simple`       |  19.6 µs  |   56.7 µs    | **2.9×** |
+| `select_join`         |  37.5 µs  |   69.5 µs    | **1.9×** |
+| `select_subquery`     |  28.3 µs  |   62.9 µs    | **2.2×** |
+| `select_cte`          |  33.8 µs  |   67.7 µs    | **2.0×** |
+| `insert_simple`       |  16.0 µs  |   54.4 µs    | **3.4×** |
+| `insert_on_conflict`  |  27.2 µs  |   65.6 µs    | **2.4×** |
+| `update_multi_column` |  19.3 µs  |   60.9 µs    | **3.2×** |
+| `delete_subquery`     |  25.4 µs  |   60.3 µs    | **2.4×** |
+| `create_table_ddl`    |  24.3 µs  |   57.8 µs    | **2.4×** |
+
+## Why pg2sqlite?
+
+Most PostgreSQL-to-SQLite translators are best-effort: they pass unknown constructs through unchanged, silently drop arguments, or emit SQL that fails at runtime.  pg2sqlite takes the opposite stance:
+
+| Behaviour                                           | pg2sqlite | polyglot-sql          | sqlglot               |
+| --------------------------------------------------- | :-------: | :-------------------: | :-------------------: |
+| Explicit `Err` for untranslatable constructs        | ✓         | ✗                     | partial               |
+| PL/pgSQL trigger body translation                   | ✓         | ✗                     | ✗                     |
+| Row-Level Security → view + triggers                | ✓         | ✗                     | ✗                     |
+| GIN / GiST index → FTS5 virtual table               | ✓         | ✗                     | ✗                     |
+| pgvector → sqlite-vec                               | ✓         | ✗                     | ✗                     |
+| Reverse translation (SQLite → PostgreSQL)           | Only DML  | partial               | partial               |
+| `GRANT` / `REVOKE` / `CREATE ROLE` silently skipped | ✓         | ✗ (emits invalid SQL) | ✗ (emits invalid SQL) |
+
+See [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs) for a full side-by-side comparison across 80+ test cases including runtime execution checks.
 
 ## License
 
