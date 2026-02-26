@@ -273,7 +273,7 @@ fn append_vec0_statements_if_needed(
 
 enum RoleTableAccess {
     Allow,
-    Deny { reason: String },
+    Deny,
 }
 
 fn role_access_for_object_name(
@@ -284,36 +284,18 @@ fn role_access_for_object_name(
     let Some(role_name) = options.get_session_user_role() else {
         return RoleTableAccess::Allow;
     };
-    let Some(role) = schema.role(role_name) else {
-        return RoleTableAccess::Deny {
-            reason: format!("session role '{role_name}' was not found in schema"),
-        };
-    };
+    let Some(role) = schema.role(role_name) else { return RoleTableAccess::Deny };
 
     let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(table_name);
-    let Some(table_name_for_lookup) = table_name_for_lookup else {
-        return RoleTableAccess::Deny {
-            reason: format!("could not resolve table name '{}'", table_name),
-        };
-    };
+    let Some(table_name_for_lookup) = table_name_for_lookup else { return RoleTableAccess::Deny };
     let Some(table) = schema.table(table_schema, table_name_for_lookup) else {
-        return RoleTableAccess::Deny {
-            reason: format!(
-                "table '{}' was not found in schema for role-filtered translation",
-                table_name_for_lookup
-            ),
-        };
+        return RoleTableAccess::Deny;
     };
 
     if table.can_select(role, schema) {
         RoleTableAccess::Allow
     } else {
-        RoleTableAccess::Deny {
-            reason: format!(
-                "role '{role_name}' has no SELECT permission on table '{}'",
-                table_name_for_lookup
-            ),
-        }
+        RoleTableAccess::Deny
     }
 }
 
@@ -335,26 +317,14 @@ impl Translator for Statement {
             Self::CreateIndex(create_index) => {
                 match role_access_for_object_name(&create_index.table_name, schema, options) {
                     RoleTableAccess::Allow => create_index.translate(schema, options)?,
-                    RoleTableAccess::Deny { reason } => {
-                        options.push_warning(TranslationWarning::SkippedObjectForRole {
-                            object_kind: "CREATE INDEX".to_string(),
-                            object_name: create_index.table_name.to_string(),
-                            reason,
-                        });
-                        Vec::new()
-                    }
+                    RoleTableAccess::Deny => Vec::new(),
                 }
             }
 
             Self::CreateTrigger(create_trigger) => {
-                if let RoleTableAccess::Deny { reason } =
+                if let RoleTableAccess::Deny =
                     role_access_for_object_name(&create_trigger.table_name, schema, options)
                 {
-                    options.push_warning(TranslationWarning::SkippedObjectForRole {
-                        object_kind: "CREATE TRIGGER".to_string(),
-                        object_name: create_trigger.table_name.to_string(),
-                        reason,
-                    });
                     return Ok(Vec::new());
                 }
 
