@@ -134,10 +134,26 @@ impl Translator for ColumnOptionDef {
                 }
             }
             ColumnOption::NotNull | ColumnOption::PrimaryKey(_) => Ok(Some(self.clone())),
+            // Translate CHECK constraints to SQLite CHECK syntax.
+            // When `remove_unsupported_check_constraints` is set, silently drop them instead.
+            ColumnOption::Check(check) => {
+                if options.should_remove_unsupported_check_constraints() {
+                    Ok(None)
+                } else {
+                    let translated_expr = check.expr.translate(schema, options)?;
+                    Ok(Some(ColumnOptionDef {
+                        name: self.name.clone(),
+                        option: ColumnOption::Check(sqlparser::ast::CheckConstraint {
+                            name: check.name.clone(),
+                            expr: Box::new(translated_expr),
+                            enforced: check.enforced,
+                        }),
+                    }))
+                }
+            }
             // Silently drop options that are either SQLite defaults or have no
             // SQLite equivalent and no runtime semantic effect.
-            ColumnOption::Check(_)
-            | ColumnOption::Null
+            ColumnOption::Null
             | ColumnOption::Collation(_)
             | ColumnOption::CharacterSet(_)
             | ColumnOption::Comment(_) => Ok(None),

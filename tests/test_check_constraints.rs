@@ -100,12 +100,11 @@ fn test_nested_function_check_constraint_removed_with_option() {
     );
 }
 
-/// Column-level CHECK constraints are always silently dropped (regardless of
-/// the option), because they are handled at the column option level, not the
-/// table constraint level.
+/// Column-level CHECK constraints are now translated to SQLite CHECK
+/// constraints.
 #[test]
-fn test_column_level_check_is_always_dropped() {
-    // Inline column CHECK (no leading comma) → ColumnOption::Check → always None
+fn test_column_level_check_is_translated() {
+    // Inline column CHECK (no leading comma) → ColumnOption::Check → translated
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, price INTEGER CHECK (price > 0));";
     let options = Pg2SqliteOptions::default();
 
@@ -113,7 +112,27 @@ fn test_column_level_check_is_always_dropped() {
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
+        sql_output.contains("CHECK"),
+        "Column-level CHECK should be translated, got: {sql_output}"
+    );
+    assert!(
+        sql_output.contains("price > 0"),
+        "CHECK condition should be preserved, got: {sql_output}"
+    );
+}
+
+/// Column-level CHECK constraints are silently dropped when
+/// `remove_unsupported_check_constraints` is set.
+#[test]
+fn test_column_level_check_is_dropped_with_option() {
+    let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, price INTEGER CHECK (price > 0));";
+    let options = Pg2SqliteOptions::default().remove_unsupported_check_constraints();
+
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+
+    assert!(
         !sql_output.contains("CHECK"),
-        "Column-level CHECK should be silently dropped, got: {sql_output}"
+        "Column-level CHECK should be dropped when option is set, got: {sql_output}"
     );
 }

@@ -110,7 +110,7 @@ impl Translator for DataType {
                     }
                     Some("cas" | "molecularformula" | "mediatype") => {
                         // SQLite does not have a CAS type, so we use BLOB instead.
-                        Ok(DataType::Binary(None))
+                        Ok(DataType::Blob(None))
                     }
                     // pgvector types: vector(N) and halfvec(N) -> BLOB for sqlite-vec
                     // The vector data is stored as BLOB in the main table, with a companion

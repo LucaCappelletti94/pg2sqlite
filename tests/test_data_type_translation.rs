@@ -101,24 +101,31 @@ fn countrycode_uppercase_to_text() {
 }
 
 #[test]
-fn cas_to_binary() {
+fn cas_to_blob() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, c cas);";
     let output = translate(sql, &Pg2SqliteOptions::default()).unwrap();
-    assert!(output.contains("BINARY"), "cas should map to BINARY, got: {output}");
+    // BINARY is not a valid SQLite STRICT type; must be BLOB.
+    assert!(output.contains("BLOB"), "cas should map to BLOB, got: {output}");
+    assert!(
+        !output.contains("BINARY"),
+        "cas must not produce BINARY (invalid in STRICT tables), got: {output}"
+    );
 }
 
 #[test]
-fn molecular_formula_to_binary() {
+fn molecular_formula_to_blob() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, mf MolecularFormula);";
     let output = translate(sql, &Pg2SqliteOptions::default()).unwrap();
-    assert!(output.contains("BINARY"), "MolecularFormula should map to BINARY, got: {output}");
+    assert!(output.contains("BLOB"), "MolecularFormula should map to BLOB, got: {output}");
+    assert!(!output.contains("BINARY"), "MolecularFormula must not produce BINARY, got: {output}");
 }
 
 #[test]
-fn media_type_to_binary() {
+fn media_type_to_blob() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, mt MediaType);";
     let output = translate(sql, &Pg2SqliteOptions::default()).unwrap();
-    assert!(output.contains("BINARY"), "MediaType should map to BINARY, got: {output}");
+    assert!(output.contains("BLOB"), "MediaType should map to BLOB, got: {output}");
+    assert!(!output.contains("BINARY"), "MediaType must not produce BINARY, got: {output}");
 }
 
 #[test]

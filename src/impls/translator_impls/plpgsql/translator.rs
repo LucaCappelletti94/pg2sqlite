@@ -7,9 +7,9 @@ use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
         BeginEndStatements, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-        GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select, SelectFlavor, SelectItem,
-        Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value, ValueWithSpan,
-        helpers::attached_token::AttachedToken,
+        GroupByExpr, Ident, JsonPathElem, ObjectName, ObjectNamePart, Query, Select, SelectFlavor,
+        SelectItem, Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
+        ValueWithSpan, helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
@@ -991,6 +991,14 @@ impl PlPgSqlTranslator {
             }
             Expr::CompoundFieldAccess { root, .. } => {
                 Self::transform_expr(root, context, options);
+            }
+            Expr::JsonAccess { value, path } => {
+                Self::transform_expr(value, context, options);
+                for elem in &mut path.path {
+                    if let JsonPathElem::Bracket { key } = elem {
+                        Self::transform_expr(key, context, options);
+                    }
+                }
             }
             _ => {}
         }

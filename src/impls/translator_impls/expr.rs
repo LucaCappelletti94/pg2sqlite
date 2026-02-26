@@ -604,7 +604,10 @@ fn function_call(name: &str, args: Vec<Expr>) -> Expr {
 }
 
 /// Translate PostgreSQL IS DISTINCT FROM / IS NOT DISTINCT FROM semantics
-/// using a CASE expression compatible with SQLite.
+/// using SQLite's native null-safe IS operator.
+///
+/// - `x IS DISTINCT FROM y`     → `NOT (x IS y)`  (null-safe inequality)
+/// - `x IS NOT DISTINCT FROM y` → `x IS y`         (null-safe equality)
 fn translate_distinct_comparison(
     left: &Expr,
     right: &Expr,
@@ -612,46 +615,24 @@ fn translate_distinct_comparison(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_left = left.translate(schema, options)?;
-    let translated_right = right.translate(schema, options)?;
-
-    let both_null = Expr::BinaryOp {
-        left: Box::new(Expr::IsNull(Box::new(translated_left.clone()))),
-        op: BinaryOperator::And,
-        right: Box::new(Expr::IsNull(Box::new(translated_right.clone()))),
+    let l = left.translate(schema, options)?;
+    let r = right.translate(schema, options)?;
+    // SQLite's `x IS y` is null-safe equality: treats NULL as equal to NULL.
+    let is_expr = Expr::BinaryOp {
+        left: Box::new(l),
+        op: BinaryOperator::Custom("IS".to_string()),
+        right: Box::new(r),
     };
-
-    let one_null = Expr::BinaryOp {
-        left: Box::new(Expr::IsNull(Box::new(translated_left.clone()))),
-        op: BinaryOperator::Or,
-        right: Box::new(Expr::IsNull(Box::new(translated_right.clone()))),
-    };
-
-    let non_null_comparison = Expr::BinaryOp {
-        left: Box::new(translated_left),
-        op: if is_not_distinct { BinaryOperator::Eq } else { BinaryOperator::NotEq },
-        right: Box::new(translated_right),
-    };
-
-    let (both_null_result, one_null_result) =
-        if is_not_distinct { (true, false) } else { (false, true) };
-
-    Ok(Expr::Case {
-        case_token: AttachedToken::empty(),
-        end_token: AttachedToken::empty(),
-        operand: None,
-        conditions: vec![
-            sqlparser::ast::CaseWhen {
-                condition: both_null,
-                result: boolean_literal(both_null_result),
-            },
-            sqlparser::ast::CaseWhen {
-                condition: one_null,
-                result: boolean_literal(one_null_result),
-            },
-        ],
-        else_result: Some(Box::new(non_null_comparison)),
-    })
+    if is_not_distinct {
+        // IS NOT DISTINCT FROM → x IS y
+        Ok(is_expr)
+    } else {
+        // IS DISTINCT FROM → NOT (x IS y)
+        Ok(Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr: Box::new(Expr::Nested(Box::new(is_expr))),
+        })
+    }
 }
 
 /// Translate PostgreSQL OVERLAY(str PLACING repl FROM pos [FOR len]) to
@@ -1146,6 +1127,14 @@ fn translate_binary_op(
              full-text search expressions."
                 .to_string(),
         ));
+    }
+
+    // PostgreSQL JSON path operators (#> and #>>) have no SQLite equivalent.
+    if matches!(op, BinaryOperator::HashArrow | BinaryOperator::HashLongArrow) {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "PostgreSQL JSON path operator `{op}` has no SQLite equivalent; \
+             use `->` / `->>` for single-key access"
+        )));
     }
 
     // pgvector distance operators -> sqlite-vec functions

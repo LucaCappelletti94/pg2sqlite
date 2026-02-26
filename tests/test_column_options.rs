@@ -139,13 +139,14 @@ fn not_null_constraint() {
     assert!(output.contains("NOT NULL"), "Expected NOT NULL: {output}");
 }
 
-// ==================== CHECK constraint (should be stripped)
+// ==================== CHECK constraint (now translated)
 // ====================
 
 #[test]
-fn check_constraint_stripped() {
+fn check_constraint_translated() {
     let output = translate("CREATE TABLE t (id INT PRIMARY KEY, age INT CHECK (age >= 0));");
-    assert!(!output.contains("CHECK"), "CHECK should be stripped: {output}");
+    assert!(output.contains("CHECK"), "CHECK should be translated: {output}");
+    assert!(output.contains("age >= 0"), "CHECK condition should be preserved: {output}");
 }
 
 // ==================== FK to RLS table ====================
