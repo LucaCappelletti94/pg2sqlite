@@ -4,12 +4,16 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
+    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
+    ValueWithSpan,
 };
 
 use super::helpers::translate_window_type;
 use crate::{
-    impls::shared_helpers::{function_argument_exprs, translate_function_argument_clauses},
+    impls::shared_helpers::{
+        GENERATE_SERIES_UNSUPPORTED_MESSAGE, function_argument_exprs,
+        translate_function_argument_clauses,
+    },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
 };
@@ -232,11 +236,9 @@ fn translate_function(
                 .to_string(),
         ),
         // generate_series: not in standard SQLite (available via an extension or recursive CTE)
-        "generate_series" => FunctionTranslation::Unsupported(
-            "generate_series() is not available in standard SQLite. \
-             Use a recursive CTE instead: WITH RECURSIVE s(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM s WHERE n < N) SELECT n FROM s"
-                .to_string(),
-        ),
+        "generate_series" => {
+            FunctionTranslation::Unsupported(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
+        }
         _ => FunctionTranslation::PassThrough,
     }
 }

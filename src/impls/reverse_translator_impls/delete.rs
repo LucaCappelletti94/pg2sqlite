@@ -9,7 +9,7 @@ use super::helpers::{
 };
 use crate::{
     errors::Error,
-    impls::shared_helpers::translate_returning,
+    impls::shared_helpers::{map_from_table, translate_returning},
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -76,24 +76,7 @@ fn reverse_translate_from_table(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<FromTable, Error> {
-    Ok(match from {
-        FromTable::WithFromKeyword(tables) => {
-            FromTable::WithFromKeyword(
-                tables
-                    .iter()
-                    .map(|t| reverse_translate_table_with_joins(t, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        }
-        FromTable::WithoutKeyword(tables) => {
-            FromTable::WithoutKeyword(
-                tables
-                    .iter()
-                    .map(|t| reverse_translate_table_with_joins(t, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        }
-    })
+    map_from_table(from, |table| reverse_translate_table_with_joins(table, schema, options))
 }
 
 #[cfg(test)]

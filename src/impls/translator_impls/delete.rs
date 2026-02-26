@@ -14,7 +14,7 @@ use super::helpers::{Forward, translate_order_by_expr, translate_table_with_join
 use crate::{
     impls::{
         object_name::{append_suffix, schema_and_table_for_lookup},
-        shared_helpers::translate_returning,
+        shared_helpers::{map_from_table, translate_returning},
     },
     options::Pg2SqliteOptions,
     traits::{TranslationOptions, translator::Translator},
@@ -152,22 +152,5 @@ fn translate_from_table(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<FromTable, crate::errors::Error> {
-    Ok(match from {
-        FromTable::WithFromKeyword(tables) => {
-            FromTable::WithFromKeyword(
-                tables
-                    .iter()
-                    .map(|t| translate_table_with_joins(t, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        }
-        FromTable::WithoutKeyword(tables) => {
-            FromTable::WithoutKeyword(
-                tables
-                    .iter()
-                    .map(|t| translate_table_with_joins(t, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        }
-    })
+    map_from_table(from, |table| translate_table_with_joins(table, schema, options))
 }

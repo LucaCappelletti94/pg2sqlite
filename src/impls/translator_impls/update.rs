@@ -7,7 +7,7 @@ use sqlparser::ast::{Update, UpdateTableFromKind};
 use super::helpers::{Forward, translate_table_with_joins};
 use crate::{
     errors::Error,
-    impls::shared_helpers::translate_returning,
+    impls::shared_helpers::{map_update_table_from_kind, translate_returning},
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -69,22 +69,5 @@ fn translate_update_from(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<UpdateTableFromKind, Error> {
-    Ok(match from {
-        UpdateTableFromKind::BeforeSet(tables) => {
-            UpdateTableFromKind::BeforeSet(
-                tables
-                    .iter()
-                    .map(|t| translate_table_with_joins(t, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        }
-        UpdateTableFromKind::AfterSet(tables) => {
-            UpdateTableFromKind::AfterSet(
-                tables
-                    .iter()
-                    .map(|t| translate_table_with_joins(t, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        }
-    })
+    map_update_table_from_kind(from, |table| translate_table_with_joins(table, schema, options))
 }

@@ -3,15 +3,15 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FunctionArg,
-    FunctionArgExpr, FunctionArgumentClause, FunctionArguments, GroupByExpr, HavingBound, Join,
-    JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow, Measure,
-    NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr,
-    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting, Statement,
-    SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
-    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, Values, WindowFrame,
-    WindowFrameBound, WindowSpec, With, WithFill, XmlNamespaceDefinition, XmlPassingArgument,
-    XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
+    Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FromTable,
+    FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArguments, GroupByExpr,
+    HavingBound, Join, JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow,
+    Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy,
+    OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting,
+    Statement, SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
+    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, UpdateTableFromKind,
+    Values, WindowFrame, WindowFrameBound, WindowSpec, With, WithFill, XmlNamespaceDefinition,
+    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
 };
 
 use crate::{errors::Error, prelude::Pg2SqliteOptions};
@@ -42,6 +42,28 @@ pub(crate) trait TranslationDirection {
     ) -> Result<ObjectName, Error> {
         Ok(name.clone())
     }
+}
+
+/// Shared unsupported-feature message for `generate_series` usage.
+pub(crate) const GENERATE_SERIES_UNSUPPORTED_MESSAGE: &str = "generate_series() is not available in standard SQLite. \
+     Use a recursive CTE instead: \
+     WITH RECURSIVE s(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM s WHERE n < N) SELECT n FROM s";
+
+/// Returns `true` when an object name resolves to `generate_series`.
+#[must_use]
+pub(crate) fn is_generate_series_object_name(name: &ObjectName) -> bool {
+    name.0
+        .last()
+        .and_then(|part| {
+            if let ObjectNamePart::Identifier(id) = part { Some(id.value.as_str()) } else { None }
+        })
+        .is_some_and(|value| value.eq_ignore_ascii_case("generate_series"))
+}
+
+/// Returns the standardized error for unsupported `generate_series`.
+#[must_use]
+pub(crate) fn generate_series_not_supported_error() -> Error {
+    Error::UnsupportedSQLiteFeature(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
 }
 
 /// Extracts a stable-ish variant name from debug output.
@@ -823,6 +845,48 @@ pub(crate) fn translate_values_rows<D: TranslationDirection>(
     })
 }
 
+/// Maps all tables in a [`FromTable`] using a caller-provided mapper.
+pub(crate) fn map_from_table<E, F>(from: &FromTable, mut mapper: F) -> Result<FromTable, E>
+where
+    F: FnMut(&TableWithJoins) -> Result<TableWithJoins, E>,
+{
+    match from {
+        FromTable::WithFromKeyword(tables) => {
+            Ok(FromTable::WithFromKeyword(
+                tables.iter().map(&mut mapper).collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        FromTable::WithoutKeyword(tables) => {
+            Ok(FromTable::WithoutKeyword(
+                tables.iter().map(&mut mapper).collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+    }
+}
+
+/// Maps all table lists in an [`UpdateTableFromKind`] using a caller-provided
+/// mapper.
+pub(crate) fn map_update_table_from_kind<E, F>(
+    from: &UpdateTableFromKind,
+    mut mapper: F,
+) -> Result<UpdateTableFromKind, E>
+where
+    F: FnMut(&TableWithJoins) -> Result<TableWithJoins, E>,
+{
+    match from {
+        UpdateTableFromKind::BeforeSet(tables) => {
+            Ok(UpdateTableFromKind::BeforeSet(
+                tables.iter().map(&mut mapper).collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        UpdateTableFromKind::AfterSet(tables) => {
+            Ok(UpdateTableFromKind::AfterSet(
+                tables.iter().map(&mut mapper).collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+    }
+}
+
 pub(crate) fn translate_pipe_operators<D: TranslationDirection>(
     pipe_operators: &[PipeOperator],
     schema: &ParserDB,
@@ -1079,27 +1143,8 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
         } => {
             // Detect PostgreSQL table-valued functions called with arguments.
             // These appear as TableFactor::Table with args: Some(...).
-            if D::IS_FORWARD && args.is_some() {
-                let fn_name = name
-                    .0
-                    .last()
-                    .and_then(|p| {
-                        if let ObjectNamePart::Identifier(id) = p {
-                            Some(id.value.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if fn_name == "generate_series" {
-                    return Err(Error::UnsupportedSQLiteFeature(
-                        "generate_series() is not available in standard SQLite. \
-                         Use a recursive CTE instead: \
-                         WITH RECURSIVE s(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM s WHERE n < N) SELECT n FROM s"
-                            .to_string(),
-                    ));
-                }
+            if D::IS_FORWARD && args.is_some() && is_generate_series_object_name(name) {
+                return Err(generate_series_not_supported_error());
             }
             TableFactor::Table {
                 name: D::translate_object_name(name, schema, options)?,
@@ -1145,27 +1190,8 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
         }
         TableFactor::Function { lateral, name, args, alias } => {
             // Detect PostgreSQL table-valued functions that have no SQLite equivalent
-            if D::IS_FORWARD {
-                let fn_name = name
-                    .0
-                    .last()
-                    .and_then(|p| {
-                        if let ObjectNamePart::Identifier(id) = p {
-                            Some(id.value.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if fn_name == "generate_series" {
-                    return Err(Error::UnsupportedSQLiteFeature(
-                        "generate_series() is not available in standard SQLite. \
-                         Use a recursive CTE instead: \
-                         WITH RECURSIVE s(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM s WHERE n < N) SELECT n FROM s"
-                            .to_string(),
-                    ));
-                }
+            if D::IS_FORWARD && is_generate_series_object_name(name) {
+                return Err(generate_series_not_supported_error());
             }
             TableFactor::Function {
                 lateral: *lateral,
