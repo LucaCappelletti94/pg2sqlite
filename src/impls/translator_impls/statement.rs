@@ -11,7 +11,6 @@ use crate::{
     errors::Error,
     impls::{
         object_name::{schema_and_table_for_lookup, sqlite_unqualified_object_name},
-        shared_helpers::statement_variant_name,
         translator_impls::{
             condition_injection::inject_condition_into_dml_statement,
             rls::{
@@ -23,7 +22,6 @@ use crate::{
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
-    translation_report::TranslationWarning,
 };
 
 fn inject_condition(stmt: &mut Statement, condition: Expr) -> Result<(), crate::errors::Error> {
@@ -57,13 +55,6 @@ fn append_guarded_statements(
         }
     }
     Ok(())
-}
-
-fn unsupported_statement_error(stmt: &Statement) -> crate::errors::Error {
-    let variant_name = statement_variant_name(stmt);
-    crate::errors::Error::UnsupportedSQLiteFeature(format!(
-        "Unsupported PostgreSQL statement variant `{variant_name}`"
-    ))
 }
 
 macro_rules! unsupported_statement_patterns {
@@ -448,18 +439,7 @@ impl Translator for Statement {
                         }]
                     }
                     // Other object types are PostgreSQL-specific, ignore them
-                    _ => {
-                        if options.should_fail_on_unsupported_statement() {
-                            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                                "Unsupported PostgreSQL DROP object type encountered: {object_type:?}"
-                            )));
-                        }
-                        options.push_warning(TranslationWarning::UnsupportedStatement {
-                            statement_variant: statement_variant_name(self),
-                            sql: self.to_string(),
-                        });
-                        Vec::new()
-                    }
+                    _ => Vec::new(),
                 }
             }
             // DROP TRIGGER - translate to SQLite (strip table name and CASCADE/RESTRICT)
@@ -471,16 +451,7 @@ impl Translator for Statement {
                     option: None,     // SQLite doesn't support CASCADE/RESTRICT
                 })]
             }
-            stmt @ unsupported_statement_patterns!() => {
-                if options.should_fail_on_unsupported_statement() {
-                    return Err(unsupported_statement_error(stmt));
-                }
-                options.push_warning(TranslationWarning::UnsupportedStatement {
-                    statement_variant: statement_variant_name(stmt),
-                    sql: stmt.to_string(),
-                });
-                Vec::new()
-            }
+            unsupported_statement_patterns!() => Vec::new(),
         })
     }
 }

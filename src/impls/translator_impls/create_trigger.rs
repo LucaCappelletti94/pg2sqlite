@@ -17,7 +17,6 @@ use crate::{
     impls::object_name::{append_suffix, schema_and_table_for_lookup},
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
-    translation_report::TranslationWarning,
 };
 
 fn generate_maintenance_trigger_body(
@@ -157,17 +156,11 @@ impl Translator for CreateTrigger {
         } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
             body
         } else {
-            if options.should_fail_on_unsupported_statement() {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                    "Trigger function '{}' is missing or has no body",
-                    exec_body.func_desc.name
-                )));
-            }
-            options.push_warning(TranslationWarning::MissingTriggerBody {
-                trigger_name: name.to_string(),
-                function_name: exec_body.func_desc.name.to_string(),
-            });
-            return Ok(None);
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "Trigger function '{}' body not found. Make sure the CREATE FUNCTION statement \
+                 is included in the same translation batch as the CREATE TRIGGER.",
+                exec_body.func_desc.name
+            )));
         };
 
         let maybe_drop_trigger = or_replace.then(|| {
@@ -253,7 +246,7 @@ mod tests {
         parser::Parser,
     };
 
-    use crate::prelude::{Pg2SqliteOptions, TranslationOptions, Translator};
+    use crate::prelude::{Pg2SqliteOptions, Translator};
 
     fn parse_statements(sql: &str) -> Vec<Statement> {
         Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
@@ -300,19 +293,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_trigger_function_body_errors_in_strict_mode() {
+    fn missing_trigger_function_body_always_errors() {
         let schema = ParserDB::from_statements(
             parse_statements("CREATE TABLE docs(id INTEGER PRIMARY KEY);"),
             "test".to_string(),
         )
         .expect("schema should build");
-        let options = Pg2SqliteOptions::default().with_fail_on_unsupported_statement();
         let trigger = parse_trigger(
             "CREATE TRIGGER docs_ai AFTER INSERT ON docs \
              FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn()",
         );
 
-        let err = trigger.translate(&schema, &options).expect_err("strict mode should fail");
+        let err =
+            trigger.translate(&schema, &Pg2SqliteOptions::default()).expect_err("should fail");
         assert!(err.to_string().contains("Trigger function"), "unexpected error: {err}");
     }
 }

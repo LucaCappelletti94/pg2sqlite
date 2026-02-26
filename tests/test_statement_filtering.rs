@@ -9,10 +9,7 @@
 //! - Filtered/skipped statements: ALTER TABLE, CREATE FUNCTION, GRANT, etc.
 //! - DROP of unsupported object type -> empty
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 /// Helper: translate SQL and return the output or error string.
 fn translate(sql: &str) -> Result<String, String> {
@@ -191,22 +188,6 @@ fn set_statement_filtered() {
     let sql = "SET search_path TO myschema;";
     let count = translate_count(sql).unwrap();
     assert_eq!(count, 0, "SET should be filtered");
-}
-
-#[test]
-fn unsupported_statement_errors_when_strict_mode_enabled() {
-    let options = Pg2SqliteOptions::default().with_fail_on_unsupported_statement();
-    let result = Pg2Sqlite::default()
-        .sql("ALTER TABLE t ADD COLUMN name TEXT;")
-        .unwrap()
-        .translate(&options);
-    assert!(result.is_err(), "Strict unsupported mode should error for ALTER TABLE");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("Unsupported PostgreSQL statement")
-            || err.contains("Unsupported SQLite feature"),
-        "Expected explicit unsupported statement error, got: {err}"
-    );
 }
 
 #[test]

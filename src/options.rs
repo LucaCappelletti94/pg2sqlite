@@ -1,12 +1,7 @@
 //! Submodule defining a struct providing options for the translation.
 
-use std::sync::{Arc, Mutex};
-
-use crate::{
-    traits::{
-        SessionVariableMapping, SessionVariablePattern, TranslationOptions, UuidRepresentation,
-    },
-    translation_report::TranslationWarning,
+use crate::traits::{
+    SessionVariableMapping, SessionVariablePattern, TranslationOptions, UuidRepresentation,
 };
 
 /// Struct to hold options for the translation.
@@ -28,10 +23,6 @@ pub struct Pg2SqliteOptions {
     rls_audit_table_name: Option<String>,
     /// Whether to enable strict RLS validation (abort on violations).
     strict_rls_validation: bool,
-    /// Whether unsupported statements should fail translation.
-    fail_on_unsupported_statement: bool,
-    /// Optional collector for non-fatal translation warnings.
-    warning_collector: Option<Arc<Mutex<Vec<TranslationWarning>>>>,
 }
 
 impl Default for Pg2SqliteOptions {
@@ -45,29 +36,10 @@ impl Default for Pg2SqliteOptions {
             session_variables: Vec::new(),
             rls_audit_table_name: None,
             strict_rls_validation: false,
-            fail_on_unsupported_statement: false,
-            warning_collector: None,
         }
     }
 }
 
-impl Pg2SqliteOptions {
-    pub(crate) fn with_warning_collector(
-        mut self,
-        collector: Arc<Mutex<Vec<TranslationWarning>>>,
-    ) -> Self {
-        self.warning_collector = Some(collector);
-        self
-    }
-
-    pub(crate) fn push_warning(&self, warning: TranslationWarning) {
-        if let Some(collector) = &self.warning_collector
-            && let Ok(mut warnings) = collector.lock()
-        {
-            warnings.push(warning);
-        }
-    }
-}
 
 impl TranslationOptions for Pg2SqliteOptions {
     fn remove_unsupported_check_constraints(mut self) -> Self {
@@ -88,8 +60,8 @@ impl TranslationOptions for Pg2SqliteOptions {
         self.uuid_representation
     }
 
-    fn with_uuid_function_name(mut self, name: String) -> Self {
-        self.uuid_function_name = name;
+    fn with_uuid_function_name(mut self, name: impl Into<String>) -> Self {
+        self.uuid_function_name = name.into();
         self
     }
 
@@ -167,12 +139,4 @@ impl TranslationOptions for Pg2SqliteOptions {
         self.strict_rls_validation
     }
 
-    fn with_fail_on_unsupported_statement(mut self) -> Self {
-        self.fail_on_unsupported_statement = true;
-        self
-    }
-
-    fn should_fail_on_unsupported_statement(&self) -> bool {
-        self.fail_on_unsupported_statement
-    }
 }

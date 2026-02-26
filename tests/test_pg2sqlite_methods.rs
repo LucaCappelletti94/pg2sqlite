@@ -2,11 +2,7 @@
 
 use std::io::Write;
 
-use pg2sqlite::{
-    options::Pg2SqliteOptions,
-    pg2sqlite::{Pg2Sqlite, TranslationWarning},
-    traits::TranslationOptions,
-};
+use pg2sqlite::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite, traits::TranslationOptions};
 use tempfile::{NamedTempFile, TempDir};
 
 #[test]
@@ -197,29 +193,17 @@ fn test_on_conflict_do_update() {
 }
 
 #[test]
-fn test_translate_with_report_collects_unsupported_statement_warning() {
-    let report = Pg2Sqlite::default()
+fn test_alter_table_is_dropped() {
+    let stmts = Pg2Sqlite::default()
         .sql("ALTER TABLE t ADD COLUMN name TEXT;")
         .unwrap()
-        .translate_with_report(&Pg2SqliteOptions::default())
+        .translate(&Pg2SqliteOptions::default())
         .unwrap();
-
-    assert!(report.statements.is_empty(), "ALTER TABLE should be filtered by default");
-    assert!(
-        report.warnings.iter().any(|warning| {
-            matches!(
-                warning,
-                TranslationWarning::UnsupportedStatement { statement_variant, sql }
-                    if statement_variant == "AlterTable" && sql.contains("ALTER TABLE")
-            )
-        }),
-        "Expected unsupported-statement warning, got: {:?}",
-        report.warnings
-    );
+    assert!(stmts.is_empty(), "ALTER TABLE should produce no output");
 }
 
 #[test]
-fn test_translate_with_report_collects_missing_trigger_body_warning_non_strict() {
+fn test_missing_trigger_body_errors() {
     let sql = r#"
         CREATE TABLE docs(id INTEGER PRIMARY KEY);
         CREATE FUNCTION docs_trigger_fn() RETURNS trigger LANGUAGE plpgsql;
@@ -228,57 +212,22 @@ fn test_translate_with_report_collects_missing_trigger_body_warning_non_strict()
         FOR EACH ROW
         EXECUTE FUNCTION docs_trigger_fn();
     "#;
-
-    let report = Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate_with_report(&Pg2SqliteOptions::default())
-        .unwrap();
-
-    assert_eq!(report.statements.len(), 1, "Only CREATE TABLE should remain");
-    assert!(
-        report.warnings.iter().any(|warning| {
-            matches!(
-                warning,
-                TranslationWarning::MissingTriggerBody { trigger_name, function_name }
-                    if trigger_name == "docs_ai" && function_name == "docs_trigger_fn"
-            )
-        }),
-        "Expected missing-trigger-body warning, got: {:?}",
-        report.warnings
-    );
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    assert!(result.is_err(), "Missing trigger body should error");
+    assert!(result.unwrap_err().to_string().contains("Trigger function"));
 }
 
 #[test]
-fn test_translate_with_report_collects_role_skip_warning_for_index() {
+fn test_index_skipped_for_role_without_access() {
     let sql = r#"
         CREATE ROLE app_user;
         CREATE TABLE private_docs(id INTEGER PRIMARY KEY, title TEXT);
         CREATE INDEX private_docs_title_idx ON private_docs(title);
     "#;
-
     let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
-    let report = Pg2Sqlite::default().sql(sql).unwrap().translate_with_report(&options).unwrap();
-
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     assert!(
-        report
-            .statements
-            .iter()
-            .all(|stmt| !stmt.to_string().contains("CREATE INDEX private_docs_title_idx")),
+        stmts.iter().all(|s| !s.to_string().contains("CREATE INDEX private_docs_title_idx")),
         "Index should be filtered for role without SELECT"
-    );
-    assert!(
-        report.warnings.iter().any(|warning| {
-            matches!(
-                warning,
-                TranslationWarning::SkippedObjectForRole {
-                    object_kind,
-                    object_name,
-                    reason: _
-                } if object_kind == "CREATE INDEX" && object_name == "private_docs"
-            )
-        }),
-        "Expected role-skip warning, got: {:?}",
-        report.warnings
     );
 }

@@ -90,7 +90,7 @@ pub trait TranslationOptions {
     #[must_use]
     /// Sets the option to specify the name of the function to use for UUID
     /// generation.
-    fn with_uuid_function_name(self, name: String) -> Self;
+    fn with_uuid_function_name(self, name: impl Into<String>) -> Self;
 
     /// Returns the name of the function to use for UUID generation.
     fn get_uuid_function_name(&self) -> &str;
@@ -176,15 +176,4 @@ pub trait TranslationOptions {
     /// Returns whether strict RLS validation is enabled.
     fn is_strict_rls_validation(&self) -> bool;
 
-    // ==================== Unsupported Statement Handling ====================
-
-    #[must_use]
-    /// Enables strict handling of unsupported PostgreSQL statements.
-    ///
-    /// When enabled, statements that would otherwise be silently filtered out
-    /// will return an error during translation.
-    fn with_fail_on_unsupported_statement(self) -> Self;
-
-    /// Returns whether unsupported statements should fail translation.
-    fn should_fail_on_unsupported_statement(&self) -> bool;
 }

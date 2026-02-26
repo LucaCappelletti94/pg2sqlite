@@ -1,16 +1,12 @@
 //! Submodule defining the main translator struct.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::path::PathBuf;
 
 use git2::Repository;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Statement;
 use tempfile::TempDir;
 
-pub use crate::translation_report::{TranslationReport, TranslationWarning};
 use crate::{
     impls::translator_impls::rls::generate_rls_audit_table,
     options::Pg2SqliteOptions,
@@ -296,24 +292,19 @@ impl Pg2Sqlite {
         self.translate_internal(options)
     }
 
-    /// Translates PostgreSQL statements and returns translated SQL plus
-    /// warnings.
+    /// Convenience method: translates to a `Vec<String>` of SQL strings.
     ///
-    /// This is useful in non-strict mode where unsupported statements are
-    /// skipped instead of raising an error.
+    /// Equivalent to `translate()` followed by mapping each statement to its
+    /// `to_string()` representation. Useful when you don't need the AST.
     ///
     /// # Errors
     ///
     /// * If parsing or translation fails.
-    pub fn translate_with_report(
+    pub fn translate_to_sql(
         self,
         options: &Pg2SqliteOptions,
-    ) -> Result<TranslationReport, crate::errors::Error> {
-        let collector = Arc::new(Mutex::new(Vec::<TranslationWarning>::new()));
-        let options_with_warnings = options.clone().with_warning_collector(Arc::clone(&collector));
-        let statements = self.translate_internal(&options_with_warnings)?;
-        let warnings = collector.lock().map(|w| w.clone()).unwrap_or_default();
-        Ok(TranslationReport { statements, warnings })
+    ) -> Result<Vec<String>, crate::errors::Error> {
+        Ok(self.translate(options)?.into_iter().map(|s| s.to_string()).collect())
     }
 
     /// Builds the schema from the loaded PostgreSQL statements.

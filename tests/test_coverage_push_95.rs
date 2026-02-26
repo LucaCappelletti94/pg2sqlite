@@ -246,10 +246,10 @@ fn create_trigger_translation_rejects_unsupported_shapes_and_handles_missing_fun
     let translated = with_drop.translate(&schema, &options).expect("translation should succeed");
     assert!(translated.expect("expected trigger tuple").0.is_some());
 
-    let none_body = base
+    let missing_body_err = base
         .translate(&schema_without_fn, &options)
-        .expect("missing function body should not be an error");
-    assert!(none_body.is_none());
+        .expect_err("missing function body must error");
+    assert!(missing_body_err.to_string().contains("Trigger function"));
 
     let mut has_statements = base.clone();
     has_statements.statements =
