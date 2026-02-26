@@ -8,11 +8,12 @@ fn lockfile_has_single_sqlparser_git_source() {
         .filter(|line| {
             line.contains("source = \"git+https://github.com/apache/datafusion-sqlparser-rs")
         })
-        .count();
+        .collect::<std::collections::BTreeSet<_>>();
 
     assert_eq!(
-        sqlparser_git_sources, 1,
-        "Cargo.lock should contain exactly one sqlparser git source to avoid duplicate sqlparser types"
+        sqlparser_git_sources.len(),
+        1,
+        "Cargo.lock should contain exactly one unique sqlparser git source to avoid duplicate sqlparser types"
     );
 }
 

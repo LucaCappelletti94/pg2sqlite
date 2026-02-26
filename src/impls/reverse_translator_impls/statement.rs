@@ -1,18 +1,15 @@
 //! Implementation of the [`ReverseTranslator`] trait for the
 //! `Statement` type.
 
+use core::ops::ControlFlow;
+
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    AccessExpr, Assignment, ConnectByKind, Delete, Expr, ExprWithAlias, ExprWithAliasAndOrderBy,
-    FromTable, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Insert,
-    JoinConstraint, JoinOperator, JsonPathElem, JsonTableColumn, LimitClause, Measure, ObjectName,
-    OrderByExpr, PipeOperator, PivotValueSource, Query, Select, SelectItem, SetExpr, Setting,
-    Statement, Subscript, SymbolDefinition, Table, TableFactor, TableFunctionArgs, TableObject,
-    TableSample, TableSampleBucket, TableSampleKind, TableSampleQuantity, TableVersion,
-    TableWithJoins, Update, UpdateTableFromKind, Values, WindowType, WithFill,
-    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
-    XmlTableColumnOption,
+    Delete, Expr, Insert, ObjectName, Query, SetExpr, Statement, Table, TableObject, Update, Visit,
+    Visitor,
 };
+#[cfg(test)]
+use sqlparser::ast::{LimitClause, TableFactor};
 
 use crate::{
     errors::Error,
@@ -87,1054 +84,112 @@ fn check_table_command_for_rls(table: &Table, options: &Pg2SqliteOptions) -> Res
     Ok(())
 }
 
-fn check_function_arg_expr_for_rls(
-    arg: &FunctionArgExpr,
+fn ensure_set_expr_supported_for_rls(
+    set_expr: &SetExpr,
     options: &Pg2SqliteOptions,
 ) -> Result<(), Error> {
-    match arg {
-        FunctionArgExpr::Expr(expr) => check_expr_for_rls(expr, options),
-        FunctionArgExpr::QualifiedWildcard(_) | FunctionArgExpr::Wildcard => Ok(()),
-    }
-}
-
-fn check_function_arg_for_rls(arg: &FunctionArg, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    match arg {
-        FunctionArg::Named { arg, .. }
-        | FunctionArg::ExprNamed { arg, .. }
-        | FunctionArg::Unnamed(arg) => check_function_arg_expr_for_rls(arg, options),
-    }
-}
-
-fn check_setting_for_rls(setting: &Setting, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    check_expr_for_rls(&setting.value, options)
-}
-
-fn check_table_function_args_for_rls(
-    args: &TableFunctionArgs,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    for arg in &args.args {
-        check_function_arg_for_rls(arg, options)?;
-    }
-    if let Some(settings) = &args.settings {
-        for setting in settings {
-            check_setting_for_rls(setting, options)?;
-        }
-    }
-    Ok(())
-}
-
-fn check_table_version_for_rls(
-    version: &TableVersion,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match version {
-        TableVersion::ForSystemTimeAsOf(expr)
-        | TableVersion::TimestampAsOf(expr)
-        | TableVersion::VersionAsOf(expr)
-        | TableVersion::Function(expr) => check_expr_for_rls(expr, options),
-    }
-}
-
-fn check_table_sample_quantity_for_rls(
-    quantity: &TableSampleQuantity,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(&quantity.value, options)
-}
-
-fn check_table_sample_bucket_for_rls(
-    bucket: &TableSampleBucket,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    if let Some(on) = &bucket.on {
-        check_expr_for_rls(on, options)?;
-    }
-    Ok(())
-}
-
-fn check_table_sample_for_rls(
-    sample: &TableSample,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    if let Some(quantity) = &sample.quantity {
-        check_table_sample_quantity_for_rls(quantity, options)?;
-    }
-    if let Some(bucket) = &sample.bucket {
-        check_table_sample_bucket_for_rls(bucket, options)?;
-    }
-    if let Some(offset) = &sample.offset {
-        check_expr_for_rls(offset, options)?;
-    }
-    Ok(())
-}
-
-fn check_table_sample_kind_for_rls(
-    sample: &TableSampleKind,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match sample {
-        TableSampleKind::BeforeTableAlias(sample) | TableSampleKind::AfterTableAlias(sample) => {
-            check_table_sample_for_rls(sample, options)
-        }
-    }
-}
-
-fn check_with_fill_for_rls(with_fill: &WithFill, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    if let Some(from) = &with_fill.from {
-        check_expr_for_rls(from, options)?;
-    }
-    if let Some(to) = &with_fill.to {
-        check_expr_for_rls(to, options)?;
-    }
-    if let Some(step) = &with_fill.step {
-        check_expr_for_rls(step, options)?;
-    }
-    Ok(())
-}
-
-fn check_order_by_expr_for_rls(
-    order_by_expr: &OrderByExpr,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(&order_by_expr.expr, options)?;
-    if let Some(with_fill) = &order_by_expr.with_fill {
-        check_with_fill_for_rls(with_fill, options)?;
-    }
-    Ok(())
-}
-
-fn check_expr_with_alias_for_rls(
-    expr_with_alias: &ExprWithAlias,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(&expr_with_alias.expr, options)
-}
-
-fn check_pivot_value_source_for_rls(
-    value_source: &PivotValueSource,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match value_source {
-        PivotValueSource::List(values) => {
-            for value in values {
-                check_expr_with_alias_for_rls(value, options)?;
-            }
-            Ok(())
-        }
-        PivotValueSource::Any(order_by) => {
-            for order_by_expr in order_by {
-                check_order_by_expr_for_rls(order_by_expr, options)?;
-            }
-            Ok(())
-        }
-        PivotValueSource::Subquery(query) => check_query_for_rls(query, options),
-    }
-}
-
-fn check_measure_for_rls(measure: &Measure, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    check_expr_for_rls(&measure.expr, options)
-}
-
-fn check_symbol_definition_for_rls(
-    symbol: &SymbolDefinition,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(&symbol.definition, options)
-}
-
-#[allow(clippy::only_used_in_recursion)]
-fn check_json_table_column_for_rls(
-    column: &JsonTableColumn,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match column {
-        JsonTableColumn::Named(_) | JsonTableColumn::ForOrdinality(_) => Ok(()),
-        JsonTableColumn::Nested(nested) => {
-            for column in &nested.columns {
-                check_json_table_column_for_rls(column, options)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn check_xml_passing_argument_for_rls(
-    argument: &XmlPassingArgument,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(&argument.expr, options)
-}
-
-fn check_xml_passing_clause_for_rls(
-    passing: &XmlPassingClause,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    for argument in &passing.arguments {
-        check_xml_passing_argument_for_rls(argument, options)?;
-    }
-    Ok(())
-}
-
-fn check_xml_table_column_option_for_rls(
-    option: &XmlTableColumnOption,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match option {
-        XmlTableColumnOption::NamedInfo { path, default, .. } => {
-            if let Some(path) = path {
-                check_expr_for_rls(path, options)?;
-            }
-            if let Some(default) = default {
-                check_expr_for_rls(default, options)?;
-            }
-            Ok(())
-        }
-        XmlTableColumnOption::ForOrdinality => Ok(()),
-    }
-}
-
-fn check_xml_table_column_for_rls(
-    column: &XmlTableColumn,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_xml_table_column_option_for_rls(&column.option, options)
-}
-
-fn check_xml_namespace_definition_for_rls(
-    namespace: &XmlNamespaceDefinition,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(&namespace.uri, options)
-}
-
-fn check_join_constraint_for_rls(
-    constraint: &JoinConstraint,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match constraint {
-        JoinConstraint::On(expr) => check_expr_for_rls(expr, options),
-        JoinConstraint::Using(_) | JoinConstraint::Natural | JoinConstraint::None => Ok(()),
-    }
-}
-
-fn check_join_operator_for_rls(
-    operator: &JoinOperator,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match operator {
-        JoinOperator::Join(constraint)
-        | JoinOperator::Inner(constraint)
-        | JoinOperator::Left(constraint)
-        | JoinOperator::LeftOuter(constraint)
-        | JoinOperator::Right(constraint)
-        | JoinOperator::RightOuter(constraint)
-        | JoinOperator::FullOuter(constraint)
-        | JoinOperator::CrossJoin(constraint)
-        | JoinOperator::Semi(constraint)
-        | JoinOperator::LeftSemi(constraint)
-        | JoinOperator::RightSemi(constraint)
-        | JoinOperator::Anti(constraint)
-        | JoinOperator::LeftAnti(constraint)
-        | JoinOperator::RightAnti(constraint)
-        | JoinOperator::StraightJoin(constraint) => {
-            check_join_constraint_for_rls(constraint, options)
-        }
-        JoinOperator::AsOf { constraint, match_condition } => {
-            check_join_constraint_for_rls(constraint, options)?;
-            check_expr_for_rls(match_condition, options)
-        }
-        JoinOperator::CrossApply | JoinOperator::OuterApply => Ok(()),
-    }
-}
-
-fn check_table_with_joins_for_rls(
-    table_with_joins: &TableWithJoins,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_table_factor_for_rls(&table_with_joins.relation, options)?;
-    for join in &table_with_joins.joins {
-        check_table_factor_for_rls(&join.relation, options)?;
-        check_join_operator_for_rls(&join.join_operator, options)?;
-    }
-    Ok(())
-}
-
-/// Check all table references in a FROM clause for RLS tables.
-fn check_from_clause_for_rls(
-    from: &[TableWithJoins],
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    for table_with_joins in from {
-        check_table_with_joins_for_rls(table_with_joins, options)?;
-    }
-    Ok(())
-}
-
-/// Check a FromTable enum for RLS tables.
-fn check_from_table_for_rls(from: &FromTable, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    match from {
-        FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => {
-            check_from_clause_for_rls(tables, options)
-        }
-    }
-}
-
-/// Check an UpdateTableFromKind for RLS tables.
-fn check_update_from_for_rls(
-    from: &UpdateTableFromKind,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match from {
-        UpdateTableFromKind::BeforeSet(tables) | UpdateTableFromKind::AfterSet(tables) => {
-            check_from_clause_for_rls(tables, options)
-        }
-    }
-}
-
-/// Check a table factor for RLS table access.
-#[allow(clippy::too_many_lines)]
-fn check_table_factor_for_rls(
-    factor: &TableFactor,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match factor {
-        TableFactor::Table { name, args, with_hints, version, sample, .. } => {
-            check_table_for_rls(name, options)?;
-            if let Some(args) = args {
-                check_table_function_args_for_rls(args, options)?;
-            }
-            for hint in with_hints {
-                check_expr_for_rls(hint, options)?;
-            }
-            if let Some(version) = version {
-                check_table_version_for_rls(version, options)?;
-            }
-            if let Some(sample) = sample {
-                check_table_sample_kind_for_rls(sample, options)?;
-            }
-            Ok(())
-        }
-        TableFactor::Derived { subquery, sample, .. } => {
-            check_query_for_rls(subquery, options)?;
-            if let Some(sample) = sample {
-                check_table_sample_kind_for_rls(sample, options)?;
-            }
-            Ok(())
-        }
-        TableFactor::TableFunction { expr, .. } => check_expr_for_rls(expr, options),
-        TableFactor::Function { args, .. } => {
-            for arg in args {
-                check_function_arg_for_rls(arg, options)?;
-            }
-            Ok(())
-        }
-        TableFactor::UNNEST { array_exprs, .. } => check_expr_slice_for_rls(array_exprs, options),
-        TableFactor::JsonTable { json_expr, columns, .. } => {
-            check_expr_for_rls(json_expr, options)?;
-            for column in columns {
-                check_json_table_column_for_rls(column, options)?;
-            }
-            Ok(())
-        }
-        TableFactor::OpenJsonTable { json_expr, .. } => check_expr_for_rls(json_expr, options),
-        TableFactor::NestedJoin { table_with_joins, .. } => {
-            check_table_with_joins_for_rls(table_with_joins, options)
-        }
-        TableFactor::Pivot {
-            table,
-            aggregate_functions,
-            value_column,
-            value_source,
-            default_on_null,
-            ..
-        } => {
-            check_table_factor_for_rls(table, options)?;
-            for expr_with_alias in aggregate_functions {
-                check_expr_with_alias_for_rls(expr_with_alias, options)?;
-            }
-            check_expr_slice_for_rls(value_column, options)?;
-            check_pivot_value_source_for_rls(value_source, options)?;
-            if let Some(default_on_null) = default_on_null {
-                check_expr_for_rls(default_on_null, options)?;
-            }
-            Ok(())
-        }
-        TableFactor::Unpivot { table, value, columns, .. } => {
-            check_table_factor_for_rls(table, options)?;
-            check_expr_for_rls(value, options)?;
-            for expr_with_alias in columns {
-                check_expr_with_alias_for_rls(expr_with_alias, options)?;
-            }
-            Ok(())
-        }
-        TableFactor::MatchRecognize {
-            table, partition_by, order_by, measures, symbols, ..
-        } => {
-            check_table_factor_for_rls(table, options)?;
-            check_expr_slice_for_rls(partition_by, options)?;
-            for order_by_expr in order_by {
-                check_order_by_expr_for_rls(order_by_expr, options)?;
-            }
-            for measure in measures {
-                check_measure_for_rls(measure, options)?;
-            }
-            for symbol in symbols {
-                check_symbol_definition_for_rls(symbol, options)?;
-            }
-            Ok(())
-        }
-        TableFactor::XmlTable { namespaces, row_expression, passing, columns, .. } => {
-            for namespace in namespaces {
-                check_xml_namespace_definition_for_rls(namespace, options)?;
-            }
-            check_expr_for_rls(row_expression, options)?;
-            check_xml_passing_clause_for_rls(passing, options)?;
-            for column in columns {
-                check_xml_table_column_for_rls(column, options)?;
-            }
-            Ok(())
-        }
-        TableFactor::SemanticView { dimensions, metrics, facts, where_clause, .. } => {
-            check_expr_slice_for_rls(dimensions, options)?;
-            check_expr_slice_for_rls(metrics, options)?;
-            check_expr_slice_for_rls(facts, options)?;
-            if let Some(where_clause) = where_clause {
-                check_expr_for_rls(where_clause, options)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn check_expr_pair_for_rls(
-    left: &Expr,
-    right: &Expr,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(left, options)?;
-    check_expr_for_rls(right, options)
-}
-
-fn check_expr_slice_for_rls(exprs: &[Expr], options: &Pg2SqliteOptions) -> Result<(), Error> {
-    for expr in exprs {
-        check_expr_for_rls(expr, options)?;
-    }
-    Ok(())
-}
-
-fn check_expr_matrix_for_rls(exprs: &[Vec<Expr>], options: &Pg2SqliteOptions) -> Result<(), Error> {
-    for group in exprs {
-        check_expr_slice_for_rls(group, options)?;
-    }
-    Ok(())
-}
-
-fn check_case_expr_for_rls(
-    operand: Option<&Expr>,
-    conditions: &[sqlparser::ast::CaseWhen],
-    else_result: Option<&Expr>,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    if let Some(operand) = operand {
-        check_expr_for_rls(operand, options)?;
-    }
-    for condition in conditions {
-        check_expr_pair_for_rls(&condition.condition, &condition.result, options)?;
-    }
-    if let Some(else_result) = else_result {
-        check_expr_for_rls(else_result, options)?;
-    }
-    Ok(())
-}
-
-fn check_trim_expr_for_rls(
-    expr: &Expr,
-    trim_what: Option<&Expr>,
-    trim_characters: Option<&[Expr]>,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(expr, options)?;
-    if let Some(trim_what) = trim_what {
-        check_expr_for_rls(trim_what, options)?;
-    }
-    if let Some(trim_characters) = trim_characters {
-        check_expr_slice_for_rls(trim_characters, options)?;
-    }
-    Ok(())
-}
-
-fn check_substring_expr_for_rls(
-    expr: &Expr,
-    substring_from: Option<&Expr>,
-    substring_for: Option<&Expr>,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(expr, options)?;
-    if let Some(substring_from) = substring_from {
-        check_expr_for_rls(substring_from, options)?;
-    }
-    if let Some(substring_for) = substring_for {
-        check_expr_for_rls(substring_for, options)?;
-    }
-    Ok(())
-}
-
-fn check_overlay_expr_for_rls(
-    expr: &Expr,
-    overlay_what: &Expr,
-    overlay_from: &Expr,
-    overlay_for: Option<&Expr>,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(expr, options)?;
-    check_expr_for_rls(overlay_what, options)?;
-    check_expr_for_rls(overlay_from, options)?;
-    if let Some(overlay_for) = overlay_for {
-        check_expr_for_rls(overlay_for, options)?;
-    }
-    Ok(())
-}
-
-fn check_compound_access_for_rls(
-    root: &Expr,
-    access_chain: &[AccessExpr],
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(root, options)?;
-    for access in access_chain {
-        check_access_expr_for_rls(access, options)?;
-    }
-    Ok(())
-}
-
-fn check_access_expr_for_rls(access: &AccessExpr, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    match access {
-        AccessExpr::Dot(expr) => check_expr_for_rls(expr, options),
-        AccessExpr::Subscript(subscript) => {
-            match subscript {
-                Subscript::Index { index } => check_expr_for_rls(index, options),
-                Subscript::Slice { lower_bound, upper_bound, stride } => {
-                    if let Some(lower_bound) = lower_bound {
-                        check_expr_for_rls(lower_bound, options)?;
-                    }
-                    if let Some(upper_bound) = upper_bound {
-                        check_expr_for_rls(upper_bound, options)?;
-                    }
-                    if let Some(stride) = stride {
-                        check_expr_for_rls(stride, options)?;
-                    }
-                    Ok(())
-                }
-            }
-        }
-    }
-}
-
-fn check_json_path_for_rls(
-    path: &sqlparser::ast::JsonPath,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    for elem in &path.path {
-        if let JsonPathElem::Bracket { key } = elem {
-            check_expr_for_rls(key, options)?;
-        }
-    }
-    Ok(())
-}
-
-/// Check an expression tree for RLS table references in subqueries.
-#[allow(clippy::too_many_lines)]
-fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    match expr {
-        Expr::Identifier(_)
-        | Expr::CompoundIdentifier(_)
-        | Expr::Value(_)
-        | Expr::TypedString(_)
-        | Expr::Wildcard(_)
-        | Expr::QualifiedWildcard(_, _) => Ok(()),
-        Expr::Subquery(query) => check_query_for_rls(query, options),
-        Expr::Exists { subquery, .. } => check_query_for_rls(subquery, options),
-        Expr::InSubquery { expr, subquery, .. } => {
-            check_expr_for_rls(expr, options)?;
-            check_query_for_rls(subquery, options)
-        }
-        Expr::BinaryOp { left, right, .. }
-        | Expr::AnyOp { left, right, .. }
-        | Expr::AllOp { left, right, .. } => check_expr_pair_for_rls(left, right, options),
-        Expr::Convert { expr, styles, .. } => {
-            check_expr_for_rls(expr, options)?;
-            for style in styles {
-                check_expr_for_rls(style, options)?;
-            }
-            Ok(())
-        }
-        Expr::Function(func) => check_function_for_rls(func, options),
-        Expr::UnaryOp { expr, .. }
-        | Expr::Cast { expr, .. }
-        | Expr::Extract { expr, .. }
-        | Expr::Ceil { expr, .. }
-        | Expr::Floor { expr, .. }
-        | Expr::IsNull(expr)
-        | Expr::IsNotNull(expr)
-        | Expr::IsUnknown(expr)
-        | Expr::IsNotUnknown(expr)
-        | Expr::IsTrue(expr)
-        | Expr::IsNotTrue(expr)
-        | Expr::IsFalse(expr)
-        | Expr::IsNotFalse(expr)
-        | Expr::IsNormalized { expr, .. }
-        | Expr::Named { expr, .. } => check_expr_for_rls(expr, options),
-        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
-            check_expr_pair_for_rls(left, right, options)
-        }
-        Expr::Nested(inner) | Expr::OuterJoin(inner) | Expr::Prior(inner) => {
-            check_expr_for_rls(inner, options)
-        }
-        Expr::AtTimeZone { timestamp, time_zone } => {
-            check_expr_pair_for_rls(timestamp, time_zone, options)
-        }
-        Expr::Like { expr, pattern, .. }
-        | Expr::ILike { expr, pattern, .. }
-        | Expr::SimilarTo { expr, pattern, .. }
-        | Expr::RLike { expr, pattern, .. } => check_expr_pair_for_rls(expr, pattern, options),
-        Expr::Tuple(exprs) => check_expr_slice_for_rls(exprs, options),
-        Expr::Array(array) => check_expr_slice_for_rls(&array.elem, options),
-        Expr::GroupingSets(exprs) | Expr::Cube(exprs) | Expr::Rollup(exprs) => {
-            check_expr_matrix_for_rls(exprs, options)
-        }
-        Expr::Case { operand, conditions, else_result, .. } => {
-            check_case_expr_for_rls(operand.as_deref(), conditions, else_result.as_deref(), options)
-        }
-        Expr::Between { expr, low, high, .. } => {
-            check_expr_for_rls(expr, options)?;
-            check_expr_pair_for_rls(low, high, options)
-        }
-        Expr::InList { expr, list, .. } => {
-            check_expr_for_rls(expr, options)?;
-            check_expr_slice_for_rls(list, options)
-        }
-        Expr::Trim { expr, trim_what, trim_characters, .. } => {
-            check_trim_expr_for_rls(expr, trim_what.as_deref(), trim_characters.as_deref(), options)
-        }
-        Expr::Position { expr, r#in } => check_expr_pair_for_rls(expr, r#in, options),
-        Expr::Substring { expr, substring_from, substring_for, .. } => {
-            check_substring_expr_for_rls(
-                expr,
-                substring_from.as_deref(),
-                substring_for.as_deref(),
-                options,
-            )
-        }
-        Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
-            check_overlay_expr_for_rls(
-                expr,
-                overlay_what,
-                overlay_from,
-                overlay_for.as_deref(),
-                options,
-            )
-        }
-        Expr::Prefixed { value, .. } | Expr::Collate { expr: value, .. } => {
-            check_expr_for_rls(value, options)
-        }
-        Expr::Interval(interval) => check_expr_for_rls(&interval.value, options),
-        Expr::JsonAccess { value, path } => {
-            check_expr_for_rls(value, options)?;
-            check_json_path_for_rls(path, options)
-        }
-        Expr::CompoundFieldAccess { root, access_chain } => {
-            check_compound_access_for_rls(root, access_chain, options)
-        }
-        Expr::InUnnest { expr, array_expr, .. } => {
-            check_expr_pair_for_rls(expr, array_expr, options)
-        }
-        Expr::Struct { values, .. } => check_expr_slice_for_rls(values, options),
-        Expr::Dictionary(fields) => {
-            for field in fields {
-                check_expr_for_rls(&field.value, options)?;
-            }
-            Ok(())
-        }
-        Expr::Map(map) => {
-            for entry in &map.entries {
-                check_expr_pair_for_rls(&entry.key, &entry.value, options)?;
-            }
-            Ok(())
-        }
-        Expr::Lambda(lambda) => check_expr_for_rls(&lambda.body, options),
-        Expr::MemberOf(member) => check_expr_pair_for_rls(&member.value, &member.array, options),
-        other @ Expr::MatchAgainst { .. } => {
-            Err(Error::UnsupportedRlsExpressionVariant {
-                expr_variant: expr_variant_name(other),
-                expression: other.to_string(),
-            })
-        }
-    }
-}
-
-/// Check a select item for RLS table references in subqueries.
-fn check_select_item_for_rls(item: &SelectItem, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    match item {
-        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-            check_expr_for_rls(expr, options)
-        }
-        _ => Ok(()),
-    }
-}
-
-fn check_select_for_rls(select: &Select, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    check_from_clause_for_rls(&select.from, options)?;
-
-    if let Some(prewhere) = &select.prewhere {
-        check_expr_for_rls(prewhere, options)?;
-    }
-
-    if let Some(selection) = &select.selection {
-        check_expr_for_rls(selection, options)?;
-    }
-
-    if let Some(having) = &select.having {
-        check_expr_for_rls(having, options)?;
-    }
-
-    for item in &select.projection {
-        check_select_item_for_rls(item, options)?;
-    }
-
-    if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
-        for expr in exprs {
-            check_expr_for_rls(expr, options)?;
-        }
-    }
-
-    for expr in &select.cluster_by {
-        check_expr_for_rls(expr, options)?;
-    }
-    for expr in &select.distribute_by {
-        check_expr_for_rls(expr, options)?;
-    }
-    for order_by_expr in &select.sort_by {
-        check_order_by_expr_for_rls(order_by_expr, options)?;
-    }
-    for connect_by in &select.connect_by {
-        check_connect_by_for_rls(connect_by, options)?;
-    }
-
-    if let Some(qualify) = &select.qualify {
-        check_expr_for_rls(qualify, options)?;
-    }
-
-    Ok(())
-}
-
-fn check_values_for_rls(values: &Values, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    for row in &values.rows {
-        for expr in row {
-            check_expr_for_rls(expr, options)?;
-        }
-    }
-    Ok(())
-}
-
-fn check_set_expr_for_rls(set_expr: &SetExpr, options: &Pg2SqliteOptions) -> Result<(), Error> {
     match set_expr {
-        SetExpr::Select(select) => check_select_for_rls(select, options),
-        SetExpr::Query(query) => check_query_for_rls(query, options),
         SetExpr::SetOperation { left, right, .. } => {
-            check_set_expr_for_rls(left, options)?;
-            check_set_expr_for_rls(right, options)
+            ensure_set_expr_supported_for_rls(left, options)?;
+            ensure_set_expr_supported_for_rls(right, options)
         }
-        SetExpr::Insert(stmt) => {
-            if let Statement::Insert(insert) = stmt {
-                check_insert_for_rls(insert, options)?;
-            }
-            Ok(())
-        }
-        SetExpr::Update(stmt) => {
-            if let Statement::Update(update) = stmt {
-                check_update_for_rls(update, options)?;
-            }
-            Ok(())
-        }
-        SetExpr::Delete(stmt) => {
-            if let Statement::Delete(delete) = stmt {
-                check_delete_for_rls(delete, options)?;
-            }
-            Ok(())
-        }
-        SetExpr::Values(values) => check_values_for_rls(values, options),
+        SetExpr::Query(query) => ensure_set_expr_supported_for_rls(query.body.as_ref(), options),
         SetExpr::Table(table) => check_table_command_for_rls(table, options),
         SetExpr::Merge(_) => {
             Err(Error::UnsupportedSQLiteFeature(
                 "MERGE set expressions are not supported in reverse translation".to_string(),
             ))
         }
+        SetExpr::Select(_)
+        | SetExpr::Insert(_)
+        | SetExpr::Update(_)
+        | SetExpr::Delete(_)
+        | SetExpr::Values(_) => Ok(()),
     }
 }
 
+struct RlsAstVisitor<'a> {
+    options: &'a Pg2SqliteOptions,
+}
+
+impl Visitor for RlsAstVisitor<'_> {
+    type Break = Box<Error>;
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        match ensure_set_expr_supported_for_rls(query.body.as_ref(), self.options) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(err) => ControlFlow::Break(Box::new(err)),
+        }
+    }
+
+    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
+        match check_table_for_rls(relation, self.options) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(err) => ControlFlow::Break(Box::new(err)),
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if let Expr::MatchAgainst { .. } = expr {
+            return ControlFlow::Break(Box::new(Error::UnsupportedRlsExpressionVariant {
+                expr_variant: expr_variant_name(expr),
+                expression: expr.to_string(),
+            }));
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn run_rls_visitor<T: Visit>(node: &T, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    let mut visitor = RlsAstVisitor { options };
+    match node.visit(&mut visitor) {
+        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(err) => Err(*err),
+    }
+}
+
+#[cfg(test)]
+fn check_table_factor_for_rls(
+    factor: &TableFactor,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    run_rls_visitor(factor, options)
+}
+
+/// Check an expression tree for RLS table references in subqueries.
+#[cfg(test)]
+fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    run_rls_visitor(expr, options)
+}
+
+#[cfg(test)]
+fn check_set_expr_for_rls(set_expr: &SetExpr, options: &Pg2SqliteOptions) -> Result<(), Error> {
+    ensure_set_expr_supported_for_rls(set_expr, options)?;
+    run_rls_visitor(set_expr, options)
+}
+
+#[cfg(test)]
 fn check_limit_clause_for_rls(
     limit_clause: &LimitClause,
     options: &Pg2SqliteOptions,
 ) -> Result<(), Error> {
-    match limit_clause {
-        LimitClause::LimitOffset { limit, offset, limit_by } => {
-            if let Some(limit) = limit {
-                check_expr_for_rls(limit, options)?;
-            }
-            if let Some(offset) = offset {
-                check_expr_for_rls(&offset.value, options)?;
-            }
-            for expr in limit_by {
-                check_expr_for_rls(expr, options)?;
-            }
-            Ok(())
-        }
-        LimitClause::OffsetCommaLimit { offset, limit } => {
-            check_expr_for_rls(offset, options)?;
-            check_expr_for_rls(limit, options)
-        }
-    }
+    run_rls_visitor(limit_clause, options)
 }
 
 fn check_query_for_rls(query: &Query, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    if let Some(with) = &query.with {
-        for cte in &with.cte_tables {
-            check_query_for_rls(&cte.query, options)?;
-        }
-    }
-    check_set_expr_for_rls(query.body.as_ref(), options)?;
-
-    if let Some(order_by) = &query.order_by
-        && let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind
-    {
-        for order_expr in exprs {
-            check_expr_for_rls(&order_expr.expr, options)?;
-        }
-    }
-
-    if let Some(limit_clause) = &query.limit_clause {
-        check_limit_clause_for_rls(limit_clause, options)?;
-    }
-
-    if let Some(settings) = &query.settings {
-        for setting in settings {
-            check_setting_for_rls(setting, options)?;
-        }
-    }
-
-    if let Some(fetch) = &query.fetch
-        && let Some(quantity) = &fetch.quantity
-    {
-        check_expr_for_rls(quantity, options)?;
-    }
-
-    for pipe_operator in &query.pipe_operators {
-        check_pipe_operator_for_rls(pipe_operator, options)?;
-    }
-
-    Ok(())
+    run_rls_visitor(query, options)
 }
-
-fn check_function_for_rls(
-    function: &sqlparser::ast::Function,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match &function.args {
-        FunctionArguments::List(arg_list) => {
-            for arg in &arg_list.args {
-                match arg {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                    | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. }
-                    | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(expr), .. } => {
-                        check_expr_for_rls(expr, options)?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        FunctionArguments::Subquery(query) => check_query_for_rls(query, options)?,
-        FunctionArguments::None => {}
-    }
-
-    if let Some(filter) = &function.filter {
-        check_expr_for_rls(filter, options)?;
-    }
-
-    if let Some(over) = &function.over
-        && let WindowType::WindowSpec(window_spec) = over
-    {
-        for expr in &window_spec.partition_by {
-            check_expr_for_rls(expr, options)?;
-        }
-        for order_by_expr in &window_spec.order_by {
-            check_expr_for_rls(&order_by_expr.expr, options)?;
-        }
-    }
-
-    for order_by_expr in &function.within_group {
-        check_expr_for_rls(&order_by_expr.expr, options)?;
-    }
-
-    Ok(())
-}
-
-fn check_connect_by_for_rls(
-    connect_by: &ConnectByKind,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match connect_by {
-        ConnectByKind::ConnectBy { relationships, .. } => {
-            for relationship in relationships {
-                check_expr_for_rls(relationship, options)?;
-            }
-        }
-        ConnectByKind::StartWith { condition, .. } => {
-            check_expr_for_rls(condition, options)?;
-        }
-    }
-    Ok(())
-}
-
-fn check_expr_with_alias_and_order_by_for_rls(
-    expr_with_alias: &ExprWithAliasAndOrderBy,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_with_alias_for_rls(&expr_with_alias.expr, options)
-}
-
-fn check_assignment_for_rls(
-    assignment: &Assignment,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    check_expr_for_rls(&assignment.value, options)
-}
-
-fn check_pipe_operator_for_rls(
-    pipe_operator: &PipeOperator,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
-    match pipe_operator {
-        PipeOperator::Limit { expr, offset } => {
-            check_expr_for_rls(expr, options)?;
-            if let Some(offset) = offset {
-                check_expr_for_rls(offset, options)?;
-            }
-        }
-        PipeOperator::Where { expr } => {
-            check_expr_for_rls(expr, options)?;
-        }
-        PipeOperator::OrderBy { exprs } => {
-            for expr in exprs {
-                check_order_by_expr_for_rls(expr, options)?;
-            }
-        }
-        PipeOperator::Select { exprs } | PipeOperator::Extend { exprs } => {
-            for expr in exprs {
-                check_select_item_for_rls(expr, options)?;
-            }
-        }
-        PipeOperator::Set { assignments } => {
-            for assignment in assignments {
-                check_assignment_for_rls(assignment, options)?;
-            }
-        }
-        PipeOperator::Aggregate { full_table_exprs, group_by_expr } => {
-            for expr in full_table_exprs {
-                check_expr_with_alias_and_order_by_for_rls(expr, options)?;
-            }
-            for expr in group_by_expr {
-                check_expr_with_alias_and_order_by_for_rls(expr, options)?;
-            }
-        }
-        PipeOperator::TableSample { sample } => {
-            check_table_sample_for_rls(sample, options)?;
-        }
-        PipeOperator::Union { queries, .. }
-        | PipeOperator::Intersect { queries, .. }
-        | PipeOperator::Except { queries, .. } => {
-            for query in queries {
-                check_query_for_rls(query, options)?;
-            }
-        }
-        PipeOperator::Call { function, .. } => {
-            check_function_for_rls(function, options)?;
-        }
-        PipeOperator::Pivot { aggregate_functions, value_source, .. } => {
-            for expr_with_alias in aggregate_functions {
-                check_expr_with_alias_for_rls(expr_with_alias, options)?;
-            }
-            check_pivot_value_source_for_rls(value_source, options)?;
-        }
-        PipeOperator::Join(join) => {
-            check_table_factor_for_rls(&join.relation, options)?;
-            check_join_operator_for_rls(&join.join_operator, options)?;
-        }
-        PipeOperator::Drop { .. }
-        | PipeOperator::As { .. }
-        | PipeOperator::Rename { .. }
-        | PipeOperator::Unpivot { .. } => {}
-    }
-
-    Ok(())
-}
-
 fn check_insert_for_rls(insert: &Insert, options: &Pg2SqliteOptions) -> Result<(), Error> {
     check_table_object_for_rls(&insert.table, options)?;
-
-    if let Some(source) = &insert.source {
-        check_query_for_rls(source, options)?;
-    }
-
-    Ok(())
+    run_rls_visitor(insert, options)
 }
 
 fn check_update_for_rls(update: &Update, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    check_table_factor_for_rls(&update.table.relation, options)?;
-    for join in &update.table.joins {
-        check_table_factor_for_rls(&join.relation, options)?;
-    }
-
-    if let Some(from) = &update.from {
-        check_update_from_for_rls(from, options)?;
-    }
-
-    if let Some(selection) = &update.selection {
-        check_expr_for_rls(selection, options)?;
-    }
-
-    for assignment in &update.assignments {
-        check_expr_for_rls(&assignment.value, options)?;
-    }
-    if let Some(limit) = &update.limit {
-        check_expr_for_rls(limit, options)?;
-    }
-
-    Ok(())
+    run_rls_visitor(update, options)
 }
 
 fn check_delete_for_rls(delete: &Delete, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    for table_name in &delete.tables {
-        check_table_for_rls(table_name, options)?;
-    }
-
-    check_from_table_for_rls(&delete.from, options)?;
-
-    if let Some(using) = &delete.using {
-        check_from_clause_for_rls(using, options)?;
-    }
-
-    if let Some(selection) = &delete.selection {
-        check_expr_for_rls(selection, options)?;
-    }
-    for order_by_expr in &delete.order_by {
-        check_order_by_expr_for_rls(order_by_expr, options)?;
-    }
-    if let Some(limit) = &delete.limit {
-        check_expr_for_rls(limit, options)?;
-    }
-
-    Ok(())
+    run_rls_visitor(delete, options)
 }
 
 impl ReverseTranslator for Statement {

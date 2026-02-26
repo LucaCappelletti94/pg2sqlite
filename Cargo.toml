@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
-sqlparser = { version = "0.61", git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
+sqlparser = { version = "0.61", git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main", features = ["visitor"] }
 sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "1d5a6d7e31358daf68362a2078a3a17cfdfed549" }
 git2 = "0.20.4"
 tempfile = "3.25"
