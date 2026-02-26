@@ -145,3 +145,42 @@ fn partial_index() {
         "Expected index or table: {output}"
     );
 }
+
+// ==================== Bug 1: PG-only fields stripped from regular CREATE INDEX
+// ====================
+
+#[test]
+fn concurrently_is_dropped() {
+    // CONCURRENTLY is not valid in SQLite
+    let sql = "
+        CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+        CREATE INDEX CONCURRENTLY idx_name ON users (name);
+    ";
+    let output = translate(sql);
+    assert!(!output.contains("CONCURRENTLY"), "CONCURRENTLY must be stripped: {output}");
+    assert!(output.contains("idx_name"), "Index name should be preserved: {output}");
+}
+
+#[test]
+fn include_clause_is_dropped() {
+    // INCLUDE (covering index) is PostgreSQL-only
+    let sql = "
+        CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
+        CREATE INDEX idx_name ON users (name) INCLUDE (age);
+    ";
+    let output = translate(sql);
+    assert!(!output.contains("INCLUDE"), "INCLUDE clause must be stripped: {output}");
+    assert!(output.contains("idx_name"), "Index name should be preserved: {output}");
+}
+
+#[test]
+fn using_btree_is_dropped() {
+    // USING BTREE is the default and is not emitted in SQLite syntax
+    let sql = "
+        CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+        CREATE INDEX idx_name ON users USING BTREE (name);
+    ";
+    let output = translate(sql);
+    assert!(!output.contains("USING"), "USING clause must be stripped: {output}");
+    assert!(output.contains("idx_name"), "Index name should be preserved: {output}");
+}

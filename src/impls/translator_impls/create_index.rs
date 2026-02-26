@@ -125,17 +125,26 @@ fn analyze_fts_index(create_index: &CreateIndex) -> FtsTranslation {
     FtsTranslation::Fts5 { table_name, columns: fts_columns }
 }
 
-/// Generate an FTS5 virtual table statement.
-/// We use regular FTS5 (not external content mode) which stores its own copy
-/// of the indexed content. This allows triggers to properly manage
-/// insert/update/delete synchronization using standard DELETE statements.
-fn create_fts5_virtual_table(base_name: &str, columns: &[String]) -> Statement {
+/// Generate an FTS5 virtual table statement using external content mode.
+///
+/// External content mode (`content=<table>`) avoids storing a second copy of
+/// the indexed text inside the FTS5 table — the content is read from the
+/// source table at query time. Sync triggers must use the FTS5 `'delete'`
+/// command instead of plain `DELETE` when removing rows from the index.
+fn create_fts5_virtual_table(
+    base_name: &str,
+    content_table: &str,
+    pk_column: &str,
+    columns: &[String],
+) -> Statement {
     let fts_name =
         ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(&format!("{base_name}_fts")))]);
 
-    // Build the module arguments: just column names
-    // Using regular FTS5 (no content option) so triggers can use DELETE statements
-    let module_args: Vec<Ident> = columns.iter().map(|c| quoted_ident(c)).collect();
+    // Column names followed by external content mode options (unquoted, as
+    // SQLite parses FTS5 module args as plain strings).
+    let mut module_args: Vec<Ident> = columns.iter().map(|c| quoted_ident(c)).collect();
+    module_args.push(Ident::new(format!("content={content_table}")));
+    module_args.push(Ident::new(format!("content_rowid={pk_column}")));
 
     Statement::CreateVirtualTable {
         name: fts_name,
@@ -145,15 +154,21 @@ fn create_fts5_virtual_table(base_name: &str, columns: &[String]) -> Statement {
     }
 }
 
-/// Generate FTS5 sync triggers.
-/// These triggers keep the FTS5 index in sync with the source table using
-/// standard DELETE and INSERT statements (not external content 'delete'
-/// command).
+/// Generate FTS5 sync triggers for external content mode.
+///
+/// These triggers keep the FTS5 index in sync with the source table.
+/// The DELETE and UPDATE triggers use the FTS5 `'delete'` command (inserting
+/// the special string into the table's own name column) rather than a plain
+/// `DELETE`, which is required when the FTS5 table is in external content mode.
+///
+/// When `predicate_sql` is `Some`, each trigger gets a `WHEN <predicate>`
+/// clause so that only rows matching the partial-index predicate are indexed.
 fn create_fts5_triggers(
     trigger_table: &str,
     fts_table_base: &str,
     pk_column: &str,
     columns: &[String],
+    predicate_sql: Option<&str>,
 ) -> Vec<String> {
     let fts_name = format!("{fts_table_base}_fts");
     let trigger_table_quoted = quote_identifier(trigger_table);
@@ -161,39 +176,51 @@ fn create_fts5_triggers(
     let columns_list = columns.iter().map(|c| quote_identifier(c)).collect::<Vec<_>>().join(", ");
     let new_values =
         columns.iter().map(|c| prefixed_quoted_identifier("new", c)).collect::<Vec<_>>().join(", ");
+    let old_values =
+        columns.iter().map(|c| prefixed_quoted_identifier("old", c)).collect::<Vec<_>>().join(", ");
     let new_pk = prefixed_quoted_identifier("new", pk_column);
     let old_pk = prefixed_quoted_identifier("old", pk_column);
     let insert_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ai"));
     let delete_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ad"));
     let update_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_au"));
 
+    // Build optional WHEN clause; placed between ON <table> and BEGIN.
+    let when_clause = predicate_sql.map(|p| format!(" WHEN {p}")).unwrap_or_default();
+
     vec![
-        // AFTER INSERT trigger - attached to the actual table (may be RLS backing table)
+        // AFTER INSERT trigger — attach to the actual table (may be RLS backing table)
         format!(
-            "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON {trigger_table_quoted} BEGIN \
+            "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON \
+             {trigger_table_quoted}{when_clause} BEGIN \
              INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
              END"
         ),
-        // AFTER DELETE trigger
+        // AFTER DELETE trigger — use FTS5 'delete' command (external content mode)
         format!(
-            "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON {trigger_table_quoted} BEGIN \
-             DELETE FROM {fts_name_quoted} WHERE rowid = {old_pk}; \
+            "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON \
+             {trigger_table_quoted}{when_clause} BEGIN \
+             INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
+             VALUES ('delete', {old_pk}, {old_values}); \
              END"
         ),
-        // AFTER UPDATE trigger
+        // AFTER UPDATE trigger — delete old entry then insert new (external content mode)
         format!(
-            "CREATE TRIGGER {update_trigger_name} AFTER UPDATE ON {trigger_table_quoted} BEGIN \
-             DELETE FROM {fts_name_quoted} WHERE rowid = {old_pk}; \
+            "CREATE TRIGGER {update_trigger_name} AFTER UPDATE ON \
+             {trigger_table_quoted}{when_clause} BEGIN \
+             INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
+             VALUES ('delete', {old_pk}, {old_values}); \
              INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
              END"
         ),
     ]
 }
 
-/// Generate all FTS5 statements (virtual table + sync triggers).
+/// Generate all FTS5 statements (virtual table + sync triggers + backfill
+/// INSERT).
 fn create_fts5_statements(
     table_name: &ObjectName,
     columns: &[String],
+    predicate_sql: Option<&str>,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Vec<Statement>, Error> {
@@ -223,14 +250,24 @@ fn create_fts5_statements(
     }
     let pk_column = pk_columns[0].column_name();
 
-    // Determine the correct table for trigger attachment (accounts for RLS)
+    // Determine the correct table for trigger attachment (accounts for RLS).
+    // In external content mode the content table is the same as the trigger
+    // table (i.e. the RLS backing table when applicable).
     let trigger_table_name = resolve_trigger_table_name(&base_name, table, schema, options);
 
-    let mut statements = vec![create_fts5_virtual_table(&base_name, columns)];
+    let fts_name = format!("{base_name}_fts");
+    let fts_name_quoted = quote_identifier(&fts_name);
+    let trigger_table_quoted = quote_identifier(&trigger_table_name);
+    let pk_column_quoted = quote_identifier(pk_column);
+    let columns_list = columns.iter().map(|c| quote_identifier(c)).collect::<Vec<_>>().join(", ");
 
-    // Add triggers as raw SQL statements
-    // We parse them using sqlparser to get proper Statement objects
-    for trigger_sql in create_fts5_triggers(&trigger_table_name, &base_name, pk_column, columns) {
+    let mut statements =
+        vec![create_fts5_virtual_table(&base_name, &trigger_table_name, pk_column, columns)];
+
+    // Add sync triggers as raw SQL statements (parsed to Statement objects).
+    for trigger_sql in
+        create_fts5_triggers(&trigger_table_name, &base_name, pk_column, columns, predicate_sql)
+    {
         let parsed = parse_generated_sql(
             &sqlparser::dialect::SQLiteDialect {},
             &trigger_sql,
@@ -238,6 +275,19 @@ fn create_fts5_statements(
         )?;
         statements.extend(parsed);
     }
+
+    // Backfill pre-existing rows into the FTS5 index so they are searchable
+    // immediately after the index is created.
+    let backfill_sql = format!(
+        "INSERT INTO {fts_name_quoted}(rowid, {columns_list}) \
+         SELECT {pk_column_quoted}, {columns_list} FROM {trigger_table_quoted}"
+    );
+    let parsed_backfill = parse_generated_sql(
+        &sqlparser::dialect::SQLiteDialect {},
+        &backfill_sql,
+        "Failed to parse generated FTS5 backfill SQL",
+    )?;
+    statements.extend(parsed_backfill);
 
     Ok(statements)
 }
@@ -255,28 +305,53 @@ impl Translator for CreateIndex {
         // Handle GIN/GiST indices - may translate to FTS5 for full-text search
         // Both GIN and GiST can be used with to_tsvector() in PostgreSQL
         if matches!(self.using, Some(IndexType::GIN | IndexType::GiST)) {
+            // Translate the partial-index predicate (if any) to a SQLite SQL string
+            // so that FTS5 sync triggers can include a WHEN clause.
+            let predicate_sql: Option<String> = self
+                .predicate
+                .as_ref()
+                .map(|p| p.translate(schema, options).map(|e| e.to_string()))
+                .transpose()?;
+
             return match analyze_fts_index(self) {
                 FtsTranslation::Fts5 { table_name, columns } => {
-                    create_fts5_statements(&table_name, &columns, schema, options)
+                    create_fts5_statements(
+                        &table_name,
+                        &columns,
+                        predicate_sql.as_deref(),
+                        schema,
+                        options,
+                    )
                 }
                 FtsTranslation::Unsupported(reason) => Err(Error::UnsupportedSQLiteFeature(reason)),
             };
         }
 
-        // Regular index - translate normally
+        // Regular index - translate normally, explicitly dropping PG-only fields
+        // (using, concurrently, include, nulls_distinct, with, index_options,
+        // alter_options) that are not valid in SQLite.
         Ok(vec![Statement::CreateIndex(CreateIndex {
+            name: self.name.clone(),
             table_name: sqlite_unqualified_object_name(&self.table_name),
+            using: None,
             columns: self
                 .columns
                 .iter()
                 .map(|col| col.translate(schema, options))
                 .collect::<Result<_, _>>()?,
+            unique: self.unique,
+            concurrently: false,
+            if_not_exists: self.if_not_exists,
+            include: vec![],
+            nulls_distinct: None,
+            with: vec![],
             predicate: self
                 .predicate
                 .as_ref()
                 .map(|predicate| predicate.translate(schema, options))
                 .transpose()?,
-            ..self.clone()
+            index_options: vec![],
+            alter_options: vec![],
         })])
     }
 }

@@ -400,8 +400,8 @@ fn test_gist_tsvector_translates_to_fts5() {
 
     let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
 
-    // Should have: table + FTS5 virtual table + 3 triggers
-    assert_eq!(translated_sql.len(), 5);
+    // Should have: table + FTS5 virtual table + 3 triggers + 1 backfill INSERT
+    assert_eq!(translated_sql.len(), 6);
 
     // First statement is the table
     assert!(translated_sql[0].contains("CREATE TABLE articles"));
@@ -435,7 +435,8 @@ fn test_gin_tsvector_translates_to_fts5() {
     let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
 
     // Should have: table + FTS5 virtual table + 3 triggers (insert, delete, update)
-    assert_eq!(translated_sql.len(), 5);
+    // + 1 backfill INSERT
+    assert_eq!(translated_sql.len(), 6);
 
     // First statement is the table
     assert!(translated_sql[0].contains("CREATE TABLE documents"));
