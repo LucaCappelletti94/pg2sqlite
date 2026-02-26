@@ -158,12 +158,13 @@ impl PlPgSqlTranslator {
         // Track negated conditions for ELSIF/ELSE blocks
         let mut negated_conditions: Vec<String> = Vec::new();
 
-        // Get the IF condition
-        let if_condition = if_stmt
-            .if_block
-            .condition
-            .as_ref()
-            .map_or_else(|| "TRUE".to_string(), ToString::to_string);
+        // Get the IF condition (translated to SQLite form)
+        let if_condition = if_stmt.if_block.condition.as_ref().map_or_else(
+            || "TRUE".to_string(),
+            |cond| {
+                cond.translate(schema, options).map_or_else(|_| cond.to_string(), |t| t.to_string())
+            },
+        );
 
         // Push IF condition onto stack
         context.push_condition(if_condition.clone());
@@ -188,10 +189,13 @@ impl PlPgSqlTranslator {
 
         // Handle ELSIF blocks
         for elseif_block in &if_stmt.elseif_blocks {
-            let elseif_condition = elseif_block
-                .condition
-                .as_ref()
-                .map_or_else(|| "TRUE".to_string(), ToString::to_string);
+            let elseif_condition = elseif_block.condition.as_ref().map_or_else(
+                || "TRUE".to_string(),
+                |cond| {
+                    cond.translate(schema, options)
+                        .map_or_else(|_| cond.to_string(), |t| t.to_string())
+                },
+            );
 
             // Build combined condition: NOT(prev conditions) AND this condition
             debug_assert!(
@@ -647,10 +651,28 @@ impl PlPgSqlTranslator {
             }
             SetExpr::Select(select) => {
                 let mut transformed_select = (**select).clone();
+                // Transform projection items
+                for item in &mut transformed_select.projection {
+                    if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } =
+                        item
+                    {
+                        Self::transform_expr(expr, context, options);
+                    }
+                }
                 Self::transform_selection(&mut transformed_select.selection, context, options);
                 // Transform FROM clauses
                 for from in &mut transformed_select.from {
                     Self::transform_table_with_joins(from, context, options);
+                }
+                // Transform HAVING clause
+                if let Some(having) = &mut transformed_select.having {
+                    Self::transform_expr(having, context, options);
+                }
+                // Transform GROUP BY expressions
+                if let GroupByExpr::Expressions(exprs, _) = &mut transformed_select.group_by {
+                    for e in exprs {
+                        Self::transform_expr(e, context, options);
+                    }
                 }
                 Ok(SetExpr::Select(Box::new(transformed_select)))
             }
@@ -747,6 +769,16 @@ impl PlPgSqlTranslator {
                 for from in &mut select.from {
                     Self::transform_table_with_joins(from, context, options);
                 }
+                // Transform HAVING clause
+                if let Some(having) = &mut select.having {
+                    Self::transform_expr(having, context, options);
+                }
+                // Transform GROUP BY expressions
+                if let GroupByExpr::Expressions(exprs, _) = &mut select.group_by {
+                    for e in exprs {
+                        Self::transform_expr(e, context, options);
+                    }
+                }
             }
             SetExpr::Values(values) => {
                 for row in &mut values.rows {
@@ -788,13 +820,16 @@ impl PlPgSqlTranslator {
     }
 
     /// Transforms a table factor (table reference).
-    const fn transform_table_factor(
-        _factor: &mut TableFactor,
-        _context: &mut PlPgSqlContext,
-        _options: &Pg2SqliteOptions,
+    fn transform_table_factor(
+        factor: &mut TableFactor,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
     ) {
-        // Currently no transformation needed for table factors
-        // This could be extended to rename tables if needed
+        if let TableFactor::Derived { subquery, .. } = factor
+            && let Ok(transformed) = Self::transform_query_body(&subquery.body, context, options)
+        {
+            *subquery.body = transformed;
+        }
     }
 
     /// Transforms an optional selection (WHERE clause).
@@ -810,6 +845,7 @@ impl PlPgSqlTranslator {
 
     /// Transforms an expression, handling NEW/OLD references and UUID
     /// functions.
+    #[allow(clippy::too_many_lines)]
     fn transform_expr(expr: &mut Expr, context: &mut PlPgSqlContext, options: &Pg2SqliteOptions) {
         match expr {
             Expr::CompoundIdentifier(parts) => {
@@ -835,8 +871,25 @@ impl PlPgSqlTranslator {
                     let new_name = options.get_uuid_function_name();
                     func.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(new_name))]);
                 }
+                // Recurse into function arguments
+                if let FunctionArguments::List(list) = &mut func.args {
+                    for arg in &mut list.args {
+                        match arg {
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+                            | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
+                            | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => {
+                                Self::transform_expr(e, context, options);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
-            Expr::BinaryOp { left, right, .. } => {
+            Expr::BinaryOp { left, right, .. }
+            | Expr::AnyOp { left, right, .. }
+            | Expr::AllOp { left, right, .. }
+            | Expr::IsDistinctFrom(left, right)
+            | Expr::IsNotDistinctFrom(left, right) => {
                 Self::transform_expr(left, context, options);
                 Self::transform_expr(right, context, options);
             }
@@ -862,13 +915,6 @@ impl PlPgSqlTranslator {
                     *subquery.body = transformed;
                 }
             }
-            Expr::Subquery(subquery) => {
-                if let Ok(transformed) =
-                    Self::transform_query_body(&subquery.body, context, options)
-                {
-                    *subquery.body = transformed;
-                }
-            }
             Expr::Case { operand, conditions, else_result, .. } => {
                 if let Some(op) = operand {
                     Self::transform_expr(op, context, options);
@@ -885,6 +931,66 @@ impl PlPgSqlTranslator {
                 Self::transform_expr(inner, context, options);
                 Self::transform_expr(low, context, options);
                 Self::transform_expr(high, context, options);
+            }
+            Expr::Subquery(subquery) | Expr::Exists { subquery, .. } => {
+                if let Ok(transformed) =
+                    Self::transform_query_body(&subquery.body, context, options)
+                {
+                    *subquery.body = transformed;
+                }
+            }
+            Expr::Like { expr, pattern, .. }
+            | Expr::ILike { expr, pattern, .. }
+            | Expr::SimilarTo { expr, pattern, .. } => {
+                Self::transform_expr(expr, context, options);
+                Self::transform_expr(pattern, context, options);
+            }
+            Expr::Extract { expr, .. } => {
+                Self::transform_expr(expr, context, options);
+            }
+            Expr::Trim { expr, trim_what, trim_characters, .. } => {
+                Self::transform_expr(expr, context, options);
+                if let Some(tw) = trim_what {
+                    Self::transform_expr(tw, context, options);
+                }
+                if let Some(chars) = trim_characters {
+                    for c in chars {
+                        Self::transform_expr(c, context, options);
+                    }
+                }
+            }
+            Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
+                Self::transform_expr(expr, context, options);
+                Self::transform_expr(overlay_what, context, options);
+                Self::transform_expr(overlay_from, context, options);
+                if let Some(overlay_for) = overlay_for {
+                    Self::transform_expr(overlay_for, context, options);
+                }
+            }
+            Expr::Substring { expr, substring_from, substring_for, .. } => {
+                Self::transform_expr(expr, context, options);
+                if let Some(from) = substring_from {
+                    Self::transform_expr(from, context, options);
+                }
+                if let Some(for_expr) = substring_for {
+                    Self::transform_expr(for_expr, context, options);
+                }
+            }
+            Expr::AtTimeZone { timestamp, .. } => {
+                Self::transform_expr(timestamp, context, options);
+            }
+            Expr::Tuple(items) => {
+                for item in items {
+                    Self::transform_expr(item, context, options);
+                }
+            }
+            Expr::Array(arr) => {
+                for elem in &mut arr.elem {
+                    Self::transform_expr(elem, context, options);
+                }
+            }
+            Expr::CompoundFieldAccess { root, .. } => {
+                Self::transform_expr(root, context, options);
             }
             _ => {}
         }
@@ -1004,6 +1110,8 @@ impl PlPgSqlTranslator {
             let translated_expr = Self::translate_uuid_function(&binding.expression, options);
             // Parse the expression
             let expr = Self::parse_expression(&translated_expr)?;
+            // Translate PG-specific constructs in the CTE expression
+            let expr = expr.translate(schema, options).unwrap_or(expr);
             let cte = CteBuilder::create_variable_cte(binding, expr);
             ctes.push(cte);
         }
