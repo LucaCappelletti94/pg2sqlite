@@ -10,7 +10,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{
     CreatePolicyCommand, CreateTable, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, Ident, JoinConstraint, JoinOperator, ObjectName,
-    Statement, TableFactor, Value,
+    Statement, TableFactor, Value, WindowType,
 };
 
 use crate::{
@@ -454,10 +454,8 @@ fn collect_patterns_from_compound_access(
 /// Collect all session variable patterns used by an expression tree.
 fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVariablePattern>) {
     match expr {
-        Expr::Identifier(ident) => {
-            if ident.value.eq_ignore_ascii_case("current_user") {
-                push_pattern_unique(patterns, SessionVariablePattern::CurrentUser);
-            }
+        Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("current_user") => {
+            push_pattern_unique(patterns, SessionVariablePattern::CurrentUser);
         }
         Expr::Function(func) => collect_patterns_from_function(func, patterns),
         Expr::Subquery(query) => collect_patterns_from_query(query, patterns),
@@ -697,15 +695,50 @@ fn transform_expr_generic<O: TranslationOptions, DB: DatabaseLike>(
 where
     DB::Table: TableLike<DB = DB>,
 {
+    let transform_function_arg_expr = |arg: &FunctionArgExpr| -> FunctionArgExpr {
+        match arg {
+            FunctionArgExpr::Expr(expr) => {
+                FunctionArgExpr::Expr(transform_expr_generic(expr, options, table, schema, strategy))
+            }
+            FunctionArgExpr::QualifiedWildcard(name) => {
+                FunctionArgExpr::QualifiedWildcard(name.clone())
+            }
+            FunctionArgExpr::Wildcard => FunctionArgExpr::Wildcard,
+        }
+    };
+
+    let transform_function_arg = |arg: &FunctionArg| -> FunctionArg {
+        match arg {
+            FunctionArg::Named { name, arg, operator } => FunctionArg::Named {
+                name: name.clone(),
+                arg: transform_function_arg_expr(arg),
+                operator: operator.clone(),
+            },
+            FunctionArg::ExprNamed { name, arg, operator } => FunctionArg::ExprNamed {
+                name: name.clone(),
+                arg: transform_function_arg_expr(arg),
+                operator: operator.clone(),
+            },
+            FunctionArg::Unnamed(arg) => FunctionArg::Unnamed(transform_function_arg_expr(arg)),
+        }
+    };
+
     match expr {
         // Handle current_setting('name')::type -> sqlite_func()
-        Expr::Cast { expr: inner, .. } => {
+        Expr::Cast { expr: inner, data_type, format, kind, array } => {
             if let Expr::Function(func) = inner.as_ref()
                 && let Some(transformed) = try_transform_session_function(func, options)
             {
                 return transformed;
             }
-            transform_expr_generic(inner, options, table, schema, strategy)
+
+            Expr::Cast {
+                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
+                data_type: data_type.clone(),
+                format: format.clone(),
+                kind: kind.clone(),
+                array: *array,
+            }
         }
 
         // Handle current_setting('name') without cast, and current_user as a function
@@ -722,7 +755,84 @@ where
                 return make_function_call(sqlite_func);
             }
 
-            Expr::Function(func.clone())
+            let transformed_args = match &func.args {
+                FunctionArguments::List(arg_list) => {
+                    FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: arg_list.duplicate_treatment,
+                        args: arg_list.args.iter().map(transform_function_arg).collect(),
+                        clauses: arg_list.clauses.clone(),
+                    })
+                }
+                FunctionArguments::Subquery(query) => {
+                    FunctionArguments::Subquery(Box::new(transform_query(
+                        query,
+                        options,
+                        table,
+                        schema,
+                        strategy.subquery_prefix(),
+                        strategy.table_rename(),
+                    )))
+                }
+                FunctionArguments::None => FunctionArguments::None,
+            };
+
+            let transformed_filter = func.filter.as_ref().map(|expr| {
+                Box::new(transform_expr_generic(expr, options, table, schema, strategy))
+            });
+
+            let transformed_over = func.over.as_ref().map(|window| match window {
+                WindowType::WindowSpec(window_spec) => WindowType::WindowSpec(
+                    sqlparser::ast::WindowSpec {
+                        window_name: window_spec.window_name.clone(),
+                        partition_by: window_spec
+                            .partition_by
+                            .iter()
+                            .map(|expr| {
+                                transform_expr_generic(expr, options, table, schema, strategy)
+                            })
+                            .collect(),
+                        order_by: window_spec
+                            .order_by
+                            .iter()
+                            .map(|order_by_expr| {
+                                let mut transformed = order_by_expr.clone();
+                                transformed.expr = transform_expr_generic(
+                                    &order_by_expr.expr,
+                                    options,
+                                    table,
+                                    schema,
+                                    strategy,
+                                );
+                                transformed
+                            })
+                            .collect(),
+                        window_frame: window_spec.window_frame.clone(),
+                    },
+                ),
+                WindowType::NamedWindow(named_window) => WindowType::NamedWindow(named_window.clone()),
+            });
+
+            let transformed_within_group = func
+                .within_group
+                .iter()
+                .map(|order_by_expr| {
+                    let mut transformed = order_by_expr.clone();
+                    transformed.expr =
+                        transform_expr_generic(&order_by_expr.expr, options, table, schema, strategy);
+                    transformed
+                })
+                .collect();
+
+            Expr::Function(Function {
+                name: func.name.clone(),
+                uses_odbc_syntax: func.uses_odbc_syntax,
+                parameters: func.parameters.clone(),
+                args: transformed_args,
+                filter: transformed_filter,
+                null_treatment: func.null_treatment,
+                over: transformed_over,
+                within_group: transformed_within_group,
+            })
         }
 
         // Handle bare column identifiers
@@ -1566,7 +1676,7 @@ where
     } else {
         let check = check_conditions.join(" OR ");
         format!(
-            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({check});\n    UPDATE {inner_table_name} SET {set_clause} WHERE {full_where};\nEND"
+            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({check});\n    UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {full_where};\nEND"
         )
     };
 
