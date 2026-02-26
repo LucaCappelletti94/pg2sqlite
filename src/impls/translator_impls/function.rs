@@ -10,7 +10,7 @@ use sqlparser::ast::{
 
 use super::helpers::translate_window_type;
 use crate::{
-    impls::shared_helpers::function_argument_exprs,
+    impls::shared_helpers::{function_argument_exprs, translate_function_argument_clauses},
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
 };
@@ -291,15 +291,17 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
 ///
 /// This ensures that PostgreSQL-specific constructs nested inside function
 /// arguments (e.g., `NOW()` inside `string_agg`) are properly translated.
-/// `FunctionArguments::Subquery` is passed through as-is to avoid pulling in
-/// the heavier query-translation logic here.
 fn translate_function_args(
     args: &FunctionArguments,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<FunctionArguments, crate::errors::Error> {
+    use super::helpers::Forward;
     match args {
-        FunctionArguments::None | FunctionArguments::Subquery(_) => Ok(args.clone()),
+        FunctionArguments::None => Ok(FunctionArguments::None),
+        FunctionArguments::Subquery(query) => {
+            Ok(FunctionArguments::Subquery(Box::new(query.translate(schema, options)?)))
+        }
         FunctionArguments::List(list) => {
             let translated = list
                 .args
@@ -309,7 +311,11 @@ fn translate_function_args(
             Ok(FunctionArguments::List(FunctionArgumentList {
                 duplicate_treatment: list.duplicate_treatment,
                 args: translated,
-                clauses: list.clauses.clone(),
+                clauses: translate_function_argument_clauses::<Forward>(
+                    &list.clauses,
+                    schema,
+                    options,
+                )?,
             }))
         }
     }
@@ -521,9 +527,11 @@ impl Translator for Function {
         match translate_function(&func.name, &func.args, options) {
             FunctionTranslation::Rename(new_name) => {
                 let translated_args = translate_function_args(&func.args, schema, options)?;
+                let translated_params = translate_function_args(&func.parameters, schema, options)?;
                 let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
                 Ok(Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new(new_name)]),
+                    parameters: translated_params,
                     args: translated_args,
                     over: translated_over,
                     filter: None,
@@ -790,8 +798,10 @@ impl Translator for Function {
             }
             FunctionTranslation::PassThrough => {
                 let translated_args = translate_function_args(&func.args, schema, options)?;
+                let translated_params = translate_function_args(&func.parameters, schema, options)?;
                 let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
                 Ok(Expr::Function(Function {
+                    parameters: translated_params,
                     args: translated_args,
                     over: translated_over,
                     ..func

@@ -4,13 +4,14 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FunctionArg,
-    FunctionArgExpr, FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator,
-    LimitClause, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart,
-    OrderBy, OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting,
-    Statement, SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
-    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, Values, WindowSpec, With,
-    WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
-    XmlTableColumnOption,
+    FunctionArgExpr, FunctionArgumentClause, FunctionArguments, GroupByExpr, HavingBound, Join,
+    JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow, Measure,
+    NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr,
+    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting, Statement,
+    SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
+    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, Values, WindowFrame,
+    WindowFrameBound, WindowSpec, With, WithFill, XmlNamespaceDefinition, XmlPassingArgument,
+    XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
 };
 
 use crate::{errors::Error, prelude::Pg2SqliteOptions};
@@ -673,7 +674,107 @@ pub(crate) fn translate_window_spec<D: TranslationDirection>(
             .iter()
             .map(|e| translate_order_by_expr::<D>(e, schema, options))
             .collect::<Result<Vec<_>, _>>()?,
-        window_frame: spec.window_frame.clone(),
+        window_frame: spec
+            .window_frame
+            .as_ref()
+            .map(|frame| translate_window_frame::<D>(frame, schema, options))
+            .transpose()?,
+    })
+}
+
+fn translate_window_frame_bound<D: TranslationDirection>(
+    bound: &WindowFrameBound,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<WindowFrameBound, Error> {
+    Ok(match bound {
+        WindowFrameBound::Preceding(Some(e)) => {
+            WindowFrameBound::Preceding(Some(Box::new(D::translate_expr(e, schema, options)?)))
+        }
+        WindowFrameBound::Following(Some(e)) => {
+            WindowFrameBound::Following(Some(Box::new(D::translate_expr(e, schema, options)?)))
+        }
+        other => other.clone(),
+    })
+}
+
+fn translate_window_frame<D: TranslationDirection>(
+    frame: &WindowFrame,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<WindowFrame, Error> {
+    Ok(WindowFrame {
+        units: frame.units,
+        start_bound: translate_window_frame_bound::<D>(&frame.start_bound, schema, options)?,
+        end_bound: frame
+            .end_bound
+            .as_ref()
+            .map(|b| translate_window_frame_bound::<D>(b, schema, options))
+            .transpose()?,
+    })
+}
+
+/// Translate all [`FunctionArgumentClause`] items, recursively translating
+/// any [`Expr`] payloads they contain.
+pub(crate) fn translate_function_argument_clauses<D: TranslationDirection>(
+    clauses: &[FunctionArgumentClause],
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<FunctionArgumentClause>, Error> {
+    clauses
+        .iter()
+        .map(|clause| translate_function_argument_clause::<D>(clause, schema, options))
+        .collect()
+}
+
+fn translate_function_argument_clause<D: TranslationDirection>(
+    clause: &FunctionArgumentClause,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<FunctionArgumentClause, Error> {
+    Ok(match clause {
+        FunctionArgumentClause::OrderBy(order_by_exprs) => {
+            FunctionArgumentClause::OrderBy(
+                order_by_exprs
+                    .iter()
+                    .map(|e| translate_order_by_expr::<D>(e, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        FunctionArgumentClause::Limit(e) => {
+            FunctionArgumentClause::Limit(D::translate_expr(e, schema, options)?)
+        }
+        FunctionArgumentClause::Having(HavingBound(kind, e)) => {
+            FunctionArgumentClause::Having(HavingBound(
+                *kind,
+                D::translate_expr(e, schema, options)?,
+            ))
+        }
+        FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate { filler, with_count }) => {
+            FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate {
+                filler: filler
+                    .as_ref()
+                    .map(|e| D::translate_expr(e, schema, options).map(Box::new))
+                    .transpose()?,
+                with_count: *with_count,
+            })
+        }
+        other => other.clone(),
+    })
+}
+
+/// Translate a [`LateralView`], recursively translating its `lateral_view`
+/// expression.
+pub(crate) fn translate_lateral_view<D: TranslationDirection>(
+    lv: &LateralView,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<LateralView, Error> {
+    Ok(LateralView {
+        lateral_view: D::translate_expr(&lv.lateral_view, schema, options)?,
+        lateral_view_name: lv.lateral_view_name.clone(),
+        lateral_col_alias: lv.lateral_col_alias.clone(),
+        outer: lv.outer,
     })
 }
 

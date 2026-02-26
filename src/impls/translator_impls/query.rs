@@ -11,14 +11,17 @@ use sqlparser::ast::{
 };
 
 use super::helpers::{
-    translate_connect_by_kinds, translate_fetch_clause, translate_group_by_expr,
+    Forward, translate_connect_by_kinds, translate_fetch_clause, translate_group_by_expr,
     translate_limit_clause as translate_limit_clause_shared,
     translate_named_windows as translate_named_window_shared, translate_order_by_clause,
     translate_order_by_expr, translate_pipe_operators, translate_query_settings,
     translate_select_item, translate_table_with_joins, translate_values_rows,
     translate_with_clause,
 };
-use crate::prelude::{Pg2SqliteOptions, Translator};
+use crate::{
+    impls::shared_helpers::translate_lateral_view,
+    prelude::{Pg2SqliteOptions, Translator},
+};
 
 const DISTINCT_ON_DERIVED_ALIAS: &str = "__pg2sqlite_distinct_on";
 const DISTINCT_ON_ROWNUM_ALIAS: &str = "__pg2sqlite_rn";
@@ -755,7 +758,11 @@ impl Translator for Select {
             projection,
             into: self.into.clone(),
             from,
-            lateral_views: self.lateral_views.clone(),
+            lateral_views: self
+                .lateral_views
+                .iter()
+                .map(|lv| translate_lateral_view::<Forward>(lv, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
             prewhere,
             selection,
             group_by: translate_group_by(&self.group_by, schema, options)?,

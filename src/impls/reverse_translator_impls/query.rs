@@ -5,7 +5,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Distinct, NamedWindowDefinition, Query, Select, SetExpr, Values};
 
 use super::helpers::{
-    reverse_translate_connect_by_kinds, reverse_translate_fetch_clause,
+    Reverse, reverse_translate_connect_by_kinds, reverse_translate_fetch_clause,
     reverse_translate_group_by_expr,
     reverse_translate_limit_clause as reverse_translate_limit_clause_shared,
     reverse_translate_named_windows, reverse_translate_order_by_clause,
@@ -16,6 +16,7 @@ use super::helpers::{
 };
 use crate::{
     errors::Error,
+    impls::shared_helpers::translate_lateral_view,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -159,7 +160,11 @@ impl ReverseTranslator for Select {
             projection,
             into: self.into.clone(),
             from,
-            lateral_views: self.lateral_views.clone(),
+            lateral_views: self
+                .lateral_views
+                .iter()
+                .map(|lv| translate_lateral_view::<Reverse>(lv, schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
             prewhere,
             selection,
             group_by,

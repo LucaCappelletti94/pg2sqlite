@@ -11,8 +11,12 @@ use sqlparser::ast::{
     Value, ValueWithSpan,
 };
 
-use super::helpers::reverse_translate_window_type;
-use crate::{errors::Error, prelude::Pg2SqliteOptions};
+use super::helpers::{Reverse, reverse_translate_window_type};
+use crate::{
+    errors::Error,
+    impls::shared_helpers::{translate_function_argument_clauses, translate_order_by_expr},
+    prelude::Pg2SqliteOptions,
+};
 
 /// Represents a function reversal result.
 pub enum FunctionReversal {
@@ -396,12 +400,16 @@ pub fn reverse_translate_function(
             Ok(Expr::Function(Function {
                 name: ObjectName::from(vec![Ident::new("chr")]),
                 uses_odbc_syntax: func.uses_odbc_syntax,
-                parameters: func.parameters.clone(),
+                parameters: reverse_translate_function_args(&func.parameters, schema, options)?,
                 args: reverse_translate_function_args(&func.args, schema, options)?,
                 filter: None,
                 null_treatment: func.null_treatment,
                 over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
-                within_group: func.within_group.clone(),
+                within_group: func
+                    .within_group
+                    .iter()
+                    .map(|e| translate_order_by_expr::<Reverse>(e, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
             }))
         }
         FunctionReversal::ToTrimDirectional(field) => {
@@ -428,7 +436,7 @@ pub fn reverse_translate_function(
             Ok(Expr::Function(Function {
                 name: func.name.clone(),
                 uses_odbc_syntax: func.uses_odbc_syntax,
-                parameters: func.parameters.clone(),
+                parameters: reverse_translate_function_args(&func.parameters, schema, options)?,
                 args: reverse_translate_function_args(&func.args, schema, options)?,
                 filter: func
                     .filter
@@ -444,7 +452,11 @@ pub fn reverse_translate_function(
                     .map(Box::new),
                 null_treatment: func.null_treatment,
                 over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
-                within_group: func.within_group.clone(),
+                within_group: func
+                    .within_group
+                    .iter()
+                    .map(|e| translate_order_by_expr::<Reverse>(e, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
             }))
         }
     }
@@ -480,7 +492,11 @@ fn reverse_translate_function_args(
             Ok(FunctionArguments::List(FunctionArgumentList {
                 duplicate_treatment: list.duplicate_treatment,
                 args: translated_args,
-                clauses: list.clauses.clone(),
+                clauses: translate_function_argument_clauses::<Reverse>(
+                    &list.clauses,
+                    schema,
+                    options,
+                )?,
             }))
         }
         FunctionArguments::Subquery(query) => {
