@@ -9,26 +9,18 @@
 //! - Filtered/skipped statements: ALTER TABLE, CREATE FUNCTION, GRANT, etc.
 //! - DROP of unsupported object type -> empty
 
+mod helpers;
+
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 /// Helper: translate SQL and return the output or error string.
 fn translate(sql: &str) -> Result<String, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-        .map_err(|e| e.to_string())
+    helpers::translate_sql(sql, &Pg2SqliteOptions::default())
 }
 
 /// Helper: translate SQL and return the count of resulting statements.
 fn translate_count(sql: &str) -> Result<usize, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(|stmts| stmts.len())
-        .map_err(|e| e.to_string())
+    helpers::translate_count(sql, &Pg2SqliteOptions::default())
 }
 
 // ==================== Passthrough statements ====================

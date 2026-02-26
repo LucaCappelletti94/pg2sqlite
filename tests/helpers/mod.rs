@@ -5,7 +5,9 @@
 use std::cell::RefCell;
 
 use diesel::{prelude::*, sqlite::SqliteConnection};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rosetta_uuid::Uuid;
+use sqlparser::ast::Statement;
 
 #[declare_sql_function]
 extern "SQL" {
@@ -315,4 +317,30 @@ pub fn count_users(conn: &mut SqliteConnection) -> QueryResult<i64> {
 #[allow(dead_code)]
 pub fn count_posts(conn: &mut SqliteConnection) -> QueryResult<i64> {
     posts::table.count().get_result(conn)
+}
+
+/// Translates PostgreSQL SQL text into SQLite AST statements.
+#[allow(dead_code)]
+pub fn translate_statements(
+    sql: &str,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<Statement>, String> {
+    Pg2Sqlite::default()
+        .sql(sql)
+        .map_err(|err| err.to_string())?
+        .translate(options)
+        .map_err(|err| err.to_string())
+}
+
+/// Translates PostgreSQL SQL text and returns rendered SQLite SQL.
+#[allow(dead_code)]
+pub fn translate_sql(sql: &str, options: &Pg2SqliteOptions) -> Result<String, String> {
+    translate_statements(sql, options)
+        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
+}
+
+/// Translates PostgreSQL SQL text and returns output statement count.
+#[allow(dead_code)]
+pub fn translate_count(sql: &str, options: &Pg2SqliteOptions) -> Result<usize, String> {
+    translate_statements(sql, options).map(|stmts| stmts.len())
 }
