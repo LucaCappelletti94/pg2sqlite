@@ -282,7 +282,13 @@ pub(crate) fn translate_order_by_expr<D: TranslationDirection>(
 ) -> Result<OrderByExpr, Error> {
     Ok(OrderByExpr {
         expr: D::translate_expr(&order_by_expr.expr, schema, options)?,
-        options: order_by_expr.options,
+        options: sqlparser::ast::OrderByOptions {
+            asc: order_by_expr.options.asc,
+            // Strip NULLS FIRST/LAST in forward direction: SQLite < 3.30 rejects
+            // this syntax and the semantics differ from PostgreSQL defaults anyway.
+            // Preserve it in reverse translation to maintain PostgreSQL round-trip.
+            nulls_first: if D::IS_FORWARD { None } else { order_by_expr.options.nulls_first },
+        },
         with_fill: order_by_expr
             .with_fill
             .as_ref()

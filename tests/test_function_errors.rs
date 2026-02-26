@@ -87,24 +87,27 @@ fn test_generated_by_default_as_identity_causes_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn bool_and_translates_to_min() {
-    let out = translate_ok(&format!("{SIMPLE_TABLE} SELECT bool_and(flag) FROM t;"));
-    assert!(out.to_uppercase().contains("MIN("), "bool_and should become MIN: {out}");
-    assert!(!out.to_lowercase().contains("bool_and"), "Should not contain bool_and: {out}");
+fn bool_and_causes_error() {
+    // bool_and has NULL semantics incompatible with MIN — must error, not silently map.
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bool_and(flag) FROM t;"));
+    assert!(err.to_lowercase().contains("bool_and"), "Error must mention bool_and: {err}");
 }
 
 #[test]
-fn bool_or_translates_to_max() {
-    let out = translate_ok(&format!("{SIMPLE_TABLE} SELECT bool_or(flag) FROM t;"));
-    assert!(out.to_uppercase().contains("MAX("), "bool_or should become MAX: {out}");
-    assert!(!out.to_lowercase().contains("bool_or"), "Should not contain bool_or: {out}");
+fn bool_or_causes_error() {
+    // bool_or has NULL semantics incompatible with MAX — must error, not silently map.
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bool_or(flag) FROM t;"));
+    assert!(err.to_lowercase().contains("bool_or"), "Error must mention bool_or: {err}");
 }
 
 #[test]
-fn every_translates_to_min() {
-    let out = translate_ok(&format!("{SIMPLE_TABLE} SELECT every(flag) FROM t;"));
-    assert!(out.to_uppercase().contains("MIN("), "every should become MIN: {out}");
-    assert!(!out.to_lowercase().contains("every"), "Should not contain every: {out}");
+fn every_causes_error() {
+    // every is an alias for bool_and in PostgreSQL — must error, not silently map to MIN.
+    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT every(flag) FROM t;"));
+    assert!(
+        err.to_lowercase().contains("every") || err.to_lowercase().contains("bool"),
+        "Error must mention every or bool: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------

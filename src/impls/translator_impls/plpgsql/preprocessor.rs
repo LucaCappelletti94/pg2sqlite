@@ -170,7 +170,7 @@ impl PlPgSqlPreprocessor {
                 (9usize, true)
             } else if rest_upper.starts_with("NOTICE")
                 || rest_upper.starts_with("WARNING")
-                || rest_upper.starts_with("INFO   ")
+                || rest_upper.starts_with("INFO ")
                 || rest_upper.starts_with("INFO\n")
                 || rest_upper.starts_with("INFO;")
                 || rest_upper.starts_with("DEBUG")

@@ -107,9 +107,10 @@ struct Product {
     price: Option<f64>,
 }
 
-/// Test that basic INTERVAL expressions are translated without crashing.
+/// INTERVAL expressions are not valid SQLite syntax; the translator must reject them.
+/// SQLite uses date modifier strings like date('now', '-7 days') instead.
 #[test]
-fn test_interval_translation_basic() -> Result<(), Box<dyn std::error::Error>> {
+fn test_interval_translation_basic_errors() {
     let sql = "
         CREATE TABLE events (
             id INTEGER PRIMARY KEY,
@@ -118,23 +119,18 @@ fn test_interval_translation_basic() -> Result<(), Box<dyn std::error::Error>> {
         SELECT * FROM events WHERE event_time > INTERVAL '1 day';
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(select_stmt.contains("INTERVAL"), "Should contain INTERVAL clause, got: {select_stmt}");
-
-    Ok(())
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    assert!(result.is_err(), "INTERVAL expression must cause a translation error");
+    let err = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err.contains("interval"),
+        "Error must mention INTERVAL, got: {err}"
+    );
 }
 
-/// Test that INTERVAL with time unit is translated without crashing.
+/// INTERVAL with time unit must also be rejected.
 #[test]
-fn test_interval_with_time_unit() -> Result<(), Box<dyn std::error::Error>> {
+fn test_interval_with_time_unit_errors() {
     let sql = "
         CREATE TABLE logs (
             id INTEGER PRIMARY KEY,
@@ -143,18 +139,8 @@ fn test_interval_with_time_unit() -> Result<(), Box<dyn std::error::Error>> {
         SELECT * FROM logs WHERE created_at > INTERVAL '2 hours';
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(select_stmt.contains("INTERVAL"), "Should contain INTERVAL clause, got: {select_stmt}");
-
-    Ok(())
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    assert!(result.is_err(), "INTERVAL expression must cause a translation error");
 }
 
 /// Test that INTERVAL in date arithmetic expressions is translated without

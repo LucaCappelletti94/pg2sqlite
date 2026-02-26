@@ -235,18 +235,32 @@ fn translate_extract(
         DateTimeField::Day | DateTimeField::Days => ("%d", DataType::Integer(None)),
         DateTimeField::Hour | DateTimeField::Hours => ("%H", DataType::Integer(None)),
         DateTimeField::Minute | DateTimeField::Minutes => ("%M", DataType::Integer(None)),
-        // %f returns "SS.SSS" preserving fractional seconds
+        // %f returns "SS.SSS" (millisecond precision); PostgreSQL has microsecond precision.
         DateTimeField::Second | DateTimeField::Seconds => ("%f", DataType::Real),
-        DateTimeField::Week(_) | DateTimeField::Weeks => ("%W", DataType::Integer(None)),
         DateTimeField::DayOfWeek => ("%w", DataType::Integer(None)),
         DateTimeField::DayOfYear => ("%j", DataType::Integer(None)),
         // EPOCH: strftime('%s') gives integer seconds since Unix epoch.
         // Cast to REAL for consistency with PostgreSQL's float return type.
         DateTimeField::Epoch => ("%s", DataType::Real),
+        // WEEK uses ISO 8601 week numbering in PostgreSQL (Monday-based, week 1
+        // contains the first Thursday). SQLite's strftime('%W') uses Sunday-based
+        // week numbers and disagrees near year boundaries. No single strftime
+        // format produces ISO week numbers; emit a clear error instead.
+        DateTimeField::Week(_) | DateTimeField::Weeks => {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                "EXTRACT(WEEK) is not supported in SQLite. PostgreSQL uses ISO 8601 \
+                 week numbers (Monday-based) while SQLite's strftime('%W') uses \
+                 Sunday-based week numbers — they diverge near year boundaries. \
+                 To compute ISO week number manually: \
+                 CAST((CAST(strftime('%j', date(ts, 'weekday 1', '-6 days')) AS INTEGER) \
+                 - 1) / 7 + 1 AS INTEGER)"
+                    .to_string(),
+            ));
+        }
         other => {
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                 "EXTRACT({other}) is not supported in SQLite. Supported fields: \
-                 YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, WEEK, DOW, DOY, EPOCH."
+                 YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH."
             )));
         }
     };
@@ -1466,22 +1480,43 @@ impl Translator for Expr {
             }
             // Prefixed string (e.g., N'value', X'value') - translate the inner value
             Expr::Prefixed { value, .. } => value.translate(schema, options)?,
-            // COLLATE expression - pass through with translated expression
+            // COLLATE expression - validate that the collation is a SQLite built-in.
+            // SQLite only supports BINARY (default), NOCASE, and RTRIM.
+            // PostgreSQL collation names (e.g. "en_US", "C", "pg_catalog.default") are invalid
+            // in SQLite and will cause a runtime error if passed through.
             Expr::Collate { expr, collation } => {
+                let collation_name = collation
+                    .0
+                    .last()
+                    .and_then(|p| p.as_ident())
+                    .map(|i| i.value.to_ascii_uppercase())
+                    .unwrap_or_default();
+                if !matches!(collation_name.as_str(), "BINARY" | "NOCASE" | "RTRIM") {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "COLLATE {collation_name} is not a valid SQLite collation. \
+                         SQLite only supports BINARY (default), NOCASE, and RTRIM. \
+                         PostgreSQL collation names must be dropped or replaced before \
+                         translation."
+                    )));
+                }
                 Expr::Collate {
                     expr: Box::new(expr.translate(schema, options)?),
                     collation: collation.clone(),
                 }
             }
-            // Interval expression - translate value, keep fields as-is
+            // Interval expressions (e.g. INTERVAL '7 days') are not valid SQLite syntax.
+            // SQLite uses date modifier strings like date('now', '-7 days') instead.
+            // Passing INTERVAL through would produce SQL that errors at runtime in SQLite.
             Expr::Interval(interval) => {
-                Expr::Interval(sqlparser::ast::Interval {
-                    value: Box::new(interval.value.translate(schema, options)?),
-                    leading_field: interval.leading_field.clone(),
-                    leading_precision: interval.leading_precision,
-                    last_field: interval.last_field.clone(),
-                    fractional_seconds_precision: interval.fractional_seconds_precision,
-                })
+                let field_str = interval
+                    .leading_field
+                    .as_ref()
+                    .map_or(String::new(), |f| format!(" {f}"));
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "INTERVAL{field_str} expressions are not supported in SQLite. \
+                     Use SQLite date modifiers instead: \
+                     date('now', '-7 days'), datetime('now', '+1 hour'), etc."
+                )));
             }
             // Qualified wildcard (e.g., table.*) - pass through as-is
             Expr::QualifiedWildcard(name, token) => {
@@ -1768,14 +1803,19 @@ mod tests {
         let schema = empty_schema();
         let options = Pg2SqliteOptions::default();
 
-        let extracted_week = translate_extract(
+        // EXTRACT(WEEK) now correctly errors: SQLite's %W is Sunday-based while
+        // PostgreSQL uses ISO 8601 Monday-based week numbers.
+        let week_err = translate_extract(
             &DateTimeField::Week(None),
             &parse_expr("created_at"),
             &schema,
             &options,
         )
-        .expect("week extract should translate");
-        assert!(extracted_week.to_string().contains("strftime('%W'"));
+        .expect_err("week extract must now return an error (ISO vs Sunday-based mismatch)");
+        assert!(
+            week_err.to_string().to_lowercase().contains("week"),
+            "Error must mention WEEK: {week_err}"
+        );
 
         let extracted_day_of_year = translate_extract(
             &DateTimeField::DayOfYear,

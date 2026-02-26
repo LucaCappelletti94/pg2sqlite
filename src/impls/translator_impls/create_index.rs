@@ -250,6 +250,21 @@ fn create_fts5_statements(
     }
     let pk_column = pk_columns[0].column_name();
 
+    // FTS5 external content mode uses `content_rowid=` to look up rows by SQLite
+    // rowid. The rowid must be a 64-bit integer alias, so the PK column must be
+    // an integer type. A TEXT or UUID primary key cannot serve as a rowid and
+    // would cause FTS5 reads to silently return empty or wrong results.
+    let pk_type_str = pk_columns[0].attribute().data_type.to_string().to_uppercase();
+    let is_integer_pk = pk_type_str.contains("INT") || pk_type_str.contains("SERIAL");
+    if !is_integer_pk {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "FTS5 external content mode requires an INTEGER primary key column for \
+             content_rowid= (table '{base_name}', column '{pk_column}', type '{pk_type_str}'). \
+             FTS5 uses the rowid — a 64-bit integer — to look up rows in the content table. \
+             Use an INTEGER or BIGINT primary key, or add a surrogate INTEGER rowid column."
+        )));
+    }
+
     // Determine the correct table for trigger attachment (accounts for RLS).
     // In external content mode the content table is the same as the trigger
     // table (i.e. the RLS backing table when applicable).

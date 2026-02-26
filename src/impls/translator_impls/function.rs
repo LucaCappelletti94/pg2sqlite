@@ -4,8 +4,7 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
-    ValueWithSpan,
+    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
 };
 
 use super::helpers::translate_window_type;
@@ -52,8 +51,23 @@ fn translate_function(
 
     match original_name.as_str() {
         // MIN/MAX mappings
-        "least" | "bool_and" | "every" => FunctionTranslation::Rename("MIN".to_string()),
-        "greatest" | "bool_or" => FunctionTranslation::Rename("MAX".to_string()),
+        "least" => FunctionTranslation::Rename("MIN".to_string()),
+        "greatest" => FunctionTranslation::Rename("MAX".to_string()),
+        // bool_and / bool_or / every: these aggregate boolean values with NULL semantics
+        // that differ from MIN/MAX (NULL inputs are ignored, not propagated). There is
+        // no correct SQLite equivalent. Callers can rewrite as:
+        //   bool_and(col)  →  MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1
+        //   bool_or(col)   →  MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1
+        "bool_and" | "every" => FunctionTranslation::Unsupported(
+            "bool_and/every is not supported in SQLite. \
+             Rewrite as: MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1"
+                .to_string(),
+        ),
+        "bool_or" => FunctionTranslation::Unsupported(
+            "bool_or is not supported in SQLite. \
+             Rewrite as: MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1"
+                .to_string(),
+        ),
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7" => {
             FunctionTranslation::Rename(options.get_uuid_function_name().to_string())
         }

@@ -29,8 +29,11 @@ impl Translator for DataType {
             | DataType::Bytea
             | DataType::Binary(_)
             | DataType::Varbinary(_) => Ok(DataType::Blob(None)),
-            DataType::SmallInt(None)
-            | DataType::Int(None)
+            // Integer types with optional display-width precision (e.g. INT(11) in MySQL).
+            // The precision is a display hint only; drop it and map to SQLite INTEGER.
+            DataType::SmallInt(_)
+            | DataType::Int(_)
+            | DataType::Integer(Some(_))
             | DataType::Boolean
             | DataType::Bool
             | DataType::BigInt(_)
@@ -97,7 +100,9 @@ impl Translator for DataType {
                     .map(|ident| ident.value.to_ascii_lowercase());
 
                 match custom_type_name.as_deref() {
-                    Some("serial" | "smallserial") => Ok(DataType::Integer(None)),
+                    Some("serial" | "smallserial" | "bigserial" | "largeserial") => {
+                        Ok(DataType::Integer(None))
+                    }
                     Some("geography") => {
                         // SQLite does not have postgis support, but we have implemented
                         // support in the `postgis-diesel` crate for the `geometry` and
