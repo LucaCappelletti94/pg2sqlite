@@ -714,6 +714,26 @@ impl PlPgSqlTranslator {
                 Self::transform_expr(&mut ob.expr, context, options);
             }
         }
+        // Transform LIMIT clause expressions
+        if let Some(sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by }) =
+            &mut query.limit_clause
+        {
+            if let Some(expr) = limit {
+                Self::transform_expr(expr, context, options);
+            }
+            if let Some(off) = offset {
+                Self::transform_expr(&mut off.value, context, options);
+            }
+            for expr in limit_by {
+                Self::transform_expr(expr, context, options);
+            }
+        }
+        // Transform FETCH clause
+        if let Some(fetch) = &mut query.fetch
+            && let Some(expr) = &mut fetch.quantity
+        {
+            Self::transform_expr(expr, context, options);
+        }
     }
 
     /// Transforms an INSERT statement for SQLite compatibility.
@@ -830,7 +850,12 @@ impl PlPgSqlTranslator {
                 | sqlparser::ast::JoinOperator::Inner(constraint)
                 | sqlparser::ast::JoinOperator::LeftOuter(constraint)
                 | sqlparser::ast::JoinOperator::RightOuter(constraint)
-                | sqlparser::ast::JoinOperator::FullOuter(constraint) => {
+                | sqlparser::ast::JoinOperator::FullOuter(constraint)
+                | sqlparser::ast::JoinOperator::LeftSemi(constraint)
+                | sqlparser::ast::JoinOperator::RightSemi(constraint)
+                | sqlparser::ast::JoinOperator::LeftAnti(constraint)
+                | sqlparser::ast::JoinOperator::RightAnti(constraint)
+                | sqlparser::ast::JoinOperator::AsOf { constraint, .. } => {
                     if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
                         Self::transform_expr(expr, context, options);
                     }
@@ -848,11 +873,7 @@ impl PlPgSqlTranslator {
     ) {
         match factor {
             TableFactor::Derived { subquery, .. } => {
-                if let Ok(transformed) =
-                    Self::transform_query_body(&subquery.body, context, options)
-                {
-                    *subquery.body = transformed;
-                }
+                Self::transform_cte_query(subquery, context, options);
             }
             TableFactor::NestedJoin { table_with_joins, .. } => {
                 Self::transform_table_with_joins(table_with_joins, context, options);
@@ -955,6 +976,12 @@ impl PlPgSqlTranslator {
             | Expr::Nested(inner)
             | Expr::IsNotNull(inner)
             | Expr::IsNull(inner)
+            | Expr::IsTrue(inner)
+            | Expr::IsNotTrue(inner)
+            | Expr::IsFalse(inner)
+            | Expr::IsNotFalse(inner)
+            | Expr::IsUnknown(inner)
+            | Expr::IsNotUnknown(inner)
             | Expr::Cast { expr: inner, .. } => {
                 Self::transform_expr(inner, context, options);
             }
@@ -2700,14 +2727,13 @@ mod tests {
             format_clause: None,
             pipe_operators: vec![],
         }));
-        let translated = PlPgSqlTranslator::translate_insert_statement(
+        let result = PlPgSqlTranslator::translate_insert_statement(
             &insert_table_source,
             &mut ctx,
             &schema,
             &options,
-        )
-        .expect("non-select/value source should use fallback translation");
-        assert!(!translated.is_empty());
+        );
+        assert!(result.is_err(), "TABLE expression in INSERT source should error");
     }
 
     #[test]

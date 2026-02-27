@@ -714,11 +714,12 @@ impl Translator for SetExpr {
                     self.clone()
                 }
             }
-            SetExpr::Insert(_)
-            | SetExpr::Table(_)
-            | SetExpr::Update(_)
-            | SetExpr::Delete(_)
-            | SetExpr::Merge(_) => self.clone(),
+            SetExpr::Table(_) | SetExpr::Merge(_) => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "TABLE and MERGE expressions are not supported in SQLite".to_string(),
+                ));
+            }
+            SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) => self.clone(),
         })
     }
 }
@@ -1288,7 +1289,7 @@ mod tests {
             table_name: Some("users".to_string()),
             schema_name: None,
         }));
-        assert!(matches!(set_table.translate(&schema, &options).unwrap(), SetExpr::Table(_)));
+        assert!(set_table.translate(&schema, &options).is_err());
 
         let _ = translate_distinct(Some(&Distinct::Distinct), &schema, &options).unwrap();
 
