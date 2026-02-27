@@ -283,11 +283,7 @@ fn role_access_for_object_name(
         return RoleTableAccess::Deny;
     };
 
-    if table.can_select(role, schema) {
-        RoleTableAccess::Allow
-    } else {
-        RoleTableAccess::Deny
-    }
+    if table.can_select(role, schema) { RoleTableAccess::Allow } else { RoleTableAccess::Deny }
 }
 
 impl Translator for Statement {

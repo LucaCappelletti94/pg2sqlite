@@ -175,5 +175,4 @@ pub trait TranslationOptions {
 
     /// Returns whether strict RLS validation is enabled.
     fn is_strict_rls_validation(&self) -> bool;
-
 }

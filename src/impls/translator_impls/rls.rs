@@ -698,7 +698,9 @@ where
     let transform_function_arg_expr = |arg: &FunctionArgExpr| -> FunctionArgExpr {
         match arg {
             FunctionArgExpr::Expr(expr) => {
-                FunctionArgExpr::Expr(transform_expr_generic(expr, options, table, schema, strategy))
+                FunctionArgExpr::Expr(transform_expr_generic(
+                    expr, options, table, schema, strategy,
+                ))
             }
             FunctionArgExpr::QualifiedWildcard(name) => {
                 FunctionArgExpr::QualifiedWildcard(name.clone())
@@ -709,16 +711,20 @@ where
 
     let transform_function_arg = |arg: &FunctionArg| -> FunctionArg {
         match arg {
-            FunctionArg::Named { name, arg, operator } => FunctionArg::Named {
-                name: name.clone(),
-                arg: transform_function_arg_expr(arg),
-                operator: operator.clone(),
-            },
-            FunctionArg::ExprNamed { name, arg, operator } => FunctionArg::ExprNamed {
-                name: name.clone(),
-                arg: transform_function_arg_expr(arg),
-                operator: operator.clone(),
-            },
+            FunctionArg::Named { name, arg, operator } => {
+                FunctionArg::Named {
+                    name: name.clone(),
+                    arg: transform_function_arg_expr(arg),
+                    operator: operator.clone(),
+                }
+            }
+            FunctionArg::ExprNamed { name, arg, operator } => {
+                FunctionArg::ExprNamed {
+                    name: name.clone(),
+                    arg: transform_function_arg_expr(arg),
+                    operator: operator.clone(),
+                }
+            }
             FunctionArg::Unnamed(arg) => FunctionArg::Unnamed(transform_function_arg_expr(arg)),
         }
     };
@@ -780,36 +786,40 @@ where
                 Box::new(transform_expr_generic(expr, options, table, schema, strategy))
             });
 
-            let transformed_over = func.over.as_ref().map(|window| match window {
-                WindowType::WindowSpec(window_spec) => WindowType::WindowSpec(
-                    sqlparser::ast::WindowSpec {
-                        window_name: window_spec.window_name.clone(),
-                        partition_by: window_spec
-                            .partition_by
-                            .iter()
-                            .map(|expr| {
-                                transform_expr_generic(expr, options, table, schema, strategy)
-                            })
-                            .collect(),
-                        order_by: window_spec
-                            .order_by
-                            .iter()
-                            .map(|order_by_expr| {
-                                let mut transformed = order_by_expr.clone();
-                                transformed.expr = transform_expr_generic(
-                                    &order_by_expr.expr,
-                                    options,
-                                    table,
-                                    schema,
-                                    strategy,
-                                );
-                                transformed
-                            })
-                            .collect(),
-                        window_frame: window_spec.window_frame.clone(),
-                    },
-                ),
-                WindowType::NamedWindow(named_window) => WindowType::NamedWindow(named_window.clone()),
+            let transformed_over = func.over.as_ref().map(|window| {
+                match window {
+                    WindowType::WindowSpec(window_spec) => {
+                        WindowType::WindowSpec(sqlparser::ast::WindowSpec {
+                            window_name: window_spec.window_name.clone(),
+                            partition_by: window_spec
+                                .partition_by
+                                .iter()
+                                .map(|expr| {
+                                    transform_expr_generic(expr, options, table, schema, strategy)
+                                })
+                                .collect(),
+                            order_by: window_spec
+                                .order_by
+                                .iter()
+                                .map(|order_by_expr| {
+                                    let mut transformed = order_by_expr.clone();
+                                    transformed.expr = transform_expr_generic(
+                                        &order_by_expr.expr,
+                                        options,
+                                        table,
+                                        schema,
+                                        strategy,
+                                    );
+                                    transformed
+                                })
+                                .collect(),
+                            window_frame: window_spec.window_frame.clone(),
+                        })
+                    }
+                    WindowType::NamedWindow(named_window) => {
+                        WindowType::NamedWindow(named_window.clone())
+                    }
+                }
             });
 
             let transformed_within_group = func
@@ -817,8 +827,13 @@ where
                 .iter()
                 .map(|order_by_expr| {
                     let mut transformed = order_by_expr.clone();
-                    transformed.expr =
-                        transform_expr_generic(&order_by_expr.expr, options, table, schema, strategy);
+                    transformed.expr = transform_expr_generic(
+                        &order_by_expr.expr,
+                        options,
+                        table,
+                        schema,
+                        strategy,
+                    );
                     transformed
                 })
                 .collect();

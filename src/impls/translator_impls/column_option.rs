@@ -52,7 +52,8 @@ impl Translator for ColumnOptionDef {
                         // SQLite requires function-call defaults to be parenthesized:
                         //   DEFAULT (datetime('now'))  — not  DEFAULT datetime('now').
                         if function_name.as_deref() == Some("now") {
-                            let translated = Expr::Function(func.clone()).translate(schema, options)?;
+                            let translated =
+                                Expr::Function(func.clone()).translate(schema, options)?;
                             return Ok(Some(ColumnOptionDef {
                                 name: self.name.clone(),
                                 option: ColumnOption::Default(Expr::Nested(Box::new(translated))),

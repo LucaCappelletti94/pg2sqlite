@@ -40,7 +40,6 @@ impl Default for Pg2SqliteOptions {
     }
 }
 
-
 impl TranslationOptions for Pg2SqliteOptions {
     fn remove_unsupported_check_constraints(mut self) -> Self {
         self.remove_unsupported_check_constraints = true;
@@ -138,5 +137,4 @@ impl TranslationOptions for Pg2SqliteOptions {
     fn is_strict_rls_validation(&self) -> bool {
         self.strict_rls_validation
     }
-
 }
