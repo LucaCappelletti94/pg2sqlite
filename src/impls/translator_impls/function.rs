@@ -39,6 +39,14 @@ enum FunctionTranslation {
     ToChar,
     /// Unsupported function with error message
     Unsupported(String),
+    /// Transform random() to ABS(random()) / 9223372036854775807.0
+    ToRandomFloat,
+    /// Transform left(s, n) to substr(s, 1, n)
+    ToSubstrLeft,
+    /// Transform right(s, n) to substr(s, -n)
+    ToSubstrRight,
+    /// Transform to_timestamp(epoch) to datetime(epoch, 'unixepoch')
+    ToTimestampEpoch,
     /// No translation needed
     PassThrough,
 }
@@ -46,7 +54,7 @@ enum FunctionTranslation {
 #[allow(clippy::too_many_lines)]
 fn translate_function(
     name: &ObjectName,
-    _args: &FunctionArguments,
+    args: &FunctionArguments,
     options: &Pg2SqliteOptions,
 ) -> FunctionTranslation {
     let original_name = name
@@ -241,6 +249,95 @@ fn translate_function(
         "generate_series" => {
             FunctionTranslation::Unsupported(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
         }
+        // random(): PG returns [0.0, 1.0) float; SQLite returns signed 64-bit int.
+        // Map to ABS(random()) / 9223372036854775807.0 → [0.0, 1.0].
+        "random" => FunctionTranslation::ToRandomFloat,
+        // left(s, n) -> substr(s, 1, n)
+        "left" => FunctionTranslation::ToSubstrLeft,
+        // right(s, n) -> substr(s, -n)
+        "right" => FunctionTranslation::ToSubstrRight,
+        // to_timestamp(epoch) -> datetime(val, 'unixepoch') (single-arg form)
+        // to_timestamp(text, format) -> Unsupported (two-arg form)
+        "to_timestamp" => {
+            match args {
+                FunctionArguments::List(list) if list.args.len() == 1 => {
+                    FunctionTranslation::ToTimestampEpoch
+                }
+                _ => FunctionTranslation::Unsupported(
+                    "to_timestamp with format string is not supported in SQLite. \
+                     Only the single-argument epoch form (to_timestamp(epoch_seconds)) \
+                     can be translated."
+                        .to_string(),
+                ),
+            }
+        }
+        // transaction_timestamp / statement_timestamp / clock_timestamp → datetime('now')
+        "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
+            FunctionTranslation::WithArgs {
+                name: "datetime".to_string(),
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                    ValueWithSpan {
+                        value: Value::SingleQuotedString("now".to_string()),
+                        span: sqlparser::tokenizer::Span::empty(),
+                    },
+                )))],
+            }
+        }
+        // Sequence functions: no SQLite equivalent
+        "currval" | "lastval" | "setval" => FunctionTranslation::Unsupported(
+            "currval/lastval/setval are PostgreSQL sequence functions and are not available \
+             in SQLite. Use INTEGER PRIMARY KEY (ROWID alias) or application-level sequences."
+                .to_string(),
+        ),
+        // repeat: no simple SQLite equivalent
+        "repeat" => FunctionTranslation::Unsupported(
+            "repeat is not available in standard SQLite. \
+             Consider using application-level string repetition or a recursive CTE."
+                .to_string(),
+        ),
+        // translate: character-level replacement, no SQLite equivalent
+        "translate" => FunctionTranslation::Unsupported(
+            "translate (character-level replacement) is not available in SQLite. \
+             Consider using nested REPLACE() calls or application-level processing."
+                .to_string(),
+        ),
+        // md5: no hash function in core SQLite
+        "md5" => FunctionTranslation::Unsupported(
+            "md5 is not available in standard SQLite. \
+             Consider loading a custom extension for hashing."
+                .to_string(),
+        ),
+        // to_date: format-based date parsing not available in SQLite
+        "to_date" => FunctionTranslation::Unsupported(
+            "to_date is not supported in SQLite. \
+             Date strings must be in ISO 8601 format (YYYY-MM-DD) for SQLite date functions."
+                .to_string(),
+        ),
+        // age: returns interval type, no SQLite equivalent
+        "age" => FunctionTranslation::Unsupported(
+            "age is not supported in SQLite, which has no interval type. \
+             Consider using julianday() subtraction for day-level differences."
+                .to_string(),
+        ),
+        // regexp_match / regexp_matches: no built-in regex in SQLite
+        "regexp_match" | "regexp_matches" => FunctionTranslation::Unsupported(
+            "regexp_match/regexp_matches are not supported in SQLite without a REGEXP extension. \
+             For basic pattern matching use LIKE or GLOB."
+                .to_string(),
+        ),
+        // array_length / array_to_string: no array type in SQLite
+        "array_length" | "array_to_string" => FunctionTranslation::Unsupported(
+            "array_length/array_to_string are not supported in SQLite, which has no native \
+             array type. Consider using JSON arrays with json_array_length() or \
+             json_group_array()."
+                .to_string(),
+        ),
+        // format: PG format specifiers incompatible with SQLite printf
+        "format" => FunctionTranslation::Unsupported(
+            "format() with PostgreSQL format specifiers (%I, %L, %s) is not supported in SQLite. \
+             For simple string formatting use printf() with standard C-style specifiers."
+                .to_string(),
+        ),
         _ => FunctionTranslation::PassThrough,
     }
 }
@@ -420,6 +517,22 @@ fn wrap_arg_with_case_filter(arg: &FunctionArg, filter: &Expr) -> FunctionArg {
                 operator: operator.clone(),
             }
         }
+        FunctionArg::ExprNamed { name, arg: FunctionArgExpr::Expr(expr), operator } => {
+            FunctionArg::ExprNamed {
+                name: name.clone(),
+                arg: FunctionArgExpr::Expr(Expr::Case {
+                    case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                    end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                    operand: None,
+                    conditions: vec![sqlparser::ast::CaseWhen {
+                        condition: filter.clone(),
+                        result: expr.clone(),
+                    }],
+                    else_result: None,
+                }),
+                operator: operator.clone(),
+            }
+        }
         // Pass through other argument types unchanged
         other => other.clone(),
     }
@@ -497,6 +610,7 @@ impl Translator for Function {
                 }))
             }
             FunctionTranslation::WithArgs { name, args } => {
+                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
                 Ok(Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new(name)]),
                     uses_odbc_syntax: false,
@@ -508,7 +622,7 @@ impl Translator for Function {
                     }),
                     filter: None,
                     null_treatment: None,
-                    over: None,
+                    over: translated_over,
                     within_group: vec![],
                 }))
             }
@@ -592,7 +706,8 @@ impl Translator for Function {
                 };
 
                 let translated_ts = ts_expr.translate(schema, options)?;
-                Ok(build_strftime_call(format_str, translated_ts, None))
+                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+                Ok(build_strftime_call(format_str, translated_ts, translated_over))
             }
             FunctionTranslation::DatePart => {
                 // date_part('field', expr) -> CAST(strftime(format, expr) AS INTEGER/REAL)
@@ -669,7 +784,143 @@ impl Translator for Function {
                 };
                 let mapped_format = pg_timestamp_format_to_strftime(&format_str)?;
                 let translated_ts = ts_expr.translate(schema, options)?;
-                Ok(build_strftime_call(&mapped_format, translated_ts, None))
+                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+                Ok(build_strftime_call(&mapped_format, translated_ts, translated_over))
+            }
+            FunctionTranslation::ToRandomFloat => {
+                // random() → ABS(random()) / 9223372036854775807.0
+                let random_call = Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("random")]),
+                    uses_odbc_syntax: false,
+                    parameters: FunctionArguments::None,
+                    args: FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args: vec![],
+                        clauses: vec![],
+                    }),
+                    filter: None,
+                    null_treatment: None,
+                    over: None,
+                    within_group: vec![],
+                });
+                let abs_call = Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("ABS")]),
+                    uses_odbc_syntax: false,
+                    parameters: FunctionArguments::None,
+                    args: FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(random_call))],
+                        clauses: vec![],
+                    }),
+                    filter: None,
+                    null_treatment: None,
+                    over: None,
+                    within_group: vec![],
+                });
+                Ok(Expr::BinaryOp {
+                    left: Box::new(abs_call),
+                    op: BinaryOperator::Divide,
+                    right: Box::new(Expr::Value(ValueWithSpan {
+                        value: Value::Number("9223372036854775807.0".to_string(), false),
+                        span: sqlparser::tokenizer::Span::empty(),
+                    })),
+                })
+            }
+            FunctionTranslation::ToSubstrLeft => {
+                // left(s, n) → substr(s, 1, n)
+                let exprs = extract_arg_exprs(&func.args);
+                if exprs.len() != 2 {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "left() requires exactly 2 arguments: left(string, count)".to_string(),
+                    ));
+                }
+                let s = exprs[0].translate(schema, options)?;
+                let n = exprs[1].translate(schema, options)?;
+                Ok(Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("substr")]),
+                    uses_odbc_syntax: false,
+                    parameters: FunctionArguments::None,
+                    args: FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args: vec![
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(s)),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                                ValueWithSpan {
+                                    value: Value::Number("1".to_string(), false),
+                                    span: sqlparser::tokenizer::Span::empty(),
+                                },
+                            ))),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(n)),
+                        ],
+                        clauses: vec![],
+                    }),
+                    filter: None,
+                    null_treatment: None,
+                    over: None,
+                    within_group: vec![],
+                }))
+            }
+            FunctionTranslation::ToSubstrRight => {
+                // right(s, n) → substr(s, -n)
+                let exprs = extract_arg_exprs(&func.args);
+                if exprs.len() != 2 {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "right() requires exactly 2 arguments: right(string, count)".to_string(),
+                    ));
+                }
+                let s = exprs[0].translate(schema, options)?;
+                let n = exprs[1].translate(schema, options)?;
+                let neg_n =
+                    Expr::UnaryOp { op: sqlparser::ast::UnaryOperator::Minus, expr: Box::new(n) };
+                Ok(Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("substr")]),
+                    uses_odbc_syntax: false,
+                    parameters: FunctionArguments::None,
+                    args: FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args: vec![
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(s)),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(neg_n)),
+                        ],
+                        clauses: vec![],
+                    }),
+                    filter: None,
+                    null_treatment: None,
+                    over: None,
+                    within_group: vec![],
+                }))
+            }
+            FunctionTranslation::ToTimestampEpoch => {
+                // to_timestamp(epoch) → datetime(epoch, 'unixepoch')
+                let exprs = extract_arg_exprs(&func.args);
+                if exprs.len() != 1 {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "to_timestamp single-arg form requires exactly 1 argument".to_string(),
+                    ));
+                }
+                let epoch = exprs[0].translate(schema, options)?;
+                Ok(Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("datetime")]),
+                    uses_odbc_syntax: false,
+                    parameters: FunctionArguments::None,
+                    args: FunctionArguments::List(FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args: vec![
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(epoch)),
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                                ValueWithSpan {
+                                    value: Value::SingleQuotedString("unixepoch".to_string()),
+                                    span: sqlparser::tokenizer::Span::empty(),
+                                },
+                            ))),
+                        ],
+                        clauses: vec![],
+                    }),
+                    filter: None,
+                    null_treatment: None,
+                    over: None,
+                    within_group: vec![],
+                }))
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))

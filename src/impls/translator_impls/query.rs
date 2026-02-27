@@ -6,8 +6,9 @@ use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Fetch, Function, FunctionArgumentList, FunctionArguments,
     GroupByExpr, GroupByWithModifier, Ident, LimitClause, NamedWindowDefinition, ObjectName,
     ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query, Select, SelectItem,
-    SetExpr, SetOperator, SetQuantifier, Setting, TableAlias, TableFactor, TableWithJoins, Value,
-    ValueWithSpan, Values, WindowSpec, WindowType, helpers::attached_token::AttachedToken,
+    SetExpr, SetOperator, SetQuantifier, Setting, Statement, TableAlias, TableFactor,
+    TableWithJoins, Value, ValueWithSpan, Values, WindowSpec, WindowType,
+    helpers::attached_token::AttachedToken,
 };
 
 use super::helpers::{
@@ -698,6 +699,21 @@ impl Translator for SetExpr {
                 }
             }
             SetExpr::Values(values) => SetExpr::Values(translate_values(values, schema, options)?),
+            SetExpr::Insert(Statement::Insert(ins)) => {
+                SetExpr::Insert(Statement::Insert(ins.translate(schema, options)?))
+            }
+            SetExpr::Update(Statement::Update(upd)) => {
+                SetExpr::Update(Statement::Update(upd.translate(schema, options)?))
+            }
+            SetExpr::Delete(Statement::Delete(del)) => {
+                let translated = del.translate(schema, options)?;
+                if let Statement::Delete(translated_del) = translated {
+                    SetExpr::Delete(Statement::Delete(translated_del))
+                } else {
+                    // Delete::translate returns Statement; if not Delete, keep original
+                    self.clone()
+                }
+            }
             SetExpr::Insert(_)
             | SetExpr::Table(_)
             | SetExpr::Update(_)

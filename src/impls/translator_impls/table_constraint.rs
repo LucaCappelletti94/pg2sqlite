@@ -116,14 +116,26 @@ impl Translator for TableConstraint {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match self {
             Self::Check(check_constraint) => {
-                if let Some(function_name) = first_function_name(check_constraint.expr.as_ref()) {
-                    if options.should_remove_unsupported_check_constraints() {
-                        Ok(None)
-                    } else {
-                        Err(crate::errors::Error::UndefinedFunction(function_name))
+                match check_constraint.expr.translate(schema, options) {
+                    Ok(translated_expr) => {
+                        Ok(Some(Self::Check(sqlparser::ast::CheckConstraint {
+                            name: check_constraint.name.clone(),
+                            expr: Box::new(translated_expr),
+                            enforced: check_constraint.enforced,
+                        })))
                     }
-                } else {
-                    Ok(Some(self.clone()))
+                    Err(_) if options.should_remove_unsupported_check_constraints() => Ok(None),
+                    Err(e) => {
+                        // If there's a function name we can identify, wrap as
+                        // UndefinedFunction for backwards-compatible error message.
+                        if let Some(function_name) =
+                            first_function_name(check_constraint.expr.as_ref())
+                        {
+                            Err(crate::errors::Error::UndefinedFunction(function_name))
+                        } else {
+                            Err(e)
+                        }
+                    }
                 }
             }
             Self::ForeignKey(fk_constraint) => {

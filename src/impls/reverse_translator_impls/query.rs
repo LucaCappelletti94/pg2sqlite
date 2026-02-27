@@ -2,7 +2,7 @@
 //! `Query`, `SetExpr`, and `Select` types.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Distinct, NamedWindowDefinition, Query, Select, SetExpr, Values};
+use sqlparser::ast::{Distinct, NamedWindowDefinition, Query, Select, SetExpr, Statement, Values};
 
 use super::helpers::{
     Reverse, reverse_translate_connect_by_kinds, reverse_translate_fetch_clause,
@@ -81,6 +81,15 @@ impl ReverseTranslator for SetExpr {
             }
             SetExpr::Values(values) => {
                 SetExpr::Values(reverse_translate_values(values, schema, options)?)
+            }
+            SetExpr::Insert(Statement::Insert(ins)) => {
+                SetExpr::Insert(Statement::Insert(ins.reverse_translate(schema, options)?))
+            }
+            SetExpr::Update(Statement::Update(upd)) => {
+                SetExpr::Update(Statement::Update(upd.reverse_translate(schema, options)?))
+            }
+            SetExpr::Delete(Statement::Delete(del)) => {
+                SetExpr::Delete(Statement::Delete(del.reverse_translate(schema, options)?))
             }
             SetExpr::Insert(_)
             | SetExpr::Table(_)
