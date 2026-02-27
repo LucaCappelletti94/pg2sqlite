@@ -552,9 +552,6 @@ impl PlPgSqlTranslator {
                 Self::inject_with_into_in_subqueries(left, with, context, options);
                 Self::inject_with_into_in_subqueries(right, with, context, options);
             }
-            Expr::UnaryOp { expr: inner, .. } | Expr::Nested(inner) => {
-                Self::inject_with_into_in_subqueries(inner, with, context, options);
-            }
             Expr::Exists { subquery, .. } => {
                 let cte_names: Vec<String> =
                     with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
@@ -576,6 +573,65 @@ impl PlPgSqlTranslator {
                     }
                     subquery.with = Some(new_with);
                 }
+            }
+            Expr::Case { operand, conditions, else_result, .. } => {
+                if let Some(op) = operand {
+                    Self::inject_with_into_in_subqueries(op, with, context, options);
+                }
+                for cw in conditions {
+                    Self::inject_with_into_in_subqueries(&mut cw.condition, with, context, options);
+                    Self::inject_with_into_in_subqueries(&mut cw.result, with, context, options);
+                }
+                if let Some(el) = else_result {
+                    Self::inject_with_into_in_subqueries(el, with, context, options);
+                }
+            }
+            Expr::InList { expr: inner, list, .. } => {
+                Self::inject_with_into_in_subqueries(inner, with, context, options);
+                for item in list {
+                    Self::inject_with_into_in_subqueries(item, with, context, options);
+                }
+            }
+            Expr::Between { expr: inner, low, high, .. } => {
+                Self::inject_with_into_in_subqueries(inner, with, context, options);
+                Self::inject_with_into_in_subqueries(low, with, context, options);
+                Self::inject_with_into_in_subqueries(high, with, context, options);
+            }
+            Expr::Function(func) => {
+                if let FunctionArguments::List(arg_list) = &mut func.args {
+                    for arg in &mut arg_list.args {
+                        let arg_expr = match arg {
+                            FunctionArg::Unnamed(e)
+                            | FunctionArg::Named { arg: e, .. }
+                            | FunctionArg::ExprNamed { arg: e, .. } => e,
+                        };
+                        if let FunctionArgExpr::Expr(e) = arg_expr {
+                            Self::inject_with_into_in_subqueries(e, with, context, options);
+                        }
+                    }
+                }
+            }
+            Expr::UnaryOp { expr: inner, .. }
+            | Expr::Nested(inner)
+            | Expr::Cast { expr: inner, .. }
+            | Expr::IsNull(inner)
+            | Expr::IsNotNull(inner)
+            | Expr::IsTrue(inner)
+            | Expr::IsNotTrue(inner)
+            | Expr::IsFalse(inner)
+            | Expr::IsNotFalse(inner) => {
+                Self::inject_with_into_in_subqueries(inner, with, context, options);
+            }
+            Expr::Tuple(items) => {
+                for item in items {
+                    Self::inject_with_into_in_subqueries(item, with, context, options);
+                }
+            }
+            Expr::Like { expr: inner, pattern, .. }
+            | Expr::ILike { expr: inner, pattern, .. }
+            | Expr::SimilarTo { expr: inner, pattern, .. } => {
+                Self::inject_with_into_in_subqueries(inner, with, context, options);
+                Self::inject_with_into_in_subqueries(pattern, with, context, options);
             }
             _ => {}
         }
@@ -982,7 +1038,11 @@ impl PlPgSqlTranslator {
             | Expr::IsNotFalse(inner)
             | Expr::IsUnknown(inner)
             | Expr::IsNotUnknown(inner)
-            | Expr::Cast { expr: inner, .. } => {
+            | Expr::Cast { expr: inner, .. }
+            | Expr::Collate { expr: inner, .. }
+            | Expr::Ceil { expr: inner, .. }
+            | Expr::Floor { expr: inner, .. }
+            | Expr::Convert { expr: inner, .. } => {
                 Self::transform_expr(inner, context, options);
             }
             Expr::InList { expr: inner, list, .. } => {
@@ -1087,8 +1147,17 @@ impl PlPgSqlTranslator {
                     Self::transform_expr(for_expr, context, options);
                 }
             }
-            Expr::AtTimeZone { timestamp, .. } => {
+            Expr::AtTimeZone { timestamp, time_zone } => {
                 Self::transform_expr(timestamp, context, options);
+                Self::transform_expr(time_zone, context, options);
+            }
+            Expr::Position { expr: inner, r#in: in_expr } => {
+                Self::transform_expr(inner, context, options);
+                Self::transform_expr(in_expr, context, options);
+            }
+            Expr::RLike { expr: inner, pattern, .. } => {
+                Self::transform_expr(inner, context, options);
+                Self::transform_expr(pattern, context, options);
             }
             Expr::Tuple(items) => {
                 for item in items {
@@ -1560,12 +1629,24 @@ impl PlPgSqlTranslator {
                         | sqlparser::ast::JoinOperator::Inner(constraint)
                         | sqlparser::ast::JoinOperator::LeftOuter(constraint)
                         | sqlparser::ast::JoinOperator::RightOuter(constraint)
-                        | sqlparser::ast::JoinOperator::FullOuter(constraint) => {
+                        | sqlparser::ast::JoinOperator::FullOuter(constraint)
+                        | sqlparser::ast::JoinOperator::LeftSemi(constraint)
+                        | sqlparser::ast::JoinOperator::RightSemi(constraint)
+                        | sqlparser::ast::JoinOperator::LeftAnti(constraint)
+                        | sqlparser::ast::JoinOperator::RightAnti(constraint) => {
                             if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
                                 Self::expr_references_variable(expr, var_name)
                             } else {
                                 false
                             }
+                        }
+                        sqlparser::ast::JoinOperator::AsOf {
+                            match_condition,
+                            constraint,
+                        } => {
+                            Self::expr_references_variable(match_condition, var_name)
+                                || matches!(constraint, sqlparser::ast::JoinConstraint::On(expr)
+                                    if Self::expr_references_variable(expr, var_name))
                         }
                         _ => false,
                     }
@@ -1911,6 +1992,92 @@ impl PlPgSqlTranslator {
                 Expr::Exists {
                     subquery: Box::new(Self::substitute_variables_in_query(subquery, bindings)),
                     negated: *negated,
+                }
+            }
+            Expr::Like { negated, expr: inner, pattern, escape_char, any } => {
+                Expr::Like {
+                    negated: *negated,
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    pattern: Box::new(Self::substitute_variables(pattern, bindings)),
+                    escape_char: escape_char.clone(),
+                    any: *any,
+                }
+            }
+            Expr::ILike { negated, expr: inner, pattern, escape_char, any } => {
+                Expr::ILike {
+                    negated: *negated,
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    pattern: Box::new(Self::substitute_variables(pattern, bindings)),
+                    escape_char: escape_char.clone(),
+                    any: *any,
+                }
+            }
+            Expr::SimilarTo { negated, expr: inner, pattern, escape_char } => {
+                Expr::SimilarTo {
+                    negated: *negated,
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    pattern: Box::new(Self::substitute_variables(pattern, bindings)),
+                    escape_char: escape_char.clone(),
+                }
+            }
+            Expr::Extract { field, expr: inner, syntax } => {
+                Expr::Extract {
+                    field: field.clone(),
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    syntax: syntax.clone(),
+                }
+            }
+            Expr::Trim { expr: inner, trim_where, trim_what, trim_characters } => {
+                Expr::Trim {
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    trim_where: *trim_where,
+                    trim_what: trim_what
+                        .as_ref()
+                        .map(|e| Box::new(Self::substitute_variables(e, bindings))),
+                    trim_characters: trim_characters.as_ref().map(|chars| {
+                        chars.iter().map(|e| Self::substitute_variables(e, bindings)).collect()
+                    }),
+                }
+            }
+            Expr::Substring {
+                expr: inner,
+                substring_from,
+                substring_for,
+                special,
+                shorthand,
+            } => {
+                Expr::Substring {
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    substring_from: substring_from
+                        .as_ref()
+                        .map(|e| Box::new(Self::substitute_variables(e, bindings))),
+                    substring_for: substring_for
+                        .as_ref()
+                        .map(|e| Box::new(Self::substitute_variables(e, bindings))),
+                    special: *special,
+                    shorthand: *shorthand,
+                }
+            }
+            Expr::Overlay { expr: inner, overlay_what, overlay_from, overlay_for } => {
+                Expr::Overlay {
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    overlay_what: Box::new(Self::substitute_variables(overlay_what, bindings)),
+                    overlay_from: Box::new(Self::substitute_variables(overlay_from, bindings)),
+                    overlay_for: overlay_for
+                        .as_ref()
+                        .map(|e| Box::new(Self::substitute_variables(e, bindings))),
+                }
+            }
+            Expr::Collate { expr: inner, collation } => {
+                Expr::Collate {
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    collation: collation.clone(),
+                }
+            }
+            Expr::Position { expr: inner, r#in: in_expr } => {
+                Expr::Position {
+                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    r#in: Box::new(Self::substitute_variables(in_expr, bindings)),
                 }
             }
             _ => expr.clone(),
