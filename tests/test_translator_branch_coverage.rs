@@ -158,19 +158,25 @@ fn column_option_translation_covers_unhandled_default_and_option_branches() {
         .expect("column option should not be filtered");
     assert!(matches!(translated.option, ColumnOption::Default(Expr::Identifier(_))));
 
-    // now() is supported (→ datetime('now')). Use a PG-specific function that has
-    // no mapping.
-    let unsupported_function_default =
+    // Unknown functions now pass through via generic fallback (wrapped in parens).
+    let passthrough_function_default =
         ColumnOptionDef { name: None, option: ColumnOption::Default(simple_function("pg_sleep")) };
-    let err = unsupported_function_default.translate(&schema, &options).unwrap_err();
-    assert!(unsupported_message(err).contains("Unsupported default expression function"));
+    let translated = passthrough_function_default
+        .translate(&schema, &options)
+        .expect("unknown function default should translate via generic fallback")
+        .expect("column option should not be filtered");
+    assert!(matches!(translated.option, ColumnOption::Default(Expr::Nested(_))));
 
-    let unsupported_default_expr = ColumnOptionDef {
+    // Subquery defaults now translate via generic fallback.
+    let subquery_default_expr = ColumnOptionDef {
         name: None,
         option: ColumnOption::Default(Expr::Subquery(Box::new(parse_query("SELECT 1")))),
     };
-    let err = unsupported_default_expr.translate(&schema, &options).unwrap_err();
-    assert!(unsupported_message(err).contains("Unsupported default expression"));
+    let translated = subquery_default_expr
+        .translate(&schema, &options)
+        .expect("subquery default should translate via generic fallback")
+        .expect("column option should not be filtered");
+    assert!(matches!(translated.option, ColumnOption::Default(Expr::Nested(_))));
 
     // COMMENT is now silently dropped (returns Ok(None)) rather than an error
     let comment_option =

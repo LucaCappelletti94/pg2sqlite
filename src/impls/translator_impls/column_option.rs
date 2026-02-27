@@ -75,9 +75,13 @@ impl Translator for ColumnOptionDef {
                                 ))),
                             }));
                         }
-                        Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                            "Unsupported default expression function: {func}"
-                        )))
+                        // Generic fallback: translate the function through the
+                        // normal Expr translator and wrap in parentheses.
+                        let translated = Expr::Function(func.clone()).translate(schema, options)?;
+                        Ok(Some(ColumnOptionDef {
+                            name: self.name.clone(),
+                            option: ColumnOption::Default(Expr::Nested(Box::new(translated))),
+                        }))
                     }
                     Expr::Value(value) => {
                         Ok(Some(ColumnOptionDef {
@@ -139,9 +143,11 @@ impl Translator for ColumnOptionDef {
                         }))
                     }
                     other => {
-                        Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                            "Unsupported default expression: {other}"
-                        )))
+                        let translated = other.translate(schema, options)?;
+                        Ok(Some(ColumnOptionDef {
+                            name: self.name.clone(),
+                            option: ColumnOption::Default(Expr::Nested(Box::new(translated))),
+                        }))
                     }
                 }
             }

@@ -338,6 +338,32 @@ fn translate_function(
              For simple string formatting use printf() with standard C-style specifiers."
                 .to_string(),
         ),
+        // ascii(char) -> unicode(char) — character-to-codepoint
+        "ascii" => FunctionTranslation::Rename("unicode".to_string()),
+        // PG-specific system/introspection functions — no SQLite equivalent
+        "current_database" | "current_schema" | "pg_typeof" => FunctionTranslation::Unsupported(
+            "current_database/current_schema/pg_typeof are PostgreSQL system functions \
+             with no SQLite equivalent."
+                .to_string(),
+        ),
+        // unnest: requires array type
+        "unnest" => FunctionTranslation::Unsupported(
+            "unnest() requires PostgreSQL's array type, which has no SQLite equivalent. \
+             Consider using json_each() for JSON arrays."
+                .to_string(),
+        ),
+        // encode/decode: PG bytea encoding functions
+        "encode" | "decode" => FunctionTranslation::Unsupported(
+            "encode/decode are PostgreSQL bytea encoding functions with no direct \
+             SQLite equivalent. Consider using hex()/unhex() for hexadecimal conversion."
+                .to_string(),
+        ),
+        // to_number: PG pattern-based number parsing
+        "to_number" => FunctionTranslation::Unsupported(
+            "to_number() with PostgreSQL format patterns is not supported in SQLite. \
+             Use CAST(expr AS REAL) or CAST(expr AS INTEGER) for simple conversions."
+                .to_string(),
+        ),
         _ => FunctionTranslation::PassThrough,
     }
 }
