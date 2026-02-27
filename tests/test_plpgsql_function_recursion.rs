@@ -1,6 +1,5 @@
-//! Tests for plpgsql transform_expr gaps fixed in the audit.
-//!
-//! Covers: M13-M18 (MEDIUM plpgsql recursion gaps).
+//! Tests for plpgsql function arm recursion into parameters, filter, over,
+//! and within_group clauses.
 
 mod helpers;
 

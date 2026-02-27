@@ -1,8 +1,4 @@
-//! Test for complex trigger with cascading effects.
-//!
-//! Scenario: E-commerce system with products, inventory, and audit trail.
-//! - When a product is inserted, create an inventory record with initial stock
-//! - When inventory changes, create an audit log entry
+//! Test for cascading trigger translation across multiple tables.
 
 mod helpers;
 

@@ -1,5 +1,9 @@
 //! Tests for `date_trunc` translation to SQLite `strftime`.
 
+mod helpers;
+
+use diesel::{Connection, RunQueryDsl};
+use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 fn translate(sql: &str) -> Result<String, String> {
@@ -87,4 +91,84 @@ fn date_trunc_unsupported_granularity_produces_helpful_error() {
         err.to_lowercase().contains("not supported"),
         "Error should mention 'not supported', got: {err}"
     );
+}
+
+// ============================================================================
+// date_trunc preserves window OVER clause
+// ============================================================================
+
+#[test]
+fn date_trunc_preserves_window_over() {
+    let options = Pg2SqliteOptions::default();
+    let sql = translate_sql(
+        "SELECT date_trunc('day', created_at) OVER (PARTITION BY user_id) FROM events",
+        &options,
+    )
+    .unwrap();
+    let lower = sql.to_lowercase();
+    assert!(lower.contains("strftime"), "expected strftime: {sql}");
+    assert!(lower.contains("over"), "expected OVER clause preserved: {sql}");
+}
+
+#[test]
+fn date_trunc_without_over_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    // Test date_trunc semantics work correctly (without OVER, since strftime
+    // is not a valid SQLite window function).
+    let pg_sql = "
+        CREATE TABLE events (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, created_at TEXT NOT NULL);
+        SELECT date_trunc('day', created_at) AS truncated FROM events;
+    ";
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(pg_sql)?.translate(&options)?;
+
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut conn)?;
+    }
+
+    diesel::sql_query(
+        "INSERT INTO events (id, user_id, created_at) VALUES (1, 1, '2024-03-15 10:30:00'), (2, 1, '2024-03-15 14:00:00')",
+    )
+    .execute(&mut conn)?;
+
+    let select_sql = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .unwrap()
+        .to_string();
+
+    #[derive(diesel::QueryableByName, Debug)]
+    struct TruncResult {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        truncated: String,
+    }
+
+    let results = diesel::sql_query(&select_sql).load::<TruncResult>(&mut conn)?;
+    assert_eq!(results.len(), 2);
+    // Both rows for the same day should produce the same truncated date
+    assert_eq!(results[0].truncated, results[1].truncated);
+    // Day truncation should produce YYYY-MM-DD 00:00:00
+    assert!(
+        results[0].truncated.contains("2024-03-15"),
+        "expected day-truncated date, got: {}",
+        results[0].truncated
+    );
+
+    Ok(())
+}
+
+#[test]
+fn date_trunc_over_partition_translation_preserves_structure() {
+    // strftime is not a valid SQLite window function, but the translation
+    // should preserve the OVER clause structure for functions that are.
+    let options = Pg2SqliteOptions::default();
+    let sql = translate_sql(
+        "SELECT date_trunc('day', created_at) OVER (PARTITION BY user_id) FROM events",
+        &options,
+    )
+    .unwrap();
+    let lower = sql.to_lowercase();
+    assert!(lower.contains("over (partition by"), "OVER PARTITION BY should be preserved: {sql}");
+    assert!(lower.contains("user_id"), "partition column should be preserved: {sql}");
 }

@@ -1,5 +1,5 @@
-//! Tests for reverse translation of expression variants recently added in
-//! forward translation but previously missing in reverse expression matches.
+//! Tests for reverse translation of special expression forms (IS DISTINCT FROM,
+//! IS UNKNOWN, AT TIME ZONE, OVERLAY, ANY/ALL, SIMILAR TO, IS NORMALIZED).
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, ReverseTranslator};
 use sqlparser::{

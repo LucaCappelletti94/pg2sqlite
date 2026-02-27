@@ -17,12 +17,6 @@ fn translate_err(sql: &str) -> String {
         .to_string()
 }
 
-fn translate_ok(sql: &str) -> String {
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
-    stmts.iter().find(|s| matches!(s, sqlparser::ast::Statement::Query(_))).unwrap().to_string()
-}
-
 // ---------------------------------------------------------------------------
 // ts_rank / ts_rank_cd
 // ---------------------------------------------------------------------------
@@ -188,43 +182,93 @@ fn bit_or_causes_error() {
 }
 
 // ---------------------------------------------------------------------------
-// json_agg / jsonb_agg -> json_group_array (forward)
+// Sequence / utility functions → Unsupported
 // ---------------------------------------------------------------------------
 
 #[test]
-fn json_agg_translates_to_json_group_array() {
-    let sql = format!("{SIMPLE_TABLE} SELECT json_agg(val) FROM t;");
-    let out = translate_ok(&sql);
-    assert!(out.contains("json_group_array"), "json_agg should become json_group_array: {out}");
-    assert!(!out.contains("json_agg"), "Should not contain json_agg: {out}");
+fn currval_lastval_setval_unsupported() {
+    for func in &["currval('seq')", "lastval()", "setval('seq', 1)"] {
+        let sql = format!("SELECT {func};");
+        let result =
+            Pg2Sqlite::default().sql(&sql).unwrap().translate(&Pg2SqliteOptions::default());
+        assert!(result.is_err(), "{func} should be unsupported: {result:?}");
+    }
 }
 
 #[test]
-fn jsonb_agg_translates_to_json_group_array() {
-    let sql = format!("{SIMPLE_TABLE} SELECT jsonb_agg(val) FROM t;");
-    let out = translate_ok(&sql);
-    assert!(out.contains("json_group_array"), "jsonb_agg should become json_group_array: {out}");
-    assert!(!out.contains("jsonb_agg"), "Should not contain jsonb_agg: {out}");
+fn repeat_unsupported() {
+    let err = translate_err("SELECT repeat('ab', 3);");
+    assert!(!err.is_empty(), "repeat should be unsupported");
 }
 
 #[test]
-fn json_object_agg_translates_to_json_group_object() {
-    let sql = format!("{SIMPLE_TABLE} SELECT json_object_agg(id, val) FROM t;");
-    let out = translate_ok(&sql);
-    assert!(
-        out.contains("json_group_object"),
-        "json_object_agg should become json_group_object: {out}"
-    );
-    assert!(!out.contains("json_object_agg"), "Should not contain json_object_agg: {out}");
+fn md5_unsupported() {
+    let err = translate_err("SELECT md5('hello');");
+    assert!(!err.is_empty(), "md5 should be unsupported");
 }
 
 #[test]
-fn jsonb_object_agg_translates_to_json_group_object() {
-    let sql = format!("{SIMPLE_TABLE} SELECT jsonb_object_agg(id, val) FROM t;");
-    let out = translate_ok(&sql);
-    assert!(
-        out.contains("json_group_object"),
-        "jsonb_object_agg should become json_group_object: {out}"
-    );
-    assert!(!out.contains("jsonb_object_agg"), "Should not contain jsonb_object_agg: {out}");
+fn translate_function_unsupported() {
+    let err = translate_err("SELECT translate('abc', 'a', 'x');");
+    assert!(!err.is_empty(), "translate should be unsupported");
+}
+
+#[test]
+fn to_date_unsupported() {
+    let err = translate_err("SELECT to_date('2023-01-01', 'YYYY-MM-DD');");
+    assert!(!err.is_empty(), "to_date should be unsupported");
+}
+
+#[test]
+fn age_unsupported() {
+    let err = translate_err("SELECT age(timestamp '2023-01-01');");
+    assert!(!err.is_empty(), "age should be unsupported");
+}
+
+#[test]
+fn regexp_match_unsupported() {
+    let err = translate_err("SELECT regexp_match('abc', 'a');");
+    assert!(!err.is_empty(), "regexp_match should be unsupported");
+    let err2 = translate_err("SELECT regexp_matches('abc', 'a');");
+    assert!(!err2.is_empty(), "regexp_matches should be unsupported");
+}
+
+#[test]
+fn array_functions_unsupported() {
+    let err = translate_err("SELECT array_length(ARRAY[1,2,3], 1);");
+    assert!(!err.is_empty(), "array_length should be unsupported");
+}
+
+#[test]
+fn format_unsupported() {
+    let err = translate_err("SELECT format('Hello %s', 'world');");
+    assert!(!err.is_empty(), "format should be unsupported");
+}
+
+// ---------------------------------------------------------------------------
+// Negative tests from data type aliases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn percentile_cont_still_errors() {
+    let err = translate_err("SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY val) FROM t;");
+    assert!(!err.is_empty(), "Expected error for PERCENTILE_CONT, got empty");
+}
+
+#[test]
+fn stddev_still_errors() {
+    let err = translate_err("SELECT STDDEV(val) FROM t;");
+    assert!(!err.is_empty(), "Expected error for STDDEV, got empty");
+}
+
+#[test]
+fn regexp_replace_still_errors() {
+    let err = translate_err("SELECT REGEXP_REPLACE(col, 'a', 'b') FROM t;");
+    assert!(!err.is_empty(), "Expected error for REGEXP_REPLACE, got empty");
+}
+
+#[test]
+fn split_part_still_errors() {
+    let err = translate_err("SELECT SPLIT_PART(col, ',', 1) FROM t;");
+    assert!(!err.is_empty(), "Expected error for SPLIT_PART, got empty");
 }

@@ -1,7 +1,7 @@
-//! TDD regressions for forward RLS expression/trigger translation.
+//! Tests for RLS policy expression rewriting and trigger translation.
 //!
-//! These tests are intentionally written as "should succeed" semantics.
-//! On current buggy code they fail, and after fixes they pass.
+//! Covers function argument rewriting in WITH CHECK, non-session cast
+//! preservation, and quoted-table update trigger execution.
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::{

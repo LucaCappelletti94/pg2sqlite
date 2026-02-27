@@ -2,6 +2,7 @@
 
 use std::io::Write;
 
+use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite, traits::TranslationOptions};
 use tempfile::{NamedTempFile, TempDir};
 
@@ -230,4 +231,25 @@ fn test_index_skipped_for_role_without_access() {
         stmts.iter().all(|s| !s.to_string().contains("CREATE INDEX private_docs_title_idx")),
         "Index should be filtered for role without SELECT"
     );
+}
+
+/// `translate_to_sql` must return `Vec<String>` of SQL text directly.
+#[test]
+fn translate_to_sql_returns_strings() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "CREATE TABLE convenience_test (id INTEGER PRIMARY KEY, val TEXT);";
+    let sql_strings =
+        Pg2Sqlite::default().sql(sql)?.translate_to_sql(&Pg2SqliteOptions::default())?;
+    assert!(!sql_strings.is_empty(), "translate_to_sql must return at least one statement");
+    assert!(
+        sql_strings[0].to_uppercase().contains("CREATE TABLE"),
+        "First string must be the CREATE TABLE, got: {}",
+        sql_strings[0]
+    );
+
+    // The returned strings must be valid SQLite.
+    let mut conn = SqliteConnection::establish(":memory:")?;
+    for sql_str in &sql_strings {
+        diesel::sql_query(sql_str).execute(&mut conn)?;
+    }
+    Ok(())
 }

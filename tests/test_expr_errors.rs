@@ -195,3 +195,15 @@ fn vector_jaccard_produces_error() {
     let err = result.unwrap_err();
     assert!(err.contains("<%>"), "Expected <%> error, got: {err}");
 }
+
+// ==================== AT TIME ZONE ====================
+
+#[test]
+fn at_time_zone_named_zone_still_errors() {
+    // Named timezones like 'Europe/Brussels' are not supported; only
+    // UTC/local/fixed offsets are.
+    let result = translate("SELECT col AT TIME ZONE 'Europe/Brussels' FROM t;");
+    assert!(result.is_err(), "Expected error for named AT TIME ZONE");
+    let err = result.unwrap_err();
+    assert!(!err.is_empty(), "Expected error for named AT TIME ZONE, got empty");
+}

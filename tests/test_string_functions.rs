@@ -1,6 +1,9 @@
 //! Tests for PostgreSQL string function translations.
 
+mod helpers;
+
 use diesel::prelude::*;
+use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 // ============================================================================
@@ -332,6 +335,72 @@ fn test_concat_ws_semantic() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].full_name, "John-Q-Public");
     assert_eq!(results[1].full_name, "Jane-A-Doe");
+
+    Ok(())
+}
+
+// ============================================================================
+// left() -> substr()
+// ============================================================================
+
+#[test]
+fn left_function_to_substr() {
+    let options = Pg2SqliteOptions::default();
+    let sql = translate_sql("SELECT left('hello', 3)", &options).unwrap();
+    let lower = sql.to_lowercase();
+    assert!(lower.contains("substr("), "expected substr: {sql}");
+}
+
+#[test]
+fn left_function_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "SELECT left('hello world', 5) AS result";
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+
+    #[derive(QueryableByName, Debug)]
+    struct TextResult {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        result: String,
+    }
+
+    let results = diesel::sql_query(&translated[0].to_string()).load::<TextResult>(&mut conn)?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].result, "hello", "left('hello world', 5) should be 'hello'");
+
+    Ok(())
+}
+
+// ============================================================================
+// right() -> substr()
+// ============================================================================
+
+#[test]
+fn right_function_to_substr() {
+    let options = Pg2SqliteOptions::default();
+    let sql = translate_sql("SELECT right('hello', 3)", &options).unwrap();
+    let lower = sql.to_lowercase();
+    assert!(lower.contains("substr("), "expected substr: {sql}");
+}
+
+#[test]
+fn right_function_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "SELECT right('hello world', 5) AS result";
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+
+    #[derive(QueryableByName, Debug)]
+    struct TextResult {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        result: String,
+    }
+
+    let results = diesel::sql_query(&translated[0].to_string()).load::<TextResult>(&mut conn)?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].result, "world", "right('hello world', 5) should be 'world'");
 
     Ok(())
 }

@@ -260,3 +260,136 @@ fn test_substring_no_length_semantic() -> Result<(), Box<dyn std::error::Error>>
 
     Ok(())
 }
+
+// ============================================================================
+// OVERLAY Tests (from test_expr_overlay_extract.rs)
+// ============================================================================
+
+mod overlay_schema {
+    diesel::table! {
+        overlay_samples (id) {
+            id -> Integer,
+            text_val -> Text,
+        }
+    }
+}
+
+use overlay_schema::overlay_samples;
+
+#[derive(Debug, Clone, Insertable)]
+#[diesel(table_name = overlay_samples)]
+struct OverlaySample {
+    id: i32,
+    text_val: String,
+}
+
+fn translate_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, Box<dyn std::error::Error>> {
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    Ok(translated)
+}
+
+fn find_select_sql(translated: &[sqlparser::ast::Statement]) -> String {
+    translated
+        .iter()
+        .find(|stmt| matches!(stmt, sqlparser::ast::Statement::Query(_)))
+        .expect("should contain a SELECT query")
+        .to_string()
+}
+
+fn execute_non_query_stmts(
+    translated: &[sqlparser::ast::Statement],
+    conn: &mut diesel::SqliteConnection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for stmt in
+        translated.iter().filter(|stmt| !matches!(stmt, sqlparser::ast::Statement::Query(_)))
+    {
+        diesel::sql_query(stmt.to_string()).execute(conn)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, QueryableByName)]
+struct OverlayRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    id: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    out_text: String,
+}
+
+/// Test OVERLAY with FOR (replacement length specified).
+#[test]
+fn test_overlay_with_for_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE TABLE overlay_samples (
+            id INTEGER PRIMARY KEY,
+            text_val TEXT NOT NULL
+        );
+        SELECT id, OVERLAY(text_val PLACING 'ZZ' FROM 3 FOR 2) AS out_text
+        FROM overlay_samples
+        ORDER BY id;
+    ";
+
+    let translated = translate_sql(sql)?;
+    let query = find_select_sql(&translated);
+    assert!(
+        !query.to_uppercase().contains("OVERLAY("),
+        "OVERLAY should be rewritten, got: {query}"
+    );
+    assert!(query.to_uppercase().contains("SUBSTR"), "Expected SUBSTR rewrite, got: {query}");
+
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+    execute_non_query_stmts(&translated, &mut conn)?;
+
+    diesel::insert_into(overlay_samples::table)
+        .values(&[
+            OverlaySample { id: 1, text_val: "abcdef".to_string() },
+            OverlaySample { id: 2, text_val: "123456".to_string() },
+        ])
+        .execute(&mut conn)?;
+
+    let rows: Vec<OverlayRow> = diesel::sql_query(query).load(&mut conn)?;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].out_text, "abZZef");
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].out_text, "12ZZ56");
+
+    Ok(())
+}
+
+/// Test OVERLAY without FOR (replacement length defaults to length of
+/// replacement string).
+#[test]
+fn test_overlay_without_for_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE TABLE overlay_samples (
+            id INTEGER PRIMARY KEY,
+            text_val TEXT NOT NULL
+        );
+        SELECT id, OVERLAY(text_val PLACING 'sqlite' FROM 7) AS out_text
+        FROM overlay_samples
+        ORDER BY id;
+    ";
+
+    let translated = translate_sql(sql)?;
+    let query = find_select_sql(&translated);
+    assert!(
+        !query.to_uppercase().contains("OVERLAY("),
+        "OVERLAY should be rewritten, got: {query}"
+    );
+    assert!(query.to_uppercase().contains("SUBSTR"), "Expected SUBSTR rewrite, got: {query}");
+
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+    execute_non_query_stmts(&translated, &mut conn)?;
+
+    diesel::insert_into(overlay_samples::table)
+        .values(&[OverlaySample { id: 1, text_val: "hello world".to_string() }])
+        .execute(&mut conn)?;
+
+    let rows: Vec<OverlayRow> = diesel::sql_query(query).load(&mut conn)?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].out_text, "hello sqlite");
+
+    Ok(())
+}

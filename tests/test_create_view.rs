@@ -1,8 +1,5 @@
-//! Tests for CREATE VIEW error branches in
-//! `src/impls/translator_impls/create_view.rs`.
-//!
-//! Covers: MATERIALIZED VIEW error, OR REPLACE → DROP+CREATE, basic view
-//! passthrough.
+//! Tests for CREATE VIEW translation (basic, IF NOT EXISTS, TEMPORARY,
+//! MATERIALIZED error, OR REPLACE rewrite).
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
@@ -78,4 +75,26 @@ fn or_replace_view_emits_drop_then_create() {
         !create.to_uppercase().contains("OR REPLACE"),
         "CREATE VIEW should not contain OR REPLACE: {create}"
     );
+}
+
+// ==================== Negative tests from data_type_aliases
+// ====================
+
+#[test]
+fn materialized_view_still_errors() {
+    let result = translate_joined("CREATE MATERIALIZED VIEW mv AS SELECT 1;");
+    assert!(result.is_err(), "Expected error for materialized view");
+    let err = result.unwrap_err();
+    assert!(!err.is_empty(), "Expected error for materialized view, got empty");
+}
+
+#[test]
+fn create_or_replace_view_emits_drop_and_create() {
+    // CREATE OR REPLACE VIEW is now translated to DROP VIEW IF EXISTS + CREATE VIEW
+    let sql = translate_joined("CREATE OR REPLACE VIEW v AS SELECT 1;").unwrap();
+    assert!(
+        sql.to_uppercase().contains("DROP VIEW IF EXISTS"),
+        "Expected DROP VIEW IF EXISTS in output: {sql}"
+    );
+    assert!(sql.to_uppercase().contains("CREATE VIEW"), "Expected CREATE VIEW in output: {sql}");
 }

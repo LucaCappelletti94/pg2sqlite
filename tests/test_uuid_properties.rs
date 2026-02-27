@@ -8,7 +8,7 @@ use diesel::{
     sql_types::{Blob, Text},
     sqlite::SqliteConnection,
 };
-use pg2sqlite::prelude::*;
+use pg2sqlite::{prelude::*, traits::TranslationOptions};
 use rosetta_uuid::Uuid;
 
 // Schema definitions for test tables
@@ -304,4 +304,22 @@ fn test_v7_blob_sortable_and_valid() {
         // Check variant bits in byte 8 (should be 10xx xxxx = 0x80-0xBF)
         assert!(id[8] >= 0x80 && id[8] <= 0xBF, "Incorrect UUID Variant");
     }
+}
+
+/// The API must accept a string literal (&str), not require `.to_string()`.
+#[test]
+fn uuid_function_name_accepts_str_literal() -> Result<(), Box<dyn std::error::Error>> {
+    // This should compile with a &str literal, not requiring String::from(...)
+    let options = Pg2SqliteOptions::default()
+        .with_uuid_representation(UuidRepresentation::Text)
+        .with_uuid_function_name("my_uuid_fn"); // &str, not String
+    // Use gen_random_uuid() as DEFAULT so the function name appears in output.
+    let sql = "CREATE TABLE uuid_str_test (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL);";
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let ddl = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
+    assert!(
+        ddl.contains("my_uuid_fn"),
+        "Custom UUID function name must appear in DEFAULT, got: {ddl}"
+    );
+    Ok(())
 }

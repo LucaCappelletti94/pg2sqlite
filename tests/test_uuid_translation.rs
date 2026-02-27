@@ -34,3 +34,15 @@ fn test_default_gen_random_uuid() {
 
     assert_eq!(stmt, "CREATE TABLE users (id BLOB PRIMARY KEY DEFAULT (uuid()) NOT NULL) STRICT");
 }
+
+#[test]
+fn uuid_without_repr_still_errors() {
+    let sql = "CREATE TABLE t (id UUID PRIMARY KEY);";
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    assert!(result.is_err(), "UUID without representation should error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("UUID translation requires"),
+        "Expected UUID representation error, got: {err}"
+    );
+}

@@ -1,17 +1,7 @@
-//! Tests for missing type mappings and column option handling.
+//! Tests for SQL data type alias mappings from PostgreSQL to SQLite.
 //!
-//! Covers:
-//! - Integer aliases: BIGINT, INT8, INT4, INT2, TINYINT → INTEGER
-//! - Float aliases: DOUBLE, DOUBLE PRECISION, FLOAT8, FLOAT4 → REAL
-//! - Numeric/Decimal → REAL (intentionally lossy)
-//! - Binary aliases: BINARY, VARBINARY → BLOB
-//! - Text aliases: CLOB, NVARCHAR, ENUM, TSVECTOR, TSQUERY → TEXT
-//! - Bit types: BIT, VARBIT → INTEGER
-//! - Temporal types: DATE, TIME, DATETIME, TIMESTAMPTZ → TEXT (already in TEXT
-//!   group)
-//! - Column options: COLLATE, CHARACTER SET, COMMENT silently dropped
-//! - Typed string literals: DATE '...', TIME '...', DATETIME '...' translate
-//! - Negative tests: still-unsupported features produce errors
+//! Covers integer, float, numeric, binary, text, bit, and temporal type
+//! aliases, typed string literals, and a Diesel end-to-end integration test.
 
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
@@ -272,28 +262,6 @@ fn timestamptz_tz_variant_maps_to_text() {
 }
 
 // ============================================================================
-// Column option tests
-// ============================================================================
-
-#[test]
-fn collate_option_silently_dropped() {
-    let out = translate_ok(r#"CREATE TABLE t (id INT PRIMARY KEY, col TEXT COLLATE "de_DE");"#);
-    assert!(!out.contains("COLLATE"), "COLLATE should be dropped, got: {out}");
-}
-
-#[test]
-fn character_set_option_silently_dropped() {
-    let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col TEXT CHARACTER SET utf8mb4);");
-    assert!(!out.contains("CHARACTER SET"), "CHARACTER SET should be dropped, got: {out}");
-}
-
-#[test]
-fn comment_option_silently_dropped() {
-    let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col INT COMMENT 'desc');");
-    assert!(!out.contains("COMMENT"), "COMMENT should be dropped, got: {out}");
-}
-
-// ============================================================================
 // Typed string literal tests (DATE/TIME/DATETIME '...')
 // ============================================================================
 
@@ -324,64 +292,6 @@ fn datetime_typed_string_translates() {
 fn array_type_still_errors() {
     let err = translate_err("CREATE TABLE t (id INT PRIMARY KEY, arr INT[]);");
     assert!(err.contains("Array type"), "Expected Array error, got: {err}");
-}
-
-#[test]
-fn uuid_without_repr_still_errors() {
-    let err = translate_err("CREATE TABLE t (id UUID PRIMARY KEY);");
-    assert!(
-        err.contains("UUID translation requires"),
-        "Expected UUID representation error, got: {err}"
-    );
-}
-
-#[test]
-fn materialized_view_still_errors() {
-    let err = translate_err("CREATE MATERIALIZED VIEW mv AS SELECT 1;");
-    assert!(!err.is_empty(), "Expected error for materialized view, got empty");
-}
-
-#[test]
-fn at_time_zone_named_zone_still_errors() {
-    // Named timezones like 'Europe/Brussels' are not supported; only
-    // UTC/local/fixed offsets are.
-    let err = translate_err("SELECT col AT TIME ZONE 'Europe/Brussels' FROM t;");
-    assert!(!err.is_empty(), "Expected error for named AT TIME ZONE, got empty");
-}
-
-#[test]
-fn create_or_replace_view_emits_drop_and_create() {
-    // CREATE OR REPLACE VIEW is now translated to DROP VIEW IF EXISTS + CREATE VIEW
-    let sql = translate_ok("CREATE OR REPLACE VIEW v AS SELECT 1;");
-    assert!(
-        sql.to_uppercase().contains("DROP VIEW IF EXISTS"),
-        "Expected DROP VIEW IF EXISTS in output: {sql}"
-    );
-    assert!(sql.to_uppercase().contains("CREATE VIEW"), "Expected CREATE VIEW in output: {sql}");
-}
-
-#[test]
-fn percentile_cont_still_errors() {
-    let err = translate_err("SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY val) FROM t;");
-    assert!(!err.is_empty(), "Expected error for PERCENTILE_CONT, got empty");
-}
-
-#[test]
-fn stddev_still_errors() {
-    let err = translate_err("SELECT STDDEV(val) FROM t;");
-    assert!(!err.is_empty(), "Expected error for STDDEV, got empty");
-}
-
-#[test]
-fn regexp_replace_still_errors() {
-    let err = translate_err("SELECT REGEXP_REPLACE(col, 'a', 'b') FROM t;");
-    assert!(!err.is_empty(), "Expected error for REGEXP_REPLACE, got empty");
-}
-
-#[test]
-fn split_part_still_errors() {
-    let err = translate_err("SELECT SPLIT_PART(col, ',', 1) FROM t;");
-    assert!(!err.is_empty(), "Expected error for SPLIT_PART, got empty");
 }
 
 // ============================================================================

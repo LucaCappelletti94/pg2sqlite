@@ -1,4 +1,4 @@
-//! Focused branch-coverage tests to push total coverage to 95%.
+//! Tests for branch-coverage edge cases across forward and reverse translators.
 
 use pg2sqlite::{
     errors::Error,

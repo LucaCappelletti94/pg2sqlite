@@ -153,6 +153,20 @@ fn to_char_dynamic_format_causes_error() {
     assert!(err.to_lowercase().contains("literal"), "Error should mention 'literal', got: {err}");
 }
 
+// ---------------------------------------------------------------------------
+// to_char preserves window OVER clause
+// ---------------------------------------------------------------------------
+
+#[test]
+fn to_char_preserves_window_over() {
+    let sql = "CREATE TABLE events (id INT PRIMARY KEY, ts TIMESTAMP, user_id INT); \
+               SELECT to_char(ts, 'YYYY-MM-DD') OVER (PARTITION BY user_id) FROM events;";
+    let output = translate(sql).unwrap();
+    let lower = output.to_lowercase();
+    assert!(lower.contains("strftime"), "expected strftime: {output}");
+    assert!(lower.contains("over"), "expected OVER clause preserved: {output}");
+}
+
 #[test]
 fn to_char_wrong_arg_count_causes_error() {
     let sql = "SELECT to_char(NOW());";

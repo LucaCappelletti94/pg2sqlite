@@ -977,3 +977,88 @@ fn test_combined_expressions() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// ============================================================================
+// AT TIME ZONE Tests (from test_expr_overlay_extract.rs)
+// ============================================================================
+
+mod at_time_zone_schema {
+    diesel::table! {
+        time_samples (id) {
+            id -> Integer,
+            ts -> Text,
+        }
+    }
+}
+
+use at_time_zone_schema::time_samples;
+
+#[derive(Debug, Clone, Insertable)]
+#[diesel(table_name = time_samples)]
+struct TimeSample {
+    id: i32,
+    ts: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct ShiftedTimeRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    id: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    shifted: String,
+}
+
+#[test]
+fn test_at_time_zone_fixed_offset_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE TABLE time_samples (
+            id INTEGER PRIMARY KEY,
+            ts TEXT NOT NULL
+        );
+        SELECT id, ts AT TIME ZONE '+02:00' AS shifted
+        FROM time_samples
+        ORDER BY id;
+    ";
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    assert!(
+        !select_stmt.to_uppercase().contains("AT TIME ZONE"),
+        "AT TIME ZONE should be rewritten, got: {select_stmt}"
+    );
+    assert!(
+        select_stmt.to_lowercase().contains("datetime"),
+        "Expected datetime(...) rewrite, got: {select_stmt}"
+    );
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute DDL
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    diesel::insert_into(time_samples::table)
+        .values(&[
+            TimeSample { id: 1, ts: "2024-03-15 10:00:00".to_string() },
+            TimeSample { id: 2, ts: "2024-03-15 23:30:00".to_string() },
+        ])
+        .execute(&mut connection)?;
+
+    let rows: Vec<ShiftedTimeRow> = diesel::sql_query(select_stmt).load(&mut connection)?;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].shifted, "2024-03-15 12:00:00");
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].shifted, "2024-03-16 01:30:00");
+
+    Ok(())
+}

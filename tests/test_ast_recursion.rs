@@ -1,7 +1,4 @@
-//! TDD tests for "untranslated AST paths" — sub-expressions that were
-//! previously cloned verbatim instead of being recursively translated.
-//!
-//! Written red-first (failing without the fixes), then made green.
+//! Tests for recursive translation of AST sub-expressions.
 //!
 //! Categories covered:
 //! 1. Window frame PRECEDING/FOLLOWING bounds

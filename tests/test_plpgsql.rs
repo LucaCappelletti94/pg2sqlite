@@ -6,6 +6,7 @@
 //! DELETE, SetOperation in query body, inject_condition_into_statement
 //! (UPDATE/DELETE).
 
+use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     traits::TranslationOptions,
@@ -596,4 +597,57 @@ fn trigger_multiple_inserts_on_conflict() {
         output.contains("INSERT") || output.contains("stats"),
         "Expected INSERT or stats: {output}"
     );
+}
+
+// ==================== RAISE INFO single space is dropped ====================
+
+/// A PL/pgSQL function with `RAISE INFO 'msg'` (one space after INFO) was
+/// previously not detected and passed through as invalid SQLite syntax.
+#[test]
+fn raise_info_single_space_is_dropped() -> Result<(), Box<dyn std::error::Error>> {
+    // The trigger also copies NEW.val into a log table so the body is non-empty
+    // after RAISE INFO is stripped (SQLite requires at least one DML statement).
+    let sql = r"
+        CREATE TABLE ri_test (id INTEGER PRIMARY KEY, val INTEGER NOT NULL);
+        CREATE TABLE ri_log (id INTEGER PRIMARY KEY, logged_val INTEGER NOT NULL);
+        CREATE OR REPLACE FUNCTION check_ri_val() RETURNS TRIGGER AS $body$
+        BEGIN
+            RAISE INFO 'checking value';
+            INSERT INTO ri_log (id, logged_val) VALUES (NEW.id, NEW.val);
+            RETURN NEW;
+        END;
+        $body$ LANGUAGE plpgsql;
+        CREATE TRIGGER check_ri_val_trigger
+        AFTER INSERT ON ri_test
+        FOR EACH ROW EXECUTE FUNCTION check_ri_val();
+    ";
+
+    // Translation must succeed — RAISE INFO is not valid SQLite and must be
+    // dropped.
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+
+    let out = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
+    assert!(
+        !out.contains("RAISE INFO"),
+        "RAISE INFO must be dropped from the translated trigger body, got:\n{out}"
+    );
+
+    // The resulting DDL must execute without error in SQLite.
+    let mut conn = SqliteConnection::establish(":memory:")?;
+    for stmt in &translated {
+        diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
+    }
+
+    // The trigger must fire on INSERT into ri_test, populating ri_log.
+    diesel::sql_query("INSERT INTO ri_test VALUES (1, 42)").execute(&mut conn)?;
+
+    #[derive(diesel::QueryableByName)]
+    struct LogRow {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        logged_val: i32,
+    }
+    let rows = diesel::sql_query("SELECT logged_val FROM ri_log").load::<LogRow>(&mut conn)?;
+    assert_eq!(rows.len(), 1, "Trigger must have fired and inserted one log row");
+    assert_eq!(rows[0].logged_val, 42, "logged_val must match inserted val");
+    Ok(())
 }

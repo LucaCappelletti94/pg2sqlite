@@ -1,4 +1,4 @@
-//! Test specific trigger translation issues
+//! Tests for trigger translation with multiple inserts and ON CONFLICT clauses.
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection, prelude::*};
 use pg2sqlite::{

@@ -1,7 +1,4 @@
-//! TDD tests for "clone-without-translate" bugs — expressions that should be
-//! recursively translated but were previously passed through as-is.
-//!
-//! Written red-first (failing), then fixed.
+//! Tests for recursive translation of sub-expressions inside window specs.
 //!
 //! Categories covered:
 //! - Inline window spec OVER (PARTITION BY / ORDER BY) expressions

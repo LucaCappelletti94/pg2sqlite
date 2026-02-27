@@ -1,4 +1,5 @@
-//! Additional coverage-oriented integration tests for edge branches.
+//! Integration tests for edge branches across view, index, trigger, RLS,
+//! function, and reverse translation modules.
 
 use pg2sqlite::{
     errors::Error,

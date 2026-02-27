@@ -1,14 +1,12 @@
-//! TDD tests for aggregation corner cases — written first (failing), then
-//! fixed.
+//! Tests for ordered-set and statistical aggregate functions.
 //!
 //! Covers:
 //! - WITHIN GROUP ordered-set aggregates (percentile_cont, percentile_disc,
 //!   mode)
 //! - regr_* regression aggregate functions
-//! - xmlagg, range_agg, multirange_agg, listagg
-//! - Recursive arg translation in the Rename path (string_agg with NOW()
-//!   inside)
-//! - string_agg ORDER BY inside aggregate carrying through to group_concat
+//! - xmlagg, range_agg, multirange_agg
+//! - string_agg with nested expressions and ORDER BY clause
+//! - COUNT/SUM DISTINCT passthrough
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sqlparser::ast::Statement;

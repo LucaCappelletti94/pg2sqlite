@@ -1,7 +1,17 @@
 //! Tests for forward query translation covering join types and other query
 //! paths in `src/impls/translator_impls/query.rs`.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
+
+use diesel::{RunQueryDsl, SqliteConnection, prelude::*};
+use helpers::translate_statements;
+use pg2sqlite::{
+    errors::Error,
+    options::Pg2SqliteOptions,
+    prelude::{Pg2Sqlite, Translator},
+};
+use sql_traits::structs::ParserDB;
+use sqlparser::ast::{Expr, Ident, OrderByExpr, OrderByOptions, Value, ValueWithSpan, WithFill};
 
 fn translate(sql: &str) -> String {
     Pg2Sqlite::default()
@@ -380,4 +390,159 @@ fn named_window_translates_expressions() {
         output.contains("datetime('now')"),
         "Expected datetime('now') in named window: {output}"
     );
+}
+
+// ==================== ORDER BY WITH FILL rejection ====================
+
+fn empty_schema() -> ParserDB {
+    ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
+}
+
+#[test]
+fn order_by_expr_translation_rejects_with_fill_clause() {
+    let schema = empty_schema();
+    let options = Pg2SqliteOptions::default();
+    let order_by_expr = OrderByExpr {
+        expr: Expr::Identifier(Ident::new("created_at")),
+        options: OrderByOptions::default(),
+        with_fill: Some(WithFill {
+            from: Some(Expr::Value(ValueWithSpan::from(Value::Number("1".to_string(), false)))),
+            to: None,
+            step: None,
+        }),
+    };
+
+    let error =
+        order_by_expr.translate(&schema, &options).expect_err("WITH FILL should not be supported");
+    assert!(matches!(
+        error,
+        Error::UnknownPostgresFeature(message) if message == "WITH FILL in ORDER BY"
+    ));
+}
+
+// ==================== SetExpr DML translation ====================
+
+#[test]
+fn set_expr_insert_translates_expressions() {
+    let options = Pg2SqliteOptions::default();
+    let result = translate_statements(
+        "SELECT * FROM (INSERT INTO t (name) VALUES ('test') RETURNING *) AS sub",
+        &options,
+    );
+    // The key point is it doesn't panic
+    let _ = result;
+}
+
+// ==================== Qualified wildcard (table.*) translation
+// ====================
+
+diesel::table! {
+    /// Products table for testing qualified wildcards.
+    products (id) {
+        /// Product ID.
+        id -> Integer,
+        /// Product name.
+        name -> Text,
+        /// Product price.
+        price -> Nullable<Double>,
+    }
+}
+
+/// A product record.
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = products)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Product {
+    /// Product ID.
+    id: i32,
+    /// Product name.
+    name: String,
+    /// Product price.
+    price: Option<f64>,
+}
+
+#[test]
+fn test_wildcard_select_column_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE TABLE products (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            price REAL
+        );
+        SELECT products.* FROM products;
+    ";
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    assert!(
+        select_stmt.contains("products.*"),
+        "Should contain qualified wildcard, got: {select_stmt}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_wildcard_semantic() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE TABLE products (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            price REAL
+        );
+        SELECT products.* FROM products;
+    ";
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    // Execute DDL
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    // Insert test data
+    diesel::insert_into(products::table)
+        .values(&Product { id: 1, name: "Widget".to_string(), price: Some(9.99) })
+        .execute(&mut connection)?;
+    diesel::insert_into(products::table)
+        .values(&Product { id: 2, name: "Gadget".to_string(), price: Some(19.99) })
+        .execute(&mut connection)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    #[derive(diesel::QueryableByName, Debug)]
+    struct ProductResult {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        id: i32,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Double>)]
+        price: Option<f64>,
+    }
+
+    let results = diesel::sql_query(&select_stmt).load::<ProductResult>(&mut connection)?;
+
+    assert_eq!(results.len(), 2, "Should have 2 products");
+    assert_eq!(results[0].id, 1);
+    assert_eq!(results[0].name, "Widget");
+    assert!((results[0].price.unwrap() - 9.99).abs() < 0.01);
+    assert_eq!(results[1].id, 2);
+    assert_eq!(results[1].name, "Gadget");
+    assert!((results[1].price.unwrap() - 19.99).abs() < 0.01);
+
+    Ok(())
 }

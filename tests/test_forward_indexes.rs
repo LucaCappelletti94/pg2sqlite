@@ -15,6 +15,15 @@ fn translate(sql: &str) -> String {
         .join("\n")
 }
 
+fn translate_result(sql: &str) -> Result<Vec<String>, String> {
+    Pg2Sqlite::default()
+        .sql(sql)
+        .map_err(|e| e.to_string())?
+        .translate(&Pg2SqliteOptions::default())
+        .map(|stmts| stmts.iter().map(ToString::to_string).collect())
+        .map_err(|e| e.to_string())
+}
+
 // ==================== Basic index ====================
 
 #[test]
@@ -183,4 +192,115 @@ fn using_btree_is_dropped() {
     let output = translate(sql);
     assert!(!output.contains("USING"), "USING clause must be stripped: {output}");
     assert!(output.contains("idx_name"), "Index name should be preserved: {output}");
+}
+
+// ==================== GIN/GiST non-tsvector errors and tsvector FTS5
+// translation ====================
+
+/// Test that GIN index without to_tsvector causes an error.
+#[test]
+fn gin_index_non_tsvector_causes_error() {
+    let sql = "
+        CREATE TABLE documents (id SERIAL PRIMARY KEY, content TEXT);
+        CREATE INDEX idx_content ON documents USING GIN (content);
+    ";
+    let result = translate_result(sql);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("to_tsvector"), "Error should mention to_tsvector: {}", err);
+}
+
+/// Test that GiST index on non-tsvector column causes an error.
+#[test]
+fn gist_index_non_tsvector_causes_error() {
+    let sql = "
+        CREATE TABLE locations (id SERIAL PRIMARY KEY, point TEXT);
+        CREATE INDEX idx_point ON locations USING GiST (point);
+    ";
+    let result = translate_result(sql);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("GiST"), "Error should mention GiST index: {}", err);
+}
+
+/// Test that GiST index with to_tsvector translates to FTS5 (same as GIN).
+#[test]
+fn gist_tsvector_translates_to_fts5() {
+    let sql = "
+        CREATE TABLE articles (id SERIAL PRIMARY KEY, title TEXT, body TEXT);
+        CREATE INDEX idx_search ON articles USING GiST (to_tsvector('english', title || ' ' || body));
+    ";
+    let translated_sql = translate_result(sql).unwrap();
+
+    // Should have: table + FTS5 virtual table + 3 triggers + 1 backfill INSERT
+    assert_eq!(translated_sql.len(), 6);
+
+    // First statement is the table
+    assert!(translated_sql[0].contains("CREATE TABLE articles"));
+
+    // Second statement should be CREATE VIRTUAL TABLE ... USING fts5
+    assert!(
+        translated_sql[1].contains("CREATE VIRTUAL TABLE"),
+        "Expected FTS5 virtual table, got: {}",
+        translated_sql[1]
+    );
+    assert!(translated_sql[1].contains("fts5"), "Expected fts5 module, got: {}", translated_sql[1]);
+    assert!(
+        translated_sql[1].contains("articles_fts"),
+        "Expected articles_fts table name, got: {}",
+        translated_sql[1]
+    );
+}
+
+/// Test that GIN index with to_tsvector translates to FTS5.
+#[test]
+fn gin_tsvector_translates_to_fts5() {
+    let sql = "
+        CREATE TABLE documents (id SERIAL PRIMARY KEY, title TEXT, body TEXT);
+        CREATE INDEX idx_search ON documents USING GIN (to_tsvector('english', title || ' ' || body));
+    ";
+    let translated_sql = translate_result(sql).unwrap();
+
+    // Should have: table + FTS5 virtual table + 3 triggers (insert, delete, update)
+    // + 1 backfill INSERT
+    assert_eq!(translated_sql.len(), 6);
+
+    // First statement is the table
+    assert!(translated_sql[0].contains("CREATE TABLE documents"));
+
+    // Second statement should be CREATE VIRTUAL TABLE ... USING fts5
+    assert!(
+        translated_sql[1].contains("CREATE VIRTUAL TABLE"),
+        "Expected FTS5 virtual table, got: {}",
+        translated_sql[1]
+    );
+    assert!(translated_sql[1].contains("fts5"), "Expected fts5 module, got: {}", translated_sql[1]);
+    assert!(
+        translated_sql[1].contains("documents_fts"),
+        "Expected documents_fts table name, got: {}",
+        translated_sql[1]
+    );
+    assert!(
+        translated_sql[1].contains("title"),
+        "Expected title column, got: {}",
+        translated_sql[1]
+    );
+    assert!(translated_sql[1].contains("body"), "Expected body column, got: {}", translated_sql[1]);
+
+    // Statements 3-5 should be triggers
+    assert!(
+        translated_sql[2].contains("CREATE TRIGGER") && translated_sql[2].contains("AFTER INSERT"),
+        "Expected INSERT trigger, got: {}",
+        translated_sql[2]
+    );
+    assert!(
+        translated_sql[3].contains("CREATE TRIGGER") && translated_sql[3].contains("AFTER DELETE"),
+        "Expected DELETE trigger, got: {}",
+        translated_sql[3]
+    );
+    assert!(
+        translated_sql[4].contains("CREATE TRIGGER") && translated_sql[4].contains("AFTER UPDATE"),
+        "Expected UPDATE trigger, got: {}",
+        translated_sql[4]
+    );
 }

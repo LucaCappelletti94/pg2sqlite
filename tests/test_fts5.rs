@@ -852,3 +852,54 @@ fn test_at_at_operator_with_custom_primary_key() -> Result<(), Box<dyn std::erro
 
     Ok(())
 }
+
+// ============================================================================
+// FTS5 with non-INTEGER primary key must cause a clear error
+// ============================================================================
+
+/// FTS5 `content_rowid=` maps to the SQLite rowid, which must be an INTEGER.
+/// A VARCHAR primary key cannot be used as a rowid.
+#[test]
+fn fts5_with_varchar_pk_causes_error() {
+    let sql = "
+        CREATE TABLE fts_varchar_test (id VARCHAR(36) PRIMARY KEY, body TEXT);
+        CREATE INDEX fts_varchar_test_fts ON fts_varchar_test USING GIN (to_tsvector('english', body));
+    ";
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    assert!(result.is_err(), "FTS5 with VARCHAR primary key must cause a translation error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.to_lowercase().contains("integer")
+            || err.to_lowercase().contains("rowid")
+            || err.to_lowercase().contains("primary key"),
+        "Error must explain the INTEGER rowid requirement, got: {err}"
+    );
+}
+
+/// TEXT primary key is also not a valid rowid.
+#[test]
+fn fts5_with_text_pk_causes_error() {
+    let sql = "
+        CREATE TABLE fts_text_pk (id TEXT PRIMARY KEY, body TEXT);
+        CREATE INDEX fts_text_pk_idx ON fts_text_pk USING GIN (to_tsvector('english', body));
+    ";
+    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    assert!(result.is_err(), "FTS5 with TEXT primary key must cause a translation error");
+}
+
+/// INTEGER primary key must still work and produce a runnable FTS5 table.
+#[test]
+fn fts5_with_integer_pk_succeeds() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE TABLE fts_int_pk (id INTEGER PRIMARY KEY, body TEXT);
+        CREATE INDEX fts_int_pk_idx ON fts_int_pk USING GIN (to_tsvector('english', body));
+    ";
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+    for stmt in &translated {
+        diesel::sql_query(stmt.to_string()).execute(&mut connection)?;
+    }
+    Ok(())
+}
