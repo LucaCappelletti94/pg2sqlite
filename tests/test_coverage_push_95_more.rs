@@ -158,11 +158,10 @@ fn column_option_translation_covers_unhandled_default_and_option_branches() {
         .expect("column option should not be filtered");
     assert!(matches!(translated.option, ColumnOption::Default(Expr::Identifier(_))));
 
-    // now() is supported (→ datetime('now')). Use a PG-specific function that has no mapping.
-    let unsupported_function_default = ColumnOptionDef {
-        name: None,
-        option: ColumnOption::Default(simple_function("pg_sleep")),
-    };
+    // now() is supported (→ datetime('now')). Use a PG-specific function that has
+    // no mapping.
+    let unsupported_function_default =
+        ColumnOptionDef { name: None, option: ColumnOption::Default(simple_function("pg_sleep")) };
     let err = unsupported_function_default.translate(&schema, &options).unwrap_err();
     assert!(unsupported_message(err).contains("Unsupported default expression function"));
 

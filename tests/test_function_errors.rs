@@ -88,21 +88,24 @@ fn test_generated_by_default_as_identity_causes_error() {
 
 #[test]
 fn bool_and_causes_error() {
-    // bool_and has NULL semantics incompatible with MIN — must error, not silently map.
+    // bool_and has NULL semantics incompatible with MIN — must error, not silently
+    // map.
     let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bool_and(flag) FROM t;"));
     assert!(err.to_lowercase().contains("bool_and"), "Error must mention bool_and: {err}");
 }
 
 #[test]
 fn bool_or_causes_error() {
-    // bool_or has NULL semantics incompatible with MAX — must error, not silently map.
+    // bool_or has NULL semantics incompatible with MAX — must error, not silently
+    // map.
     let err = translate_err(&format!("{SIMPLE_TABLE} SELECT bool_or(flag) FROM t;"));
     assert!(err.to_lowercase().contains("bool_or"), "Error must mention bool_or: {err}");
 }
 
 #[test]
 fn every_causes_error() {
-    // every is an alias for bool_and in PostgreSQL — must error, not silently map to MIN.
+    // every is an alias for bool_and in PostgreSQL — must error, not silently map
+    // to MIN.
     let err = translate_err(&format!("{SIMPLE_TABLE} SELECT every(flag) FROM t;"));
     assert!(
         err.to_lowercase().contains("every") || err.to_lowercase().contains("bool"),

@@ -107,8 +107,8 @@ struct Product {
     price: Option<f64>,
 }
 
-/// INTERVAL expressions are not valid SQLite syntax; the translator must reject them.
-/// SQLite uses date modifier strings like date('now', '-7 days') instead.
+/// INTERVAL expressions are not valid SQLite syntax; the translator must reject
+/// them. SQLite uses date modifier strings like date('now', '-7 days') instead.
 #[test]
 fn test_interval_translation_basic_errors() {
     let sql = "
@@ -122,10 +122,7 @@ fn test_interval_translation_basic_errors() {
     let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
     assert!(result.is_err(), "INTERVAL expression must cause a translation error");
     let err = result.unwrap_err().to_string().to_lowercase();
-    assert!(
-        err.contains("interval"),
-        "Error must mention INTERVAL, got: {err}"
-    );
+    assert!(err.contains("interval"), "Error must mention INTERVAL, got: {err}");
 }
 
 /// INTERVAL with time unit must also be rejected.
