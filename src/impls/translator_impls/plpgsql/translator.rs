@@ -700,6 +700,20 @@ impl PlPgSqlTranslator {
         if let Ok(transformed_body) = Self::transform_query_body(&query.body, context, options) {
             *query.body = transformed_body;
         }
+        // Transform WITH clause CTEs recursively
+        if let Some(with) = &mut query.with {
+            for cte in &mut with.cte_tables {
+                Self::transform_cte_query(&mut cte.query, context, options);
+            }
+        }
+        // Transform ORDER BY expressions
+        if let Some(order_by) = &mut query.order_by
+            && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
+        {
+            for ob in exprs {
+                Self::transform_expr(&mut ob.expr, context, options);
+            }
+        }
     }
 
     /// Transforms an INSERT statement for SQLite compatibility.
@@ -787,6 +801,13 @@ impl PlPgSqlTranslator {
                     }
                 }
             }
+            SetExpr::SetOperation { left, right, .. } => {
+                Self::transform_set_expr(left, context, options);
+                Self::transform_set_expr(right, context, options);
+            }
+            SetExpr::Query(query) => {
+                Self::transform_cte_query(query, context, options);
+            }
             _ => {}
         }
     }
@@ -825,10 +846,18 @@ impl PlPgSqlTranslator {
         context: &mut PlPgSqlContext,
         options: &Pg2SqliteOptions,
     ) {
-        if let TableFactor::Derived { subquery, .. } = factor
-            && let Ok(transformed) = Self::transform_query_body(&subquery.body, context, options)
-        {
-            *subquery.body = transformed;
+        match factor {
+            TableFactor::Derived { subquery, .. } => {
+                if let Ok(transformed) =
+                    Self::transform_query_body(&subquery.body, context, options)
+                {
+                    *subquery.body = transformed;
+                }
+            }
+            TableFactor::NestedJoin { table_with_joins, .. } => {
+                Self::transform_table_with_joins(table_with_joins, context, options);
+            }
+            _ => {}
         }
     }
 
@@ -883,6 +912,36 @@ impl PlPgSqlTranslator {
                         }
                     }
                 }
+                // Recurse into function parameters
+                if let FunctionArguments::List(list) = &mut func.parameters {
+                    for arg in &mut list.args {
+                        match arg {
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+                            | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
+                            | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => {
+                                Self::transform_expr(e, context, options);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Recurse into FILTER clause
+                if let Some(filter) = &mut func.filter {
+                    Self::transform_expr(filter, context, options);
+                }
+                // Recurse into OVER (window spec)
+                if let Some(sqlparser::ast::WindowType::WindowSpec(spec)) = &mut func.over {
+                    for e in &mut spec.partition_by {
+                        Self::transform_expr(e, context, options);
+                    }
+                    for ob in &mut spec.order_by {
+                        Self::transform_expr(&mut ob.expr, context, options);
+                    }
+                }
+                // Recurse into WITHIN GROUP
+                for ob in &mut func.within_group {
+                    Self::transform_expr(&mut ob.expr, context, options);
+                }
             }
             Expr::BinaryOp { left, right, .. }
             | Expr::AnyOp { left, right, .. }
@@ -907,11 +966,23 @@ impl PlPgSqlTranslator {
             }
             Expr::InSubquery { expr: inner, subquery, .. } => {
                 Self::transform_expr(inner, context, options);
-                // Transform the subquery
+                // Transform the subquery body, CTEs, and ORDER BY
                 if let Ok(transformed) =
                     Self::transform_query_body(&subquery.body, context, options)
                 {
                     *subquery.body = transformed;
+                }
+                if let Some(with) = &mut subquery.with {
+                    for cte in &mut with.cte_tables {
+                        Self::transform_cte_query(&mut cte.query, context, options);
+                    }
+                }
+                if let Some(order_by) = &mut subquery.order_by
+                    && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
+                {
+                    for ob in exprs {
+                        Self::transform_expr(&mut ob.expr, context, options);
+                    }
                 }
             }
             Expr::Case { operand, conditions, else_result, .. } => {
@@ -936,6 +1007,20 @@ impl PlPgSqlTranslator {
                     Self::transform_query_body(&subquery.body, context, options)
                 {
                     *subquery.body = transformed;
+                }
+                // Transform WITH clause CTEs
+                if let Some(with) = &mut subquery.with {
+                    for cte in &mut with.cte_tables {
+                        Self::transform_cte_query(&mut cte.query, context, options);
+                    }
+                }
+                // Transform ORDER BY expressions
+                if let Some(order_by) = &mut subquery.order_by
+                    && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
+                {
+                    for ob in exprs {
+                        Self::transform_expr(&mut ob.expr, context, options);
+                    }
                 }
             }
             Expr::Like { expr, pattern, .. }
@@ -988,8 +1073,16 @@ impl PlPgSqlTranslator {
                     Self::transform_expr(elem, context, options);
                 }
             }
-            Expr::CompoundFieldAccess { root, .. } => {
+            Expr::CompoundFieldAccess { root, access_chain } => {
                 Self::transform_expr(root, context, options);
+                for access in access_chain {
+                    if let sqlparser::ast::AccessExpr::Subscript(
+                        sqlparser::ast::Subscript::Index { index },
+                    ) = access
+                    {
+                        Self::transform_expr(index, context, options);
+                    }
+                }
             }
             Expr::JsonAccess { value, path } => {
                 Self::transform_expr(value, context, options);
