@@ -153,7 +153,49 @@ impl Translator for TableConstraint {
                         append_suffix(&fk_constraint.foreign_table, options.get_rls_table_suffix());
                 }
 
+                // Translate referential actions (consistent with column_option.rs)
+                updated_fk.on_delete = fk_constraint
+                    .on_delete
+                    .map(|a| a.translate(schema, options))
+                    .transpose()?;
+                updated_fk.on_update = fk_constraint
+                    .on_update
+                    .map(|a| a.translate(schema, options))
+                    .transpose()?;
+
+                // Translate characteristics (consistent with column_option.rs:252-254)
+                updated_fk.characteristics = fk_constraint
+                    .characteristics
+                    .map(|c| c.translate(schema, options))
+                    .transpose()?;
+
                 Ok(Some(Self::ForeignKey(updated_fk)))
+            }
+            Self::PrimaryKey(pk_constraint) => {
+                let mut updated_pk = pk_constraint.clone();
+                updated_pk.columns = pk_constraint
+                    .columns
+                    .iter()
+                    .map(|col| col.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?;
+                updated_pk.characteristics = pk_constraint
+                    .characteristics
+                    .map(|c| c.translate(schema, options))
+                    .transpose()?;
+                Ok(Some(Self::PrimaryKey(updated_pk)))
+            }
+            Self::Unique(unique_constraint) => {
+                let mut updated_unique = unique_constraint.clone();
+                updated_unique.columns = unique_constraint
+                    .columns
+                    .iter()
+                    .map(|col| col.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?;
+                updated_unique.characteristics = unique_constraint
+                    .characteristics
+                    .map(|c| c.translate(schema, options))
+                    .transpose()?;
+                Ok(Some(Self::Unique(updated_unique)))
             }
             other => Ok(Some(other.clone())),
         }
