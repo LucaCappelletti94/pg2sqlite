@@ -19,6 +19,8 @@ It parses PostgreSQL-dialect statements using [`sqlparser`](https://github.com/a
 > [!IMPORTANT]
 > **Translation guarantees:** every output statement is valid SQLite. If a construct can be translated, it is; if it cannot, the call returns an explicit `Err`. *Silently skipped* statements (`CREATE FUNCTION`, `GRANT`, `CREATE ROLE`, …) carry no SQLite-representable information; *silently dropped* column options (`COLLATION`, `CHARACTER SET`, `COMMENT`) have no SQLite equivalent. Everything else either translates or errors - there are no silent pass-throughs that look valid but fail at runtime.
 
+In our test suite, translated SQL is executed against SQLite via Diesel to verify runtime behavior, not just output SQL strings.
+
 ## Quick start
 
 ```rust
@@ -127,9 +129,13 @@ PostgreSQL UUID defaults (`gen_random_uuid()`, `uuidv4()`, `uuidv7()`) are trans
 
 ```rust
 use pg2sqlite::prelude::*;
-let options = Pg2SqliteOptions::default()
-    .with_uuid_representation(UuidRepresentation::Blob)
-    .with_uuid_function_name("uuidv7".to_string());
+
+fn main() {
+    let options = Pg2SqliteOptions::default()
+        .with_uuid_representation(UuidRepresentation::Blob)
+        .with_uuid_function_name("uuidv7".to_string());
+    let _ = options;
+}
 ```
 
 ### Row-Level Security
@@ -166,12 +172,16 @@ PostgreSQL session variables are mapped to SQLite function calls:
 
 ```rust
 use pg2sqlite::prelude::*;
-let options = Pg2SqliteOptions::default()
-    .with_session_variable(SessionVariableMapping::current_setting(
-        "app.user_id",
-        "current_app_user",
-    ))
-    .with_rls_audit_table_name("rls_violations".to_string());
+
+fn main() {
+    let options = Pg2SqliteOptions::default()
+        .with_session_variable(SessionVariableMapping::current_setting(
+            "app.user_id",
+            "current_app_user",
+        ))
+        .with_rls_audit_table_name("rls_violations".to_string());
+    let _ = options;
+}
 ```
 
 ### Grant-based filtering
@@ -186,8 +196,11 @@ When `with_session_user_role` is set, the translation output is tailored to that
 
 ```rust
 use pg2sqlite::prelude::*;
-let options = Pg2SqliteOptions::default()
-    .with_session_user_role("app_user");
+
+fn main() {
+    let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+    let _ = options;
+}
 ```
 
 This is useful for generating SQLite schemas for client-side replicas that should only see and modify data they are authorized to access.
@@ -237,19 +250,21 @@ pg2sqlite can also translate SQLite DML statements (`INSERT`, `UPDATE`, `DELETE`
 
 ```rust
 use pg2sqlite::prelude::*;
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-let translator = Pg2Sqlite::default()
-    .sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")?;
-let schema = translator.build_schema()?;
-let options = Pg2SqliteOptions::default();
 
-let pg_stmts = translator.reverse_sql(
-    "SELECT * FROM users; INSERT INTO users VALUES ('abc', 'test');",
-    &schema,
-    &options,
-)?;
-assert_eq!(pg_stmts.len(), 2);
-Ok(())
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let translator = Pg2Sqlite::default()
+        .sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")?;
+    let schema = translator.build_schema()?;
+    let options = Pg2SqliteOptions::default();
+
+    let pg_stmts = translator.reverse_sql(
+        "SELECT * FROM users; INSERT INTO users VALUES ('abc', 'test');",
+        &schema,
+        &options,
+    )?;
+    assert_eq!(pg_stmts.len(), 2);
+
+    Ok(())
 }
 ```
 
@@ -326,7 +341,7 @@ pg2sqlite performs full semantic translation; polyglot-sql performs syntactic re
 
 ## Why pg2sqlite?
 
-Most PostgreSQL-to-SQLite translators are best-effort: they pass unknown constructs through unchanged, silently drop arguments, or emit SQL that fails at runtime.  pg2sqlite takes the opposite stance:
+Most PostgreSQL-to-SQLite translators are best-effort: they pass unknown constructs through unchanged, silently drop arguments, or emit SQL that fails at runtime. pg2sqlite takes the opposite stance:
 
 | Behaviour                                           | pg2sqlite | polyglot-sql          | sqlglot               |
 | --------------------------------------------------- | :-------: | :-------------------: | :-------------------: |
