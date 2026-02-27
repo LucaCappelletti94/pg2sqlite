@@ -9,15 +9,15 @@ A Rust library that translates PostgreSQL SQL into valid, runnable SQLite SQL.
 
 It parses PostgreSQL-dialect statements using [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and emits semantically equivalent SQLite SQL. Beyond basic type and syntax rewriting it handles complex PostgreSQL features that have no direct SQLite counterpart:
 
-- **Row-Level Security** — `CREATE POLICY` / `ALTER TABLE … ENABLE ROW LEVEL SECURITY` is translated to a renamed backing table, a view that enforces the `USING` clause, and `INSTEAD OF` triggers.
-- **Full-text search** — `CREATE INDEX … USING GIN (to_tsvector(…))` becomes an FTS5 virtual table with `AFTER INSERT / DELETE / UPDATE` sync triggers.
-- **Vector search** — pgvector types (`vector`, `halfvec`) and distance operators (`<->`, `<=>`) are translated to [sqlite-vec](https://github.com/asg017/sqlite-vec) equivalents, including a `vec0` virtual table and sync triggers.
-- **PL/pgSQL triggers** — trigger function bodies are parsed and rewritten to SQLite trigger syntax, including `IF / ELSIF / ELSE`, `SELECT INTO`, `RAISE EXCEPTION`, and `NEW` / `OLD` references.
-- **Grant-based filtering** — when a session role is configured, tables and indices the role cannot access are omitted from the output entirely.
-- **Reverse translation** — SQLite DML (`INSERT`, `UPDATE`, `DELETE`, `SELECT`) can be translated back to PostgreSQL for syncing client-side replicas to a PostgreSQL server.
+- **Row-Level Security** - `CREATE POLICY` / `ALTER TABLE … ENABLE ROW LEVEL SECURITY` is translated to a renamed backing table, a view that enforces the `USING` clause, and `INSTEAD OF` triggers.
+- **Full-text search** - `CREATE INDEX … USING GIN (to_tsvector(…))` becomes an FTS5 virtual table with `AFTER INSERT / DELETE / UPDATE` sync triggers.
+- **Vector search** - pgvector types (`vector`, `halfvec`) and distance operators (`<->`, `<=>`) are translated to [sqlite-vec](https://github.com/asg017/sqlite-vec) equivalents, including a `vec0` virtual table and sync triggers.
+- **PL/pgSQL triggers** - trigger function bodies are parsed and rewritten to SQLite trigger syntax, including `IF / ELSIF / ELSE`, `SELECT INTO`, `RAISE EXCEPTION`, and `NEW` / `OLD` references.
+- **Grant-based filtering** - when a session role is configured, tables and indices the role cannot access are omitted from the output entirely.
+- **Reverse translation** - SQLite DML (`INSERT`, `UPDATE`, `DELETE`, `SELECT`) can be translated back to PostgreSQL for syncing client-side replicas to a PostgreSQL server.
 
 > [!IMPORTANT]
-> **Translation guarantees:** every output statement is valid SQLite. If a construct can be translated, it is; if it cannot, the call returns an explicit `Err`. *Silently skipped* statements (`CREATE FUNCTION`, `GRANT`, `CREATE ROLE`, …) carry no SQLite-representable information; *silently dropped* column options (`COLLATION`, `CHARACTER SET`, `COMMENT`) have no SQLite equivalent. Everything else either translates or errors — there are no silent pass-throughs that look valid but fail at runtime.
+> **Translation guarantees:** every output statement is valid SQLite. If a construct can be translated, it is; if it cannot, the call returns an explicit `Err`. *Silently skipped* statements (`CREATE FUNCTION`, `GRANT`, `CREATE ROLE`, …) carry no SQLite-representable information; *silently dropped* column options (`COLLATION`, `CHARACTER SET`, `COMMENT`) have no SQLite equivalent. Everything else either translates or errors - there are no silent pass-throughs that look valid but fail at runtime.
 
 ## Quick start
 
@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `ALTER TABLE ENABLE ROW LEVEL SECURITY`                | Translated to views + `INSTEAD OF` triggers (see [RLS](#row-level-security))        |
 | `CREATE POLICY` / `CREATE ROLE` / `GRANT` / `REVOKE`   | Consumed for RLS and grant-based filtering; no invalid output emitted               |
 
-Statements with no SQLite equivalent (`CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `ALTER ROLE`, `COPY`, etc.) are silently skipped — they carry no information that can be represented in SQLite.
+Statements with no SQLite equivalent (`CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `ALTER ROLE`, `COPY`, etc.) are silently skipped - they carry no information that can be represented in SQLite.
 
 Statements that *do* have a SQLite equivalent but that pg2sqlite does not yet translate (`STDDEV`, `PERCENTILE_CONT`, `ARRAY_AGG`, `REGEXP_REPLACE`, …) return an explicit `Err` with a descriptive message. A clear error is always better than output that silently computes the wrong result or fails at runtime.
 
@@ -78,7 +78,7 @@ Statements that *do* have a SQLite equivalent but that pg2sqlite does not yet tr
 | `SERIAL` / `SMALLSERIAL` / `SMALLINT` / `INT` / `BOOLEAN`    | `INTEGER`                                     |
 | `BIGINT` / `INT8` / `INT4` / `INT2`                          | `INTEGER`                                     |
 | `FLOAT` / `DOUBLE PRECISION` / `FLOAT8` / `FLOAT4`           | `REAL`                                        |
-| `NUMERIC` / `DECIMAL`                                        | `REAL` (lossy — precision not enforced)       |
+| `NUMERIC` / `DECIMAL`                                        | `REAL` (lossy - precision not enforced)       |
 | `VARCHAR` / `CHAR` / `TEXT` / `CLOB` / `NVARCHAR`            | `TEXT`                                        |
 | `JSON` / `JSONB` / `TSVECTOR` / `TSQUERY`                    | `TEXT`                                        |
 | `TIMESTAMP` / `TIMESTAMPTZ` / `DATE` / `TIME` / `INTERVAL`   | `TEXT`                                        |
@@ -116,8 +116,8 @@ All `CREATE TABLE` output uses SQLite `STRICT` mode, and `NOT NULL` is automatic
 | Category                        | Examples                                                                         | Behavior                                             |
 | ------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | Untranslatable SQL              | `STDDEV`, `PERCENTILE_CONT`, `ARRAY_AGG`, `REGEXP_REPLACE`, `#>`, `#>>`         | Returns `Err` with a descriptive message             |
-| Silently skipped statements     | `CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `GRANT`, `REVOKE`, `CREATE ROLE`, `COPY` | Silently omitted — carry no SQLite-representable information |
-| Silently dropped column options | `COLLATION`, `CHARACTER SET`, `COMMENT`                                          | Dropped — no SQLite equivalent                       |
+| Silently skipped statements     | `CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `GRANT`, `REVOKE`, `CREATE ROLE`, `COPY` | Silently omitted - carry no SQLite-representable information |
+| Silently dropped column options | `COLLATION`, `CHARACTER SET`, `COMMENT`                                          | Dropped - no SQLite equivalent                       |
 
 ### UUID generation
 
