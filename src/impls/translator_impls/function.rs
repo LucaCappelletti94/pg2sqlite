@@ -1184,9 +1184,11 @@ impl Translator for Function {
                             within_group: vec![],
                         }))
                     }
-                    _ => Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "trunc() requires 1 or 2 arguments".to_string(),
-                    )),
+                    _ => {
+                        Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                            "trunc() requires 1 or 2 arguments".to_string(),
+                        ))
+                    }
                 }
             }
             FunctionTranslation::ToMakeDate => {
@@ -1209,9 +1211,7 @@ impl Translator for Function {
                         args: vec![
                             FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
                                 ValueWithSpan {
-                                    value: Value::SingleQuotedString(
-                                        "%04d-%02d-%02d".to_string(),
-                                    ),
+                                    value: Value::SingleQuotedString("%04d-%02d-%02d".to_string()),
                                     span: sqlparser::tokenizer::Span::empty(),
                                 },
                             ))),
@@ -1247,9 +1247,7 @@ impl Translator for Function {
                         args: vec![
                             FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
                                 ValueWithSpan {
-                                    value: Value::SingleQuotedString(
-                                        "%02d:%02d:%02d".to_string(),
-                                    ),
+                                    value: Value::SingleQuotedString("%02d:%02d:%02d".to_string()),
                                     span: sqlparser::tokenizer::Span::empty(),
                                 },
                             ))),
@@ -1277,14 +1275,13 @@ impl Translator for Function {
                 for e in &exprs {
                     translated.push(e.translate(schema, options)?);
                 }
-                let mut args = vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                    ValueWithSpan {
+                let mut args =
+                    vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
                         value: Value::SingleQuotedString(
                             "%04d-%02d-%02d %02d:%02d:%02d".to_string(),
                         ),
                         span: sqlparser::tokenizer::Span::empty(),
-                    },
-                )))];
+                    })))];
                 for t in translated {
                     args.push(FunctionArg::Unnamed(FunctionArgExpr::Expr(t)));
                 }

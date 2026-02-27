@@ -61,8 +61,9 @@ fn parse_strftime_format(format: &str) -> Option<DateTimeField> {
     datetime_field_from_strftime_format(format)
 }
 
-/// Reverse a composite strftime format string back to a `date_trunc` field name.
-/// Returns `None` if the format doesn't match a known `date_trunc` pattern.
+/// Reverse a composite strftime format string back to a `date_trunc` field
+/// name. Returns `None` if the format doesn't match a known `date_trunc`
+/// pattern.
 fn reverse_strftime_to_date_trunc_field(format: &str) -> Option<&'static str> {
     match format {
         "%Y-01-01" => Some("year"),

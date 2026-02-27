@@ -154,14 +154,10 @@ impl Translator for TableConstraint {
                 }
 
                 // Translate referential actions (consistent with column_option.rs)
-                updated_fk.on_delete = fk_constraint
-                    .on_delete
-                    .map(|a| a.translate(schema, options))
-                    .transpose()?;
-                updated_fk.on_update = fk_constraint
-                    .on_update
-                    .map(|a| a.translate(schema, options))
-                    .transpose()?;
+                updated_fk.on_delete =
+                    fk_constraint.on_delete.map(|a| a.translate(schema, options)).transpose()?;
+                updated_fk.on_update =
+                    fk_constraint.on_update.map(|a| a.translate(schema, options)).transpose()?;
 
                 // Translate characteristics (consistent with column_option.rs:252-254)
                 updated_fk.characteristics = fk_constraint

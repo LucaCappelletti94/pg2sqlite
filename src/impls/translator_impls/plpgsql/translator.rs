@@ -1640,10 +1640,7 @@ impl PlPgSqlTranslator {
                                 false
                             }
                         }
-                        sqlparser::ast::JoinOperator::AsOf {
-                            match_condition,
-                            constraint,
-                        } => {
+                        sqlparser::ast::JoinOperator::AsOf { match_condition, constraint } => {
                             Self::expr_references_variable(match_condition, var_name)
                                 || matches!(constraint, sqlparser::ast::JoinConstraint::On(expr)
                                     if Self::expr_references_variable(expr, var_name))
@@ -2039,13 +2036,7 @@ impl PlPgSqlTranslator {
                     }),
                 }
             }
-            Expr::Substring {
-                expr: inner,
-                substring_from,
-                substring_for,
-                special,
-                shorthand,
-            } => {
+            Expr::Substring { expr: inner, substring_from, substring_for, special, shorthand } => {
                 Expr::Substring {
                     expr: Box::new(Self::substitute_variables(inner, bindings)),
                     substring_from: substring_from
