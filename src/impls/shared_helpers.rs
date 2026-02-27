@@ -4,14 +4,15 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FromTable,
-    FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArguments, GroupByExpr,
-    HavingBound, Join, JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow,
-    Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy,
-    OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting,
+    FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments,
+    GroupByExpr, HavingBound, Join, JoinConstraint, JoinOperator, LateralView, LimitClause,
+    ListAggOnOverflow, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart,
+    OrderBy, OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting,
     Statement, SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
     TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, UpdateTableFromKind,
-    Values, WindowFrame, WindowFrameBound, WindowSpec, With, WithFill, XmlNamespaceDefinition,
-    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption,
+    Values, WindowFrame, WindowFrameBound, WindowSpec, WindowType, With, WithFill,
+    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
+    XmlTableColumnOption,
 };
 
 use crate::{errors::Error, prelude::Pg2SqliteOptions};
@@ -102,6 +103,33 @@ pub(crate) fn function_argument_exprs(args: &FunctionArguments) -> Vec<&Expr> {
     match args {
         FunctionArguments::List(list) => list.args.iter().filter_map(function_arg_expr).collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Translates all function arguments, recursively translating any expression or
+/// subquery payloads.
+pub(crate) fn translate_function_arguments<D: TranslationDirection>(
+    args: &FunctionArguments,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<FunctionArguments, Error> {
+    match args {
+        FunctionArguments::None => Ok(FunctionArguments::None),
+        FunctionArguments::Subquery(query) => {
+            Ok(FunctionArguments::Subquery(Box::new(D::translate_query(query, schema, options)?)))
+        }
+        FunctionArguments::List(list) => {
+            let translated = list
+                .args
+                .iter()
+                .map(|arg| translate_function_arg::<D>(arg, schema, options))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: list.duplicate_treatment,
+                args: translated,
+                clauses: translate_function_argument_clauses::<D>(&list.clauses, schema, options)?,
+            }))
+        }
     }
 }
 
@@ -708,6 +736,20 @@ pub(crate) fn translate_window_spec<D: TranslationDirection>(
             .map(|frame| translate_window_frame::<D>(frame, schema, options))
             .transpose()?,
     })
+}
+
+pub(crate) fn translate_window_type<D: TranslationDirection>(
+    over: Option<&WindowType>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<WindowType>, Error> {
+    match over {
+        None => Ok(None),
+        Some(WindowType::NamedWindow(name)) => Ok(Some(WindowType::NamedWindow(name.clone()))),
+        Some(WindowType::WindowSpec(spec)) => {
+            Ok(Some(WindowType::WindowSpec(translate_window_spec::<D>(spec, schema, options)?)))
+        }
+    }
 }
 
 fn translate_window_frame_bound<D: TranslationDirection>(

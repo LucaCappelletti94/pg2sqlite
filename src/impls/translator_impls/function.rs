@@ -3,16 +3,18 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
-    ValueWithSpan,
+    BinaryOperator, CastKind, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+    FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
 };
 
-use super::helpers::translate_window_type;
+use super::helpers::{Forward, translate_window_type};
 use crate::{
-    impls::shared_helpers::{
-        GENERATE_SERIES_UNSUPPORTED_MESSAGE, function_argument_exprs,
-        translate_function_argument_clauses,
+    impls::{
+        datetime_helpers::{build_strftime_call, parse_date_part_key, strftime_mapping_for_key},
+        shared_helpers::{
+            GENERATE_SERIES_UNSUPPORTED_MESSAGE, function_argument_exprs,
+            translate_function_arguments,
+        },
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
@@ -303,68 +305,6 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
     Ok(result)
 }
 
-/// Recursively translate all expressions inside [`FunctionArguments`].
-///
-/// This ensures that PostgreSQL-specific constructs nested inside function
-/// arguments (e.g., `NOW()` inside `string_agg`) are properly translated.
-fn translate_function_args(
-    args: &FunctionArguments,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<FunctionArguments, crate::errors::Error> {
-    use super::helpers::Forward;
-    match args {
-        FunctionArguments::None => Ok(FunctionArguments::None),
-        FunctionArguments::Subquery(query) => {
-            Ok(FunctionArguments::Subquery(Box::new(query.translate(schema, options)?)))
-        }
-        FunctionArguments::List(list) => {
-            let translated = list
-                .args
-                .iter()
-                .map(|arg| translate_function_arg(arg, schema, options))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: list.duplicate_treatment,
-                args: translated,
-                clauses: translate_function_argument_clauses::<Forward>(
-                    &list.clauses,
-                    schema,
-                    options,
-                )?,
-            }))
-        }
-    }
-}
-
-/// Recursively translate a single [`FunctionArg`].
-fn translate_function_arg(
-    arg: &FunctionArg,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<FunctionArg, crate::errors::Error> {
-    Ok(match arg {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(e.translate(schema, options)?))
-        }
-        FunctionArg::Named { name, arg: FunctionArgExpr::Expr(e), operator } => {
-            FunctionArg::Named {
-                name: name.clone(),
-                arg: FunctionArgExpr::Expr(e.translate(schema, options)?),
-                operator: operator.clone(),
-            }
-        }
-        FunctionArg::ExprNamed { name, arg: FunctionArgExpr::Expr(e), operator } => {
-            FunctionArg::ExprNamed {
-                name: name.translate(schema, options)?,
-                arg: FunctionArgExpr::Expr(e.translate(schema, options)?),
-                operator: operator.clone(),
-            }
-        }
-        other => other.clone(),
-    })
-}
-
 /// Wrap an expression with COALESCE(expr, '') to handle NULL semantics.
 ///
 /// PostgreSQL's CONCAT ignores NULL arguments; SQLite's `||` propagates them.
@@ -542,8 +482,10 @@ impl Translator for Function {
 
         match translate_function(&func.name, &func.args, options) {
             FunctionTranslation::Rename(new_name) => {
-                let translated_args = translate_function_args(&func.args, schema, options)?;
-                let translated_params = translate_function_args(&func.parameters, schema, options)?;
+                let translated_args =
+                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                let translated_params =
+                    translate_function_arguments::<Forward>(&func.parameters, schema, options)?;
                 let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
                 Ok(Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new(new_name)]),
@@ -650,29 +592,7 @@ impl Translator for Function {
                 };
 
                 let translated_ts = ts_expr.translate(schema, options)?;
-
-                Ok(Expr::Function(Function {
-                    name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                ValueWithSpan {
-                                    value: Value::SingleQuotedString(format_str.to_string()),
-                                    span: sqlparser::tokenizer::Span::empty(),
-                                },
-                            ))),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_ts)),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
+                Ok(build_strftime_call(format_str, translated_ts, None))
             }
             FunctionTranslation::DatePart => {
                 // date_part('field', expr) -> CAST(strftime(format, expr) AS INTEGER/REAL)
@@ -700,55 +620,18 @@ impl Translator for Function {
                     }
                 };
 
-                let (format_str, cast_type) = match field_str.as_str() {
-                    "year" | "years" => ("%Y", DataType::Integer(None)),
-                    "month" | "months" => ("%m", DataType::Integer(None)),
-                    "day" | "days" => ("%d", DataType::Integer(None)),
-                    "hour" | "hours" => ("%H", DataType::Integer(None)),
-                    "minute" | "minutes" => ("%M", DataType::Integer(None)),
-                    "second" | "seconds" => ("%f", DataType::Real),
-                    "week" | "weeks" => ("%W", DataType::Integer(None)),
-                    "dow" | "weekday" => ("%w", DataType::Integer(None)),
-                    "doy" => ("%j", DataType::Integer(None)),
-                    "epoch" => ("%s", DataType::Real),
-                    other => {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                            "date_part('{other}', ...) is not supported in SQLite. \
-                             Supported fields: year, month, day, hour, minute, second, \
-                             week, dow, doy, epoch."
-                        )));
-                    }
-                };
+                let key = parse_date_part_key(&field_str).ok_or_else(|| {
+                    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "date_part('{field_str}', ...) is not supported in SQLite. \
+                         Supported fields: year, month, day, hour, minute, second, \
+                         week, dow, doy, epoch."
+                    ))
+                })?;
+                let (format_str, cast_type) = strftime_mapping_for_key(key);
 
                 let translated_ts = ts_expr.translate(schema, options)?;
-
-                let strftime_call = Expr::Function(Function {
-                    name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                ValueWithSpan {
-                                    value: Value::SingleQuotedString(format_str.to_string()),
-                                    span: sqlparser::tokenizer::Span::empty(),
-                                },
-                            ))),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_ts)),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: func
-                        .over
-                        .as_ref()
-                        .map(|w| translate_window_type(Some(w), schema, options))
-                        .transpose()?
-                        .flatten(),
-                    within_group: vec![],
-                });
+                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+                let strftime_call = build_strftime_call(format_str, translated_ts, translated_over);
 
                 Ok(Expr::Cast {
                     expr: Box::new(strftime_call),
@@ -786,35 +669,16 @@ impl Translator for Function {
                 };
                 let mapped_format = pg_timestamp_format_to_strftime(&format_str)?;
                 let translated_ts = ts_expr.translate(schema, options)?;
-                Ok(Expr::Function(Function {
-                    name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                ValueWithSpan {
-                                    value: Value::SingleQuotedString(mapped_format),
-                                    span: sqlparser::tokenizer::Span::empty(),
-                                },
-                            ))),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_ts)),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
+                Ok(build_strftime_call(&mapped_format, translated_ts, None))
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
             }
             FunctionTranslation::PassThrough => {
-                let translated_args = translate_function_args(&func.args, schema, options)?;
-                let translated_params = translate_function_args(&func.parameters, schema, options)?;
+                let translated_args =
+                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                let translated_params =
+                    translate_function_arguments::<Forward>(&func.parameters, schema, options)?;
                 let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
                 Ok(Expr::Function(Function {
                     parameters: translated_params,

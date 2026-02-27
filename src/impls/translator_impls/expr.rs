@@ -17,7 +17,11 @@ use sqlparser::ast::{
 use crate::impls::timezone::is_fixed_utc_offset;
 use crate::{
     impls::{
-        shared_helpers::function_argument_exprs, timezone::normalize_timezone_modifier_for_sqlite,
+        datetime_helpers::{
+            DatePartKey, build_strftime_call, datetime_field_key, strftime_mapping_for_key,
+        },
+        shared_helpers::function_argument_exprs,
+        timezone::normalize_timezone_modifier_for_sqlite,
     },
     prelude::{Pg2SqliteOptions, Translator},
 };
@@ -229,69 +233,33 @@ fn translate_extract(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
-    // Map PostgreSQL date/time fields to (strftime format, cast type).
-    // SECOND uses %f (includes fractional seconds: "SS.SSS") and casts to REAL.
-    // EPOCH uses %s (Unix timestamp seconds) and casts to REAL for PG
-    // compatibility. All other fields return integer values.
-    let (format_str, cast_type) = match field {
-        DateTimeField::Year | DateTimeField::Years => ("%Y", DataType::Integer(None)),
-        DateTimeField::Month | DateTimeField::Months => ("%m", DataType::Integer(None)),
-        DateTimeField::Day | DateTimeField::Days => ("%d", DataType::Integer(None)),
-        DateTimeField::Hour | DateTimeField::Hours => ("%H", DataType::Integer(None)),
-        DateTimeField::Minute | DateTimeField::Minutes => ("%M", DataType::Integer(None)),
-        // %f returns "SS.SSS" (millisecond precision); PostgreSQL has microsecond precision.
-        DateTimeField::Second | DateTimeField::Seconds => ("%f", DataType::Real),
-        DateTimeField::DayOfWeek => ("%w", DataType::Integer(None)),
-        DateTimeField::DayOfYear => ("%j", DataType::Integer(None)),
-        // EPOCH: strftime('%s') gives integer seconds since Unix epoch.
-        // Cast to REAL for consistency with PostgreSQL's float return type.
-        DateTimeField::Epoch => ("%s", DataType::Real),
-        // WEEK uses ISO 8601 week numbering in PostgreSQL (Monday-based, week 1
-        // contains the first Thursday). SQLite's strftime('%W') uses Sunday-based
-        // week numbers and disagrees near year boundaries. No single strftime
-        // format produces ISO week numbers; emit a clear error instead.
-        DateTimeField::Week(_) | DateTimeField::Weeks => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                "EXTRACT(WEEK) is not supported in SQLite. PostgreSQL uses ISO 8601 \
-                 week numbers (Monday-based) while SQLite's strftime('%W') uses \
-                 Sunday-based week numbers — they diverge near year boundaries. \
-                 To compute ISO week number manually: \
-                 CAST((CAST(strftime('%j', date(ts, 'weekday 1', '-6 days')) AS INTEGER) \
-                 - 1) / 7 + 1 AS INTEGER)"
-                    .to_string(),
-            ));
-        }
-        other => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                "EXTRACT({other}) is not supported in SQLite. Supported fields: \
-                 YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH."
-            )));
-        }
-    };
+    let key = datetime_field_key(field).ok_or_else(|| {
+        crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "EXTRACT({field}) is not supported in SQLite. Supported fields: \
+             YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH."
+        ))
+    })?;
+    // WEEK uses ISO 8601 week numbering in PostgreSQL (Monday-based, week 1
+    // contains the first Thursday). SQLite's strftime('%W') uses Sunday-based
+    // week numbers and disagrees near year boundaries. No single strftime
+    // format produces ISO week numbers; emit a clear error instead.
+    if key == DatePartKey::Week {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            "EXTRACT(WEEK) is not supported in SQLite. PostgreSQL uses ISO 8601 \
+             week numbers (Monday-based) while SQLite's strftime('%W') uses \
+             Sunday-based week numbers — they diverge near year boundaries. \
+             To compute ISO week number manually: \
+             CAST((CAST(strftime('%j', date(ts, 'weekday 1', '-6 days')) AS INTEGER) \
+             - 1) / 7 + 1 AS INTEGER)"
+                .to_string(),
+        ));
+    }
+
+    let (format_str, cast_type) = strftime_mapping_for_key(key);
 
     // Build: CAST(strftime('format', expr) AS cast_type)
     let translated_expr = expr.translate(schema, options)?;
-
-    let strftime_call = Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
-        uses_odbc_syntax: false,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                    value: Value::SingleQuotedString(format_str.to_string()),
-                    span: sqlparser::tokenizer::Span::empty(),
-                }))),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_expr)),
-            ],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-    });
+    let strftime_call = build_strftime_call(format_str, translated_expr, None);
 
     Ok(Expr::Cast {
         expr: Box::new(strftime_call),

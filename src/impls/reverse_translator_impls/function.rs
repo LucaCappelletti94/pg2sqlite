@@ -17,7 +17,8 @@ use crate::impls::timezone::is_fixed_utc_offset as shared_is_fixed_utc_offset;
 use crate::{
     errors::Error,
     impls::{
-        shared_helpers::{translate_function_argument_clauses, translate_order_by_expr},
+        datetime_helpers::datetime_field_from_strftime_format,
+        shared_helpers::{translate_function_arguments, translate_order_by_expr},
         timezone::normalize_timezone_modifier_for_postgres,
     },
     prelude::Pg2SqliteOptions,
@@ -52,22 +53,7 @@ pub enum FunctionReversal {
 
 /// Parse a strftime format string and return the appropriate DateTimeField.
 fn parse_strftime_format(format: &str) -> Option<DateTimeField> {
-    match format {
-        "%Y" => Some(DateTimeField::Year),
-        "%m" => Some(DateTimeField::Month),
-        "%d" => Some(DateTimeField::Day),
-        "%H" => Some(DateTimeField::Hour),
-        "%M" => Some(DateTimeField::Minute),
-        // %S is standard strftime; %f is used by the forward translator for
-        // fractional seconds (EXTRACT(SECOND)) — both round-trip to SECOND.
-        "%S" | "%f" => Some(DateTimeField::Second),
-        // forward translator emits %s for EXTRACT(EPOCH)
-        "%s" => Some(DateTimeField::Epoch),
-        "%W" => Some(DateTimeField::Week(None)),
-        "%w" => Some(DateTimeField::DayOfWeek),
-        "%j" => Some(DateTimeField::DayOfYear),
-        _ => None,
-    }
+    datetime_field_from_strftime_format(format)
 }
 
 /// Return true when value is a fixed UTC offset in `+HH:MM` / `-HH:MM` format.
@@ -215,7 +201,7 @@ pub fn reverse_translate_function(
                 name: ObjectName::from(vec![Ident::new(new_name)]),
                 uses_odbc_syntax: func.uses_odbc_syntax,
                 parameters: func.parameters.clone(),
-                args: reverse_translate_function_args(&func.args, schema, options)?,
+                args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
                 filter: func
                     .filter
                     .as_ref()
@@ -400,8 +386,12 @@ pub fn reverse_translate_function(
             Ok(Expr::Function(Function {
                 name: ObjectName::from(vec![Ident::new("chr")]),
                 uses_odbc_syntax: func.uses_odbc_syntax,
-                parameters: reverse_translate_function_args(&func.parameters, schema, options)?,
-                args: reverse_translate_function_args(&func.args, schema, options)?,
+                parameters: translate_function_arguments::<Reverse>(
+                    &func.parameters,
+                    schema,
+                    options,
+                )?,
+                args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
                 filter: None,
                 null_treatment: func.null_treatment,
                 over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
@@ -436,8 +426,12 @@ pub fn reverse_translate_function(
             Ok(Expr::Function(Function {
                 name: func.name.clone(),
                 uses_odbc_syntax: func.uses_odbc_syntax,
-                parameters: reverse_translate_function_args(&func.parameters, schema, options)?,
-                args: reverse_translate_function_args(&func.args, schema, options)?,
+                parameters: translate_function_arguments::<Reverse>(
+                    &func.parameters,
+                    schema,
+                    options,
+                )?,
+                args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
                 filter: func
                     .filter
                     .as_ref()
@@ -474,77 +468,6 @@ fn extract_expr_from_arg(arg: &FunctionArg) -> Result<&Expr, Error> {
             ))
         }
     }
-}
-
-/// Reverse translate function arguments.
-fn reverse_translate_function_args(
-    args: &FunctionArguments,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<FunctionArguments, Error> {
-    match args {
-        FunctionArguments::List(list) => {
-            let translated_args = list
-                .args
-                .iter()
-                .map(|arg| reverse_translate_function_arg(arg, schema, options))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: list.duplicate_treatment,
-                args: translated_args,
-                clauses: translate_function_argument_clauses::<Reverse>(
-                    &list.clauses,
-                    schema,
-                    options,
-                )?,
-            }))
-        }
-        FunctionArguments::Subquery(query) => {
-            Ok(FunctionArguments::Subquery(Box::new(
-                crate::prelude::ReverseTranslator::reverse_translate(
-                    query.as_ref(),
-                    schema,
-                    options,
-                )?,
-            )))
-        }
-        FunctionArguments::None => Ok(FunctionArguments::None),
-    }
-}
-
-/// Reverse translate a single function argument.
-fn reverse_translate_function_arg(
-    arg: &FunctionArg,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<FunctionArg, Error> {
-    Ok(match arg {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(
-                crate::prelude::ReverseTranslator::reverse_translate(e, schema, options)?,
-            ))
-        }
-        FunctionArg::Named { name, arg: FunctionArgExpr::Expr(e), operator } => {
-            FunctionArg::Named {
-                name: name.clone(),
-                arg: FunctionArgExpr::Expr(crate::prelude::ReverseTranslator::reverse_translate(
-                    e, schema, options,
-                )?),
-                operator: operator.clone(),
-            }
-        }
-        FunctionArg::ExprNamed { name, arg: FunctionArgExpr::Expr(e), operator } => {
-            FunctionArg::ExprNamed {
-                name: crate::prelude::ReverseTranslator::reverse_translate(name, schema, options)?,
-                arg: FunctionArgExpr::Expr(crate::prelude::ReverseTranslator::reverse_translate(
-                    e, schema, options,
-                )?),
-                operator: operator.clone(),
-            }
-        }
-        // Pass through wildcards and other arg types
-        other => other.clone(),
-    })
 }
 
 #[cfg(test)]

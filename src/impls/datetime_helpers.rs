@@ -1,0 +1,123 @@
+//! Shared date/time mapping helpers for forward and reverse translation.
+
+use sqlparser::ast::{
+    DataType, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+    FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan, WindowType,
+};
+
+/// Canonical date/time part keys used for shared mappings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DatePartKey {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
+    DayOfWeek,
+    DayOfYear,
+    Epoch,
+    Week,
+}
+
+/// Parse a PostgreSQL `date_part` / `extract` textual field into a canonical
+/// key.
+#[must_use]
+pub(crate) fn parse_date_part_key(field: &str) -> Option<DatePartKey> {
+    match field.to_ascii_lowercase().as_str() {
+        "year" | "years" => Some(DatePartKey::Year),
+        "month" | "months" => Some(DatePartKey::Month),
+        "day" | "days" => Some(DatePartKey::Day),
+        "hour" | "hours" => Some(DatePartKey::Hour),
+        "minute" | "minutes" => Some(DatePartKey::Minute),
+        "second" | "seconds" => Some(DatePartKey::Second),
+        "dow" | "weekday" => Some(DatePartKey::DayOfWeek),
+        "doy" => Some(DatePartKey::DayOfYear),
+        "epoch" => Some(DatePartKey::Epoch),
+        "week" | "weeks" => Some(DatePartKey::Week),
+        _ => None,
+    }
+}
+
+/// Convert a parsed [`DateTimeField`] to a canonical key.
+#[must_use]
+pub(crate) fn datetime_field_key(field: &DateTimeField) -> Option<DatePartKey> {
+    match field {
+        DateTimeField::Year | DateTimeField::Years => Some(DatePartKey::Year),
+        DateTimeField::Month | DateTimeField::Months => Some(DatePartKey::Month),
+        DateTimeField::Day | DateTimeField::Days => Some(DatePartKey::Day),
+        DateTimeField::Hour | DateTimeField::Hours => Some(DatePartKey::Hour),
+        DateTimeField::Minute | DateTimeField::Minutes => Some(DatePartKey::Minute),
+        DateTimeField::Second | DateTimeField::Seconds => Some(DatePartKey::Second),
+        DateTimeField::DayOfWeek => Some(DatePartKey::DayOfWeek),
+        DateTimeField::DayOfYear => Some(DatePartKey::DayOfYear),
+        DateTimeField::Epoch => Some(DatePartKey::Epoch),
+        DateTimeField::Week(_) | DateTimeField::Weeks => Some(DatePartKey::Week),
+        _ => None,
+    }
+}
+
+/// Convert a canonical key to SQLite `strftime` format and cast type.
+#[must_use]
+pub(crate) fn strftime_mapping_for_key(key: DatePartKey) -> (&'static str, DataType) {
+    match key {
+        DatePartKey::Year => ("%Y", DataType::Integer(None)),
+        DatePartKey::Month => ("%m", DataType::Integer(None)),
+        DatePartKey::Day => ("%d", DataType::Integer(None)),
+        DatePartKey::Hour => ("%H", DataType::Integer(None)),
+        DatePartKey::Minute => ("%M", DataType::Integer(None)),
+        DatePartKey::Second => ("%f", DataType::Real),
+        DatePartKey::DayOfWeek => ("%w", DataType::Integer(None)),
+        DatePartKey::DayOfYear => ("%j", DataType::Integer(None)),
+        DatePartKey::Epoch => ("%s", DataType::Real),
+        DatePartKey::Week => ("%W", DataType::Integer(None)),
+    }
+}
+
+/// Parse a SQLite `strftime` format into a PostgreSQL date-time field.
+#[must_use]
+pub(crate) fn datetime_field_from_strftime_format(format: &str) -> Option<DateTimeField> {
+    match format {
+        "%Y" => Some(DateTimeField::Year),
+        "%m" => Some(DateTimeField::Month),
+        "%d" => Some(DateTimeField::Day),
+        "%H" => Some(DateTimeField::Hour),
+        "%M" => Some(DateTimeField::Minute),
+        // %S is standard strftime; %f is emitted for fractional-second paths.
+        "%S" | "%f" => Some(DateTimeField::Second),
+        "%s" => Some(DateTimeField::Epoch),
+        "%W" => Some(DateTimeField::Week(None)),
+        "%w" => Some(DateTimeField::DayOfWeek),
+        "%j" => Some(DateTimeField::DayOfYear),
+        _ => None,
+    }
+}
+
+/// Build `strftime('<format>', <expr>)` with optional window specification.
+#[must_use]
+pub(crate) fn build_strftime_call(
+    format: &str,
+    value_expr: Expr,
+    over: Option<WindowType>,
+) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(format.to_string()),
+                    span: sqlparser::tokenizer::Span::empty(),
+                }))),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(value_expr)),
+            ],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over,
+        within_group: vec![],
+    })
+}

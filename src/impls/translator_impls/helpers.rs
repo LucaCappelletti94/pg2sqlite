@@ -11,8 +11,8 @@ use sqlparser::ast::{
 use crate::{
     errors::Error,
     impls::{
-        object_name::sqlite_unqualified_object_name,
-        shared_helpers::{self, TranslationDirection},
+        direction_wrappers::define_direction_wrappers, object_name::sqlite_unqualified_object_name,
+        shared_helpers::TranslationDirection,
     },
     prelude::{Pg2SqliteOptions, Translator},
 };
@@ -48,122 +48,20 @@ impl TranslationDirection for Forward {
     }
 }
 
-pub(super) fn translate_table_with_joins(
-    table_with_joins: &TableWithJoins,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<TableWithJoins, Error> {
-    shared_helpers::translate_table_with_joins::<Forward>(table_with_joins, schema, options)
-}
-
-pub(super) fn translate_select_item(
-    item: &SelectItem,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<SelectItem, Error> {
-    shared_helpers::translate_select_item::<Forward>(item, schema, options)
-}
-
-pub(super) fn translate_order_by_expr(
-    expr: &OrderByExpr,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<OrderByExpr, Error> {
-    shared_helpers::translate_order_by_expr::<Forward>(expr, schema, options)
-}
-
-pub(super) fn translate_connect_by_kinds(
-    connect_by_kinds: &[ConnectByKind],
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Vec<ConnectByKind>, Error> {
-    shared_helpers::translate_connect_by_kinds::<Forward>(connect_by_kinds, schema, options)
-}
-
-pub(super) fn translate_query_settings(
-    settings: Option<&Vec<Setting>>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<Vec<Setting>>, Error> {
-    shared_helpers::translate_query_settings::<Forward>(settings, schema, options)
-}
-
-pub(super) fn translate_pipe_operators(
-    pipe_operators: &[PipeOperator],
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Vec<PipeOperator>, Error> {
-    shared_helpers::translate_pipe_operators::<Forward>(pipe_operators, schema, options)
-}
-
-pub(super) fn translate_with_clause(
-    with: Option<&With>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<With>, Error> {
-    shared_helpers::translate_with_clause::<Forward>(with, schema, options)
-}
-
-pub(super) fn translate_order_by_clause(
-    order_by: Option<&OrderBy>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<OrderBy>, Error> {
-    shared_helpers::translate_order_by_clause::<Forward>(order_by, schema, options)
-}
-
-pub(super) fn translate_limit_clause(
-    limit_clause: Option<&LimitClause>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<LimitClause>, Error> {
-    shared_helpers::translate_limit_clause::<Forward>(limit_clause, schema, options)
-}
-
-pub(super) fn translate_fetch_clause(
-    fetch: Option<&Fetch>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<Fetch>, Error> {
-    shared_helpers::translate_fetch_clause::<Forward>(fetch, schema, options)
-}
-
-pub(super) fn translate_group_by_expr(
-    group_by: &GroupByExpr,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<GroupByExpr, Error> {
-    shared_helpers::translate_group_by_expr::<Forward>(group_by, schema, options)
-}
-
-pub(super) fn translate_named_windows(
-    named_windows: &[NamedWindowDefinition],
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Vec<NamedWindowDefinition>, Error> {
-    shared_helpers::translate_named_windows::<Forward>(named_windows, schema, options)
-}
-
-pub(super) fn translate_values_rows(
-    values: &Values,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Values, Error> {
-    shared_helpers::translate_values_rows::<Forward>(values, schema, options)
-}
-
-pub(super) fn translate_window_type(
-    over: Option<&WindowType>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<WindowType>, Error> {
-    match over {
-        None => Ok(None),
-        Some(WindowType::NamedWindow(name)) => Ok(Some(WindowType::NamedWindow(name.clone()))),
-        Some(WindowType::WindowSpec(spec)) => {
-            Ok(Some(WindowType::WindowSpec(shared_helpers::translate_window_spec::<Forward>(
-                spec, schema, options,
-            )?)))
-        }
-    }
+define_direction_wrappers! {
+    direction = Forward;
+    fn translate_table_with_joins(table_with_joins: &TableWithJoins) -> TableWithJoins = translate_table_with_joins;
+    fn translate_select_item(item: &SelectItem) -> SelectItem = translate_select_item;
+    fn translate_order_by_expr(expr: &OrderByExpr) -> OrderByExpr = translate_order_by_expr;
+    fn translate_connect_by_kinds(connect_by_kinds: &[ConnectByKind]) -> Vec<ConnectByKind> = translate_connect_by_kinds;
+    fn translate_query_settings(settings: Option<&Vec<Setting>>) -> Option<Vec<Setting>> = translate_query_settings;
+    fn translate_pipe_operators(pipe_operators: &[PipeOperator]) -> Vec<PipeOperator> = translate_pipe_operators;
+    fn translate_with_clause(with: Option<&With>) -> Option<With> = translate_with_clause;
+    fn translate_order_by_clause(order_by: Option<&OrderBy>) -> Option<OrderBy> = translate_order_by_clause;
+    fn translate_limit_clause(limit_clause: Option<&LimitClause>) -> Option<LimitClause> = translate_limit_clause;
+    fn translate_fetch_clause(fetch: Option<&Fetch>) -> Option<Fetch> = translate_fetch_clause;
+    fn translate_group_by_expr(group_by: &GroupByExpr) -> GroupByExpr = translate_group_by_expr;
+    fn translate_named_windows(named_windows: &[NamedWindowDefinition]) -> Vec<NamedWindowDefinition> = translate_named_windows;
+    fn translate_values_rows(values: &Values) -> Values = translate_values_rows;
+    fn translate_window_type(over: Option<&WindowType>) -> Option<WindowType> = translate_window_type;
 }
