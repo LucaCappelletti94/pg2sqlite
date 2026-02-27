@@ -21,6 +21,10 @@ impl Translator for CreateTable {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // STRICT mode is only valid for regular CREATE TABLE, not CREATE TABLE AS
+        // SELECT
+        let is_ctas = self.query.is_some();
+
         let mut created_table = Self {
             name: sqlite_unqualified_object_name(&self.name),
             columns: self
@@ -36,10 +40,15 @@ impl Translator for CreateTable {
                 .into_iter()
                 .flatten()
                 .collect(),
-            // SQLite STRICT mode enforces type checking
-            strict: true,
+            // SQLite STRICT mode enforces type checking (not valid on CTAS)
+            strict: !is_ctas,
             ..self.clone()
         };
+
+        // Translate CREATE TABLE ... AS SELECT subquery
+        if let Some(ref q) = self.query {
+            created_table.query = Some(Box::new(q.translate(schema, options)?));
+        }
 
         let mut pk_column_names = HashSet::new();
 
