@@ -344,3 +344,16 @@ pub fn translate_sql(sql: &str, options: &Pg2SqliteOptions) -> Result<String, St
 pub fn translate_count(sql: &str, options: &Pg2SqliteOptions) -> Result<usize, String> {
     translate_statements(sql, options).map(|stmts| stmts.len())
 }
+
+/// Reverse-translates SQLite SQL text back to PostgreSQL SQL.
+///
+/// Uses a minimal schema with table `t` for reverse translation context.
+#[allow(dead_code)]
+pub fn reverse_translate_sql(sql: &str) -> Result<String, String> {
+    let ddl = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT, val TEXT, key TEXT, value TEXT);";
+    let translator = Pg2Sqlite::default().sql(ddl).map_err(|e| e.to_string())?;
+    let schema = translator.build_schema().map_err(|e| e.to_string())?;
+    let options = Pg2SqliteOptions::default();
+    let stmts = translator.reverse_sql(sql, &schema, &options).map_err(|e| e.to_string())?;
+    Ok(stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
+}

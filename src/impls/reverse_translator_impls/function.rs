@@ -22,6 +22,7 @@ use crate::{
         timezone::normalize_timezone_modifier_for_postgres,
     },
     prelude::Pg2SqliteOptions,
+    traits::TranslationOptions,
 };
 
 /// Represents a function reversal result.
@@ -47,6 +48,10 @@ pub enum FunctionReversal {
     /// Transform LTRIM/RTRIM/TRIM(str, chars) to TRIM(LEADING|TRAILING|BOTH
     /// chars FROM str)
     ToTrimDirectional(TrimWhereField),
+    /// Transform datetime(epoch, 'unixepoch') to to_timestamp(epoch)
+    ToTimestampFromEpoch,
+    /// Transform strftime(composite_fmt, ts) to date_trunc(field, ts)
+    ToDateTrunc(String),
     /// No translation needed
     PassThrough,
 }
@@ -54,6 +59,20 @@ pub enum FunctionReversal {
 /// Parse a strftime format string and return the appropriate DateTimeField.
 fn parse_strftime_format(format: &str) -> Option<DateTimeField> {
     datetime_field_from_strftime_format(format)
+}
+
+/// Reverse a composite strftime format string back to a `date_trunc` field name.
+/// Returns `None` if the format doesn't match a known `date_trunc` pattern.
+fn reverse_strftime_to_date_trunc_field(format: &str) -> Option<&'static str> {
+    match format {
+        "%Y-01-01" => Some("year"),
+        "%Y-%m-01" => Some("month"),
+        "%Y-%m-%d" => Some("day"),
+        "%Y-%m-%d %H:00:00" => Some("hour"),
+        "%Y-%m-%d %H:%M:00" => Some("minute"),
+        "%Y-%m-%d %H:%M:%S" => Some("second"),
+        _ => None,
+    }
 }
 
 /// Return true when value is a fixed UTC offset in `+HH:MM` / `-HH:MM` format.
@@ -69,7 +88,12 @@ fn normalize_datetime_timezone_modifier(modifier: &str) -> Option<String> {
 }
 
 /// Determine how to reverse a SQLite function to PostgreSQL.
-pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> FunctionReversal {
+#[allow(clippy::too_many_lines)]
+pub fn reverse_function(
+    name: &ObjectName,
+    args: &FunctionArguments,
+    options: &Pg2SqliteOptions,
+) -> FunctionReversal {
     let func_name = name.0.last().and_then(|part| part.as_ident()).map_or_else(
         || name.to_string().to_ascii_lowercase(),
         |ident| ident.value.to_ascii_lowercase(),
@@ -92,12 +116,17 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
                 && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
                     ValueWithSpan { value: Value::SingleQuotedString(modifier), .. },
                 )))) = list.args.get(1)
-                && let Some(zone) = normalize_datetime_timezone_modifier(modifier)
             {
-                return FunctionReversal::ToAtTimeZone(zone);
+                if let Some(zone) = normalize_datetime_timezone_modifier(modifier) {
+                    return FunctionReversal::ToAtTimeZone(zone);
+                }
+                if modifier == "unixepoch" {
+                    return FunctionReversal::ToTimestampFromEpoch;
+                }
             }
             FunctionReversal::PassThrough
         }
+        // strftime('%Y-01-01', expr) -> date_trunc('year', expr)
         // strftime('%Y', expr) -> EXTRACT(YEAR FROM expr)
         "strftime" => {
             if let FunctionArguments::List(list) = args
@@ -105,9 +134,13 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
                 && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
                     ValueWithSpan { value: Value::SingleQuotedString(format), .. },
                 )))) = list.args.first()
-                && let Some(field) = parse_strftime_format(format)
             {
-                return FunctionReversal::ToExtract(field);
+                if let Some(field) = reverse_strftime_to_date_trunc_field(format) {
+                    return FunctionReversal::ToDateTrunc(field.to_string());
+                }
+                if let Some(field) = parse_strftime_format(format) {
+                    return FunctionReversal::ToExtract(field);
+                }
             }
             FunctionReversal::PassThrough
         }
@@ -159,7 +192,7 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
             FunctionReversal::PassThrough
         }
         // TRIM(str, chars) -> TRIM(BOTH chars FROM str)
-        // Single-arg TRIM(str) is identical in PG; pass through.
+        // Single-arg TRIM(str) is parsed as Expr::Trim, not Function; pass through.
         "trim" => {
             if let FunctionArguments::List(list) = args
                 && list.args.len() == 2
@@ -189,6 +222,18 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
         "json_object" => FunctionReversal::Rename("json_build_object".to_string()),
         // json_array -> json_build_array (SQLite → PG)
         "json_array" => FunctionReversal::Rename("json_build_array".to_string()),
+        // json_type -> json_typeof (SQLite → PG)
+        "json_type" => FunctionReversal::Rename("json_typeof".to_string()),
+        // json_array_length -> jsonb_array_length (SQLite → PG)
+        "json_array_length" => FunctionReversal::Rename("jsonb_array_length".to_string()),
+        // sqlite_version -> version (SQLite → PG)
+        "sqlite_version" => FunctionReversal::Rename("version".to_string()),
+        // quote -> quote_nullable (SQLite → PG)
+        "quote" => FunctionReversal::Rename("quote_nullable".to_string()),
+        // uuid() / custom UUID function -> gen_random_uuid()
+        name if name == options.get_uuid_function_name() => {
+            FunctionReversal::Rename("gen_random_uuid".to_string())
+        }
 
         _ => FunctionReversal::PassThrough,
     }
@@ -201,12 +246,16 @@ pub fn reverse_translate_function(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, Error> {
-    match reverse_function(&func.name, &func.args) {
+    match reverse_function(&func.name, &func.args, options) {
         FunctionReversal::Rename(new_name) => {
             Ok(Expr::Function(Function {
                 name: ObjectName::from(vec![Ident::new(new_name)]),
                 uses_odbc_syntax: func.uses_odbc_syntax,
-                parameters: func.parameters.clone(),
+                parameters: translate_function_arguments::<Reverse>(
+                    &func.parameters,
+                    schema,
+                    options,
+                )?,
                 args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
                 filter: func
                     .filter
@@ -225,16 +274,8 @@ pub fn reverse_translate_function(
                 within_group: func
                     .within_group
                     .iter()
-                    .map(|ob| {
-                        Ok(sqlparser::ast::OrderByExpr {
-                            expr: crate::prelude::ReverseTranslator::reverse_translate(
-                                &ob.expr, schema, options,
-                            )?,
-                            options: ob.options,
-                            with_fill: ob.with_fill.clone(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?,
+                    .map(|e| translate_order_by_expr::<Reverse>(e, schema, options))
+                    .collect::<Result<Vec<_>, _>>()?,
             }))
         }
         FunctionReversal::ToNow => {
@@ -439,6 +480,64 @@ pub fn reverse_translate_function(
                 trim_what: Some(Box::new(reversed_char)),
                 trim_characters: None,
             })
+        }
+        FunctionReversal::ToTimestampFromEpoch => {
+            let FunctionArguments::List(list) = &func.args else {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "datetime unixepoch requires list arguments".to_string(),
+                ));
+            };
+            let epoch_expr = extract_expr_from_arg(
+                list.args.first().expect("datetime must have epoch argument"),
+            )?;
+            let reversed_epoch =
+                crate::prelude::ReverseTranslator::reverse_translate(epoch_expr, schema, options)?;
+            Ok(Expr::Function(Function {
+                name: ObjectName::from(vec![Ident::new("to_timestamp")]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(reversed_epoch))],
+                    clauses: vec![],
+                }),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            }))
+        }
+        FunctionReversal::ToDateTrunc(field) => {
+            let FunctionArguments::List(list) = &func.args else {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "strftime requires list arguments for date_trunc reversal".to_string(),
+                ));
+            };
+            let ts_expr = extract_expr_from_arg(
+                list.args.get(1).expect("strftime must have timestamp argument"),
+            )?;
+            let reversed_ts =
+                crate::prelude::ReverseTranslator::reverse_translate(ts_expr, schema, options)?;
+            Ok(Expr::Function(Function {
+                name: ObjectName::from(vec![Ident::new("date_trunc")]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: vec![
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(field),
+                            span: sqlparser::tokenizer::Span::empty(),
+                        }))),
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(reversed_ts)),
+                    ],
+                    clauses: vec![],
+                }),
+                filter: None,
+                null_treatment: None,
+                over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
+                within_group: vec![],
+            }))
         }
         FunctionReversal::PassThrough => {
             Ok(Expr::Function(Function {

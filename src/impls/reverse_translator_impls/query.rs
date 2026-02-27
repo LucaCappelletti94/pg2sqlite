@@ -161,10 +161,34 @@ impl ReverseTranslator for Select {
         // Reverse translate GROUP BY expressions
         let group_by = reverse_translate_group_by(&self.group_by, schema, options)?;
 
+        let top = self
+            .top
+            .as_ref()
+            .map(|t| -> Result<sqlparser::ast::Top, Error> {
+                let quantity = t
+                    .quantity
+                    .as_ref()
+                    .map(|q| -> Result<sqlparser::ast::TopQuantity, Error> {
+                        match q {
+                            sqlparser::ast::TopQuantity::Expr(expr) => {
+                                Ok(sqlparser::ast::TopQuantity::Expr(
+                                    expr.reverse_translate(schema, options)?,
+                                ))
+                            }
+                            sqlparser::ast::TopQuantity::Constant(c) => {
+                                Ok(sqlparser::ast::TopQuantity::Constant(*c))
+                            }
+                        }
+                    })
+                    .transpose()?;
+                Ok(sqlparser::ast::Top { with_ties: t.with_ties, percent: t.percent, quantity })
+            })
+            .transpose()?;
+
         Ok(Select {
             select_token: self.select_token.clone(),
             distinct: reverse_translate_distinct(self.distinct.as_ref(), schema, options)?,
-            top: self.top.clone(),
+            top,
             top_before_distinct: self.top_before_distinct,
             projection,
             into: self.into.clone(),

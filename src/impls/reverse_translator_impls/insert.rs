@@ -156,13 +156,23 @@ impl ReverseTranslator for Insert {
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
+        let table = match &self.table {
+            TableObject::TableName(_) => self.table.clone(),
+            TableObject::TableFunction(func) => {
+                match super::function::reverse_translate_function(func, schema, options)? {
+                    Expr::Function(f) => TableObject::TableFunction(f),
+                    _ => self.table.clone(),
+                }
+            }
+        };
+
         let mut insert = Insert {
             insert_token: self.insert_token.clone(),
             optimizer_hint: self.optimizer_hint.clone(),
             or: None, // Will be set below based on conversion
             ignore: self.ignore,
             into: self.into,
-            table: self.table.clone(),
+            table,
             table_alias: self.table_alias.clone(),
             columns: self.columns.clone(),
             overwrite: self.overwrite,
