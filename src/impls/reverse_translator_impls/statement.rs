@@ -223,6 +223,12 @@ impl ReverseTranslator for Statement {
 
                 Ok(Statement::Query(Box::new(query.reverse_translate(schema, options)?)))
             }
+            // Transaction control statements pass through unchanged
+            Statement::Commit { .. }
+            | Statement::Rollback { .. }
+            | Statement::StartTransaction { .. }
+            | Statement::Savepoint { .. }
+            | Statement::ReleaseSavepoint { .. } => Ok(self.clone()),
             // Non-DML statements are not supported for reverse translation
             other => {
                 let variant_name = statement_variant_name(other);

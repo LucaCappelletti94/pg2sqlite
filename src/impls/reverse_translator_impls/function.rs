@@ -183,6 +183,12 @@ pub fn reverse_function(name: &ObjectName, args: &FunctionArguments) -> Function
         "vec_f32" => FunctionReversal::ToVectorCast,
         // vec_f16(expr) -> expr::halfvec
         "vec_f16" => FunctionReversal::ToHalfvecCast,
+        // unicode(char) -> ascii(char)
+        "unicode" => FunctionReversal::Rename("ascii".to_string()),
+        // json_object -> json_build_object (SQLite → PG)
+        "json_object" => FunctionReversal::Rename("json_build_object".to_string()),
+        // json_array -> json_build_array (SQLite → PG)
+        "json_array" => FunctionReversal::Rename("json_build_array".to_string()),
 
         _ => FunctionReversal::PassThrough,
     }
@@ -216,7 +222,19 @@ pub fn reverse_translate_function(
                     .map(Box::new),
                 null_treatment: func.null_treatment,
                 over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
-                within_group: func.within_group.clone(),
+                within_group: func
+                    .within_group
+                    .iter()
+                    .map(|ob| {
+                        Ok(sqlparser::ast::OrderByExpr {
+                            expr: crate::prelude::ReverseTranslator::reverse_translate(
+                                &ob.expr, schema, options,
+                            )?,
+                            options: ob.options,
+                            with_fill: ob.with_fill.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?,
             }))
         }
         FunctionReversal::ToNow => {
