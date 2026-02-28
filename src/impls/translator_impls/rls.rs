@@ -726,7 +726,7 @@ fn transform_function_argument_clause_rls<O: TranslationOptions, DB: DatabaseLik
     }
 }
 
-/// Transforms a [`WindowFrameBound`] for RLS, recursing into
+/// Transforms a [`sqlparser::ast::WindowFrameBound`] for RLS, recursing into
 /// `Preceding(Some(expr))` and `Following(Some(expr))`.
 fn transform_window_frame_bound_rls<O: TranslationOptions, DB: DatabaseLike>(
     bound: &sqlparser::ast::WindowFrameBound,
