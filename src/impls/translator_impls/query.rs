@@ -69,19 +69,16 @@ impl Translator for Query {
             return Ok(rewritten);
         }
 
-        Ok(Query {
+        Ok(build_query_envelope(
+            self.body.translate(schema, options)?,
             with,
-            body: Box::new(self.body.translate(schema, options)?),
             order_by,
             limit_clause,
             fetch,
-            // Strip FOR UPDATE / FOR SHARE: SQLite has no row-level locking.
-            locks: vec![],
-            for_clause: None,
             settings,
-            format_clause: self.format_clause.clone(),
+            self.format_clause.clone(),
             pipe_operators,
-        })
+        ))
     }
 }
 
@@ -91,6 +88,33 @@ fn translate_order_by(
     options: &Pg2SqliteOptions,
 ) -> Result<Option<OrderBy>, crate::errors::Error> {
     translate_order_by_clause(order_by, schema, options)
+}
+
+/// Build a `Query` envelope with the translated top-level clauses and the given
+/// body. Strips FOR UPDATE / FOR SHARE (SQLite has no row-level locking).
+#[allow(clippy::too_many_arguments)]
+fn build_query_envelope(
+    body: SetExpr,
+    with: Option<sqlparser::ast::With>,
+    order_by: Option<OrderBy>,
+    limit_clause: Option<LimitClause>,
+    fetch: Option<Fetch>,
+    settings: Option<Vec<Setting>>,
+    format_clause: Option<sqlparser::ast::FormatClause>,
+    pipe_operators: Vec<PipeOperator>,
+) -> Query {
+    Query {
+        with,
+        body: Box::new(body),
+        order_by,
+        limit_clause,
+        fetch,
+        locks: vec![],
+        for_clause: None,
+        settings,
+        format_clause,
+        pipe_operators,
+    }
 }
 
 fn ensure_distinct_on_projection_is_rewriteable(
@@ -311,19 +335,16 @@ fn try_translate_distinct_on_query(
         select_modifiers: None,
     };
 
-    Ok(Some(Query {
+    Ok(Some(build_query_envelope(
+        SetExpr::Select(Box::new(outer_select)),
         with,
-        body: Box::new(SetExpr::Select(Box::new(outer_select))),
         order_by,
         limit_clause,
         fetch,
-        // Strip FOR UPDATE / FOR SHARE: SQLite has no row-level locking.
-        locks: vec![],
-        for_clause: None,
         settings,
-        format_clause: query.format_clause.clone(),
+        query.format_clause.clone(),
         pipe_operators,
-    }))
+    )))
 }
 
 #[derive(Clone, Copy)]
@@ -650,19 +671,16 @@ fn try_translate_grouping_query(
         branches.push(SetExpr::Select(Box::new(branch_select)));
     }
 
-    Ok(Some(Query {
+    Ok(Some(build_query_envelope(
+        union_all(branches),
         with,
-        body: Box::new(union_all(branches)),
         order_by,
         limit_clause,
         fetch,
-        // Strip FOR UPDATE / FOR SHARE: SQLite has no row-level locking.
-        locks: vec![],
-        for_clause: None,
         settings,
-        format_clause: query.format_clause.clone(),
+        query.format_clause.clone(),
         pipe_operators,
-    }))
+    )))
 }
 
 impl Translator for SetExpr {
