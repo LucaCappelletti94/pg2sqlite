@@ -4,23 +4,19 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Fetch, Function, FunctionArgumentList, FunctionArguments,
-    GroupByExpr, GroupByWithModifier, Ident, LimitClause, NamedWindowDefinition, ObjectName,
-    ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query, Select, SelectItem,
-    SetExpr, SetOperator, SetQuantifier, Setting, Statement, TableAlias, TableFactor,
-    TableWithJoins, Value, ValueWithSpan, Values, WindowSpec, WindowType,
-    helpers::attached_token::AttachedToken,
+    GroupByExpr, GroupByWithModifier, Ident, LimitClause, ObjectName, ObjectNamePart, OrderBy,
+    OrderByExpr, OrderByKind, PipeOperator, Query, Select, SelectItem, SetExpr, SetOperator,
+    SetQuantifier, Setting, TableAlias, TableFactor, TableWithJoins, Value, ValueWithSpan,
+    WindowSpec, WindowType, helpers::attached_token::AttachedToken,
 };
 
 use super::helpers::{
-    Forward, translate_connect_by_kinds, translate_fetch_clause, translate_group_by_expr,
-    translate_limit_clause as translate_limit_clause_shared,
-    translate_named_windows as translate_named_window_shared, translate_order_by_clause,
-    translate_order_by_expr, translate_pipe_operators, translate_query_settings,
-    translate_select_item, translate_table_with_joins, translate_values_rows,
+    Forward, translate_fetch_clause, translate_limit_clause as translate_limit_clause_shared,
+    translate_order_by_clause, translate_pipe_operators, translate_query_settings,
     translate_with_clause,
 };
 use crate::{
-    impls::shared_helpers::translate_lateral_view,
+    impls::function_helpers::integer_literal,
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -37,10 +33,11 @@ impl Translator for Query {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        let with = translate_with(self.with.as_ref(), schema, options)?;
+        let with = translate_with_clause(self.with.as_ref(), schema, options)?;
         let order_by = translate_order_by(self.order_by.as_ref(), schema, options)?;
-        let limit_clause = translate_limit_clause(self.limit_clause.as_ref(), schema, options)?;
-        let fetch = translate_fetch(self.fetch.as_ref(), schema, options)?;
+        let limit_clause =
+            translate_limit_clause_shared(self.limit_clause.as_ref(), schema, options)?;
+        let fetch = translate_fetch_clause(self.fetch.as_ref(), schema, options)?;
         let settings = translate_query_settings(self.settings.as_ref(), schema, options)?;
         let pipe_operators = translate_pipe_operators(&self.pipe_operators, schema, options)?;
 
@@ -178,13 +175,6 @@ fn row_number_expr(partition_by: Vec<Expr>, order_by: Vec<OrderByExpr>) -> Expr 
             window_frame: None,
         })),
         within_group: vec![],
-    })
-}
-
-fn integer_literal(value: i64) -> Expr {
-    Expr::Value(ValueWithSpan {
-        value: Value::Number(value.to_string(), false),
-        span: sqlparser::tokenizer::Span::empty(),
     })
 }
 
@@ -685,42 +675,7 @@ impl Translator for SetExpr {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        Ok(match self {
-            SetExpr::Select(select) => {
-                SetExpr::Select(Box::new(select.translate(schema, options)?))
-            }
-            SetExpr::Query(query) => SetExpr::Query(Box::new(query.translate(schema, options)?)),
-            SetExpr::SetOperation { op, set_quantifier, left, right } => {
-                SetExpr::SetOperation {
-                    op: *op,
-                    set_quantifier: *set_quantifier,
-                    left: Box::new(left.translate(schema, options)?),
-                    right: Box::new(right.translate(schema, options)?),
-                }
-            }
-            SetExpr::Values(values) => SetExpr::Values(translate_values(values, schema, options)?),
-            SetExpr::Insert(Statement::Insert(ins)) => {
-                SetExpr::Insert(Statement::Insert(ins.translate(schema, options)?))
-            }
-            SetExpr::Update(Statement::Update(upd)) => {
-                SetExpr::Update(Statement::Update(upd.translate(schema, options)?))
-            }
-            SetExpr::Delete(Statement::Delete(del)) => {
-                let translated = del.translate(schema, options)?;
-                if let Statement::Delete(translated_del) = translated {
-                    SetExpr::Delete(Statement::Delete(translated_del))
-                } else {
-                    // Delete::translate returns Statement; if not Delete, keep original
-                    self.clone()
-                }
-            }
-            SetExpr::Table(_) | SetExpr::Merge(_) => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                    "TABLE and MERGE expressions are not supported in SQLite".to_string(),
-                ));
-            }
-            SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) => self.clone(),
-        })
+        crate::impls::shared_helpers::translate_set_expr_shared::<Forward>(self, schema, options)
     }
 }
 
@@ -734,91 +689,21 @@ impl Translator for Select {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        // Translate the WHERE clause (selection) which may contain @@ expressions
-        let selection =
-            self.selection.as_ref().map(|expr| expr.translate(schema, options)).transpose()?;
-
-        // Translate subqueries in FROM clause
-        let from = self
-            .from
-            .iter()
-            .map(|table_with_joins| translate_table_with_joins(table_with_joins, schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Translate expressions in projections (SELECT clause)
-        let projection = self
-            .projection
-            .iter()
-            .map(|item| translate_select_item(item, schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let prewhere =
-            self.prewhere.as_ref().map(|expr| expr.translate(schema, options)).transpose()?;
-        let cluster_by = self
-            .cluster_by
-            .iter()
-            .map(|expr| expr.translate(schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let distribute_by = self
-            .distribute_by
-            .iter()
-            .map(|expr| expr.translate(schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let sort_by = self
-            .sort_by
-            .iter()
-            .map(|expr| translate_order_by_expr(expr, schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let connect_by = translate_connect_by_kinds(&self.connect_by, schema, options)?;
-
-        Ok(Select {
-            select_token: self.select_token.clone(),
-            distinct: translate_distinct(self.distinct.as_ref(), schema, options)?,
-            top: self.top.clone(),
-            top_before_distinct: self.top_before_distinct,
-            projection,
-            into: self.into.clone(),
-            from,
-            lateral_views: self
-                .lateral_views
-                .iter()
-                .map(|lv| translate_lateral_view::<Forward>(lv, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            prewhere,
-            selection,
-            group_by: translate_group_by(&self.group_by, schema, options)?,
-            cluster_by,
-            distribute_by,
-            sort_by,
-            having: self.having.as_ref().map(|expr| expr.translate(schema, options)).transpose()?,
-            named_window: translate_named_window(&self.named_window, schema, options)?,
-            qualify: self.qualify.as_ref().map(|e| e.translate(schema, options)).transpose()?,
-            window_before_qualify: self.window_before_qualify,
-            value_table_mode: self.value_table_mode,
-            connect_by,
-            flavor: self.flavor,
-            exclude: self.exclude.clone(),
-            optimizer_hint: self.optimizer_hint.clone(),
-            select_modifiers: self.select_modifiers.clone(),
-        })
+        crate::impls::shared_helpers::translate_select_shared::<Forward>(self, schema, options)
     }
 }
 
-fn translate_with(
-    with: Option<&sqlparser::ast::With>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<sqlparser::ast::With>, crate::errors::Error> {
-    translate_with_clause(with, schema, options)
-}
-
+/// Test-only wrappers for internal helpers.
+#[cfg(test)]
 fn translate_group_by(
     group_by: &sqlparser::ast::GroupByExpr,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<sqlparser::ast::GroupByExpr, crate::errors::Error> {
-    translate_group_by_expr(group_by, schema, options)
+    crate::impls::shared_helpers::translate_group_by_expr::<Forward>(group_by, schema, options)
 }
 
+#[cfg(test)]
 fn translate_limit_clause(
     limit_clause: Option<&LimitClause>,
     schema: &ParserDB,
@@ -827,6 +712,7 @@ fn translate_limit_clause(
     translate_limit_clause_shared(limit_clause, schema, options)
 }
 
+#[cfg(test)]
 fn translate_fetch(
     fetch: Option<&Fetch>,
     schema: &ParserDB,
@@ -835,40 +721,22 @@ fn translate_fetch(
     translate_fetch_clause(fetch, schema, options)
 }
 
+#[cfg(test)]
 fn translate_distinct(
     distinct: Option<&Distinct>,
-    _schema: &ParserDB,
-    _options: &Pg2SqliteOptions,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
 ) -> Result<Option<Distinct>, crate::errors::Error> {
-    distinct
-        .map(|d| {
-            Ok(match d {
-                Distinct::On(_) => {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "DISTINCT ON is not supported in SQLite".to_string(),
-                    ));
-                }
-                Distinct::Distinct => Distinct::Distinct,
-                Distinct::All => Distinct::All,
-            })
-        })
-        .transpose()
+    crate::impls::shared_helpers::translate_distinct_shared::<Forward>(distinct, schema, options)
 }
 
+#[cfg(test)]
 fn translate_named_window(
-    named_windows: &[NamedWindowDefinition],
+    named_windows: &[sqlparser::ast::NamedWindowDefinition],
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
-) -> Result<Vec<NamedWindowDefinition>, crate::errors::Error> {
-    translate_named_window_shared(named_windows, schema, options)
-}
-
-fn translate_values(
-    values: &Values,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Values, crate::errors::Error> {
-    translate_values_rows(values, schema, options)
+) -> Result<Vec<sqlparser::ast::NamedWindowDefinition>, crate::errors::Error> {
+    crate::impls::shared_helpers::translate_named_windows::<Forward>(named_windows, schema, options)
 }
 
 #[cfg(test)]

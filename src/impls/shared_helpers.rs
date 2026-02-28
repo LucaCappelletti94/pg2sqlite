@@ -35,6 +35,16 @@ pub(crate) trait TranslationDirection {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Query, Error>;
+    fn translate_insert(
+        insert: &sqlparser::ast::Insert,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<sqlparser::ast::Insert, Error>;
+    fn translate_delete(
+        delete: &sqlparser::ast::Delete,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<sqlparser::ast::Delete, Error>;
 
     fn translate_object_name(
         name: &ObjectName,
@@ -929,6 +939,294 @@ where
     }
 }
 
+/// Shared UPDATE translation used by both forward and reverse paths.
+///
+/// Forward-specific: validates that no joins exist on the target table.
+pub(crate) fn translate_update<D: TranslationDirection>(
+    update: &sqlparser::ast::Update,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<sqlparser::ast::Update, Error> {
+    if D::IS_FORWARD && !update.table.joins.is_empty() {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "UPDATE with joins on the target table is not supported in SQLite. \
+             Use UPDATE ... FROM ... instead."
+                .to_string(),
+        ));
+    }
+
+    let assignments = update
+        .assignments
+        .iter()
+        .map(|a| {
+            Ok(Assignment {
+                target: a.target.clone(),
+                value: D::translate_expr(&a.value, schema, options)?,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    let selection = update
+        .selection
+        .as_ref()
+        .map(|expr| D::translate_expr(expr, schema, options))
+        .transpose()?;
+
+    let from = update
+        .from
+        .as_ref()
+        .map(|f| {
+            map_update_table_from_kind(f, |table| {
+                translate_table_with_joins::<D>(table, schema, options)
+            })
+        })
+        .transpose()?;
+
+    let returning = translate_returning::<D>(update.returning.as_ref(), schema, options)?;
+    let limit =
+        update.limit.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?;
+
+    Ok(sqlparser::ast::Update {
+        update_token: update.update_token.clone(),
+        optimizer_hint: update.optimizer_hint.clone(),
+        table: translate_table_with_joins::<D>(&update.table, schema, options)?,
+        assignments,
+        from,
+        selection,
+        returning,
+        or: update.or,
+        limit,
+    })
+}
+
+/// Shared DISTINCT translation.
+///
+/// Forward: errors on `DISTINCT ON` (not supported in SQLite).
+/// Reverse: translates `DISTINCT ON` expressions.
+pub(crate) fn translate_distinct_shared<D: TranslationDirection>(
+    distinct: Option<&sqlparser::ast::Distinct>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::Distinct>, Error> {
+    distinct
+        .map(|d| {
+            Ok(match d {
+                sqlparser::ast::Distinct::On(exprs) => {
+                    if D::IS_FORWARD {
+                        return Err(Error::UnsupportedSQLiteFeature(
+                            "DISTINCT ON is not supported in SQLite".to_string(),
+                        ));
+                    }
+                    sqlparser::ast::Distinct::On(
+                        exprs
+                            .iter()
+                            .map(|e| D::translate_expr(e, schema, options))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                }
+                sqlparser::ast::Distinct::Distinct => sqlparser::ast::Distinct::Distinct,
+                sqlparser::ast::Distinct::All => sqlparser::ast::Distinct::All,
+            })
+        })
+        .transpose()
+}
+
+/// Shared TOP quantity translation.
+///
+/// Forward: clones as-is. Reverse: translates quantity expressions.
+pub(crate) fn translate_top_shared<D: TranslationDirection>(
+    top: Option<&sqlparser::ast::Top>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::Top>, Error> {
+    top.map(|t| {
+        if D::IS_FORWARD {
+            return Ok(t.clone());
+        }
+        let quantity = t
+            .quantity
+            .as_ref()
+            .map(|q| -> Result<sqlparser::ast::TopQuantity, Error> {
+                match q {
+                    sqlparser::ast::TopQuantity::Expr(expr) => {
+                        Ok(sqlparser::ast::TopQuantity::Expr(D::translate_expr(
+                            expr, schema, options,
+                        )?))
+                    }
+                    sqlparser::ast::TopQuantity::Constant(c) => {
+                        Ok(sqlparser::ast::TopQuantity::Constant(*c))
+                    }
+                }
+            })
+            .transpose()?;
+        Ok(sqlparser::ast::Top { with_ties: t.with_ties, percent: t.percent, quantity })
+    })
+    .transpose()
+}
+
+/// Shared SELECT translation used by both forward and reverse paths.
+pub(crate) fn translate_select_shared<D: TranslationDirection>(
+    select: &sqlparser::ast::Select,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<sqlparser::ast::Select, Error> {
+    let selection = select
+        .selection
+        .as_ref()
+        .map(|expr| D::translate_expr(expr, schema, options))
+        .transpose()?;
+    let having =
+        select.having.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?;
+    let from = select
+        .from
+        .iter()
+        .map(|twj| translate_table_with_joins::<D>(twj, schema, options))
+        .collect::<Result<Vec<_>, _>>()?;
+    let projection = select
+        .projection
+        .iter()
+        .map(|item| translate_select_item::<D>(item, schema, options))
+        .collect::<Result<Vec<_>, _>>()?;
+    let prewhere = select
+        .prewhere
+        .as_ref()
+        .map(|expr| D::translate_expr(expr, schema, options))
+        .transpose()?;
+    let cluster_by = select
+        .cluster_by
+        .iter()
+        .map(|expr| D::translate_expr(expr, schema, options))
+        .collect::<Result<Vec<_>, _>>()?;
+    let distribute_by = select
+        .distribute_by
+        .iter()
+        .map(|expr| D::translate_expr(expr, schema, options))
+        .collect::<Result<Vec<_>, _>>()?;
+    let sort_by = select
+        .sort_by
+        .iter()
+        .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+        .collect::<Result<Vec<_>, _>>()?;
+    let connect_by = translate_connect_by_kinds::<D>(&select.connect_by, schema, options)?;
+
+    Ok(sqlparser::ast::Select {
+        select_token: select.select_token.clone(),
+        distinct: translate_distinct_shared::<D>(select.distinct.as_ref(), schema, options)?,
+        top: translate_top_shared::<D>(select.top.as_ref(), schema, options)?,
+        top_before_distinct: select.top_before_distinct,
+        projection,
+        into: select.into.clone(),
+        from,
+        lateral_views: select
+            .lateral_views
+            .iter()
+            .map(|lv| translate_lateral_view::<D>(lv, schema, options))
+            .collect::<Result<Vec<_>, _>>()?,
+        prewhere,
+        selection,
+        group_by: translate_group_by_expr::<D>(&select.group_by, schema, options)?,
+        cluster_by,
+        distribute_by,
+        sort_by,
+        having,
+        named_window: translate_named_windows::<D>(&select.named_window, schema, options)?,
+        qualify: select
+            .qualify
+            .as_ref()
+            .map(|e| D::translate_expr(e, schema, options))
+            .transpose()?,
+        window_before_qualify: select.window_before_qualify,
+        value_table_mode: select.value_table_mode,
+        connect_by,
+        flavor: select.flavor,
+        exclude: select.exclude.clone(),
+        optimizer_hint: select.optimizer_hint.clone(),
+        select_modifiers: select.select_modifiers.clone(),
+    })
+}
+
+/// Shared `SetExpr` translation used by both forward and reverse paths.
+///
+/// Forward-specific: errors on `Table` and `Merge` variants.
+pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
+    set_expr: &sqlparser::ast::SetExpr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<sqlparser::ast::SetExpr, Error> {
+    use sqlparser::ast::SetExpr;
+    Ok(match set_expr {
+        SetExpr::Select(select) => {
+            SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, options)?))
+        }
+        SetExpr::Query(query) => {
+            SetExpr::Query(Box::new(translate_query_shared::<D>(query, schema, options)?))
+        }
+        SetExpr::SetOperation { op, set_quantifier, left, right } => {
+            SetExpr::SetOperation {
+                op: *op,
+                set_quantifier: *set_quantifier,
+                left: Box::new(translate_set_expr_shared::<D>(left, schema, options)?),
+                right: Box::new(translate_set_expr_shared::<D>(right, schema, options)?),
+            }
+        }
+        SetExpr::Values(values) => {
+            SetExpr::Values(translate_values_rows::<D>(values, schema, options)?)
+        }
+        SetExpr::Insert(Statement::Insert(ins)) => {
+            SetExpr::Insert(Statement::Insert(D::translate_insert(ins, schema, options)?))
+        }
+        SetExpr::Update(Statement::Update(upd)) => {
+            SetExpr::Update(Statement::Update(translate_update::<D>(upd, schema, options)?))
+        }
+        SetExpr::Delete(Statement::Delete(del)) => {
+            SetExpr::Delete(Statement::Delete(D::translate_delete(del, schema, options)?))
+        }
+        SetExpr::Table(_) | SetExpr::Merge(_) => {
+            if D::IS_FORWARD {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "TABLE and MERGE expressions are not supported in SQLite".to_string(),
+                ));
+            }
+            set_expr.clone()
+        }
+        // Catch-all for non-matching DML wrappers
+        SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) => set_expr.clone(),
+    })
+}
+
+/// Shared base `Query` translation used by both forward and reverse paths.
+///
+/// Forward-specific: strips locks and for_clause. Reverse preserves them.
+/// Note: Forward path may call DISTINCT ON / GROUPING SETS rewrites separately
+/// before falling through to this function.
+pub(crate) fn translate_query_shared<D: TranslationDirection>(
+    query: &Query,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Query, Error> {
+    let order_by = translate_order_by_clause::<D>(query.order_by.as_ref(), schema, options)?;
+    let settings = translate_query_settings::<D>(query.settings.as_ref(), schema, options)?;
+    let pipe_operators = translate_pipe_operators::<D>(&query.pipe_operators, schema, options)?;
+    let with = translate_with_clause::<D>(query.with.as_ref(), schema, options)?;
+    let limit_clause = translate_limit_clause::<D>(query.limit_clause.as_ref(), schema, options)?;
+    let fetch = translate_fetch_clause::<D>(query.fetch.as_ref(), schema, options)?;
+
+    Ok(Query {
+        with,
+        body: Box::new(translate_set_expr_shared::<D>(&query.body, schema, options)?),
+        order_by,
+        limit_clause,
+        fetch,
+        // Forward: strip row-level locks (SQLite has no FOR UPDATE/SHARE).
+        // Reverse: preserve as-is.
+        locks: if D::IS_FORWARD { vec![] } else { query.locks.clone() },
+        for_clause: if D::IS_FORWARD { None } else { query.for_clause.clone() },
+        settings,
+        format_clause: query.format_clause.clone(),
+        pipe_operators,
+    })
+}
+
 pub(crate) fn translate_pipe_operators<D: TranslationDirection>(
     pipe_operators: &[PipeOperator],
     schema: &ParserDB,
@@ -1488,6 +1786,22 @@ mod tests {
         ) -> Result<Query, Error> {
             Ok(query.clone())
         }
+
+        fn translate_insert(
+            insert: &sqlparser::ast::Insert,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+        ) -> Result<sqlparser::ast::Insert, Error> {
+            Ok(insert.clone())
+        }
+
+        fn translate_delete(
+            delete: &sqlparser::ast::Delete,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+        ) -> Result<sqlparser::ast::Delete, Error> {
+            Ok(delete.clone())
+        }
     }
 
     struct NestingDirection;
@@ -1507,6 +1821,22 @@ mod tests {
             _options: &Pg2SqliteOptions,
         ) -> Result<Query, Error> {
             Ok(query.clone())
+        }
+
+        fn translate_insert(
+            insert: &sqlparser::ast::Insert,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+        ) -> Result<sqlparser::ast::Insert, Error> {
+            Ok(insert.clone())
+        }
+
+        fn translate_delete(
+            delete: &sqlparser::ast::Delete,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+        ) -> Result<sqlparser::ast::Delete, Error> {
+            Ok(delete.clone())
         }
     }
 

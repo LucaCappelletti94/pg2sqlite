@@ -2,21 +2,14 @@
 //! `Query`, `SetExpr`, and `Select` types.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Distinct, NamedWindowDefinition, Query, Select, SetExpr, Statement, Values};
+use sqlparser::ast::{Query, Select, SetExpr};
 
-use super::helpers::{
-    Reverse, reverse_translate_connect_by_kinds, reverse_translate_fetch_clause,
-    reverse_translate_group_by_expr,
-    reverse_translate_limit_clause as reverse_translate_limit_clause_shared,
-    reverse_translate_named_windows, reverse_translate_order_by_clause,
-    reverse_translate_order_by_expr, reverse_translate_pipe_operators,
-    reverse_translate_query_settings, reverse_translate_select_item,
-    reverse_translate_table_with_joins, reverse_translate_values_rows,
-    reverse_translate_with_clause,
-};
+use super::helpers::Reverse;
 use crate::{
     errors::Error,
-    impls::shared_helpers::translate_lateral_view,
+    impls::shared_helpers::{
+        translate_query_shared, translate_select_shared, translate_set_expr_shared,
+    },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -30,27 +23,7 @@ impl ReverseTranslator for Query {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        let order_by = reverse_translate_order_by_clause(self.order_by.as_ref(), schema, options)?;
-        let settings = reverse_translate_query_settings(self.settings.as_ref(), schema, options)?;
-        let pipe_operators =
-            reverse_translate_pipe_operators(&self.pipe_operators, schema, options)?;
-
-        Ok(Query {
-            with: reverse_translate_with_clause(self.with.as_ref(), schema, options)?,
-            body: Box::new(self.body.reverse_translate(schema, options)?),
-            order_by,
-            limit_clause: reverse_translate_limit_clause_shared(
-                self.limit_clause.as_ref(),
-                schema,
-                options,
-            )?,
-            fetch: reverse_translate_fetch_clause(self.fetch.as_ref(), schema, options)?,
-            locks: self.locks.clone(),
-            for_clause: self.for_clause.clone(),
-            settings,
-            format_clause: self.format_clause.clone(),
-            pipe_operators,
-        })
+        translate_query_shared::<Reverse>(self, schema, options)
     }
 }
 
@@ -64,39 +37,7 @@ impl ReverseTranslator for SetExpr {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        Ok(match self {
-            SetExpr::Select(select) => {
-                SetExpr::Select(Box::new(select.reverse_translate(schema, options)?))
-            }
-            SetExpr::Query(query) => {
-                SetExpr::Query(Box::new(query.reverse_translate(schema, options)?))
-            }
-            SetExpr::SetOperation { op, set_quantifier, left, right } => {
-                SetExpr::SetOperation {
-                    op: *op,
-                    set_quantifier: *set_quantifier,
-                    left: Box::new(left.reverse_translate(schema, options)?),
-                    right: Box::new(right.reverse_translate(schema, options)?),
-                }
-            }
-            SetExpr::Values(values) => {
-                SetExpr::Values(reverse_translate_values(values, schema, options)?)
-            }
-            SetExpr::Insert(Statement::Insert(ins)) => {
-                SetExpr::Insert(Statement::Insert(ins.reverse_translate(schema, options)?))
-            }
-            SetExpr::Update(Statement::Update(upd)) => {
-                SetExpr::Update(Statement::Update(upd.reverse_translate(schema, options)?))
-            }
-            SetExpr::Delete(Statement::Delete(del)) => {
-                SetExpr::Delete(Statement::Delete(del.reverse_translate(schema, options)?))
-            }
-            SetExpr::Insert(_)
-            | SetExpr::Table(_)
-            | SetExpr::Update(_)
-            | SetExpr::Delete(_)
-            | SetExpr::Merge(_) => self.clone(),
-        })
+        translate_set_expr_shared::<Reverse>(self, schema, options)
     }
 }
 
@@ -110,180 +51,8 @@ impl ReverseTranslator for Select {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        // Reverse translate the WHERE clause
-        let selection = self
-            .selection
-            .as_ref()
-            .map(|expr| expr.reverse_translate(schema, options))
-            .transpose()?;
-
-        // Reverse translate HAVING clause
-        let having =
-            self.having.as_ref().map(|expr| expr.reverse_translate(schema, options)).transpose()?;
-
-        // Reverse translate subqueries in FROM clause
-        let from = self
-            .from
-            .iter()
-            .map(|table_with_joins| {
-                reverse_translate_table_with_joins(table_with_joins, schema, options)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Reverse translate expressions in projections
-        let projection = self
-            .projection
-            .iter()
-            .map(|item| reverse_translate_select_item(item, schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let prewhere = self
-            .prewhere
-            .as_ref()
-            .map(|expr| expr.reverse_translate(schema, options))
-            .transpose()?;
-        let cluster_by = self
-            .cluster_by
-            .iter()
-            .map(|expr| expr.reverse_translate(schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let distribute_by = self
-            .distribute_by
-            .iter()
-            .map(|expr| expr.reverse_translate(schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let sort_by = self
-            .sort_by
-            .iter()
-            .map(|expr| reverse_translate_order_by_expr(expr, schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let connect_by = reverse_translate_connect_by_kinds(&self.connect_by, schema, options)?;
-
-        // Reverse translate GROUP BY expressions
-        let group_by = reverse_translate_group_by(&self.group_by, schema, options)?;
-
-        let top = self
-            .top
-            .as_ref()
-            .map(|t| -> Result<sqlparser::ast::Top, Error> {
-                let quantity = t
-                    .quantity
-                    .as_ref()
-                    .map(|q| -> Result<sqlparser::ast::TopQuantity, Error> {
-                        match q {
-                            sqlparser::ast::TopQuantity::Expr(expr) => {
-                                Ok(sqlparser::ast::TopQuantity::Expr(
-                                    expr.reverse_translate(schema, options)?,
-                                ))
-                            }
-                            sqlparser::ast::TopQuantity::Constant(c) => {
-                                Ok(sqlparser::ast::TopQuantity::Constant(*c))
-                            }
-                        }
-                    })
-                    .transpose()?;
-                Ok(sqlparser::ast::Top { with_ties: t.with_ties, percent: t.percent, quantity })
-            })
-            .transpose()?;
-
-        Ok(Select {
-            select_token: self.select_token.clone(),
-            distinct: reverse_translate_distinct(self.distinct.as_ref(), schema, options)?,
-            top,
-            top_before_distinct: self.top_before_distinct,
-            projection,
-            into: self.into.clone(),
-            from,
-            lateral_views: self
-                .lateral_views
-                .iter()
-                .map(|lv| translate_lateral_view::<Reverse>(lv, schema, options))
-                .collect::<Result<Vec<_>, _>>()?,
-            prewhere,
-            selection,
-            group_by,
-            cluster_by,
-            distribute_by,
-            sort_by,
-            having,
-            named_window: reverse_translate_named_window(&self.named_window, schema, options)?,
-            qualify: self
-                .qualify
-                .as_ref()
-                .map(|e| e.reverse_translate(schema, options))
-                .transpose()?,
-            window_before_qualify: self.window_before_qualify,
-            value_table_mode: self.value_table_mode,
-            connect_by,
-            flavor: self.flavor,
-            exclude: self.exclude.clone(),
-            optimizer_hint: self.optimizer_hint.clone(),
-            select_modifiers: self.select_modifiers.clone(),
-        })
+        translate_select_shared::<Reverse>(self, schema, options)
     }
-}
-
-fn reverse_translate_values(
-    values: &Values,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Values, Error> {
-    reverse_translate_values_rows(values, schema, options)
-}
-
-#[cfg(test)]
-fn reverse_translate_limit_clause(
-    limit_clause: Option<&sqlparser::ast::LimitClause>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<sqlparser::ast::LimitClause>, Error> {
-    reverse_translate_limit_clause_shared(limit_clause, schema, options)
-}
-
-#[cfg(test)]
-fn reverse_translate_fetch(
-    fetch: Option<&sqlparser::ast::Fetch>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<sqlparser::ast::Fetch>, Error> {
-    reverse_translate_fetch_clause(fetch, schema, options)
-}
-
-fn reverse_translate_distinct(
-    distinct: Option<&Distinct>,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<Distinct>, Error> {
-    distinct
-        .map(|d| {
-            Ok(match d {
-                Distinct::On(exprs) => {
-                    let translated = exprs
-                        .iter()
-                        .map(|e| e.reverse_translate(schema, options))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Distinct::On(translated)
-                }
-                Distinct::Distinct => Distinct::Distinct,
-                Distinct::All => Distinct::All,
-            })
-        })
-        .transpose()
-}
-
-fn reverse_translate_named_window(
-    named_windows: &[NamedWindowDefinition],
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Vec<NamedWindowDefinition>, Error> {
-    reverse_translate_named_windows(named_windows, schema, options)
-}
-
-fn reverse_translate_group_by(
-    group_by: &sqlparser::ast::GroupByExpr,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::GroupByExpr, Error> {
-    reverse_translate_group_by_expr(group_by, schema, options)
 }
 
 #[cfg(test)]
@@ -295,11 +64,13 @@ mod tests {
         parser::Parser,
     };
 
-    use super::{
-        reverse_translate_distinct, reverse_translate_fetch, reverse_translate_group_by,
-        reverse_translate_limit_clause,
+    use super::super::helpers::Reverse;
+    use crate::{
+        impls::shared_helpers::{
+            translate_distinct_shared, translate_fetch_clause, translate_limit_clause,
+        },
+        prelude::{Pg2SqliteOptions, ReverseTranslator},
     };
-    use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
 
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
@@ -353,13 +124,13 @@ mod tests {
             limit_by: vec![parse_expr("2")],
         };
         let translated =
-            reverse_translate_limit_clause(Some(&limit_offset), &schema, &options).unwrap();
+            translate_limit_clause::<Reverse>(Some(&limit_offset), &schema, &options).unwrap();
         assert!(matches!(translated, Some(LimitClause::LimitOffset { .. })));
 
         let offset_comma =
             LimitClause::OffsetCommaLimit { offset: parse_expr("1"), limit: parse_expr("10") };
         let translated =
-            reverse_translate_limit_clause(Some(&offset_comma), &schema, &options).unwrap();
+            translate_limit_clause::<Reverse>(Some(&offset_comma), &schema, &options).unwrap();
         assert!(matches!(translated, Some(LimitClause::OffsetCommaLimit { .. })));
     }
 
@@ -374,14 +145,22 @@ mod tests {
         };
 
         let distinct =
-            reverse_translate_distinct(select.distinct.as_ref(), &schema, &options).unwrap();
+            translate_distinct_shared::<Reverse>(select.distinct.as_ref(), &schema, &options)
+                .unwrap();
         assert!(matches!(distinct, Some(Distinct::On(_))));
 
-        let group_by = reverse_translate_group_by(&select.group_by, &schema, &options).unwrap();
+        let group_by = crate::impls::shared_helpers::translate_group_by_expr::<Reverse>(
+            &select.group_by,
+            &schema,
+            &options,
+        )
+        .unwrap();
         assert!(matches!(group_by, sqlparser::ast::GroupByExpr::Expressions(_, _)));
 
         let fetch_query = parse_query("SELECT 1 FETCH FIRST 2 ROWS ONLY");
-        let fetch = reverse_translate_fetch(fetch_query.fetch.as_ref(), &schema, &options).unwrap();
+        let fetch =
+            translate_fetch_clause::<Reverse>(fetch_query.fetch.as_ref(), &schema, &options)
+                .unwrap();
         assert!(fetch.is_some());
     }
 

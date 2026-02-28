@@ -2,12 +2,12 @@
 //! `Update` type.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Update, UpdateTableFromKind};
+use sqlparser::ast::Update;
 
-use super::helpers::{Reverse, reverse_translate_table_with_joins};
+use super::helpers::Reverse;
 use crate::{
     errors::Error,
-    impls::shared_helpers::{map_update_table_from_kind, translate_returning},
+    impls::shared_helpers::translate_update,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -21,60 +21,6 @@ impl ReverseTranslator for Update {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        // Reverse translate SET clause expressions
-        let assignments = self
-            .assignments
-            .iter()
-            .map(|assignment| {
-                Ok(sqlparser::ast::Assignment {
-                    target: assignment.target.clone(),
-                    value: assignment.value.reverse_translate(schema, options)?,
-                })
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        // Reverse translate WHERE clause
-        let selection = self
-            .selection
-            .as_ref()
-            .map(|expr| expr.reverse_translate(schema, options))
-            .transpose()?;
-
-        // Reverse translate FROM clause if present
-        let from = self
-            .from
-            .as_ref()
-            .map(|f| reverse_translate_update_from(f, schema, options))
-            .transpose()?;
-
-        // Reverse translate RETURNING clause if present
-        let returning = translate_returning::<Reverse>(self.returning.as_ref(), schema, options)?;
-        let limit =
-            self.limit.as_ref().map(|expr| expr.reverse_translate(schema, options)).transpose()?;
-
-        // Reverse translate the table
-        let table = reverse_translate_table_with_joins(&self.table, schema, options)?;
-
-        Ok(Update {
-            update_token: self.update_token.clone(),
-            optimizer_hint: self.optimizer_hint.clone(),
-            table,
-            assignments,
-            from,
-            selection,
-            returning,
-            or: self.or,
-            limit,
-        })
+        translate_update::<Reverse>(self, schema, options)
     }
-}
-
-fn reverse_translate_update_from(
-    from: &UpdateTableFromKind,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<UpdateTableFromKind, Error> {
-    map_update_table_from_kind(from, |table| {
-        reverse_translate_table_with_joins(table, schema, options)
-    })
 }
