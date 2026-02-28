@@ -84,18 +84,6 @@ pub(crate) fn debug_variant_name(value: &impl std::fmt::Debug) -> String {
     debug.split(['(', '{', ' ']).next().unwrap_or("Unknown").to_string()
 }
 
-/// Returns a normalized statement variant name for user-facing errors.
-#[must_use]
-pub(crate) fn statement_variant_name(statement: &Statement) -> String {
-    debug_variant_name(statement)
-}
-
-/// Returns a normalized expression variant name for user-facing errors.
-#[must_use]
-pub(crate) fn expr_variant_name(expr: &Expr) -> String {
-    debug_variant_name(expr)
-}
-
 /// Recursively translate an expression using direction `D`, delegating all
 /// structural recursion to
 /// [`crate::impls::expr_helpers::try_map_expr_children`].
@@ -600,7 +588,7 @@ fn translate_pipe_operator<D: TranslationDirection>(
             let Expr::Function(translated_function) = translated_expr else {
                 return Err(Error::UnsupportedSQLiteFeature(format!(
                     "Pipe CALL translation expected function expression, got {}",
-                    expr_variant_name(&translated_expr)
+                    debug_variant_name(&translated_expr)
                 )));
             };
             PipeOperator::Call { function: translated_function, alias: alias.clone() }

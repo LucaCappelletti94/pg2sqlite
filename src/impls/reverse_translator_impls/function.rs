@@ -11,8 +11,6 @@ use sqlparser::ast::{
 };
 
 use super::helpers::{Reverse, reverse_translate_window_type};
-#[cfg(test)]
-use crate::impls::timezone::is_fixed_utc_offset as shared_is_fixed_utc_offset;
 use crate::{
     errors::Error,
     impls::{
@@ -71,11 +69,6 @@ pub enum FunctionReversal {
     PassThrough,
 }
 
-/// Parse a strftime format string and return the appropriate DateTimeField.
-fn parse_strftime_format(format: &str) -> Option<DateTimeField> {
-    datetime_field_from_strftime_format(format)
-}
-
 /// Reverse a composite strftime format string back to a `date_trunc` field
 /// name. Returns `None` if the format doesn't match a known `date_trunc`
 /// pattern.
@@ -89,18 +82,6 @@ fn reverse_strftime_to_date_trunc_field(format: &str) -> Option<&'static str> {
         "%Y-%m-%d %H:%M:%S" => Some("second"),
         _ => None,
     }
-}
-
-/// Return true when value is a fixed UTC offset in `+HH:MM` / `-HH:MM` format.
-#[cfg(test)]
-fn is_fixed_utc_offset(value: &str) -> bool {
-    shared_is_fixed_utc_offset(value)
-}
-
-/// Normalize SQLite datetime timezone modifiers to PostgreSQL AT TIME ZONE
-/// literals.
-fn normalize_datetime_timezone_modifier(modifier: &str) -> Option<String> {
-    normalize_timezone_modifier_for_postgres(modifier)
 }
 
 /// Determine how to reverse a SQLite function to PostgreSQL.
@@ -140,7 +121,7 @@ pub fn reverse_function(
                     ValueWithSpan { value: Value::SingleQuotedString(modifier), .. },
                 )))) = list.args.get(1)
             {
-                if let Some(zone) = normalize_datetime_timezone_modifier(modifier) {
+                if let Some(zone) = normalize_timezone_modifier_for_postgres(modifier) {
                     return FunctionReversal::ToAtTimeZone(zone);
                 }
                 if modifier == "unixepoch" {
@@ -161,7 +142,7 @@ pub fn reverse_function(
                 if let Some(field) = reverse_strftime_to_date_trunc_field(format) {
                     return FunctionReversal::ToDateTrunc(field.to_string());
                 }
-                if let Some(field) = parse_strftime_format(format) {
+                if let Some(field) = datetime_field_from_strftime_format(format) {
                     return FunctionReversal::ToExtract(field);
                 }
             }
@@ -505,8 +486,11 @@ mod tests {
         parser::Parser,
     };
 
-    use super::{is_fixed_utc_offset, reverse_translate_function};
-    use crate::{impls::function_helpers::function_arg_expr_or_err, prelude::Pg2SqliteOptions};
+    use super::reverse_translate_function;
+    use crate::{
+        impls::{function_helpers::function_arg_expr_or_err, timezone::is_fixed_utc_offset},
+        prelude::Pg2SqliteOptions,
+    };
 
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")

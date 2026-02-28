@@ -13,10 +13,7 @@ use sqlparser::ast::{LimitClause, TableFactor};
 
 use crate::{
     errors::Error,
-    impls::{
-        object_name::last_ident,
-        shared_helpers::{expr_variant_name, statement_variant_name},
-    },
+    impls::{object_name::last_ident, shared_helpers::debug_variant_name},
     prelude::{Pg2SqliteOptions, ReverseTranslator},
     traits::TranslationOptions,
 };
@@ -132,7 +129,7 @@ impl Visitor for RlsAstVisitor<'_> {
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
         if let Expr::MatchAgainst { .. } = expr {
             return ControlFlow::Break(Box::new(Error::UnsupportedRlsExpressionVariant {
-                expr_variant: expr_variant_name(expr),
+                expr_variant: debug_variant_name(expr),
                 expression: expr.to_string(),
             }));
         }
@@ -231,7 +228,7 @@ impl ReverseTranslator for Statement {
             | Statement::ReleaseSavepoint { .. } => Ok(self.clone()),
             // Non-DML statements are not supported for reverse translation
             other => {
-                let variant_name = statement_variant_name(other);
+                let variant_name = debug_variant_name(other);
                 Err(Error::UnsupportedReverseStatement { statement_type: variant_name })
             }
         }
