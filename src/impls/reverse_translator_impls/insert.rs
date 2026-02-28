@@ -13,7 +13,7 @@ use sqlparser::ast::{
 use super::helpers::Reverse;
 use crate::{
     errors::Error,
-    impls::shared_helpers::translate_returning,
+    impls::shared_helpers::{translate_on_conflict_do_update, translate_returning},
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -225,37 +225,16 @@ impl ReverseTranslator for Insert {
             }
         }
 
-        // Reverse translate ON CONFLICT expressions if present (from original
-        // statement)
+        // Reverse translate ON CONFLICT expressions if present
         if let Some(OnInsert::OnConflict(on_conflict)) = &self.on
             && let OnConflictAction::DoUpdate(do_update) = &on_conflict.action
         {
-            // Reverse translate the SET clause expressions
-            let translated_assignments = do_update
-                .assignments
-                .iter()
-                .map(|assignment| {
-                    Ok(sqlparser::ast::Assignment {
-                        target: assignment.target.clone(),
-                        value: assignment.value.reverse_translate(schema, options)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-
-            // Reverse translate the WHERE clause if present
-            let translated_selection = do_update
-                .selection
-                .as_ref()
-                .map(|expr| expr.reverse_translate(schema, options))
-                .transpose()?;
-
-            insert.on = Some(OnInsert::OnConflict(OnConflict {
-                conflict_target: on_conflict.conflict_target.clone(),
-                action: OnConflictAction::DoUpdate(sqlparser::ast::DoUpdate {
-                    assignments: translated_assignments,
-                    selection: translated_selection,
-                }),
-            }));
+            insert.on = Some(translate_on_conflict_do_update::<Reverse>(
+                on_conflict,
+                do_update,
+                schema,
+                options,
+            )?);
         }
 
         Ok(insert)
