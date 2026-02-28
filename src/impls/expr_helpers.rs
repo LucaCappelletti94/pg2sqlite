@@ -307,6 +307,402 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
 }
 
 // ---------------------------------------------------------------------------
+// try_map_expr_children  –  fallible immutable rebuild
+// ---------------------------------------------------------------------------
+
+/// Fallible version of [`map_expr_children`].  Takes two closures:
+///
+/// - `f_expr`: transforms each child [`Expr`], may fail.
+/// - `f_query`: transforms each child [`Query`] (for `Subquery`, `Exists`,
+///   `InSubquery`), may fail.
+///
+/// **Leaf variants** (no child) are cloned as-is.  `Function` is **not**
+/// walked; callers must handle it separately (function name rewriting, argument
+/// translation, etc.).
+///
+/// Unlike `map_expr_children`, this function also recurses into:
+/// - `Dictionary` / `Map` / `Lambda` / `MemberOf` fields
+/// - `Subquery`, `Exists`, `InSubquery` via `f_query`
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
+pub(crate) fn try_map_expr_children<E>(
+    expr: &Expr,
+    f: &impl Fn(&Expr) -> Result<Expr, E>,
+    f_query: &impl Fn(&sqlparser::ast::Query) -> Result<sqlparser::ast::Query, E>,
+) -> Result<Expr, E> {
+    Ok(match expr {
+        // -- leaf nodes (no child Expr) → clone as-is -----------------------
+        Expr::Identifier(_)
+        | Expr::CompoundIdentifier(_)
+        | Expr::Value(_)
+        | Expr::TypedString(_)
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(..)
+        | Expr::MatchAgainst { .. } => expr.clone(),
+
+        // -- single child ---------------------------------------------------
+        Expr::IsFalse(e) => Expr::IsFalse(Box::new(f(e)?)),
+        Expr::IsNotFalse(e) => Expr::IsNotFalse(Box::new(f(e)?)),
+        Expr::IsTrue(e) => Expr::IsTrue(Box::new(f(e)?)),
+        Expr::IsNotTrue(e) => Expr::IsNotTrue(Box::new(f(e)?)),
+        Expr::IsNull(e) => Expr::IsNull(Box::new(f(e)?)),
+        Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(f(e)?)),
+        Expr::IsUnknown(e) => Expr::IsUnknown(Box::new(f(e)?)),
+        Expr::IsNotUnknown(e) => Expr::IsNotUnknown(Box::new(f(e)?)),
+        Expr::Nested(e) => Expr::Nested(Box::new(f(e)?)),
+        Expr::OuterJoin(e) => Expr::OuterJoin(Box::new(f(e)?)),
+        Expr::Prior(e) => Expr::Prior(Box::new(f(e)?)),
+        Expr::Prefixed { prefix, value } => {
+            Expr::Prefixed { prefix: prefix.clone(), value: Box::new(f(value)?) }
+        }
+        Expr::Named { expr: inner, name } => {
+            Expr::Named { expr: Box::new(f(inner)?), name: name.clone() }
+        }
+        Expr::IsNormalized { expr: inner, form, negated } => {
+            Expr::IsNormalized { expr: Box::new(f(inner)?), form: *form, negated: *negated }
+        }
+        Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp { op: *op, expr: Box::new(f(inner)?) },
+        Expr::Cast { kind, expr: inner, data_type, array, format } => {
+            Expr::Cast {
+                kind: kind.clone(),
+                expr: Box::new(f(inner)?),
+                data_type: data_type.clone(),
+                array: *array,
+                format: format.clone(),
+            }
+        }
+        Expr::Extract { field, syntax, expr: inner } => {
+            Expr::Extract {
+                field: field.clone(),
+                syntax: syntax.clone(),
+                expr: Box::new(f(inner)?),
+            }
+        }
+        Expr::Ceil { expr: inner, field } => {
+            Expr::Ceil { expr: Box::new(f(inner)?), field: field.clone() }
+        }
+        Expr::Floor { expr: inner, field } => {
+            Expr::Floor { expr: Box::new(f(inner)?), field: field.clone() }
+        }
+        Expr::Collate { expr: inner, collation } => {
+            Expr::Collate { expr: Box::new(f(inner)?), collation: collation.clone() }
+        }
+        Expr::Convert { is_try, expr: inner, data_type, charset, target_before_value, styles } => {
+            Expr::Convert {
+                is_try: *is_try,
+                expr: Box::new(f(inner)?),
+                data_type: data_type.clone(),
+                charset: charset.clone(),
+                target_before_value: *target_before_value,
+                styles: styles.iter().map(f).collect::<Result<_, _>>()?,
+            }
+        }
+
+        // -- two children ---------------------------------------------------
+        Expr::IsDistinctFrom(a, b) => Expr::IsDistinctFrom(Box::new(f(a)?), Box::new(f(b)?)),
+        Expr::IsNotDistinctFrom(a, b) => Expr::IsNotDistinctFrom(Box::new(f(a)?), Box::new(f(b)?)),
+        Expr::BinaryOp { left, op, right } => {
+            Expr::BinaryOp { left: Box::new(f(left)?), op: op.clone(), right: Box::new(f(right)?) }
+        }
+        Expr::AnyOp { left, compare_op, right, is_some } => {
+            Expr::AnyOp {
+                left: Box::new(f(left)?),
+                compare_op: compare_op.clone(),
+                right: Box::new(f(right)?),
+                is_some: *is_some,
+            }
+        }
+        Expr::AllOp { left, compare_op, right } => {
+            Expr::AllOp {
+                left: Box::new(f(left)?),
+                compare_op: compare_op.clone(),
+                right: Box::new(f(right)?),
+            }
+        }
+        Expr::Like { negated, any, expr: inner, pattern, escape_char } => {
+            Expr::Like {
+                negated: *negated,
+                any: *any,
+                expr: Box::new(f(inner)?),
+                pattern: Box::new(f(pattern)?),
+                escape_char: escape_char.clone(),
+            }
+        }
+        Expr::ILike { negated, any, expr: inner, pattern, escape_char } => {
+            Expr::ILike {
+                negated: *negated,
+                any: *any,
+                expr: Box::new(f(inner)?),
+                pattern: Box::new(f(pattern)?),
+                escape_char: escape_char.clone(),
+            }
+        }
+        Expr::SimilarTo { negated, expr: inner, pattern, escape_char } => {
+            Expr::SimilarTo {
+                negated: *negated,
+                expr: Box::new(f(inner)?),
+                pattern: Box::new(f(pattern)?),
+                escape_char: escape_char.clone(),
+            }
+        }
+        Expr::RLike { negated, expr: inner, pattern, regexp } => {
+            Expr::RLike {
+                negated: *negated,
+                expr: Box::new(f(inner)?),
+                pattern: Box::new(f(pattern)?),
+                regexp: *regexp,
+            }
+        }
+        Expr::AtTimeZone { timestamp, time_zone } => {
+            Expr::AtTimeZone {
+                timestamp: Box::new(f(timestamp)?),
+                time_zone: Box::new(f(time_zone)?),
+            }
+        }
+        Expr::Position { expr: inner, r#in } => {
+            Expr::Position { expr: Box::new(f(inner)?), r#in: Box::new(f(r#in)?) }
+        }
+
+        // -- three children -------------------------------------------------
+        Expr::Between { expr: inner, negated, low, high } => {
+            Expr::Between {
+                expr: Box::new(f(inner)?),
+                negated: *negated,
+                low: Box::new(f(low)?),
+                high: Box::new(f(high)?),
+            }
+        }
+        Expr::Overlay { expr: inner, overlay_what, overlay_from, overlay_for } => {
+            Expr::Overlay {
+                expr: Box::new(f(inner)?),
+                overlay_what: Box::new(f(overlay_what)?),
+                overlay_from: Box::new(f(overlay_from)?),
+                overlay_for: overlay_for.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+            }
+        }
+
+        // -- list children --------------------------------------------------
+        Expr::InList { expr: inner, list, negated } => {
+            Expr::InList {
+                expr: Box::new(f(inner)?),
+                list: list.iter().map(f).collect::<Result<_, _>>()?,
+                negated: *negated,
+            }
+        }
+        Expr::Tuple(items) => Expr::Tuple(items.iter().map(f).collect::<Result<_, _>>()?),
+        Expr::Array(arr) => {
+            Expr::Array(sqlparser::ast::Array {
+                elem: arr.elem.iter().map(f).collect::<Result<_, _>>()?,
+                named: arr.named,
+            })
+        }
+        Expr::GroupingSets(sets) => {
+            Expr::GroupingSets(
+                sets.iter()
+                    .map(|s| s.iter().map(f).collect::<Result<_, _>>())
+                    .collect::<Result<_, _>>()?,
+            )
+        }
+        Expr::Cube(sets) => {
+            Expr::Cube(
+                sets.iter()
+                    .map(|s| s.iter().map(f).collect::<Result<_, _>>())
+                    .collect::<Result<_, _>>()?,
+            )
+        }
+        Expr::Rollup(sets) => {
+            Expr::Rollup(
+                sets.iter()
+                    .map(|s| s.iter().map(f).collect::<Result<_, _>>())
+                    .collect::<Result<_, _>>()?,
+            )
+        }
+        Expr::Struct { values, fields } => {
+            Expr::Struct {
+                values: values.iter().map(f).collect::<Result<_, _>>()?,
+                fields: fields.clone(),
+            }
+        }
+
+        // -- structured with optional children ------------------------------
+        Expr::Substring { expr: inner, substring_from, substring_for, special, shorthand } => {
+            Expr::Substring {
+                expr: Box::new(f(inner)?),
+                substring_from: substring_from.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                substring_for: substring_for.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                special: *special,
+                shorthand: *shorthand,
+            }
+        }
+        Expr::Trim { expr: inner, trim_where, trim_what, trim_characters } => {
+            Expr::Trim {
+                expr: Box::new(f(inner)?),
+                trim_where: *trim_where,
+                trim_what: trim_what.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                trim_characters: trim_characters
+                    .as_ref()
+                    .map(|v| v.iter().map(f).collect::<Result<_, _>>())
+                    .transpose()?,
+            }
+        }
+        Expr::Case { case_token, end_token, operand, conditions, else_result } => {
+            Expr::Case {
+                case_token: case_token.clone(),
+                end_token: end_token.clone(),
+                operand: operand.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                conditions: conditions
+                    .iter()
+                    .map(|cw| {
+                        Ok(sqlparser::ast::CaseWhen {
+                            condition: f(&cw.condition)?,
+                            result: f(&cw.result)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+                else_result: else_result.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+            }
+        }
+        Expr::Interval(interval) => {
+            Expr::Interval(sqlparser::ast::Interval {
+                value: Box::new(f(&interval.value)?),
+                leading_field: interval.leading_field.clone(),
+                leading_precision: interval.leading_precision,
+                last_field: interval.last_field.clone(),
+                fractional_seconds_precision: interval.fractional_seconds_precision,
+            })
+        }
+        Expr::InUnnest { expr: inner, array_expr, negated } => {
+            Expr::InUnnest {
+                expr: Box::new(f(inner)?),
+                array_expr: Box::new(f(array_expr)?),
+                negated: *negated,
+            }
+        }
+
+        // -- compound access ------------------------------------------------
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            Expr::CompoundFieldAccess {
+                root: Box::new(f(root)?),
+                access_chain: access_chain
+                    .iter()
+                    .map(|a| try_map_access_expr(a, f))
+                    .collect::<Result<_, _>>()?,
+            }
+        }
+        Expr::JsonAccess { value, path } => {
+            Expr::JsonAccess { value: Box::new(f(value)?), path: try_map_json_path(path, f)? }
+        }
+
+        // -- subquery nodes (use f_query) -----------------------------------
+        Expr::Subquery(q) => Expr::Subquery(Box::new(f_query(q)?)),
+        Expr::Exists { subquery, negated } => {
+            Expr::Exists { subquery: Box::new(f_query(subquery)?), negated: *negated }
+        }
+        Expr::InSubquery { expr: inner, subquery, negated } => {
+            Expr::InSubquery {
+                expr: Box::new(f(inner)?),
+                subquery: Box::new(f_query(subquery)?),
+                negated: *negated,
+            }
+        }
+
+        // -- Dictionary / Map / Lambda / MemberOf (recurse into children) ---
+        Expr::Dictionary(fields) => {
+            Expr::Dictionary(
+                fields
+                    .iter()
+                    .map(|field| {
+                        Ok(sqlparser::ast::DictionaryField {
+                            key: field.key.clone(),
+                            value: Box::new(f(&field.value)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+            )
+        }
+        Expr::Map(map) => {
+            Expr::Map(sqlparser::ast::Map {
+                entries: map
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        Ok(sqlparser::ast::MapEntry {
+                            key: Box::new(f(&entry.key)?),
+                            value: Box::new(f(&entry.value)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+            })
+        }
+        Expr::Lambda(lambda) => {
+            Expr::Lambda(sqlparser::ast::LambdaFunction {
+                params: lambda.params.clone(),
+                body: Box::new(f(&lambda.body)?),
+                syntax: lambda.syntax,
+            })
+        }
+        Expr::MemberOf(member) => {
+            Expr::MemberOf(sqlparser::ast::MemberOf {
+                value: Box::new(f(&member.value)?),
+                array: Box::new(f(&member.array)?),
+            })
+        }
+
+        // -- Function is NOT walked; callers handle separately. -------------
+        Expr::Function(_) => expr.clone(),
+    })
+}
+
+fn try_map_access_expr<E>(
+    access: &sqlparser::ast::AccessExpr,
+    f: &impl Fn(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::AccessExpr, E> {
+    Ok(match access {
+        sqlparser::ast::AccessExpr::Dot(e) => sqlparser::ast::AccessExpr::Dot(f(e)?),
+        sqlparser::ast::AccessExpr::Subscript(sub) => {
+            sqlparser::ast::AccessExpr::Subscript(try_map_subscript(sub, f)?)
+        }
+    })
+}
+
+fn try_map_subscript<E>(
+    sub: &sqlparser::ast::Subscript,
+    f: &impl Fn(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::Subscript, E> {
+    Ok(match sub {
+        sqlparser::ast::Subscript::Index { index } => {
+            sqlparser::ast::Subscript::Index { index: f(index)? }
+        }
+        sqlparser::ast::Subscript::Slice { lower_bound, upper_bound, stride } => {
+            sqlparser::ast::Subscript::Slice {
+                lower_bound: lower_bound.as_ref().map(f).transpose()?,
+                upper_bound: upper_bound.as_ref().map(f).transpose()?,
+                stride: stride.as_ref().map(f).transpose()?,
+            }
+        }
+    })
+}
+
+fn try_map_json_path<E>(
+    path: &sqlparser::ast::JsonPath,
+    f: &impl Fn(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::JsonPath, E> {
+    Ok(sqlparser::ast::JsonPath {
+        path: path
+            .path
+            .iter()
+            .map(|elem| {
+                Ok(match elem {
+                    JsonPathElem::Dot { key, quoted } => {
+                        JsonPathElem::Dot { key: key.clone(), quoted: *quoted }
+                    }
+                    JsonPathElem::Bracket { key } => JsonPathElem::Bracket { key: f(key)? },
+                })
+            })
+            .collect::<Result<Vec<_>, E>>()?,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // for_each_child_expr  –  read-only traversal
 // ---------------------------------------------------------------------------
 

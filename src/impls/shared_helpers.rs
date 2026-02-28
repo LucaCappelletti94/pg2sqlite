@@ -96,6 +96,25 @@ pub(crate) fn expr_variant_name(expr: &Expr) -> String {
     debug_variant_name(expr)
 }
 
+/// Recursively translate an expression using direction `D`, delegating all
+/// structural recursion to
+/// [`crate::impls::expr_helpers::try_map_expr_children`].
+///
+/// This handles the "boring" arms — variants that simply recurse into their
+/// children.  Callers should match direction-specific semantic transforms
+/// **before** falling through to this function.
+pub(crate) fn translate_expr_recursive<D: TranslationDirection>(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, Error> {
+    crate::impls::expr_helpers::try_map_expr_children(
+        expr,
+        &|e| D::translate_expr(e, schema, options),
+        &|q| D::translate_query(q, schema, options),
+    )
+}
+
 /// Returns the expression for argument variants that carry one.
 #[must_use]
 pub(crate) fn function_arg_expr(arg: &FunctionArg) -> Option<&Expr> {

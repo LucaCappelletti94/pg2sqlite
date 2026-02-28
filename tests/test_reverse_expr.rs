@@ -493,13 +493,11 @@ fn reverse_manual_expr_variants_cover_prefixed_trim_chars_and_compound_access() 
 }
 
 #[test]
-fn reverse_manual_expr_unsupported_variant_returns_error() {
+fn reverse_wildcard_expr_clones_through() {
     let schema = empty_schema();
     let options = Pg2SqliteOptions::default();
-    let unsupported =
-        Expr::Wildcard(sqlparser::ast::helpers::attached_token::AttachedToken::empty());
-    let err = unsupported
-        .reverse_translate(&schema, &options)
-        .expect_err("wildcard expr should be unsupported");
-    assert!(err.to_string().contains("not yet implemented"));
+    let wildcard = Expr::Wildcard(sqlparser::ast::helpers::attached_token::AttachedToken::empty());
+    // Wildcard is a leaf node — reverse translation clones it as-is.
+    let result = wildcard.reverse_translate(&schema, &options).expect("wildcard should clone");
+    assert_eq!(result.to_string(), wildcard.to_string());
 }
