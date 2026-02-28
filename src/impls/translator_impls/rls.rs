@@ -17,6 +17,7 @@ use sqlparser::ast::{
 use crate::{
     errors::Error,
     impls::{
+        expr_helpers::{for_each_child_expr, map_expr_children},
         generated_sql::{parse_generated_sql, parse_single_generated_sql},
         object_name::{
             append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier,
@@ -361,97 +362,6 @@ fn collect_patterns_from_query(
     }
 }
 
-fn collect_patterns_from_expr_pair(
-    left: &Expr,
-    right: &Expr,
-    patterns: &mut Vec<SessionVariablePattern>,
-) {
-    collect_session_variable_patterns(left, patterns);
-    collect_session_variable_patterns(right, patterns);
-}
-
-fn collect_patterns_from_expr_slice(exprs: &[Expr], patterns: &mut Vec<SessionVariablePattern>) {
-    for expr in exprs {
-        collect_session_variable_patterns(expr, patterns);
-    }
-}
-
-fn collect_patterns_from_case_expr(
-    operand: Option<&Expr>,
-    conditions: &[sqlparser::ast::CaseWhen],
-    else_result: Option<&Expr>,
-    patterns: &mut Vec<SessionVariablePattern>,
-) {
-    if let Some(operand) = operand {
-        collect_session_variable_patterns(operand, patterns);
-    }
-    for case_when in conditions {
-        collect_session_variable_patterns(&case_when.condition, patterns);
-        collect_session_variable_patterns(&case_when.result, patterns);
-    }
-    if let Some(else_result) = else_result {
-        collect_session_variable_patterns(else_result, patterns);
-    }
-}
-
-fn collect_patterns_from_trim_expr(
-    expr: &Expr,
-    trim_what: Option<&Expr>,
-    trim_characters: Option<&[Expr]>,
-    patterns: &mut Vec<SessionVariablePattern>,
-) {
-    collect_session_variable_patterns(expr, patterns);
-    if let Some(trim_what) = trim_what {
-        collect_session_variable_patterns(trim_what, patterns);
-    }
-    if let Some(trim_characters) = trim_characters {
-        collect_patterns_from_expr_slice(trim_characters, patterns);
-    }
-}
-
-fn collect_patterns_from_substring_expr(
-    expr: &Expr,
-    substring_from: Option<&Expr>,
-    substring_for: Option<&Expr>,
-    patterns: &mut Vec<SessionVariablePattern>,
-) {
-    collect_session_variable_patterns(expr, patterns);
-    if let Some(substring_from) = substring_from {
-        collect_session_variable_patterns(substring_from, patterns);
-    }
-    if let Some(substring_for) = substring_for {
-        collect_session_variable_patterns(substring_for, patterns);
-    }
-}
-
-fn collect_patterns_from_overlay_expr(
-    expr: &Expr,
-    overlay_what: &Expr,
-    overlay_from: &Expr,
-    overlay_for: Option<&Expr>,
-    patterns: &mut Vec<SessionVariablePattern>,
-) {
-    collect_session_variable_patterns(expr, patterns);
-    collect_session_variable_patterns(overlay_what, patterns);
-    collect_session_variable_patterns(overlay_from, patterns);
-    if let Some(overlay_for) = overlay_for {
-        collect_session_variable_patterns(overlay_for, patterns);
-    }
-}
-
-fn collect_patterns_from_compound_access(
-    root: &Expr,
-    access_chain: &[sqlparser::ast::AccessExpr],
-    patterns: &mut Vec<SessionVariablePattern>,
-) {
-    collect_session_variable_patterns(root, patterns);
-    for access in access_chain {
-        if let sqlparser::ast::AccessExpr::Dot(expr) = access {
-            collect_session_variable_patterns(expr, patterns);
-        }
-    }
-}
-
 /// Collect all session variable patterns used by an expression tree.
 fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVariablePattern>) {
     match expr {
@@ -459,93 +369,18 @@ fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVari
             push_pattern_unique(patterns, SessionVariablePattern::CurrentUser);
         }
         Expr::Function(func) => collect_patterns_from_function(func, patterns),
-        Expr::Subquery(query) => collect_patterns_from_query(query, patterns),
-        Expr::Exists { subquery, .. } => collect_patterns_from_query(subquery, patterns),
-        Expr::InSubquery { expr, subquery, .. } => {
-            collect_session_variable_patterns(expr, patterns);
+        Expr::Subquery(query) | Expr::Exists { subquery: query, .. } => {
+            collect_patterns_from_query(query, patterns);
+        }
+        Expr::InSubquery { expr: inner, subquery, .. } => {
+            collect_session_variable_patterns(inner, patterns);
             collect_patterns_from_query(subquery, patterns);
         }
-        Expr::BinaryOp { left, right, .. }
-        | Expr::AnyOp { left, right, .. }
-        | Expr::AllOp { left, right, .. } => {
-            collect_patterns_from_expr_pair(left, right, patterns);
+        _ => {
+            for_each_child_expr(expr, &mut |child| {
+                collect_session_variable_patterns(child, patterns);
+            });
         }
-        Expr::Like { expr, pattern, .. }
-        | Expr::ILike { expr, pattern, .. }
-        | Expr::SimilarTo { expr, pattern, .. }
-        | Expr::RLike { expr, pattern, .. }
-        | Expr::Position { expr, r#in: pattern }
-        | Expr::AtTimeZone { timestamp: expr, time_zone: pattern }
-        | Expr::IsDistinctFrom(expr, pattern)
-        | Expr::IsNotDistinctFrom(expr, pattern) => {
-            collect_patterns_from_expr_pair(expr, pattern, patterns);
-        }
-        Expr::UnaryOp { expr, .. }
-        | Expr::Cast { expr, .. }
-        | Expr::Extract { expr, .. }
-        | Expr::Ceil { expr, .. }
-        | Expr::Floor { expr, .. }
-        | Expr::Nested(expr)
-        | Expr::IsNull(expr)
-        | Expr::IsNotNull(expr)
-        | Expr::IsUnknown(expr)
-        | Expr::IsNotUnknown(expr)
-        | Expr::IsTrue(expr)
-        | Expr::IsNotTrue(expr)
-        | Expr::IsFalse(expr)
-        | Expr::IsNotFalse(expr)
-        | Expr::Prefixed { value: expr, .. }
-        | Expr::Collate { expr, .. }
-        | Expr::IsNormalized { expr, .. } => collect_session_variable_patterns(expr, patterns),
-        Expr::Tuple(exprs) | Expr::Array(sqlparser::ast::Array { elem: exprs, .. }) => {
-            collect_patterns_from_expr_slice(exprs, patterns);
-        }
-        Expr::InList { expr, list, .. } => {
-            collect_session_variable_patterns(expr, patterns);
-            collect_patterns_from_expr_slice(list, patterns);
-        }
-        Expr::Between { expr, low, high, .. } => {
-            collect_session_variable_patterns(expr, patterns);
-            collect_patterns_from_expr_pair(low, high, patterns);
-        }
-        Expr::Case { operand, conditions, else_result, .. } => {
-            collect_patterns_from_case_expr(
-                operand.as_deref(),
-                conditions,
-                else_result.as_deref(),
-                patterns,
-            );
-        }
-        Expr::Trim { expr, trim_what, trim_characters, .. } => {
-            collect_patterns_from_trim_expr(
-                expr,
-                trim_what.as_deref(),
-                trim_characters.as_deref(),
-                patterns,
-            );
-        }
-        Expr::Substring { expr, substring_from, substring_for, .. } => {
-            collect_patterns_from_substring_expr(
-                expr,
-                substring_from.as_deref(),
-                substring_for.as_deref(),
-                patterns,
-            );
-        }
-        Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
-            collect_patterns_from_overlay_expr(
-                expr,
-                overlay_what,
-                overlay_from,
-                overlay_for.as_deref(),
-                patterns,
-            );
-        }
-        Expr::CompoundFieldAccess { root, access_chain } => {
-            collect_patterns_from_compound_access(root, access_chain, patterns);
-        }
-        Expr::Interval(interval) => collect_session_variable_patterns(&interval.value, patterns),
-        _ => {}
     }
 }
 
@@ -766,39 +601,7 @@ fn transform_expr_generic<O: TranslationOptions, DB: DatabaseLike>(
 where
     DB::Table: TableLike<DB = DB>,
 {
-    let transform_function_arg_expr = |arg: &FunctionArgExpr| -> FunctionArgExpr {
-        match arg {
-            FunctionArgExpr::Expr(expr) => {
-                FunctionArgExpr::Expr(transform_expr_generic(
-                    expr, options, table, schema, strategy,
-                ))
-            }
-            FunctionArgExpr::QualifiedWildcard(name) => {
-                FunctionArgExpr::QualifiedWildcard(name.clone())
-            }
-            FunctionArgExpr::Wildcard => FunctionArgExpr::Wildcard,
-        }
-    };
-
-    let transform_function_arg = |arg: &FunctionArg| -> FunctionArg {
-        match arg {
-            FunctionArg::Named { name, arg, operator } => {
-                FunctionArg::Named {
-                    name: name.clone(),
-                    arg: transform_function_arg_expr(arg),
-                    operator: operator.clone(),
-                }
-            }
-            FunctionArg::ExprNamed { name, arg, operator } => {
-                FunctionArg::ExprNamed {
-                    name: name.clone(),
-                    arg: transform_function_arg_expr(arg),
-                    operator: operator.clone(),
-                }
-            }
-            FunctionArg::Unnamed(arg) => FunctionArg::Unnamed(transform_function_arg_expr(arg)),
-        }
-    };
+    let recurse = |e: &Expr| transform_expr_generic(e, options, table, schema, strategy);
 
     match expr {
         // Handle current_setting('name')::type -> sqlite_func()
@@ -810,7 +613,7 @@ where
             }
 
             Expr::Cast {
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
+                expr: Box::new(recurse(inner)),
                 data_type: data_type.clone(),
                 format: format.clone(),
                 kind: kind.clone(),
@@ -836,7 +639,11 @@ where
                 FunctionArguments::List(arg_list) => {
                     FunctionArguments::List(FunctionArgumentList {
                         duplicate_treatment: arg_list.duplicate_treatment,
-                        args: arg_list.args.iter().map(transform_function_arg).collect(),
+                        args: arg_list
+                            .args
+                            .iter()
+                            .map(|arg| transform_function_arg_with_rls(arg, &recurse))
+                            .collect(),
                         clauses: arg_list
                             .clauses
                             .iter()
@@ -861,34 +668,20 @@ where
                 FunctionArguments::None => FunctionArguments::None,
             };
 
-            let transformed_filter = func.filter.as_ref().map(|expr| {
-                Box::new(transform_expr_generic(expr, options, table, schema, strategy))
-            });
+            let transformed_filter = func.filter.as_ref().map(|expr| Box::new(recurse(expr)));
 
             let transformed_over = func.over.as_ref().map(|window| {
                 match window {
                     WindowType::WindowSpec(window_spec) => {
                         WindowType::WindowSpec(sqlparser::ast::WindowSpec {
                             window_name: window_spec.window_name.clone(),
-                            partition_by: window_spec
-                                .partition_by
-                                .iter()
-                                .map(|expr| {
-                                    transform_expr_generic(expr, options, table, schema, strategy)
-                                })
-                                .collect(),
+                            partition_by: window_spec.partition_by.iter().map(&recurse).collect(),
                             order_by: window_spec
                                 .order_by
                                 .iter()
                                 .map(|order_by_expr| {
                                     let mut transformed = order_by_expr.clone();
-                                    transformed.expr = transform_expr_generic(
-                                        &order_by_expr.expr,
-                                        options,
-                                        table,
-                                        schema,
-                                        strategy,
-                                    );
+                                    transformed.expr = recurse(&order_by_expr.expr);
                                     transformed
                                 })
                                 .collect(),
@@ -922,13 +715,7 @@ where
                 .iter()
                 .map(|order_by_expr| {
                     let mut transformed = order_by_expr.clone();
-                    transformed.expr = transform_expr_generic(
-                        &order_by_expr.expr,
-                        options,
-                        table,
-                        schema,
-                        strategy,
-                    );
+                    transformed.expr = recurse(&order_by_expr.expr);
                     transformed
                 })
                 .collect();
@@ -937,7 +724,11 @@ where
                 FunctionArguments::List(param_list) => {
                     FunctionArguments::List(FunctionArgumentList {
                         duplicate_treatment: param_list.duplicate_treatment,
-                        args: param_list.args.iter().map(transform_function_arg).collect(),
+                        args: param_list
+                            .args
+                            .iter()
+                            .map(|arg| transform_function_arg_with_rls(arg, &recurse))
+                            .collect(),
                         clauses: param_list
                             .clauses
                             .iter()
@@ -1019,56 +810,7 @@ where
             Expr::CompoundIdentifier(idents.clone())
         }
 
-        // Recursively handle binary operations
-        Expr::BinaryOp { left, op, right } => {
-            Expr::BinaryOp {
-                left: Box::new(transform_expr_generic(left, options, table, schema, strategy)),
-                op: op.clone(),
-                right: Box::new(transform_expr_generic(right, options, table, schema, strategy)),
-            }
-        }
-
-        Expr::UnaryOp { op, expr: inner } => {
-            Expr::UnaryOp {
-                op: *op,
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-            }
-        }
-
-        Expr::Nested(inner) => {
-            Expr::Nested(Box::new(transform_expr_generic(inner, options, table, schema, strategy)))
-        }
-
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(transform_expr_generic(inner, options, table, schema, strategy)))
-        }
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(transform_expr_generic(
-                inner, options, table, schema, strategy,
-            )))
-        }
-
-        Expr::InList { expr: inner, list, negated } => {
-            Expr::InList {
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                list: list
-                    .iter()
-                    .map(|item| transform_expr_generic(item, options, table, schema, strategy))
-                    .collect(),
-                negated: *negated,
-            }
-        }
-
-        Expr::Between { expr: inner, negated, low, high } => {
-            Expr::Between {
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                negated: *negated,
-                low: Box::new(transform_expr_generic(low, options, table, schema, strategy)),
-                high: Box::new(transform_expr_generic(high, options, table, schema, strategy)),
-            }
-        }
-
-        // Handle EXISTS (subquery) - recursively transform the subquery's selection
+        // Handle subqueries with transform_query (not just expr recursion)
         Expr::Exists { subquery, negated } => {
             Expr::Exists {
                 subquery: Box::new(transform_query(
@@ -1096,7 +838,7 @@ where
 
         Expr::InSubquery { expr: inner, subquery, negated } => {
             Expr::InSubquery {
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
+                expr: Box::new(recurse(inner)),
                 subquery: Box::new(transform_query(
                     subquery,
                     options,
@@ -1109,192 +851,8 @@ where
             }
         }
 
-        Expr::Case { operand, conditions, else_result, .. } => {
-            Expr::Case {
-                operand: operand
-                    .as_ref()
-                    .map(|e| Box::new(transform_expr_generic(e, options, table, schema, strategy))),
-                conditions: conditions
-                    .iter()
-                    .map(|cw| {
-                        sqlparser::ast::CaseWhen {
-                            condition: transform_expr_generic(
-                                &cw.condition,
-                                options,
-                                table,
-                                schema,
-                                strategy,
-                            ),
-                            result: transform_expr_generic(
-                                &cw.result, options, table, schema, strategy,
-                            ),
-                        }
-                    })
-                    .collect(),
-                else_result: else_result
-                    .as_ref()
-                    .map(|e| Box::new(transform_expr_generic(e, options, table, schema, strategy))),
-                case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-            }
-        }
-
-        Expr::Like { negated, expr: inner, pattern, escape_char, any } => {
-            Expr::Like {
-                negated: *negated,
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                pattern: Box::new(transform_expr_generic(
-                    pattern, options, table, schema, strategy,
-                )),
-                escape_char: escape_char.clone(),
-                any: *any,
-            }
-        }
-
-        Expr::ILike { negated, expr: inner, pattern, escape_char, any } => {
-            Expr::ILike {
-                negated: *negated,
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                pattern: Box::new(transform_expr_generic(
-                    pattern, options, table, schema, strategy,
-                )),
-                escape_char: escape_char.clone(),
-                any: *any,
-            }
-        }
-
-        Expr::SimilarTo { negated, expr: inner, pattern, escape_char } => {
-            Expr::SimilarTo {
-                negated: *negated,
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                pattern: Box::new(transform_expr_generic(
-                    pattern, options, table, schema, strategy,
-                )),
-                escape_char: escape_char.clone(),
-            }
-        }
-
-        Expr::IsTrue(inner) => {
-            Expr::IsTrue(Box::new(transform_expr_generic(inner, options, table, schema, strategy)))
-        }
-        Expr::IsNotTrue(inner) => {
-            Expr::IsNotTrue(Box::new(transform_expr_generic(
-                inner, options, table, schema, strategy,
-            )))
-        }
-        Expr::IsFalse(inner) => {
-            Expr::IsFalse(Box::new(transform_expr_generic(inner, options, table, schema, strategy)))
-        }
-        Expr::IsNotFalse(inner) => {
-            Expr::IsNotFalse(Box::new(transform_expr_generic(
-                inner, options, table, schema, strategy,
-            )))
-        }
-        Expr::IsUnknown(inner) => {
-            Expr::IsUnknown(Box::new(transform_expr_generic(
-                inner, options, table, schema, strategy,
-            )))
-        }
-        Expr::IsNotUnknown(inner) => {
-            Expr::IsNotUnknown(Box::new(transform_expr_generic(
-                inner, options, table, schema, strategy,
-            )))
-        }
-
-        Expr::Tuple(exprs) => {
-            Expr::Tuple(
-                exprs
-                    .iter()
-                    .map(|e| transform_expr_generic(e, options, table, schema, strategy))
-                    .collect(),
-            )
-        }
-
-        Expr::Extract { field, expr: inner, syntax } => {
-            Expr::Extract {
-                field: field.clone(),
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                syntax: syntax.clone(),
-            }
-        }
-
-        Expr::AtTimeZone { timestamp, time_zone } => {
-            Expr::AtTimeZone {
-                timestamp: Box::new(transform_expr_generic(
-                    timestamp, options, table, schema, strategy,
-                )),
-                time_zone: Box::new(transform_expr_generic(
-                    time_zone, options, table, schema, strategy,
-                )),
-            }
-        }
-
-        Expr::Trim { expr: inner, trim_where, trim_what, trim_characters } => {
-            Expr::Trim {
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                trim_where: *trim_where,
-                trim_what: trim_what
-                    .as_ref()
-                    .map(|e| Box::new(transform_expr_generic(e, options, table, schema, strategy))),
-                trim_characters: trim_characters.as_ref().map(|chars| {
-                    chars
-                        .iter()
-                        .map(|e| transform_expr_generic(e, options, table, schema, strategy))
-                        .collect()
-                }),
-            }
-        }
-
-        Expr::Substring { expr: inner, substring_from, substring_for, special, shorthand } => {
-            Expr::Substring {
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                substring_from: substring_from
-                    .as_ref()
-                    .map(|e| Box::new(transform_expr_generic(e, options, table, schema, strategy))),
-                substring_for: substring_for
-                    .as_ref()
-                    .map(|e| Box::new(transform_expr_generic(e, options, table, schema, strategy))),
-                special: *special,
-                shorthand: *shorthand,
-            }
-        }
-
-        Expr::Overlay { expr: inner, overlay_what, overlay_from, overlay_for } => {
-            Expr::Overlay {
-                expr: Box::new(transform_expr_generic(inner, options, table, schema, strategy)),
-                overlay_what: Box::new(transform_expr_generic(
-                    overlay_what,
-                    options,
-                    table,
-                    schema,
-                    strategy,
-                )),
-                overlay_from: Box::new(transform_expr_generic(
-                    overlay_from,
-                    options,
-                    table,
-                    schema,
-                    strategy,
-                )),
-                overlay_for: overlay_for
-                    .as_ref()
-                    .map(|e| Box::new(transform_expr_generic(e, options, table, schema, strategy))),
-            }
-        }
-
-        Expr::Array(arr) => {
-            Expr::Array(sqlparser::ast::Array {
-                elem: arr
-                    .elem
-                    .iter()
-                    .map(|e| transform_expr_generic(e, options, table, schema, strategy))
-                    .collect(),
-                named: arr.named,
-            })
-        }
-
-        // For any other expression type, return as-is
-        other => other.clone(),
+        // All other variants: delegate structural recursion to map_expr_children
+        other => map_expr_children(other, &recurse),
     }
 }
 
@@ -1633,140 +1191,18 @@ fn transform_join_operator_for_subquery<O: TranslationOptions, DB: DatabaseLike>
 ///   `NEW.id`
 /// - If prefix is None: `ownables.id` -> `ownables_rls.id` (using
 ///   renamed_table)
-#[allow(clippy::too_many_lines)]
-fn transform_outer_table_refs(
-    expr: &Expr,
-    outer_table_name: &str,
-    prefix: Option<&str>,
-    renamed_table: Option<&str>,
-) -> Expr {
-    match expr {
-        Expr::CompoundIdentifier(idents) => {
-            // Check if this is a reference to the outer table
-            if idents.len() >= 2
-                && idents[0].value.to_lowercase() == outer_table_name.to_lowercase()
-            {
-                let mut new_idents = idents.clone();
-                if let Some(pfx) = prefix {
-                    // In trigger context: ownables.id -> OLD.id or NEW.id
-                    new_idents[0] = Ident::new(pfx);
-                } else if let Some(renamed) = renamed_table {
-                    // In view context: ownables.id -> ownables_rls.id
-                    new_idents[0] = Ident::new(renamed);
-                }
-                return Expr::CompoundIdentifier(new_idents);
-            }
-            Expr::CompoundIdentifier(idents.clone())
-        }
-
-        Expr::BinaryOp { left, op, right } => {
-            Expr::BinaryOp {
-                left: Box::new(transform_outer_table_refs(
-                    left,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                op: op.clone(),
-                right: Box::new(transform_outer_table_refs(
-                    right,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-            }
-        }
-
-        Expr::UnaryOp { op, expr: inner } => {
-            Expr::UnaryOp {
-                op: *op,
-                expr: Box::new(transform_outer_table_refs(
-                    inner,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-            }
-        }
-
-        Expr::Nested(inner) => {
-            Expr::Nested(Box::new(transform_outer_table_refs(
-                inner,
-                outer_table_name,
-                prefix,
-                renamed_table,
-            )))
-        }
-
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(transform_outer_table_refs(
-                inner,
-                outer_table_name,
-                prefix,
-                renamed_table,
-            )))
-        }
-
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(transform_outer_table_refs(
-                inner,
-                outer_table_name,
-                prefix,
-                renamed_table,
-            )))
-        }
-
-        Expr::InList { expr: inner, list, negated } => {
-            Expr::InList {
-                expr: Box::new(transform_outer_table_refs(
-                    inner,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                list: list
-                    .iter()
-                    .map(|e| transform_outer_table_refs(e, outer_table_name, prefix, renamed_table))
-                    .collect(),
-                negated: *negated,
-            }
-        }
-
-        Expr::Between { expr: inner, negated, low, high } => {
-            Expr::Between {
-                expr: Box::new(transform_outer_table_refs(
-                    inner,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                negated: *negated,
-                low: Box::new(transform_outer_table_refs(
-                    low,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                high: Box::new(transform_outer_table_refs(
-                    high,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-            }
-        }
-
-        Expr::Function(func) => {
+// Transform all expression arguments in a [`FunctionArguments`] using the
+// provided expression transform function. Handles `List` args (including
+// `OrderBy`, `Limit`, `Having` clauses) and clones other argument forms.
+fn transform_function_arg_with(
+    args: &FunctionArguments,
+    transform_expr_fn: &impl Fn(&Expr) -> Expr,
+) -> FunctionArguments {
+    match args {
+        FunctionArguments::List(arg_list) => {
             let transform_arg_expr = |arg_expr: &FunctionArgExpr| -> FunctionArgExpr {
                 match arg_expr {
-                    FunctionArgExpr::Expr(e) => {
-                        FunctionArgExpr::Expr(transform_outer_table_refs(
-                            e,
-                            outer_table_name,
-                            prefix,
-                            renamed_table,
-                        ))
-                    }
+                    FunctionArgExpr::Expr(e) => FunctionArgExpr::Expr(transform_expr_fn(e)),
                     other => other.clone(),
                 }
             };
@@ -1789,64 +1225,103 @@ fn transform_outer_table_refs(
                     FunctionArg::Unnamed(arg) => FunctionArg::Unnamed(transform_arg_expr(arg)),
                 }
             };
-            let transform_clause_outer =
-                |clause: &FunctionArgumentClause| -> FunctionArgumentClause {
-                    match clause {
-                        FunctionArgumentClause::OrderBy(order_by_exprs) => {
-                            FunctionArgumentClause::OrderBy(
-                                order_by_exprs
-                                    .iter()
-                                    .map(|ob| {
-                                        let mut t = ob.clone();
-                                        t.expr = transform_outer_table_refs(
-                                            &ob.expr,
-                                            outer_table_name,
-                                            prefix,
-                                            renamed_table,
-                                        );
-                                        t
-                                    })
-                                    .collect(),
-                            )
-                        }
-                        FunctionArgumentClause::Limit(e) => {
-                            FunctionArgumentClause::Limit(transform_outer_table_refs(
-                                e,
-                                outer_table_name,
-                                prefix,
-                                renamed_table,
-                            ))
-                        }
-                        FunctionArgumentClause::Having(HavingBound(kind, e)) => {
-                            FunctionArgumentClause::Having(HavingBound(
-                                *kind,
-                                transform_outer_table_refs(
-                                    e,
-                                    outer_table_name,
-                                    prefix,
-                                    renamed_table,
-                                ),
-                            ))
-                        }
-                        other => other.clone(),
+            let transform_clause = |clause: &FunctionArgumentClause| -> FunctionArgumentClause {
+                match clause {
+                    FunctionArgumentClause::OrderBy(order_by_exprs) => {
+                        FunctionArgumentClause::OrderBy(
+                            order_by_exprs
+                                .iter()
+                                .map(|ob| {
+                                    let mut t = ob.clone();
+                                    t.expr = transform_expr_fn(&ob.expr);
+                                    t
+                                })
+                                .collect(),
+                        )
                     }
-                };
-            let transformed_args = match &func.args {
-                FunctionArguments::List(arg_list) => {
-                    FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: arg_list.duplicate_treatment,
-                        args: arg_list.args.iter().map(transform_arg).collect(),
-                        clauses: arg_list.clauses.iter().map(transform_clause_outer).collect(),
-                    })
+                    FunctionArgumentClause::Limit(e) => {
+                        FunctionArgumentClause::Limit(transform_expr_fn(e))
+                    }
+                    FunctionArgumentClause::Having(HavingBound(kind, e)) => {
+                        FunctionArgumentClause::Having(HavingBound(*kind, transform_expr_fn(e)))
+                    }
+                    other => other.clone(),
                 }
-                other => other.clone(),
             };
+            FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: arg_list.duplicate_treatment,
+                args: arg_list.args.iter().map(transform_arg).collect(),
+                clauses: arg_list.clauses.iter().map(transform_clause).collect(),
+            })
+        }
+        other => other.clone(),
+    }
+}
+
+/// Transform a single [`FunctionArg`] by applying `transform_fn` to its
+/// expression content.
+fn transform_function_arg_with_rls(
+    arg: &FunctionArg,
+    transform_fn: &impl Fn(&Expr) -> Expr,
+) -> FunctionArg {
+    let transform_arg_expr = |arg_expr: &FunctionArgExpr| -> FunctionArgExpr {
+        match arg_expr {
+            FunctionArgExpr::Expr(e) => FunctionArgExpr::Expr(transform_fn(e)),
+            other => other.clone(),
+        }
+    };
+    match arg {
+        FunctionArg::Named { name, arg, operator } => {
+            FunctionArg::Named {
+                name: name.clone(),
+                arg: transform_arg_expr(arg),
+                operator: operator.clone(),
+            }
+        }
+        FunctionArg::ExprNamed { name, arg, operator } => {
+            FunctionArg::ExprNamed {
+                name: name.clone(),
+                arg: transform_arg_expr(arg),
+                operator: operator.clone(),
+            }
+        }
+        FunctionArg::Unnamed(arg) => FunctionArg::Unnamed(transform_arg_expr(arg)),
+    }
+}
+
+fn transform_outer_table_refs(
+    expr: &Expr,
+    outer_table_name: &str,
+    prefix: Option<&str>,
+    renamed_table: Option<&str>,
+) -> Expr {
+    let recurse = |e: &Expr| transform_outer_table_refs(e, outer_table_name, prefix, renamed_table);
+
+    match expr {
+        Expr::CompoundIdentifier(idents) => {
+            // Check if this is a reference to the outer table
+            if idents.len() >= 2
+                && idents[0].value.to_lowercase() == outer_table_name.to_lowercase()
+            {
+                let mut new_idents = idents.clone();
+                if let Some(pfx) = prefix {
+                    // In trigger context: ownables.id -> OLD.id or NEW.id
+                    new_idents[0] = Ident::new(pfx);
+                } else if let Some(renamed) = renamed_table {
+                    // In view context: ownables.id -> ownables_rls.id
+                    new_idents[0] = Ident::new(renamed);
+                }
+                return Expr::CompoundIdentifier(new_idents);
+            }
+            Expr::CompoundIdentifier(idents.clone())
+        }
+
+        Expr::Function(func) => {
+            let transformed_args = transform_function_arg_with(&func.args, &recurse);
             Expr::Function(Function {
                 name: func.name.clone(),
                 args: transformed_args,
-                filter: func.filter.as_ref().map(|e| {
-                    Box::new(transform_outer_table_refs(e, outer_table_name, prefix, renamed_table))
-                }),
+                filter: func.filter.as_ref().map(|e| Box::new(recurse(e))),
                 null_treatment: func.null_treatment,
                 over: func.over.clone(),
                 within_group: func.within_group.clone(),
@@ -1855,136 +1330,7 @@ fn transform_outer_table_refs(
             })
         }
 
-        Expr::Cast { expr: inner, data_type, format, kind, array } => {
-            Expr::Cast {
-                expr: Box::new(transform_outer_table_refs(
-                    inner,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                data_type: data_type.clone(),
-                format: format.clone(),
-                kind: kind.clone(),
-                array: *array,
-            }
-        }
-
-        Expr::Case { operand, conditions, else_result, .. } => {
-            Expr::Case {
-                operand: operand.as_ref().map(|e| {
-                    Box::new(transform_outer_table_refs(e, outer_table_name, prefix, renamed_table))
-                }),
-                conditions: conditions
-                    .iter()
-                    .map(|cw| {
-                        sqlparser::ast::CaseWhen {
-                            condition: transform_outer_table_refs(
-                                &cw.condition,
-                                outer_table_name,
-                                prefix,
-                                renamed_table,
-                            ),
-                            result: transform_outer_table_refs(
-                                &cw.result,
-                                outer_table_name,
-                                prefix,
-                                renamed_table,
-                            ),
-                        }
-                    })
-                    .collect(),
-                else_result: else_result.as_ref().map(|e| {
-                    Box::new(transform_outer_table_refs(e, outer_table_name, prefix, renamed_table))
-                }),
-                case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-            }
-        }
-
-        Expr::Like { negated, expr: inner, pattern, escape_char, any } => {
-            Expr::Like {
-                negated: *negated,
-                expr: Box::new(transform_outer_table_refs(
-                    inner,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                pattern: Box::new(transform_outer_table_refs(
-                    pattern,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                escape_char: escape_char.clone(),
-                any: *any,
-            }
-        }
-
-        Expr::ILike { negated, expr: inner, pattern, escape_char, any } => {
-            Expr::ILike {
-                negated: *negated,
-                expr: Box::new(transform_outer_table_refs(
-                    inner,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                pattern: Box::new(transform_outer_table_refs(
-                    pattern,
-                    outer_table_name,
-                    prefix,
-                    renamed_table,
-                )),
-                escape_char: escape_char.clone(),
-                any: *any,
-            }
-        }
-
-        Expr::IsTrue(inner) => {
-            Expr::IsTrue(Box::new(transform_outer_table_refs(
-                inner,
-                outer_table_name,
-                prefix,
-                renamed_table,
-            )))
-        }
-        Expr::IsNotTrue(inner) => {
-            Expr::IsNotTrue(Box::new(transform_outer_table_refs(
-                inner,
-                outer_table_name,
-                prefix,
-                renamed_table,
-            )))
-        }
-        Expr::IsFalse(inner) => {
-            Expr::IsFalse(Box::new(transform_outer_table_refs(
-                inner,
-                outer_table_name,
-                prefix,
-                renamed_table,
-            )))
-        }
-        Expr::IsNotFalse(inner) => {
-            Expr::IsNotFalse(Box::new(transform_outer_table_refs(
-                inner,
-                outer_table_name,
-                prefix,
-                renamed_table,
-            )))
-        }
-
-        Expr::Tuple(exprs) => {
-            Expr::Tuple(
-                exprs
-                    .iter()
-                    .map(|e| transform_outer_table_refs(e, outer_table_name, prefix, renamed_table))
-                    .collect(),
-            )
-        }
-
-        other => other.clone(),
+        other => map_expr_children(other, &recurse),
     }
 }
 
@@ -2629,27 +1975,17 @@ fn generate_validation_view_sql(
     let column_list =
         columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
-    // Build the WHERE clause to match rows by primary key
-    let pk_match = if pk_columns.is_empty() {
-        // No PK - this is rare but we'll use all columns (inefficient but correct)
-        columns
-            .iter()
-            .map(|col| {
-                let col_quoted = quote_identifier(col);
-                format!("{inner_table_name_quoted}.{col_quoted} = {table_name_quoted}.{col_quoted}")
-            })
-            .collect::<Vec<_>>()
-            .join(" AND ")
-    } else {
-        pk_columns
-            .iter()
-            .map(|col| {
-                let col_quoted = quote_identifier(col);
-                format!("{inner_table_name_quoted}.{col_quoted} = {table_name_quoted}.{col_quoted}")
-            })
-            .collect::<Vec<_>>()
-            .join(" AND ")
-    };
+    // Build the WHERE clause to match rows by primary key (fall back to all
+    // columns when no PK is defined — rare but correct).
+    let match_columns = if pk_columns.is_empty() { columns } else { pk_columns };
+    let pk_match = match_columns
+        .iter()
+        .map(|col| {
+            let col_quoted = quote_identifier(col);
+            format!("{inner_table_name_quoted}.{col_quoted} = {table_name_quoted}.{col_quoted}")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
 
     format!(
         r"CREATE VIEW {validation_view_name} AS

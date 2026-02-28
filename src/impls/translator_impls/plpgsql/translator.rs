@@ -7,20 +7,22 @@ use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
         BeginEndStatements, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-        GroupByExpr, Ident, JsonPathElem, ObjectName, ObjectNamePart, Query, Select, SelectFlavor,
-        SelectItem, Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
-        ValueWithSpan, helpers::attached_token::AttachedToken,
+        GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select, SelectItem, Set, SetExpr,
+        Statement, TableAlias, TableFactor, TableWithJoins, Value, ValueWithSpan,
     },
     tokenizer::Span,
 };
 
 use super::{
     context::{PlPgSqlContext, VariableBinding},
-    cte_builder::CteBuilder,
+    cte_builder::{CteBuilder, make_query, make_simple_select},
 };
 use crate::{
     errors::Error,
-    impls::translator_impls::condition_injection::inject_condition_into_dml_statement,
+    impls::{
+        expr_helpers::{any_child_expr, map_expr_children},
+        translator_impls::condition_injection::inject_condition_into_dml_statement,
+    },
     options::Pg2SqliteOptions,
     traits::{TranslationOptions, Translator},
 };
@@ -279,14 +281,7 @@ impl PlPgSqlTranslator {
                 let transformed_query = Query {
                     with: transformed_with,
                     body: Box::new(transformed_body),
-                    order_by: query.order_by.clone(),
-                    limit_clause: query.limit_clause.clone(),
-                    fetch: query.fetch.clone(),
-                    locks: query.locks.clone(),
-                    for_clause: query.for_clause.clone(),
-                    settings: query.settings.clone(),
-                    format_clause: query.format_clause.clone(),
-                    pipe_operators: query.pipe_operators.clone(),
+                    ..query.clone()
                 };
 
                 vec![Statement::Query(Box::new(transformed_query))]
@@ -294,18 +289,8 @@ impl PlPgSqlTranslator {
         } else {
             // For non-WITH query statements, transform normally
             let transformed_body = Self::transform_query_body(&query.body, context, options)?;
-            let transformed_query = Query {
-                with: None,
-                body: Box::new(transformed_body),
-                order_by: query.order_by.clone(),
-                limit_clause: query.limit_clause.clone(),
-                fetch: query.fetch.clone(),
-                locks: query.locks.clone(),
-                for_clause: query.for_clause.clone(),
-                settings: query.settings.clone(),
-                format_clause: query.format_clause.clone(),
-                pipe_operators: query.pipe_operators.clone(),
-            };
+            let transformed_query =
+                Query { with: None, body: Box::new(transformed_body), ..query.clone() };
 
             vec![Statement::Query(Box::new(transformed_query))]
         };
@@ -355,18 +340,7 @@ impl PlPgSqlTranslator {
         };
 
         // Create a new WITH query that wraps the original SELECT
-        let inner_query = Query {
-            with: Some(with.clone()),
-            body: source.body.clone(),
-            order_by: source.order_by.clone(),
-            limit_clause: source.limit_clause.clone(),
-            fetch: source.fetch.clone(),
-            locks: source.locks.clone(),
-            for_clause: source.for_clause.clone(),
-            settings: source.settings.clone(),
-            format_clause: source.format_clause.clone(),
-            pipe_operators: source.pipe_operators.clone(),
-        };
+        let inner_query = Query { with: Some(with.clone()), ..source.as_ref().clone() };
 
         // Transform NEW/OLD references in the inner query
         let mut transformed_inner = inner_query;
@@ -438,15 +412,9 @@ impl PlPgSqlTranslator {
             outer_projection
         };
 
-        let new_select = Select {
-            select_token: AttachedToken::empty(),
-            optimizer_hint: None,
-            distinct: None,
-            top: None,
-            top_before_distinct: false,
-            projection: final_projection,
-            into: None,
-            from: vec![TableWithJoins {
+        let new_select = make_simple_select(
+            final_projection,
+            vec![TableWithJoins {
                 relation: TableFactor::Derived {
                     lateral: false,
                     subquery: Box::new(transformed_inner),
@@ -459,37 +427,11 @@ impl PlPgSqlTranslator {
                 },
                 joins: vec![],
             }],
-            lateral_views: vec![],
-            prewhere: None,
-            selection: None,
-            group_by: GroupByExpr::Expressions(vec![], vec![]),
-            cluster_by: vec![],
-            distribute_by: vec![],
-            sort_by: vec![],
-            having: None,
-            named_window: vec![],
-            qualify: None,
-            window_before_qualify: false,
-            value_table_mode: None,
-            connect_by: vec![],
-            exclude: None,
-            flavor: SelectFlavor::Standard,
-            select_modifiers: None,
-        };
+            None,
+        );
 
         // Build new source query
-        let new_source = Query {
-            with: None,
-            body: Box::new(SetExpr::Select(Box::new(new_select))),
-            order_by: None,
-            limit_clause: None,
-            fetch: None,
-            locks: vec![],
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: vec![],
-        };
+        let new_source = make_query(None, SetExpr::Select(Box::new(new_select)));
 
         // Build the new INSERT, handling ON CONFLICT DO NOTHING -> OR IGNORE
         let mut new_insert = insert.clone();
@@ -533,69 +475,31 @@ impl PlPgSqlTranslator {
         context: &mut PlPgSqlContext,
         options: &Pg2SqliteOptions,
     ) {
-        match expr {
-            Expr::InSubquery { subquery, .. } => {
-                // Check if the subquery references any CTE from the WITH clause
-                let cte_names: Vec<String> =
-                    with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
+        use crate::impls::expr_helpers::mutate_expr_children;
 
-                if Self::query_references_ctes(subquery, &cte_names) {
-                    // Move the WITH clause into the subquery
-                    let mut new_with = with.clone();
-                    for cte in &mut new_with.cte_tables {
-                        Self::transform_cte_query(&mut cte.query, context, options);
-                    }
-                    subquery.with = Some(new_with);
+        /// Inject CTE into a subquery if it references any of the CTEs.
+        fn maybe_inject_with(
+            subquery: &mut Query,
+            with: &sqlparser::ast::With,
+            context: &mut PlPgSqlContext,
+            options: &Pg2SqliteOptions,
+        ) {
+            let cte_names: Vec<String> =
+                with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
+            if PlPgSqlTranslator::query_references_ctes(subquery, &cte_names) {
+                let mut new_with = with.clone();
+                for cte in &mut new_with.cte_tables {
+                    PlPgSqlTranslator::transform_cte_query(&mut cte.query, context, options);
                 }
+                subquery.with = Some(new_with);
             }
-            Expr::BinaryOp { left, right, .. } => {
-                Self::inject_with_into_in_subqueries(left, with, context, options);
-                Self::inject_with_into_in_subqueries(right, with, context, options);
-            }
-            Expr::Exists { subquery, .. } => {
-                let cte_names: Vec<String> =
-                    with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
-                if Self::query_references_ctes(subquery, &cte_names) {
-                    let mut new_with = with.clone();
-                    for cte in &mut new_with.cte_tables {
-                        Self::transform_cte_query(&mut cte.query, context, options);
-                    }
-                    subquery.with = Some(new_with);
-                }
-            }
-            Expr::Subquery(subquery) => {
-                let cte_names: Vec<String> =
-                    with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
-                if Self::query_references_ctes(subquery, &cte_names) {
-                    let mut new_with = with.clone();
-                    for cte in &mut new_with.cte_tables {
-                        Self::transform_cte_query(&mut cte.query, context, options);
-                    }
-                    subquery.with = Some(new_with);
-                }
-            }
-            Expr::Case { operand, conditions, else_result, .. } => {
-                if let Some(op) = operand {
-                    Self::inject_with_into_in_subqueries(op, with, context, options);
-                }
-                for cw in conditions {
-                    Self::inject_with_into_in_subqueries(&mut cw.condition, with, context, options);
-                    Self::inject_with_into_in_subqueries(&mut cw.result, with, context, options);
-                }
-                if let Some(el) = else_result {
-                    Self::inject_with_into_in_subqueries(el, with, context, options);
-                }
-            }
-            Expr::InList { expr: inner, list, .. } => {
-                Self::inject_with_into_in_subqueries(inner, with, context, options);
-                for item in list {
-                    Self::inject_with_into_in_subqueries(item, with, context, options);
-                }
-            }
-            Expr::Between { expr: inner, low, high, .. } => {
-                Self::inject_with_into_in_subqueries(inner, with, context, options);
-                Self::inject_with_into_in_subqueries(low, with, context, options);
-                Self::inject_with_into_in_subqueries(high, with, context, options);
+        }
+
+        match expr {
+            Expr::InSubquery { subquery, .. }
+            | Expr::Subquery(subquery)
+            | Expr::Exists { subquery, .. } => {
+                maybe_inject_with(subquery, with, context, options);
             }
             Expr::Function(func) => {
                 if let FunctionArguments::List(arg_list) = &mut func.args {
@@ -611,29 +515,11 @@ impl PlPgSqlTranslator {
                     }
                 }
             }
-            Expr::UnaryOp { expr: inner, .. }
-            | Expr::Nested(inner)
-            | Expr::Cast { expr: inner, .. }
-            | Expr::IsNull(inner)
-            | Expr::IsNotNull(inner)
-            | Expr::IsTrue(inner)
-            | Expr::IsNotTrue(inner)
-            | Expr::IsFalse(inner)
-            | Expr::IsNotFalse(inner) => {
-                Self::inject_with_into_in_subqueries(inner, with, context, options);
+            other => {
+                mutate_expr_children(other, &mut |child| {
+                    Self::inject_with_into_in_subqueries(child, with, context, options);
+                });
             }
-            Expr::Tuple(items) => {
-                for item in items {
-                    Self::inject_with_into_in_subqueries(item, with, context, options);
-                }
-            }
-            Expr::Like { expr: inner, pattern, .. }
-            | Expr::ILike { expr: inner, pattern, .. }
-            | Expr::SimilarTo { expr: inner, pattern, .. } => {
-                Self::inject_with_into_in_subqueries(inner, with, context, options);
-                Self::inject_with_into_in_subqueries(pattern, with, context, options);
-            }
-            _ => {}
         }
     }
 
@@ -689,6 +575,7 @@ impl PlPgSqlTranslator {
     }
 
     /// Transforms the body of a Query (INSERT, DELETE, SELECT, etc.).
+    #[allow(clippy::unnecessary_wraps)]
     fn transform_query_body(
         body: &SetExpr,
         context: &mut PlPgSqlContext,
@@ -696,53 +583,18 @@ impl PlPgSqlTranslator {
     ) -> Result<SetExpr, Error> {
         match body {
             SetExpr::Insert(Statement::Insert(insert)) => {
-                let transformed_insert =
-                    Self::transform_insert_for_sqlite(insert, context, options);
-                Ok(SetExpr::Insert(Statement::Insert(transformed_insert)))
+                let transformed = Self::transform_insert_for_sqlite(insert, context, options);
+                Ok(SetExpr::Insert(Statement::Insert(transformed)))
             }
             SetExpr::Delete(Statement::Delete(delete)) => {
-                let transformed_delete =
-                    Self::transform_delete_for_sqlite(delete, context, options);
-                Ok(SetExpr::Delete(Statement::Delete(transformed_delete)))
+                let transformed = Self::transform_delete_for_sqlite(delete, context, options);
+                Ok(SetExpr::Delete(Statement::Delete(transformed)))
             }
-            SetExpr::Select(select) => {
-                let mut transformed_select = (**select).clone();
-                // Transform projection items
-                for item in &mut transformed_select.projection {
-                    if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } =
-                        item
-                    {
-                        Self::transform_expr(expr, context, options);
-                    }
-                }
-                Self::transform_selection(&mut transformed_select.selection, context, options);
-                // Transform FROM clauses
-                for from in &mut transformed_select.from {
-                    Self::transform_table_with_joins(from, context, options);
-                }
-                // Transform HAVING clause
-                if let Some(having) = &mut transformed_select.having {
-                    Self::transform_expr(having, context, options);
-                }
-                // Transform GROUP BY expressions
-                if let GroupByExpr::Expressions(exprs, _) = &mut transformed_select.group_by {
-                    for e in exprs {
-                        Self::transform_expr(e, context, options);
-                    }
-                }
-                Ok(SetExpr::Select(Box::new(transformed_select)))
+            other => {
+                let mut cloned = other.clone();
+                Self::transform_set_expr(&mut cloned, context, options);
+                Ok(cloned)
             }
-            SetExpr::SetOperation { op, set_quantifier, left, right } => {
-                let transformed_left = Self::transform_query_body(left, context, options)?;
-                let transformed_right = Self::transform_query_body(right, context, options)?;
-                Ok(SetExpr::SetOperation {
-                    op: *op,
-                    set_quantifier: *set_quantifier,
-                    left: Box::new(transformed_left),
-                    right: Box::new(transformed_right),
-                })
-            }
-            other => Ok(other.clone()),
         }
     }
 
@@ -953,15 +805,15 @@ impl PlPgSqlTranslator {
     /// functions.
     #[allow(clippy::too_many_lines)]
     fn transform_expr(expr: &mut Expr, context: &mut PlPgSqlContext, options: &Pg2SqliteOptions) {
+        use crate::impls::expr_helpers::mutate_expr_children;
+
         match expr {
             Expr::CompoundIdentifier(parts)
-                // Check if this is a NEW.col or OLD.col reference - keep it as is for SQLite
-                // triggers SQLite supports NEW and OLD directly in triggers
                 if parts.len() == 2
                     && (parts[0].value.eq_ignore_ascii_case("NEW")
                         || parts[0].value.eq_ignore_ascii_case("OLD")) =>
             {
-                // Keep as-is, SQLite supports NEW.col and OLD.col
+                // Keep as-is, SQLite supports NEW.col and OLD.col in triggers
             }
             Expr::Function(func) => {
                 // Transform UUID function names
@@ -976,219 +828,83 @@ impl PlPgSqlTranslator {
                     let new_name = options.get_uuid_function_name();
                     func.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(new_name))]);
                 }
-                // Recurse into function arguments
-                if let FunctionArguments::List(list) = &mut func.args {
-                    for arg in &mut list.args {
-                        match arg {
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
-                            | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
-                            | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => {
-                                Self::transform_expr(e, context, options);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                // Recurse into function parameters
-                if let FunctionArguments::List(list) = &mut func.parameters {
-                    for arg in &mut list.args {
-                        match arg {
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
-                            | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
-                            | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => {
-                                Self::transform_expr(e, context, options);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                // Recurse into FILTER clause
-                if let Some(filter) = &mut func.filter {
-                    Self::transform_expr(filter, context, options);
-                }
-                // Recurse into OVER (window spec)
-                if let Some(sqlparser::ast::WindowType::WindowSpec(spec)) = &mut func.over {
-                    for e in &mut spec.partition_by {
-                        Self::transform_expr(e, context, options);
-                    }
-                    for ob in &mut spec.order_by {
-                        Self::transform_expr(&mut ob.expr, context, options);
-                    }
-                }
-                // Recurse into WITHIN GROUP
-                for ob in &mut func.within_group {
-                    Self::transform_expr(&mut ob.expr, context, options);
-                }
-            }
-            Expr::BinaryOp { left, right, .. }
-            | Expr::AnyOp { left, right, .. }
-            | Expr::AllOp { left, right, .. }
-            | Expr::IsDistinctFrom(left, right)
-            | Expr::IsNotDistinctFrom(left, right) => {
-                Self::transform_expr(left, context, options);
-                Self::transform_expr(right, context, options);
-            }
-            Expr::UnaryOp { expr: inner, .. }
-            | Expr::Nested(inner)
-            | Expr::IsNotNull(inner)
-            | Expr::IsNull(inner)
-            | Expr::IsTrue(inner)
-            | Expr::IsNotTrue(inner)
-            | Expr::IsFalse(inner)
-            | Expr::IsNotFalse(inner)
-            | Expr::IsUnknown(inner)
-            | Expr::IsNotUnknown(inner)
-            | Expr::Cast { expr: inner, .. }
-            | Expr::Collate { expr: inner, .. }
-            | Expr::Ceil { expr: inner, .. }
-            | Expr::Floor { expr: inner, .. }
-            | Expr::Convert { expr: inner, .. } => {
-                Self::transform_expr(inner, context, options);
-            }
-            Expr::InList { expr: inner, list, .. } => {
-                Self::transform_expr(inner, context, options);
-                for item in list {
-                    Self::transform_expr(item, context, options);
-                }
+                Self::transform_function_parts(func, context, options);
             }
             Expr::InSubquery { expr: inner, subquery, .. } => {
                 Self::transform_expr(inner, context, options);
-                // Transform the subquery body, CTEs, and ORDER BY
-                if let Ok(transformed) =
-                    Self::transform_query_body(&subquery.body, context, options)
-                {
-                    *subquery.body = transformed;
-                }
-                if let Some(with) = &mut subquery.with {
-                    for cte in &mut with.cte_tables {
-                        Self::transform_cte_query(&mut cte.query, context, options);
-                    }
-                }
-                if let Some(order_by) = &mut subquery.order_by
-                    && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
-                {
-                    for ob in exprs {
-                        Self::transform_expr(&mut ob.expr, context, options);
-                    }
-                }
-            }
-            Expr::Case { operand, conditions, else_result, .. } => {
-                if let Some(op) = operand {
-                    Self::transform_expr(op, context, options);
-                }
-                for when in conditions {
-                    Self::transform_expr(&mut when.condition, context, options);
-                    Self::transform_expr(&mut when.result, context, options);
-                }
-                if let Some(else_expr) = else_result {
-                    Self::transform_expr(else_expr, context, options);
-                }
-            }
-            Expr::Between { expr: inner, low, high, .. } => {
-                Self::transform_expr(inner, context, options);
-                Self::transform_expr(low, context, options);
-                Self::transform_expr(high, context, options);
+                Self::transform_subquery(subquery, context, options);
             }
             Expr::Subquery(subquery) | Expr::Exists { subquery, .. } => {
-                if let Ok(transformed) =
-                    Self::transform_query_body(&subquery.body, context, options)
-                {
-                    *subquery.body = transformed;
-                }
-                // Transform WITH clause CTEs
-                if let Some(with) = &mut subquery.with {
-                    for cte in &mut with.cte_tables {
-                        Self::transform_cte_query(&mut cte.query, context, options);
+                Self::transform_subquery(subquery, context, options);
+            }
+            other => {
+                mutate_expr_children(other, &mut |child| {
+                    Self::transform_expr(child, context, options);
+                });
+            }
+        }
+    }
+
+    /// Transform function arguments, parameters, filter, over, and
+    /// within_group.
+    fn transform_function_parts(
+        func: &mut sqlparser::ast::Function,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) {
+        let transform_func_args =
+            |args: &mut FunctionArguments, ctx: &mut PlPgSqlContext, opts: &Pg2SqliteOptions| {
+                if let FunctionArguments::List(list) = args {
+                    for arg in &mut list.args {
+                        match arg {
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+                            | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
+                            | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => {
+                                Self::transform_expr(e, ctx, opts);
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                // Transform ORDER BY expressions
-                if let Some(order_by) = &mut subquery.order_by
-                    && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
-                {
-                    for ob in exprs {
-                        Self::transform_expr(&mut ob.expr, context, options);
-                    }
-                }
+            };
+        transform_func_args(&mut func.args, context, options);
+        transform_func_args(&mut func.parameters, context, options);
+        if let Some(filter) = &mut func.filter {
+            Self::transform_expr(filter, context, options);
+        }
+        if let Some(sqlparser::ast::WindowType::WindowSpec(spec)) = &mut func.over {
+            for e in &mut spec.partition_by {
+                Self::transform_expr(e, context, options);
             }
-            Expr::Like { expr, pattern, .. }
-            | Expr::ILike { expr, pattern, .. }
-            | Expr::SimilarTo { expr, pattern, .. } => {
-                Self::transform_expr(expr, context, options);
-                Self::transform_expr(pattern, context, options);
+            for ob in &mut spec.order_by {
+                Self::transform_expr(&mut ob.expr, context, options);
             }
-            Expr::Extract { expr, .. } => {
-                Self::transform_expr(expr, context, options);
+        }
+        for ob in &mut func.within_group {
+            Self::transform_expr(&mut ob.expr, context, options);
+        }
+    }
+
+    /// Transform a subquery's body, CTEs, and ORDER BY expressions.
+    fn transform_subquery(
+        subquery: &mut Query,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) {
+        if let Ok(transformed) = Self::transform_query_body(&subquery.body, context, options) {
+            *subquery.body = transformed;
+        }
+        if let Some(with) = &mut subquery.with {
+            for cte in &mut with.cte_tables {
+                Self::transform_cte_query(&mut cte.query, context, options);
             }
-            Expr::Trim { expr, trim_what, trim_characters, .. } => {
-                Self::transform_expr(expr, context, options);
-                if let Some(tw) = trim_what {
-                    Self::transform_expr(tw, context, options);
-                }
-                if let Some(chars) = trim_characters {
-                    for c in chars {
-                        Self::transform_expr(c, context, options);
-                    }
-                }
+        }
+        if let Some(order_by) = &mut subquery.order_by
+            && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
+        {
+            for ob in exprs {
+                Self::transform_expr(&mut ob.expr, context, options);
             }
-            Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
-                Self::transform_expr(expr, context, options);
-                Self::transform_expr(overlay_what, context, options);
-                Self::transform_expr(overlay_from, context, options);
-                if let Some(overlay_for) = overlay_for {
-                    Self::transform_expr(overlay_for, context, options);
-                }
-            }
-            Expr::Substring { expr, substring_from, substring_for, .. } => {
-                Self::transform_expr(expr, context, options);
-                if let Some(from) = substring_from {
-                    Self::transform_expr(from, context, options);
-                }
-                if let Some(for_expr) = substring_for {
-                    Self::transform_expr(for_expr, context, options);
-                }
-            }
-            Expr::AtTimeZone { timestamp, time_zone } => {
-                Self::transform_expr(timestamp, context, options);
-                Self::transform_expr(time_zone, context, options);
-            }
-            Expr::Position { expr: inner, r#in: in_expr } => {
-                Self::transform_expr(inner, context, options);
-                Self::transform_expr(in_expr, context, options);
-            }
-            Expr::RLike { expr: inner, pattern, .. } => {
-                Self::transform_expr(inner, context, options);
-                Self::transform_expr(pattern, context, options);
-            }
-            Expr::Tuple(items) => {
-                for item in items {
-                    Self::transform_expr(item, context, options);
-                }
-            }
-            Expr::Array(arr) => {
-                for elem in &mut arr.elem {
-                    Self::transform_expr(elem, context, options);
-                }
-            }
-            Expr::CompoundFieldAccess { root, access_chain } => {
-                Self::transform_expr(root, context, options);
-                for access in access_chain {
-                    if let sqlparser::ast::AccessExpr::Subscript(
-                        sqlparser::ast::Subscript::Index { index },
-                    ) = access
-                    {
-                        Self::transform_expr(index, context, options);
-                    }
-                }
-            }
-            Expr::JsonAccess { value, path } => {
-                Self::transform_expr(value, context, options);
-                for elem in &mut path.path {
-                    if let JsonPathElem::Bracket { key } = elem {
-                        Self::transform_expr(key, context, options);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -1362,14 +1078,7 @@ impl PlPgSqlTranslator {
                     new_insert.source = Some(Box::new(Query {
                         with: CteBuilder::combine_ctes(ctes),
                         body: Box::new(SetExpr::Select(Box::new(new_select))),
-                        order_by: source.order_by.clone(),
-                        limit_clause: source.limit_clause.clone(),
-                        fetch: source.fetch.clone(),
-                        locks: source.locks.clone(),
-                        for_clause: source.for_clause.clone(),
-                        settings: source.settings.clone(),
-                        format_clause: source.format_clause.clone(),
-                        pipe_operators: source.pipe_operators.clone(),
+                        ..source.as_ref().clone()
                     }));
                 }
                 _ => {
@@ -1425,82 +1134,20 @@ impl PlPgSqlTranslator {
         args_have_var || filter_has_var || over_has_var || within_group_has_var
     }
 
-    fn case_references_variable(
-        operand: Option<&Expr>,
-        conditions: &[sqlparser::ast::CaseWhen],
-        else_result: Option<&Expr>,
-        var_name: &str,
-    ) -> bool {
-        operand.is_some_and(|inner| Self::expr_references_variable(inner, var_name))
-            || conditions.iter().any(|when| {
-                Self::expr_references_variable(&when.condition, var_name)
-                    || Self::expr_references_variable(&when.result, var_name)
-            })
-            || else_result.is_some_and(|inner| Self::expr_references_variable(inner, var_name))
-    }
-
-    fn expr_list_references_variable(exprs: &[Expr], var_name: &str) -> bool {
-        exprs.iter().any(|expr| Self::expr_references_variable(expr, var_name))
-    }
-
     /// Checks if an expression references a specific variable name.
     fn expr_references_variable(expr: &Expr, var_name: &str) -> bool {
         match expr {
             Expr::Identifier(ident) => ident.value == var_name,
             Expr::CompoundIdentifier(idents) => idents.iter().any(|i| i.value == var_name),
-            Expr::BinaryOp { left, right, .. }
-            | Expr::IsDistinctFrom(left, right)
-            | Expr::IsNotDistinctFrom(left, right) => {
-                Self::expr_references_variable(left, var_name)
-                    || Self::expr_references_variable(right, var_name)
-            }
-            Expr::UnaryOp { expr: inner, .. }
-            | Expr::Cast { expr: inner, .. }
-            | Expr::IsNull(inner)
-            | Expr::IsNotNull(inner)
-            | Expr::IsUnknown(inner)
-            | Expr::IsNotUnknown(inner)
-            | Expr::IsTrue(inner)
-            | Expr::IsNotTrue(inner)
-            | Expr::IsFalse(inner)
-            | Expr::IsNotFalse(inner)
-            | Expr::Nested(inner) => Self::expr_references_variable(inner, var_name),
             Expr::Function(func) => Self::function_references_variable(func, var_name),
-            Expr::AtTimeZone { timestamp, time_zone } => {
-                Self::expr_references_variable(timestamp, var_name)
-                    || Self::expr_references_variable(time_zone, var_name)
-            }
-            Expr::InList { expr: inner, list, .. } => {
-                Self::expr_references_variable(inner, var_name)
-                    || Self::expr_list_references_variable(list, var_name)
+            Expr::Subquery(subquery) | Expr::Exists { subquery, .. } => {
+                Self::query_references_variable_expr(subquery, var_name)
             }
             Expr::InSubquery { expr: inner, subquery, .. } => {
                 Self::expr_references_variable(inner, var_name)
                     || Self::query_references_variable_expr(subquery, var_name)
             }
-            Expr::InUnnest { expr: inner, array_expr, .. } => {
-                Self::expr_references_variable(inner, var_name)
-                    || Self::expr_references_variable(array_expr, var_name)
-            }
-            Expr::Between { expr: inner, low, high, .. } => {
-                Self::expr_references_variable(inner, var_name)
-                    || Self::expr_references_variable(low, var_name)
-                    || Self::expr_references_variable(high, var_name)
-            }
-            Expr::Case { operand, conditions, else_result, .. } => {
-                Self::case_references_variable(
-                    operand.as_deref(),
-                    conditions,
-                    else_result.as_deref(),
-                    var_name,
-                )
-            }
-            Expr::Tuple(items) => Self::expr_list_references_variable(items, var_name),
-            Expr::Array(array) => Self::expr_list_references_variable(&array.elem, var_name),
-            Expr::Subquery(subquery) | Expr::Exists { subquery, .. } => {
-                Self::query_references_variable_expr(subquery, var_name)
-            }
-            _ => false,
+            _ => any_child_expr(expr, &|child| Self::expr_references_variable(child, var_name)),
         }
     }
 
@@ -1710,46 +1357,17 @@ impl PlPgSqlTranslator {
                 relation: TableFactor::Derived {
                     lateral: false,
                     sample: None,
-                    subquery: Box::new(Query {
-                        with: None,
-                        body: Box::new(SetExpr::Select(Box::new(Select {
-                            select_token: AttachedToken::empty(),
-                            distinct: None,
-                            top: None,
-                            top_before_distinct: false,
-                            projection: vec![SelectItem::UnnamedExpr(Expr::Value(ValueWithSpan {
+                    subquery: Box::new(make_query(
+                        None,
+                        SetExpr::Select(Box::new(make_simple_select(
+                            vec![SelectItem::UnnamedExpr(Expr::Value(ValueWithSpan {
                                 value: Value::Number("1".to_string(), false),
                                 span: Span::empty(),
                             }))],
-                            into: None,
-                            from: vec![],
-                            lateral_views: vec![],
-                            selection: None,
-                            group_by: GroupByExpr::Expressions(vec![], vec![]),
-                            cluster_by: vec![],
-                            distribute_by: vec![],
-                            sort_by: vec![],
-                            having: None,
-                            named_window: vec![],
-                            qualify: None,
-                            window_before_qualify: false,
-                            value_table_mode: None,
-                            connect_by: vec![],
-                            flavor: SelectFlavor::Standard,
-                            exclude: None,
-                            optimizer_hint: None,
-                            prewhere: None,
-                            select_modifiers: None,
-                        }))),
-                        order_by: None,
-                        limit_clause: None,
-                        fetch: None,
-                        locks: vec![],
-                        for_clause: None,
-                        settings: None,
-                        format_clause: None,
-                        pipe_operators: vec![],
-                    }),
+                            vec![],
+                            None,
+                        ))),
+                    )),
                     alias: Some(TableAlias {
                         name: Ident::new("_dummy".to_string()),
                         columns: vec![],
@@ -1764,32 +1382,7 @@ impl PlPgSqlTranslator {
         let selection =
             if let Some(cond) = condition { Some(Self::parse_expression(cond)?) } else { None };
 
-        Ok(SetExpr::Select(Box::new(Select {
-            select_token: AttachedToken::empty(),
-            distinct: None,
-            top: None,
-            top_before_distinct: false,
-            projection: projections,
-            into: None,
-            from: from_tables,
-            lateral_views: vec![],
-            selection,
-            group_by: GroupByExpr::Expressions(vec![], vec![]),
-            cluster_by: vec![],
-            distribute_by: vec![],
-            sort_by: vec![],
-            having: None,
-            named_window: vec![],
-            qualify: None,
-            window_before_qualify: false,
-            value_table_mode: None,
-            connect_by: vec![],
-            flavor: SelectFlavor::Standard,
-            exclude: None,
-            optimizer_hint: None,
-            prewhere: None,
-            select_modifiers: None,
-        })))
+        Ok(SetExpr::Select(Box::new(make_simple_select(projections, from_tables, selection))))
     }
 
     fn substitute_bound_variable(name: &str, bindings: &[VariableBinding]) -> Option<Expr> {
@@ -1832,51 +1425,11 @@ impl PlPgSqlTranslator {
         Expr::Function(rewritten)
     }
 
-    fn substitute_case_expr(
-        case_token: &AttachedToken,
-        end_token: &AttachedToken,
-        operand: Option<&Expr>,
-        conditions: &[sqlparser::ast::CaseWhen],
-        else_result: Option<&Expr>,
-        bindings: &[VariableBinding],
-    ) -> Expr {
-        Expr::Case {
-            case_token: case_token.clone(),
-            end_token: end_token.clone(),
-            operand: operand.map(|inner| Box::new(Self::substitute_variables(inner, bindings))),
-            conditions: conditions
-                .iter()
-                .map(|when| {
-                    sqlparser::ast::CaseWhen {
-                        condition: Self::substitute_variables(&when.condition, bindings),
-                        result: Self::substitute_variables(&when.result, bindings),
-                    }
-                })
-                .collect(),
-            else_result: else_result
-                .map(|inner| Box::new(Self::substitute_variables(inner, bindings))),
-        }
-    }
-
-    fn rebuild_unary_wrapper(expr: &Expr, rewritten: Expr) -> Expr {
-        match expr {
-            Expr::IsNull(_) => Expr::IsNull(Box::new(rewritten)),
-            Expr::IsNotNull(_) => Expr::IsNotNull(Box::new(rewritten)),
-            Expr::IsUnknown(_) => Expr::IsUnknown(Box::new(rewritten)),
-            Expr::IsNotUnknown(_) => Expr::IsNotUnknown(Box::new(rewritten)),
-            Expr::IsTrue(_) => Expr::IsTrue(Box::new(rewritten)),
-            Expr::IsNotTrue(_) => Expr::IsNotTrue(Box::new(rewritten)),
-            Expr::IsFalse(_) => Expr::IsFalse(Box::new(rewritten)),
-            Expr::IsNotFalse(_) => Expr::IsNotFalse(Box::new(rewritten)),
-            Expr::Nested(_) => Expr::Nested(Box::new(rewritten)),
-            _ => unreachable!("match arm should cover only unary wrapper variants"),
-        }
-    }
-
     /// Substitutes variable references in an expression with CTE column
     /// references.
-    #[allow(clippy::too_many_lines)]
     fn substitute_variables(expr: &Expr, bindings: &[VariableBinding]) -> Expr {
+        let recurse = |e: &Expr| Self::substitute_variables(e, bindings);
+
         match expr {
             Expr::Identifier(ident) => {
                 Self::substitute_bound_variable(&ident.value, bindings)
@@ -1886,101 +1439,13 @@ impl PlPgSqlTranslator {
                 Self::substitute_bound_variable(&idents[0].value, bindings)
                     .unwrap_or_else(|| expr.clone())
             }
-            Expr::BinaryOp { left, op, right } => {
-                Expr::BinaryOp {
-                    left: Box::new(Self::substitute_variables(left, bindings)),
-                    op: op.clone(),
-                    right: Box::new(Self::substitute_variables(right, bindings)),
-                }
-            }
-            Expr::UnaryOp { op, expr: inner } => {
-                Expr::UnaryOp {
-                    op: *op,
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                }
-            }
-            Expr::Cast { expr: inner, data_type, format, kind, array } => {
-                Expr::Cast {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    data_type: data_type.clone(),
-                    format: format.clone(),
-                    kind: kind.clone(),
-                    array: *array,
-                }
-            }
             Expr::Function(func) => Self::substitute_function(func, bindings),
-            Expr::AtTimeZone { timestamp, time_zone } => {
-                Expr::AtTimeZone {
-                    timestamp: Box::new(Self::substitute_variables(timestamp, bindings)),
-                    time_zone: Box::new(Self::substitute_variables(time_zone, bindings)),
-                }
-            }
-            Expr::InList { expr: inner, list, negated } => {
-                Expr::InList {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    list: list
-                        .iter()
-                        .map(|item| Self::substitute_variables(item, bindings))
-                        .collect(),
-                    negated: *negated,
-                }
-            }
             Expr::InSubquery { expr: inner, subquery, negated } => {
                 Expr::InSubquery {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
+                    expr: Box::new(recurse(inner)),
                     subquery: Box::new(Self::substitute_variables_in_query(subquery, bindings)),
                     negated: *negated,
                 }
-            }
-            Expr::InUnnest { expr: inner, array_expr, negated } => {
-                Expr::InUnnest {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    array_expr: Box::new(Self::substitute_variables(array_expr, bindings)),
-                    negated: *negated,
-                }
-            }
-            Expr::Between { expr: inner, negated, low, high } => {
-                Expr::Between {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    negated: *negated,
-                    low: Box::new(Self::substitute_variables(low, bindings)),
-                    high: Box::new(Self::substitute_variables(high, bindings)),
-                }
-            }
-            Expr::Case { case_token, end_token, operand, conditions, else_result } => {
-                Self::substitute_case_expr(
-                    case_token,
-                    end_token,
-                    operand.as_deref(),
-                    conditions,
-                    else_result.as_deref(),
-                    bindings,
-                )
-            }
-            Expr::Tuple(items) => {
-                Expr::Tuple(
-                    items.iter().map(|item| Self::substitute_variables(item, bindings)).collect(),
-                )
-            }
-            Expr::Array(array) => {
-                let mut rewritten = array.clone();
-                rewritten.elem = rewritten
-                    .elem
-                    .iter()
-                    .map(|item| Self::substitute_variables(item, bindings))
-                    .collect();
-                Expr::Array(rewritten)
-            }
-            Expr::IsNull(inner)
-            | Expr::IsNotNull(inner)
-            | Expr::IsUnknown(inner)
-            | Expr::IsNotUnknown(inner)
-            | Expr::IsTrue(inner)
-            | Expr::IsNotTrue(inner)
-            | Expr::IsFalse(inner)
-            | Expr::IsNotFalse(inner)
-            | Expr::Nested(inner) => {
-                Self::rebuild_unary_wrapper(expr, Self::substitute_variables(inner, bindings))
             }
             Expr::Subquery(subquery) => {
                 Expr::Subquery(Box::new(Self::substitute_variables_in_query(subquery, bindings)))
@@ -1991,87 +1456,7 @@ impl PlPgSqlTranslator {
                     negated: *negated,
                 }
             }
-            Expr::Like { negated, expr: inner, pattern, escape_char, any } => {
-                Expr::Like {
-                    negated: *negated,
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    pattern: Box::new(Self::substitute_variables(pattern, bindings)),
-                    escape_char: escape_char.clone(),
-                    any: *any,
-                }
-            }
-            Expr::ILike { negated, expr: inner, pattern, escape_char, any } => {
-                Expr::ILike {
-                    negated: *negated,
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    pattern: Box::new(Self::substitute_variables(pattern, bindings)),
-                    escape_char: escape_char.clone(),
-                    any: *any,
-                }
-            }
-            Expr::SimilarTo { negated, expr: inner, pattern, escape_char } => {
-                Expr::SimilarTo {
-                    negated: *negated,
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    pattern: Box::new(Self::substitute_variables(pattern, bindings)),
-                    escape_char: escape_char.clone(),
-                }
-            }
-            Expr::Extract { field, expr: inner, syntax } => {
-                Expr::Extract {
-                    field: field.clone(),
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    syntax: syntax.clone(),
-                }
-            }
-            Expr::Trim { expr: inner, trim_where, trim_what, trim_characters } => {
-                Expr::Trim {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    trim_where: *trim_where,
-                    trim_what: trim_what
-                        .as_ref()
-                        .map(|e| Box::new(Self::substitute_variables(e, bindings))),
-                    trim_characters: trim_characters.as_ref().map(|chars| {
-                        chars.iter().map(|e| Self::substitute_variables(e, bindings)).collect()
-                    }),
-                }
-            }
-            Expr::Substring { expr: inner, substring_from, substring_for, special, shorthand } => {
-                Expr::Substring {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    substring_from: substring_from
-                        .as_ref()
-                        .map(|e| Box::new(Self::substitute_variables(e, bindings))),
-                    substring_for: substring_for
-                        .as_ref()
-                        .map(|e| Box::new(Self::substitute_variables(e, bindings))),
-                    special: *special,
-                    shorthand: *shorthand,
-                }
-            }
-            Expr::Overlay { expr: inner, overlay_what, overlay_from, overlay_for } => {
-                Expr::Overlay {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    overlay_what: Box::new(Self::substitute_variables(overlay_what, bindings)),
-                    overlay_from: Box::new(Self::substitute_variables(overlay_from, bindings)),
-                    overlay_for: overlay_for
-                        .as_ref()
-                        .map(|e| Box::new(Self::substitute_variables(e, bindings))),
-                }
-            }
-            Expr::Collate { expr: inner, collation } => {
-                Expr::Collate {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    collation: collation.clone(),
-                }
-            }
-            Expr::Position { expr: inner, r#in: in_expr } => {
-                Expr::Position {
-                    expr: Box::new(Self::substitute_variables(inner, bindings)),
-                    r#in: Box::new(Self::substitute_variables(in_expr, bindings)),
-                }
-            }
-            _ => expr.clone(),
+            other => map_expr_children(other, &recurse),
         }
     }
 
