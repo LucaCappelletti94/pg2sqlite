@@ -10,14 +10,14 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{
     CreatePolicyCommand, CreateTable, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentClause, FunctionArgumentList, FunctionArguments, HavingBound, Ident,
-    JoinConstraint, JoinOperator, ListAggOnOverflow, ObjectName, Statement, TableFactor, Value,
-    WindowType,
+    JoinConstraint, JoinOperator, ListAggOnOverflow, Statement, TableFactor, Value, WindowType,
 };
 
 use crate::{
     errors::Error,
     impls::{
         expr_helpers::{for_each_child_expr, map_expr_children},
+        function_helpers::simple_function_expr,
         generated_sql::{parse_generated_sql, parse_single_generated_sql},
         object_name::{
             append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier,
@@ -907,28 +907,9 @@ where
 
 /// Creates a COALESCE(NEW.column, OLD.column) expression.
 fn make_coalesce_expr(column: &Ident) -> Expr {
-    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArgumentList, ObjectNamePart};
-
     let new_ref = Expr::CompoundIdentifier(vec![Ident::new("NEW"), column.clone()]);
     let old_ref = Expr::CompoundIdentifier(vec![Ident::new("OLD"), column.clone()]);
-
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("COALESCE"))]),
-        args: FunctionArguments::List(FunctionArgumentList {
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(new_ref)),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(old_ref)),
-            ],
-            duplicate_treatment: None,
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-        uses_odbc_syntax: false,
-    })
+    simple_function_expr("COALESCE", vec![new_ref, old_ref], None)
 }
 
 /// Transforms a Query (used in subqueries) by recursively transforming table
@@ -1352,21 +1333,7 @@ fn try_transform_session_function<O: TranslationOptions>(
 
 /// Creates a simple function call expression with no arguments: func_name()
 fn make_function_call(func_name: &str) -> Expr {
-    use sqlparser::ast::ObjectNamePart;
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(func_name))]),
-        args: FunctionArguments::List(FunctionArgumentList {
-            args: vec![],
-            duplicate_treatment: None,
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-        uses_odbc_syntax: false,
-    })
+    simple_function_expr(func_name, vec![], None)
 }
 
 /// Generates the CREATE VIEW SQL statement for a table with RLS.

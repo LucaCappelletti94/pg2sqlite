@@ -4,8 +4,7 @@
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
-    ValueWithSpan,
+    FunctionArgumentList, FunctionArguments, Ident, ObjectName, Value, ValueWithSpan,
 };
 
 use super::helpers::{Forward, translate_window_type};
@@ -466,11 +465,6 @@ fn translate_function(
     }
 }
 
-/// Extract expressions from function arguments.
-fn extract_arg_exprs(args: &FunctionArguments) -> Vec<&Expr> {
-    function_argument_exprs(args)
-}
-
 /// Convert a PostgreSQL `TO_CHAR` timestamp format string to a SQLite
 /// `strftime` format.
 ///
@@ -531,26 +525,7 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
 /// PostgreSQL's CONCAT ignores NULL arguments; SQLite's `||` propagates them.
 /// Wrapping with COALESCE ensures consistent behaviour.
 fn wrap_with_coalesce(expr: Expr) -> Expr {
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("COALESCE"))]),
-        uses_odbc_syntax: false,
-        parameters: FunctionArguments::None,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                    value: Value::SingleQuotedString(String::new()),
-                    span: sqlparser::tokenizer::Span::empty(),
-                }))),
-            ],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-    })
+    simple_function_expr("COALESCE", vec![expr, string_literal("")], None)
 }
 
 /// Build a concatenation expression from a list of expressions using ||.
@@ -753,7 +728,7 @@ impl Translator for Function {
             FunctionTranslation::ToConcatenation => {
                 // CONCAT(a, b, c) -> COALESCE(a, '') || COALESCE(b, '') || COALESCE(c, '')
                 // PostgreSQL's CONCAT ignores NULLs; SQLite's || propagates them.
-                let exprs: Vec<Expr> = extract_arg_exprs(&func.args)
+                let exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
                     .map(|e| e.translate(schema, options))
                     .collect::<Result<Vec<_>, _>>()?
@@ -770,7 +745,7 @@ impl Translator for Function {
                 // CONCAT_WS(sep, a, b, c) -> COALESCE(a, '') || sep || COALESCE(b, '') || sep
                 // || COALESCE(c, '') The separator is not COALESCE-wrapped: if
                 // sep is NULL, the result is NULL.
-                let mut exprs: Vec<Expr> = extract_arg_exprs(&func.args)
+                let mut exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
                     .map(|e| e.translate(schema, options))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1049,10 +1024,13 @@ mod tests {
     };
 
     use super::{
-        build_concatenation_with_separator, extract_arg_exprs, transform_filter_to_case,
-        wrap_arg_with_case_filter, wrap_with_coalesce,
+        build_concatenation_with_separator, transform_filter_to_case, wrap_arg_with_case_filter,
+        wrap_with_coalesce,
     };
-    use crate::prelude::{Pg2SqliteOptions, Translator};
+    use crate::{
+        impls::shared_helpers::function_argument_exprs,
+        prelude::{Pg2SqliteOptions, Translator},
+    };
 
     fn parse_expr(sql: &str) -> Expr {
         Parser::new(&PostgreSqlDialect {})
@@ -1064,7 +1042,7 @@ mod tests {
 
     #[test]
     fn helper_functions_cover_none_args_passthrough_and_separator_builder() {
-        assert!(extract_arg_exprs(&FunctionArguments::None).is_empty());
+        assert!(function_argument_exprs(&FunctionArguments::None).is_empty());
 
         let sep = parse_expr("','");
         let concatenated = build_concatenation_with_separator(
