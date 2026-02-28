@@ -23,6 +23,7 @@ use crate::{
             append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier,
             schema_and_table_for_lookup,
         },
+        shared_helpers::{join_constraint_mut, join_constraint_ref},
     },
     traits::{SessionVariablePattern, TranslationOptions},
 };
@@ -239,32 +240,11 @@ fn collect_patterns_from_select(
         collect_patterns_from_table_factor(&table_with_joins.relation, patterns);
         for join in &table_with_joins.joins {
             collect_patterns_from_table_factor(&join.relation, patterns);
-            match &join.join_operator {
-                JoinOperator::Join(JoinConstraint::On(expr))
-                | JoinOperator::Inner(JoinConstraint::On(expr))
-                | JoinOperator::Left(JoinConstraint::On(expr))
-                | JoinOperator::LeftOuter(JoinConstraint::On(expr))
-                | JoinOperator::Right(JoinConstraint::On(expr))
-                | JoinOperator::RightOuter(JoinConstraint::On(expr))
-                | JoinOperator::FullOuter(JoinConstraint::On(expr))
-                | JoinOperator::CrossJoin(JoinConstraint::On(expr))
-                | JoinOperator::Semi(JoinConstraint::On(expr))
-                | JoinOperator::LeftSemi(JoinConstraint::On(expr))
-                | JoinOperator::RightSemi(JoinConstraint::On(expr))
-                | JoinOperator::Anti(JoinConstraint::On(expr))
-                | JoinOperator::LeftAnti(JoinConstraint::On(expr))
-                | JoinOperator::RightAnti(JoinConstraint::On(expr))
-                | JoinOperator::StraightJoin(JoinConstraint::On(expr)) => {
-                    collect_session_variable_patterns(expr, patterns);
-                }
-                JoinOperator::AsOf { constraint: JoinConstraint::On(expr), match_condition } => {
-                    collect_session_variable_patterns(expr, patterns);
-                    collect_session_variable_patterns(match_condition, patterns);
-                }
-                JoinOperator::AsOf { match_condition, .. } => {
-                    collect_session_variable_patterns(match_condition, patterns);
-                }
-                _ => {}
+            if let Some(JoinConstraint::On(expr)) = join_constraint_ref(&join.join_operator) {
+                collect_session_variable_patterns(expr, patterns);
+            }
+            if let JoinOperator::AsOf { match_condition, .. } = &join.join_operator {
+                collect_session_variable_patterns(match_condition, patterns);
             }
         }
     }
@@ -1102,28 +1082,6 @@ fn transform_table_factor_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
             );
         }
         _ => {}
-    }
-}
-
-fn join_constraint_mut(join_operator: &mut JoinOperator) -> Option<&mut JoinConstraint> {
-    match join_operator {
-        JoinOperator::Join(constraint)
-        | JoinOperator::Inner(constraint)
-        | JoinOperator::Left(constraint)
-        | JoinOperator::LeftOuter(constraint)
-        | JoinOperator::Right(constraint)
-        | JoinOperator::RightOuter(constraint)
-        | JoinOperator::FullOuter(constraint)
-        | JoinOperator::CrossJoin(constraint)
-        | JoinOperator::Semi(constraint)
-        | JoinOperator::LeftSemi(constraint)
-        | JoinOperator::RightSemi(constraint)
-        | JoinOperator::Anti(constraint)
-        | JoinOperator::LeftAnti(constraint)
-        | JoinOperator::RightAnti(constraint)
-        | JoinOperator::StraightJoin(constraint)
-        | JoinOperator::AsOf { constraint, .. } => Some(constraint),
-        JoinOperator::CrossApply | JoinOperator::OuterApply => None,
     }
 }
 

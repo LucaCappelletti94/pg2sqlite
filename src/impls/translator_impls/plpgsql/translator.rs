@@ -753,22 +753,10 @@ impl PlPgSqlTranslator {
         for join in &mut table_with_joins.joins {
             Self::transform_table_factor(&mut join.relation, context, options);
             // Transform join condition
-            match &mut join.join_operator {
-                sqlparser::ast::JoinOperator::Join(constraint)
-                | sqlparser::ast::JoinOperator::Inner(constraint)
-                | sqlparser::ast::JoinOperator::LeftOuter(constraint)
-                | sqlparser::ast::JoinOperator::RightOuter(constraint)
-                | sqlparser::ast::JoinOperator::FullOuter(constraint)
-                | sqlparser::ast::JoinOperator::LeftSemi(constraint)
-                | sqlparser::ast::JoinOperator::RightSemi(constraint)
-                | sqlparser::ast::JoinOperator::LeftAnti(constraint)
-                | sqlparser::ast::JoinOperator::RightAnti(constraint)
-                | sqlparser::ast::JoinOperator::AsOf { constraint, .. } => {
-                    if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
-                        Self::transform_expr(expr, context, options);
-                    }
-                }
-                _ => {}
+            if let Some(sqlparser::ast::JoinConstraint::On(expr)) =
+                crate::impls::shared_helpers::join_constraint_mut(&mut join.join_operator)
+            {
+                Self::transform_expr(expr, context, options);
             }
         }
     }
@@ -1270,30 +1258,19 @@ impl PlPgSqlTranslator {
     fn table_with_joins_references_variable(table: &TableWithJoins, var_name: &str) -> bool {
         Self::table_factor_references_variable(&table.relation, var_name)
             || table.joins.iter().any(|join| {
-                Self::table_factor_references_variable(&join.relation, var_name)
-                    || match &join.join_operator {
-                        sqlparser::ast::JoinOperator::Join(constraint)
-                        | sqlparser::ast::JoinOperator::Inner(constraint)
-                        | sqlparser::ast::JoinOperator::LeftOuter(constraint)
-                        | sqlparser::ast::JoinOperator::RightOuter(constraint)
-                        | sqlparser::ast::JoinOperator::FullOuter(constraint)
-                        | sqlparser::ast::JoinOperator::LeftSemi(constraint)
-                        | sqlparser::ast::JoinOperator::RightSemi(constraint)
-                        | sqlparser::ast::JoinOperator::LeftAnti(constraint)
-                        | sqlparser::ast::JoinOperator::RightAnti(constraint) => {
-                            if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
-                                Self::expr_references_variable(expr, var_name)
-                            } else {
-                                false
-                            }
-                        }
-                        sqlparser::ast::JoinOperator::AsOf { match_condition, constraint } => {
-                            Self::expr_references_variable(match_condition, var_name)
-                                || matches!(constraint, sqlparser::ast::JoinConstraint::On(expr)
-                                    if Self::expr_references_variable(expr, var_name))
-                        }
-                        _ => false,
-                    }
+                Self::table_factor_references_variable(&join.relation, var_name) || {
+                    let constraint_refs = matches!(
+                        crate::impls::shared_helpers::join_constraint_ref(&join.join_operator),
+                        Some(sqlparser::ast::JoinConstraint::On(expr))
+                            if Self::expr_references_variable(expr, var_name)
+                    );
+                    let match_refs = matches!(
+                        &join.join_operator,
+                        sqlparser::ast::JoinOperator::AsOf { match_condition, .. }
+                            if Self::expr_references_variable(match_condition, var_name)
+                    );
+                    constraint_refs || match_refs
+                }
             })
     }
 

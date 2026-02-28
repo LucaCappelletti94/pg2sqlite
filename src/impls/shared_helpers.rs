@@ -1405,66 +1405,99 @@ pub(crate) fn translate_join<D: TranslationDirection>(
     })
 }
 
+/// Map a [`JoinOperator`] by applying `f_constraint` to each constraint and
+/// `f_expr` to the `AsOf::match_condition`.  Replaces 16+-arm match blocks
+/// in `rls.rs`, `plpgsql/translator.rs`, and this module.
+pub(crate) fn map_join_operator<E>(
+    op: &JoinOperator,
+    f_constraint: &impl Fn(&JoinConstraint) -> Result<JoinConstraint, E>,
+    f_expr: &impl Fn(&Expr) -> Result<Expr, E>,
+) -> Result<JoinOperator, E> {
+    Ok(match op {
+        JoinOperator::Join(c) => JoinOperator::Join(f_constraint(c)?),
+        JoinOperator::Inner(c) => JoinOperator::Inner(f_constraint(c)?),
+        JoinOperator::Left(c) => JoinOperator::Left(f_constraint(c)?),
+        JoinOperator::LeftOuter(c) => JoinOperator::LeftOuter(f_constraint(c)?),
+        JoinOperator::Right(c) => JoinOperator::Right(f_constraint(c)?),
+        JoinOperator::RightOuter(c) => JoinOperator::RightOuter(f_constraint(c)?),
+        JoinOperator::FullOuter(c) => JoinOperator::FullOuter(f_constraint(c)?),
+        JoinOperator::CrossJoin(c) => JoinOperator::CrossJoin(f_constraint(c)?),
+        JoinOperator::Semi(c) => JoinOperator::Semi(f_constraint(c)?),
+        JoinOperator::LeftSemi(c) => JoinOperator::LeftSemi(f_constraint(c)?),
+        JoinOperator::RightSemi(c) => JoinOperator::RightSemi(f_constraint(c)?),
+        JoinOperator::Anti(c) => JoinOperator::Anti(f_constraint(c)?),
+        JoinOperator::LeftAnti(c) => JoinOperator::LeftAnti(f_constraint(c)?),
+        JoinOperator::RightAnti(c) => JoinOperator::RightAnti(f_constraint(c)?),
+        JoinOperator::StraightJoin(c) => JoinOperator::StraightJoin(f_constraint(c)?),
+        JoinOperator::AsOf { constraint, match_condition } => {
+            JoinOperator::AsOf {
+                constraint: f_constraint(constraint)?,
+                match_condition: f_expr(match_condition)?,
+            }
+        }
+        JoinOperator::CrossApply | JoinOperator::OuterApply => op.clone(),
+    })
+}
+
+/// Immutable reference to the [`JoinConstraint`] inside any variant that
+/// carries one. Returns `None` for `CrossApply` / `OuterApply`.
+#[must_use]
+pub(crate) fn join_constraint_ref(op: &JoinOperator) -> Option<&JoinConstraint> {
+    match op {
+        JoinOperator::Join(c)
+        | JoinOperator::Inner(c)
+        | JoinOperator::Left(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::Right(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::CrossJoin(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c)
+        | JoinOperator::RightAnti(c)
+        | JoinOperator::StraightJoin(c)
+        | JoinOperator::AsOf { constraint: c, .. } => Some(c),
+        JoinOperator::CrossApply | JoinOperator::OuterApply => None,
+    }
+}
+
+/// Mutable reference to the [`JoinConstraint`] inside any variant that
+/// carries one. Returns `None` for `CrossApply` / `OuterApply`.
+pub(crate) fn join_constraint_mut(op: &mut JoinOperator) -> Option<&mut JoinConstraint> {
+    match op {
+        JoinOperator::Join(c)
+        | JoinOperator::Inner(c)
+        | JoinOperator::Left(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::Right(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::CrossJoin(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c)
+        | JoinOperator::RightAnti(c)
+        | JoinOperator::StraightJoin(c)
+        | JoinOperator::AsOf { constraint: c, .. } => Some(c),
+        JoinOperator::CrossApply | JoinOperator::OuterApply => None,
+    }
+}
+
 pub(crate) fn translate_join_operator<D: TranslationDirection>(
     join_operator: &JoinOperator,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<JoinOperator, Error> {
-    Ok(match join_operator {
-        JoinOperator::Join(constraint) => {
-            JoinOperator::Join(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::Inner(constraint) => {
-            JoinOperator::Inner(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::Left(constraint) => {
-            JoinOperator::Left(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::LeftOuter(constraint) => {
-            JoinOperator::LeftOuter(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::Right(constraint) => {
-            JoinOperator::Right(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::RightOuter(constraint) => {
-            JoinOperator::RightOuter(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::FullOuter(constraint) => {
-            JoinOperator::FullOuter(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::CrossJoin(constraint) => {
-            JoinOperator::CrossJoin(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::Semi(constraint) => {
-            JoinOperator::Semi(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::LeftSemi(constraint) => {
-            JoinOperator::LeftSemi(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::RightSemi(constraint) => {
-            JoinOperator::RightSemi(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::Anti(constraint) => {
-            JoinOperator::Anti(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::LeftAnti(constraint) => {
-            JoinOperator::LeftAnti(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::RightAnti(constraint) => {
-            JoinOperator::RightAnti(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        JoinOperator::AsOf { constraint, match_condition } => {
-            JoinOperator::AsOf {
-                constraint: translate_join_constraint::<D>(constraint, schema, options)?,
-                match_condition: D::translate_expr(match_condition, schema, options)?,
-            }
-        }
-        JoinOperator::StraightJoin(constraint) => {
-            JoinOperator::StraightJoin(translate_join_constraint::<D>(constraint, schema, options)?)
-        }
-        // These operators don't have constraints that need translation
-        JoinOperator::CrossApply | JoinOperator::OuterApply => join_operator.clone(),
-    })
+    map_join_operator(
+        join_operator,
+        &|c| translate_join_constraint::<D>(c, schema, options),
+        &|e| D::translate_expr(e, schema, options),
+    )
 }
 
 pub(crate) fn translate_join_constraint<D: TranslationDirection>(
