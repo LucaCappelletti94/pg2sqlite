@@ -4,17 +4,17 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        Delete, Expr, FromTable, GroupByExpr, Query, Select, SelectFlavor, SelectItem, SetExpr,
-        Statement, TableFactor, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+        Delete, Expr, GroupByExpr, Query, Select, SelectFlavor, SelectItem, SetExpr, Statement,
+        TableFactor, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
 
-use super::helpers::{Forward, translate_order_by_expr, translate_table_with_joins};
+use super::helpers::{Forward, translate_table_with_joins};
 use crate::{
     impls::{
         object_name::{append_suffix, schema_and_table_for_lookup},
-        shared_helpers::{map_from_table, translate_returning},
+        shared_helpers::translate_delete_core,
     },
     options::Pg2SqliteOptions,
     traits::{TranslationOptions, translator::Translator},
@@ -30,21 +30,8 @@ impl Translator for Delete {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        // Translate the WHERE clause up front
-        let selection =
-            self.selection.as_ref().map(|e| e.translate(schema, options)).transpose()?;
-
-        // Translate the FROM clause
-        let from = translate_from_table(&self.from, schema, options)?;
-
-        // Translate RETURNING expressions
-        let returning = translate_returning::<Forward>(self.returning.as_ref(), schema, options)?;
-        let order_by = self
-            .order_by
-            .iter()
-            .map(|expr| translate_order_by_expr(expr, schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let limit = self.limit.as_ref().map(|expr| expr.translate(schema, options)).transpose()?;
+        let (selection, from, returning, order_by, limit) =
+            translate_delete_core::<Forward>(self, schema, options)?;
 
         let mut delete = Delete { selection, from, returning, order_by, limit, ..self.clone() };
 
@@ -145,12 +132,4 @@ impl Translator for Delete {
 
         Ok(Statement::Delete(delete))
     }
-}
-
-fn translate_from_table(
-    from: &FromTable,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<FromTable, crate::errors::Error> {
-    map_from_table(from, |table| translate_table_with_joins(table, schema, options))
 }

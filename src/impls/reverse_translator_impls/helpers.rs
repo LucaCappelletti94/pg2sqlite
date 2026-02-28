@@ -2,7 +2,7 @@
 //! joins, and select items.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Expr, OrderByExpr, Query, TableWithJoins, WindowType};
+use sqlparser::ast::{Expr, Query, TableWithJoins, WindowType};
 
 use crate::{
     errors::Error,
@@ -50,6 +50,5 @@ impl TranslationDirection for Reverse {
 define_direction_wrappers! {
     direction = Reverse;
     fn reverse_translate_table_with_joins(table_with_joins: &TableWithJoins) -> TableWithJoins = translate_table_with_joins;
-    fn reverse_translate_order_by_expr(expr: &OrderByExpr) -> OrderByExpr = translate_order_by_expr;
     fn reverse_translate_window_type(over: Option<&WindowType>) -> Option<WindowType> = translate_window_type;
 }

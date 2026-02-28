@@ -2,14 +2,12 @@
 //! `Delete` type.
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Delete, FromTable};
+use sqlparser::ast::Delete;
 
-use super::helpers::{
-    Reverse, reverse_translate_order_by_expr, reverse_translate_table_with_joins,
-};
+use super::helpers::{Reverse, reverse_translate_table_with_joins};
 use crate::{
     errors::Error,
-    impls::shared_helpers::{map_from_table, translate_returning},
+    impls::shared_helpers::translate_delete_core,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -23,15 +21,8 @@ impl ReverseTranslator for Delete {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        // Reverse translate WHERE clause
-        let selection = self
-            .selection
-            .as_ref()
-            .map(|expr| expr.reverse_translate(schema, options))
-            .transpose()?;
-
-        // Reverse translate FROM clause
-        let from = reverse_translate_from_table(&self.from, schema, options)?;
+        let (selection, from, returning, order_by, limit) =
+            translate_delete_core::<Reverse>(self, schema, options)?;
 
         // Reverse translate USING clause if present
         let using = self
@@ -47,16 +38,6 @@ impl ReverseTranslator for Delete {
             })
             .transpose()?;
 
-        // Reverse translate RETURNING clause if present
-        let returning = translate_returning::<Reverse>(self.returning.as_ref(), schema, options)?;
-        let order_by = self
-            .order_by
-            .iter()
-            .map(|expr| reverse_translate_order_by_expr(expr, schema, options))
-            .collect::<Result<Vec<_>, _>>()?;
-        let limit =
-            self.limit.as_ref().map(|expr| expr.reverse_translate(schema, options)).transpose()?;
-
         Ok(Delete {
             delete_token: self.delete_token.clone(),
             optimizer_hint: self.optimizer_hint.clone(),
@@ -71,14 +52,6 @@ impl ReverseTranslator for Delete {
     }
 }
 
-fn reverse_translate_from_table(
-    from: &FromTable,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<FromTable, Error> {
-    map_from_table(from, |table| reverse_translate_table_with_joins(table, schema, options))
-}
-
 #[cfg(test)]
 mod tests {
     use sql_traits::structs::ParserDB;
@@ -88,7 +61,6 @@ mod tests {
         parser::Parser,
     };
 
-    use super::reverse_translate_from_table;
     use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
 
     fn empty_schema() -> ParserDB {
@@ -128,7 +100,7 @@ mod tests {
 
         let schema = empty_schema();
         let options = Pg2SqliteOptions::default();
-        let translated = reverse_translate_from_table(&delete.from, &schema, &options).unwrap();
-        assert!(matches!(translated, FromTable::WithoutKeyword(_)));
+        let translated = delete.reverse_translate(&schema, &options).unwrap();
+        assert!(matches!(translated.from, FromTable::WithoutKeyword(_)));
     }
 }

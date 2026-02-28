@@ -3,8 +3,8 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Expr, Fetch, LimitClause, OrderBy, OrderByExpr, PipeOperator, Query, Setting, TableWithJoins,
-    WindowType, With,
+    Expr, Fetch, LimitClause, OrderBy, PipeOperator, Query, Setting, TableWithJoins, WindowType,
+    With,
 };
 
 use crate::{
@@ -69,7 +69,6 @@ impl TranslationDirection for Forward {
 define_direction_wrappers! {
     direction = Forward;
     fn translate_table_with_joins(table_with_joins: &TableWithJoins) -> TableWithJoins = translate_table_with_joins;
-    fn translate_order_by_expr(expr: &OrderByExpr) -> OrderByExpr = translate_order_by_expr;
     fn translate_query_settings(settings: Option<&Vec<Setting>>) -> Option<Vec<Setting>> = translate_query_settings;
     fn translate_pipe_operators(pipe_operators: &[PipeOperator]) -> Vec<PipeOperator> = translate_pipe_operators;
     fn translate_with_clause(with: Option<&With>) -> Option<With> = translate_with_clause;

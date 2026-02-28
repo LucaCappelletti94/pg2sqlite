@@ -147,6 +147,31 @@ pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
     }))
 }
 
+/// Translate the core fields shared by forward and reverse `Delete`
+/// translation: `selection`, `from`, `returning`, `order_by`, and `limit`.
+#[allow(clippy::type_complexity)]
+pub(crate) fn translate_delete_core<D: TranslationDirection>(
+    delete: &sqlparser::ast::Delete,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(Option<Expr>, FromTable, Option<Vec<SelectItem>>, Vec<OrderByExpr>, Option<Expr>), Error>
+{
+    let selection =
+        delete.selection.as_ref().map(|e| D::translate_expr(e, schema, options)).transpose()?;
+    let from = map_from_table(&delete.from, |table| {
+        translate_table_with_joins::<D>(table, schema, options)
+    })?;
+    let returning = translate_returning::<D>(delete.returning.as_ref(), schema, options)?;
+    let order_by = delete
+        .order_by
+        .iter()
+        .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+        .collect::<Result<Vec<_>, _>>()?;
+    let limit =
+        delete.limit.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?;
+    Ok((selection, from, returning, order_by, limit))
+}
+
 /// Returns the expression for argument variants that carry one.
 #[must_use]
 pub(crate) fn function_arg_expr(arg: &FunctionArg) -> Option<&Expr> {
