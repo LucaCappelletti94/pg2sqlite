@@ -20,6 +20,7 @@ use crate::{
         datetime_helpers::{
             DatePartKey, build_strftime_call, datetime_field_key, strftime_mapping_for_key,
         },
+        function_helpers::{integer_literal, simple_function_expr},
         shared_helpers::function_argument_exprs,
         timezone::normalize_timezone_modifier_for_sqlite,
     },
@@ -563,30 +564,10 @@ fn boolean_literal(value: bool) -> Expr {
     })
 }
 
-/// Create a SQLite-compatible integer literal expression.
-fn integer_literal(value: i64) -> Expr {
-    Expr::Value(ValueWithSpan {
-        value: Value::Number(value.to_string(), false),
-        span: sqlparser::tokenizer::Span::empty(),
-    })
-}
-
-/// Build a function call expression with unnamed positional arguments.
+/// Build a function call expression with unnamed positional arguments (no
+/// window specification).
 fn function_call(name: &str, args: Vec<Expr>) -> Expr {
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
-        uses_odbc_syntax: false,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: args.into_iter().map(FunctionArgExpr::Expr).map(FunctionArg::Unnamed).collect(),
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-    })
+    simple_function_expr(name, args, None)
 }
 
 /// Translate PostgreSQL IS DISTINCT FROM / IS NOT DISTINCT FROM semantics

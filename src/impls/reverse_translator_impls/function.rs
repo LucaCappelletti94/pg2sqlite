@@ -6,9 +6,8 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, TrimWhereField,
-    Value, ValueWithSpan,
+    BinaryOperator, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+    Ident, ObjectName, ObjectNamePart, TrimWhereField, Value, ValueWithSpan,
 };
 
 use super::helpers::{Reverse, reverse_translate_window_type};
@@ -18,12 +17,28 @@ use crate::{
     errors::Error,
     impls::{
         datetime_helpers::datetime_field_from_strftime_format,
+        function_helpers::{function_arg_expr_or_err, simple_function_expr, string_literal},
         shared_helpers::{translate_function_arguments, translate_order_by_expr},
         timezone::normalize_timezone_modifier_for_postgres,
     },
     prelude::Pg2SqliteOptions,
     traits::TranslationOptions,
 };
+
+/// Simple reverse renames: `(sqlite_name, pg_name)`.
+/// Checked before the main match for a compact fast path.
+const REVERSE_RENAMES: &[(&str, &str)] = &[
+    ("group_concat", "string_agg"),
+    ("json_group_array", "json_agg"),
+    ("json_group_object", "json_object_agg"),
+    ("unicode", "ascii"),
+    ("json_object", "json_build_object"),
+    ("json_array", "json_build_array"),
+    ("json_type", "json_typeof"),
+    ("json_array_length", "jsonb_array_length"),
+    ("sqlite_version", "version"),
+    ("quote", "quote_nullable"),
+];
 
 /// Represents a function reversal result.
 pub enum FunctionReversal {
@@ -100,6 +115,13 @@ pub fn reverse_function(
         |ident| ident.value.to_ascii_lowercase(),
     );
 
+    // Fast path: check static reverse rename table.
+    if let Some(&(_, target)) =
+        REVERSE_RENAMES.iter().find(|&&(sqlite, _)| sqlite == func_name.as_str())
+    {
+        return FunctionReversal::Rename(target.to_string());
+    }
+
     match func_name.as_str() {
         // datetime('now') -> NOW()
         "datetime" => {
@@ -147,12 +169,6 @@ pub fn reverse_function(
         }
         // INSTR(str, substr) -> POSITION(substr IN str)
         "instr" => FunctionReversal::ToPosition,
-        // group_concat -> string_agg
-        "group_concat" => FunctionReversal::Rename("string_agg".to_string()),
-        // json_group_array -> json_agg
-        "json_group_array" => FunctionReversal::Rename("json_agg".to_string()),
-        // json_group_object -> json_object_agg
-        "json_group_object" => FunctionReversal::Rename("json_object_agg".to_string()),
         // min(a, b, ...) -> LEAST(a, b, ...)
         // Keep aggregate MIN(x) unchanged (single-arg form).
         "min" => {
@@ -217,20 +233,6 @@ pub fn reverse_function(
         "vec_f32" => FunctionReversal::ToVectorCast,
         // vec_f16(expr) -> expr::halfvec
         "vec_f16" => FunctionReversal::ToHalfvecCast,
-        // unicode(char) -> ascii(char)
-        "unicode" => FunctionReversal::Rename("ascii".to_string()),
-        // json_object -> json_build_object (SQLite → PG)
-        "json_object" => FunctionReversal::Rename("json_build_object".to_string()),
-        // json_array -> json_build_array (SQLite → PG)
-        "json_array" => FunctionReversal::Rename("json_build_array".to_string()),
-        // json_type -> json_typeof (SQLite → PG)
-        "json_type" => FunctionReversal::Rename("json_typeof".to_string()),
-        // json_array_length -> jsonb_array_length (SQLite → PG)
-        "json_array_length" => FunctionReversal::Rename("jsonb_array_length".to_string()),
-        // sqlite_version -> version (SQLite → PG)
-        "sqlite_version" => FunctionReversal::Rename("version".to_string()),
-        // quote -> quote_nullable (SQLite → PG)
-        "quote" => FunctionReversal::Rename("quote_nullable".to_string()),
         // uuid() / custom UUID function -> gen_random_uuid()
         name if name == options.get_uuid_function_name() => {
             FunctionReversal::Rename("gen_random_uuid".to_string())
@@ -238,6 +240,37 @@ pub fn reverse_function(
 
         _ => FunctionReversal::PassThrough,
     }
+}
+
+/// Build a reverse-translated function: translate args, params, window, filter
+/// and within_group, then wrap in `Expr::Function` with the given name.
+fn build_reverse_function(
+    new_name: &str,
+    func: &Function,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, Error> {
+    Ok(Expr::Function(Function {
+        name: ObjectName::from(vec![Ident::new(new_name)]),
+        uses_odbc_syntax: func.uses_odbc_syntax,
+        parameters: translate_function_arguments::<Reverse>(&func.parameters, schema, options)?,
+        args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
+        filter: func
+            .filter
+            .as_ref()
+            .map(|f| {
+                crate::prelude::ReverseTranslator::reverse_translate(f.as_ref(), schema, options)
+            })
+            .transpose()?
+            .map(Box::new),
+        null_treatment: func.null_treatment,
+        over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
+        within_group: func
+            .within_group
+            .iter()
+            .map(|e| translate_order_by_expr::<Reverse>(e, schema, options))
+            .collect::<Result<Vec<_>, _>>()?,
+    }))
 }
 
 /// Reverse translate a SQLite function to PostgreSQL.
@@ -249,52 +282,11 @@ pub fn reverse_translate_function(
 ) -> Result<Expr, Error> {
     match reverse_function(&func.name, &func.args, options) {
         FunctionReversal::Rename(new_name) => {
-            Ok(Expr::Function(Function {
-                name: ObjectName::from(vec![Ident::new(new_name)]),
-                uses_odbc_syntax: func.uses_odbc_syntax,
-                parameters: translate_function_arguments::<Reverse>(
-                    &func.parameters,
-                    schema,
-                    options,
-                )?,
-                args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
-                filter: func
-                    .filter
-                    .as_ref()
-                    .map(|f| {
-                        crate::prelude::ReverseTranslator::reverse_translate(
-                            f.as_ref(),
-                            schema,
-                            options,
-                        )
-                    })
-                    .transpose()?
-                    .map(Box::new),
-                null_treatment: func.null_treatment,
-                over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
-                within_group: func
-                    .within_group
-                    .iter()
-                    .map(|e| translate_order_by_expr::<Reverse>(e, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            }))
+            build_reverse_function(&new_name, func, schema, options)
         }
         FunctionReversal::ToNow => {
             // datetime('now') -> NOW()
-            Ok(Expr::Function(Function {
-                name: ObjectName::from(vec![Ident::new("NOW")]),
-                uses_odbc_syntax: false,
-                parameters: FunctionArguments::None,
-                args: FunctionArguments::List(FunctionArgumentList {
-                    duplicate_treatment: None,
-                    args: vec![],
-                    clauses: vec![],
-                }),
-                filter: None,
-                null_treatment: None,
-                over: None,
-                within_group: vec![],
-            }))
+            Ok(simple_function_expr("NOW", vec![], None))
         }
         FunctionReversal::ToAtTimeZone(time_zone) => {
             let FunctionArguments::List(list) = &func.args else {
@@ -311,7 +303,7 @@ pub fn reverse_translate_function(
                 2,
                 "reverse_function classified datetime as ToAtTimeZone without exactly 2 args"
             );
-            let timestamp_expr = extract_expr_from_arg(
+            let timestamp_expr = function_arg_expr_or_err(
                 list.args
                     .first()
                     .expect("reverse_function must provide datetime timestamp argument"),
@@ -353,8 +345,8 @@ pub fn reverse_translate_function(
             if let FunctionArguments::List(list) = &func.args
                 && list.args.len() == 2
             {
-                let str_expr = extract_expr_from_arg(&list.args[0])?;
-                let substr_expr = extract_expr_from_arg(&list.args[1])?;
+                let str_expr = function_arg_expr_or_err(&list.args[0])?;
+                let substr_expr = function_arg_expr_or_err(&list.args[1])?;
 
                 let reversed_str = crate::prelude::ReverseTranslator::reverse_translate(
                     str_expr, schema, options,
@@ -377,8 +369,8 @@ pub fn reverse_translate_function(
             if let FunctionArguments::List(list) = &func.args
                 && list.args.len() == 2
             {
-                let left_expr = extract_expr_from_arg(&list.args[0])?;
-                let right_expr = extract_expr_from_arg(&list.args[1])?;
+                let left_expr = function_arg_expr_or_err(&list.args[0])?;
+                let right_expr = function_arg_expr_or_err(&list.args[1])?;
 
                 let reversed_left = crate::prelude::ReverseTranslator::reverse_translate(
                     left_expr, schema, options,
@@ -402,7 +394,7 @@ pub fn reverse_translate_function(
             if let FunctionArguments::List(list) = &func.args
                 && list.args.len() == 1
             {
-                let expr = extract_expr_from_arg(&list.args[0])?;
+                let expr = function_arg_expr_or_err(&list.args[0])?;
                 let reversed_expr =
                     crate::prelude::ReverseTranslator::reverse_translate(expr, schema, options)?;
 
@@ -424,7 +416,7 @@ pub fn reverse_translate_function(
             if let FunctionArguments::List(list) = &func.args
                 && list.args.len() == 1
             {
-                let expr = extract_expr_from_arg(&list.args[0])?;
+                let expr = function_arg_expr_or_err(&list.args[0])?;
                 let reversed_expr =
                     crate::prelude::ReverseTranslator::reverse_translate(expr, schema, options)?;
 
@@ -441,27 +433,7 @@ pub fn reverse_translate_function(
             }
             Err(Error::UnsupportedSQLiteFeature("vec_f16 requires exactly 1 argument".to_string()))
         }
-        FunctionReversal::ToChr => {
-            // char(n) -> chr(n)
-            Ok(Expr::Function(Function {
-                name: ObjectName::from(vec![Ident::new("chr")]),
-                uses_odbc_syntax: func.uses_odbc_syntax,
-                parameters: translate_function_arguments::<Reverse>(
-                    &func.parameters,
-                    schema,
-                    options,
-                )?,
-                args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
-                filter: None,
-                null_treatment: func.null_treatment,
-                over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
-                within_group: func
-                    .within_group
-                    .iter()
-                    .map(|e| translate_order_by_expr::<Reverse>(e, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            }))
-        }
+        FunctionReversal::ToChr => build_reverse_function("chr", func, schema, options),
         FunctionReversal::ToTrimDirectional(field) => {
             // LTRIM/RTRIM(str, chars) or TRIM(str, chars)
             // -> TRIM(LEADING|TRAILING|BOTH chars FROM str)
@@ -469,8 +441,8 @@ pub fn reverse_translate_function(
                 unreachable!("reverse_function only returns ToTrimDirectional for List args");
             };
             debug_assert_eq!(list.args.len(), 2, "ToTrimDirectional requires exactly 2 args");
-            let str_expr = extract_expr_from_arg(&list.args[0])?;
-            let char_expr = extract_expr_from_arg(&list.args[1])?;
+            let str_expr = function_arg_expr_or_err(&list.args[0])?;
+            let char_expr = function_arg_expr_or_err(&list.args[1])?;
             let reversed_str =
                 crate::prelude::ReverseTranslator::reverse_translate(str_expr, schema, options)?;
             let reversed_char =
@@ -488,25 +460,12 @@ pub fn reverse_translate_function(
                     "datetime unixepoch requires list arguments".to_string(),
                 ));
             };
-            let epoch_expr = extract_expr_from_arg(
+            let epoch_expr = function_arg_expr_or_err(
                 list.args.first().expect("datetime must have epoch argument"),
             )?;
             let reversed_epoch =
                 crate::prelude::ReverseTranslator::reverse_translate(epoch_expr, schema, options)?;
-            Ok(Expr::Function(Function {
-                name: ObjectName::from(vec![Ident::new("to_timestamp")]),
-                uses_odbc_syntax: false,
-                parameters: FunctionArguments::None,
-                args: FunctionArguments::List(FunctionArgumentList {
-                    duplicate_treatment: None,
-                    args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(reversed_epoch))],
-                    clauses: vec![],
-                }),
-                filter: None,
-                null_treatment: None,
-                over: None,
-                within_group: vec![],
-            }))
+            Ok(simple_function_expr("to_timestamp", vec![reversed_epoch], None))
         }
         FunctionReversal::ToDateTrunc(field) => {
             let FunctionArguments::List(list) = &func.args else {
@@ -514,76 +473,21 @@ pub fn reverse_translate_function(
                     "strftime requires list arguments for date_trunc reversal".to_string(),
                 ));
             };
-            let ts_expr = extract_expr_from_arg(
+            let ts_expr = function_arg_expr_or_err(
                 list.args.get(1).expect("strftime must have timestamp argument"),
             )?;
             let reversed_ts =
                 crate::prelude::ReverseTranslator::reverse_translate(ts_expr, schema, options)?;
-            Ok(Expr::Function(Function {
-                name: ObjectName::from(vec![Ident::new("date_trunc")]),
-                uses_odbc_syntax: false,
-                parameters: FunctionArguments::None,
-                args: FunctionArguments::List(FunctionArgumentList {
-                    duplicate_treatment: None,
-                    args: vec![
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                            value: Value::SingleQuotedString(field),
-                            span: sqlparser::tokenizer::Span::empty(),
-                        }))),
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(reversed_ts)),
-                    ],
-                    clauses: vec![],
-                }),
-                filter: None,
-                null_treatment: None,
-                over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
-                within_group: vec![],
-            }))
+            let translated_over =
+                reverse_translate_window_type(func.over.as_ref(), schema, options)?;
+            Ok(simple_function_expr(
+                "date_trunc",
+                vec![string_literal(&field), reversed_ts],
+                translated_over,
+            ))
         }
         FunctionReversal::PassThrough => {
-            Ok(Expr::Function(Function {
-                name: func.name.clone(),
-                uses_odbc_syntax: func.uses_odbc_syntax,
-                parameters: translate_function_arguments::<Reverse>(
-                    &func.parameters,
-                    schema,
-                    options,
-                )?,
-                args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
-                filter: func
-                    .filter
-                    .as_ref()
-                    .map(|f| {
-                        crate::prelude::ReverseTranslator::reverse_translate(
-                            f.as_ref(),
-                            schema,
-                            options,
-                        )
-                    })
-                    .transpose()?
-                    .map(Box::new),
-                null_treatment: func.null_treatment,
-                over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
-                within_group: func
-                    .within_group
-                    .iter()
-                    .map(|e| translate_order_by_expr::<Reverse>(e, schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-            }))
-        }
-    }
-}
-
-/// Extract an expression from a function argument.
-fn extract_expr_from_arg(arg: &FunctionArg) -> Result<&Expr, Error> {
-    match arg {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
-        | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
-        | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => Ok(e),
-        _ => {
-            Err(Error::UnsupportedSQLiteFeature(
-                "Expected expression argument in function".to_string(),
-            ))
+            build_reverse_function(&func.name.to_string(), func, schema, options)
         }
     }
 }
@@ -601,8 +505,8 @@ mod tests {
         parser::Parser,
     };
 
-    use super::{extract_expr_from_arg, is_fixed_utc_offset, reverse_translate_function};
-    use crate::prelude::Pg2SqliteOptions;
+    use super::{is_fixed_utc_offset, reverse_translate_function};
+    use crate::{impls::function_helpers::function_arg_expr_or_err, prelude::Pg2SqliteOptions};
 
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
@@ -635,7 +539,7 @@ mod tests {
     #[test]
     fn extract_expr_and_datetime_reverse_translation_reject_wildcards() {
         let wildcard = FunctionArg::Unnamed(FunctionArgExpr::Wildcard);
-        let err = extract_expr_from_arg(&wildcard).expect_err("wildcard should be rejected");
+        let err = function_arg_expr_or_err(&wildcard).expect_err("wildcard should be rejected");
         assert!(err.to_string().contains("Expected expression argument"));
 
         let func = Function {
@@ -695,13 +599,14 @@ mod tests {
     }
 
     #[test]
-    fn extract_expr_from_arg_accepts_expr_named() {
+    fn function_arg_expr_or_err_accepts_expr_named() {
         let arg = FunctionArg::ExprNamed {
             name: parse_expr("param"),
             arg: FunctionArgExpr::Expr(parse_expr("value")),
             operator: FunctionArgOperator::Equals,
         };
-        let extracted = extract_expr_from_arg(&arg).expect("expr-named args should be supported");
+        let extracted =
+            function_arg_expr_or_err(&arg).expect("expr-named args should be supported");
         assert_eq!(extracted.to_string(), "value");
     }
 

@@ -1,9 +1,8 @@
 //! Shared date/time mapping helpers for forward and reverse translation.
 
-use sqlparser::ast::{
-    DataType, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan, WindowType,
-};
+use sqlparser::ast::{DataType, DateTimeField, Expr, WindowType};
+
+use super::function_helpers::{simple_function_expr, string_literal};
 
 /// Canonical date/time part keys used for shared mappings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,24 +99,5 @@ pub(crate) fn build_strftime_call(
     value_expr: Expr,
     over: Option<WindowType>,
 ) -> Expr {
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("strftime"))]),
-        uses_odbc_syntax: false,
-        parameters: FunctionArguments::None,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                    value: Value::SingleQuotedString(format.to_string()),
-                    span: sqlparser::tokenizer::Span::empty(),
-                }))),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(value_expr)),
-            ],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over,
-        within_group: vec![],
-    })
+    simple_function_expr("strftime", vec![string_literal(format), value_expr], over)
 }

@@ -12,6 +12,9 @@ use super::helpers::{Forward, translate_window_type};
 use crate::{
     impls::{
         datetime_helpers::{build_strftime_call, parse_date_part_key, strftime_mapping_for_key},
+        function_helpers::{
+            extract_exactly, number_literal, simple_function_expr, string_literal, unnamed_arg,
+        },
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, function_argument_exprs,
             translate_function_arguments,
@@ -54,17 +57,45 @@ enum FunctionTranslation {
     ToIntegerDiv,
     /// Transform trunc(x) to CAST(x AS INTEGER), trunc(x, n) to round(x, n)
     ToTrunc,
-    /// Transform make_date(y, m, d) to printf('%04d-%02d-%02d', y, m, d)
-    ToMakeDate,
-    /// Transform make_time(h, m, s) to printf('%02d:%02d:%02d', h, m, s)
-    ToMakeTime,
-    /// Transform make_timestamp(y,m,d,h,mi,s) to printf(...)
-    ToMakeTimestamp,
+    /// Transform make_date/make_time/make_timestamp to printf(format, args...)
+    ToMakePrintf { format: &'static str, arg_count: usize, func_label: &'static str },
     /// Transform json_extract_path(j, keys...) to json_extract(j, '$.k1.k2...')
     ToJsonExtractPath,
     /// No translation needed
     PassThrough,
 }
+
+/// Simple name-only renames: `(pg_name, sqlite_name)`.
+/// Checked before the main match for a compact fast path.
+const FORWARD_RENAMES: &[(&str, &str)] = &[
+    ("least", "MIN"),
+    ("greatest", "MAX"),
+    ("string_agg", "group_concat"),
+    ("strpos", "INSTR"),
+    ("chr", "char"),
+    ("char_length", "length"),
+    ("character_length", "length"),
+    ("json_agg", "json_group_array"),
+    ("jsonb_agg", "json_group_array"),
+    ("json_object_agg", "json_group_object"),
+    ("jsonb_object_agg", "json_group_object"),
+    ("json_build_object", "json_object"),
+    ("btrim", "trim"),
+    ("jsonb_array_length", "json_array_length"),
+    ("json_typeof", "json_type"),
+    ("jsonb_typeof", "json_type"),
+    ("quote_nullable", "quote"),
+    ("quote_literal", "quote"),
+    ("version", "sqlite_version"),
+    ("to_json", "json"),
+    ("to_jsonb", "json"),
+    ("jsonb_set", "json_set"),
+    ("jsonb_insert", "json_insert"),
+    ("jsonb_each", "json_each"),
+    ("json_each_text", "json_each"),
+    ("jsonb_each_text", "json_each"),
+    ("ascii", "unicode"),
+];
 
 #[allow(clippy::too_many_lines)]
 fn translate_function(
@@ -78,15 +109,15 @@ fn translate_function(
         .and_then(|part| part.as_ident())
         .map_or_else(|| name.to_string().to_lowercase(), |ident| ident.value.to_ascii_lowercase());
 
+    // Fast path: check static rename table first.
+    if let Some(&(_, target)) =
+        FORWARD_RENAMES.iter().find(|&&(pg, _)| pg == original_name.as_str())
+    {
+        return FunctionTranslation::Rename(target.to_string());
+    }
+
     match original_name.as_str() {
-        // MIN/MAX mappings
-        "least" => FunctionTranslation::Rename("MIN".to_string()),
-        "greatest" => FunctionTranslation::Rename("MAX".to_string()),
-        // bool_and / bool_or / every: these aggregate boolean values with NULL semantics
-        // that differ from MIN/MAX (NULL inputs are ignored, not propagated). There is
-        // no correct SQLite equivalent. Callers can rewrite as:
-        //   bool_and(col)  →  MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1
-        //   bool_or(col)   →  MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1
+        // bool_and / bool_or / every
         "bool_and" | "every" => FunctionTranslation::Unsupported(
             "bool_and/every is not supported in SQLite. \
              Rewrite as: MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1"
@@ -100,20 +131,11 @@ fn translate_function(
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7" => {
             FunctionTranslation::Rename(options.get_uuid_function_name().to_string())
         }
-        "now" => {
-            // NOW() -> datetime('now')
-            FunctionTranslation::WithArgs {
-                name: "datetime".to_string(),
-                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                    ValueWithSpan {
-                        value: Value::SingleQuotedString("now".to_string()),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    },
-                )))],
-            }
-        }
-        // string_agg -> group_concat (for SQLite < 3.44 compatibility)
-        "string_agg" => FunctionTranslation::Rename("group_concat".to_string()),
+        // NOW() -> datetime('now')
+        "now" => FunctionTranslation::WithArgs {
+            name: "datetime".to_string(),
+            args: vec![unnamed_arg(string_literal("now"))],
+        },
         "ts_rank" | "ts_rank_cd" => FunctionTranslation::Unsupported(
             "ts_rank/ts_rank_cd are not directly translatable to SQLite. \
              FTS5 provides bm25() for ranking, but it requires a different query structure. \
@@ -121,42 +143,18 @@ fn translate_function(
              SELECT *, bm25(table_fts) AS rank FROM table_fts WHERE table_fts MATCH 'query' ORDER BY rank"
                 .to_string(),
         ),
-        // CONCAT(a, b, c) -> COALESCE(a, '') || COALESCE(b, '') || COALESCE(c, '')
         "concat" => FunctionTranslation::ToConcatenation,
-        // CONCAT_WS(sep, a, b, c) -> COALESCE(a, '') || sep || COALESCE(b, '') || sep || COALESCE(c, '')
         "concat_ws" => FunctionTranslation::ToConcatenationWithSeparator,
-        // strpos(string, substring) -> INSTR(string, substring)
-        "strpos" => FunctionTranslation::Rename("INSTR".to_string()),
-        // chr(n) -> char(n)
-        "chr" => FunctionTranslation::Rename("char".to_string()),
-        // char_length / character_length -> length (SQLite counts characters)
-        "char_length" | "character_length" => FunctionTranslation::Rename("length".to_string()),
-        // date_trunc(field, ts) -> strftime(format, ts)
         "date_trunc" => FunctionTranslation::DateTrunc,
-        // array_agg has no SQLite equivalent (no native arrays)
         "array_agg" => FunctionTranslation::Unsupported(
             "array_agg is not supported in SQLite because arrays are not a native type. \
              Use group_concat() instead: GROUP_CONCAT(column, ',')"
                 .to_string(),
         ),
-        // json_agg / jsonb_agg -> json_group_array (SQLite JSON extension)
-        "json_agg" | "jsonb_agg" => FunctionTranslation::Rename("json_group_array".to_string()),
-        // json_object_agg / jsonb_object_agg -> json_group_object
-        "json_object_agg" | "jsonb_object_agg" => {
-            FunctionTranslation::Rename("json_group_object".to_string())
-        }
-        // bit_and / bit_or: no built-in SQLite aggregate equivalent
-        "bit_and" => FunctionTranslation::Unsupported(
-            "bit_and is not supported as an aggregate in SQLite. \
+        "bit_and" | "bit_or" => FunctionTranslation::Unsupported(format!(
+            "{original_name} is not supported as an aggregate in SQLite. \
              Consider loading a custom extension or rewriting with bitwise expressions."
-                .to_string(),
-        ),
-        "bit_or" => FunctionTranslation::Unsupported(
-            "bit_or is not supported as an aggregate in SQLite. \
-             Consider loading a custom extension or rewriting with bitwise expressions."
-                .to_string(),
-        ),
-        // Statistical aggregates: not available in SQLite without an extension
+        )),
         "stddev" | "stddev_pop" | "stddev_samp" => FunctionTranslation::Unsupported(
             "stddev/stddev_pop/stddev_samp are not supported in SQLite. \
              Consider loading the statistics1 extension or computing manually."
@@ -177,36 +175,20 @@ fn translate_function(
              Consider loading the statistics1 extension or computing manually."
                 .to_string(),
         ),
-        // Regression aggregate functions: no SQLite equivalent
-        "regr_slope"
-        | "regr_intercept"
-        | "regr_r2"
-        | "regr_avgx"
-        | "regr_avgy"
-        | "regr_sxx"
-        | "regr_syy"
-        | "regr_sxy"
-        | "regr_count" => FunctionTranslation::Unsupported(
-            "regr_* regression aggregate functions are not supported in SQLite. \
-             Consider loading a custom extension or computing regression manually."
-                .to_string(),
-        ),
-        // xmlagg: no XML support in SQLite
+        "regr_slope" | "regr_intercept" | "regr_r2" | "regr_avgx" | "regr_avgy"
+        | "regr_sxx" | "regr_syy" | "regr_sxy" | "regr_count" => {
+            FunctionTranslation::Unsupported(
+                "regr_* regression aggregate functions are not supported in SQLite. \
+                 Consider loading a custom extension or computing regression manually."
+                    .to_string(),
+            )
+        }
         "xmlagg" => FunctionTranslation::Unsupported(
-            "xmlagg is not supported in SQLite, which has no native XML type."
-                .to_string(),
+            "xmlagg is not supported in SQLite, which has no native XML type.".to_string(),
         ),
-        // range_agg / multirange_agg: no range type in SQLite
-        "range_agg" => FunctionTranslation::Unsupported(
-            "range_agg is not supported in SQLite, which has no range types."
-                .to_string(),
-        ),
-        "multirange_agg" => FunctionTranslation::Unsupported(
-            "multirange_agg is not supported in SQLite, which has no range types."
-                .to_string(),
-        ),
-        // Ordered-set aggregates (WITHIN GROUP): handled by the WITHIN GROUP guard in translate()
-        // but also listed here so they get a clear error even without WITHIN GROUP syntax.
+        "range_agg" | "multirange_agg" => FunctionTranslation::Unsupported(format!(
+            "{original_name} is not supported in SQLite, which has no range types."
+        )),
         "percentile_cont" | "percentile_disc" => FunctionTranslation::Unsupported(
             "percentile_cont/percentile_disc are not supported in SQLite. \
              They use WITHIN GROUP (ORDER BY ...) syntax which has no SQLite equivalent."
@@ -217,89 +199,50 @@ fn translate_function(
              There is no built-in equivalent; consider computing the mode manually."
                 .to_string(),
         ),
-        // split_part has no direct SQLite equivalent
         "split_part" => FunctionTranslation::Unsupported(
             "split_part is not supported in SQLite. \
              Consider using INSTR() and SUBSTR() to manually split strings, \
              or restructure the query to avoid string splitting."
                 .to_string(),
         ),
-        // regexp_replace requires PCRE extension in SQLite
         "regexp_replace" => FunctionTranslation::Unsupported(
             "regexp_replace is not supported in SQLite without a PCRE extension. \
              For literal string replacement, use REPLACE(string, pattern, replacement). \
              For regex support, load the SQLite REGEXP extension."
                 .to_string(),
         ),
-        // to_char(expr, format) -> strftime(mapped_format, expr) for timestamp formats
         "to_char" => FunctionTranslation::ToChar,
-        // json_build_object(k, v, ...) -> json_object(k, v, ...) (SQLite JSON1 built-in)
-        "json_build_object" => FunctionTranslation::Rename("json_object".to_string()),
-        // json_build_array(v, ...) -> json_array(v, ...) (SQLite JSON1 built-in)
-        "json_build_array" | "jsonb_build_array" | "jsonb_build_object" => {
-            let target = if original_name.contains("array") { "json_array" } else { "json_object" };
-            FunctionTranslation::Rename(target.to_string())
-        }
-        // btrim(s) -> trim(s) (SQLite trim is BOTH by default, same as btrim)
-        "btrim" => FunctionTranslation::Rename("trim".to_string()),
-        // jsonb_array_length(j) -> json_array_length(j)
-        "jsonb_array_length" => FunctionTranslation::Rename("json_array_length".to_string()),
-        // json_typeof / jsonb_typeof -> json_type (SQLite JSON1)
-        "json_typeof" | "jsonb_typeof" => FunctionTranslation::Rename("json_type".to_string()),
-        // quote_nullable / quote_literal -> quote (slight semantic diffs)
-        "quote_nullable" | "quote_literal" => FunctionTranslation::Rename("quote".to_string()),
-        // version() -> sqlite_version()
-        "version" => FunctionTranslation::Rename("sqlite_version".to_string()),
-        // to_json / to_jsonb -> json() (SQLite JSON1 built-in)
-        "to_json" | "to_jsonb" => FunctionTranslation::Rename("json".to_string()),
-        // jsonb_set -> json_set (SQLite JSON1)
-        "jsonb_set" => FunctionTranslation::Rename("json_set".to_string()),
-        // jsonb_insert -> json_insert (SQLite JSON1)
-        "jsonb_insert" => FunctionTranslation::Rename("json_insert".to_string()),
-        // jsonb_each / json_each_text / jsonb_each_text -> json_each (SQLite JSON1)
-        "jsonb_each" | "json_each_text" | "jsonb_each_text" => {
-            FunctionTranslation::Rename("json_each".to_string())
-        }
+        // json_build_array(v, ...) -> json_array(v, ...) (handle remaining jsonb_build_*)
+        "jsonb_build_array" => FunctionTranslation::Rename("json_array".to_string()),
+        "jsonb_build_object" => FunctionTranslation::Rename("json_object".to_string()),
         // localtimestamp -> datetime('now', 'localtime')
         "localtimestamp" => FunctionTranslation::WithArgs {
             name: "datetime".to_string(),
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                    value: Value::SingleQuotedString("now".to_string()),
-                    span: sqlparser::tokenizer::Span::empty(),
-                }))),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                    value: Value::SingleQuotedString("localtime".to_string()),
-                    span: sqlparser::tokenizer::Span::empty(),
-                }))),
-            ],
+            args: vec![unnamed_arg(string_literal("now")), unnamed_arg(string_literal("localtime"))],
         },
         // localtime -> time('now', 'localtime')
         "localtime" => FunctionTranslation::WithArgs {
             name: "time".to_string(),
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                    value: Value::SingleQuotedString("now".to_string()),
-                    span: sqlparser::tokenizer::Span::empty(),
-                }))),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                    value: Value::SingleQuotedString("localtime".to_string()),
-                    span: sqlparser::tokenizer::Span::empty(),
-                }))),
-            ],
+            args: vec![unnamed_arg(string_literal("now")), unnamed_arg(string_literal("localtime"))],
         },
-        // mod(a, b) -> (a % b)
         "mod" => FunctionTranslation::ToModulo,
-        // div(a, b) -> CAST(a / b AS INTEGER)
         "div" => FunctionTranslation::ToIntegerDiv,
-        // trunc(x) -> CAST(x AS INTEGER), trunc(x, n) -> round(x, n)
         "trunc" | "truncate" => FunctionTranslation::ToTrunc,
-        // make_date(y, m, d) -> printf('%04d-%02d-%02d', y, m, d)
-        "make_date" => FunctionTranslation::ToMakeDate,
-        // make_time(h, m, s) -> printf('%02d:%02d:%02d', h, m, s)
-        "make_time" => FunctionTranslation::ToMakeTime,
-        // make_timestamp(y,m,d,h,mi,s) -> printf('%04d-%02d-%02d %02d:%02d:%02d', ...)
-        "make_timestamp" => FunctionTranslation::ToMakeTimestamp,
+        "make_date" => FunctionTranslation::ToMakePrintf {
+            format: "%04d-%02d-%02d",
+            arg_count: 3,
+            func_label: "make_date",
+        },
+        "make_time" => FunctionTranslation::ToMakePrintf {
+            format: "%02d:%02d:%02d",
+            arg_count: 3,
+            func_label: "make_time",
+        },
+        "make_timestamp" => FunctionTranslation::ToMakePrintf {
+            format: "%04d-%02d-%02d %02d:%02d:%02d",
+            arg_count: 6,
+            func_label: "make_timestamp",
+        },
         // json_extract_path* -> json_extract(j, '$.k1.k2...')
         "json_extract_path" | "json_extract_path_text" | "jsonb_extract_path"
         | "jsonb_extract_path_text" => FunctionTranslation::ToJsonExtractPath,
@@ -353,12 +296,7 @@ fn translate_function(
         "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
             FunctionTranslation::WithArgs {
                 name: "datetime".to_string(),
-                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                    ValueWithSpan {
-                        value: Value::SingleQuotedString("now".to_string()),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    },
-                )))],
+                args: vec![unnamed_arg(string_literal("now"))],
             }
         }
         // Sequence functions: no SQLite equivalent
@@ -416,8 +354,6 @@ fn translate_function(
              For simple string formatting use printf() with standard C-style specifiers."
                 .to_string(),
         ),
-        // ascii(char) -> unicode(char) — character-to-codepoint
-        "ascii" => FunctionTranslation::Rename("unicode".to_string()),
         // PG-specific system/introspection functions — no SQLite equivalent
         "current_database" | "current_schema" | "pg_typeof" => FunctionTranslation::Unsupported(
             "current_database/current_schema/pg_typeof are PostgreSQL system functions \
@@ -851,13 +787,7 @@ impl Translator for Function {
             }
             FunctionTranslation::DateTrunc => {
                 // date_trunc(field, timestamp) -> strftime(format, timestamp)
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "date_trunc requires exactly 2 arguments: date_trunc(field, timestamp)"
-                            .to_string(),
-                    ));
-                }
+                let exprs = extract_exactly(&func.args, 2, "date_trunc")?;
                 let field_expr = exprs[0];
                 let ts_expr = exprs[1].clone();
 
@@ -899,14 +829,7 @@ impl Translator for Function {
             }
             FunctionTranslation::DatePart => {
                 // date_part('field', expr) -> CAST(strftime(format, expr) AS INTEGER/REAL)
-                // Semantics mirror EXTRACT(field FROM expr).
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "date_part requires exactly 2 arguments: date_part('field', expression)"
-                            .to_string(),
-                    ));
-                }
+                let exprs = extract_exactly(&func.args, 2, "date_part")?;
                 let field_expr = exprs[0];
                 let ts_expr = exprs[1].clone();
 
@@ -946,15 +869,7 @@ impl Translator for Function {
             }
             FunctionTranslation::ToChar => {
                 // to_char(expr, format) -> strftime(mapped_format, expr)
-                // Note: PG arg order is (expr, format); SQLite strftime arg order is (format,
-                // expr).
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "to_char requires exactly 2 arguments: to_char(expression, format)"
-                            .to_string(),
-                    ));
-                }
+                let exprs = extract_exactly(&func.args, 2, "to_char")?;
                 let ts_expr = exprs[0].clone();
                 let format_expr = exprs[1];
                 let format_str = match format_expr {
@@ -977,147 +892,39 @@ impl Translator for Function {
             }
             FunctionTranslation::ToRandomFloat => {
                 // random() → ABS(random()) / 9223372036854775807.0
-                let random_call = Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("random")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                });
-                let abs_call = Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("ABS")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(random_call))],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                });
+                let random_call = simple_function_expr("random", vec![], None);
+                let abs_call = simple_function_expr("ABS", vec![random_call], None);
                 Ok(Expr::BinaryOp {
                     left: Box::new(abs_call),
                     op: BinaryOperator::Divide,
-                    right: Box::new(Expr::Value(ValueWithSpan {
-                        value: Value::Number("9223372036854775807.0".to_string(), false),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    })),
+                    right: Box::new(number_literal("9223372036854775807.0")),
                 })
             }
             FunctionTranslation::ToSubstrLeft => {
                 // left(s, n) → substr(s, 1, n)
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "left() requires exactly 2 arguments: left(string, count)".to_string(),
-                    ));
-                }
+                let exprs = extract_exactly(&func.args, 2, "left")?;
                 let s = exprs[0].translate(schema, options)?;
                 let n = exprs[1].translate(schema, options)?;
-                Ok(Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("substr")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(s)),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                ValueWithSpan {
-                                    value: Value::Number("1".to_string(), false),
-                                    span: sqlparser::tokenizer::Span::empty(),
-                                },
-                            ))),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(n)),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
+                Ok(simple_function_expr("substr", vec![s, number_literal("1"), n], None))
             }
             FunctionTranslation::ToSubstrRight => {
                 // right(s, n) → substr(s, -n)
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "right() requires exactly 2 arguments: right(string, count)".to_string(),
-                    ));
-                }
+                let exprs = extract_exactly(&func.args, 2, "right")?;
                 let s = exprs[0].translate(schema, options)?;
                 let n = exprs[1].translate(schema, options)?;
                 let neg_n =
                     Expr::UnaryOp { op: sqlparser::ast::UnaryOperator::Minus, expr: Box::new(n) };
-                Ok(Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("substr")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(s)),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(neg_n)),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
+                Ok(simple_function_expr("substr", vec![s, neg_n], None))
             }
             FunctionTranslation::ToTimestampEpoch => {
                 // to_timestamp(epoch) → datetime(epoch, 'unixepoch')
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 1 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "to_timestamp single-arg form requires exactly 1 argument".to_string(),
-                    ));
-                }
+                let exprs = extract_exactly(&func.args, 1, "to_timestamp")?;
                 let epoch = exprs[0].translate(schema, options)?;
-                Ok(Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("datetime")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(epoch)),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                ValueWithSpan {
-                                    value: Value::SingleQuotedString("unixepoch".to_string()),
-                                    span: sqlparser::tokenizer::Span::empty(),
-                                },
-                            ))),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
+                Ok(simple_function_expr("datetime", vec![epoch, string_literal("unixepoch")], None))
             }
             FunctionTranslation::ToModulo => {
                 // mod(a, b) → (a % b)
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "mod() requires exactly 2 arguments".to_string(),
-                    ));
-                }
+                let exprs = extract_exactly(&func.args, 2, "mod")?;
                 let left = exprs[0].translate(schema, options)?;
                 let right = exprs[1].translate(schema, options)?;
                 Ok(Expr::Nested(Box::new(Expr::BinaryOp {
@@ -1128,12 +935,7 @@ impl Translator for Function {
             }
             FunctionTranslation::ToIntegerDiv => {
                 // div(a, b) → CAST(a / b AS INTEGER)
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "div() requires exactly 2 arguments".to_string(),
-                    ));
-                }
+                let exprs = extract_exactly(&func.args, 2, "div")?;
                 let left = exprs[0].translate(schema, options)?;
                 let right = exprs[1].translate(schema, options)?;
                 Ok(Expr::Cast {
@@ -1149,7 +951,7 @@ impl Translator for Function {
                 })
             }
             FunctionTranslation::ToTrunc => {
-                let exprs = extract_arg_exprs(&func.args);
+                let exprs = function_argument_exprs(&func.args);
                 match exprs.len() {
                     // trunc(x) → CAST(x AS INTEGER)
                     1 => {
@@ -1166,23 +968,7 @@ impl Translator for Function {
                     2 => {
                         let x = exprs[0].translate(schema, options)?;
                         let n = exprs[1].translate(schema, options)?;
-                        Ok(Expr::Function(Function {
-                            name: ObjectName::from(vec![Ident::new("round")]),
-                            uses_odbc_syntax: false,
-                            parameters: FunctionArguments::None,
-                            args: FunctionArguments::List(FunctionArgumentList {
-                                duplicate_treatment: None,
-                                args: vec![
-                                    FunctionArg::Unnamed(FunctionArgExpr::Expr(x)),
-                                    FunctionArg::Unnamed(FunctionArgExpr::Expr(n)),
-                                ],
-                                clauses: vec![],
-                            }),
-                            filter: None,
-                            null_treatment: None,
-                            over: None,
-                            within_group: vec![],
-                        }))
+                        Ok(simple_function_expr("round", vec![x, n], None))
                     }
                     _ => {
                         Err(crate::errors::Error::UnsupportedSQLiteFeature(
@@ -1191,125 +977,23 @@ impl Translator for Function {
                     }
                 }
             }
-            FunctionTranslation::ToMakeDate => {
-                // make_date(y, m, d) → printf('%04d-%02d-%02d', y, m, d)
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 3 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "make_date() requires exactly 3 arguments".to_string(),
-                    ));
-                }
-                let y = exprs[0].translate(schema, options)?;
-                let m = exprs[1].translate(schema, options)?;
-                let d = exprs[2].translate(schema, options)?;
-                Ok(Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("printf")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                ValueWithSpan {
-                                    value: Value::SingleQuotedString("%04d-%02d-%02d".to_string()),
-                                    span: sqlparser::tokenizer::Span::empty(),
-                                },
-                            ))),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(y)),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(m)),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(d)),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
-            }
-            FunctionTranslation::ToMakeTime => {
-                // make_time(h, m, s) → printf('%02d:%02d:%02d', h, m, s)
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 3 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "make_time() requires exactly 3 arguments".to_string(),
-                    ));
-                }
-                let h = exprs[0].translate(schema, options)?;
-                let mi = exprs[1].translate(schema, options)?;
-                let s = exprs[2].translate(schema, options)?;
-                Ok(Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("printf")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                ValueWithSpan {
-                                    value: Value::SingleQuotedString("%02d:%02d:%02d".to_string()),
-                                    span: sqlparser::tokenizer::Span::empty(),
-                                },
-                            ))),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(h)),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(mi)),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(s)),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
-            }
-            FunctionTranslation::ToMakeTimestamp => {
-                // make_timestamp(y,m,d,h,mi,s) → printf('%04d-%02d-%02d %02d:%02d:%02d', ...)
-                let exprs = extract_arg_exprs(&func.args);
-                if exprs.len() != 6 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "make_timestamp() requires exactly 6 arguments".to_string(),
-                    ));
-                }
-                let mut translated = Vec::with_capacity(6);
+            FunctionTranslation::ToMakePrintf { format, arg_count, func_label } => {
+                let exprs = extract_exactly(&func.args, arg_count, func_label)?;
+                let mut printf_args = vec![string_literal(format)];
                 for e in &exprs {
-                    translated.push(e.translate(schema, options)?);
+                    printf_args.push(e.translate(schema, options)?);
                 }
-                let mut args =
-                    vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(
-                            "%04d-%02d-%02d %02d:%02d:%02d".to_string(),
-                        ),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    })))];
-                for t in translated {
-                    args.push(FunctionArg::Unnamed(FunctionArgExpr::Expr(t)));
-                }
-                Ok(Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("printf")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args,
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
+                Ok(simple_function_expr("printf", printf_args, None))
             }
             FunctionTranslation::ToJsonExtractPath => {
                 // json_extract_path(j, 'k1', 'k2') → json_extract(j, '$.k1.k2')
-                let exprs = extract_arg_exprs(&func.args);
+                let exprs = function_argument_exprs(&func.args);
                 if exprs.len() < 2 {
                     return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                         "json_extract_path requires at least 2 arguments".to_string(),
                     ));
                 }
                 let json_expr = exprs[0].translate(schema, options)?;
-                // Build the JSON path from key arguments
                 let mut path = String::from("$");
                 for key_expr in &exprs[1..] {
                     if let Expr::Value(ValueWithSpan {
@@ -1326,28 +1010,11 @@ impl Translator for Function {
                         ));
                     }
                 }
-                Ok(Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new("json_extract")]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(json_expr)),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                ValueWithSpan {
-                                    value: Value::SingleQuotedString(path),
-                                    span: sqlparser::tokenizer::Span::empty(),
-                                },
-                            ))),
-                        ],
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: None,
-                    within_group: vec![],
-                }))
+                Ok(simple_function_expr(
+                    "json_extract",
+                    vec![json_expr, string_literal(&path)],
+                    None,
+                ))
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))

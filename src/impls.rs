@@ -2,6 +2,7 @@
 
 pub(crate) mod datetime_helpers;
 pub(crate) mod direction_wrappers;
+pub(crate) mod function_helpers;
 pub(crate) mod generated_sql;
 pub(crate) mod object_name;
 pub mod reverse_translator_impls;
