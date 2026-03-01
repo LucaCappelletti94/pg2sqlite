@@ -110,6 +110,68 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
 }
 
 #[test]
+fn test_maintenance_trigger_with_recursive_triggers_enabled()
+-> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+CREATE TABLE brands (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    edited_at TEXT
+);
+
+CREATE OR REPLACE FUNCTION update_brands_edited_at() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.edited_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_update_brands_edited_at
+BEFORE UPDATE ON brands
+FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
+";
+
+    let translator = Pg2Sqlite::default().sql(sql)?;
+    let translated = translator.translate(&Pg2SqliteOptions::default())?;
+
+    let trigger_sql = translated
+        .iter()
+        .map(ToString::to_string)
+        .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
+        .expect("translated trigger statement should exist");
+    assert!(
+        trigger_sql.contains("UPDATE OF id, name ON brands"),
+        "maintenance trigger should exclude maintenance columns from UPDATE event: {trigger_sql}"
+    );
+
+    let mut connection = SqliteConnection::establish(":memory:")?;
+    diesel::sql_query("PRAGMA foreign_keys = ON").execute(&mut connection)?;
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut connection)?;
+
+    for stmt in translated {
+        diesel::sql_query(stmt.to_string()).execute(&mut connection)?;
+    }
+
+    diesel::insert_into(brands::table)
+        .values(&NewBrand {
+            id: 1,
+            name: "Adidas".to_string(),
+            edited_at: Some("2020-01-01".to_string()),
+        })
+        .execute(&mut connection)?;
+
+    diesel::update(brands::table.filter(brands::id.eq(1)))
+        .set(brands::name.eq("Nike"))
+        .execute(&mut connection)?;
+
+    let updated =
+        brands::table.filter(brands::id.eq(1)).select(Brand::as_select()).first(&mut connection)?;
+    assert_eq!(updated.name, "Nike");
+
+    Ok(())
+}
+
+#[test]
 fn test_maintenance_trigger_on_rls_table() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
 CREATE TABLE brands (
@@ -139,8 +201,19 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
     let translator = Pg2Sqlite::default().sql(sql)?;
     let translated = translator.translate(&options)?;
 
+    let trigger_sql = translated
+        .iter()
+        .map(ToString::to_string)
+        .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
+        .expect("translated trigger statement should exist");
+    assert!(
+        trigger_sql.contains("UPDATE OF id, name ON brands_rls"),
+        "maintenance trigger should target RLS table and exclude maintenance columns: {trigger_sql}"
+    );
+
     let mut connection = SqliteConnection::establish(":memory:")?;
     diesel::sql_query("PRAGMA foreign_keys = ON").execute(&mut connection)?;
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut connection)?;
 
     for stmt in translated {
         diesel::sql_query(stmt.to_string()).execute(&mut connection)?;
