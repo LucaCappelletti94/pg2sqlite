@@ -116,6 +116,14 @@ fn build_upsert_on_conflict(
     pk_columns: &[String],
     insert_columns: &[Ident],
 ) -> Result<OnInsert, Error> {
+    if pk_columns.is_empty() {
+        return Err(Error::MissingPrimaryKeyInUpsert {
+            table_name: table_name.to_string(),
+            pk_columns: Vec::new(),
+            insert_columns: insert_columns.iter().map(|c| c.value.clone()).collect(),
+        });
+    }
+
     // Validate that all PK columns are present in insert_columns
     let has_missing_pk = pk_columns
         .iter()

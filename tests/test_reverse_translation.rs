@@ -371,6 +371,34 @@ mod errors {
     }
 
     #[test]
+    fn test_insert_or_replace_without_primary_key_in_schema_errors() {
+        let pg_ddl = "CREATE TABLE users (id UUID, name TEXT, email TEXT);";
+        let translator = setup_translator(pg_ddl);
+        let schema = translator.build_schema().unwrap();
+        let options = Pg2SqliteOptions::default();
+
+        let sqlite_sql =
+            "INSERT OR REPLACE INTO users (id, name, email) VALUES ('abc', 'Alice', 'a@b.com')";
+        let result = translator.reverse_sql(sqlite_sql, &schema, &options);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            Error::MissingPrimaryKeyInUpsert { table_name, pk_columns, insert_columns } => {
+                assert_eq!(table_name, "users");
+                assert!(
+                    pk_columns.is_empty(),
+                    "tables without PK should report empty required PK list"
+                );
+                assert!(insert_columns.contains(&"id".to_string()));
+                assert!(insert_columns.contains(&"name".to_string()));
+                assert!(insert_columns.contains(&"email".to_string()));
+            }
+            other => panic!("Expected MissingPrimaryKeyInUpsert, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_insert_or_replace_with_three_part_table_name_errors() {
         let pg_ddl = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, email TEXT);";
         let translator = setup_translator(pg_ddl);
