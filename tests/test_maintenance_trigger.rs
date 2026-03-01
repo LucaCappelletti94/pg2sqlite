@@ -228,6 +228,90 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
 }
 
 #[test]
+fn test_maintenance_trigger_before_insert_or_update_splits_trigger()
+-> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+CREATE TABLE brands (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    edited_at TEXT
+);
+
+CREATE OR REPLACE FUNCTION set_brands_edited_at() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.edited_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_upsert_brands_edited_at
+BEFORE INSERT OR UPDATE ON brands
+FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
+";
+
+    let translator = Pg2Sqlite::default().sql(sql)?;
+    let translated = translator.translate(&Pg2SqliteOptions::default())?;
+    let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>();
+
+    let update_trigger_sql = translated_sql
+        .iter()
+        .find(|stmt| stmt.contains("CREATE TRIGGER trigger_upsert_brands_edited_at "))
+        .expect("translated BEFORE UPDATE trigger should exist");
+    assert!(
+        update_trigger_sql.contains("BEFORE UPDATE OF id, name ON brands"),
+        "maintenance update branch should remain BEFORE UPDATE: {update_trigger_sql}"
+    );
+
+    let insert_trigger_sql = translated_sql
+        .iter()
+        .find(|stmt| {
+            stmt.contains("CREATE TRIGGER trigger_upsert_brands_edited_at_pg2sqlite_insert")
+        })
+        .expect("translated AFTER INSERT trigger should exist");
+    assert!(
+        insert_trigger_sql.contains("AFTER INSERT ON brands"),
+        "maintenance insert branch should be translated to AFTER INSERT: {insert_trigger_sql}"
+    );
+
+    let mut connection = SqliteConnection::establish(":memory:")?;
+    diesel::sql_query("PRAGMA foreign_keys = ON").execute(&mut connection)?;
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut connection)?;
+
+    for stmt in translated {
+        diesel::sql_query(stmt.to_string()).execute(&mut connection)?;
+    }
+
+    diesel::insert_into(brands::table)
+        .values(&NewBrand { id: 1, name: "Adidas".to_string(), edited_at: None })
+        .execute(&mut connection)?;
+
+    let inserted =
+        brands::table.filter(brands::id.eq(1)).select(Brand::as_select()).first(&mut connection)?;
+    assert!(
+        inserted.edited_at.is_some(),
+        "edited_at should be populated after INSERT by the split insert trigger"
+    );
+
+    diesel::update(brands::table.filter(brands::id.eq(1)))
+        .set(brands::name.eq("Nike"))
+        .execute(&mut connection)?;
+
+    diesel::update(brands::table.filter(brands::id.eq(1)))
+        .set(brands::edited_at.eq("manual"))
+        .execute(&mut connection)?;
+
+    let updated =
+        brands::table.filter(brands::id.eq(1)).select(Brand::as_select()).first(&mut connection)?;
+    assert_eq!(
+        updated.edited_at.as_deref(),
+        Some("manual"),
+        "UPDATE branch should exclude maintenance column to avoid self-recursion"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_maintenance_trigger_on_rls_table() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
 CREATE TABLE brands (
