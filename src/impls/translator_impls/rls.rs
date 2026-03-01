@@ -2298,6 +2298,52 @@ mod tests {
     }
 
     #[test]
+    fn transform_table_factor_for_subquery_does_not_downgrade_three_part_names() {
+        let schema = schema_from_sql(
+            r#"
+            CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER);
+            ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY docs_select ON docs FOR SELECT USING (owner_id > 0);
+            "#,
+        );
+        let table = schema.table(None, "docs").expect("table should exist");
+        let options = Pg2SqliteOptions::default();
+        let context = SubqueryTransformContext {
+            options: &options,
+            table,
+            schema: &schema,
+            prefix: Some("NEW"),
+            outer_table: Some(("docs", "docs_rls")),
+            rls_suffix: options.get_rls_table_suffix(),
+        };
+
+        let mut rename_pairs = Vec::new();
+        let mut three_part = TableFactor::Table {
+            name: ObjectName(vec![
+                ObjectNamePart::Identifier(Ident::new("catalog")),
+                ObjectNamePart::Identifier(Ident::new("public")),
+                ObjectNamePart::Identifier(Ident::new("docs")),
+            ]),
+            alias: None,
+            args: None,
+            with_hints: vec![],
+            version: None,
+            with_ordinality: false,
+            partitions: vec![],
+            json_path: None,
+            sample: None,
+            index_hints: vec![],
+        };
+        transform_table_factor_for_subquery(&mut three_part, &context, &mut rename_pairs);
+
+        let TableFactor::Table { name, .. } = three_part else {
+            panic!("expected Table variant");
+        };
+        assert_eq!(name.to_string(), "catalog.public.docs");
+        assert_eq!(rename_pairs, vec![("docs".to_string(), "docs".to_string())]);
+    }
+
+    #[test]
     fn generate_rls_view_sql_without_select_policies_omits_where_clause() {
         let schema =
             schema_from_sql("CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER);");

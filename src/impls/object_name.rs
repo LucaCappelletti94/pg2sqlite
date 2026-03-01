@@ -34,6 +34,8 @@ pub(crate) fn sqlite_unqualified_object_name(name: &ObjectName) -> ObjectName {
 /// Supported forms:
 /// - `table`
 /// - `schema.table`
+///
+/// Any other shape returns `(None, None)`.
 pub(crate) fn schema_and_table_for_lookup(name: &ObjectName) -> (Option<&str>, Option<&str>) {
     match name.0.as_slice() {
         [single] => (None, single.as_ident().map(|ident| ident.value.as_str())),
@@ -43,7 +45,7 @@ pub(crate) fn schema_and_table_for_lookup(name: &ObjectName) -> (Option<&str>, O
                 table.as_ident().map(|ident| ident.value.as_str()),
             )
         }
-        _ => (None, last_ident(name).map(|ident| ident.value.as_str())),
+        _ => (None, None),
     }
 }
 
@@ -105,11 +107,24 @@ fn parse_implicit_public_lookup_parts(
     }
 }
 
-fn implicit_public_lookup_parts(
+pub(crate) fn implicit_public_lookup_parts(
     name: &ObjectName,
 ) -> Result<(Option<&str>, Option<&str>, &str), Error> {
     let parts = parse_implicit_public_lookup_parts(name)?;
     Ok((parts.primary_schema, parts.fallback_schema, parts.table_name))
+}
+
+fn lookup_implicit_public_table<'a>(
+    schema: &'a ParserDB,
+    parts: &ImplicitPublicLookupParts<'_>,
+) -> (Option<&'static str>, Option<&'a <ParserDB as DatabaseLike>::Table>) {
+    if let Some(table) = schema.table(parts.primary_schema, parts.table_name) {
+        return (parts.primary_schema, Some(table));
+    }
+    if let Some(table) = schema.table(parts.fallback_schema, parts.table_name) {
+        return (parts.fallback_schema, Some(table));
+    }
+    (parts.primary_schema, None)
 }
 
 fn object_name_from_schema_and_table_part(
@@ -139,21 +154,9 @@ pub(crate) fn normalize_implicit_public_object_name_for_schema(
     name: &ObjectName,
 ) -> Result<ObjectName, Error> {
     let parts = parse_implicit_public_lookup_parts(name)?;
+    let (resolved_schema, _) = lookup_implicit_public_table(schema, &parts);
 
-    if schema.table(parts.primary_schema, parts.table_name).is_some() {
-        return Ok(object_name_from_schema_and_table_part(
-            parts.primary_schema,
-            parts.table_part.clone(),
-        ));
-    }
-    if schema.table(parts.fallback_schema, parts.table_name).is_some() {
-        return Ok(object_name_from_schema_and_table_part(
-            parts.fallback_schema,
-            parts.table_part.clone(),
-        ));
-    }
-
-    Ok(object_name_from_schema_and_table_part(parts.primary_schema, parts.table_part))
+    Ok(object_name_from_schema_and_table_part(resolved_schema, parts.table_part))
 }
 
 /// Looks up a table under the crate's implicit-public policy.
@@ -164,17 +167,9 @@ pub(crate) fn table_with_implicit_public_lookup<'a>(
     schema: &'a ParserDB,
     name: &ObjectName,
 ) -> Result<Option<&'a <ParserDB as DatabaseLike>::Table>, Error> {
-    let (primary_schema, fallback_schema, table_name) = implicit_public_lookup_parts(name)?;
-
-    if let Some(table) = schema.table(primary_schema, table_name) {
-        return Ok(Some(table));
-    }
-
-    if let Some(table) = schema.table(fallback_schema, table_name) {
-        return Ok(Some(table));
-    }
-
-    Ok(None)
+    let parts = parse_implicit_public_lookup_parts(name)?;
+    let (_, table) = lookup_implicit_public_table(schema, &parts);
+    Ok(table)
 }
 
 /// Returns whether an object name resolves to an RLS-protected table under the
@@ -253,7 +248,7 @@ mod tests {
         assert_eq!(schema_and_table_for_lookup(&two), (Some("public"), Some("users")));
 
         let three = name(&["catalog", "public", "users"]);
-        assert_eq!(schema_and_table_for_lookup(&three), (None, Some("users")));
+        assert_eq!(schema_and_table_for_lookup(&three), (None, None));
     }
 
     #[test]

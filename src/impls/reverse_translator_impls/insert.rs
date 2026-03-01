@@ -16,15 +16,11 @@ use super::helpers::Reverse;
 use crate::{
     errors::Error,
     impls::{
-        object_name::{normalize_implicit_public_object_name, table_with_implicit_public_lookup},
+        object_name::{implicit_public_lookup_parts, table_with_implicit_public_lookup},
         shared_helpers::{translate_on_conflict_do_update, translate_returning},
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
-
-fn is_unqualified_identifier_name(name: &ObjectName) -> bool {
-    matches!(name.0.as_slice(), [segment] if segment.as_ident().is_some())
-}
 
 /// Resolve the target table for reverse upsert reconstruction.
 ///
@@ -43,19 +39,8 @@ fn resolve_insert_table<'a>(
         ));
     };
 
-    let is_unqualified = is_unqualified_identifier_name(table_name);
-    let normalized = normalize_implicit_public_object_name(table_name)?;
-    let bare_table_name = normalized
-        .0
-        .first()
-        .and_then(ObjectNamePart::as_ident)
-        .map(|ident| ident.value.as_str())
-        .ok_or_else(|| {
-            Error::UnsupportedSchemaQualification {
-                object_name: table_name.to_string(),
-                reason: "table segment must be an identifier".to_string(),
-            }
-        })?;
+    let (primary_schema, _, bare_table_name) = implicit_public_lookup_parts(table_name)?;
+    let is_unqualified = primary_schema.is_none();
 
     if let Some(found) = table_with_implicit_public_lookup(schema, table_name)? {
         return Ok(found);
@@ -300,17 +285,21 @@ impl ReverseTranslator for Insert {
 
 #[cfg(test)]
 mod tests {
-    use sql_traits::structs::ParserDB;
+    use sql_traits::{structs::ParserDB, traits::TableLike};
     use sqlparser::{
         ast::{
             Assignment, AssignmentTarget, Expr, Ident, Insert, ObjectName, ObjectNamePart,
-            Statement,
+            ObjectNamePartFunction, Statement, TableObject,
         },
         dialect::PostgreSqlDialect,
         parser::Parser,
     };
 
-    use crate::prelude::{Pg2SqliteOptions, ReverseTranslator};
+    use super::resolve_insert_table;
+    use crate::{
+        errors::Error,
+        prelude::{Pg2SqliteOptions, ReverseTranslator},
+    };
 
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
@@ -333,6 +322,20 @@ mod tests {
             .expect("expr should parse")
     }
 
+    fn schema_from_sql(sql: &str) -> ParserDB {
+        let statements = Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse");
+        ParserDB::from_statements(statements, "test".to_string()).expect("schema should build")
+    }
+
+    fn table_object(parts: &[&str]) -> TableObject {
+        TableObject::TableName(ObjectName(
+            parts
+                .iter()
+                .map(|part| ObjectNamePart::Identifier(Ident::new(*part)))
+                .collect::<Vec<_>>(),
+        ))
+    }
+
     #[test]
     fn reverse_translate_insert_translates_assignment_values() {
         let mut insert = parse_insert("INSERT INTO users(id) VALUES (1)");
@@ -350,5 +353,41 @@ mod tests {
 
         assert_eq!(reversed.assignments.len(), 1);
         assert_eq!(reversed.assignments[0].value.to_string(), "chr(65)");
+    }
+
+    #[test]
+    fn resolve_insert_table_accepts_unqualified_and_public_names() {
+        let schema = schema_from_sql("CREATE TABLE users(id INT PRIMARY KEY);");
+
+        let unqualified = resolve_insert_table(&schema, &table_object(&["users"]))
+            .expect("unqualified table should resolve");
+        assert_eq!(unqualified.table_name(), "users");
+
+        let public_qualified = resolve_insert_table(&schema, &table_object(&["public", "users"]))
+            .expect("public-qualified table should resolve");
+        assert_eq!(public_qualified.table_name(), "users");
+    }
+
+    #[test]
+    fn resolve_insert_table_rejects_non_public_schema_name() {
+        let schema = schema_from_sql("CREATE TABLE users(id INT PRIMARY KEY);");
+
+        let err = resolve_insert_table(&schema, &table_object(&["my_custom_app", "users"]))
+            .expect_err("non-public schema should be rejected");
+        assert!(matches!(err, Error::UnsupportedSchemaQualification { .. }));
+        assert!(err.to_string().contains("schema must be omitted or set to public"));
+    }
+
+    #[test]
+    fn resolve_insert_table_rejects_non_identifier_table_segment() {
+        let schema = schema_from_sql("CREATE TABLE users(id INT PRIMARY KEY);");
+        let table = TableObject::TableName(ObjectName(vec![ObjectNamePart::Function(
+            ObjectNamePartFunction { name: Ident::new("remote"), args: vec![] },
+        )]));
+
+        let err = resolve_insert_table(&schema, &table)
+            .expect_err("function-style segment should be rejected");
+        assert!(matches!(err, Error::UnsupportedSchemaQualification { .. }));
+        assert!(err.to_string().contains("table segment must be an identifier"));
     }
 }
