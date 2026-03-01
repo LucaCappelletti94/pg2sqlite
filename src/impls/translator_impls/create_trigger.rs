@@ -21,6 +21,7 @@ use crate::{
 
 fn generate_maintenance_trigger_body(
     trigger: &CreateTrigger,
+    target_table_name: &ObjectName,
     schema: &ParserDB,
 ) -> sqlparser::ast::BeginEndStatements {
     let assignments = trigger
@@ -43,7 +44,7 @@ fn generate_maintenance_trigger_body(
         }))),
         table: TableWithJoins {
             relation: TableFactor::Table {
-                name: trigger.table_name.clone(),
+                name: target_table_name.clone(),
                 alias: None,
                 args: None,
                 with_hints: vec![],
@@ -151,8 +152,27 @@ impl Translator for CreateTrigger {
             )));
         }
 
+        // For BEFORE/AFTER triggers on RLS-protected tables, redirect to the underlying
+        // _rls table. INSTEAD OF triggers are used on the view, but
+        // BEFORE/AFTER triggers must target the actual table (which has been
+        // renamed to table_rls).
+        let redirected_table_name =
+            if matches!(period, Some(TriggerPeriod::Before | TriggerPeriod::After)) {
+                let (table_schema, table_name_part) = schema_and_table_for_lookup(&table_name);
+                if table_name_part
+                    .and_then(|name_part| schema.table(table_schema, name_part))
+                    .is_some_and(|table| table.has_row_level_security(schema))
+                {
+                    append_suffix(&table_name, options.get_rls_table_suffix())
+                } else {
+                    table_name.clone()
+                }
+            } else {
+                table_name.clone()
+            };
+
         let function_body = if self.is_maintenance_trigger(schema) {
-            generate_maintenance_trigger_body(self, schema)
+            generate_maintenance_trigger_body(self, &redirected_table_name, schema)
         } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
             body
         } else {
@@ -189,25 +209,6 @@ impl Translator for CreateTrigger {
                 "Triggers with characteristics are not supported: `{characteristics}`"
             )));
         }
-
-        // For BEFORE/AFTER triggers on RLS-protected tables, redirect to the underlying
-        // _rls table. INSTEAD OF triggers are used on the view, but
-        // BEFORE/AFTER triggers must target the actual table (which has been
-        // renamed to table_rls).
-        let redirected_table_name =
-            if matches!(period, Some(TriggerPeriod::Before | TriggerPeriod::After)) {
-                let (table_schema, table_name_part) = schema_and_table_for_lookup(&table_name);
-                if table_name_part
-                    .and_then(|name_part| schema.table(table_schema, name_part))
-                    .is_some_and(|table| table.has_row_level_security(schema))
-                {
-                    append_suffix(&table_name, options.get_rls_table_suffix())
-                } else {
-                    table_name
-                }
-            } else {
-                table_name
-            };
 
         Ok(Some((
             maybe_drop_trigger,
