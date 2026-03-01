@@ -92,6 +92,18 @@ pub enum Error {
         /// The name of the table that was not found.
         table_name: String,
     },
+    /// Error when an unqualified table reference matches multiple schema
+    /// tables.
+    #[error(
+        "Table '{table_name}' is ambiguous across schemas: {schemas:?}. \
+         Please qualify the table name with a schema."
+    )]
+    AmbiguousTableInSchema {
+        /// The unqualified table name that matched multiple schema entries.
+        table_name: String,
+        /// Candidate schema names where the table exists.
+        schemas: Vec<String>,
+    },
     /// Error when an upsert (INSERT OR REPLACE) does not include primary key
     /// columns.
     #[error(

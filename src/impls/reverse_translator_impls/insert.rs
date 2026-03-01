@@ -1,6 +1,8 @@
 //! Implementation of the [`ReverseTranslator`] trait for the
 //! `Insert` type.
 
+use std::collections::BTreeSet;
+
 use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, TableLike},
@@ -13,27 +15,71 @@ use sqlparser::ast::{
 use super::helpers::Reverse;
 use crate::{
     errors::Error,
-    impls::shared_helpers::{translate_on_conflict_do_update, translate_returning},
+    impls::{
+        object_name::schema_and_table_for_lookup,
+        shared_helpers::{translate_on_conflict_do_update, translate_returning},
+    },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
-/// Get the table name from a TableObject.
-fn get_table_name(table: &TableObject) -> Option<String> {
-    match table {
-        TableObject::TableName(name) => Some(name.to_string()),
-        TableObject::TableFunction(_) => None,
+/// Resolve the target table for reverse upsert reconstruction.
+///
+/// Behavior:
+/// - If table name is schema-qualified, resolve by exact `(schema, table)` key.
+/// - If unqualified, try `(None, table)` first.
+/// - If still missing, scan all schemas for unique table-name match.
+/// - If multiple schema matches exist, return an ambiguity error.
+fn resolve_insert_table<'a>(
+    schema: &'a ParserDB,
+    table: &TableObject,
+) -> Result<&'a <ParserDB as DatabaseLike>::Table, Error> {
+    let TableObject::TableName(table_name) = table else {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "INSERT OR REPLACE with table function is not supported".to_string(),
+        ));
+    };
+
+    let (schema_name, bare_table_name) = schema_and_table_for_lookup(table_name);
+    let Some(bare_table_name) = bare_table_name else {
+        return Err(Error::TableNotFoundInSchema { table_name: table_name.to_string() });
+    };
+
+    if let Some(schema_name) = schema_name {
+        return schema
+            .table(Some(schema_name), bare_table_name)
+            .ok_or_else(|| Error::TableNotFoundInSchema { table_name: table_name.to_string() });
+    }
+
+    if let Some(found) = schema.table(None, bare_table_name) {
+        return Ok(found);
+    }
+
+    let candidates = schema
+        .tables()
+        .filter(|candidate| candidate.table_name().eq_ignore_ascii_case(bare_table_name))
+        .collect::<Vec<_>>();
+
+    match candidates.as_slice() {
+        [] => Err(Error::TableNotFoundInSchema { table_name: bare_table_name.to_string() }),
+        [single] => Ok(*single),
+        many => {
+            let schemas = many
+                .iter()
+                .map(|table| table.table_schema().unwrap_or("<default>").to_string())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Err(Error::AmbiguousTableInSchema { table_name: bare_table_name.to_string(), schemas })
+        }
     }
 }
 
-/// Look up primary key columns for a table from the schema.
-/// Returns an error if the table is not found.
-fn get_primary_key_columns(schema: &ParserDB, table_name: &str) -> Result<Vec<String>, Error> {
-    schema
-        .table(None, table_name)
-        .map(|table| {
-            table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect()
-        })
-        .ok_or_else(|| Error::TableNotFoundInSchema { table_name: table_name.to_string() })
+/// Look up primary key columns for a resolved table.
+fn get_primary_key_columns(
+    schema: &ParserDB,
+    table: &<ParserDB as DatabaseLike>::Table,
+) -> Vec<String> {
+    table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect()
 }
 
 /// Resolve the INSERT column list.
@@ -43,18 +89,14 @@ fn get_primary_key_columns(schema: &ParserDB, table_name: &str) -> Result<Vec<St
 /// schema order".
 fn resolve_insert_columns(
     schema: &ParserDB,
-    table_name: &str,
+    table: &<ParserDB as DatabaseLike>::Table,
     explicit_columns: &[Ident],
-) -> Result<Vec<Ident>, Error> {
+) -> Vec<Ident> {
     if !explicit_columns.is_empty() {
-        return Ok(explicit_columns.to_vec());
+        return explicit_columns.to_vec();
     }
 
-    let table = schema
-        .table(None, table_name)
-        .ok_or_else(|| Error::TableNotFoundInSchema { table_name: table_name.to_string() })?;
-
-    Ok(table.columns(schema).map(|column| Ident::new(column.column_name().to_string())).collect())
+    table.columns(schema).map(|column| Ident::new(column.column_name().to_string())).collect()
 }
 
 /// Build ON CONFLICT DO UPDATE SET clause for all non-PK columns.
@@ -207,14 +249,11 @@ impl ReverseTranslator for Insert {
                 SqliteOnConflict::Replace => {
                     // INSERT OR REPLACE → INSERT ... ON CONFLICT (pk) DO UPDATE SET ...
                     // Look up the primary key from the schema
-                    let table_name = get_table_name(&self.table).ok_or_else(|| {
-                        Error::UnsupportedSQLiteFeature(
-                            "INSERT OR REPLACE with table function is not supported".to_string(),
-                        )
-                    })?;
-                    let pk_columns = get_primary_key_columns(schema, &table_name)?;
+                    let resolved_table = resolve_insert_table(schema, &self.table)?;
+                    let table_name = resolved_table.table_name().to_string();
+                    let pk_columns = get_primary_key_columns(schema, resolved_table);
                     let insert_columns =
-                        resolve_insert_columns(schema, &table_name, &self.columns)?;
+                        resolve_insert_columns(schema, resolved_table, &self.columns);
                     insert.on =
                         Some(build_upsert_on_conflict(&table_name, &pk_columns, &insert_columns)?);
                 }
