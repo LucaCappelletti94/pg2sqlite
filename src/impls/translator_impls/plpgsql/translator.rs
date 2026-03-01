@@ -620,17 +620,23 @@ impl PlPgSqlTranslator {
                 Self::transform_expr(&mut ob.expr, context, options);
             }
         }
-        if let Some(sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by }) =
-            &mut query.limit_clause
-        {
-            if let Some(expr) = limit {
-                Self::transform_expr(expr, context, options);
-            }
-            if let Some(off) = offset {
-                Self::transform_expr(&mut off.value, context, options);
-            }
-            for expr in limit_by {
-                Self::transform_expr(expr, context, options);
+        if let Some(limit_clause) = &mut query.limit_clause {
+            match limit_clause {
+                sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by } => {
+                    if let Some(expr) = limit {
+                        Self::transform_expr(expr, context, options);
+                    }
+                    if let Some(off) = offset {
+                        Self::transform_expr(&mut off.value, context, options);
+                    }
+                    for expr in limit_by {
+                        Self::transform_expr(expr, context, options);
+                    }
+                }
+                sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
+                    Self::transform_expr(offset, context, options);
+                    Self::transform_expr(limit, context, options);
+                }
             }
         }
         if let Some(fetch) = &mut query.fetch
@@ -2201,6 +2207,36 @@ mod tests {
         assert!(
             subquery.to_string().contains("sqlite_uuid()"),
             "LIMIT expressions inside subqueries should be transformed: {subquery}"
+        );
+    }
+
+    #[test]
+    fn transform_subquery_matches_cte_query_for_offset_comma_limit_expression() {
+        let options =
+            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string());
+        let mut cte_ctx = PlPgSqlContext::new();
+        let mut subquery_ctx = PlPgSqlContext::new();
+
+        let mut query = parse_query("SELECT id FROM teams ORDER BY id");
+        query.limit_clause = Some(sqlparser::ast::LimitClause::OffsetCommaLimit {
+            offset: parse_expr("gen_random_uuid()"),
+            limit: parse_expr("uuidv4()"),
+        });
+        let mut cte_query = query.clone();
+        let mut subquery = query;
+
+        PlPgSqlTranslator::transform_cte_query(&mut cte_query, &mut cte_ctx, &options);
+        PlPgSqlTranslator::transform_subquery(&mut subquery, &mut subquery_ctx, &options);
+
+        assert_eq!(
+            subquery.to_string(),
+            cte_query.to_string(),
+            "subquery transform should stay in parity with cte query transform"
+        );
+        let sql = subquery.to_string();
+        assert!(
+            sql.contains("sqlite_uuid()"),
+            "OffsetCommaLimit expressions inside subqueries should be transformed: {sql}"
         );
     }
 
