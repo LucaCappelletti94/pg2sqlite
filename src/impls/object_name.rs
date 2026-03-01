@@ -54,18 +54,27 @@ fn unsupported_schema_qualification(name: &ObjectName, reason: &str) -> Error {
     }
 }
 
-fn implicit_public_lookup_parts(
+struct ImplicitPublicLookupParts<'a> {
+    primary_schema: Option<&'static str>,
+    fallback_schema: Option<&'static str>,
+    table_name: &'a str,
+    table_part: ObjectNamePart,
+}
+
+fn parse_implicit_public_lookup_parts(
     name: &ObjectName,
-) -> Result<(Option<&str>, Option<&str>, &str), Error> {
+) -> Result<ImplicitPublicLookupParts<'_>, Error> {
     match name.0.as_slice() {
         [table] => {
-            let table = table.as_ident().map(|ident| ident.value.as_str()).ok_or_else(|| {
-                unsupported_schema_qualification(
-                    name,
-                    "object name must contain identifier segments",
-                )
+            let table_ident = table.as_ident().ok_or_else(|| {
+                unsupported_schema_qualification(name, "table segment must be an identifier")
             })?;
-            Ok((None, Some("public"), table))
+            Ok(ImplicitPublicLookupParts {
+                primary_schema: None,
+                fallback_schema: Some("public"),
+                table_name: table_ident.value.as_str(),
+                table_part: table.clone(),
+            })
         }
         [schema, table] => {
             let schema_ident = schema.as_ident().ok_or_else(|| {
@@ -77,10 +86,15 @@ fn implicit_public_lookup_parts(
                     "schema must be omitted or set to public",
                 ));
             }
-            let table = table.as_ident().map(|ident| ident.value.as_str()).ok_or_else(|| {
+            let table_ident = table.as_ident().ok_or_else(|| {
                 unsupported_schema_qualification(name, "table segment must be an identifier")
             })?;
-            Ok((Some("public"), None, table))
+            Ok(ImplicitPublicLookupParts {
+                primary_schema: Some("public"),
+                fallback_schema: None,
+                table_name: table_ident.value.as_str(),
+                table_part: table.clone(),
+            })
         }
         _ => {
             Err(unsupported_schema_qualification(
@@ -89,6 +103,13 @@ fn implicit_public_lookup_parts(
             ))
         }
     }
+}
+
+fn implicit_public_lookup_parts(
+    name: &ObjectName,
+) -> Result<(Option<&str>, Option<&str>, &str), Error> {
+    let parts = parse_implicit_public_lookup_parts(name)?;
+    Ok((parts.primary_schema, parts.fallback_schema, parts.table_name))
 }
 
 fn object_name_from_schema_and_table_part(
@@ -107,35 +128,8 @@ fn object_name_from_schema_and_table_part(
 pub(crate) fn normalize_implicit_public_object_name(
     name: &ObjectName,
 ) -> Result<ObjectName, Error> {
-    match name.0.as_slice() {
-        [table] => {
-            let _ = table.as_ident().ok_or_else(|| {
-                unsupported_schema_qualification(name, "table segment must be an identifier")
-            })?;
-            Ok(ObjectName(vec![table.clone()]))
-        }
-        [schema, table] => {
-            let schema_ident = schema.as_ident().ok_or_else(|| {
-                unsupported_schema_qualification(name, "schema segment must be an identifier")
-            })?;
-            if !schema_ident.value.eq_ignore_ascii_case("public") {
-                return Err(unsupported_schema_qualification(
-                    name,
-                    "schema must be omitted or set to public",
-                ));
-            }
-            let _ = table.as_ident().ok_or_else(|| {
-                unsupported_schema_qualification(name, "table segment must be an identifier")
-            })?;
-            Ok(ObjectName(vec![table.clone()]))
-        }
-        _ => {
-            Err(unsupported_schema_qualification(
-                name,
-                "object names with more than two parts are not supported",
-            ))
-        }
-    }
+    let parts = parse_implicit_public_lookup_parts(name)?;
+    Ok(ObjectName(vec![parts.table_part]))
 }
 
 /// Returns a canonical object name for schema-sensitive operations by choosing
@@ -144,25 +138,22 @@ pub(crate) fn normalize_implicit_public_object_name_for_schema(
     schema: &ParserDB,
     name: &ObjectName,
 ) -> Result<ObjectName, Error> {
-    let (primary_schema, fallback_schema, table_name) = implicit_public_lookup_parts(name)?;
-    let table_part = match name.0.as_slice() {
-        [table] | [_, table] => table.clone(),
-        _ => {
-            return Err(unsupported_schema_qualification(
-                name,
-                "object names with more than two parts are not supported",
-            ));
-        }
-    };
+    let parts = parse_implicit_public_lookup_parts(name)?;
 
-    if schema.table(primary_schema, table_name).is_some() {
-        return Ok(object_name_from_schema_and_table_part(primary_schema, table_part.clone()));
+    if schema.table(parts.primary_schema, parts.table_name).is_some() {
+        return Ok(object_name_from_schema_and_table_part(
+            parts.primary_schema,
+            parts.table_part.clone(),
+        ));
     }
-    if schema.table(fallback_schema, table_name).is_some() {
-        return Ok(object_name_from_schema_and_table_part(fallback_schema, table_part.clone()));
+    if schema.table(parts.fallback_schema, parts.table_name).is_some() {
+        return Ok(object_name_from_schema_and_table_part(
+            parts.fallback_schema,
+            parts.table_part.clone(),
+        ));
     }
 
-    Ok(object_name_from_schema_and_table_part(primary_schema, table_part))
+    Ok(object_name_from_schema_and_table_part(parts.primary_schema, parts.table_part))
 }
 
 /// Looks up a table under the crate's implicit-public policy.
@@ -226,7 +217,7 @@ pub(crate) fn quoted_ident(name: &str) -> Ident {
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
-        ast::{Ident, ObjectName, ObjectNamePart},
+        ast::{Ident, ObjectName, ObjectNamePart, ObjectNamePartFunction},
         dialect::PostgreSqlDialect,
         parser::Parser,
     };
@@ -313,6 +304,68 @@ mod tests {
         let err = normalize_implicit_public_object_name(&name(&["catalog", "public", "users"]))
             .unwrap_err();
         assert!(err.to_string().contains("object names with more than two parts"));
+    }
+
+    #[test]
+    fn implicit_public_helpers_reject_non_public_and_three_part_names() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE users(id INT PRIMARY KEY);")
+                .unwrap(),
+            "test".to_string(),
+        )
+        .unwrap();
+
+        let err = table_with_implicit_public_lookup(&schema, &name(&["my_custom_app", "users"]))
+            .unwrap_err();
+        assert!(err.to_string().contains("schema must be omitted or set to public"));
+
+        let err =
+            table_with_implicit_public_lookup(&schema, &name(&["catalog", "public", "users"]))
+                .unwrap_err();
+        assert!(err.to_string().contains("object names with more than two parts"));
+    }
+
+    #[test]
+    fn normalize_for_schema_rejects_non_public_schema() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE users(id INT PRIMARY KEY);")
+                .unwrap(),
+            "test".to_string(),
+        )
+        .unwrap();
+
+        let err = normalize_implicit_public_object_name_for_schema(
+            &schema,
+            &name(&["my_custom_app", "users"]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("schema must be omitted or set to public"));
+    }
+
+    #[test]
+    fn implicit_public_lookup_rejects_non_identifier_segments() {
+        let function_part = ObjectNamePart::Function(ObjectNamePartFunction {
+            name: Ident::new("remote"),
+            args: vec![],
+        });
+
+        let err = normalize_implicit_public_object_name(&ObjectName(vec![function_part.clone()]))
+            .unwrap_err();
+        assert!(err.to_string().contains("table segment must be an identifier"));
+
+        let err = normalize_implicit_public_object_name(&ObjectName(vec![
+            function_part.clone(),
+            ObjectNamePart::Identifier(Ident::new("users")),
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("schema segment must be an identifier"));
+
+        let err = normalize_implicit_public_object_name(&ObjectName(vec![
+            ObjectNamePart::Identifier(Ident::new("public")),
+            function_part,
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("table segment must be an identifier"));
     }
 
     #[test]
