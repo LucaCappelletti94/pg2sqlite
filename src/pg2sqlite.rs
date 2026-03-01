@@ -25,34 +25,7 @@ pub struct Pg2Sqlite {
 }
 
 impl Pg2Sqlite {
-    fn normalize_statements_for_translation(
-        statements: &[Statement],
-    ) -> Result<Vec<Statement>, crate::errors::Error> {
-        statements
-            .iter()
-            .map(|statement| {
-                let mut statement = statement.clone();
-                match &mut statement {
-                    Statement::CreateTable(create_table) => {
-                        create_table.name =
-                            normalize_implicit_public_object_name(&create_table.name)?;
-                    }
-                    Statement::CreateIndex(create_index) => {
-                        create_index.table_name =
-                            normalize_implicit_public_object_name(&create_index.table_name)?;
-                    }
-                    Statement::CreateTrigger(create_trigger) => {
-                        create_trigger.table_name =
-                            normalize_implicit_public_object_name(&create_trigger.table_name)?;
-                    }
-                    _ => {}
-                }
-                Ok(statement)
-            })
-            .collect()
-    }
-
-    fn normalize_statements_for_schema_build(
+    fn normalize_statements(
         statements: &[Statement],
     ) -> Result<Vec<Statement>, crate::errors::Error> {
         statements
@@ -294,8 +267,7 @@ impl Pg2Sqlite {
     ) -> Result<Vec<Statement>, crate::errors::Error> {
         use sql_traits::traits::{DatabaseLike, TableLike};
 
-        let normalized_statements =
-            Self::normalize_statements_for_translation(&self.pg_statements)?;
+        let normalized_statements = Self::normalize_statements(&self.pg_statements)?;
         let schema =
             ParserDB::from_statements(normalized_statements.clone(), "translation_db".to_owned())?;
 
@@ -388,8 +360,7 @@ impl Pg2Sqlite {
     /// let schema = translator.build_schema().unwrap();
     /// ```
     pub fn build_schema(&self) -> Result<ParserDB, crate::errors::Error> {
-        let normalized_statements =
-            Self::normalize_statements_for_schema_build(&self.pg_statements)?;
+        let normalized_statements = Self::normalize_statements(&self.pg_statements)?;
         ParserDB::from_statements(normalized_statements, "translation_db".to_owned())
             .map_err(crate::errors::Error::from)
     }
