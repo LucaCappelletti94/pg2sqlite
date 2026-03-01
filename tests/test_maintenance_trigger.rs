@@ -172,6 +172,62 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
 }
 
 #[test]
+fn test_maintenance_trigger_before_insert() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+CREATE TABLE brands (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    edited_at TEXT
+);
+
+CREATE OR REPLACE FUNCTION set_brands_edited_at() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.edited_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_insert_brands_edited_at
+BEFORE INSERT ON brands
+FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
+";
+
+    let translator = Pg2Sqlite::default().sql(sql)?;
+    let translated = translator.translate(&Pg2SqliteOptions::default())?;
+
+    let trigger_sql = translated
+        .iter()
+        .map(ToString::to_string)
+        .find(|sql| sql.contains("CREATE TRIGGER trigger_insert_brands_edited_at"))
+        .expect("translated trigger statement should exist");
+    assert!(
+        trigger_sql.contains("AFTER INSERT ON brands"),
+        "maintenance insert trigger should be translated to AFTER INSERT: {trigger_sql}"
+    );
+
+    let mut connection = SqliteConnection::establish(":memory:")?;
+    diesel::sql_query("PRAGMA foreign_keys = ON").execute(&mut connection)?;
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut connection)?;
+
+    for stmt in translated {
+        diesel::sql_query(stmt.to_string()).execute(&mut connection)?;
+    }
+
+    diesel::insert_into(brands::table)
+        .values(&NewBrand { id: 1, name: "Adidas".to_string(), edited_at: None })
+        .execute(&mut connection)?;
+
+    let inserted =
+        brands::table.filter(brands::id.eq(1)).select(Brand::as_select()).first(&mut connection)?;
+    assert!(
+        inserted.edited_at.is_some(),
+        "edited_at should be populated by translated maintenance insert trigger"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_maintenance_trigger_on_rls_table() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
 CREATE TABLE brands (
