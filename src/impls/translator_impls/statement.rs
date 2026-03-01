@@ -3,17 +3,14 @@
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{DatabaseLike, TableLike, TriggerLike},
+    traits::{DatabaseLike, TableLike},
 };
-use sqlparser::ast::{
-    BinaryOperator, CreateTrigger, Expr, ObjectType, Statement, TriggerEvent, TriggerPeriod,
-    UnaryOperator,
-};
+use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement, UnaryOperator};
 
 use crate::{
     errors::Error,
     impls::{
-        object_name::{append_suffix, schema_and_table_for_lookup, sqlite_unqualified_object_name},
+        object_name::{schema_and_table_for_lookup, sqlite_unqualified_object_name},
         translator_impls::{
             condition_injection::inject_condition_into_dml_statement,
             rls::{
@@ -60,53 +57,13 @@ fn append_guarded_statements(
     Ok(())
 }
 
-fn split_before_insert_maintenance_trigger(
-    create_trigger: &CreateTrigger,
-    schema: &ParserDB,
-) -> Option<(CreateTrigger, CreateTrigger)> {
-    if !create_trigger.is_maintenance_trigger(schema) {
-        return None;
-    }
-
-    if !matches!(create_trigger.period, Some(TriggerPeriod::Before)) {
-        return None;
-    }
-
-    let has_insert_event =
-        create_trigger.events.iter().any(|event| matches!(event, TriggerEvent::Insert));
-    if !has_insert_event {
-        return None;
-    }
-
-    let non_insert_events = create_trigger
-        .events
-        .iter()
-        .filter(|event| !matches!(event, TriggerEvent::Insert))
-        .cloned()
-        .collect::<Vec<_>>();
-    if non_insert_events.is_empty() {
-        return None;
-    }
-
-    let mut insert_trigger = create_trigger.clone();
-    insert_trigger.events = vec![TriggerEvent::Insert];
-    insert_trigger.name = append_suffix(&create_trigger.name, "_pg2sqlite_insert");
-
-    let mut non_insert_trigger = create_trigger.clone();
-    non_insert_trigger.events = non_insert_events;
-
-    Some((insert_trigger, non_insert_trigger))
-}
-
 fn append_translated_create_trigger_statements(
     statements: &mut Vec<Statement>,
-    create_trigger: &CreateTrigger,
+    create_trigger: &sqlparser::ast::CreateTrigger,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<(), Error> {
-    if let Some((maybe_drop_trigger, translated_trigger)) =
-        create_trigger.translate(schema, options)?
-    {
+    for (maybe_drop_trigger, translated_trigger) in create_trigger.translate(schema, options)? {
         if let Some(drop_trigger) = maybe_drop_trigger {
             statements.push(drop_trigger.into());
         }
@@ -374,29 +331,12 @@ impl Translator for Statement {
                 }
 
                 let mut statements = vec![];
-                if let Some((insert_trigger, non_insert_trigger)) =
-                    split_before_insert_maintenance_trigger(create_trigger, schema)
-                {
-                    append_translated_create_trigger_statements(
-                        &mut statements,
-                        &non_insert_trigger,
-                        schema,
-                        options,
-                    )?;
-                    append_translated_create_trigger_statements(
-                        &mut statements,
-                        &insert_trigger,
-                        schema,
-                        options,
-                    )?;
-                } else {
-                    append_translated_create_trigger_statements(
-                        &mut statements,
-                        create_trigger,
-                        schema,
-                        options,
-                    )?;
-                }
+                append_translated_create_trigger_statements(
+                    &mut statements,
+                    create_trigger,
+                    schema,
+                    options,
+                )?;
                 statements
             }
             Self::Insert(insert) => vec![insert.translate(schema, options)?.into()],

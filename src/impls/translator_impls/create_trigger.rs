@@ -185,10 +185,48 @@ fn maintenance_trigger_has_insert_event(events: &[TriggerEvent]) -> bool {
     events.iter().any(|event| matches!(event, TriggerEvent::Insert))
 }
 
+fn split_before_insert_maintenance_trigger(
+    create_trigger: &CreateTrigger,
+    schema: &ParserDB,
+) -> Option<(CreateTrigger, CreateTrigger)> {
+    if !create_trigger.is_maintenance_trigger(schema) {
+        return None;
+    }
+
+    if !matches!(create_trigger.period, Some(TriggerPeriod::Before)) {
+        return None;
+    }
+
+    let has_insert_event =
+        create_trigger.events.iter().any(|event| matches!(event, TriggerEvent::Insert));
+    if !has_insert_event {
+        return None;
+    }
+
+    let non_insert_events = create_trigger
+        .events
+        .iter()
+        .filter(|event| !matches!(event, TriggerEvent::Insert))
+        .cloned()
+        .collect::<Vec<_>>();
+    if non_insert_events.is_empty() {
+        return None;
+    }
+
+    let mut insert_trigger = create_trigger.clone();
+    insert_trigger.events = vec![TriggerEvent::Insert];
+    insert_trigger.name = append_suffix(&create_trigger.name, "_pg2sqlite_insert");
+
+    let mut non_insert_trigger = create_trigger.clone();
+    non_insert_trigger.events = non_insert_events;
+
+    Some((insert_trigger, non_insert_trigger))
+}
+
 impl Translator for CreateTrigger {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Option<(Option<DropTrigger>, Self)>;
+    type SQLiteEntry = Vec<(Option<DropTrigger>, Self)>;
 
     #[allow(clippy::too_many_lines)]
     fn translate(
@@ -196,6 +234,15 @@ impl Translator for CreateTrigger {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        if let Some((insert_trigger, non_insert_trigger)) =
+            split_before_insert_maintenance_trigger(self, schema)
+        {
+            let mut translated = Vec::new();
+            translated.extend(non_insert_trigger.translate(schema, options)?);
+            translated.extend(insert_trigger.translate(schema, options)?);
+            return Ok(translated);
+        }
+
         let CreateTrigger {
             or_alter,
             temporary,
@@ -309,7 +356,7 @@ impl Translator for CreateTrigger {
             )));
         }
 
-        Ok(Some((
+        Ok(vec![(
             maybe_drop_trigger,
             CreateTrigger {
                 or_alter,
@@ -333,7 +380,7 @@ impl Translator for CreateTrigger {
                 statements: Some(ConditionalStatements::BeginEnd(function_body)),
                 characteristics: None,
             },
-        )))
+        )])
     }
 }
 
@@ -386,6 +433,8 @@ mod tests {
         let translated = trigger
             .translate(&schema, &options)
             .expect("trigger translation should succeed")
+            .into_iter()
+            .next()
             .expect("trigger should be translated");
 
         let (_drop_stmt, create_trigger) = translated;
@@ -407,5 +456,50 @@ mod tests {
         let err =
             trigger.translate(&schema, &Pg2SqliteOptions::default()).expect_err("should fail");
         assert!(err.to_string().contains("Trigger function"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn before_insert_or_update_maintenance_trigger_translates_to_two_triggers() {
+        let schema = ParserDB::from_statements(
+            parse_statements(
+                r#"
+                CREATE TABLE brands(id INTEGER PRIMARY KEY, name TEXT, edited_at TEXT);
+                CREATE FUNCTION set_brands_edited_at() RETURNS trigger AS $$
+                BEGIN
+                    NEW.edited_at = CURRENT_TIMESTAMP;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+                "#,
+            ),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+        let trigger = parse_trigger(
+            "CREATE TRIGGER trigger_upsert_brands_edited_at \
+             BEFORE INSERT OR UPDATE ON brands \
+             FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at()",
+        );
+
+        let translated = trigger
+            .translate(&schema, &Pg2SqliteOptions::default())
+            .expect("trigger translation should succeed");
+        assert_eq!(translated.len(), 2, "expected split translation for mixed maintenance trigger");
+
+        let sql = translated
+            .into_iter()
+            .map(|(_, trigger)| trigger.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            sql.contains(
+                "CREATE TRIGGER trigger_upsert_brands_edited_at BEFORE UPDATE OF id, name ON brands"
+            ),
+            "missing BEFORE UPDATE branch: {sql}"
+        );
+        assert!(
+            sql.contains("CREATE TRIGGER trigger_upsert_brands_edited_at_pg2sqlite_insert AFTER INSERT ON brands"),
+            "missing AFTER INSERT branch: {sql}"
+        );
     }
 }

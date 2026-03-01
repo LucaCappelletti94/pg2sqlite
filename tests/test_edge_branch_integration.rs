@@ -240,12 +240,15 @@ fn create_trigger_translation_rejects_unsupported_shapes_and_handles_missing_fun
     );
 
     let ok = base.translate(&schema, &options).expect("translation should succeed");
-    assert!(ok.is_some());
+    assert!(!ok.is_empty(), "expected at least one translated trigger");
 
     let mut with_drop = base.clone();
     with_drop.or_replace = true;
     let translated = with_drop.translate(&schema, &options).expect("translation should succeed");
-    assert!(translated.expect("expected trigger tuple").0.is_some());
+    assert!(
+        translated.iter().any(|(drop, _)| drop.is_some()),
+        "expected at least one DROP TRIGGER emitted for OR REPLACE"
+    );
 
     let missing_body_err =
         base.translate(&schema_without_fn, &options).expect_err("missing function body must error");
