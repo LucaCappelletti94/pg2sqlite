@@ -2,6 +2,7 @@
 //! `Statement` type.
 
 use core::ops::ControlFlow;
+use std::collections::HashSet;
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
@@ -81,23 +82,36 @@ fn check_table_command_for_rls(table: &Table, options: &Pg2SqliteOptions) -> Res
     Ok(())
 }
 
+fn table_command_name(table: &Table) -> Option<&str> {
+    table.table_name.as_deref()
+}
+
 fn ensure_set_expr_supported_for_rls(
     set_expr: &SetExpr,
     options: &Pg2SqliteOptions,
+    cte_scopes: &[HashSet<String>],
 ) -> Result<(), Error> {
     match set_expr {
         SetExpr::SetOperation { left, right, .. } => {
-            ensure_set_expr_supported_for_rls(left, options)?;
-            ensure_set_expr_supported_for_rls(right, options)
+            ensure_set_expr_supported_for_rls(left, options, cte_scopes)?;
+            ensure_set_expr_supported_for_rls(right, options, cte_scopes)
         }
-        SetExpr::Query(query) => ensure_set_expr_supported_for_rls(query.body.as_ref(), options),
-        SetExpr::Table(table) => check_table_command_for_rls(table, options),
+        SetExpr::Table(table) => {
+            if let Some(table_name) = table_command_name(table) {
+                let normalized = strip_identifier_quotes(table_name).to_ascii_lowercase();
+                if cte_scopes.iter().rev().any(|scope| scope.contains(&normalized)) {
+                    return Ok(());
+                }
+            }
+            check_table_command_for_rls(table, options)
+        }
         SetExpr::Merge(_) => {
             Err(Error::UnsupportedSQLiteFeature(
                 "MERGE set expressions are not supported in reverse translation".to_string(),
             ))
         }
-        SetExpr::Select(_)
+        SetExpr::Query(_)
+        | SetExpr::Select(_)
         | SetExpr::Insert(_)
         | SetExpr::Update(_)
         | SetExpr::Delete(_)
@@ -107,19 +121,54 @@ fn ensure_set_expr_supported_for_rls(
 
 struct RlsAstVisitor<'a> {
     options: &'a Pg2SqliteOptions,
+    cte_scopes: Vec<HashSet<String>>,
+}
+
+impl RlsAstVisitor<'_> {
+    fn is_cte_relation(&self, relation: &ObjectName) -> bool {
+        let Some(last) = last_ident(relation) else {
+            return false;
+        };
+        let normalized = strip_identifier_quotes(&last.value).to_ascii_lowercase();
+        self.cte_scopes.iter().rev().any(|scope| scope.contains(&normalized))
+    }
 }
 
 impl Visitor for RlsAstVisitor<'_> {
     type Break = Box<Error>;
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        match ensure_set_expr_supported_for_rls(query.body.as_ref(), self.options) {
+        let current_scope = query
+            .with
+            .as_ref()
+            .map(|with| {
+                with.cte_tables
+                    .iter()
+                    .map(|cte| cte.alias.name.value.to_ascii_lowercase())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        self.cte_scopes.push(current_scope);
+
+        match ensure_set_expr_supported_for_rls(query.body.as_ref(), self.options, &self.cte_scopes)
+        {
             Ok(()) => ControlFlow::Continue(()),
-            Err(err) => ControlFlow::Break(Box::new(err)),
+            Err(err) => {
+                let _ = self.cte_scopes.pop();
+                ControlFlow::Break(Box::new(err))
+            }
         }
     }
 
+    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
+        let _ = self.cte_scopes.pop();
+        ControlFlow::Continue(())
+    }
+
     fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
+        if self.is_cte_relation(relation) {
+            return ControlFlow::Continue(());
+        }
         match check_table_for_rls(relation, self.options) {
             Ok(()) => ControlFlow::Continue(()),
             Err(err) => ControlFlow::Break(Box::new(err)),
@@ -138,7 +187,7 @@ impl Visitor for RlsAstVisitor<'_> {
 }
 
 fn run_rls_visitor<T: Visit>(node: &T, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    let mut visitor = RlsAstVisitor { options };
+    let mut visitor = RlsAstVisitor { options, cte_scopes: Vec::new() };
     match node.visit(&mut visitor) {
         ControlFlow::Continue(()) => Ok(()),
         ControlFlow::Break(err) => Err(*err),
@@ -161,7 +210,7 @@ fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Err
 
 #[cfg(test)]
 fn check_set_expr_for_rls(set_expr: &SetExpr, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    ensure_set_expr_supported_for_rls(set_expr, options)?;
+    ensure_set_expr_supported_for_rls(set_expr, options, &[])?;
     run_rls_visitor(set_expr, options)
 }
 

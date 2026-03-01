@@ -39,6 +39,41 @@ fn rls_table_in_select_produces_error() {
 }
 
 #[test]
+fn cte_alias_with_rls_suffix_is_allowed() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+
+    let result = translator.reverse_sql(
+        "WITH users_rls AS (SELECT id, name FROM users) SELECT * FROM users_rls;",
+        &schema,
+        &options,
+    );
+
+    assert!(result.is_ok(), "CTE aliases ending with _rls should be allowed: {result:?}");
+}
+
+#[test]
+fn cte_alias_with_custom_rls_suffix_is_allowed() {
+    let translator =
+        Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default().with_rls_table_suffix("_backing");
+
+    let result = translator.reverse_sql(
+        "WITH users_backing AS (SELECT id, name FROM users) SELECT * FROM users_backing;",
+        &schema,
+        &options,
+    );
+
+    assert!(
+        result.is_ok(),
+        "CTE aliases ending with custom RLS suffix should be allowed: {result:?}"
+    );
+}
+
+#[test]
 fn rls_table_in_join_produces_error() {
     let translator = Pg2Sqlite::default()
         .sql(
