@@ -8,33 +8,10 @@ use sql_traits::{
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, Expr, ForeignKeyConstraint, GeneratedAs};
 
 use crate::{
-    impls::{
-        function_helpers::{number_literal, simple_function_expr},
-        object_name::{append_suffix, schema_and_table_for_lookup},
-    },
+    impls::object_name::{append_suffix, schema_and_table_for_lookup},
     prelude::{Pg2SqliteOptions, Translator},
-    traits::{TranslationOptions, UuidRepresentation},
+    traits::TranslationOptions,
 };
-
-fn default_uuid_expr_for_sqlite(options: &Pg2SqliteOptions) -> Option<Expr> {
-    // `uuid()` is not built into stock SQLite. When the default UUID function name
-    // is left at its default, prefer SQLite-native expressions for column DEFAULTs.
-    if options.get_uuid_function_name() != "uuid" {
-        return None;
-    }
-
-    match options.get_uuid_representation() {
-        Some(UuidRepresentation::Blob) => {
-            Some(simple_function_expr("randomblob", vec![number_literal("16")], None))
-        }
-        Some(UuidRepresentation::Text) => {
-            let randomblob = simple_function_expr("randomblob", vec![number_literal("16")], None);
-            let hex = simple_function_expr("hex", vec![randomblob], None);
-            Some(simple_function_expr("lower", vec![hex], None))
-        }
-        None => None,
-    }
-}
 
 impl Translator for ColumnOptionDef {
     type Schema = ParserDB;
@@ -87,15 +64,6 @@ impl Translator for ColumnOptionDef {
                             function_name.as_deref(),
                             Some("gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7")
                         ) {
-                            if let Some(default_expr) = default_uuid_expr_for_sqlite(options) {
-                                return Ok(Some(ColumnOptionDef {
-                                    name: self.name.clone(),
-                                    option: ColumnOption::Default(Expr::Nested(Box::new(
-                                        default_expr,
-                                    ))),
-                                }));
-                            }
-
                             let mut new_func = func.clone();
                             new_func.name.0 = vec![sqlparser::ast::ObjectNamePart::Identifier(
                                 sqlparser::ast::Ident::new(options.get_uuid_function_name()),

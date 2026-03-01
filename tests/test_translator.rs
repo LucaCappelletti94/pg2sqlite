@@ -1,12 +1,23 @@
 //! Integration test for translating migrations loaded from a git repository.
 
-use diesel::{Connection, RunQueryDsl, SqliteConnection};
+use diesel::{Connection, RunQueryDsl, SqliteConnection, declare_sql_function};
 use git2::{Repository, Signature};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     traits::{TranslationOptions, UuidRepresentation},
 };
+use rosetta_uuid::Uuid;
 use tempfile::TempDir;
+
+#[declare_sql_function]
+extern "SQL" {
+    /// Generates UUID bytes for translated DEFAULT uuid() execution.
+    fn uuid() -> diesel::sql_types::Binary;
+}
+
+fn uuid_impl() -> Vec<u8> {
+    Uuid::new_v4().as_bytes().to_vec()
+}
 
 fn build_local_migration_repo() -> Result<TempDir, Box<dyn std::error::Error>> {
     let repo_dir = TempDir::new()?;
@@ -86,6 +97,8 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
     diesel::sql_query("PRAGMA journal_mode = WAL")
         .execute(&mut connection)
         .expect("Failed to set journal mode to WAL");
+
+    uuid_utils::register_impl(&connection, uuid_impl).expect("Failed to register uuid()");
 
     // Execute all translated statements and fail fast on runtime incompatibility.
     let number_of_migrations = translated_migrations.len();
