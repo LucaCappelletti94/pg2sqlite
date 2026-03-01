@@ -550,18 +550,61 @@ fn build_concatenation(exprs: Vec<Expr>) -> Option<Expr> {
 }
 
 /// Build a concatenation expression with separator: first || sep || next...
-fn build_concatenation_with_separator(separator: &Expr, first: Expr, remaining: Vec<Expr>) -> Expr {
-    remaining.into_iter().fold(first, |acc, expr| {
+fn build_case_when(condition: Expr, then_expr: Expr, else_expr: Expr) -> Expr {
+    Expr::Case {
+        case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+        end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+        operand: None,
+        conditions: vec![sqlparser::ast::CaseWhen { condition, result: then_expr }],
+        else_result: Some(Box::new(else_expr)),
+    }
+}
+
+fn any_not_null_condition(exprs: &[Expr]) -> Option<Expr> {
+    let mut iter = exprs.iter();
+    let first = iter.next()?.clone();
+    let mut condition = Expr::IsNotNull(Box::new(first));
+    for expr in iter {
+        condition = Expr::BinaryOp {
+            left: Box::new(condition),
+            op: BinaryOperator::Or,
+            right: Box::new(Expr::IsNotNull(Box::new(expr.clone()))),
+        };
+    }
+    Some(condition)
+}
+
+fn build_concat_ws_piece(value: Expr, separator: &Expr, prior_values: &[Expr]) -> Expr {
+    let prefixed_value = if let Some(has_prior_non_null) = any_not_null_condition(prior_values) {
+        let prefix = build_case_when(has_prior_non_null, separator.clone(), string_literal(""));
         Expr::BinaryOp {
-            left: Box::new(Expr::BinaryOp {
-                left: Box::new(acc),
-                op: BinaryOperator::StringConcat,
-                right: Box::new(separator.clone()),
-            }),
+            left: Box::new(prefix),
             op: BinaryOperator::StringConcat,
-            right: Box::new(expr),
+            right: Box::new(value.clone()),
         }
-    })
+    } else {
+        value.clone()
+    };
+
+    // PostgreSQL CONCAT_WS skips NULL values entirely.
+    build_case_when(Expr::IsNull(Box::new(value)), string_literal(""), prefixed_value)
+}
+
+fn build_concat_ws_expression(separator: &Expr, values: Vec<Expr>) -> Option<Expr> {
+    if values.is_empty() {
+        return None;
+    }
+
+    let mut pieces = Vec::with_capacity(values.len());
+    let mut prior_values = Vec::with_capacity(values.len());
+
+    for value in values {
+        let piece = build_concat_ws_piece(value.clone(), separator, &prior_values);
+        pieces.push(piece);
+        prior_values.push(value);
+    }
+
+    build_concatenation(pieces)
 }
 
 /// Wrap an aggregate function argument with CASE WHEN filter THEN value END.
@@ -742,9 +785,8 @@ impl Translator for Function {
                 })
             }
             FunctionTranslation::ToConcatenationWithSeparator => {
-                // CONCAT_WS(sep, a, b, c) -> COALESCE(a, '') || sep || COALESCE(b, '') || sep
-                // || COALESCE(c, '') The separator is not COALESCE-wrapped: if
-                // sep is NULL, the result is NULL.
+                // CONCAT_WS(sep, a, b, c) skips NULL value args and only inserts the
+                // separator between non-NULL values.
                 let mut exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
                     .map(|e| e.translate(schema, options))
@@ -756,9 +798,11 @@ impl Translator for Function {
                     ));
                 }
                 let separator = exprs.remove(0);
-                let first_value = wrap_with_coalesce(exprs.remove(0));
-                let remaining: Vec<Expr> = exprs.into_iter().map(wrap_with_coalesce).collect();
-                Ok(build_concatenation_with_separator(&separator, first_value, remaining))
+                build_concat_ws_expression(&separator, exprs).ok_or_else(|| {
+                    crate::errors::Error::UnsupportedSQLiteFeature(
+                        "CONCAT_WS requires at least one value argument".to_string(),
+                    )
+                })
             }
             FunctionTranslation::DateTrunc => {
                 // date_trunc(field, timestamp) -> strftime(format, timestamp)
@@ -1024,7 +1068,7 @@ mod tests {
     };
 
     use super::{
-        build_concatenation_with_separator, transform_filter_to_case, wrap_arg_with_case_filter,
+        build_concat_ws_expression, transform_filter_to_case, wrap_arg_with_case_filter,
         wrap_with_coalesce,
     };
     use crate::{
@@ -1044,13 +1088,17 @@ mod tests {
     fn helper_functions_cover_none_args_passthrough_and_separator_builder() {
         assert!(function_argument_exprs(&FunctionArguments::None).is_empty());
 
-        let sep = parse_expr("','");
-        let concatenated = build_concatenation_with_separator(
-            &sep,
-            parse_expr("a"),
-            vec![parse_expr("b"), parse_expr("c")],
+        let concatenated = build_concat_ws_expression(
+            &parse_expr("','"),
+            vec![parse_expr("a"), parse_expr("b"), parse_expr("c")],
+        )
+        .expect("concat_ws helper should return expression");
+        let sql = concatenated.to_string();
+        assert!(sql.contains("CASE WHEN"), "expected CASE-based concat_ws expression: {sql}");
+        assert!(
+            sql.contains("||"),
+            "expected concatenation operators in concat_ws expression: {sql}"
         );
-        assert_eq!(concatenated.to_string(), "a || ',' || b || ',' || c");
 
         let wildcard_named = FunctionArg::Named {
             name: Ident::new("value"),
@@ -1114,11 +1162,9 @@ mod tests {
         };
 
         let translated = func.translate(&schema, &options).expect("concat_ws should translate");
-        // With COALESCE wrapping: COALESCE(first_name, '') || ',' ||
-        // COALESCE(last_name, '')
         assert!(
-            translated.to_string().contains("COALESCE"),
-            "concat_ws should wrap values with COALESCE: {}",
+            translated.to_string().contains("CASE WHEN"),
+            "concat_ws should use CASE expressions to skip NULL values: {}",
             translated
         );
         assert!(
