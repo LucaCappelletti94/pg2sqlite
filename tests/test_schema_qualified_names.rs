@@ -81,6 +81,110 @@ fn create_index_schema_qualified_target_is_unqualified() {
 }
 
 #[test]
+fn create_index_schema_qualified_target_works_in_batch_translation() {
+    let output = translated_sql(
+        "
+        CREATE TABLE public.users (id INT PRIMARY KEY, name TEXT);
+        CREATE INDEX idx_users_name ON public.users(name);
+        ",
+    );
+    assert!(
+        output.contains("CREATE INDEX idx_users_name ON users"),
+        "expected schema-qualified index target to translate in batch mode, got: {output}"
+    );
+}
+
+#[test]
+fn create_trigger_schema_qualified_target_works_in_batch_translation() {
+    let output = translated_sql(
+        "
+        CREATE TABLE public.docs (id INT PRIMARY KEY, name TEXT);
+        CREATE FUNCTION docs_trigger_fn() RETURNS trigger AS $$
+        BEGIN
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER docs_ai
+        AFTER INSERT ON public.docs
+        FOR EACH ROW
+        EXECUTE FUNCTION docs_trigger_fn();
+        ",
+    );
+    assert!(
+        output.contains("CREATE TRIGGER docs_ai"),
+        "expected schema-qualified trigger target to translate in batch mode, got: {output}"
+    );
+}
+
+#[test]
+fn non_public_schema_qualified_index_target_is_rejected() {
+    let err = Pg2Sqlite::default()
+        .sql(
+            "
+            CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+            CREATE INDEX idx_users_name ON my_custom_app.users(name);
+            ",
+        )
+        .expect("sql should parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("non-public schema-qualified index target should be rejected");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Only unqualified names and public.<table> names are supported"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn non_public_schema_qualified_trigger_target_is_rejected() {
+    let err = Pg2Sqlite::default()
+        .sql(
+            "
+            CREATE TABLE docs (id INT PRIMARY KEY, name TEXT);
+            CREATE FUNCTION docs_trigger_fn() RETURNS trigger AS $$
+            BEGIN
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            CREATE TRIGGER docs_ai
+            AFTER INSERT ON my_custom_app.docs
+            FOR EACH ROW
+            EXECUTE FUNCTION docs_trigger_fn();
+            ",
+        )
+        .expect("sql should parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("non-public schema-qualified trigger target should be rejected");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Only unqualified names and public.<table> names are supported"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn three_part_index_target_is_rejected() {
+    let err = Pg2Sqlite::default()
+        .sql(
+            "
+            CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+            CREATE INDEX idx_users_name ON catalog.public.users(name);
+            ",
+        )
+        .expect("sql should parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("three-part index target should be rejected");
+
+    let message = err.to_string();
+    assert!(
+        message.to_lowercase().contains("object names with more than two parts"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
 fn drop_schema_qualified_object_names_are_unqualified() {
     let output = translated_sql(
         "
