@@ -3,7 +3,7 @@
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{ColumnLike, DatabaseLike, TableLike},
+    traits::{ColumnLike, TableLike},
 };
 use sqlparser::ast::{CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement};
 
@@ -12,8 +12,8 @@ use crate::{
     impls::{
         generated_sql::parse_generated_sql,
         object_name::{
-            last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
-            schema_and_table_for_lookup, sqlite_unqualified_object_name,
+            normalize_implicit_public_object_name, prefixed_quoted_identifier, quote_identifier,
+            quoted_ident, sqlite_unqualified_object_name, table_with_implicit_public_lookup,
         },
         shared_helpers::function_argument_exprs,
         translator_impls::rls::resolve_trigger_table_name,
@@ -230,12 +230,8 @@ fn create_fts5_statements(
         .and_then(|p| p.as_ident())
         .map_or_else(|| "unknown".to_string(), |i| i.value.clone());
 
-    let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(table_name);
-    let table_name_for_lookup = table_name_for_lookup
-        .unwrap_or_else(|| last_ident(table_name).map_or("unknown", |ident| ident.value.as_str()));
-
     // Look up the table to get its primary key column
-    let table = schema.table(table_schema, table_name_for_lookup).ok_or_else(|| {
+    let table = table_with_implicit_public_lookup(schema, table_name)?.ok_or_else(|| {
         Error::UnsupportedSQLiteFeature(format!(
             "Could not find table '{base_name}' in schema for FTS5 index creation"
         ))
@@ -317,6 +313,8 @@ impl Translator for CreateIndex {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        let normalized_table_name = normalize_implicit_public_object_name(&self.table_name)?;
+
         // Handle GIN/GiST indices - may translate to FTS5 for full-text search
         // Both GIN and GiST can be used with to_tsvector() in PostgreSQL
         if matches!(self.using, Some(IndexType::GIN | IndexType::GiST)) {
@@ -328,7 +326,10 @@ impl Translator for CreateIndex {
                 .map(|p| p.translate(schema, options).map(|e| e.to_string()))
                 .transpose()?;
 
-            return match analyze_fts_index(self) {
+            let mut normalized_index = self.clone();
+            normalized_index.table_name = normalized_table_name.clone();
+
+            return match analyze_fts_index(&normalized_index) {
                 FtsTranslation::Fts5 { table_name, columns } => {
                     create_fts5_statements(
                         &table_name,
@@ -347,7 +348,7 @@ impl Translator for CreateIndex {
         // alter_options) that are not valid in SQLite.
         Ok(vec![Statement::CreateIndex(CreateIndex {
             name: self.name.clone(),
-            table_name: sqlite_unqualified_object_name(&self.table_name),
+            table_name: sqlite_unqualified_object_name(&normalized_table_name),
             using: None,
             columns: self
                 .columns

@@ -16,7 +16,10 @@ use sqlparser::{
 };
 
 use crate::{
-    impls::object_name::{append_suffix, schema_and_table_for_lookup},
+    impls::object_name::{
+        append_suffix, normalize_implicit_public_object_name_for_schema,
+        schema_and_table_for_lookup,
+    },
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
 };
@@ -234,14 +237,20 @@ impl Translator for CreateTrigger {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        let mut normalized_trigger = self.clone();
+        normalized_trigger.table_name =
+            normalize_implicit_public_object_name_for_schema(schema, &self.table_name)?;
+
         if let Some((insert_trigger, non_insert_trigger)) =
-            split_before_insert_maintenance_trigger(self, schema)
+            split_before_insert_maintenance_trigger(&normalized_trigger, schema)
         {
             let mut translated = Vec::new();
             translated.extend(non_insert_trigger.translate(schema, options)?);
             translated.extend(insert_trigger.translate(schema, options)?);
             return Ok(translated);
         }
+
+        let trigger_for_helpers = normalized_trigger.clone();
 
         let CreateTrigger {
             or_alter,
@@ -261,7 +270,7 @@ impl Translator for CreateTrigger {
             exec_body,
             statements,
             characteristics,
-        } = self.clone();
+        } = normalized_trigger;
 
         if let Some(statements) = statements {
             return Err(crate::errors::Error::UnknownPostgresFeature(format!(
@@ -282,9 +291,9 @@ impl Translator for CreateTrigger {
         }
 
         let mut period = period;
-        let is_maintenance_trigger = self.is_maintenance_trigger(schema);
+        let is_maintenance_trigger = trigger_for_helpers.is_maintenance_trigger(schema);
         let events = if is_maintenance_trigger {
-            rewrite_maintenance_update_events(self, events, schema)
+            rewrite_maintenance_update_events(&trigger_for_helpers, events, schema)
         } else {
             events
         };
@@ -318,7 +327,12 @@ impl Translator for CreateTrigger {
 
         let function_body = if is_maintenance_trigger {
             let row_context = if maintenance_insert_event { "NEW" } else { "OLD" };
-            generate_maintenance_trigger_body(self, &redirected_table_name, row_context, schema)
+            generate_maintenance_trigger_body(
+                &trigger_for_helpers,
+                &redirected_table_name,
+                row_context,
+                schema,
+            )
         } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
             body
         } else {

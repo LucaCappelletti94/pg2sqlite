@@ -1,6 +1,9 @@
 //! Helpers for structured [`sqlparser::ast::ObjectName`] manipulation.
 
+use sql_traits::{structs::ParserDB, traits::DatabaseLike};
 use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+
+use crate::errors::Error;
 
 /// Returns the last identifier segment of an object name.
 pub(crate) fn last_ident(name: &ObjectName) -> Option<&Ident> {
@@ -41,6 +44,145 @@ pub(crate) fn schema_and_table_for_lookup(name: &ObjectName) -> (Option<&str>, O
     }
 }
 
+fn unsupported_schema_qualification(name: &ObjectName, reason: &str) -> Error {
+    Error::UnsupportedSchemaQualification {
+        object_name: name.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+fn implicit_public_lookup_parts(
+    name: &ObjectName,
+) -> Result<(Option<&str>, Option<&str>, &str), Error> {
+    match name.0.as_slice() {
+        [table] => {
+            let table = table.as_ident().map(|ident| ident.value.as_str()).ok_or_else(|| {
+                unsupported_schema_qualification(
+                    name,
+                    "object name must contain identifier segments",
+                )
+            })?;
+            Ok((None, Some("public"), table))
+        }
+        [schema, table] => {
+            let schema_ident = schema.as_ident().ok_or_else(|| {
+                unsupported_schema_qualification(name, "schema segment must be an identifier")
+            })?;
+            if !schema_ident.value.eq_ignore_ascii_case("public") {
+                return Err(unsupported_schema_qualification(
+                    name,
+                    "schema must be omitted or set to public",
+                ));
+            }
+            let table = table.as_ident().map(|ident| ident.value.as_str()).ok_or_else(|| {
+                unsupported_schema_qualification(name, "table segment must be an identifier")
+            })?;
+            Ok((Some("public"), None, table))
+        }
+        _ => {
+            Err(unsupported_schema_qualification(
+                name,
+                "object names with more than two parts are not supported",
+            ))
+        }
+    }
+}
+
+fn object_name_from_schema_and_table_part(
+    schema: Option<&str>,
+    table_part: ObjectNamePart,
+) -> ObjectName {
+    match schema {
+        Some(schema) => {
+            ObjectName(vec![ObjectNamePart::Identifier(Ident::new(schema)), table_part])
+        }
+        None => ObjectName(vec![table_part]),
+    }
+}
+
+/// Returns an unqualified object name under the crate's implicit-public policy.
+pub(crate) fn normalize_implicit_public_object_name(
+    name: &ObjectName,
+) -> Result<ObjectName, Error> {
+    match name.0.as_slice() {
+        [table] => {
+            let _ = table.as_ident().ok_or_else(|| {
+                unsupported_schema_qualification(name, "table segment must be an identifier")
+            })?;
+            Ok(ObjectName(vec![table.clone()]))
+        }
+        [schema, table] => {
+            let schema_ident = schema.as_ident().ok_or_else(|| {
+                unsupported_schema_qualification(name, "schema segment must be an identifier")
+            })?;
+            if !schema_ident.value.eq_ignore_ascii_case("public") {
+                return Err(unsupported_schema_qualification(
+                    name,
+                    "schema must be omitted or set to public",
+                ));
+            }
+            let _ = table.as_ident().ok_or_else(|| {
+                unsupported_schema_qualification(name, "table segment must be an identifier")
+            })?;
+            Ok(ObjectName(vec![table.clone()]))
+        }
+        _ => {
+            Err(unsupported_schema_qualification(
+                name,
+                "object names with more than two parts are not supported",
+            ))
+        }
+    }
+}
+
+/// Returns a canonical object name for schema-sensitive operations by choosing
+/// the first schema variant that exists in `schema`.
+pub(crate) fn normalize_implicit_public_object_name_for_schema(
+    schema: &ParserDB,
+    name: &ObjectName,
+) -> Result<ObjectName, Error> {
+    let (primary_schema, fallback_schema, table_name) = implicit_public_lookup_parts(name)?;
+    let table_part = match name.0.as_slice() {
+        [table] | [_, table] => table.clone(),
+        _ => {
+            return Err(unsupported_schema_qualification(
+                name,
+                "object names with more than two parts are not supported",
+            ));
+        }
+    };
+
+    if schema.table(primary_schema, table_name).is_some() {
+        return Ok(object_name_from_schema_and_table_part(primary_schema, table_part.clone()));
+    }
+    if schema.table(fallback_schema, table_name).is_some() {
+        return Ok(object_name_from_schema_and_table_part(fallback_schema, table_part.clone()));
+    }
+
+    Ok(object_name_from_schema_and_table_part(primary_schema, table_part))
+}
+
+/// Looks up a table under the crate's implicit-public policy.
+///
+/// For `table`, lookup order is: `None`, then `"public"`.
+/// For `public.table`, lookup order is: `"public"`, then `None`.
+pub(crate) fn table_with_implicit_public_lookup<'a>(
+    schema: &'a ParserDB,
+    name: &ObjectName,
+) -> Result<Option<&'a <ParserDB as DatabaseLike>::Table>, Error> {
+    let (primary_schema, fallback_schema, table_name) = implicit_public_lookup_parts(name)?;
+
+    if let Some(table) = schema.table(primary_schema, table_name) {
+        return Ok(Some(table));
+    }
+
+    if let Some(table) = schema.table(fallback_schema, table_name) {
+        return Ok(Some(table));
+    }
+
+    Ok(None)
+}
+
 /// Quotes an SQL identifier with double quotes, escaping interior quotes.
 #[must_use]
 pub(crate) fn quote_identifier(name: &str) -> String {
@@ -69,11 +211,18 @@ pub(crate) fn quoted_ident(name: &str) -> Ident {
 
 #[cfg(test)]
 mod tests {
-    use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{Ident, ObjectName, ObjectNamePart},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
 
     use super::{
-        append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
-        schema_and_table_for_lookup, sqlite_unqualified_object_name,
+        append_suffix, last_ident, normalize_implicit_public_object_name,
+        normalize_implicit_public_object_name_for_schema, prefixed_quoted_identifier,
+        quote_identifier, quoted_ident, schema_and_table_for_lookup,
+        sqlite_unqualified_object_name, table_with_implicit_public_lookup,
     };
 
     fn name(parts: &[&str]) -> ObjectName {
@@ -125,6 +274,75 @@ mod tests {
         assert_eq!(
             sqlite_unqualified_object_name(&name(&["catalog", "public", "users"])).to_string(),
             "users"
+        );
+    }
+
+    #[test]
+    fn implicit_public_lookup_accepts_unqualified_and_public_names() {
+        assert_eq!(
+            normalize_implicit_public_object_name(&name(&["users"])).unwrap().to_string(),
+            "users"
+        );
+        assert_eq!(
+            normalize_implicit_public_object_name(&name(&["public", "users"])).unwrap().to_string(),
+            "users"
+        );
+    }
+
+    #[test]
+    fn implicit_public_lookup_rejects_non_public_and_three_part_names() {
+        let err = normalize_implicit_public_object_name(&name(&["app", "users"])).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Only unqualified names and public.<table> names are supported")
+        );
+
+        let err = normalize_implicit_public_object_name(&name(&["catalog", "public", "users"]))
+            .unwrap_err();
+        assert!(err.to_string().contains("object names with more than two parts"));
+    }
+
+    #[test]
+    fn implicit_public_lookup_resolves_public_and_unqualified_tables() {
+        let unqualified_schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE users(id INT PRIMARY KEY);")
+                .unwrap(),
+            "test".to_string(),
+        )
+        .unwrap();
+        assert!(
+            table_with_implicit_public_lookup(&unqualified_schema, &name(&["users"]))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            table_with_implicit_public_lookup(&unqualified_schema, &name(&["public", "users"]))
+                .unwrap()
+                .is_some()
+        );
+
+        let public_schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                "CREATE TABLE public.users(id INT PRIMARY KEY);",
+            )
+            .unwrap(),
+            "test".to_string(),
+        )
+        .unwrap();
+        assert!(
+            table_with_implicit_public_lookup(&public_schema, &name(&["users"])).unwrap().is_some()
+        );
+        assert!(
+            table_with_implicit_public_lookup(&public_schema, &name(&["public", "users"]))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            normalize_implicit_public_object_name_for_schema(&public_schema, &name(&["users"]))
+                .unwrap()
+                .to_string(),
+            "public.users"
         );
     }
 }

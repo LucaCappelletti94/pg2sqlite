@@ -10,7 +10,7 @@ use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement, UnaryOperator}
 use crate::{
     errors::Error,
     impls::{
-        object_name::{schema_and_table_for_lookup, sqlite_unqualified_object_name},
+        object_name::{sqlite_unqualified_object_name, table_with_implicit_public_lookup},
         translator_impls::{
             condition_injection::inject_condition_into_dml_statement,
             rls::{
@@ -291,18 +291,20 @@ fn role_access_for_object_name(
     table_name: &sqlparser::ast::ObjectName,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
-) -> RoleTableAccess {
+) -> Result<RoleTableAccess, Error> {
     let Some(role) = resolve_session_role(schema, options) else {
-        return RoleTableAccess::Allow;
+        return Ok(RoleTableAccess::Allow);
     };
 
-    let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(table_name);
-    let Some(table_name_for_lookup) = table_name_for_lookup else { return RoleTableAccess::Deny };
-    let Some(table) = schema.table(table_schema, table_name_for_lookup) else {
-        return RoleTableAccess::Deny;
+    let Some(table) = table_with_implicit_public_lookup(schema, table_name)? else {
+        return Ok(RoleTableAccess::Deny);
     };
 
-    if table.can_select(role, schema) { RoleTableAccess::Allow } else { RoleTableAccess::Deny }
+    if table.can_select(role, schema) {
+        Ok(RoleTableAccess::Allow)
+    } else {
+        Ok(RoleTableAccess::Deny)
+    }
 }
 
 impl Translator for Statement {
@@ -321,7 +323,7 @@ impl Translator for Statement {
                 translate_create_table(create_table, schema, options)?
             }
             Self::CreateIndex(create_index) => {
-                match role_access_for_object_name(&create_index.table_name, schema, options) {
+                match role_access_for_object_name(&create_index.table_name, schema, options)? {
                     RoleTableAccess::Allow => create_index.translate(schema, options)?,
                     RoleTableAccess::Deny => Vec::new(),
                 }
@@ -329,7 +331,7 @@ impl Translator for Statement {
 
             Self::CreateTrigger(create_trigger) => {
                 if let RoleTableAccess::Deny =
-                    role_access_for_object_name(&create_trigger.table_name, schema, options)
+                    role_access_for_object_name(&create_trigger.table_name, schema, options)?
                 {
                     return Ok(Vec::new());
                 }
@@ -862,6 +864,67 @@ mod tests {
         assert!(
             !translated_trigger.is_empty(),
             "unknown role should not filter CREATE TRIGGER statements"
+        );
+    }
+
+    #[test]
+    fn role_filtered_create_index_with_public_schema_is_allowed_when_selectable() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                r#"
+                CREATE ROLE app_user;
+                CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
+                GRANT SELECT ON docs TO app_user;
+                "#,
+            )
+            .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let index_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "CREATE INDEX docs_title_idx ON public.docs(title);",
+        )
+        .expect("index SQL should parse")
+        .remove(0);
+
+        let translated =
+            index_stmt.translate(&schema, &options).expect("translation should succeed");
+        assert!(!translated.is_empty(), "public-qualified table should be considered selectable");
+    }
+
+    #[test]
+    fn role_filtered_create_index_with_non_public_schema_errors() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                r#"
+                CREATE ROLE app_user;
+                CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
+                GRANT SELECT ON docs TO app_user;
+                "#,
+            )
+            .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let index_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "CREATE INDEX docs_title_idx ON my_custom_app.docs(title);",
+        )
+        .expect("index SQL should parse")
+        .remove(0);
+
+        let err = index_stmt.translate(&schema, &options).expect_err("translation should fail");
+        assert!(
+            err.to_string()
+                .contains("Only unqualified names and public.<table> names are supported"),
+            "unexpected error: {err}"
         );
     }
 }

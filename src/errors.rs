@@ -144,4 +144,15 @@ pub enum Error {
         /// The path that was not found.
         path: String,
     },
+    /// Error when an object name uses unsupported schema qualification.
+    #[error(
+        "Unsupported schema-qualified object name '{object_name}': {reason}. \
+         Only unqualified names and public.<table> names are supported."
+    )]
+    UnsupportedSchemaQualification {
+        /// The original object name.
+        object_name: String,
+        /// Reason why this qualification is unsupported.
+        reason: String,
+    },
 }
