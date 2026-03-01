@@ -308,7 +308,7 @@ fn role_access_for_object_name(
     };
 
     let Some(table) = table_with_implicit_public_lookup(schema, table_name)? else {
-        return Ok(RoleTableAccess::Deny);
+        return Err(Error::TableNotFoundInSchema { table_name: table_name.to_string() });
     };
 
     if table.can_select(role, schema) {
@@ -805,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn role_filtered_create_index_is_skipped_when_table_lookup_fails() {
+    fn role_filtered_create_index_errors_when_table_lookup_fails() {
         let schema = ParserDB::from_statements(
             Parser::parse_sql(&PostgreSqlDialect {}, "CREATE ROLE app_user;")
                 .expect("schema SQL should parse"),
@@ -821,9 +821,35 @@ mod tests {
         .expect("index SQL should parse")
         .remove(0);
 
-        let translated =
-            index_stmt.translate(&schema, &options).expect("translation should not error");
-        assert!(translated.is_empty(), "missing table should be treated as non-selectable");
+        let err = index_stmt.translate(&schema, &options).expect_err("translation should fail");
+        assert!(
+            matches!(&err, crate::errors::Error::TableNotFoundInSchema { table_name } if table_name == "missing_docs"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn role_filtered_create_trigger_errors_when_table_lookup_fails() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE ROLE app_user;")
+                .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let trigger_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "CREATE TRIGGER missing_docs_ai AFTER INSERT ON missing_docs FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn();",
+        )
+        .expect("trigger SQL should parse")
+        .remove(0);
+
+        let err = trigger_stmt.translate(&schema, &options).expect_err("translation should fail");
+        assert!(
+            matches!(&err, crate::errors::Error::TableNotFoundInSchema { table_name } if table_name == "missing_docs"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
