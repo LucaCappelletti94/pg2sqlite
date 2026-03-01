@@ -270,7 +270,7 @@ fn translate_function(
             FunctionTranslation::Unsupported(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
         }
         // random(): PG returns [0.0, 1.0) float; SQLite returns signed 64-bit int.
-        // Map to ABS(random()) / 9223372036854775807.0 → [0.0, 1.0].
+        // Map to (CAST(random() AS REAL) + 2^63) / 2^64 → [0.0, 1.0) without ABS overflow.
         "random" => FunctionTranslation::ToRandomFloat,
         // left(s, n) -> substr(s, 1, n)
         "left" => FunctionTranslation::ToSubstrLeft,
@@ -910,13 +910,26 @@ impl Translator for Function {
                 Ok(build_strftime_call(&mapped_format, translated_ts, translated_over))
             }
             FunctionTranslation::ToRandomFloat => {
-                // random() → ABS(random()) / 9223372036854775807.0
+                // random() -> (CAST(random() AS REAL) + 9223372036854775808.0) /
+                // 18446744073709551616.0 This avoids ABS(-9223372036854775808)
+                // overflow in SQLite.
                 let random_call = simple_function_expr("random", vec![], None);
-                let abs_call = simple_function_expr("ABS", vec![random_call], None);
+                let random_as_real = Expr::Cast {
+                    expr: Box::new(random_call),
+                    data_type: DataType::Real,
+                    format: None,
+                    kind: CastKind::Cast,
+                    array: false,
+                };
+                let shifted = Expr::BinaryOp {
+                    left: Box::new(random_as_real),
+                    op: BinaryOperator::Plus,
+                    right: Box::new(number_literal("9223372036854775808.0")),
+                };
                 Ok(Expr::BinaryOp {
-                    left: Box::new(abs_call),
+                    left: Box::new(Expr::Nested(Box::new(shifted))),
                     op: BinaryOperator::Divide,
-                    right: Box::new(number_literal("9223372036854775807.0")),
+                    right: Box::new(number_literal("18446744073709551616.0")),
                 })
             }
             FunctionTranslation::ToSubstrLeft => {
