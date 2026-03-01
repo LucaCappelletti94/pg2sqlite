@@ -598,23 +598,21 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transforms a CTE query (used in WITH clauses).
-    fn transform_cte_query(
+    /// Applies the standard query-expression rewrites used by both CTE and
+    /// subquery transformation paths.
+    fn transform_query_expressions(
         query: &mut Query,
         context: &mut PlPgSqlContext,
         options: &Pg2SqliteOptions,
     ) {
-        // Transform the body
         if let Ok(transformed_body) = Self::transform_query_body(&query.body, context, options) {
             *query.body = transformed_body;
         }
-        // Transform WITH clause CTEs recursively
         if let Some(with) = &mut query.with {
             for cte in &mut with.cte_tables {
                 Self::transform_cte_query(&mut cte.query, context, options);
             }
         }
-        // Transform ORDER BY expressions
         if let Some(order_by) = &mut query.order_by
             && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
         {
@@ -622,7 +620,6 @@ impl PlPgSqlTranslator {
                 Self::transform_expr(&mut ob.expr, context, options);
             }
         }
-        // Transform LIMIT clause expressions
         if let Some(sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by }) =
             &mut query.limit_clause
         {
@@ -636,12 +633,20 @@ impl PlPgSqlTranslator {
                 Self::transform_expr(expr, context, options);
             }
         }
-        // Transform FETCH clause
         if let Some(fetch) = &mut query.fetch
             && let Some(expr) = &mut fetch.quantity
         {
             Self::transform_expr(expr, context, options);
         }
+    }
+
+    /// Transforms a CTE query (used in WITH clauses).
+    fn transform_cte_query(
+        query: &mut Query,
+        context: &mut PlPgSqlContext,
+        options: &Pg2SqliteOptions,
+    ) {
+        Self::transform_query_expressions(query, context, options);
     }
 
     /// Transforms an INSERT statement for SQLite compatibility.
@@ -873,27 +878,13 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transform a subquery's body, CTEs, and ORDER BY expressions.
+    /// Transform a subquery's body and query-level expressions.
     fn transform_subquery(
         subquery: &mut Query,
         context: &mut PlPgSqlContext,
         options: &Pg2SqliteOptions,
     ) {
-        if let Ok(transformed) = Self::transform_query_body(&subquery.body, context, options) {
-            *subquery.body = transformed;
-        }
-        if let Some(with) = &mut subquery.with {
-            for cte in &mut with.cte_tables {
-                Self::transform_cte_query(&mut cte.query, context, options);
-            }
-        }
-        if let Some(order_by) = &mut subquery.order_by
-            && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
-        {
-            for ob in exprs {
-                Self::transform_expr(&mut ob.expr, context, options);
-            }
-        }
+        Self::transform_query_expressions(subquery, context, options);
     }
 
     /// Translates an INSERT statement with CTE injection for variables.
@@ -2185,6 +2176,62 @@ mod tests {
         }));
         PlPgSqlTranslator::transform_set_expr(&mut table_set_expr, &mut ctx, &options);
         assert!(matches!(table_set_expr, SetExpr::Table(_)));
+    }
+
+    #[test]
+    fn transform_subquery_matches_cte_query_for_limit_expression() {
+        let options =
+            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string());
+        let mut cte_ctx = PlPgSqlContext::new();
+        let mut subquery_ctx = PlPgSqlContext::new();
+
+        let query =
+            parse_query("SELECT id FROM teams ORDER BY id LIMIT gen_random_uuid() + uuidv4()");
+        let mut cte_query = query.clone();
+        let mut subquery = query;
+
+        PlPgSqlTranslator::transform_cte_query(&mut cte_query, &mut cte_ctx, &options);
+        PlPgSqlTranslator::transform_subquery(&mut subquery, &mut subquery_ctx, &options);
+
+        assert_eq!(
+            subquery.to_string(),
+            cte_query.to_string(),
+            "subquery transform should stay in parity with cte query transform"
+        );
+        assert!(
+            subquery.to_string().contains("sqlite_uuid()"),
+            "LIMIT expressions inside subqueries should be transformed: {subquery}"
+        );
+    }
+
+    #[test]
+    fn transform_subquery_matches_cte_query_for_fetch_expression() {
+        let options =
+            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string());
+        let mut cte_ctx = PlPgSqlContext::new();
+        let mut subquery_ctx = PlPgSqlContext::new();
+
+        let mut query = parse_query("SELECT id FROM teams ORDER BY id");
+        query.fetch = Some(sqlparser::ast::Fetch {
+            with_ties: false,
+            percent: false,
+            quantity: Some(parse_expr("gen_random_uuid() + uuidv4()")),
+        });
+        let mut cte_query = query.clone();
+        let mut subquery = query;
+
+        PlPgSqlTranslator::transform_cte_query(&mut cte_query, &mut cte_ctx, &options);
+        PlPgSqlTranslator::transform_subquery(&mut subquery, &mut subquery_ctx, &options);
+
+        assert_eq!(
+            subquery.to_string(),
+            cte_query.to_string(),
+            "subquery transform should stay in parity with cte query transform"
+        );
+        assert!(
+            subquery.to_string().contains("sqlite_uuid()"),
+            "FETCH quantity inside subqueries should be transformed: {subquery}"
+        );
     }
 
     #[test]
