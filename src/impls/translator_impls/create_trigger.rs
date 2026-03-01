@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, TableLike, TriggerLike},
@@ -6,7 +8,7 @@ use sqlparser::{
     ast::{
         Assignment, AssignmentTarget, BinaryOperator, ConditionalStatements, CreateTrigger,
         DropTrigger, Expr, Ident, ObjectName, ObjectNamePart, Statement, TableFactor,
-        TableWithJoins, TriggerExecBodyType, TriggerPeriod, Update,
+        TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerPeriod, Update,
         helpers::attached_token::AttachedToken,
     },
     keywords::Keyword,
@@ -103,6 +105,78 @@ fn generate_standard_trigger_body(
     }
 }
 
+fn collect_non_maintenance_update_columns(
+    trigger: &CreateTrigger,
+    schema: &ParserDB,
+    maintenance_columns: &HashSet<String>,
+) -> Vec<Ident> {
+    let (table_schema, table_name_part) = schema_and_table_for_lookup(&trigger.table_name);
+    let Some(table_name_part) = table_name_part else {
+        return vec![];
+    };
+
+    let Some(table) = schema.table(table_schema, table_name_part) else {
+        return vec![];
+    };
+
+    table
+        .columns(schema)
+        .filter_map(|column| {
+            let name = column.column_name();
+            (!maintenance_columns.contains(&name.to_lowercase())).then(|| Ident::new(name))
+        })
+        .collect()
+}
+
+fn rewrite_maintenance_update_events(
+    trigger: &CreateTrigger,
+    events: Vec<TriggerEvent>,
+    schema: &ParserDB,
+) -> Vec<TriggerEvent> {
+    let maintenance_columns = trigger
+        .maintenance_assignments(schema)
+        .map(|(column, _)| column.column_name().to_lowercase())
+        .collect::<HashSet<_>>();
+
+    if maintenance_columns.is_empty() {
+        return events;
+    }
+
+    let non_maintenance_columns =
+        collect_non_maintenance_update_columns(trigger, schema, &maintenance_columns);
+
+    events
+        .into_iter()
+        .map(|event| {
+            match event {
+                TriggerEvent::Update(columns) if columns.is_empty() => {
+                    if non_maintenance_columns.is_empty() {
+                        TriggerEvent::Update(columns)
+                    } else {
+                        TriggerEvent::Update(non_maintenance_columns.clone())
+                    }
+                }
+                TriggerEvent::Update(columns) => {
+                    let filtered_columns = columns
+                        .iter()
+                        .filter(|column| {
+                            !maintenance_columns.contains(&column.value.to_lowercase())
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+
+                    if filtered_columns.is_empty() {
+                        TriggerEvent::Update(columns)
+                    } else {
+                        TriggerEvent::Update(filtered_columns)
+                    }
+                }
+                other => other,
+            }
+        })
+        .collect()
+}
+
 impl Translator for CreateTrigger {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -152,6 +226,13 @@ impl Translator for CreateTrigger {
             )));
         }
 
+        let is_maintenance_trigger = self.is_maintenance_trigger(schema);
+        let events = if is_maintenance_trigger {
+            rewrite_maintenance_update_events(self, events, schema)
+        } else {
+            events
+        };
+
         // For BEFORE/AFTER triggers on RLS-protected tables, redirect to the underlying
         // _rls table. INSTEAD OF triggers are used on the view, but
         // BEFORE/AFTER triggers must target the actual table (which has been
@@ -171,7 +252,7 @@ impl Translator for CreateTrigger {
                 table_name.clone()
             };
 
-        let function_body = if self.is_maintenance_trigger(schema) {
+        let function_body = if is_maintenance_trigger {
             generate_maintenance_trigger_body(self, &redirected_table_name, schema)
         } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
             body
