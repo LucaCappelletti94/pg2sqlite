@@ -1,10 +1,12 @@
 //! Test for maintenance trigger translation.
 
-use diesel::{Connection, RunQueryDsl, SqliteConnection, prelude::*};
+use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection, prelude::*};
 use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
+    prelude::{Pg2Sqlite, Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
 };
+use sql_traits::structs::ParserDB;
+use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
 // Schema definitions for test tables
 diesel::table! {
@@ -43,6 +45,41 @@ struct NewBrand {
     name: String,
     /// Timestamp of last edit.
     edited_at: Option<String>,
+}
+
+#[derive(QueryableByName)]
+struct TriggerDefinition {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    sql: String,
+}
+
+fn translate_with_direct_create_trigger_path(
+    sql: &str,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<Statement>, Box<dyn std::error::Error>> {
+    let pg_statements = Parser::parse_sql(&PostgreSqlDialect {}, sql)?;
+    let schema = ParserDB::from_statements(pg_statements.clone(), "test".to_string())?;
+    let mut translated = Vec::new();
+
+    for statement in pg_statements {
+        match statement {
+            Statement::CreateTrigger(create_trigger) => {
+                for (maybe_drop, translated_trigger) in
+                    create_trigger.translate(&schema, options)?
+                {
+                    if let Some(drop_trigger) = maybe_drop {
+                        translated.push(Statement::DropTrigger(drop_trigger));
+                    }
+                    translated.push(Statement::CreateTrigger(translated_trigger));
+                }
+            }
+            other => translated.extend(other.translate(&schema, options)?),
+        }
+    }
+
+    Ok(translated)
 }
 
 #[test]
@@ -306,6 +343,73 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
         updated.edited_at.as_deref(),
         Some("manual"),
         "UPDATE branch should exclude maintenance column to avoid self-recursion"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_direct_create_trigger_translation_before_insert_or_update_splits_trigger()
+-> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+CREATE TABLE brands (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    edited_at TEXT
+);
+
+CREATE OR REPLACE FUNCTION set_brands_edited_at() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.edited_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_upsert_brands_edited_at
+BEFORE INSERT OR UPDATE ON brands
+FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
+";
+
+    let translated = translate_with_direct_create_trigger_path(sql, &Pg2SqliteOptions::default())?;
+
+    let mut connection = SqliteConnection::establish(":memory:")?;
+    diesel::sql_query("PRAGMA foreign_keys = ON").execute(&mut connection)?;
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut connection)?;
+
+    for stmt in translated {
+        diesel::sql_query(stmt.to_string()).execute(&mut connection)?;
+    }
+
+    let trigger_definitions: Vec<TriggerDefinition> = diesel::sql_query(
+        "SELECT name, sql FROM sqlite_master \
+         WHERE type = 'trigger' AND name LIKE 'trigger_upsert_brands_edited_at%' ORDER BY name",
+    )
+    .load(&mut connection)?;
+
+    assert_eq!(
+        trigger_definitions.len(),
+        2,
+        "direct CreateTrigger translation should create distinct INSERT and UPDATE triggers"
+    );
+
+    let update_trigger = trigger_definitions
+        .iter()
+        .find(|trigger| trigger.name == "trigger_upsert_brands_edited_at")
+        .expect("translated BEFORE UPDATE trigger should exist");
+    assert!(
+        update_trigger.sql.contains("BEFORE UPDATE OF id, name ON brands"),
+        "maintenance update branch should remain BEFORE UPDATE: {}",
+        update_trigger.sql
+    );
+
+    let insert_trigger = trigger_definitions
+        .iter()
+        .find(|trigger| trigger.name == "trigger_upsert_brands_edited_at_pg2sqlite_insert")
+        .expect("translated AFTER INSERT trigger should exist");
+    assert!(
+        insert_trigger.sql.contains("AFTER INSERT ON brands"),
+        "maintenance insert branch should be translated to AFTER INSERT: {}",
+        insert_trigger.sql
     );
 
     Ok(())
