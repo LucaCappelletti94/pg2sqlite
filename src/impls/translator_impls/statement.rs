@@ -10,7 +10,10 @@ use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement, UnaryOperator}
 use crate::{
     errors::Error,
     impls::{
-        object_name::{sqlite_unqualified_object_name, table_with_implicit_public_lookup},
+        object_name::{
+            normalize_schema_qualified_object_name_for_sqlite, sqlite_unqualified_object_name,
+            table_with_implicit_public_lookup,
+        },
         translator_impls::{
             condition_injection::inject_condition_into_dml_statement,
             rls::{
@@ -454,10 +457,14 @@ impl Translator for Statement {
                 match object_type {
                     // SQLite supports these object types
                     ObjectType::Table | ObjectType::View | ObjectType::Index => {
+                        let normalized_names = names
+                            .iter()
+                            .map(|name| normalize_schema_qualified_object_name_for_sqlite(schema, name))
+                            .collect::<Result<Vec<_>, _>>()?;
                         vec![Statement::Drop {
                             object_type: *object_type,
                             if_exists: *if_exists,
-                            names: names.iter().map(sqlite_unqualified_object_name).collect(),
+                            names: normalized_names,
                             cascade: false,  // SQLite doesn't support CASCADE
                             restrict: false, // SQLite doesn't support RESTRICT
                             purge: false,
@@ -473,7 +480,10 @@ impl Translator for Statement {
             Self::DropTrigger(drop_trigger) => {
                 vec![Statement::DropTrigger(sqlparser::ast::DropTrigger {
                     if_exists: drop_trigger.if_exists,
-                    trigger_name: sqlite_unqualified_object_name(&drop_trigger.trigger_name),
+                    trigger_name: normalize_schema_qualified_object_name_for_sqlite(
+                        schema,
+                        &drop_trigger.trigger_name,
+                    )?,
                     table_name: None, // SQLite doesn't use ON table_name
                     option: None,     // SQLite doesn't support CASCADE/RESTRICT
                 })]
@@ -959,8 +969,8 @@ mod tests {
 
         let err = index_stmt.translate(&schema, &options).expect_err("translation should fail");
         assert!(
-            err.to_string()
-                .contains("Only unqualified names and public.<table> names are supported"),
+            err.to_string().contains("Unsupported schema-qualified object name")
+                && err.to_string().contains("does not resolve"),
             "unexpected error: {err}"
         );
     }

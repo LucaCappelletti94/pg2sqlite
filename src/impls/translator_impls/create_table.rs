@@ -7,7 +7,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, CreateTable, TableConstraint};
 
 use crate::{
-    impls::object_name::sqlite_unqualified_object_name,
+    impls::object_name::normalize_schema_qualified_object_name_for_sqlite,
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -26,7 +26,7 @@ impl Translator for CreateTable {
         let is_ctas = self.query.is_some();
 
         let mut created_table = Self {
-            name: sqlite_unqualified_object_name(&self.name),
+            name: normalize_schema_qualified_object_name_for_sqlite(schema, &self.name)?,
             columns: self
                 .columns
                 .iter()

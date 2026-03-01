@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{ColumnLike, TableLike, TriggerLike},
+    traits::{ColumnLike, DatabaseLike, TableLike, TriggerLike},
 };
 use sqlparser::{
     ast::{
@@ -17,8 +17,9 @@ use sqlparser::{
 
 use crate::{
     impls::object_name::{
-        append_suffix, normalize_implicit_public_object_name_for_schema,
+        append_suffix, normalize_schema_qualified_object_name_for_sqlite,
         table_has_implicit_public_rls, table_with_implicit_public_lookup,
+        validate_schema_qualified_object_name_for_sqlite,
     },
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
@@ -232,12 +233,24 @@ impl Translator for CreateTrigger {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        let mut normalized_trigger = self.clone();
-        normalized_trigger.table_name =
-            normalize_implicit_public_object_name_for_schema(schema, &self.table_name)?;
+        let source_table_name = self.table_name.clone();
+        validate_schema_qualified_object_name_for_sqlite(schema, &source_table_name)?;
+        let normalized_source_table_name =
+            normalize_schema_qualified_object_name_for_sqlite(schema, &source_table_name)?;
 
-        if let Some((insert_trigger, non_insert_trigger)) =
-            split_before_insert_maintenance_trigger(&normalized_trigger, schema)
+        let mut normalized_trigger = self.clone();
+        normalized_trigger.table_name = normalized_source_table_name;
+
+        let can_use_trigger_traits = normalized_trigger
+            .table_name
+            .0
+            .last()
+            .and_then(|part| part.as_ident())
+            .is_some_and(|ident| schema.table(None, ident.value.as_str()).is_some());
+
+        if can_use_trigger_traits
+            && let Some((insert_trigger, non_insert_trigger)) =
+                split_before_insert_maintenance_trigger(&normalized_trigger, schema)
         {
             let mut translated = Vec::new();
             translated.extend(non_insert_trigger.translate(schema, options)?);
@@ -255,7 +268,7 @@ impl Translator for CreateTrigger {
             name,
             period,
             events,
-            table_name,
+            table_name: _table_name,
             referenced_table_name,
             referencing,
             trigger_object,
@@ -286,7 +299,8 @@ impl Translator for CreateTrigger {
         }
 
         let mut period = period;
-        let is_maintenance_trigger = trigger_for_helpers.is_maintenance_trigger(schema);
+        let is_maintenance_trigger =
+            can_use_trigger_traits && trigger_for_helpers.is_maintenance_trigger(schema);
         let events = if is_maintenance_trigger {
             rewrite_maintenance_update_events(&trigger_for_helpers, events, schema)
         } else {
@@ -305,16 +319,20 @@ impl Translator for CreateTrigger {
         // _rls table. INSTEAD OF triggers are used on the view, but
         // BEFORE/AFTER triggers must target the actual table (which has been
         // renamed to table_rls).
-        let redirected_table_name =
+        let redirected_source_table_name =
             if matches!(period, Some(TriggerPeriod::Before | TriggerPeriod::After)) {
-                if table_has_implicit_public_rls(schema, &table_name)? {
-                    append_suffix(&table_name, options.get_rls_table_suffix())
+                if table_has_implicit_public_rls(schema, &source_table_name)? {
+                    append_suffix(&source_table_name, options.get_rls_table_suffix())
                 } else {
-                    table_name.clone()
+                    source_table_name.clone()
                 }
             } else {
-                table_name.clone()
+                source_table_name.clone()
             };
+        let redirected_table_name = normalize_schema_qualified_object_name_for_sqlite(
+            schema,
+            &redirected_source_table_name,
+        )?;
 
         let function_body = if is_maintenance_trigger {
             let row_context = if maintenance_insert_event { "NEW" } else { "OLD" };

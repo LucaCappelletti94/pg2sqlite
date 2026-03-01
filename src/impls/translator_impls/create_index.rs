@@ -12,8 +12,9 @@ use crate::{
     impls::{
         generated_sql::parse_generated_sql,
         object_name::{
-            normalize_implicit_public_object_name, prefixed_quoted_identifier, quote_identifier,
-            quoted_ident, sqlite_unqualified_object_name, table_with_implicit_public_lookup,
+            normalize_schema_qualified_object_name_for_sqlite, prefixed_quoted_identifier,
+            quote_identifier, quoted_ident, sqlite_unqualified_object_name,
+            table_with_implicit_public_lookup,
         },
         shared_helpers::function_argument_exprs,
         translator_impls::rls::resolve_trigger_table_name,
@@ -313,7 +314,8 @@ impl Translator for CreateIndex {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        let normalized_table_name = normalize_implicit_public_object_name(&self.table_name)?;
+        let sqlite_table_name =
+            normalize_schema_qualified_object_name_for_sqlite(schema, &self.table_name)?;
 
         // Handle GIN/GiST indices - may translate to FTS5 for full-text search
         // Both GIN and GiST can be used with to_tsvector() in PostgreSQL
@@ -327,7 +329,7 @@ impl Translator for CreateIndex {
                 .transpose()?;
 
             let mut normalized_index = self.clone();
-            normalized_index.table_name = normalized_table_name.clone();
+            normalized_index.table_name = self.table_name.clone();
 
             return match analyze_fts_index(&normalized_index) {
                 FtsTranslation::Fts5 { table_name, columns } => {
@@ -348,7 +350,7 @@ impl Translator for CreateIndex {
         // alter_options) that are not valid in SQLite.
         Ok(vec![Statement::CreateIndex(CreateIndex {
             name: self.name.clone(),
-            table_name: sqlite_unqualified_object_name(&normalized_table_name),
+            table_name: sqlite_unqualified_object_name(&sqlite_table_name),
             using: None,
             columns: self
                 .columns

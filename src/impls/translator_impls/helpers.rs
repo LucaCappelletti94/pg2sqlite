@@ -11,7 +11,8 @@ use crate::{
     errors::Error,
     impls::{
         direction_wrappers::define_direction_wrappers,
-        object_name::normalize_implicit_public_object_name, shared_helpers::TranslationDirection,
+        object_name::normalize_schema_qualified_object_name_for_sqlite,
+        shared_helpers::TranslationDirection,
     },
     prelude::{Pg2SqliteOptions, Translator},
 };
@@ -59,10 +60,10 @@ impl TranslationDirection for Forward {
 
     fn translate_object_name(
         name: &sqlparser::ast::ObjectName,
-        _schema: &ParserDB,
+        schema: &ParserDB,
         _options: &Pg2SqliteOptions,
     ) -> Result<sqlparser::ast::ObjectName, Error> {
-        normalize_implicit_public_object_name(name)
+        normalize_schema_qualified_object_name_for_sqlite(schema, name)
     }
 }
 

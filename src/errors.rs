@@ -147,7 +147,7 @@ pub enum Error {
     /// Error when an object name uses unsupported schema qualification.
     #[error(
         "Unsupported schema-qualified object name '{object_name}': {reason}. \
-         Only unqualified names and public.<table> names are supported."
+         Forward translation accepts explicit schemas only when they resolve in the input schema."
     )]
     UnsupportedSchemaQualification {
         /// The original object name.

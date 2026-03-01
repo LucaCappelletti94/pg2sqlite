@@ -25,8 +25,9 @@ use crate::{
 /// Resolve the target table for reverse upsert reconstruction.
 ///
 /// Behavior:
-/// - Accept only unqualified or `public.<table>` names.
+/// - Accept unqualified or schema-qualified names with at most two parts.
 /// - Try implicit-public lookup (`None`/`public`) first.
+/// - For explicit non-public schemas, require schema resolution in `schema`.
 /// - If still missing, scan all schemas for unique table-name match.
 /// - If multiple schema matches exist, return an ambiguity error.
 fn resolve_insert_table<'a>(
@@ -369,13 +370,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_insert_table_rejects_non_public_schema_name() {
+    fn resolve_insert_table_rejects_unknown_non_public_schema_name() {
         let schema = schema_from_sql("CREATE TABLE users(id INT PRIMARY KEY);");
 
         let err = resolve_insert_table(&schema, &table_object(&["my_custom_app", "users"]))
             .expect_err("non-public schema should be rejected");
         assert!(matches!(err, Error::UnsupportedSchemaQualification { .. }));
-        assert!(err.to_string().contains("schema must be omitted or set to public"));
+        assert!(err.to_string().contains("does not resolve in the translation schema"));
+    }
+
+    #[test]
+    fn resolve_insert_table_accepts_resolvable_non_public_schema_name() {
+        let schema = schema_from_sql(
+            "CREATE SCHEMA my_custom_app; CREATE TABLE my_custom_app.users(id INT PRIMARY KEY);",
+        );
+
+        let resolved = resolve_insert_table(&schema, &table_object(&["my_custom_app", "users"]))
+            .expect("known schema-qualified table should resolve");
+        assert_eq!(resolved.table_schema(), Some("my_custom_app"));
+        assert_eq!(resolved.table_name(), "users");
     }
 
     #[test]

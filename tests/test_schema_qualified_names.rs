@@ -131,23 +131,44 @@ fn non_public_schema_qualified_index_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("Only unqualified names and public.<table> names are supported"),
+        message.contains("Unsupported schema-qualified object name")
+            && message.contains("does not resolve"),
         "unexpected error: {message}"
     );
 }
 
 #[test]
-fn non_public_schema_qualified_create_table_is_rejected() {
-    let err = Pg2Sqlite::default()
-        .sql("CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);")
-        .expect("sql should parse")
-        .translate(&Pg2SqliteOptions::default())
-        .expect_err("non-public schema-qualified create table should be rejected");
-
-    let message = err.to_string();
+fn non_public_schema_qualified_index_target_is_unqualified_when_schema_resolves() {
+    let output = translated_sql(
+        "
+        CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
+        CREATE INDEX idx_users_name ON my_custom_app.users(name);
+        ",
+    );
     assert!(
-        message.contains("Only unqualified names and public.<table> names are supported"),
-        "unexpected error: {message}"
+        output.contains("CREATE INDEX idx_users_name ON users"),
+        "expected schema-qualified index target to translate when schema resolves, got: {output}"
+    );
+    assert!(
+        !output.contains("my_custom_app."),
+        "schema qualifier should be removed for SQLite, got: {output}"
+    );
+}
+
+#[test]
+fn non_public_schema_qualified_create_table_is_unqualified_when_schema_resolves() {
+    let output = translated_sql(
+        "
+        CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
+        ",
+    );
+    assert!(
+        output.contains("CREATE TABLE users"),
+        "expected unqualified CREATE TABLE output, got: {output}"
+    );
+    assert!(
+        !output.contains("my_custom_app."),
+        "schema qualifier should be removed for SQLite, got: {output}"
     );
 }
 
@@ -174,8 +195,35 @@ fn non_public_schema_qualified_trigger_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("Only unqualified names and public.<table> names are supported"),
+        message.contains("Unsupported schema-qualified object name")
+            && message.contains("does not resolve"),
         "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn non_public_schema_qualified_trigger_target_is_unqualified_when_schema_resolves() {
+    let output = translated_sql(
+        "
+        CREATE TABLE my_custom_app.docs (id INT PRIMARY KEY, name TEXT);
+        CREATE FUNCTION docs_trigger_fn() RETURNS trigger AS $$
+        BEGIN
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER docs_ai
+        AFTER INSERT ON my_custom_app.docs
+        FOR EACH ROW
+        EXECUTE FUNCTION docs_trigger_fn();
+        ",
+    );
+    assert!(
+        output.contains("CREATE TRIGGER docs_ai"),
+        "expected trigger translation to succeed, got: {output}"
+    );
+    assert!(
+        !output.contains("my_custom_app."),
+        "schema qualifier should be removed for SQLite, got: {output}"
     );
 }
 
@@ -194,8 +242,27 @@ fn non_public_schema_qualified_delete_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("Only unqualified names and public.<table> names are supported"),
+        message.contains("Unsupported schema-qualified object name")
+            && message.contains("does not resolve"),
         "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn non_public_schema_qualified_delete_target_is_unqualified_when_schema_resolves() {
+    let output = translated_sql(
+        "
+        CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
+        DELETE FROM my_custom_app.users WHERE id = 1;
+        ",
+    );
+    assert!(
+        output.contains("DELETE FROM users WHERE id = 1"),
+        "expected DELETE target to be unqualified, got: {output}"
+    );
+    assert!(
+        !output.contains("my_custom_app."),
+        "schema qualifier should be removed for SQLite, got: {output}"
     );
 }
 
@@ -214,8 +281,36 @@ fn non_public_schema_qualified_select_from_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("Only unqualified names and public.<table> names are supported"),
+        message.contains("Unsupported schema-qualified object name")
+            && message.contains("does not resolve"),
         "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn non_public_schema_qualified_join_target_is_unqualified_when_schema_resolves() {
+    let output = translated_sql(
+        "
+        CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
+        CREATE TABLE teams (id INT PRIMARY KEY, owner_id INT);
+        CREATE VIEW team_owners AS
+        SELECT u.id
+        FROM my_custom_app.users u
+        JOIN teams t ON t.owner_id = u.id;
+        ",
+    );
+    assert!(
+        output.contains("CREATE VIEW team_owners AS"),
+        "expected view translation to succeed, got: {output}"
+    );
+    assert!(
+        output.contains("FROM users"),
+        "expected schema-qualified FROM target to be unqualified, got: {output}"
+    );
+    assert!(output.contains("JOIN teams"), "expected join source to be unqualified, got: {output}");
+    assert!(
+        !output.contains("my_custom_app."),
+        "schema qualifier should be removed for SQLite, got: {output}"
     );
 }
 
@@ -238,7 +333,8 @@ fn non_public_schema_qualified_join_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("Only unqualified names and public.<table> names are supported"),
+        message.contains("Unsupported schema-qualified object name")
+            && message.contains("does not resolve"),
         "unexpected error: {message}"
     );
 }
@@ -275,6 +371,68 @@ fn drop_schema_qualified_object_names_are_unqualified() {
     assert!(
         !output.contains("public."),
         "DROP targets should be unqualified for SQLite, got: {output}"
+    );
+}
+
+#[test]
+fn drop_non_public_schema_qualified_object_names_error_when_schema_unresolved() {
+    let err = Pg2Sqlite::default()
+        .sql("DROP TABLE IF EXISTS my_custom_app.users;")
+        .expect("sql should parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("unresolved non-public DROP target should error");
+    let message = err.to_string();
+    assert!(
+        message.contains("Unsupported schema-qualified object name")
+            && message.contains("does not resolve"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn drop_non_public_schema_qualified_object_names_are_unqualified_when_schema_resolves() {
+    let output = translated_sql(
+        "
+        CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
+        DROP TABLE IF EXISTS my_custom_app.users;
+        ",
+    );
+    assert!(
+        output.contains("DROP TABLE IF EXISTS users"),
+        "expected DROP target to be unqualified when schema resolves, got: {output}"
+    );
+    assert!(
+        !output.contains("my_custom_app."),
+        "schema qualifier should be removed for SQLite, got: {output}"
+    );
+}
+
+#[test]
+fn create_view_non_public_schema_name_is_unqualified_when_schema_resolves() {
+    let output = translated_sql(
+        "
+        CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
+        CREATE VIEW my_custom_app.active_users AS SELECT id FROM my_custom_app.users;
+        ",
+    );
+    assert!(
+        output.contains("CREATE VIEW active_users AS SELECT id FROM users"),
+        "expected schema-qualified view + source to be unqualified in output, got: {output}"
+    );
+}
+
+#[test]
+fn create_view_non_public_schema_name_errors_when_schema_unresolved() {
+    let err = Pg2Sqlite::default()
+        .sql("CREATE VIEW my_custom_app.active_users AS SELECT 1;")
+        .expect("sql should parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("unresolved non-public view schema should error");
+    let message = err.to_string();
+    assert!(
+        message.contains("Unsupported schema-qualified object name")
+            && message.contains("does not resolve"),
+        "unexpected error: {message}"
     );
 }
 

@@ -56,46 +56,37 @@ fn unsupported_schema_qualification(name: &ObjectName, reason: &str) -> Error {
     }
 }
 
-struct ImplicitPublicLookupParts<'a> {
-    primary_schema: Option<&'static str>,
-    fallback_schema: Option<&'static str>,
-    table_name: &'a str,
-    table_part: ObjectNamePart,
+struct SchemaQualifiedNameParts<'a> {
+    explicit_schema: Option<&'a str>,
+    object_name: &'a str,
+    object_part: ObjectNamePart,
 }
 
-fn parse_implicit_public_lookup_parts(
+fn parse_schema_qualified_name_parts(
     name: &ObjectName,
-) -> Result<ImplicitPublicLookupParts<'_>, Error> {
+) -> Result<SchemaQualifiedNameParts<'_>, Error> {
     match name.0.as_slice() {
-        [table] => {
-            let table_ident = table.as_ident().ok_or_else(|| {
+        [object] => {
+            let object_ident = object.as_ident().ok_or_else(|| {
                 unsupported_schema_qualification(name, "table segment must be an identifier")
             })?;
-            Ok(ImplicitPublicLookupParts {
-                primary_schema: None,
-                fallback_schema: Some("public"),
-                table_name: table_ident.value.as_str(),
-                table_part: table.clone(),
+            Ok(SchemaQualifiedNameParts {
+                explicit_schema: None,
+                object_name: object_ident.value.as_str(),
+                object_part: object.clone(),
             })
         }
-        [schema, table] => {
+        [schema, object] => {
             let schema_ident = schema.as_ident().ok_or_else(|| {
                 unsupported_schema_qualification(name, "schema segment must be an identifier")
             })?;
-            if !schema_ident.value.eq_ignore_ascii_case("public") {
-                return Err(unsupported_schema_qualification(
-                    name,
-                    "schema must be omitted or set to public",
-                ));
-            }
-            let table_ident = table.as_ident().ok_or_else(|| {
+            let object_ident = object.as_ident().ok_or_else(|| {
                 unsupported_schema_qualification(name, "table segment must be an identifier")
             })?;
-            Ok(ImplicitPublicLookupParts {
-                primary_schema: Some("public"),
-                fallback_schema: None,
-                table_name: table_ident.value.as_str(),
-                table_part: table.clone(),
+            Ok(SchemaQualifiedNameParts {
+                explicit_schema: Some(schema_ident.value.as_str()),
+                object_name: object_ident.value.as_str(),
+                object_part: object.clone(),
             })
         }
         _ => {
@@ -107,69 +98,104 @@ fn parse_implicit_public_lookup_parts(
     }
 }
 
-pub(crate) fn implicit_public_lookup_parts(
+fn schema_resolves(schema: &ParserDB, schema_name: &str) -> bool {
+    if schema_name.eq_ignore_ascii_case("public") {
+        return true;
+    }
+
+    if schema.schema(schema_name).is_some() {
+        return true;
+    }
+
+    schema.tables().any(|table| {
+        table
+            .table_schema()
+            .is_some_and(|table_schema| table_schema.eq_ignore_ascii_case(schema_name))
+    })
+}
+
+fn ensure_schema_resolves(
+    schema: &ParserDB,
     name: &ObjectName,
-) -> Result<(Option<&str>, Option<&str>, &str), Error> {
-    let parts = parse_implicit_public_lookup_parts(name)?;
-    Ok((parts.primary_schema, parts.fallback_schema, parts.table_name))
+    explicit_schema: Option<&str>,
+) -> Result<(), Error> {
+    if let Some(schema_name) = explicit_schema
+        && !schema_resolves(schema, schema_name)
+    {
+        return Err(unsupported_schema_qualification(
+            name,
+            &format!("schema '{schema_name}' does not resolve in the translation schema"),
+        ));
+    }
+    Ok(())
 }
 
-fn lookup_implicit_public_table<'a>(
-    schema: &'a ParserDB,
-    parts: &ImplicitPublicLookupParts<'_>,
-) -> (Option<&'static str>, Option<&'a <ParserDB as DatabaseLike>::Table>) {
-    if let Some(table) = schema.table(parts.primary_schema, parts.table_name) {
-        return (parts.primary_schema, Some(table));
-    }
-    if let Some(table) = schema.table(parts.fallback_schema, parts.table_name) {
-        return (parts.fallback_schema, Some(table));
-    }
-    (parts.primary_schema, None)
-}
-
-fn object_name_from_schema_and_table_part(
-    schema: Option<&str>,
-    table_part: ObjectNamePart,
-) -> ObjectName {
-    match schema {
-        Some(schema) => {
-            ObjectName(vec![ObjectNamePart::Identifier(Ident::new(schema)), table_part])
-        }
-        None => ObjectName(vec![table_part]),
-    }
-}
-
-/// Returns an unqualified object name under the crate's implicit-public policy.
-pub(crate) fn normalize_implicit_public_object_name(
+/// Validates schema qualification for forward translation under the
+/// "resolvable schema" policy.
+pub(crate) fn validate_schema_qualified_object_name_for_sqlite(
+    schema: &ParserDB,
     name: &ObjectName,
-) -> Result<ObjectName, Error> {
-    let parts = parse_implicit_public_lookup_parts(name)?;
-    Ok(ObjectName(vec![parts.table_part]))
+) -> Result<(), Error> {
+    let parts = parse_schema_qualified_name_parts(name)?;
+    ensure_schema_resolves(schema, name, parts.explicit_schema)
 }
 
-/// Returns a canonical object name for schema-sensitive operations by choosing
-/// the first schema variant that exists in `schema`.
-pub(crate) fn normalize_implicit_public_object_name_for_schema(
+/// Normalizes an object name to SQLite output shape while enforcing that any
+/// explicit schema is resolvable in `schema`.
+pub(crate) fn normalize_schema_qualified_object_name_for_sqlite(
     schema: &ParserDB,
     name: &ObjectName,
 ) -> Result<ObjectName, Error> {
-    let parts = parse_implicit_public_lookup_parts(name)?;
-    let (resolved_schema, _) = lookup_implicit_public_table(schema, &parts);
-
-    Ok(object_name_from_schema_and_table_part(resolved_schema, parts.table_part))
+    let parts = parse_schema_qualified_name_parts(name)?;
+    ensure_schema_resolves(schema, name, parts.explicit_schema)?;
+    Ok(ObjectName(vec![parts.object_part]))
 }
 
-/// Looks up a table under the crate's implicit-public policy.
+pub(crate) fn implicit_public_lookup_parts(
+    name: &ObjectName,
+) -> Result<(Option<&str>, Option<&str>, &str), Error> {
+    let parts = parse_schema_qualified_name_parts(name)?;
+    Ok(match parts.explicit_schema {
+        None => (None, Some("public"), parts.object_name),
+        Some(explicit_schema) if explicit_schema.eq_ignore_ascii_case("public") => {
+            (Some("public"), None, parts.object_name)
+        }
+        Some(explicit_schema) => (Some(explicit_schema), None, parts.object_name),
+    })
+}
+
+/// Looks up a table under forward-translation schema policy.
 ///
 /// For `table`, lookup order is: `None`, then `"public"`.
 /// For `public.table`, lookup order is: `"public"`, then `None`.
+/// For `<schema>.table` where schema != `public`, lookup is exact schema only
+/// and schema must resolve in `schema`.
 pub(crate) fn table_with_implicit_public_lookup<'a>(
     schema: &'a ParserDB,
     name: &ObjectName,
 ) -> Result<Option<&'a <ParserDB as DatabaseLike>::Table>, Error> {
-    let parts = parse_implicit_public_lookup_parts(name)?;
-    let (_, table) = lookup_implicit_public_table(schema, &parts);
-    Ok(table)
+    let parts = parse_schema_qualified_name_parts(name)?;
+
+    Ok(match parts.explicit_schema {
+        None => {
+            if let Some(table) = schema.table(None, parts.object_name) {
+                Some(table)
+            } else {
+                schema.table(Some("public"), parts.object_name)
+            }
+        }
+        Some(explicit_schema) if explicit_schema.eq_ignore_ascii_case("public") => {
+            if let Some(table) = schema.table(Some("public"), parts.object_name) {
+                Some(table)
+            } else {
+                schema.table(None, parts.object_name)
+            }
+        }
+        Some(explicit_schema) => {
+            ensure_schema_resolves(schema, name, Some(explicit_schema))?;
+            schema.table(Some(explicit_schema), parts.object_name)
+        }
+    })
 }
 
 /// Returns whether an object name resolves to an RLS-protected table under the
@@ -218,10 +244,11 @@ mod tests {
     };
 
     use super::{
-        append_suffix, last_ident, normalize_implicit_public_object_name,
-        normalize_implicit_public_object_name_for_schema, prefixed_quoted_identifier,
+        append_suffix, implicit_public_lookup_parts, last_ident,
+        normalize_schema_qualified_object_name_for_sqlite, prefixed_quoted_identifier,
         quote_identifier, quoted_ident, schema_and_table_for_lookup,
         sqlite_unqualified_object_name, table_with_implicit_public_lookup,
+        validate_schema_qualified_object_name_for_sqlite,
     };
 
     fn name(parts: &[&str]) -> ObjectName {
@@ -277,27 +304,24 @@ mod tests {
     }
 
     #[test]
-    fn implicit_public_lookup_accepts_unqualified_and_public_names() {
+    fn implicit_public_lookup_parts_handle_unqualified_public_and_explicit_schema() {
         assert_eq!(
-            normalize_implicit_public_object_name(&name(&["users"])).unwrap().to_string(),
-            "users"
+            implicit_public_lookup_parts(&name(&["users"])).unwrap(),
+            (None, Some("public"), "users")
         );
         assert_eq!(
-            normalize_implicit_public_object_name(&name(&["public", "users"])).unwrap().to_string(),
-            "users"
+            implicit_public_lookup_parts(&name(&["public", "users"])).unwrap(),
+            (Some("public"), None, "users")
+        );
+        assert_eq!(
+            implicit_public_lookup_parts(&name(&["my_custom_app", "users"])).unwrap(),
+            (Some("my_custom_app"), None, "users")
         );
     }
 
     #[test]
-    fn implicit_public_lookup_rejects_non_public_and_three_part_names() {
-        let err = normalize_implicit_public_object_name(&name(&["app", "users"])).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Only unqualified names and public.<table> names are supported")
-        );
-
-        let err = normalize_implicit_public_object_name(&name(&["catalog", "public", "users"]))
-            .unwrap_err();
+    fn implicit_public_lookup_parts_reject_three_part_names() {
+        let err = implicit_public_lookup_parts(&name(&["catalog", "public", "users"])).unwrap_err();
         assert!(err.to_string().contains("object names with more than two parts"));
     }
 
@@ -312,7 +336,7 @@ mod tests {
 
         let err = table_with_implicit_public_lookup(&schema, &name(&["my_custom_app", "users"]))
             .unwrap_err();
-        assert!(err.to_string().contains("schema must be omitted or set to public"));
+        assert!(err.to_string().contains("does not resolve in the translation schema"));
 
         let err =
             table_with_implicit_public_lookup(&schema, &name(&["catalog", "public", "users"]))
@@ -321,7 +345,31 @@ mod tests {
     }
 
     #[test]
-    fn normalize_for_schema_rejects_non_public_schema() {
+    fn schema_qualified_helpers_allow_resolvable_non_public_schemas_and_unqualify_output() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                "
+                CREATE SCHEMA my_custom_app;
+                CREATE TABLE my_custom_app.users(id INT PRIMARY KEY);
+                ",
+            )
+            .unwrap(),
+            "test".to_string(),
+        )
+        .unwrap();
+
+        let name = name(&["my_custom_app", "users"]);
+        validate_schema_qualified_object_name_for_sqlite(&schema, &name).unwrap();
+        assert_eq!(
+            normalize_schema_qualified_object_name_for_sqlite(&schema, &name).unwrap().to_string(),
+            "users"
+        );
+        assert!(table_with_implicit_public_lookup(&schema, &name).unwrap().is_some());
+    }
+
+    #[test]
+    fn schema_qualified_helpers_reject_unresolvable_non_public_schemas() {
         let schema = ParserDB::from_statements(
             Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE users(id INT PRIMARY KEY);")
                 .unwrap(),
@@ -329,12 +377,19 @@ mod tests {
         )
         .unwrap();
 
-        let err = normalize_implicit_public_object_name_for_schema(
+        let err = validate_schema_qualified_object_name_for_sqlite(
             &schema,
             &name(&["my_custom_app", "users"]),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("schema must be omitted or set to public"));
+        assert!(err.to_string().contains("does not resolve in the translation schema"));
+
+        let err = normalize_schema_qualified_object_name_for_sqlite(
+            &schema,
+            &name(&["my_custom_app", "users"]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not resolve in the translation schema"));
     }
 
     #[test]
@@ -344,18 +399,18 @@ mod tests {
             args: vec![],
         });
 
-        let err = normalize_implicit_public_object_name(&ObjectName(vec![function_part.clone()]))
-            .unwrap_err();
+        let err =
+            implicit_public_lookup_parts(&ObjectName(vec![function_part.clone()])).unwrap_err();
         assert!(err.to_string().contains("table segment must be an identifier"));
 
-        let err = normalize_implicit_public_object_name(&ObjectName(vec![
+        let err = implicit_public_lookup_parts(&ObjectName(vec![
             function_part.clone(),
             ObjectNamePart::Identifier(Ident::new("users")),
         ]))
         .unwrap_err();
         assert!(err.to_string().contains("schema segment must be an identifier"));
 
-        let err = normalize_implicit_public_object_name(&ObjectName(vec![
+        let err = implicit_public_lookup_parts(&ObjectName(vec![
             ObjectNamePart::Identifier(Ident::new("public")),
             function_part,
         ]))
@@ -398,12 +453,6 @@ mod tests {
             table_with_implicit_public_lookup(&public_schema, &name(&["public", "users"]))
                 .unwrap()
                 .is_some()
-        );
-        assert_eq!(
-            normalize_implicit_public_object_name_for_schema(&public_schema, &name(&["users"]))
-                .unwrap()
-                .to_string(),
-            "public.users"
         );
     }
 }

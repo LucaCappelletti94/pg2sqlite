@@ -35,7 +35,7 @@ fn build_schema_returns_valid_schema() {
 }
 
 #[test]
-fn build_schema_rejects_non_public_schema_qualification_for_table_refs() {
+fn build_schema_allows_non_public_schema_qualification_for_table_refs() {
     let translator = Pg2Sqlite::default()
         .sql(
             "
@@ -46,33 +46,33 @@ fn build_schema_rejects_non_public_schema_qualification_for_table_refs() {
         .expect("sql should parse");
 
     let schema = translator.build_schema();
-    assert!(schema.is_err(), "build_schema should reject non-public schema qualification");
+    assert!(schema.is_ok(), "build_schema should build schema without forward-translation checks");
 }
 
 #[test]
-fn build_schema_rejects_non_public_schema_qualified_create_table() {
+fn build_schema_allows_non_public_schema_qualified_create_table() {
     let translator = Pg2Sqlite::default()
         .sql("CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);")
         .expect("sql should parse");
 
     let schema = translator.build_schema();
-    assert!(schema.is_err(), "build_schema should reject non-public create table schema");
+    assert!(schema.is_ok(), "build_schema should accept schema-qualified CREATE TABLE");
 }
 
 #[test]
-fn build_schema_and_translate_enforce_same_schema_policy() {
+fn build_schema_and_translate_can_differ_on_schema_validation() {
     let sql = "
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
         CREATE INDEX idx_users_name ON my_custom_app.users(name);
     ";
     let translator = Pg2Sqlite::default().sql(sql).expect("sql should parse");
 
-    let build_schema_is_err = translator.build_schema().is_err();
+    let build_schema_is_ok = translator.build_schema().is_ok();
     let translate_is_err = translator.translate(&Pg2SqliteOptions::default()).is_err();
 
-    assert_eq!(
-        build_schema_is_err, translate_is_err,
-        "build_schema and translate should enforce the same schema qualification policy"
+    assert!(
+        build_schema_is_ok && translate_is_err,
+        "build_schema should succeed while translate enforces schema-resolution policy"
     );
 }
 

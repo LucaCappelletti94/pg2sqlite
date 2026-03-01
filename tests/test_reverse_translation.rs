@@ -440,34 +440,38 @@ mod errors {
     }
 
     #[test]
-    fn test_insert_or_replace_with_non_public_schema_in_ddl_errors_on_schema_build() {
+    fn test_insert_or_replace_with_non_public_schema_in_ddl_builds_and_reverses() {
         let pg_ddl = "CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT, email TEXT);";
         let translator = setup_translator(pg_ddl);
-        let err = translator.build_schema().expect_err(
-            "strict schema policy should reject non-public CREATE TABLE in build_schema",
-        );
-        assert!(
-            err.to_string()
-                .contains("Only unqualified names and public.<table> names are supported"),
-            "unexpected error: {err}"
-        );
+        let schema = translator.build_schema().expect("schema build should allow app.users");
+        let options = Pg2SqliteOptions::default();
+
+        let sqlite_sql =
+            "INSERT OR REPLACE INTO app.users (id, name, email) VALUES ('abc', 'Alice', 'a@b.com')";
+        let reversed = translator
+            .reverse_sql(sqlite_sql, &schema, &options)
+            .expect("reverse should resolve known explicit schema");
+        let output = reversed[0].to_string();
+        assert!(output.contains("ON CONFLICT"), "expected ON CONFLICT in reversed SQL: {output}");
     }
 
     #[test]
-    fn test_insert_or_replace_with_multiple_non_public_schema_tables_errors_on_schema_build() {
+    fn test_insert_or_replace_with_multiple_non_public_schema_tables_errors_on_ambiguous_lookup() {
         let pg_ddl = "
             CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT);
             CREATE TABLE auth.users (id UUID PRIMARY KEY, name TEXT);
         ";
         let translator = setup_translator(pg_ddl);
-        let err = translator.build_schema().expect_err(
-            "strict schema policy should reject non-public CREATE TABLE in build_schema",
-        );
-        assert!(
-            err.to_string()
-                .contains("Only unqualified names and public.<table> names are supported"),
-            "unexpected error: {err}"
-        );
+        let schema = translator
+            .build_schema()
+            .expect("schema build should allow multiple non-public schemas");
+        let options = Pg2SqliteOptions::default();
+
+        let sqlite_sql = "INSERT OR REPLACE INTO users (id, name) VALUES ('abc', 'Alice')";
+        let err = translator
+            .reverse_sql(sqlite_sql, &schema, &options)
+            .expect_err("unqualified users should be ambiguous across app/auth schemas");
+        assert!(matches!(err, Error::AmbiguousTableInSchema { .. }));
     }
 
     #[test]
