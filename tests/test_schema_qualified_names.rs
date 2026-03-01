@@ -137,6 +137,21 @@ fn non_public_schema_qualified_index_target_is_rejected() {
 }
 
 #[test]
+fn non_public_schema_qualified_create_table_is_rejected() {
+    let err = Pg2Sqlite::default()
+        .sql("CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);")
+        .expect("sql should parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("non-public schema-qualified create table should be rejected");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Only unqualified names and public.<table> names are supported"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
 fn non_public_schema_qualified_trigger_target_is_rejected() {
     let err = Pg2Sqlite::default()
         .sql(

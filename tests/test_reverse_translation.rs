@@ -391,44 +391,34 @@ mod errors {
     }
 
     #[test]
-    fn test_insert_or_replace_resolves_unqualified_name_from_unique_schema_table() {
+    fn test_insert_or_replace_with_non_public_schema_in_ddl_errors_on_schema_build() {
         let pg_ddl = "CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT, email TEXT);";
         let translator = setup_translator(pg_ddl);
-        let schema = translator.build_schema().unwrap();
-        let options = Pg2SqliteOptions::default();
-
-        let sqlite_sql =
-            "INSERT OR REPLACE INTO users (id, name, email) VALUES ('abc', 'Alice', 'a@b.com')";
-        let result = translator.reverse_sql(sqlite_sql, &schema, &options);
-
+        let err = translator.build_schema().expect_err(
+            "strict schema policy should reject non-public CREATE TABLE in build_schema",
+        );
         assert!(
-            result.is_ok(),
-            "Expected OR REPLACE to resolve unique schema-qualified table, got: {result:?}"
+            err.to_string()
+                .contains("Only unqualified names and public.<table> names are supported"),
+            "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn test_insert_or_replace_with_ambiguous_unqualified_name_errors() {
+    fn test_insert_or_replace_with_multiple_non_public_schema_tables_errors_on_schema_build() {
         let pg_ddl = "
             CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT);
             CREATE TABLE auth.users (id UUID PRIMARY KEY, name TEXT);
         ";
         let translator = setup_translator(pg_ddl);
-        let schema = translator.build_schema().unwrap();
-        let options = Pg2SqliteOptions::default();
-
-        let sqlite_sql = "INSERT OR REPLACE INTO users (id, name) VALUES ('abc', 'Alice')";
-        let result = translator.reverse_sql(sqlite_sql, &schema, &options);
-
-        assert!(result.is_err(), "expected ambiguous table lookup to fail");
-        match result.unwrap_err() {
-            Error::AmbiguousTableInSchema { table_name, schemas } => {
-                assert_eq!(table_name, "users");
-                assert!(schemas.iter().any(|schema_name| schema_name == "app"));
-                assert!(schemas.iter().any(|schema_name| schema_name == "auth"));
-            }
-            other => panic!("expected AmbiguousTableInSchema, got: {other:?}"),
-        }
+        let err = translator.build_schema().expect_err(
+            "strict schema policy should reject non-public CREATE TABLE in build_schema",
+        );
+        assert!(
+            err.to_string()
+                .contains("Only unqualified names and public.<table> names are supported"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

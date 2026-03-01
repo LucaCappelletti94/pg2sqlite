@@ -60,7 +60,10 @@ impl Pg2Sqlite {
             .map(|statement| {
                 let mut statement = statement.clone();
                 match &mut statement {
-                    // Keep CREATE TABLE schemas for reverse-translation schema resolution.
+                    Statement::CreateTable(create_table) => {
+                        create_table.name =
+                            normalize_implicit_public_object_name(&create_table.name)?;
+                    }
                     Statement::CreateIndex(create_index) => {
                         create_index.table_name =
                             normalize_implicit_public_object_name(&create_index.table_name)?;
