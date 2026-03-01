@@ -16,17 +16,21 @@ use super::helpers::Reverse;
 use crate::{
     errors::Error,
     impls::{
-        object_name::schema_and_table_for_lookup,
+        object_name::{normalize_implicit_public_object_name, table_with_implicit_public_lookup},
         shared_helpers::{translate_on_conflict_do_update, translate_returning},
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
+fn is_unqualified_identifier_name(name: &ObjectName) -> bool {
+    matches!(name.0.as_slice(), [segment] if segment.as_ident().is_some())
+}
+
 /// Resolve the target table for reverse upsert reconstruction.
 ///
 /// Behavior:
-/// - If table name is schema-qualified, resolve by exact `(schema, table)` key.
-/// - If unqualified, try `(None, table)` first.
+/// - Accept only unqualified or `public.<table>` names.
+/// - Try implicit-public lookup (`None`/`public`) first.
 /// - If still missing, scan all schemas for unique table-name match.
 /// - If multiple schema matches exist, return an ambiguity error.
 fn resolve_insert_table<'a>(
@@ -39,19 +43,25 @@ fn resolve_insert_table<'a>(
         ));
     };
 
-    let (schema_name, bare_table_name) = schema_and_table_for_lookup(table_name);
-    let Some(bare_table_name) = bare_table_name else {
-        return Err(Error::TableNotFoundInSchema { table_name: table_name.to_string() });
-    };
+    let is_unqualified = is_unqualified_identifier_name(table_name);
+    let normalized = normalize_implicit_public_object_name(table_name)?;
+    let bare_table_name = normalized
+        .0
+        .first()
+        .and_then(ObjectNamePart::as_ident)
+        .map(|ident| ident.value.as_str())
+        .ok_or_else(|| {
+            Error::UnsupportedSchemaQualification {
+                object_name: table_name.to_string(),
+                reason: "table segment must be an identifier".to_string(),
+            }
+        })?;
 
-    if let Some(schema_name) = schema_name {
-        return schema
-            .table(Some(schema_name), bare_table_name)
-            .ok_or_else(|| Error::TableNotFoundInSchema { table_name: table_name.to_string() });
-    }
-
-    if let Some(found) = schema.table(None, bare_table_name) {
+    if let Some(found) = table_with_implicit_public_lookup(schema, table_name)? {
         return Ok(found);
+    }
+    if !is_unqualified {
+        return Err(Error::TableNotFoundInSchema { table_name: table_name.to_string() });
     }
 
     let candidates = schema

@@ -371,6 +371,27 @@ mod errors {
     }
 
     #[test]
+    fn test_insert_or_replace_with_three_part_table_name_errors() {
+        let pg_ddl = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, email TEXT);";
+        let translator = setup_translator(pg_ddl);
+        let schema = translator.build_schema().unwrap();
+        let options = Pg2SqliteOptions::default();
+
+        let sqlite_sql = "INSERT OR REPLACE INTO catalog.public.users (id, name, email) VALUES ('abc', 'Alice', 'a@b.com')";
+        let result = translator.reverse_sql(sqlite_sql, &schema, &options);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            Error::UnsupportedSchemaQualification { object_name, reason } => {
+                assert_eq!(object_name, "catalog.public.users");
+                assert!(reason.contains("more than two parts"), "unexpected reason: {reason}");
+            }
+            other => panic!("Expected UnsupportedSchemaQualification, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_or_replace_without_column_list_uses_table_columns() {
         let pg_ddl = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, email TEXT);";
         let translator = setup_translator(pg_ddl);
