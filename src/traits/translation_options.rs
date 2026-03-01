@@ -81,7 +81,11 @@ pub trait TranslationOptions {
     fn should_remove_unsupported_check_constraints(&self) -> bool;
 
     #[must_use]
-    /// Sets the option to specify the representation of UUIDs in `SQLite`.
+    /// Sets the UUID storage representation expected in translated SQLite
+    /// schemas.
+    ///
+    /// This must be compatible with the runtime return type of the configured
+    /// UUID function name (`with_uuid_function_name`).
     fn with_uuid_representation(self, representation: UuidRepresentation) -> Self;
 
     /// Returns the representation of UUIDs in `SQLite`.
@@ -90,6 +94,11 @@ pub trait TranslationOptions {
     #[must_use]
     /// Sets the option to specify the name of the function to use for UUID
     /// generation.
+    ///
+    /// The translator rewrites PostgreSQL UUID default generators to this
+    /// function name, but cannot inspect SQLite UDF implementations. Ensure the
+    /// runtime return type of this function matches the configured UUID
+    /// representation.
     fn with_uuid_function_name(self, name: impl Into<String>) -> Self;
 
     /// Returns the name of the function to use for UUID generation.

@@ -12,6 +12,7 @@ pub struct Pg2SqliteOptions {
     /// The representation of UUIDs in `SQLite`.
     uuid_representation: Option<UuidRepresentation>,
     /// The name of the function to use for UUID generation.
+    /// Its runtime return type must match `uuid_representation`.
     uuid_function_name: String,
     /// The suffix to append to table names when renaming them for RLS views.
     rls_table_suffix: String,

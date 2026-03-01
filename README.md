@@ -123,9 +123,24 @@ All `CREATE TABLE` output uses SQLite `STRICT` mode, and `NOT NULL` is automatic
 
 ### UUID generation
 
-**UUID translation requires explicit configuration.** Without `.with_uuid_representation()`, UUID columns default to `BLOB` (16 bytes); use `UuidRepresentation::Text` for 36-character strings. UUID default functions (`gen_random_uuid()`, `uuidv7()`, …) are renamed to the function configured via `.with_uuid_function_name()`.
+**UUID translation requires explicit configuration.** Set `.with_uuid_representation(...)` to choose `UuidRepresentation::Blob` (16 bytes) or `UuidRepresentation::Text` (36-character strings). UUID default functions (`gen_random_uuid()`, `uuidv7()`, …) are always renamed to the function configured via `.with_uuid_function_name()`.
 
-PostgreSQL UUID defaults (`gen_random_uuid()`, `uuidv4()`, `uuidv7()`) are translated to a configurable SQLite function call. Both `BLOB` (16 bytes) and `TEXT` (36 chars) representations are supported.
+PostgreSQL UUID defaults (`gen_random_uuid()`, `uuidv4()`, `uuidv7()`) are translated to a configurable SQLite function call. Ensure that function exists at runtime (for example, a registered SQLite UDF), and that its runtime return type matches the selected UUID representation.
+
+Compatibility contract:
+
+1. `UuidRepresentation::Blob` expects the configured UUID function to return a 16-byte SQLite `BLOB`.
+2. `UuidRepresentation::Text` expects the configured UUID function to return SQLite `TEXT` (typically canonical UUID strings).
+3. The translator rewrites function names but cannot inspect SQLite UDF implementations or infer their runtime return type.
+
+Configuration matrix:
+
+| Representation | UUID function return type | Result |
+| --- | --- | --- |
+| `Blob` | `BLOB` | Valid |
+| `Text` | `TEXT` | Valid |
+| `Text` | `BLOB` | Runtime insert/type error in `STRICT` tables |
+| `Blob` | `TEXT` | Runtime type mismatch or unexpected storage semantics |
 
 ```rust
 use pg2sqlite::prelude::*;
@@ -137,6 +152,12 @@ fn main() {
     let _ = options;
 }
 ```
+
+Troubleshooting (`STRICT` tables):
+
+- Symptom: insert fails with an error like `cannot store BLOB value in TEXT column ...`
+- Cause: `UuidRepresentation::Text` is configured, but the runtime UUID function returns `BLOB`.
+- Fix: use a text-returning UUID UDF for `Text` representation, or switch representation to `Blob`.
 
 ### Row-Level Security
 
