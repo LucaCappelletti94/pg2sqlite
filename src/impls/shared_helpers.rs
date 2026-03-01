@@ -104,7 +104,8 @@ pub(crate) fn translate_expr_recursive<D: TranslationDirection>(
 }
 
 /// Translate the DO UPDATE assignments and selection inside an ON CONFLICT
-/// clause using direction `D`.  Returns the translated [`OnConflict`].
+/// clause using direction `D`. Returns a translated
+/// [`sqlparser::ast::OnInsert::OnConflict`] variant.
 pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
     on_conflict: &sqlparser::ast::OnConflict,
     do_update: &sqlparser::ast::DoUpdate,

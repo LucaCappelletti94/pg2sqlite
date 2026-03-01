@@ -313,8 +313,8 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
 /// Fallible version of [`map_expr_children`].  Takes two closures:
 ///
 /// - `f_expr`: transforms each child [`Expr`], may fail.
-/// - `f_query`: transforms each child [`Query`] (for `Subquery`, `Exists`,
-///   `InSubquery`), may fail.
+/// - `f_query`: transforms each child [`sqlparser::ast::Query`] (for
+///   `Subquery`, `Exists`, `InSubquery`), may fail.
 ///
 /// **Leaf variants** (no child) are cloned as-is.  `Function` is **not**
 /// walked; callers must handle it separately (function name rewriting, argument
