@@ -52,6 +52,30 @@ impl Pg2Sqlite {
             .collect()
     }
 
+    fn normalize_statements_for_schema_build(
+        statements: &[Statement],
+    ) -> Result<Vec<Statement>, crate::errors::Error> {
+        statements
+            .iter()
+            .map(|statement| {
+                let mut statement = statement.clone();
+                match &mut statement {
+                    // Keep CREATE TABLE schemas for reverse-translation schema resolution.
+                    Statement::CreateIndex(create_index) => {
+                        create_index.table_name =
+                            normalize_implicit_public_object_name(&create_index.table_name)?;
+                    }
+                    Statement::CreateTrigger(create_trigger) => {
+                        create_trigger.table_name =
+                            normalize_implicit_public_object_name(&create_trigger.table_name)?;
+                    }
+                    _ => {}
+                }
+                Ok(statement)
+            })
+            .collect()
+    }
+
     #[must_use]
     /// Adds a new SQL statement to the set of `PostgreSQL` statements to be
     /// translated.
@@ -361,7 +385,9 @@ impl Pg2Sqlite {
     /// let schema = translator.build_schema().unwrap();
     /// ```
     pub fn build_schema(&self) -> Result<ParserDB, crate::errors::Error> {
-        ParserDB::from_statements(self.pg_statements.clone(), "translation_db".to_owned())
+        let normalized_statements =
+            Self::normalize_statements_for_schema_build(&self.pg_statements)?;
+        ParserDB::from_statements(normalized_statements, "translation_db".to_owned())
             .map_err(crate::errors::Error::from)
     }
 

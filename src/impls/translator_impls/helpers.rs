@@ -10,8 +10,8 @@ use sqlparser::ast::{
 use crate::{
     errors::Error,
     impls::{
-        direction_wrappers::define_direction_wrappers, object_name::sqlite_unqualified_object_name,
-        shared_helpers::TranslationDirection,
+        direction_wrappers::define_direction_wrappers,
+        object_name::normalize_implicit_public_object_name, shared_helpers::TranslationDirection,
     },
     prelude::{Pg2SqliteOptions, Translator},
 };
@@ -62,7 +62,7 @@ impl TranslationDirection for Forward {
         _schema: &ParserDB,
         _options: &Pg2SqliteOptions,
     ) -> Result<sqlparser::ast::ObjectName, Error> {
-        Ok(sqlite_unqualified_object_name(name))
+        normalize_implicit_public_object_name(name)
     }
 }
 

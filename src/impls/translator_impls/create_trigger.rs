@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{ColumnLike, DatabaseLike, TableLike, TriggerLike},
+    traits::{ColumnLike, TableLike, TriggerLike},
 };
 use sqlparser::{
     ast::{
@@ -18,7 +18,7 @@ use sqlparser::{
 use crate::{
     impls::object_name::{
         append_suffix, normalize_implicit_public_object_name_for_schema,
-        schema_and_table_for_lookup,
+        table_has_implicit_public_rls, table_with_implicit_public_lookup,
     },
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
@@ -117,12 +117,7 @@ fn collect_non_maintenance_update_columns(
     schema: &ParserDB,
     maintenance_columns: &HashSet<String>,
 ) -> Vec<Ident> {
-    let (table_schema, table_name_part) = schema_and_table_for_lookup(&trigger.table_name);
-    let Some(table_name_part) = table_name_part else {
-        return vec![];
-    };
-
-    let Some(table) = schema.table(table_schema, table_name_part) else {
+    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &trigger.table_name) else {
         return vec![];
     };
 
@@ -312,11 +307,7 @@ impl Translator for CreateTrigger {
         // renamed to table_rls).
         let redirected_table_name =
             if matches!(period, Some(TriggerPeriod::Before | TriggerPeriod::After)) {
-                let (table_schema, table_name_part) = schema_and_table_for_lookup(&table_name);
-                if table_name_part
-                    .and_then(|name_part| schema.table(table_schema, name_part))
-                    .is_some_and(|table| table.has_row_level_security(schema))
-                {
+                if table_has_implicit_public_rls(schema, &table_name)? {
                     append_suffix(&table_name, options.get_rls_table_suffix())
                 } else {
                     table_name.clone()

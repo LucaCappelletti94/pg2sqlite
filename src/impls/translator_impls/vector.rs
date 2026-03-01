@@ -25,7 +25,7 @@
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{ColumnLike, DatabaseLike, TableLike},
+    traits::{ColumnLike, TableLike},
 };
 use sqlparser::ast::{CreateTable, DataType, Ident, ObjectName, ObjectNamePart, Statement};
 
@@ -35,7 +35,7 @@ use crate::{
         generated_sql::parse_generated_sql,
         object_name::{
             last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
-            schema_and_table_for_lookup,
+            table_with_implicit_public_lookup,
         },
         translator_impls::rls::resolve_trigger_table_name,
     },
@@ -134,10 +134,7 @@ fn find_pk_column(create_table: &CreateTable, schema: &ParserDB) -> Option<Strin
     }
 
     // Try to look up from schema
-    let (table_schema, table_name) = schema_and_table_for_lookup(&create_table.name);
-    if let Some(table_name) = table_name
-        && let Some(table) = schema.table(table_schema, table_name)
-    {
+    if let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &create_table.name) {
         let pk_cols: Vec<_> = table.primary_key_columns(schema).collect();
         if pk_cols.len() == 1 {
             return Some(pk_cols[0].column_name().to_string());
@@ -276,10 +273,8 @@ pub fn generate_vec0_statements(
     })?;
 
     // Look up the table in schema to check for RLS
-    let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(&create_table.name);
-    let table_obj = table_name_for_lookup
-        .and_then(|table_name| schema.table(table_schema, table_name))
-        .ok_or_else(|| {
+    let table_obj =
+        table_with_implicit_public_lookup(schema, &create_table.name)?.ok_or_else(|| {
             Error::UnsupportedSQLiteFeature(format!(
                 "Table '{table_name}' not found in schema for vector sync triggers"
             ))

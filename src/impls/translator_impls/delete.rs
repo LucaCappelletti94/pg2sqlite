@@ -1,7 +1,4 @@
-use sql_traits::{
-    structs::ParserDB,
-    traits::{DatabaseLike, TableLike},
-};
+use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
         Delete, Expr, GroupByExpr, Query, Select, SelectFlavor, SelectItem, SetExpr, Statement,
@@ -13,7 +10,7 @@ use sqlparser::{
 use super::helpers::{Forward, translate_table_with_joins};
 use crate::{
     impls::{
-        object_name::{append_suffix, schema_and_table_for_lookup},
+        object_name::{append_suffix, table_has_implicit_public_rls},
         shared_helpers::translate_delete_core,
     },
     options::Pg2SqliteOptions,
@@ -98,26 +95,18 @@ impl Translator for Delete {
             if let SetExpr::Select(ref mut select) = *subquery.body {
                 for table_with_joins in &mut select.from {
                     // Update main table reference
-                    if let TableFactor::Table { name, .. } = &mut table_with_joins.relation {
-                        let (table_schema, table_name) = schema_and_table_for_lookup(name);
-                        if table_name
-                            .and_then(|table_name| schema.table(table_schema, table_name))
-                            .is_some_and(|table| table.has_row_level_security(schema))
-                        {
-                            *name = append_suffix(name, rls_suffix);
-                        }
+                    if let TableFactor::Table { name, .. } = &mut table_with_joins.relation
+                        && table_has_implicit_public_rls(schema, name)?
+                    {
+                        *name = append_suffix(name, rls_suffix);
                     }
 
                     // Update JOINed table references
                     for join in &mut table_with_joins.joins {
-                        if let TableFactor::Table { name, .. } = &mut join.relation {
-                            let (table_schema, table_name) = schema_and_table_for_lookup(name);
-                            if table_name
-                                .and_then(|table_name| schema.table(table_schema, table_name))
-                                .is_some_and(|table| table.has_row_level_security(schema))
-                            {
-                                *name = append_suffix(name, rls_suffix);
-                            }
+                        if let TableFactor::Table { name, .. } = &mut join.relation
+                            && table_has_implicit_public_rls(schema, name)?
+                        {
+                            *name = append_suffix(name, rls_suffix);
                         }
                     }
                 }

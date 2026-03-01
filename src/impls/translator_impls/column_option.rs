@@ -1,14 +1,11 @@
 //! Implementation of the [`Translator`] trait for the
 //! `Column` type.
 
-use sql_traits::{
-    structs::ParserDB,
-    traits::{DatabaseLike, TableLike},
-};
+use sql_traits::structs::ParserDB;
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, Expr, ForeignKeyConstraint, GeneratedAs};
 
 use crate::{
-    impls::object_name::{append_suffix, schema_and_table_for_lookup},
+    impls::object_name::{append_suffix, table_has_implicit_public_rls},
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
 };
@@ -222,12 +219,7 @@ impl Translator for ColumnOptionDef {
             }) => {
                 // Check if the referenced table has RLS and update the foreign_table reference
                 let updated_foreign_table = {
-                    let (fk_schema, fk_table_name) = schema_and_table_for_lookup(foreign_table);
-                    if let Some(fk_table_name) = fk_table_name
-                        && schema
-                            .table(fk_schema, fk_table_name)
-                            .is_some_and(|table| table.has_row_level_security(schema))
-                    {
+                    if table_has_implicit_public_rls(schema, foreign_table)? {
                         append_suffix(foreign_table, options.get_rls_table_suffix())
                     } else {
                         foreign_table.clone()

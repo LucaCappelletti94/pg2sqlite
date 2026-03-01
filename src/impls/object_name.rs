@@ -1,6 +1,9 @@
 //! Helpers for structured [`sqlparser::ast::ObjectName`] manipulation.
 
-use sql_traits::{structs::ParserDB, traits::DatabaseLike};
+use sql_traits::{
+    structs::ParserDB,
+    traits::{DatabaseLike, TableLike},
+};
 use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
 
 use crate::errors::Error;
@@ -181,6 +184,16 @@ pub(crate) fn table_with_implicit_public_lookup<'a>(
     }
 
     Ok(None)
+}
+
+/// Returns whether an object name resolves to an RLS-protected table under the
+/// crate's implicit-public policy.
+pub(crate) fn table_has_implicit_public_rls(
+    schema: &ParserDB,
+    name: &ObjectName,
+) -> Result<bool, Error> {
+    Ok(table_with_implicit_public_lookup(schema, name)?
+        .is_some_and(|table| table.has_row_level_security(schema)))
 }
 
 /// Quotes an SQL identifier with double quotes, escaping interior quotes.
