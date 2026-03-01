@@ -1553,6 +1553,75 @@ where
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RlsStatementMode {
+    ReadWrite,
+    ReadOnly,
+}
+
+fn generate_rls_statements_with_mode<O: TranslationOptions, DB: DatabaseLike>(
+    table: &DB::Table,
+    schema: &DB,
+    options: &O,
+    mode: RlsStatementMode,
+) -> Result<Vec<Statement>, Error>
+where
+    DB::Table: TableLike<DB = DB>,
+    DB::Policy: PolicyLike<DB = DB>,
+{
+    // Validate that audit table name is configured
+    let audit_table_name =
+        options.get_rls_audit_table_name().ok_or(Error::RlsAuditTableNameRequired)?;
+
+    let dialect = sqlparser::dialect::SQLiteDialect {};
+    let mut statements = Vec::new();
+
+    // Generate view
+    let view_sql = generate_rls_view_sql(table, schema, options)?;
+    let view_context = match mode {
+        RlsStatementMode::ReadWrite => "Failed to parse generated RLS view SQL",
+        RlsStatementMode::ReadOnly => "Failed to parse generated read-only RLS view",
+    };
+    let view_stmts = parse_generated_sql(&dialect, &view_sql, view_context)?;
+    statements.extend(view_stmts);
+
+    if mode == RlsStatementMode::ReadWrite {
+        // Generate INSERT trigger
+        let insert_sql = generate_insert_trigger_sql(table, schema, options);
+        let insert_stmts = parse_generated_sql(
+            &dialect,
+            &insert_sql,
+            "Failed to parse generated RLS INSERT trigger SQL",
+        )?;
+        statements.extend(insert_stmts);
+
+        // Generate UPDATE trigger
+        let update_sql = generate_update_trigger_sql(table, schema, options);
+        let update_stmts = parse_generated_sql(
+            &dialect,
+            &update_sql,
+            "Failed to parse generated RLS UPDATE trigger SQL",
+        )?;
+        statements.extend(update_stmts);
+
+        // Generate DELETE trigger
+        let delete_sql = generate_delete_trigger_sql(table, schema, options);
+        let delete_stmts = parse_generated_sql(
+            &dialect,
+            &delete_sql,
+            "Failed to parse generated RLS DELETE trigger SQL",
+        )?;
+        statements.extend(delete_stmts);
+    }
+
+    // Generate RLS validation monitoring triggers and views
+    let validation_stmts =
+        generate_rls_validation_statements(table, schema, options, audit_table_name)?;
+    statements.extend(validation_stmts);
+
+    Ok(statements)
+}
+
 /// Generates all RLS-related SQL statements for a table.
 ///
 /// # Errors
@@ -1568,52 +1637,7 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
-    // Validate that audit table name is configured
-    let audit_table_name =
-        options.get_rls_audit_table_name().ok_or(Error::RlsAuditTableNameRequired)?;
-
-    let dialect = sqlparser::dialect::SQLiteDialect {};
-    let mut statements = Vec::new();
-
-    // Generate view
-    let view_sql = generate_rls_view_sql(table, schema, options)?;
-    let view_stmts =
-        parse_generated_sql(&dialect, &view_sql, "Failed to parse generated RLS view SQL")?;
-    statements.extend(view_stmts);
-
-    // Generate INSERT trigger
-    let insert_sql = generate_insert_trigger_sql(table, schema, options);
-    let insert_stmts = parse_generated_sql(
-        &dialect,
-        &insert_sql,
-        "Failed to parse generated RLS INSERT trigger SQL",
-    )?;
-    statements.extend(insert_stmts);
-
-    // Generate UPDATE trigger
-    let update_sql = generate_update_trigger_sql(table, schema, options);
-    let update_stmts = parse_generated_sql(
-        &dialect,
-        &update_sql,
-        "Failed to parse generated RLS UPDATE trigger SQL",
-    )?;
-    statements.extend(update_stmts);
-
-    // Generate DELETE trigger
-    let delete_sql = generate_delete_trigger_sql(table, schema, options);
-    let delete_stmts = parse_generated_sql(
-        &dialect,
-        &delete_sql,
-        "Failed to parse generated RLS DELETE trigger SQL",
-    )?;
-    statements.extend(delete_stmts);
-
-    // Generate RLS validation monitoring triggers and views
-    let validation_stmts =
-        generate_rls_validation_statements(table, schema, options, audit_table_name)?;
-    statements.extend(validation_stmts);
-
-    Ok(statements)
+    generate_rls_statements_with_mode(table, schema, options, RlsStatementMode::ReadWrite)
 }
 
 /// Generates SQLite statements for a read-only RLS view (no write triggers).
@@ -1635,26 +1659,7 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
-    // Validate that audit table name is configured
-    let audit_table_name =
-        options.get_rls_audit_table_name().ok_or(Error::RlsAuditTableNameRequired)?;
-
-    let dialect = sqlparser::dialect::SQLiteDialect {};
-    let mut statements = Vec::new();
-
-    // Generate view only (no write triggers)
-    let view_sql = generate_rls_view_sql(table, schema, options)?;
-    let view_stmts =
-        parse_generated_sql(&dialect, &view_sql, "Failed to parse generated read-only RLS view")?;
-    statements.extend(view_stmts);
-
-    // Generate RLS validation monitoring triggers and views
-    // (even for read-only tables, we monitor sync operations)
-    let validation_stmts =
-        generate_rls_validation_statements(table, schema, options, audit_table_name)?;
-    statements.extend(validation_stmts);
-
-    Ok(statements)
+    generate_rls_statements_with_mode(table, schema, options, RlsStatementMode::ReadOnly)
 }
 
 /// Renames a CREATE TABLE statement to use the inner table name for RLS.
