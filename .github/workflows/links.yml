@@ -15,6 +15,11 @@ jobs:
         uses: lycheeverse/lychee-action@v2
         with:
           # Check all markdown and rust files
-          args: --verbose --no-progress './**/*.md' './**/*.rs'
+          args: >-
+            --verbose
+            --no-progress
+            --exclude '^https://codecov\.io/gh/LucaCappelletti94/pg2sqlite(?:/.*)?$'
+            './**/*.md'
+            './**/*.rs'
           # Fail the action if broken links are found
           fail: true
