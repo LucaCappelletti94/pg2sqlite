@@ -45,10 +45,9 @@ fn concat_ws_wraps_value_args_with_coalesce_not_separator() {
                SELECT CONCAT_WS(',', a, b) FROM t;";
     let output = translate(sql).unwrap();
     assert!(
-        output.contains("COALESCE"),
-        "CONCAT_WS should wrap value args with COALESCE, got: {output}"
+        output.contains("CASE WHEN"),
+        "CONCAT_WS should use CASE expressions to skip NULL values, got: {output}"
     );
-    // The separator ',' should not be wrapped in COALESCE
     assert!(
         !output.contains("COALESCE(',',"),
         "CONCAT_WS should not wrap the separator with COALESCE, got: {output}"

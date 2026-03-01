@@ -339,6 +339,71 @@ fn test_concat_ws_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Semantic test: CONCAT_WS skips NULL arguments without adding extra
+/// separators.
+#[test]
+fn test_concat_ws_semantic_skips_nulls() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE TABLE names (id SERIAL PRIMARY KEY, first TEXT, middle TEXT, last TEXT);
+        SELECT CONCAT_WS('-', first, middle, last) as full_name FROM names ORDER BY id;
+    ";
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
+
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        diesel::sql_query(&stmt.to_string()).execute(&mut connection)?;
+    }
+
+    diesel::insert_into(names::table)
+        .values(&Name {
+            id: 1,
+            first: Some("John".to_string()),
+            middle: None,
+            last: Some("Doe".to_string()),
+        })
+        .execute(&mut connection)?;
+    diesel::insert_into(names::table)
+        .values(&Name {
+            id: 2,
+            first: None,
+            middle: Some("Q".to_string()),
+            last: Some("Public".to_string()),
+        })
+        .execute(&mut connection)?;
+    diesel::insert_into(names::table)
+        .values(&Name { id: 3, first: Some("Jane".to_string()), middle: None, last: None })
+        .execute(&mut connection)?;
+    diesel::insert_into(names::table)
+        .values(&Name { id: 4, first: None, middle: None, last: None })
+        .execute(&mut connection)?;
+
+    let select_stmt = translated
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("Should have a SELECT statement")
+        .to_string();
+
+    #[derive(QueryableByName, Debug)]
+    struct FullName {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        full_name: String,
+    }
+
+    let results = diesel::sql_query(&select_stmt).load::<FullName>(&mut connection)?;
+
+    assert_eq!(results.len(), 4);
+    assert_eq!(results[0].full_name, "John-Doe");
+    assert_eq!(results[1].full_name, "Q-Public");
+    assert_eq!(results[2].full_name, "Jane");
+    assert_eq!(results[3].full_name, "");
+
+    Ok(())
+}
+
 // ============================================================================
 // left() -> substr()
 // ============================================================================
