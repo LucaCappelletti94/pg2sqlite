@@ -227,10 +227,7 @@ fn translate_create_table_for_role(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<Vec<Statement>>, Error> {
-    let Some(role_name) = options.get_session_user_role() else {
-        return Ok(None);
-    };
-    let Some(role) = schema.role(role_name) else {
+    let Some(role) = resolve_session_role(schema, options) else {
         return Ok(None);
     };
     let Some(table) = schema.table(create_table.table_schema(), create_table.table_name()) else {
@@ -282,15 +279,22 @@ enum RoleTableAccess {
     Deny,
 }
 
+fn resolve_session_role<'a>(
+    schema: &'a ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Option<&'a <ParserDB as DatabaseLike>::Role> {
+    let role_name = options.get_session_user_role()?;
+    schema.role(role_name)
+}
+
 fn role_access_for_object_name(
     table_name: &sqlparser::ast::ObjectName,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> RoleTableAccess {
-    let Some(role_name) = options.get_session_user_role() else {
+    let Some(role) = resolve_session_role(schema, options) else {
         return RoleTableAccess::Allow;
     };
-    let Some(role) = schema.role(role_name) else { return RoleTableAccess::Deny };
 
     let (table_schema, table_name_for_lookup) = schema_and_table_for_lookup(table_name);
     let Some(table_name_for_lookup) = table_name_for_lookup else { return RoleTableAccess::Deny };
@@ -807,5 +811,57 @@ mod tests {
         let translated =
             index_stmt.translate(&schema, &options).expect("translation should not error");
         assert!(translated.is_empty(), "missing table should be treated as non-selectable");
+    }
+
+    #[test]
+    fn unknown_session_role_does_not_filter_create_index_or_trigger() {
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(
+                &PostgreSqlDialect {},
+                r#"
+                CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
+                CREATE FUNCTION docs_trigger_fn() RETURNS trigger AS $$
+                BEGIN
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+                CREATE INDEX docs_title_idx ON docs(title);
+                CREATE TRIGGER docs_ai
+                AFTER INSERT ON docs
+                FOR EACH ROW
+                EXECUTE FUNCTION docs_trigger_fn();
+                "#,
+            )
+            .expect("schema SQL should parse"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+
+        let options = Pg2SqliteOptions::default().with_session_user_role("missing_role");
+
+        let index_stmt =
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE INDEX docs_title_idx ON docs(title);")
+                .expect("index SQL should parse")
+                .remove(0);
+        let trigger_stmt = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "CREATE TRIGGER docs_ai AFTER INSERT ON docs FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn();",
+        )
+        .expect("trigger SQL should parse")
+        .remove(0);
+
+        let translated_index =
+            index_stmt.translate(&schema, &options).expect("index translation should succeed");
+        assert!(
+            !translated_index.is_empty(),
+            "unknown role should not filter CREATE INDEX statements"
+        );
+
+        let translated_trigger =
+            trigger_stmt.translate(&schema, &options).expect("trigger translation should succeed");
+        assert!(
+            !translated_trigger.is_empty(),
+            "unknown role should not filter CREATE TRIGGER statements"
+        );
     }
 }
