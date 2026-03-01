@@ -24,6 +24,7 @@ use crate::{
 fn generate_maintenance_trigger_body(
     trigger: &CreateTrigger,
     target_table_name: &ObjectName,
+    row_context: &str,
     schema: &ParserDB,
 ) -> sqlparser::ast::BeginEndStatements {
     let assignments = trigger
@@ -64,7 +65,10 @@ fn generate_maintenance_trigger_body(
         selection: Some(Expr::BinaryOp {
             left: Box::new(Expr::Identifier(Ident::new("rowid"))),
             op: BinaryOperator::Eq,
-            right: Box::new(Expr::CompoundIdentifier(vec![Ident::new("OLD"), Ident::new("rowid")])),
+            right: Box::new(Expr::CompoundIdentifier(vec![
+                Ident::new(row_context),
+                Ident::new("rowid"),
+            ])),
         }),
         returning: None,
         or: None,
@@ -177,6 +181,10 @@ fn rewrite_maintenance_update_events(
         .collect()
 }
 
+fn maintenance_trigger_has_insert_event(events: &[TriggerEvent]) -> bool {
+    events.iter().any(|event| matches!(event, TriggerEvent::Insert))
+}
+
 impl Translator for CreateTrigger {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -226,12 +234,21 @@ impl Translator for CreateTrigger {
             )));
         }
 
+        let mut period = period;
         let is_maintenance_trigger = self.is_maintenance_trigger(schema);
         let events = if is_maintenance_trigger {
             rewrite_maintenance_update_events(self, events, schema)
         } else {
             events
         };
+        let maintenance_insert_event =
+            is_maintenance_trigger && maintenance_trigger_has_insert_event(&events);
+        if maintenance_insert_event && matches!(period, Some(TriggerPeriod::Before)) {
+            // SQLite cannot apply row maintenance updates for INSERT in BEFORE timing
+            // because the row does not exist yet; translate to AFTER to
+            // preserve final-row semantics.
+            period = Some(TriggerPeriod::After);
+        }
 
         // For BEFORE/AFTER triggers on RLS-protected tables, redirect to the underlying
         // _rls table. INSTEAD OF triggers are used on the view, but
@@ -253,7 +270,8 @@ impl Translator for CreateTrigger {
             };
 
         let function_body = if is_maintenance_trigger {
-            generate_maintenance_trigger_body(self, &redirected_table_name, schema)
+            let row_context = if maintenance_insert_event { "NEW" } else { "OLD" };
+            generate_maintenance_trigger_body(self, &redirected_table_name, row_context, schema)
         } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
             body
         } else {
