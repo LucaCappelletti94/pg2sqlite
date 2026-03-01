@@ -87,17 +87,15 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
         .execute(&mut connection)
         .expect("Failed to set journal mode to WAL");
 
-    // Execute all translated DDL statements
+    // Execute all translated statements and fail fast on runtime incompatibility.
     let number_of_migrations = translated_migrations.len();
     for (i, translated_migration) in
         translated_migrations.iter().enumerate().map(|(v, s)| (v + 1, s))
     {
         let sql = translated_migration.to_string();
-        if let Err(err) = diesel::sql_query(&sql).execute(&mut connection) {
-            eprintln!(
-                "Failed to run the translated statement {i}/{number_of_migrations} {sql}: {err}"
-            );
-        }
+        diesel::sql_query(&sql).execute(&mut connection).unwrap_or_else(|err| {
+            panic!("Failed to run translated statement {i}/{number_of_migrations}: {sql}\n{err}")
+        });
     }
 
     Ok(())
