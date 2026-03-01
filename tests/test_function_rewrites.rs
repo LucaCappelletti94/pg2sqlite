@@ -8,7 +8,7 @@ use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 // ============================================================================
-// H1: random() semantic mismatch → ABS(random()) / 9223372036854775807.0
+// H1: random() semantic mismatch and ABS(min-int) overflow edge in SQLite.
 // ============================================================================
 
 #[test]
@@ -16,9 +16,45 @@ fn random_translates_to_float_range() {
     let options = Pg2SqliteOptions::default();
     let sql = translate_sql("SELECT random()", &options).unwrap();
     let lower = sql.to_lowercase();
-    assert!(lower.contains("abs"), "expected ABS wrapping: {sql}");
-    assert!(lower.contains("9223372036854775807"), "expected divisor constant: {sql}");
+    assert!(lower.contains("cast"), "expected CAST(random() AS REAL): {sql}");
+    assert!(lower.contains("9223372036854775808"), "expected offset constant: {sql}");
+    assert!(lower.contains("18446744073709551616"), "expected divisor constant: {sql}");
+    assert!(!lower.contains("abs("), "random rewrite should avoid ABS to prevent overflow: {sql}");
     assert!(lower.contains('/'), "expected division operator: {sql}");
+}
+
+#[test]
+fn random_rewrite_handles_sqlite_min_i64_without_overflow() -> Result<(), Box<dyn std::error::Error>>
+{
+    let sql = "SELECT random() AS val";
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let select_sql = translated[0].to_string();
+
+    let forced_min_sql = if select_sql.contains("random()") {
+        select_sql.replacen("random()", "-9223372036854775808", 1)
+    } else if select_sql.contains("RANDOM()") {
+        select_sql.replacen("RANDOM()", "-9223372036854775808", 1)
+    } else {
+        panic!("translated random SQL did not contain random() call: {select_sql}");
+    };
+
+    #[derive(QueryableByName, Debug)]
+    struct FloatResult {
+        #[diesel(sql_type = diesel::sql_types::Double)]
+        val: f64,
+    }
+
+    let mut conn = SqliteConnection::establish(":memory:")?;
+    let results = diesel::sql_query(&forced_min_sql).load::<FloatResult>(&mut conn)?;
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].val.is_finite(),
+        "forced min-int rewrite result should be finite, got: {} (sql: {forced_min_sql})",
+        results[0].val
+    );
+
+    Ok(())
 }
 
 #[test]
