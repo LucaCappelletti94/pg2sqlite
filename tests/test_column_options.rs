@@ -94,7 +94,10 @@ fn default_uuid_function() {
         &options,
     );
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
-    assert!(output.contains("uuid"), "Expected uuid function: {output}");
+    assert!(
+        output.contains("randomblob") && output.contains("lower"),
+        "Expected SQLite-native UUID default expression: {output}"
+    );
 }
 
 #[test]
