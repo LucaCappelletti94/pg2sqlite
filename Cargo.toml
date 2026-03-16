@@ -8,16 +8,16 @@ rust-version = "1.88"
 sqlparser = { version = "0.61", git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main", features = ["visitor"] }
 sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "1d5a6d7e31358daf68362a2078a3a17cfdfed549" }
 git2 = "0.20.4"
-tempfile = "3.25"
+tempfile = "3.27"
 thiserror = "2.0"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-diesel = { version = "2.3.5", features = ["sqlite"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+diesel = { version = "2.3.7", features = ["sqlite"] }
 insta = "1.46.3"
-polyglot-sql = "0.1.7"
+polyglot-sql = "0.1.15"
 rosetta-uuid = { version = "0.1", features = ["diesel", "sqlite"] }
-rusqlite = { version = "0.35", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 sqlite-vec = "0.1"
 zerocopy = "0.8"
 rand = "0.10"
