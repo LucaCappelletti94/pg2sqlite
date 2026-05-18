@@ -85,9 +85,10 @@ Statements that *do* have a SQLite equivalent but that pg2sqlite does not yet tr
 | `JSON` / `JSONB` / `TSVECTOR` / `TSQUERY`                    | `TEXT`                                        |
 | `TIMESTAMP` / `TIMESTAMPTZ` / `DATE` / `TIME` / `INTERVAL`   | `TEXT`                                        |
 | `UUID`                                                       | `BLOB` or `TEXT` (configurable)               |
-| `BYTEA` / `BINARY` / `VARBINARY` / `GEOGRAPHY`               | `BLOB`                                        |
+| `BYTEA` / `BINARY` / `VARBINARY`                             | `BLOB`                                        |
 | `BIT` / `BIT VARYING`                                        | `INTEGER`                                     |
 | `vector(N)` / `halfvec(N)`                                   | `BLOB` (see [Vector search](#vector-search))  |
+| `GEOMETRY` / `GEOGRAPHY`                                     | `BLOB` (see [PostGIS](#postgis-via-geolite))  |
 
 All `CREATE TABLE` output uses SQLite `STRICT` mode, and `NOT NULL` is automatically added to primary key columns.
 
@@ -237,6 +238,50 @@ Translates [pgvector](https://github.com/pgvector/pgvector) types and operators 
 | `'[1,2,3]'::vector`     | `vec_f32('[1,2,3]')`      |
 
 For tables with vector columns, pg2sqlite additionally generates a `vec0` virtual table and sync triggers (`INSERT`, `UPDATE`, `DELETE`) to keep it synchronized with the main table.
+
+### PostGIS via geolite
+
+Translates [PostGIS](https://postgis.net/) types, functions, and GiST indexes to the [geolite](https://github.com/LucaCappelletti94/geolite) SQLite extension. Opt in by enabling the runtime flag:
+
+```rust
+use pg2sqlite::prelude::*;
+
+fn main() {
+    let options = Pg2SqliteOptions::default().with_geolite_enabled();
+    let _ = options;
+}
+```
+
+What the translator does:
+
+- `GEOMETRY` and `GEOGRAPHY` columns become `BLOB` (EWKB on the wire, matching geolite's storage format).
+- The 88 `ST_*` scalar functions geolite implements at v0.1 pass through verbatim, validated against geolite's published catalog so arity mismatches and unknown spatial calls (e.g. `ST_Transform`) fail at translation time instead of producing SQL that errors at runtime.
+- `CREATE INDEX ... USING gist (geom_col)` on a geometry/geography column becomes `SELECT CreateSpatialIndex('tbl', 'geom_col')`, which geolite turns into an rtree shadow table at runtime. Mixed-column GiST and partial spatial indexes (`WHERE ...`) error explicitly.
+- GiST on `to_tsvector(...)` keeps routing to FTS5 as before.
+- Spatial WHERE predicates over an indexed column are rewritten at translation time to drive the rtree shadow. A plain `SELECT ... FROM features WHERE ST_Intersects(geom, env)` becomes a query whose plan uses `VIRTUAL TABLE INDEX` against `features_geom_rtree`, with no manual JOIN needed.
+
+```sql
+-- Input (PostgreSQL)
+CREATE TABLE features (id INT PRIMARY KEY, geom GEOMETRY);
+CREATE INDEX features_geom_idx ON features USING gist (geom);
+SELECT id FROM features WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));
+
+-- Output (SQLite, with geolite loaded at runtime)
+CREATE TABLE features (id INTEGER PRIMARY KEY NOT NULL, geom BLOB) STRICT;
+SELECT CreateSpatialIndex('features', 'geom');
+SELECT id FROM features
+WHERE features.rowid IN (
+    SELECT id FROM features_geom_rtree
+    WHERE xmin <= ST_XMax(ST_MakeEnvelope(0, 0, 10, 10))
+      AND xmax >= ST_XMin(ST_MakeEnvelope(0, 0, 10, 10))
+      AND ymin <= ST_YMax(ST_MakeEnvelope(0, 0, 10, 10))
+      AND ymax >= ST_YMin(ST_MakeEnvelope(0, 0, 10, 10))
+) AND ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));
+```
+
+The rewrite is conservative: single-table FROM, flat AND in WHERE, bbox-overlap-narrowable predicates (`ST_Intersects`, `ST_Contains`, `ST_Within`, `ST_Covers`, `ST_CoveredBy`, `ST_Equals`, `ST_Touches`, `ST_Crosses`, `ST_Overlaps`), simple column reference as the predicate's first arg. Joins, subqueries, top-level `OR`/`NOT`, non-trivial first args, and predicates over unindexed columns all pass through unchanged.
+
+The caller is responsible for loading geolite onto the destination SQLite connection (for example via `SELECT load_extension('libgeolite_sqlite')` or `sqlite3_auto_extension`); pg2sqlite only emits the SQL. Without the runtime flag set, `geometry` and `geography` still map to `BLOB` for backward compatibility, `ST_*` calls keep their pre-existing passthrough behavior, and no rewriting fires.
 
 ### Full-text search
 
