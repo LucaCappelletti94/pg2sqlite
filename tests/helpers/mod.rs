@@ -2,6 +2,9 @@
 
 #![allow(dead_code)]
 
+#[cfg(feature = "geolite")]
+pub mod geolite;
+
 use std::cell::RefCell;
 
 use diesel::{prelude::*, sqlite::SqliteConnection};

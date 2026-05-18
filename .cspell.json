@@ -48,7 +48,19 @@
     "insta",
     "criterion",
     "vec0",
-    "sqlite"
+    "sqlite",
+    "geolite",
+    "Geolite",
+    "libgeolite",
+    "EWKB",
+    "rtree",
+    "rebound",
+    "rebounded",
+    "footgun",
+    "bboxes",
+    "savepoint",
+    "savepoints",
+    "xfunc"
   ],
   "ignorePaths": [
     "target/**",
