@@ -1174,7 +1174,7 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         .collect::<Result<Vec<_>, _>>()?;
     let connect_by = translate_connect_by_kinds::<D>(&select.connect_by, schema, options)?;
 
-    Ok(sqlparser::ast::Select {
+    let translated = sqlparser::ast::Select {
         select_token: select.select_token.clone(),
         distinct: translate_distinct_shared::<D>(select.distinct.as_ref(), schema, options)?,
         top: translate_top_shared::<D>(select.top.as_ref(), schema, options)?,
@@ -1207,7 +1207,25 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         exclude: select.exclude.clone(),
         optimizer_hint: select.optimizer_hint.clone(),
         select_modifiers: select.select_modifiers.clone(),
-    })
+    };
+
+    // Forward-only spatial predicate rewriting (Step 6): drive `ST_*`
+    // predicates over indexed columns through the rtree shadow via an
+    // IN-subquery. Hooked here, at the single canonical Select translation
+    // entry point, so DISTINCT ON and GROUPING SETS rewrites (which call
+    // `<Select as Translator>::translate` directly via `query.rs:236/639`)
+    // get the same treatment as the normal `Query` dispatch path. Gated on
+    // `D::IS_FORWARD` to skip on reverse translation.
+    if D::IS_FORWARD
+        && let Some(rewritten) =
+            crate::impls::translator_impls::postgis::try_rewrite_spatial_select(
+                &translated,
+                options,
+            )?
+    {
+        return Ok(rewritten);
+    }
+    Ok(translated)
 }
 
 /// Shared `SetExpr` translation used by both forward and reverse paths.
@@ -1221,6 +1239,9 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
     use sqlparser::ast::SetExpr;
     Ok(match set_expr {
         SetExpr::Select(select) => {
+            // Spatial predicate rewriting lives inside `translate_select_shared`
+            // so DISTINCT ON / GROUPING SETS rewrites that call it directly
+            // also receive the same treatment.
             SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, options)?))
         }
         SetExpr::Query(query) => {

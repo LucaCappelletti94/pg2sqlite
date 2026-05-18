@@ -27,6 +27,13 @@ pub struct Pg2SqliteOptions {
     /// Whether to enable geolite-backed PostGIS translation (passthrough of
     /// `ST_*` scalar functions in geolite's catalog).
     enable_geolite: bool,
+    /// Spatially-indexed `(table, column)` pairs, both lowercased, populated
+    /// automatically by `Pg2Sqlite::translate` from `CREATE INDEX ... USING
+    /// gist (...)` statements in the input. Consumed by the query-time
+    /// predicate rewriting pass to drive `ST_*` predicates through the rtree
+    /// shadow table. Intentionally not exposed in the public builder API:
+    /// the catalog is derived from translation context, not user config.
+    pub(crate) spatial_indexes: Vec<(String, String)>,
 }
 
 impl Default for Pg2SqliteOptions {
@@ -41,7 +48,36 @@ impl Default for Pg2SqliteOptions {
             rls_audit_table_name: None,
             strict_rls_validation: false,
             enable_geolite: false,
+            spatial_indexes: Vec::new(),
         }
+    }
+}
+
+impl Pg2SqliteOptions {
+    /// Records `(table, column)` as having a translated spatial index. Both
+    /// are lowercased on insert so later lookups via
+    /// [`Self::has_spatial_index`] can match the parser's case-folded
+    /// identifiers without re-normalizing. Idempotent: duplicate entries
+    /// are filtered out.
+    pub(crate) fn add_spatial_index(
+        &mut self,
+        table: impl Into<String>,
+        column: impl Into<String>,
+    ) {
+        let entry = (table.into().to_ascii_lowercase(), column.into().to_ascii_lowercase());
+        if !self.spatial_indexes.contains(&entry) {
+            self.spatial_indexes.push(entry);
+        }
+    }
+
+    /// Returns whether the given `(table, column)` pair was registered as a
+    /// spatial index in the same translation unit. Case-insensitive on both
+    /// inputs.
+    #[must_use]
+    pub(crate) fn has_spatial_index(&self, table: &str, column: &str) -> bool {
+        let table = table.to_ascii_lowercase();
+        let column = column.to_ascii_lowercase();
+        self.spatial_indexes.iter().any(|(t, c)| *t == table && *c == column)
     }
 }
 

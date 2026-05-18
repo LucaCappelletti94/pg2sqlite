@@ -1,0 +1,414 @@
+//! Step 4 (geolite-gated): the translated GiST->CreateSpatialIndex DDL
+//! executes against a real geolite-loaded SQLite, producing the rtree
+//! shadow table at `<table>_<col>_rtree`, and subsequent spatial queries
+//! work against the indexed column.
+//!
+//! Run with: `cargo test --features geolite --test test_postgis_gist_diesel`
+
+#![cfg(feature = "geolite")]
+
+mod helpers;
+
+use diesel::{
+    QueryableByName, RunQueryDsl, sql_query,
+    sql_types::{Integer, Text},
+};
+use helpers::geolite::geolite_connection;
+use pg2sqlite::{
+    pg2sqlite::Pg2Sqlite,
+    prelude::{Pg2SqliteOptions, TranslationOptions},
+};
+
+#[derive(QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = Integer)]
+    n: i32,
+}
+
+#[derive(QueryableByName)]
+struct NameRow {
+    #[diesel(sql_type = Text)]
+    name: String,
+}
+
+#[derive(QueryableByName)]
+struct PlanRow {
+    #[diesel(sql_type = Text)]
+    detail: String,
+}
+
+#[test]
+fn gist_geometry_index_round_trips_via_diesel() {
+    let mut conn = geolite_connection();
+    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+
+    let pg_sql = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
+                  CREATE INDEX features_geom_idx ON features USING gist (geom);";
+    let stmts = Pg2Sqlite::default()
+        .sql(pg_sql)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate");
+
+    for s in &stmts {
+        sql_query(s)
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("execute failed for `{s}`: {e:?}"));
+    }
+
+    // geolite names the rtree shadow as `<table>_<col>_rtree`.
+    let rows: Vec<NameRow> = sql_query(
+        "SELECT name FROM sqlite_master WHERE name = 'features_geom_rtree' AND type = 'table'",
+    )
+    .load(&mut conn)
+    .expect("query sqlite_master");
+    assert_eq!(rows.len(), 1, "rtree shadow table should exist after CreateSpatialIndex");
+    assert_eq!(rows[0].name, "features_geom_rtree");
+
+    // Insert one row and verify the spatial predicate finds it. The AFTER INSERT
+    // trigger installed by geolite's CreateSpatialIndex also populates the rtree
+    // shadow, but this test focuses on translation shape only; the full-grid
+    // acceleration test below covers rtree sync and planner usage explicitly.
+    sql_query("INSERT INTO features (id, geom) VALUES (1, ST_Point(0.5, 0.5))")
+        .execute(&mut conn)
+        .expect("insert point");
+
+    let rows: Vec<CountRow> = sql_query(
+        "SELECT count(*) AS n FROM features \
+         WHERE ST_Intersects(geom, ST_MakeEnvelope(0.0, 0.0, 1.0, 1.0))",
+    )
+    .load(&mut conn)
+    .expect("spatial query");
+    assert_eq!(rows[0].n, 1, "ST_Intersects should match the inserted point");
+}
+
+/// Verifies that pg2sqlite's translation of `CREATE INDEX ... USING gist
+/// (geom)` produces a maintained, query-accelerating rtree shadow when the
+/// geolite extension is loaded:
+///
+/// 1. After the translated DDL runs, the rtree shadow exists and is empty.
+/// 2. AFTER INSERT triggers installed by geolite's `CreateSpatialIndex`
+///    populate the rtree as rows are written, with no manual sync.
+/// 3. A bounding-box probe of the rtree alone narrows the candidate set to a
+///    tiny fraction of the base table, demonstrating that the index is
+///    mechanically functional (the planner won't auto-join through it on a
+///    plain `ST_Intersects` predicate, but explicit joins are fast).
+/// 4. The rtree-join query and the full-scan query return the same count,
+///    proving correctness of the indexed candidate set.
+/// 5. `EXPLAIN QUERY PLAN` on the rtree-join confirms the planner reaches the
+///    rtree virtual table.
+#[test]
+fn gist_geometry_index_accelerates_spatial_queries() {
+    let mut conn = geolite_connection();
+    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+
+    // 1. Translate and execute the PG-shaped DDL.
+    let pg_sql = "CREATE TABLE perf_grid (id INTEGER PRIMARY KEY, geom geometry); \
+                  CREATE INDEX perf_grid_geom_idx ON perf_grid USING gist (geom);";
+    let stmts = Pg2Sqlite::default()
+        .sql(pg_sql)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate");
+    for s in &stmts {
+        sql_query(s)
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("execute failed for `{s}`: {e:?}"));
+    }
+
+    // 2. Rtree shadow exists and is empty before any writes.
+    let rtree_initial: Vec<CountRow> = sql_query("SELECT count(*) AS n FROM perf_grid_geom_rtree")
+        .load(&mut conn)
+        .expect("rtree count (initial)");
+    assert_eq!(rtree_initial[0].n, 0, "rtree must start empty on a freshly-translated GiST index");
+
+    // 3. Insert 10k points on a 100x100 grid. The AFTER INSERT triggers installed
+    //    by geolite's CreateSpatialIndex must populate the rtree transparently;
+    //    pg2sqlite emits no extra sync SQL of its own.
+    sql_query("BEGIN").execute(&mut conn).expect("begin tx");
+    for i in 0..100 {
+        for j in 0..100 {
+            let id = i * 100 + j;
+            sql_query(format!(
+                "INSERT INTO perf_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
+            ))
+            .execute(&mut conn)
+            .expect("insert grid point");
+        }
+    }
+    sql_query("COMMIT").execute(&mut conn).expect("commit tx");
+
+    let base_count: Vec<CountRow> =
+        sql_query("SELECT count(*) AS n FROM perf_grid").load(&mut conn).expect("base count");
+    assert_eq!(base_count[0].n, 10_000);
+
+    let rtree_after: Vec<CountRow> = sql_query("SELECT count(*) AS n FROM perf_grid_geom_rtree")
+        .load(&mut conn)
+        .expect("rtree count (after writes)");
+    assert_eq!(
+        rtree_after[0].n, 10_000,
+        "geolite triggers must keep the rtree synchronized with inserts; \
+         got {} entries against {} base rows",
+        rtree_after[0].n, base_count[0].n
+    );
+
+    // 4. Rtree-only bbox probe narrows the candidate set deterministically. The
+    //    (20..=30, 20..=30) window covers an 11x11 grid: 121 points.
+    let candidates: Vec<CountRow> = sql_query(
+        "SELECT count(*) AS n FROM perf_grid_geom_rtree \
+         WHERE xmin >= 20 AND xmax <= 30 AND ymin >= 20 AND ymax <= 30",
+    )
+    .load(&mut conn)
+    .expect("rtree bbox probe");
+    assert_eq!(candidates[0].n, 121, "rtree bbox probe must isolate the 11x11 window");
+    assert!(
+        candidates[0].n * 50 < base_count[0].n,
+        "rtree must narrow candidates by at least 50x (got {} of {})",
+        candidates[0].n,
+        base_count[0].n
+    );
+
+    // 5. Full-scan and rtree-join must agree on the answer count.
+    let full_scan: Vec<CountRow> = sql_query(
+        "SELECT count(*) AS n FROM perf_grid \
+         WHERE ST_Intersects(geom, ST_MakeEnvelope(20.0, 20.0, 30.0, 30.0)) = 1",
+    )
+    .load(&mut conn)
+    .expect("full-scan ST_Intersects");
+    let rtree_join: Vec<CountRow> = sql_query(
+        "SELECT count(*) AS n FROM perf_grid p \
+         JOIN perf_grid_geom_rtree r ON p.id = r.id \
+         WHERE r.xmin >= 20 AND r.xmax <= 30 AND r.ymin >= 20 AND r.ymax <= 30 \
+           AND ST_Intersects(p.geom, ST_MakeEnvelope(20.0, 20.0, 30.0, 30.0)) = 1",
+    )
+    .load(&mut conn)
+    .expect("rtree-join ST_Intersects");
+    assert_eq!(
+        full_scan[0].n, 121,
+        "ST_Intersects full scan must return all 121 points in the window"
+    );
+    assert_eq!(
+        rtree_join[0].n, full_scan[0].n,
+        "rtree-join query must return the same count as the full scan"
+    );
+
+    // 6. Query plan: the rtree-join must reach the rtree virtual table. SQLite's
+    //    EXPLAIN QUERY PLAN reports `VIRTUAL TABLE INDEX <n>:<id>` for rtree scans
+    //    (and only for rtree-style virtual tables in this schema), so the presence
+    //    of that marker is sufficient evidence that the planner is using the index
+    //    rather than falling back to a table scan on `perf_grid_geom_rtree`'s
+    //    shadow rows.
+    let plan: Vec<PlanRow> = sql_query(
+        "EXPLAIN QUERY PLAN \
+         SELECT p.id FROM perf_grid p \
+         JOIN perf_grid_geom_rtree r ON p.id = r.id \
+         WHERE r.xmin >= 20 AND r.xmax <= 30 AND r.ymin >= 20 AND r.ymax <= 30",
+    )
+    .load(&mut conn)
+    .expect("EXPLAIN QUERY PLAN");
+    let plan_text = plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(
+        plan_text.contains("VIRTUAL TABLE INDEX"),
+        "query plan should drive the rtree virtual-table index; got:\n{plan_text}"
+    );
+}
+
+/// Step 6 (predicate rewriting): a plain `SELECT ... WHERE ST_Intersects(geom,
+/// envelope)` over an indexed column must, after translation, hit the rtree
+/// without the user writing the JOIN explicitly.
+#[test]
+fn st_intersects_on_indexed_column_uses_rtree_via_translation() {
+    let mut conn = geolite_connection();
+    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+
+    // Translate the schema together with the user's spatial query so that
+    // pg2sqlite's spatial-index catalog sees the GiST DDL before reaching
+    // the SELECT. This is how a real consumer drives pg2sqlite: feed it the
+    // full schema and the queries that target it, in one call.
+    let full_sql = "CREATE TABLE perf_grid (id INTEGER PRIMARY KEY, geom geometry); \
+                    CREATE INDEX perf_grid_geom_idx ON perf_grid USING gist (geom); \
+                    SELECT id FROM perf_grid \
+                     WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30));";
+    let translated = Pg2Sqlite::default()
+        .sql(full_sql)
+        .expect("parse schema + query")
+        .translate_to_sql(&opts)
+        .expect("translate schema + query");
+
+    // Execute the schema-shaped statements (CREATE TABLE, CreateSpatialIndex).
+    // The user SELECT comes last; we run it separately so we can inspect its
+    // query plan in isolation.
+    let user_select = translated
+        .iter()
+        .find(|s| {
+            s.to_ascii_uppercase().trim_start().starts_with("SELECT")
+                && !s.contains("CreateSpatialIndex")
+        })
+        .expect("translator emitted a user SELECT");
+    for s in &translated {
+        if std::ptr::eq(s, user_select) {
+            continue;
+        }
+        sql_query(s).execute(&mut conn).expect("execute schema stmt");
+    }
+
+    sql_query("BEGIN").execute(&mut conn).expect("begin tx");
+    for i in 0..100 {
+        for j in 0..100 {
+            let id = i * 100 + j;
+            sql_query(format!(
+                "INSERT INTO perf_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
+            ))
+            .execute(&mut conn)
+            .expect("insert");
+        }
+    }
+    sql_query("COMMIT").execute(&mut conn).expect("commit");
+
+    let select = user_select;
+
+    // Correctness: same answer count as the unindexed full scan would give.
+    let count: Vec<CountRow> = sql_query(format!("SELECT count(*) AS n FROM ({select})"))
+        .load(&mut conn)
+        .expect("execute translated SELECT");
+    assert_eq!(count[0].n, 121, "rewritten query must return 11x11 = 121 points");
+
+    // Plan: the translated SELECT, run as-is by the user, must reach the
+    // rtree virtual table without any manual JOIN.
+    let plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {select}"))
+        .load(&mut conn)
+        .expect("explain translated SELECT");
+    let plan_text = plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(
+        plan_text.contains("VIRTUAL TABLE INDEX"),
+        "translated SELECT should hit the rtree virtual table; got plan:\n{plan_text}\n\
+         translated SQL was:\n{select}"
+    );
+}
+
+/// Proves the acceleration is conditional on index presence by running the
+/// SAME spatial predicate against two identically-populated tables - one
+/// with a translated GiST index, one without - and asserting the query
+/// plans differ accordingly while both return the same correct row count.
+#[test]
+fn acceleration_is_conditional_on_index_presence() {
+    let mut conn = geolite_connection();
+    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+
+    // Both tables share the same shape; only the indexed one gets a
+    // CREATE INDEX USING gist. The two SELECTs are byte-identical apart
+    // from their FROM target, so any plan or output difference must come
+    // from the index translation path.
+    let full_sql = "\
+        CREATE TABLE indexed_grid (id INTEGER PRIMARY KEY, geom geometry); \
+        CREATE TABLE unindexed_grid (id INTEGER PRIMARY KEY, geom geometry); \
+        CREATE INDEX indexed_grid_geom_idx ON indexed_grid USING gist (geom); \
+        SELECT id FROM indexed_grid \
+         WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30)); \
+        SELECT id FROM unindexed_grid \
+         WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30));";
+
+    let translated = Pg2Sqlite::default()
+        .sql(full_sql)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate");
+
+    // Pick out the two user SELECTs (skip CREATE TABLE + CreateSpatialIndex).
+    let selects: Vec<&String> = translated
+        .iter()
+        .filter(|s| {
+            s.to_ascii_uppercase().trim_start().starts_with("SELECT")
+                && !s.contains("CreateSpatialIndex")
+        })
+        .collect();
+    assert_eq!(selects.len(), 2, "expected two translated user SELECTs, got: {selects:?}");
+    let indexed_select =
+        selects.iter().find(|s| s.contains("indexed_grid")).expect("indexed SELECT").as_str();
+    let unindexed_select = selects
+        .iter()
+        .find(|s| s.contains("unindexed_grid") && !s.contains("indexed_grid_geom_rtree"))
+        .expect("unindexed SELECT")
+        .as_str();
+
+    // Translation-side assertion: only the indexed query carries the rewrite.
+    assert!(
+        indexed_select.contains("indexed_grid_geom_rtree"),
+        "indexed query must be rewritten via the rtree shadow, got:\n{indexed_select}"
+    );
+    assert!(
+        !unindexed_select.contains("_rtree"),
+        "unindexed query must not reference any rtree shadow, got:\n{unindexed_select}"
+    );
+
+    // Apply the schema-shaped statements; skip the SELECTs (we run those
+    // separately so we can inspect their query plans).
+    for s in &translated {
+        let upper = s.to_ascii_uppercase();
+        if upper.trim_start().starts_with("SELECT") && !s.contains("CreateSpatialIndex") {
+            continue;
+        }
+        sql_query(s).execute(&mut conn).expect("execute schema stmt");
+    }
+
+    // Populate both tables identically with the same 10k-point grid so the
+    // ST_Intersects answers are guaranteed equal.
+    sql_query("BEGIN").execute(&mut conn).expect("begin tx");
+    for i in 0..100 {
+        for j in 0..100 {
+            let id = i * 100 + j;
+            sql_query(format!(
+                "INSERT INTO indexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
+            ))
+            .execute(&mut conn)
+            .expect("insert indexed");
+            sql_query(format!(
+                "INSERT INTO unindexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
+            ))
+            .execute(&mut conn)
+            .expect("insert unindexed");
+        }
+    }
+    sql_query("COMMIT").execute(&mut conn).expect("commit");
+
+    // Correctness: both queries return the same row count.
+    let indexed_count: Vec<CountRow> =
+        sql_query(format!("SELECT count(*) AS n FROM ({indexed_select})"))
+            .load(&mut conn)
+            .expect("count indexed");
+    let unindexed_count: Vec<CountRow> =
+        sql_query(format!("SELECT count(*) AS n FROM ({unindexed_select})"))
+            .load(&mut conn)
+            .expect("count unindexed");
+    assert_eq!(indexed_count[0].n, 121, "indexed query must find 11x11 = 121 points");
+    assert_eq!(
+        unindexed_count[0].n, indexed_count[0].n,
+        "both queries must return the same count over identical data"
+    );
+
+    // Plan: indexed reaches the rtree virtual table; unindexed full-scans.
+    let indexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {indexed_select}"))
+        .load(&mut conn)
+        .expect("explain indexed");
+    let unindexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {unindexed_select}"))
+        .load(&mut conn)
+        .expect("explain unindexed");
+    let indexed_text =
+        indexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    let unindexed_text =
+        unindexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+
+    assert!(
+        indexed_text.contains("VIRTUAL TABLE INDEX"),
+        "indexed plan must drive the rtree; got:\n{indexed_text}\nfor SQL:\n{indexed_select}"
+    );
+    assert!(
+        !unindexed_text.contains("VIRTUAL TABLE INDEX"),
+        "unindexed plan must NOT mention the rtree (would mean leakage); got:\n{unindexed_text}\n\
+         for SQL:\n{unindexed_select}"
+    );
+    assert!(
+        unindexed_text.contains("SCAN"),
+        "unindexed plan should be a full table scan; got:\n{unindexed_text}"
+    );
+}

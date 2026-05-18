@@ -5,7 +5,10 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
 };
-use sqlparser::ast::{CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement};
+use sqlparser::{
+    ast::{CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement},
+    dialect::PostgreSqlDialect,
+};
 
 use crate::{
     errors::Error,
@@ -17,9 +20,9 @@ use crate::{
             table_with_implicit_public_lookup,
         },
         shared_helpers::function_argument_exprs,
-        translator_impls::rls::resolve_trigger_table_name,
+        translator_impls::{postgis, rls::resolve_trigger_table_name},
     },
-    prelude::{Pg2SqliteOptions, Translator},
+    prelude::{Pg2SqliteOptions, TranslationOptions, Translator},
 };
 
 /// Represents the result of translating a GIN/GiST index - either an FTS5
@@ -304,6 +307,58 @@ fn create_fts5_statements(
     Ok(statements)
 }
 
+/// Inspects a GiST `CreateIndex` and, if every indexed column resolves to a
+/// `geometry` or `geography` data type in `schema`, returns
+/// `SELECT CreateSpatialIndex('tbl','col')` statements (one per column) for
+/// geolite to execute at runtime. Returns `Ok(None)` when no indexed column
+/// is spatial so the caller can fall through to the FTS5 / error path.
+///
+/// Errors when:
+/// - the GiST has a `WHERE` predicate (geolite's `CreateSpatialIndex` doesn't
+///   honor partial indexes);
+/// - the GiST mixes spatial and non-spatial columns (silently dropping the
+///   non-spatial side would change query semantics).
+fn try_spatial_index_routing(
+    create_index: &CreateIndex,
+    sqlite_table_name: &ObjectName,
+    schema: &ParserDB,
+) -> Result<Option<Vec<Statement>>, Error> {
+    let Some(spatial_columns) = postgis::classify_gist_spatial_columns(create_index, schema)?
+    else {
+        return Ok(None);
+    };
+
+    let table_literal = sqlite_string_literal(&unqualified_name_for_literal(sqlite_table_name));
+    let mut statements = Vec::with_capacity(spatial_columns.len());
+    for col in spatial_columns {
+        let col_literal = sqlite_string_literal(&col);
+        let sql = format!("SELECT CreateSpatialIndex({table_literal}, {col_literal});");
+        let mut parsed = parse_generated_sql(
+            &PostgreSqlDialect {},
+            &sql,
+            "spatial index translation (CreateSpatialIndex call)",
+        )?;
+        statements.append(&mut parsed);
+    }
+    Ok(Some(statements))
+}
+
+/// Returns the bare table identifier (without quoting) to embed inside a
+/// single-quoted SQL string literal passed to geolite.
+fn unqualified_name_for_literal(sqlite_table_name: &ObjectName) -> String {
+    sqlite_table_name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .map_or_else(|| sqlite_table_name.to_string(), |ident| ident.value.clone())
+}
+
+/// Wraps `s` in single quotes and escapes interior single quotes per the
+/// standard SQL convention (`'` -> `''`).
+fn sqlite_string_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
 impl Translator for CreateIndex {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -316,6 +371,17 @@ impl Translator for CreateIndex {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         let sqlite_table_name =
             normalize_schema_qualified_object_name_for_sqlite(schema, &self.table_name)?;
+
+        // PostGIS GiST on geometry/geography -> geolite's CreateSpatialIndex.
+        // Routed before the FTS5 path so spatial columns don't fall into the
+        // tsvector-only analyzer below.
+        if options.is_geolite_enabled()
+            && matches!(self.using, Some(IndexType::GiST))
+            && let Some(spatial_stmts) =
+                try_spatial_index_routing(self, &sqlite_table_name, schema)?
+        {
+            return Ok(spatial_stmts);
+        }
 
         // Handle GIN/GiST indices - may translate to FTS5 for full-text search
         // Both GIN and GiST can be used with to_tsvector() in PostgreSQL

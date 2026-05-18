@@ -4,15 +4,52 @@ use std::path::PathBuf;
 
 use git2::Repository;
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::Statement;
+use sqlparser::ast::{IndexType, Statement};
 use tempfile::TempDir;
 
 use crate::{
-    impls::translator_impls::rls::generate_rls_audit_table,
+    impls::translator_impls::{postgis, rls::generate_rls_audit_table},
     options::Pg2SqliteOptions,
     prelude::{ReverseTranslator, Translator},
     traits::TranslationOptions,
 };
+
+/// Pre-walks the input statements for GiST indexes over `geometry`/`geography`
+/// columns and registers each `(table, column)` pair in the options' internal
+/// spatial-index catalog. Used by `Pg2Sqlite::translate_internal` to drive
+/// later query-time predicate rewriting through the rtree shadow.
+///
+/// Classification errors are deliberately swallowed here: the per-statement
+/// translation in the main loop will re-run the same classifier and surface
+/// the error with full context.
+fn populate_spatial_index_catalog(
+    statements: &[Statement],
+    schema: &ParserDB,
+    options: &mut Pg2SqliteOptions,
+) {
+    for stmt in statements {
+        let Statement::CreateIndex(create_index) = stmt else {
+            continue;
+        };
+        if !matches!(create_index.using, Some(IndexType::GiST)) {
+            continue;
+        }
+        let Ok(Some(spatial_columns)) =
+            postgis::classify_gist_spatial_columns(create_index, schema)
+        else {
+            continue;
+        };
+        let table_name = create_index
+            .table_name
+            .0
+            .last()
+            .and_then(|p| p.as_ident())
+            .map_or_else(|| create_index.table_name.to_string(), |i| i.value.clone());
+        for col in spatial_columns {
+            options.add_spatial_index(&table_name, &col);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 /// Struct to translate between a `PostgreSQL` entry and a `SQLite` entry.
@@ -261,9 +298,20 @@ impl Pg2Sqlite {
         let schema_statements = Self::schema_statements_for_translation(&normalized_statements);
         let schema = ParserDB::from_statements(schema_statements, "translation_db".to_owned())?;
 
+        // Pre-walk for spatial-index DDL so that the same translation unit's
+        // SELECTs can rewrite `ST_*` predicates over indexed columns through
+        // the rtree shadow. Only fires when geolite translation is enabled;
+        // skips errors (an unsupported GiST will surface its own error when
+        // the statement itself is translated below).
+        let mut options = options.clone();
+        if options.is_geolite_enabled() {
+            populate_spatial_index_catalog(&normalized_statements, &schema, &mut options);
+        }
+        let options = options;
+
         let mut result: Vec<Statement> = normalized_statements
             .iter()
-            .map(|statement| statement.translate(&schema, options))
+            .map(|statement| statement.translate(&schema, &options))
             .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?
             .into_iter()
             .flatten()

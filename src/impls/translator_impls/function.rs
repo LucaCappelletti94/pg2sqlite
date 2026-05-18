@@ -7,7 +7,10 @@ use sqlparser::ast::{
     FunctionArgumentList, FunctionArguments, Ident, ObjectName, Value, ValueWithSpan,
 };
 
-use super::helpers::{Forward, translate_window_type};
+use super::{
+    helpers::{Forward, translate_window_type},
+    postgis,
+};
 use crate::{
     impls::{
         datetime_helpers::{build_strftime_call, parse_date_part_key, strftime_mapping_for_key},
@@ -461,7 +464,53 @@ fn translate_function(
             "{original_name}() is a PostgreSQL size function not available in SQLite."
         )),
 
-        _ => FunctionTranslation::PassThrough,
+        _ => maybe_geolite_passthrough(&original_name, args, options),
+    }
+}
+
+/// When `enable_geolite` is on, validate `ST_*`-shaped calls against the
+/// catalog mirrored from geolite (`super::postgis`). Functions in the
+/// catalog with matching arity pass through; arity mismatches and unknown
+/// `st_*` names error with a precise message. With `enable_geolite` off
+/// this is a no-op and unknown functions keep their pre-existing
+/// passthrough behavior.
+fn maybe_geolite_passthrough(
+    name: &str,
+    args: &FunctionArguments,
+    options: &Pg2SqliteOptions,
+) -> FunctionTranslation {
+    if !options.is_geolite_enabled() {
+        return FunctionTranslation::PassThrough;
+    }
+    let Some(arity) = function_arg_count(args) else {
+        return FunctionTranslation::PassThrough;
+    };
+    if postgis::is_geolite_function(name, arity) {
+        return FunctionTranslation::PassThrough;
+    }
+    let known_arities = postgis::geolite_function_arities(name);
+    if !known_arities.is_empty() {
+        return FunctionTranslation::Unsupported(format!(
+            "{name}/{arity} is not in the geolite catalog; geolite implements arities {known_arities:?} for this name."
+        ));
+    }
+    if postgis::is_postgis_shaped_name(name) {
+        return FunctionTranslation::Unsupported(format!(
+            "{name}() looks like a PostGIS function but is not implemented by the geolite SQLite extension; \
+             see https://github.com/LucaCappelletti94/geolite for the supported list."
+        ));
+    }
+    FunctionTranslation::PassThrough
+}
+
+/// Returns the positional arg count when it can be determined from the
+/// `FunctionArguments` shape, or `None` for subquery-shaped arguments
+/// where positional arity isn't meaningful.
+fn function_arg_count(args: &FunctionArguments) -> Option<i32> {
+    match args {
+        FunctionArguments::List(list) => i32::try_from(list.args.len()).ok(),
+        FunctionArguments::None => Some(0),
+        FunctionArguments::Subquery(_) => None,
     }
 }
 
