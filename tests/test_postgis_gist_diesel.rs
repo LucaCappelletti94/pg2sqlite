@@ -412,3 +412,217 @@ fn acceleration_is_conditional_on_index_presence() {
         "unindexed plan should be a full table scan; got:\n{unindexed_text}"
     );
 }
+
+/// Like `acceleration_is_conditional_on_index_presence` but for `UPDATE`:
+/// runs the same spatial UPDATE against two identically-populated tables
+/// (one indexed, one not) and asserts the plan reaches the rtree only for
+/// the indexed table while both updates touch the same row set.
+#[test]
+fn update_acceleration_is_conditional_on_index_presence() {
+    let mut conn = geolite_connection();
+    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+
+    let full_sql = "\
+        CREATE TABLE indexed_grid (id INTEGER PRIMARY KEY, geom geometry, marker text); \
+        CREATE TABLE unindexed_grid (id INTEGER PRIMARY KEY, geom geometry, marker text); \
+        CREATE INDEX indexed_grid_geom_idx ON indexed_grid USING gist (geom); \
+        UPDATE indexed_grid SET marker = 'hit' \
+         WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30)); \
+        UPDATE unindexed_grid SET marker = 'hit' \
+         WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30));";
+    let translated = Pg2Sqlite::default()
+        .sql(full_sql)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate");
+
+    let updates: Vec<&String> = translated
+        .iter()
+        .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("UPDATE"))
+        .collect();
+    assert_eq!(updates.len(), 2, "expected two translated UPDATEs, got: {updates:?}");
+    let indexed_update = updates
+        .iter()
+        .find(|s| s.contains("indexed_grid") && !s.contains("unindexed_grid"))
+        .expect("indexed UPDATE")
+        .as_str();
+    let unindexed_update =
+        updates.iter().find(|s| s.contains("unindexed_grid")).expect("unindexed UPDATE").as_str();
+    assert!(
+        indexed_update.contains("indexed_grid_geom_rtree"),
+        "indexed UPDATE must be rewritten via the rtree shadow, got:\n{indexed_update}"
+    );
+    assert!(
+        !unindexed_update.contains("_rtree"),
+        "unindexed UPDATE must not reference any rtree shadow, got:\n{unindexed_update}"
+    );
+
+    // Apply schema + CreateSpatialIndex; skip the UPDATEs.
+    for s in &translated {
+        if s.to_ascii_uppercase().trim_start().starts_with("UPDATE") {
+            continue;
+        }
+        sql_query(s).execute(&mut conn).expect("execute schema stmt");
+    }
+
+    sql_query("BEGIN").execute(&mut conn).expect("begin tx");
+    for i in 0..100 {
+        for j in 0..100 {
+            let id = i * 100 + j;
+            sql_query(format!(
+                "INSERT INTO indexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
+            ))
+            .execute(&mut conn)
+            .expect("insert indexed");
+            sql_query(format!(
+                "INSERT INTO unindexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
+            ))
+            .execute(&mut conn)
+            .expect("insert unindexed");
+        }
+    }
+    sql_query("COMMIT").execute(&mut conn).expect("commit");
+
+    // EXPLAIN QUERY PLAN before running, so we can observe the planner's
+    // choice without depending on per-row execution semantics.
+    let indexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {indexed_update}"))
+        .load(&mut conn)
+        .expect("explain indexed UPDATE");
+    let unindexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {unindexed_update}"))
+        .load(&mut conn)
+        .expect("explain unindexed UPDATE");
+    let indexed_text =
+        indexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    let unindexed_text =
+        unindexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(
+        indexed_text.contains("VIRTUAL TABLE INDEX"),
+        "indexed UPDATE plan must drive the rtree; got:\n{indexed_text}\nfor SQL:\n{indexed_update}"
+    );
+    assert!(
+        !unindexed_text.contains("VIRTUAL TABLE INDEX"),
+        "unindexed UPDATE plan must NOT mention the rtree (would mean leakage); got:\n{unindexed_text}"
+    );
+
+    // Run both UPDATEs and assert each marked exactly the 11x11 grid window.
+    sql_query(indexed_update).execute(&mut conn).expect("execute indexed UPDATE");
+    sql_query(unindexed_update).execute(&mut conn).expect("execute unindexed UPDATE");
+    let indexed_hits: Vec<CountRow> =
+        sql_query("SELECT count(*) AS n FROM indexed_grid WHERE marker = 'hit'")
+            .load(&mut conn)
+            .expect("count indexed hits");
+    let unindexed_hits: Vec<CountRow> =
+        sql_query("SELECT count(*) AS n FROM unindexed_grid WHERE marker = 'hit'")
+            .load(&mut conn)
+            .expect("count unindexed hits");
+    assert_eq!(indexed_hits[0].n, 121, "indexed UPDATE must mark 11x11 = 121 rows");
+    assert_eq!(
+        unindexed_hits[0].n, indexed_hits[0].n,
+        "both UPDATEs must touch the same row set over identical data"
+    );
+}
+
+/// Like the above but for `DELETE`: same spatial predicate against two
+/// identically-populated tables; the indexed one's plan reaches the rtree,
+/// the unindexed one full-scans, both end up with the same surviving rows.
+#[test]
+fn delete_acceleration_is_conditional_on_index_presence() {
+    let mut conn = geolite_connection();
+    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+
+    let full_sql = "\
+        CREATE TABLE indexed_grid (id INTEGER PRIMARY KEY, geom geometry); \
+        CREATE TABLE unindexed_grid (id INTEGER PRIMARY KEY, geom geometry); \
+        CREATE INDEX indexed_grid_geom_idx ON indexed_grid USING gist (geom); \
+        DELETE FROM indexed_grid \
+         WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30)); \
+        DELETE FROM unindexed_grid \
+         WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30));";
+    let translated = Pg2Sqlite::default()
+        .sql(full_sql)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate");
+
+    let deletes: Vec<&String> = translated
+        .iter()
+        .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("DELETE"))
+        .collect();
+    assert_eq!(deletes.len(), 2, "expected two translated DELETEs, got: {deletes:?}");
+    let indexed_delete = deletes
+        .iter()
+        .find(|s| s.contains("indexed_grid") && !s.contains("unindexed_grid"))
+        .expect("indexed DELETE")
+        .as_str();
+    let unindexed_delete =
+        deletes.iter().find(|s| s.contains("unindexed_grid")).expect("unindexed DELETE").as_str();
+    assert!(
+        indexed_delete.contains("indexed_grid_geom_rtree"),
+        "indexed DELETE must be rewritten via the rtree shadow, got:\n{indexed_delete}"
+    );
+    assert!(
+        !unindexed_delete.contains("_rtree"),
+        "unindexed DELETE must not reference any rtree shadow, got:\n{unindexed_delete}"
+    );
+
+    for s in &translated {
+        if s.to_ascii_uppercase().trim_start().starts_with("DELETE") {
+            continue;
+        }
+        sql_query(s).execute(&mut conn).expect("execute schema stmt");
+    }
+
+    sql_query("BEGIN").execute(&mut conn).expect("begin tx");
+    for i in 0..100 {
+        for j in 0..100 {
+            let id = i * 100 + j;
+            sql_query(format!(
+                "INSERT INTO indexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
+            ))
+            .execute(&mut conn)
+            .expect("insert indexed");
+            sql_query(format!(
+                "INSERT INTO unindexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
+            ))
+            .execute(&mut conn)
+            .expect("insert unindexed");
+        }
+    }
+    sql_query("COMMIT").execute(&mut conn).expect("commit");
+
+    let indexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {indexed_delete}"))
+        .load(&mut conn)
+        .expect("explain indexed DELETE");
+    let unindexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {unindexed_delete}"))
+        .load(&mut conn)
+        .expect("explain unindexed DELETE");
+    let indexed_text =
+        indexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    let unindexed_text =
+        unindexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(
+        indexed_text.contains("VIRTUAL TABLE INDEX"),
+        "indexed DELETE plan must drive the rtree; got:\n{indexed_text}"
+    );
+    assert!(
+        !unindexed_text.contains("VIRTUAL TABLE INDEX"),
+        "unindexed DELETE plan must NOT mention the rtree; got:\n{unindexed_text}"
+    );
+
+    sql_query(indexed_delete).execute(&mut conn).expect("execute indexed DELETE");
+    sql_query(unindexed_delete).execute(&mut conn).expect("execute unindexed DELETE");
+    let indexed_remaining: Vec<CountRow> = sql_query("SELECT count(*) AS n FROM indexed_grid")
+        .load(&mut conn)
+        .expect("count indexed remaining");
+    let unindexed_remaining: Vec<CountRow> = sql_query("SELECT count(*) AS n FROM unindexed_grid")
+        .load(&mut conn)
+        .expect("count unindexed remaining");
+    assert_eq!(
+        indexed_remaining[0].n, 9879,
+        "indexed DELETE must remove 11x11 = 121 of the 10000 rows"
+    );
+    assert_eq!(
+        unindexed_remaining[0].n, indexed_remaining[0].n,
+        "both DELETEs must remove the same row set over identical data"
+    );
+}

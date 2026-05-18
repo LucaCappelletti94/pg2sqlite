@@ -12,6 +12,7 @@ use crate::{
     impls::{
         object_name::{append_suffix, table_has_implicit_public_rls},
         shared_helpers::translate_delete_core,
+        translator_impls::postgis,
     },
     options::Pg2SqliteOptions,
     traits::{TranslationOptions, translator::Translator},
@@ -117,6 +118,14 @@ impl Translator for Delete {
 
             // Clear USING
             delete.using = None;
+        }
+
+        // Spatial predicate rewriting: route `ST_*` WHERE predicates over
+        // indexed columns through the rtree shadow via an IN-subquery. The
+        // helper rejects multi-source shapes naturally, so DELETE ... USING
+        // (which by this point has its WHERE wrapped in EXISTS) falls through.
+        if let Some(rewritten) = postgis::try_rewrite_spatial_delete(&delete, options)? {
+            return Ok(Statement::Delete(rewritten));
         }
 
         Ok(Statement::Delete(delete))

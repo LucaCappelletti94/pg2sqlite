@@ -1051,7 +1051,7 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     let limit =
         update.limit.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?;
 
-    Ok(sqlparser::ast::Update {
+    let translated = sqlparser::ast::Update {
         update_token: update.update_token.clone(),
         optimizer_hint: update.optimizer_hint.clone(),
         table: translate_table_with_joins::<D>(&update.table, schema, options)?,
@@ -1061,7 +1061,22 @@ pub(crate) fn translate_update<D: TranslationDirection>(
         returning,
         or: update.or,
         limit,
-    })
+    };
+
+    // Forward-only spatial predicate rewriting: route `ST_*` WHERE predicates
+    // over indexed columns through the rtree shadow via an IN-subquery, same
+    // shape as the SELECT path. Single-target-table only; UPDATE ... FROM
+    // and joined targets pass through unchanged.
+    if D::IS_FORWARD
+        && let Some(rewritten) =
+            crate::impls::translator_impls::postgis::try_rewrite_spatial_update(
+                &translated,
+                options,
+            )?
+    {
+        return Ok(rewritten);
+    }
+    Ok(translated)
 }
 
 /// Shared DISTINCT translation.

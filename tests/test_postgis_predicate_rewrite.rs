@@ -31,6 +31,15 @@ fn user_select(stmts: &[String]) -> String {
         .clone()
 }
 
+/// Returns the translated DML statement of the given kind (UPDATE / DELETE).
+fn user_dml(stmts: &[String], kind: &str) -> String {
+    stmts
+        .iter()
+        .find(|s| s.to_ascii_uppercase().trim_start().starts_with(kind))
+        .unwrap_or_else(|| panic!("no user {kind} in:\n{}", stmts.join("\n")))
+        .clone()
+}
+
 #[test]
 fn st_intersects_on_indexed_column_rewrites_with_rtree_join() {
     let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
@@ -179,6 +188,140 @@ fn distinct_on_select_also_reaches_the_rewrite() {
     assert!(
         select.contains("features_geom_rtree"),
         "DISTINCT ON SELECT must still reach the spatial rewrite, got:\n{select}"
+    );
+}
+
+#[test]
+fn update_indexed_column_rewrites_via_rtree() {
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry, name text); \
+              CREATE INDEX features_geom_idx ON features USING gist (geom); \
+              UPDATE features SET name = 'hit' \
+               WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let update = user_dml(&stmts, "UPDATE");
+    assert!(
+        update.contains("features_geom_rtree"),
+        "expected rtree filter in rewritten UPDATE, got:\n{update}"
+    );
+    assert!(
+        update.to_ascii_uppercase().contains("ST_INTERSECTS"),
+        "original predicate must remain as final-pass filter, got:\n{update}"
+    );
+}
+
+#[test]
+fn delete_indexed_column_rewrites_via_rtree() {
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
+              CREATE INDEX features_geom_idx ON features USING gist (geom); \
+              DELETE FROM features WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let delete = user_dml(&stmts, "DELETE");
+    assert!(
+        delete.contains("features_geom_rtree"),
+        "expected rtree filter in rewritten DELETE, got:\n{delete}"
+    );
+    assert!(
+        delete.to_ascii_uppercase().contains("ST_INTERSECTS"),
+        "original predicate must remain as final-pass filter, got:\n{delete}"
+    );
+}
+
+#[test]
+fn update_without_where_does_not_rewrite() {
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry, name text); \
+              CREATE INDEX features_geom_idx ON features USING gist (geom); \
+              UPDATE features SET name = 'all';";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let update = user_dml(&stmts, "UPDATE");
+    assert!(
+        !update.contains("_rtree"),
+        "UPDATE without WHERE has no spatial filter to rewrite, got:\n{update}"
+    );
+}
+
+#[test]
+fn delete_without_where_does_not_rewrite() {
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
+              CREATE INDEX features_geom_idx ON features USING gist (geom); \
+              DELETE FROM features;";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let delete = user_dml(&stmts, "DELETE");
+    assert!(
+        !delete.contains("_rtree"),
+        "DELETE without WHERE has no spatial filter to rewrite, got:\n{delete}"
+    );
+}
+
+#[test]
+fn update_with_or_in_where_does_not_rewrite() {
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry, name text, kind text); \
+              CREATE INDEX features_geom_idx ON features USING gist (geom); \
+              UPDATE features SET name = 'hit' \
+               WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10)) OR kind = 'pinned';";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let update = user_dml(&stmts, "UPDATE");
+    assert!(
+        !update.contains("features_geom_rtree"),
+        "top-level OR must disable UPDATE rewrite, got:\n{update}"
+    );
+}
+
+#[test]
+fn delete_with_or_in_where_does_not_rewrite() {
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry, kind text); \
+              CREATE INDEX features_geom_idx ON features USING gist (geom); \
+              DELETE FROM features \
+               WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10)) OR kind = 'pinned';";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let delete = user_dml(&stmts, "DELETE");
+    assert!(
+        !delete.contains("features_geom_rtree"),
+        "top-level OR must disable DELETE rewrite, got:\n{delete}"
+    );
+}
+
+#[test]
+fn update_on_unindexed_column_does_not_rewrite() {
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, g geometry, name text); \
+              UPDATE features SET name = 'hit' \
+               WHERE ST_Intersects(g, ST_MakeEnvelope(0, 0, 10, 10));";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let update = user_dml(&stmts, "UPDATE");
+    assert!(
+        !update.to_ascii_lowercase().contains("_rtree"),
+        "no spatial index means no rewrite, got:\n{update}"
+    );
+}
+
+#[test]
+fn delete_on_unindexed_column_does_not_rewrite() {
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, g geometry); \
+              DELETE FROM features WHERE ST_Intersects(g, ST_MakeEnvelope(0, 0, 10, 10));";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let delete = user_dml(&stmts, "DELETE");
+    assert!(
+        !delete.to_ascii_lowercase().contains("_rtree"),
+        "no spatial index means no rewrite, got:\n{delete}"
+    );
+}
+
+#[test]
+fn delete_with_using_does_not_rewrite() {
+    // DELETE ... USING translates to a DELETE whose WHERE is wrapped in
+    // EXISTS(subquery). Multi-source statements are out of scope and the
+    // EXISTS wrap means the WHERE is no longer a flat AND, so the rewrite
+    // naturally bails.
+    let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
+              CREATE INDEX features_geom_idx ON features USING gist (geom); \
+              CREATE TABLE tags (feature_id INTEGER); \
+              DELETE FROM features USING tags \
+               WHERE features.id = tags.feature_id \
+                 AND ST_Intersects(features.geom, ST_MakeEnvelope(0, 0, 10, 10));";
+    let stmts = translate_with_geolite(pg).expect("translate");
+    let delete = user_dml(&stmts, "DELETE");
+    assert!(
+        !delete.contains("features_geom_rtree"),
+        "multi-source DELETE ... USING must not be rewritten, got:\n{delete}"
     );
 }
 

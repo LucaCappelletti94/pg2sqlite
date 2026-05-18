@@ -249,7 +249,7 @@ pub(crate) fn is_spatial_data_type(dt: &str) -> bool {
 // reference. Anything else passes through unchanged.
 
 use sqlparser::{
-    ast::{BinaryOperator, Select, TableFactor},
+    ast::{BinaryOperator, Select, TableFactor, TableWithJoins},
     dialect::PostgreSqlDialect,
 };
 
@@ -282,28 +282,53 @@ pub(crate) fn is_bbox_narrowable_predicate(name: &str) -> bool {
 
 /// Returns a rewritten `Select` when `select`'s shape is eligible for spatial
 /// predicate rewriting against the spatial index catalog in `options`, or
-/// `Ok(None)` to fall through to the original. Errors bubble up only from
-/// `parse_single_generated_sql` if the synthesized SQL fails to round-trip.
+/// `Ok(None)` to fall through to the original.
 pub(crate) fn try_rewrite_spatial_select(
     select: &Select,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<Select>, crate::errors::Error> {
-    let Some((base_table_name, base_alias)) = single_table_from(select) else {
+    if select.from.len() != 1 {
+        return Ok(None);
+    }
+    let Some((base_table_name, base_alias)) = single_base_table(&select.from[0]) else {
         return Ok(None);
     };
     let Some(where_expr) = select.selection.as_ref() else {
         return Ok(None);
     };
+    let Some(new_selection) =
+        try_build_rtree_filter(&base_table_name, base_alias.as_deref(), where_expr, options)?
+    else {
+        return Ok(None);
+    };
+    let mut rewritten = select.clone();
+    rewritten.selection = Some(new_selection);
+    Ok(Some(rewritten))
+}
+
+/// Given a single-table base reference plus its WHERE clause, returns a new
+/// WHERE expression that pre-filters via the rtree shadow, or `Ok(None)` when
+/// the shape isn't eligible. Shared by the SELECT, UPDATE, and DELETE rewrite
+/// paths so the analysis and SQL synthesis live in one place.
+///
+/// The returned expression has shape `(<base>.rowid IN (SELECT id FROM <rtree>
+/// WHERE bbox-conditions)) AND (<original_where>)`, parsed from a synthesized
+/// `SELECT 1 WHERE ...` so we can reuse the existing PG-dialect parser instead
+/// of constructing the AST by hand.
+pub(crate) fn try_build_rtree_filter(
+    base_table_name: &str,
+    base_alias: Option<&str>,
+    where_expr: &sqlparser::ast::Expr,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::Expr>, crate::errors::Error> {
     if !is_safe_top_level_and(where_expr) {
         return Ok(None);
     }
     let conjuncts = flatten_top_level_and(where_expr);
 
     let base_table_lower = base_table_name.to_ascii_lowercase();
-    let base_alias_lower = base_alias.as_deref().map(str::to_ascii_lowercase);
+    let base_alias_lower = base_alias.map(str::to_ascii_lowercase);
 
-    // Find the first spatial predicate over an indexed column on the base table.
-    // v1 keeps it simple: one rewrite per SELECT.
     let spatial = conjuncts.iter().find_map(|c| {
         extract_spatial_filter(c, &base_table_lower, base_alias_lower.as_deref(), options)
     });
@@ -312,26 +337,23 @@ pub(crate) fn try_rewrite_spatial_select(
     };
 
     let rtree_table = format!("{}_{}_rtree", base_table_lower, spatial.column);
-    let base_for_rowid = base_alias.clone().unwrap_or_else(|| base_table_name.clone());
-    let projection = render_csv(&select.projection);
-    let from = render_csv(&select.from);
+    let base_for_rowid = base_alias.map_or_else(|| base_table_name.to_string(), str::to_string);
     let geom_sql = format!("{}", spatial.geom_expr);
     let original_where = format!("{where_expr}");
 
-    let new_sql = format!(
-        "SELECT {projection} FROM {from} \
-         WHERE {base_for_rowid}.rowid IN ( \
+    let probe_sql = format!(
+        "SELECT 1 WHERE \
+         ({base_for_rowid}.rowid IN ( \
              SELECT id FROM {rtree_table} \
              WHERE xmin <= ST_XMax({geom_sql}) AND xmax >= ST_XMin({geom_sql}) \
                AND ymin <= ST_YMax({geom_sql}) AND ymax >= ST_YMin({geom_sql}) \
-         ) \
-         AND ({original_where})"
+         )) AND ({original_where})"
     );
 
     let stmt = parse_single_generated_sql(
         &PostgreSqlDialect {},
-        &new_sql,
-        "spatial predicate rewriting (Step 6)",
+        &probe_sql,
+        "spatial predicate rewriting",
     )?;
     let sqlparser::ast::Statement::Query(query) = stmt else {
         return Ok(None);
@@ -339,21 +361,82 @@ pub(crate) fn try_rewrite_spatial_select(
     let sqlparser::ast::SetExpr::Select(inner) = *query.body else {
         return Ok(None);
     };
-    Ok(Some(*inner))
+    Ok(inner.selection)
 }
 
-/// Returns `(table_name, alias)` from a `Select` whose FROM is a single
-/// non-joined base-table reference. Anything else (joins, subqueries,
-/// table-valued functions, multi-table FROM list) returns `None`.
-fn single_table_from(select: &Select) -> Option<(String, Option<String>)> {
-    if select.from.len() != 1 {
+/// Returns a rewritten `Delete` when the target is a single base table
+/// without `USING` and the WHERE clause carries a rewriteable spatial
+/// predicate. Otherwise returns `Ok(None)`. `DELETE ... USING` is naturally
+/// excluded: the `<Delete as Translator>::translate` caller wraps its WHERE
+/// in `EXISTS(subquery)` before invoking this helper, and that shape fails
+/// the flat-AND check inside `try_build_rtree_filter`.
+pub(crate) fn try_rewrite_spatial_delete(
+    delete: &sqlparser::ast::Delete,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::Delete>, crate::errors::Error> {
+    use sqlparser::ast::FromTable;
+
+    if delete.using.as_ref().is_some_and(|u| !u.is_empty()) {
+        return Ok(None);
+    }
+    let from_tables = match &delete.from {
+        FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
+    };
+    if from_tables.len() != 1 {
+        return Ok(None);
+    }
+    let Some((base_table_name, base_alias)) = single_base_table(&from_tables[0]) else {
+        return Ok(None);
+    };
+    let Some(where_expr) = delete.selection.as_ref() else {
+        return Ok(None);
+    };
+    let Some(new_selection) =
+        try_build_rtree_filter(&base_table_name, base_alias.as_deref(), where_expr, options)?
+    else {
+        return Ok(None);
+    };
+    let mut rewritten = delete.clone();
+    rewritten.selection = Some(new_selection);
+    Ok(Some(rewritten))
+}
+
+/// Returns a rewritten `Update` when the target's shape is a single base
+/// table without an `UPDATE ... FROM` extension and the WHERE clause carries
+/// a rewriteable spatial predicate. Otherwise returns `Ok(None)`.
+pub(crate) fn try_rewrite_spatial_update(
+    update: &sqlparser::ast::Update,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::Update>, crate::errors::Error> {
+    // UPDATE ... FROM is multi-source; out of scope for v1.
+    if update.from.is_some() {
+        return Ok(None);
+    }
+    let Some((base_table_name, base_alias)) = single_base_table(&update.table) else {
+        return Ok(None);
+    };
+    let Some(where_expr) = update.selection.as_ref() else {
+        return Ok(None);
+    };
+    let Some(new_selection) =
+        try_build_rtree_filter(&base_table_name, base_alias.as_deref(), where_expr, options)?
+    else {
+        return Ok(None);
+    };
+    let mut rewritten = update.clone();
+    rewritten.selection = Some(new_selection);
+    Ok(Some(rewritten))
+}
+
+/// Returns `(table_name, alias)` from a `TableWithJoins` that names exactly
+/// one base table, with no joins, no table-valued-function args, and no
+/// subquery / derived shape. Used by SELECT (via `select.from[0]`), UPDATE
+/// (via `update.table`), and DELETE (via `delete.from[0]`).
+pub(crate) fn single_base_table(twj: &TableWithJoins) -> Option<(String, Option<String>)> {
+    if !twj.joins.is_empty() {
         return None;
     }
-    let with_joins = &select.from[0];
-    if !with_joins.joins.is_empty() {
-        return None;
-    }
-    let TableFactor::Table { name, alias, args: None, .. } = &with_joins.relation else {
+    let TableFactor::Table { name, alias, args: None, .. } = &twj.relation else {
         return None;
     };
     let table = name.0.last().and_then(|p| p.as_ident()).map(|i| i.value.clone())?;
@@ -449,11 +532,3 @@ fn column_resolving_to_base(
         _ => None,
     }
 }
-
-/// Renders a slice of `Display`-implementing items as a comma-separated SQL
-/// fragment. Used to glue the original projection and FROM list into the
-/// synthesized rewritten SELECT.
-fn render_csv<T: std::fmt::Display>(items: &[T]) -> String {
-    items.iter().map(|i| format!("{i}")).collect::<Vec<_>>().join(", ")
-}
-
