@@ -163,6 +163,24 @@ pub trait TranslationOptions {
     /// Returns the configured RLS audit table name, if set.
     fn get_rls_audit_table_name(&self) -> Option<&str>;
 
+    // ==================== Geolite / PostGIS Options ====================
+
+    #[must_use]
+    /// Enables translation of PostGIS-equivalent SQL via the geolite SQLite
+    /// extension. With this on, `ST_*` scalar functions whose `(name, arity)`
+    /// match geolite's published catalog pass through untouched; functions
+    /// outside the catalog still error as unsupported.
+    ///
+    /// The caller is responsible for ensuring geolite's extension is loaded
+    /// on the destination SQLite connection at runtime; pg2sqlite only
+    /// emits SQL.
+    ///
+    /// Default is `false`.
+    fn with_geolite_enabled(self) -> Self;
+
+    /// Returns whether geolite-backed PostGIS translation is enabled.
+    fn is_geolite_enabled(&self) -> bool;
+
     #[must_use]
     /// Enables strict RLS validation mode.
     ///

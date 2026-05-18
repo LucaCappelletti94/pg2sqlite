@@ -24,6 +24,9 @@ pub struct Pg2SqliteOptions {
     rls_audit_table_name: Option<String>,
     /// Whether to enable strict RLS validation (abort on violations).
     strict_rls_validation: bool,
+    /// Whether to enable geolite-backed PostGIS translation (passthrough of
+    /// `ST_*` scalar functions in geolite's catalog).
+    enable_geolite: bool,
 }
 
 impl Default for Pg2SqliteOptions {
@@ -37,6 +40,7 @@ impl Default for Pg2SqliteOptions {
             session_variables: Vec::new(),
             rls_audit_table_name: None,
             strict_rls_validation: false,
+            enable_geolite: false,
         }
     }
 }
@@ -137,5 +141,14 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn is_strict_rls_validation(&self) -> bool {
         self.strict_rls_validation
+    }
+
+    fn with_geolite_enabled(mut self) -> Self {
+        self.enable_geolite = true;
+        self
+    }
+
+    fn is_geolite_enabled(&self) -> bool {
+        self.enable_geolite
     }
 }
