@@ -37,6 +37,16 @@ struct PlanRow {
     detail: String,
 }
 
+/// Runs `EXPLAIN QUERY PLAN <sql>` and returns the planner's `detail` column
+/// rows joined with newlines. Tests assert substrings (such as
+/// `"VIRTUAL TABLE INDEX"`) on the returned string.
+fn explain_plan_text(conn: &mut SqliteConnection, sql: &str) -> String {
+    let plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {sql}"))
+        .load(conn)
+        .unwrap_or_else(|e| panic!("EXPLAIN QUERY PLAN for `{sql}`: {e:?}"));
+    plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n")
+}
+
 /// Inserts a 100x100 grid of `ST_Point(i, j)` rows into `table`. The caller
 /// manages the transaction (with `BEGIN` / `COMMIT`) so paired tests can
 /// populate two tables atomically inside a single transaction.
@@ -203,15 +213,12 @@ fn gist_geometry_index_accelerates_spatial_queries() {
     //    of that marker is sufficient evidence that the planner is using the index
     //    rather than falling back to a table scan on `perf_grid_geom_rtree`'s
     //    shadow rows.
-    let plan: Vec<PlanRow> = sql_query(
-        "EXPLAIN QUERY PLAN \
-         SELECT p.id FROM perf_grid p \
+    let plan_text = explain_plan_text(
+        &mut conn,
+        "SELECT p.id FROM perf_grid p \
          JOIN perf_grid_geom_rtree r ON p.id = r.id \
          WHERE r.xmin >= 20 AND r.xmax <= 30 AND r.ymin >= 20 AND r.ymax <= 30",
-    )
-    .load(&mut conn)
-    .expect("EXPLAIN QUERY PLAN");
-    let plan_text = plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    );
     assert!(
         plan_text.contains("VIRTUAL TABLE INDEX"),
         "query plan should drive the rtree virtual-table index; got:\n{plan_text}"
@@ -271,10 +278,7 @@ fn st_intersects_on_indexed_column_uses_rtree_via_translation() {
 
     // Plan: the translated SELECT, run as-is by the user, must reach the
     // rtree virtual table without any manual JOIN.
-    let plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {select}"))
-        .load(&mut conn)
-        .expect("explain translated SELECT");
-    let plan_text = plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    let plan_text = explain_plan_text(&mut conn, select);
     assert!(
         plan_text.contains("VIRTUAL TABLE INDEX"),
         "translated SELECT should hit the rtree virtual table; got plan:\n{plan_text}\n\
@@ -370,16 +374,8 @@ fn acceleration_is_conditional_on_index_presence() {
     );
 
     // Plan: indexed reaches the rtree virtual table; unindexed full-scans.
-    let indexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {indexed_select}"))
-        .load(&mut conn)
-        .expect("explain indexed");
-    let unindexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {unindexed_select}"))
-        .load(&mut conn)
-        .expect("explain unindexed");
-    let indexed_text =
-        indexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
-    let unindexed_text =
-        unindexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    let indexed_text = explain_plan_text(&mut conn, indexed_select);
+    let unindexed_text = explain_plan_text(&mut conn, unindexed_select);
 
     assert!(
         indexed_text.contains("VIRTUAL TABLE INDEX"),
@@ -455,16 +451,8 @@ fn update_acceleration_is_conditional_on_index_presence() {
 
     // EXPLAIN QUERY PLAN before running, so we can observe the planner's
     // choice without depending on per-row execution semantics.
-    let indexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {indexed_update}"))
-        .load(&mut conn)
-        .expect("explain indexed UPDATE");
-    let unindexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {unindexed_update}"))
-        .load(&mut conn)
-        .expect("explain unindexed UPDATE");
-    let indexed_text =
-        indexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
-    let unindexed_text =
-        unindexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    let indexed_text = explain_plan_text(&mut conn, indexed_update);
+    let unindexed_text = explain_plan_text(&mut conn, unindexed_update);
     assert!(
         indexed_text.contains("VIRTUAL TABLE INDEX"),
         "indexed UPDATE plan must drive the rtree; got:\n{indexed_text}\nfor SQL:\n{indexed_update}"
@@ -547,16 +535,8 @@ fn delete_acceleration_is_conditional_on_index_presence() {
     populate_grid_points(&mut conn, "unindexed_grid");
     sql_query("COMMIT").execute(&mut conn).expect("commit");
 
-    let indexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {indexed_delete}"))
-        .load(&mut conn)
-        .expect("explain indexed DELETE");
-    let unindexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {unindexed_delete}"))
-        .load(&mut conn)
-        .expect("explain unindexed DELETE");
-    let indexed_text =
-        indexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
-    let unindexed_text =
-        unindexed_plan.iter().map(|p| p.detail.as_str()).collect::<Vec<_>>().join("\n");
+    let indexed_text = explain_plan_text(&mut conn, indexed_delete);
+    let unindexed_text = explain_plan_text(&mut conn, unindexed_delete);
     assert!(
         indexed_text.contains("VIRTUAL TABLE INDEX"),
         "indexed DELETE plan must drive the rtree; got:\n{indexed_text}"

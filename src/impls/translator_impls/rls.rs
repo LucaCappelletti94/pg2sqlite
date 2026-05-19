@@ -21,7 +21,7 @@ use crate::{
         generated_sql::{parse_generated_sql, parse_single_generated_sql},
         object_name::{
             append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier,
-            schema_and_table_for_lookup,
+            schema_and_table_for_lookup, sql_string_literal,
         },
         shared_helpers::{join_constraint_mut, join_constraint_ref},
     },
@@ -139,10 +139,6 @@ where
 struct RlsTriggerContext<'a> {
     table_name: &'a str,
     inner_table_name: String,
-}
-
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 impl<'a> RlsTriggerContext<'a> {

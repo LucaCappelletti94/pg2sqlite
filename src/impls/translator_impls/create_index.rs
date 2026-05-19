@@ -15,9 +15,9 @@ use crate::{
     impls::{
         generated_sql::parse_generated_sql,
         object_name::{
-            normalize_schema_qualified_object_name_for_sqlite, prefixed_quoted_identifier,
-            quote_identifier, quoted_ident, sqlite_unqualified_object_name,
-            table_with_implicit_public_lookup,
+            last_ident_value_or_display, normalize_schema_qualified_object_name_for_sqlite,
+            prefixed_quoted_identifier, quote_identifier, quoted_ident, sql_string_literal,
+            sqlite_unqualified_object_name, table_with_implicit_public_lookup,
         },
         shared_helpers::function_argument_exprs,
         translator_impls::{postgis, rls::resolve_trigger_table_name},
@@ -328,10 +328,10 @@ fn try_spatial_index_routing(
         return Ok(None);
     };
 
-    let table_literal = sqlite_string_literal(&unqualified_name_for_literal(sqlite_table_name));
+    let table_literal = sql_string_literal(&last_ident_value_or_display(sqlite_table_name));
     let mut statements = Vec::with_capacity(spatial_columns.len());
     for col in spatial_columns {
-        let col_literal = sqlite_string_literal(&col);
+        let col_literal = sql_string_literal(&col);
         let sql = format!("SELECT CreateSpatialIndex({table_literal}, {col_literal});");
         let mut parsed = parse_generated_sql(
             &PostgreSqlDialect {},
@@ -341,22 +341,6 @@ fn try_spatial_index_routing(
         statements.append(&mut parsed);
     }
     Ok(Some(statements))
-}
-
-/// Returns the bare table identifier (without quoting) to embed inside a
-/// single-quoted SQL string literal passed to geolite.
-fn unqualified_name_for_literal(sqlite_table_name: &ObjectName) -> String {
-    sqlite_table_name
-        .0
-        .last()
-        .and_then(|part| part.as_ident())
-        .map_or_else(|| sqlite_table_name.to_string(), |ident| ident.value.clone())
-}
-
-/// Wraps `s` in single quotes and escapes interior single quotes per the
-/// standard SQL convention (`'` -> `''`).
-fn sqlite_string_literal(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
 }
 
 impl Translator for CreateIndex {

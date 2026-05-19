@@ -8,7 +8,10 @@ use sqlparser::ast::{IndexType, Statement};
 use tempfile::TempDir;
 
 use crate::{
-    impls::translator_impls::{postgis, rls::generate_rls_audit_table},
+    impls::{
+        object_name::last_ident_value_or_display,
+        translator_impls::{postgis, rls::generate_rls_audit_table},
+    },
     options::Pg2SqliteOptions,
     prelude::{ReverseTranslator, Translator},
     traits::TranslationOptions,
@@ -39,12 +42,7 @@ fn populate_spatial_index_catalog(
         else {
             continue;
         };
-        let table_name = create_index
-            .table_name
-            .0
-            .last()
-            .and_then(|p| p.as_ident())
-            .map_or_else(|| create_index.table_name.to_string(), |i| i.value.clone());
+        let table_name = last_ident_value_or_display(&create_index.table_name);
         for col in spatial_columns {
             options.add_spatial_index(&table_name, &col);
         }

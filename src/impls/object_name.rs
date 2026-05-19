@@ -13,6 +13,23 @@ pub(crate) fn last_ident(name: &ObjectName) -> Option<&Ident> {
     name.0.last().and_then(ObjectNamePart::as_ident)
 }
 
+/// Returns the last identifier's value if `name` ends in a bare identifier;
+/// otherwise falls back to the full `ObjectName`'s `Display` form. Useful when
+/// synthesizing single-quoted SQL string literals from a table or column
+/// reference (e.g. `SELECT CreateSpatialIndex('features', 'geom')`).
+#[must_use]
+pub(crate) fn last_ident_value_or_display(name: &ObjectName) -> String {
+    last_ident(name).map_or_else(|| name.to_string(), |ident| ident.value.clone())
+}
+
+/// Wraps `value` in single quotes and escapes interior single quotes per the
+/// standard SQL convention (`'` -> `''`). Used wherever we synthesize SQL
+/// string literals into generated statements.
+#[must_use]
+pub(crate) fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 /// Appends a suffix to the last identifier in an object name.
 pub(crate) fn append_suffix(name: &ObjectName, suffix: &str) -> ObjectName {
     let mut updated = name.clone();
