@@ -290,20 +290,33 @@ pub(crate) fn try_rewrite_spatial_select(
     if select.from.len() != 1 {
         return Ok(None);
     }
-    let Some((base_table_name, base_alias)) = single_base_table(&select.from[0]) else {
-        return Ok(None);
-    };
-    let Some(where_expr) = select.selection.as_ref() else {
-        return Ok(None);
-    };
     let Some(new_selection) =
-        try_build_rtree_filter(&base_table_name, base_alias.as_deref(), where_expr, options)?
+        compute_rtree_filtered_where(&select.from[0], select.selection.as_ref(), options)?
     else {
         return Ok(None);
     };
     let mut rewritten = select.clone();
     rewritten.selection = Some(new_selection);
     Ok(Some(rewritten))
+}
+
+/// Shared analysis half of the spatial rewrite, used by SELECT, UPDATE, and
+/// DELETE wrappers. Resolves the single-table base and the WHERE clause,
+/// then asks `try_build_rtree_filter` to produce the rewritten predicate.
+/// Returns `Ok(None)` for any shape the rewrite can't handle so callers
+/// fall through to their existing translation.
+fn compute_rtree_filtered_where(
+    base_twj: &TableWithJoins,
+    where_expr: Option<&sqlparser::ast::Expr>,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::Expr>, crate::errors::Error> {
+    let Some((base_table_name, base_alias)) = single_base_table(base_twj) else {
+        return Ok(None);
+    };
+    let Some(where_expr) = where_expr else {
+        return Ok(None);
+    };
+    try_build_rtree_filter(&base_table_name, base_alias.as_deref(), where_expr, options)
 }
 
 /// Given a single-table base reference plus its WHERE clause, returns a new
@@ -385,14 +398,8 @@ pub(crate) fn try_rewrite_spatial_delete(
     if from_tables.len() != 1 {
         return Ok(None);
     }
-    let Some((base_table_name, base_alias)) = single_base_table(&from_tables[0]) else {
-        return Ok(None);
-    };
-    let Some(where_expr) = delete.selection.as_ref() else {
-        return Ok(None);
-    };
     let Some(new_selection) =
-        try_build_rtree_filter(&base_table_name, base_alias.as_deref(), where_expr, options)?
+        compute_rtree_filtered_where(&from_tables[0], delete.selection.as_ref(), options)?
     else {
         return Ok(None);
     };
@@ -412,14 +419,8 @@ pub(crate) fn try_rewrite_spatial_update(
     if update.from.is_some() {
         return Ok(None);
     }
-    let Some((base_table_name, base_alias)) = single_base_table(&update.table) else {
-        return Ok(None);
-    };
-    let Some(where_expr) = update.selection.as_ref() else {
-        return Ok(None);
-    };
     let Some(new_selection) =
-        try_build_rtree_filter(&base_table_name, base_alias.as_deref(), where_expr, options)?
+        compute_rtree_filtered_where(&update.table, update.selection.as_ref(), options)?
     else {
         return Ok(None);
     };

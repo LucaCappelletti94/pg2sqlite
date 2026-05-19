@@ -10,7 +10,7 @@
 mod helpers;
 
 use diesel::{
-    QueryableByName, RunQueryDsl, sql_query,
+    QueryableByName, RunQueryDsl, SqliteConnection, sql_query,
     sql_types::{Integer, Text},
 };
 use helpers::geolite::geolite_connection;
@@ -35,6 +35,20 @@ struct NameRow {
 struct PlanRow {
     #[diesel(sql_type = Text)]
     detail: String,
+}
+
+/// Inserts a 100x100 grid of `ST_Point(i, j)` rows into `table`. The caller
+/// manages the transaction (with `BEGIN` / `COMMIT`) so paired tests can
+/// populate two tables atomically inside a single transaction.
+fn populate_grid_points(conn: &mut SqliteConnection, table: &str) {
+    for i in 0..100 {
+        for j in 0..100 {
+            let id = i * 100 + j;
+            sql_query(format!("INSERT INTO {table} (id, geom) VALUES ({id}, ST_Point({i}, {j}))"))
+                .execute(conn)
+                .unwrap_or_else(|e| panic!("insert into {table}: {e:?}"));
+        }
+    }
 }
 
 #[test]
@@ -126,16 +140,7 @@ fn gist_geometry_index_accelerates_spatial_queries() {
     //    by geolite's CreateSpatialIndex must populate the rtree transparently;
     //    pg2sqlite emits no extra sync SQL of its own.
     sql_query("BEGIN").execute(&mut conn).expect("begin tx");
-    for i in 0..100 {
-        for j in 0..100 {
-            let id = i * 100 + j;
-            sql_query(format!(
-                "INSERT INTO perf_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
-            ))
-            .execute(&mut conn)
-            .expect("insert grid point");
-        }
-    }
+    populate_grid_points(&mut conn, "perf_grid");
     sql_query("COMMIT").execute(&mut conn).expect("commit tx");
 
     let base_count: Vec<CountRow> =
@@ -253,16 +258,7 @@ fn st_intersects_on_indexed_column_uses_rtree_via_translation() {
     }
 
     sql_query("BEGIN").execute(&mut conn).expect("begin tx");
-    for i in 0..100 {
-        for j in 0..100 {
-            let id = i * 100 + j;
-            sql_query(format!(
-                "INSERT INTO perf_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
-            ))
-            .execute(&mut conn)
-            .expect("insert");
-        }
-    }
+    populate_grid_points(&mut conn, "perf_grid");
     sql_query("COMMIT").execute(&mut conn).expect("commit");
 
     let select = user_select;
@@ -354,21 +350,8 @@ fn acceleration_is_conditional_on_index_presence() {
     // Populate both tables identically with the same 10k-point grid so the
     // ST_Intersects answers are guaranteed equal.
     sql_query("BEGIN").execute(&mut conn).expect("begin tx");
-    for i in 0..100 {
-        for j in 0..100 {
-            let id = i * 100 + j;
-            sql_query(format!(
-                "INSERT INTO indexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
-            ))
-            .execute(&mut conn)
-            .expect("insert indexed");
-            sql_query(format!(
-                "INSERT INTO unindexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
-            ))
-            .execute(&mut conn)
-            .expect("insert unindexed");
-        }
-    }
+    populate_grid_points(&mut conn, "indexed_grid");
+    populate_grid_points(&mut conn, "unindexed_grid");
     sql_query("COMMIT").execute(&mut conn).expect("commit");
 
     // Correctness: both queries return the same row count.
@@ -466,21 +449,8 @@ fn update_acceleration_is_conditional_on_index_presence() {
     }
 
     sql_query("BEGIN").execute(&mut conn).expect("begin tx");
-    for i in 0..100 {
-        for j in 0..100 {
-            let id = i * 100 + j;
-            sql_query(format!(
-                "INSERT INTO indexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
-            ))
-            .execute(&mut conn)
-            .expect("insert indexed");
-            sql_query(format!(
-                "INSERT INTO unindexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
-            ))
-            .execute(&mut conn)
-            .expect("insert unindexed");
-        }
-    }
+    populate_grid_points(&mut conn, "indexed_grid");
+    populate_grid_points(&mut conn, "unindexed_grid");
     sql_query("COMMIT").execute(&mut conn).expect("commit");
 
     // EXPLAIN QUERY PLAN before running, so we can observe the planner's
@@ -573,21 +543,8 @@ fn delete_acceleration_is_conditional_on_index_presence() {
     }
 
     sql_query("BEGIN").execute(&mut conn).expect("begin tx");
-    for i in 0..100 {
-        for j in 0..100 {
-            let id = i * 100 + j;
-            sql_query(format!(
-                "INSERT INTO indexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
-            ))
-            .execute(&mut conn)
-            .expect("insert indexed");
-            sql_query(format!(
-                "INSERT INTO unindexed_grid (id, geom) VALUES ({id}, ST_Point({i}, {j}))"
-            ))
-            .execute(&mut conn)
-            .expect("insert unindexed");
-        }
-    }
+    populate_grid_points(&mut conn, "indexed_grid");
+    populate_grid_points(&mut conn, "unindexed_grid");
     sql_query("COMMIT").execute(&mut conn).expect("commit");
 
     let indexed_plan: Vec<PlanRow> = sql_query(format!("EXPLAIN QUERY PLAN {indexed_delete}"))
