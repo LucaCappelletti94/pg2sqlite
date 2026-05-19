@@ -1,0 +1,7 @@
+---
+source: tests/test_postgis_rewrite_snapshots.rs
+expression: translate_to_text(pg)
+---
+CREATE TABLE features (id INTEGER PRIMARY KEY NOT NULL, geom BLOB) STRICT
+SELECT CreateSpatialIndex('features', 'geom')
+DELETE FROM features WHERE (features.rowid IN (SELECT id FROM features_geom_rtree WHERE xmin <= ST_XMax(ST_MakeEnvelope(0, 0, 10, 10)) AND xmax >= ST_XMin(ST_MakeEnvelope(0, 0, 10, 10)) AND ymin <= ST_YMax(ST_MakeEnvelope(0, 0, 10, 10)) AND ymax >= ST_YMin(ST_MakeEnvelope(0, 0, 10, 10)))) AND (ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10)))
