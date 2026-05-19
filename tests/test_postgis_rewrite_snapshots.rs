@@ -6,16 +6,13 @@
 //! or the rtree subquery shape surfaces as a snapshot diff rather than a
 //! silent semantic change.
 
-use pg2sqlite::{
-    pg2sqlite::Pg2Sqlite,
-    prelude::{Pg2SqliteOptions, TranslationOptions},
-};
+use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
+
+mod helpers;
 
 fn translate_to_text(pg: &str) -> String {
     let opts = Pg2SqliteOptions::default().with_geolite_enabled();
-    let stmts =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&opts).expect("translate");
-    stmts.join("\n")
+    helpers::translate_pg(pg, &opts).expect("translate").join("\n")
 }
 
 #[test]

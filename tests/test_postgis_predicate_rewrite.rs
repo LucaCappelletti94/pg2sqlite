@@ -7,37 +7,21 @@
 
 use pg2sqlite::{
     errors::Error,
-    pg2sqlite::Pg2Sqlite,
     prelude::{Pg2SqliteOptions, TranslationOptions},
 };
 
+mod helpers;
+
 fn translate_with_geolite(sql: &str) -> Result<Vec<String>, Error> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .expect("parse")
-        .translate_to_sql(&Pg2SqliteOptions::default().with_geolite_enabled())
+    helpers::translate_pg(sql, &Pg2SqliteOptions::default().with_geolite_enabled())
 }
 
-/// Returns the translated user SELECT (the one that is not a
-/// `SELECT CreateSpatialIndex(...)` call emitted by index translation).
 fn user_select(stmts: &[String]) -> String {
-    stmts
-        .iter()
-        .find(|s| {
-            let upper = s.to_ascii_uppercase();
-            upper.trim_start().starts_with("SELECT") && !s.contains("CreateSpatialIndex")
-        })
-        .unwrap_or_else(|| panic!("no user SELECT in:\n{}", stmts.join("\n")))
-        .clone()
+    helpers::user_statement_of(stmts, "SELECT").clone()
 }
 
-/// Returns the translated DML statement of the given kind (UPDATE / DELETE).
 fn user_dml(stmts: &[String], kind: &str) -> String {
-    stmts
-        .iter()
-        .find(|s| s.to_ascii_uppercase().trim_start().starts_with(kind))
-        .unwrap_or_else(|| panic!("no user {kind} in:\n{}", stmts.join("\n")))
-        .clone()
+    helpers::user_statement_of(stmts, kind).clone()
 }
 
 #[test]
@@ -336,7 +320,6 @@ fn rewrite_disabled_without_geolite_flag() {
     // Without enable_geolite the CREATE INDEX USING gist errors out today,
     // so this assertion just checks the option-gating is consistent; if Step 4
     // ever relaxes, the test should also assert no rtree JOIN appears.
-    let result =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&Pg2SqliteOptions::default());
+    let result = helpers::translate_pg(pg, &Pg2SqliteOptions::default());
     assert!(result.is_err(), "without enable_geolite the GiST DDL still errors");
 }

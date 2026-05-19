@@ -7,12 +7,13 @@
 
 use pg2sqlite::{
     errors::Error,
-    pg2sqlite::Pg2Sqlite,
     prelude::{Pg2SqliteOptions, TranslationOptions},
 };
 
+mod helpers;
+
 fn translate(sql: &str, opts: &Pg2SqliteOptions) -> Result<Vec<String>, Error> {
-    Pg2Sqlite::default().sql(sql).expect("parse").translate_to_sql(opts)
+    helpers::translate_pg(sql, opts)
 }
 
 fn translate_with_geolite(sql: &str) -> Result<Vec<String>, Error> {

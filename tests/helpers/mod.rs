@@ -12,6 +12,38 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rosetta_uuid::Uuid;
 use sqlparser::ast::Statement;
 
+/// Translates `pg` SQL through
+/// `Pg2Sqlite::default().sql(...).translate_to_sql(...)` and returns the
+/// resulting SQLite statements as strings. Lets test files avoid the parse/
+/// translate boilerplate; callers either unwrap, assert on the returned
+/// `Result`, or join via `.join("\n")` for snapshot tests.
+pub fn translate_pg(
+    pg: &str,
+    opts: &Pg2SqliteOptions,
+) -> Result<Vec<String>, pg2sqlite::errors::Error> {
+    Pg2Sqlite::default().sql(pg)?.translate_to_sql(opts)
+}
+
+/// Returns `true` when `stmt` is a translated user-level statement of `kind`
+/// (case-insensitive prefix match on `"SELECT"`, `"UPDATE"`, `"DELETE"`, etc.)
+/// and not a `SELECT CreateSpatialIndex(...)` call emitted by GiST index
+/// translation. The `CreateSpatialIndex` exclusion is a no-op for UPDATE and
+/// DELETE since `CreateSpatialIndex` is always emitted as a `SELECT`.
+#[must_use]
+pub fn is_user_statement(stmt: &str, kind: &str) -> bool {
+    stmt.to_ascii_uppercase().trim_start().starts_with(kind) && !stmt.contains("CreateSpatialIndex")
+}
+
+/// Finds the first translated user statement of `kind`. Panics with the full
+/// statement list if none is found, which gives a useful error message in
+/// tests that assert a specific DML kind was emitted.
+pub fn user_statement_of<'a>(stmts: &'a [String], kind: &str) -> &'a String {
+    stmts
+        .iter()
+        .find(|s| is_user_statement(s, kind))
+        .unwrap_or_else(|| panic!("no user {kind} in:\n{}", stmts.join("\n")))
+}
+
 #[declare_sql_function]
 extern "SQL" {
     /// Generates a UUIDv7 value as a BLOB.

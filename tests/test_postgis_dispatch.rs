@@ -7,19 +7,18 @@
 
 use pg2sqlite::{
     impls::translator_impls::postgis,
-    pg2sqlite::Pg2Sqlite,
     prelude::{Pg2SqliteOptions, TranslationOptions},
 };
+
+mod helpers;
 
 #[test]
 fn st_point_passthrough_when_geolite_disabled() {
     // Backward compat: without `enable_geolite`, any ST_* call falls into the
     // existing PassThrough fallback so legacy users aren't broken.
-    let translated = Pg2Sqlite::default()
-        .sql("SELECT ST_Point(0, 0) AS p;")
-        .expect("parse")
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("should pass through ST_Point untouched when geolite is disabled");
+    let translated =
+        helpers::translate_pg("SELECT ST_Point(0, 0) AS p;", &Pg2SqliteOptions::default())
+            .expect("should pass through ST_Point untouched when geolite is disabled");
     let joined = translated.join("\n").to_ascii_uppercase();
     assert!(joined.contains("ST_POINT"), "expected verbatim ST_Point passthrough, got: {joined}");
 }
@@ -27,10 +26,7 @@ fn st_point_passthrough_when_geolite_disabled() {
 #[test]
 fn st_point_passthrough_when_geolite_enabled_and_arity_matches() {
     let opts = Pg2SqliteOptions::default().with_geolite_enabled();
-    let translated = Pg2Sqlite::default()
-        .sql("SELECT ST_Point(0, 0) AS p;")
-        .expect("parse")
-        .translate_to_sql(&opts)
+    let translated = helpers::translate_pg("SELECT ST_Point(0, 0) AS p;", &opts)
         .expect("ST_Point/2 is in geolite catalog and should pass through");
     let joined = translated.join("\n").to_ascii_uppercase();
     assert!(joined.contains("ST_POINT"), "got: {joined}");
@@ -39,10 +35,7 @@ fn st_point_passthrough_when_geolite_enabled_and_arity_matches() {
 #[test]
 fn st_point_wrong_arity_errors_when_geolite_enabled() {
     let opts = Pg2SqliteOptions::default().with_geolite_enabled();
-    let result = Pg2Sqlite::default()
-        .sql("SELECT ST_Point(1) AS x;")
-        .expect("parse")
-        .translate_to_sql(&opts);
+    let result = helpers::translate_pg("SELECT ST_Point(1) AS x;", &opts);
     let err = result.expect_err("ST_Point/1 is not in geolite catalog, must error");
     let msg = format!("{err:?}");
     assert!(
@@ -56,10 +49,7 @@ fn st_transform_errors_when_geolite_enabled() {
     // ST_Transform is a real PostGIS function but is NOT in geolite's catalog
     // (no SRID reprojection yet). Hard error so users notice setup gaps.
     let opts = Pg2SqliteOptions::default().with_geolite_enabled();
-    let result = Pg2Sqlite::default()
-        .sql("SELECT ST_Transform(geom, 4326) AS x FROM t;")
-        .expect("parse")
-        .translate_to_sql(&opts);
+    let result = helpers::translate_pg("SELECT ST_Transform(geom, 4326) AS x FROM t;", &opts);
     let err = result.expect_err("ST_Transform must error when geolite is enabled");
     assert!(
         format!("{err:?}").to_ascii_lowercase().contains("st_transform"),

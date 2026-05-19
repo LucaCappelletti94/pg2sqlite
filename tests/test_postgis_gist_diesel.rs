@@ -14,10 +14,7 @@ use diesel::{
     sql_types::{Integer, Text},
 };
 use helpers::geolite::geolite_connection;
-use pg2sqlite::{
-    pg2sqlite::Pg2Sqlite,
-    prelude::{Pg2SqliteOptions, TranslationOptions},
-};
+use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
 
 #[derive(QueryableByName)]
 struct CountRow {
@@ -68,11 +65,7 @@ fn gist_geometry_index_round_trips_via_diesel() {
 
     let pg_sql = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
                   CREATE INDEX features_geom_idx ON features USING gist (geom);";
-    let stmts = Pg2Sqlite::default()
-        .sql(pg_sql)
-        .expect("parse")
-        .translate_to_sql(&opts)
-        .expect("translate");
+    let stmts = helpers::translate_pg(pg_sql, &opts).expect("translate");
 
     for s in &stmts {
         sql_query(s)
@@ -129,11 +122,7 @@ fn gist_geometry_index_accelerates_spatial_queries() {
     // 1. Translate and execute the PG-shaped DDL.
     let pg_sql = "CREATE TABLE perf_grid (id INTEGER PRIMARY KEY, geom geometry); \
                   CREATE INDEX perf_grid_geom_idx ON perf_grid USING gist (geom);";
-    let stmts = Pg2Sqlite::default()
-        .sql(pg_sql)
-        .expect("parse")
-        .translate_to_sql(&opts)
-        .expect("translate");
+    let stmts = helpers::translate_pg(pg_sql, &opts).expect("translate");
     for s in &stmts {
         sql_query(s)
             .execute(&mut conn)
@@ -241,22 +230,12 @@ fn st_intersects_on_indexed_column_uses_rtree_via_translation() {
                     CREATE INDEX perf_grid_geom_idx ON perf_grid USING gist (geom); \
                     SELECT id FROM perf_grid \
                      WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30));";
-    let translated = Pg2Sqlite::default()
-        .sql(full_sql)
-        .expect("parse schema + query")
-        .translate_to_sql(&opts)
-        .expect("translate schema + query");
+    let translated = helpers::translate_pg(full_sql, &opts).expect("translate schema + query");
 
     // Execute the schema-shaped statements (CREATE TABLE, CreateSpatialIndex).
     // The user SELECT comes last; we run it separately so we can inspect its
     // query plan in isolation.
-    let user_select = translated
-        .iter()
-        .find(|s| {
-            s.to_ascii_uppercase().trim_start().starts_with("SELECT")
-                && !s.contains("CreateSpatialIndex")
-        })
-        .expect("translator emitted a user SELECT");
+    let user_select = helpers::user_statement_of(&translated, "SELECT");
     for s in &translated {
         if std::ptr::eq(s, user_select) {
             continue;
@@ -308,20 +287,11 @@ fn acceleration_is_conditional_on_index_presence() {
         SELECT id FROM unindexed_grid \
          WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30));";
 
-    let translated = Pg2Sqlite::default()
-        .sql(full_sql)
-        .expect("parse")
-        .translate_to_sql(&opts)
-        .expect("translate");
+    let translated = helpers::translate_pg(full_sql, &opts).expect("translate");
 
     // Pick out the two user SELECTs (skip CREATE TABLE + CreateSpatialIndex).
-    let selects: Vec<&String> = translated
-        .iter()
-        .filter(|s| {
-            s.to_ascii_uppercase().trim_start().starts_with("SELECT")
-                && !s.contains("CreateSpatialIndex")
-        })
-        .collect();
+    let selects: Vec<&String> =
+        translated.iter().filter(|s| helpers::is_user_statement(s, "SELECT")).collect();
     assert_eq!(selects.len(), 2, "expected two translated user SELECTs, got: {selects:?}");
     let indexed_select =
         selects.iter().find(|s| s.contains("indexed_grid")).expect("indexed SELECT").as_str();
@@ -344,8 +314,7 @@ fn acceleration_is_conditional_on_index_presence() {
     // Apply the schema-shaped statements; skip the SELECTs (we run those
     // separately so we can inspect their query plans).
     for s in &translated {
-        let upper = s.to_ascii_uppercase();
-        if upper.trim_start().starts_with("SELECT") && !s.contains("CreateSpatialIndex") {
+        if helpers::is_user_statement(s, "SELECT") {
             continue;
         }
         sql_query(s).execute(&mut conn).expect("execute schema stmt");
@@ -409,16 +378,10 @@ fn update_acceleration_is_conditional_on_index_presence() {
          WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30)); \
         UPDATE unindexed_grid SET marker = 'hit' \
          WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30));";
-    let translated = Pg2Sqlite::default()
-        .sql(full_sql)
-        .expect("parse")
-        .translate_to_sql(&opts)
-        .expect("translate");
+    let translated = helpers::translate_pg(full_sql, &opts).expect("translate");
 
-    let updates: Vec<&String> = translated
-        .iter()
-        .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("UPDATE"))
-        .collect();
+    let updates: Vec<&String> =
+        translated.iter().filter(|s| helpers::is_user_statement(s, "UPDATE")).collect();
     assert_eq!(updates.len(), 2, "expected two translated UPDATEs, got: {updates:?}");
     let indexed_update = updates
         .iter()
@@ -438,7 +401,7 @@ fn update_acceleration_is_conditional_on_index_presence() {
 
     // Apply schema + CreateSpatialIndex; skip the UPDATEs.
     for s in &translated {
-        if s.to_ascii_uppercase().trim_start().starts_with("UPDATE") {
+        if helpers::is_user_statement(s, "UPDATE") {
             continue;
         }
         sql_query(s).execute(&mut conn).expect("execute schema stmt");
@@ -496,16 +459,10 @@ fn delete_acceleration_is_conditional_on_index_presence() {
          WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30)); \
         DELETE FROM unindexed_grid \
          WHERE ST_Intersects(geom, ST_MakeEnvelope(20, 20, 30, 30));";
-    let translated = Pg2Sqlite::default()
-        .sql(full_sql)
-        .expect("parse")
-        .translate_to_sql(&opts)
-        .expect("translate");
+    let translated = helpers::translate_pg(full_sql, &opts).expect("translate");
 
-    let deletes: Vec<&String> = translated
-        .iter()
-        .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("DELETE"))
-        .collect();
+    let deletes: Vec<&String> =
+        translated.iter().filter(|s| helpers::is_user_statement(s, "DELETE")).collect();
     assert_eq!(deletes.len(), 2, "expected two translated DELETEs, got: {deletes:?}");
     let indexed_delete = deletes
         .iter()
@@ -524,7 +481,7 @@ fn delete_acceleration_is_conditional_on_index_presence() {
     );
 
     for s in &translated {
-        if s.to_ascii_uppercase().trim_start().starts_with("DELETE") {
+        if helpers::is_user_statement(s, "DELETE") {
             continue;
         }
         sql_query(s).execute(&mut conn).expect("execute schema stmt");

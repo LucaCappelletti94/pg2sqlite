@@ -158,7 +158,10 @@ use sql_traits::{
 };
 use sqlparser::ast::{CreateIndex, Expr};
 
-use crate::{errors::Error, impls::object_name::table_with_implicit_public_lookup};
+use crate::{
+    errors::Error,
+    impls::object_name::{last_ident, table_with_implicit_public_lookup},
+};
 
 /// Classifies a GiST `CreateIndex` against the schema.
 ///
@@ -440,7 +443,7 @@ pub(crate) fn single_base_table(twj: &TableWithJoins) -> Option<(String, Option<
     let TableFactor::Table { name, alias, args: None, .. } = &twj.relation else {
         return None;
     };
-    let table = name.0.last().and_then(|p| p.as_ident()).map(|i| i.value.clone())?;
+    let table = last_ident(name).map(|i| i.value.clone())?;
     let alias_name = alias.as_ref().map(|a| a.name.value.clone());
     Some((table, alias_name))
 }
@@ -496,7 +499,7 @@ fn extract_spatial_filter<'a>(
     let sqlparser::ast::Expr::Function(func) = expr else {
         return None;
     };
-    let name = func.name.0.last().and_then(|p| p.as_ident()).map(|i| i.value.clone())?;
+    let name = last_ident(&func.name).map(|i| i.value.clone())?;
     if !is_bbox_narrowable_predicate(&name) {
         return None;
     }
