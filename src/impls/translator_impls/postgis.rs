@@ -3,7 +3,7 @@
 //!
 //! Used by the function dispatcher in `function.rs` to decide whether an
 //! `ST_*`-shaped call should pass through unchanged (when
-//! [`crate::options::Pg2SqliteOptions::with_geolite_enabled`] is on) or
+//! [`crate::traits::TranslationOptions::with_geolite_enabled`] is on) or
 //! fail with a precise `UnsupportedSQLiteFeature` error.
 //!
 //! The list MUST stay in sync with geolite's
