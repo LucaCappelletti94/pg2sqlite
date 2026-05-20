@@ -28,3 +28,6 @@ coverage/
 #.idea/
 hfuzz_target
 tarpaulin-report.json
+
+# Playwright MCP session artifacts
+.playwright-mcp/
