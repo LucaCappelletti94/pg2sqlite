@@ -1,10 +1,13 @@
 //! Submodule defining the main translator struct.
 
+#[cfg(feature = "std")]
 use std::path::PathBuf;
 
+#[cfg(feature = "std")]
 use git2::Repository;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{IndexType, Statement};
+#[cfg(feature = "std")]
 use tempfile::TempDir;
 
 use crate::{
@@ -132,6 +135,8 @@ impl Pg2Sqlite {
     /// Adds a new path with an SQL file to be parsed and added to the set of
     /// `PostgreSQL` statements to be translated.
     ///
+    /// Only available with the `std` feature.
+    ///
     /// # Arguments
     ///
     /// * `path` - The path to the SQL file to be parsed and added to the set of
@@ -146,6 +151,7 @@ impl Pg2Sqlite {
     ///
     /// * If the SQL file could not be read.
     /// * If the SQL file could not be parsed.
+    #[cfg(feature = "std")]
     pub fn file<P: AsRef<std::path::Path>>(self, path: P) -> Result<Self, crate::errors::Error> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path)?;
@@ -154,6 +160,8 @@ impl Pg2Sqlite {
 
     /// Adds all of the `up.sql` migrations found under the given directory to
     /// the set of `PostgreSQL` statements to be translated.
+    ///
+    /// Only available with the `std` feature.
     ///
     /// # Arguments
     ///
@@ -168,6 +176,7 @@ impl Pg2Sqlite {
     ///
     /// * If the SQL files could not be read.
     /// * If the SQL files could not be parsed.
+    #[cfg(feature = "std")]
     pub fn ups<P: AsRef<std::path::Path>>(directory: P) -> Result<Self, crate::errors::Error> {
         let up_sql_paths = Self::sorted_up_sql_paths(directory.as_ref())?;
         Self::from_migration_paths(up_sql_paths)
@@ -176,6 +185,8 @@ impl Pg2Sqlite {
     /// Adds all of the `up.sql` migrations found under the given directory to
     /// the set of `PostgreSQL` statements to be translated, stopping at (and
     /// including) the specified migration.
+    ///
+    /// Only available with the `std` feature.
     ///
     /// # Arguments
     ///
@@ -193,6 +204,7 @@ impl Pg2Sqlite {
     ///
     /// * If the SQL files could not be read.
     /// * If the SQL files could not be parsed.
+    #[cfg(feature = "std")]
     pub fn ups_until<P: AsRef<std::path::Path>>(
         directory: P,
         stop_at: P,
@@ -202,6 +214,7 @@ impl Pg2Sqlite {
         Self::from_migration_paths(up_sql_paths.iter().take(stop_index + 1))
     }
 
+    #[cfg(feature = "std")]
     fn sorted_up_sql_paths(
         directory: &std::path::Path,
     ) -> Result<Vec<PathBuf>, crate::errors::Error> {
@@ -211,6 +224,7 @@ impl Pg2Sqlite {
         Ok(up_sql_paths)
     }
 
+    #[cfg(feature = "std")]
     fn find_stop_migration_index(
         up_sql_paths: &[PathBuf],
         stop_at: &std::path::Path,
@@ -226,6 +240,7 @@ impl Pg2Sqlite {
         Err(crate::errors::Error::MigrationNotFound { path: stop_at.display().to_string() })
     }
 
+    #[cfg(feature = "std")]
     fn from_migration_paths<I, P>(paths: I) -> Result<Self, crate::errors::Error>
     where
         I: IntoIterator<Item = P>,
@@ -238,6 +253,7 @@ impl Pg2Sqlite {
         Ok(translator)
     }
 
+    #[cfg(feature = "std")]
     fn collect_up_sql_paths(
         directory: &std::path::Path,
         paths: &mut Vec<PathBuf>,
@@ -269,6 +285,8 @@ impl Pg2Sqlite {
     /// Adds all of the `up.sql` migrations found in the provided git repository
     /// to the set of `PostgreSQL` statements to be translated.
     ///
+    /// Only available with the `std` feature.
+    ///
     /// # Arguments
     ///
     /// * `url` - The URL of the git repository containing the `up.sql`
@@ -285,6 +303,7 @@ impl Pg2Sqlite {
     /// * If the git repository could not be cloned.
     /// * If the SQL files could not be read.
     /// * If the SQL files could not be parsed.
+    #[cfg(feature = "std")]
     pub fn from_git(url: &str) -> Result<Self, crate::errors::Error> {
         let temp_dir = TempDir::new()?;
         Repository::clone(url, temp_dir.path())

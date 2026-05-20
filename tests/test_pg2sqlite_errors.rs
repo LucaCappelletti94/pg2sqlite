@@ -18,6 +18,7 @@ fn sql_with_invalid_sql_produces_parser_error() {
     assert!(err.contains("Parser error"), "Expected parser error, got: {err}");
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn file_with_nonexistent_path_produces_io_error() {
     let result = Pg2Sqlite::default().file("/nonexistent/path/to/file.sql");

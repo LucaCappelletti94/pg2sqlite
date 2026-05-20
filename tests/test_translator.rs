@@ -1,4 +1,9 @@
 //! Integration test for translating migrations loaded from a git repository.
+//!
+//! Uses `Pg2Sqlite::from_git`, which is gated on the `std` feature (it
+//! pulls in `git2` + `tempfile`).
+
+#![cfg(feature = "std")]
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection, declare_sql_function};
 use git2::{Repository, Signature};

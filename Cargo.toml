@@ -6,11 +6,11 @@ rust-version = "1.88"
 license = "MIT"
 
 [dependencies]
-sqlparser = { version = "0.62", features = ["visitor"] }
-sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "858e17e4561c2b80d779674192d242bcb12f8afa" }
-git2 = "0.20.4"
-tempfile = "3.27"
-thiserror = "2.0"
+sqlparser = { version = "0.62", default-features = false, features = ["visitor"] }
+sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "858e17e4561c2b80d779674192d242bcb12f8afa", default-features = false }
+git2 = { version = "0.20.4", optional = true }
+tempfile = { version = "3.27", optional = true }
+thiserror = { version = "2.0", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -48,7 +48,25 @@ version = "0.33"
 optional = true
 
 [features]
+# Default feature: pulls in everything that depends on the host environment
+# (filesystem-backed loaders, git-backed loaders, std-bound error variants,
+# and the `recursive-protection` stack guard from sqlparser). Drop this with
+# `--no-default-features` to build for `wasm32-unknown-unknown` or other
+# no_std targets. See docs/sqlparser_derive_no_std_fix.md for the upstream
+# patch that makes `sqlparser/visitor` no_std-compatible.
+default = ["std"]
+std = [
+    "sqlparser/std",
+    "sqlparser/recursive-protection",
+    "sql-traits/std",
+    "thiserror/std",
+    "dep:git2",
+    "dep:tempfile",
+]
+# `geolite` (Diesel + sqlite-vec spatial integration) is native-only,
+# so it implies `std`.
 geolite = [
+    "std",
     "dep:geolite-core",
     "dep:geolite-sqlite",
     "dep:geolite-diesel",

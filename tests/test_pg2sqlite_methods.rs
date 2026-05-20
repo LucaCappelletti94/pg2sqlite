@@ -1,4 +1,9 @@
 //! Tests for the `Pg2Sqlite` struct methods.
+//!
+//! Exercises the filesystem-backed loaders (`file`, `ups`, `ups_until`) and
+//! their downstream translation, which all depend on the `std` feature.
+
+#![cfg(feature = "std")]
 
 use std::io::Write;
 

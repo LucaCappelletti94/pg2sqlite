@@ -14,6 +14,11 @@ pub enum Error {
     #[error("Schema error: {0}")]
     SchemaError(#[from] sql_traits::errors::Error),
     /// Error that may occur during the reading of a file.
+    ///
+    /// Only available with the `std` feature; produced by the
+    /// filesystem-backed loaders on `Pg2Sqlite` (`file`, `ups`, `ups_until`,
+    /// `from_git`), which are themselves `std`-gated.
+    #[cfg(feature = "std")]
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     /// Error that may occur during git operations.

@@ -1,4 +1,9 @@
 //! Tests for migration discovery helpers (`ups`, `ups_until`).
+//!
+//! `ups`/`ups_until` are filesystem-backed and only available with the
+//! `std` feature.
+
+#![cfg(feature = "std")]
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use tempfile::TempDir;
