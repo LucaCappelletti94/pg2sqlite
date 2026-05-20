@@ -1265,7 +1265,7 @@ mod tests {
                 assert!(relationships[0].to_string().contains("datetime('now')"));
             }
             sqlparser::ast::ConnectByKind::StartWith { .. } => {
-                panic!("unexpected connect by variant: {:?}", &select.connect_by[0]);
+                panic!("unexpected connect by variant: {:?}", select.connect_by[0]);
             }
         }
         match &select.connect_by[1] {
@@ -1273,7 +1273,7 @@ mod tests {
                 assert!(condition.to_string().contains("datetime('now')"));
             }
             sqlparser::ast::ConnectByKind::ConnectBy { .. } => {
-                panic!("unexpected connect by variant: {:?}", &select.connect_by[1]);
+                panic!("unexpected connect by variant: {:?}", select.connect_by[1]);
             }
         }
 
