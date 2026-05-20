@@ -1902,7 +1902,7 @@ fn generate_validation_view_sql(
         columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
     // Build the WHERE clause to match rows by primary key (fall back to all
-    // columns when no PK is defined — rare but correct).
+    // columns when no PK is defined - rare but correct).
     let match_columns = if pk_columns.is_empty() { columns } else { pk_columns };
     let pk_match = match_columns
         .iter()

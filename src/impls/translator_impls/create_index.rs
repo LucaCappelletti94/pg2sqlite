@@ -132,7 +132,7 @@ fn analyze_fts_index(create_index: &CreateIndex) -> FtsTranslation {
 /// Generate an FTS5 virtual table statement using external content mode.
 ///
 /// External content mode (`content=<table>`) avoids storing a second copy of
-/// the indexed text inside the FTS5 table — the content is read from the
+/// the indexed text inside the FTS5 table - the content is read from the
 /// source table at query time. Sync triggers must use the FTS5 `'delete'`
 /// command instead of plain `DELETE` when removing rows from the index.
 fn create_fts5_virtual_table(
@@ -192,14 +192,14 @@ fn create_fts5_triggers(
     let when_clause = predicate_sql.map(|p| format!(" WHEN {p}")).unwrap_or_default();
 
     vec![
-        // AFTER INSERT trigger — attach to the actual table (may be RLS backing table)
+        // AFTER INSERT trigger - attach to the actual table (may be RLS backing table)
         format!(
             "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON \
              {trigger_table_quoted}{when_clause} BEGIN \
              INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
              END"
         ),
-        // AFTER DELETE trigger — use FTS5 'delete' command (external content mode)
+        // AFTER DELETE trigger - use FTS5 'delete' command (external content mode)
         format!(
             "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON \
              {trigger_table_quoted}{when_clause} BEGIN \
@@ -207,7 +207,7 @@ fn create_fts5_triggers(
              VALUES ('delete', {old_pk}, {old_values}); \
              END"
         ),
-        // AFTER UPDATE trigger — delete old entry then insert new (external content mode)
+        // AFTER UPDATE trigger - delete old entry then insert new (external content mode)
         format!(
             "CREATE TRIGGER {update_trigger_name} AFTER UPDATE ON \
              {trigger_table_quoted}{when_clause} BEGIN \
@@ -260,7 +260,7 @@ fn create_fts5_statements(
         return Err(Error::UnsupportedSQLiteFeature(format!(
             "FTS5 external content mode requires an INTEGER primary key column for \
              content_rowid= (table '{base_name}', column '{pk_column}', type '{pk_type_str}'). \
-             FTS5 uses the rowid — a 64-bit integer — to look up rows in the content table. \
+             FTS5 uses the rowid - a 64-bit integer - to look up rows in the content table. \
              Use an INTEGER or BIGINT primary key, or add a surrogate INTEGER rowid column."
         )));
     }
@@ -315,7 +315,7 @@ fn create_fts5_statements(
 ///
 /// Errors when:
 /// - the GiST has a `WHERE` predicate (geolite's `CreateSpatialIndex` doesn't
-///   honor partial indexes);
+///   honor partial indexes).
 /// - the GiST mixes spatial and non-spatial columns (silently dropping the
 ///   non-spatial side would change query semantics).
 fn try_spatial_index_routing(

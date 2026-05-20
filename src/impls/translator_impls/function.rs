@@ -356,7 +356,7 @@ fn translate_function(
              For simple string formatting use printf() with standard C-style specifiers."
                 .to_string(),
         ),
-        // PG-specific system/introspection functions — no SQLite equivalent
+        // PG-specific system/introspection functions - no SQLite equivalent
         "current_database" | "current_schema" | "pg_typeof" => FunctionTranslation::Unsupported(
             "current_database/current_schema/pg_typeof are PostgreSQL system functions \
              with no SQLite equivalent."
@@ -470,7 +470,7 @@ fn translate_function(
 
 /// When `enable_geolite` is on, validate `ST_*`-shaped calls against the
 /// catalog mirrored from geolite (`super::postgis`). Functions in the
-/// catalog with matching arity pass through; arity mismatches and unknown
+/// catalog with matching arity pass through. Arity mismatches and unknown
 /// `st_*` names error with a precise message. With `enable_geolite` off
 /// this is a no-op and unknown functions keep their pre-existing
 /// passthrough behavior.
@@ -562,7 +562,7 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                 "to_char format '{pg_format}' contains unsupported character '{c}'. \
                  Supported separators: - : . / , _ (space) T. \
-                 For number formatting codes (9, 0, FM, L, …) use printf() or CAST."
+                 For number formatting codes (9, 0, FM, L, ...) use printf() or CAST."
             )));
         }
     }
@@ -571,7 +571,7 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
 
 /// Wrap an expression with COALESCE(expr, '') to handle NULL semantics.
 ///
-/// PostgreSQL's CONCAT ignores NULL arguments; SQLite's `||` propagates them.
+/// PostgreSQL's CONCAT ignores NULL arguments. SQLite's `||` propagates them.
 /// Wrapping with COALESCE ensures consistent behaviour.
 fn wrap_with_coalesce(expr: Expr) -> Expr {
     simple_function_expr("COALESCE", vec![expr, string_literal("")], None)
@@ -774,11 +774,11 @@ impl Translator for Function {
         let func =
             if self.filter.is_some() { transform_filter_to_case(self) } else { self.clone() };
 
-        // WITHIN GROUP is ordered-set aggregate syntax (percentile_cont, mode, …).
+        // WITHIN GROUP is ordered-set aggregate syntax (percentile_cont, mode, ...).
         // SQLite has no equivalent; reject early with a clear error.
         if !func.within_group.is_empty() {
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                "{} with WITHIN GROUP (ORDER BY …) is not supported in SQLite. \
+                "{} with WITHIN GROUP (ORDER BY ...) is not supported in SQLite. \
                  Ordered-set aggregates have no SQLite equivalent.",
                 func.name
             )));

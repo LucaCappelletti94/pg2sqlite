@@ -136,7 +136,7 @@ impl PlPgSqlPreprocessor {
         // Transform SELECT INTO statements to extract variable bindings
         result = Self::transform_select_into(&result, context);
 
-        // Transform RAISE EXCEPTION/NOTICE/… → SELECT RAISE(ABORT, …) or drop
+        // Transform RAISE EXCEPTION/NOTICE/... → SELECT RAISE(ABORT, ...) or drop
         result = Self::transform_raise_statements(&result);
 
         result
@@ -150,7 +150,7 @@ impl PlPgSqlPreprocessor {
     /// - `RAISE EXCEPTION 'msg'` → `SELECT RAISE(ABORT, 'msg')`
     /// - `RAISE EXCEPTION 'fmt %', arg` → `SELECT RAISE(ABORT, 'fmt %')`
     ///   (format args dropped)
-    /// - `RAISE NOTICE/INFO/WARNING/DEBUG/LOG …` → removed (no SQLite
+    /// - `RAISE NOTICE/INFO/WARNING/DEBUG/LOG ...` → removed (no SQLite
     ///   equivalent)
     fn transform_raise_statements(body: &str) -> String {
         let mut result = String::new();
@@ -181,7 +181,7 @@ impl PlPgSqlPreprocessor {
                     .unwrap_or(rest_upper.len());
                 (len, false)
             } else {
-                // Not a recognized RAISE level — pass through unchanged
+                // Not a recognized RAISE level - pass through unchanged
                 result.push_str(&body[search_from..after_raise_start]);
                 search_from = after_raise_start;
                 continue;
@@ -204,7 +204,7 @@ impl PlPgSqlPreprocessor {
                 // Keep the semicolon
                 result.push(';');
             }
-            // else: informational — drop entirely (emit nothing)
+            // else: informational - drop entirely (emit nothing)
 
             search_from = stmt_end + 1; // skip past the semicolon
         }
@@ -678,7 +678,7 @@ END";
         let (transformed, _) = PlPgSqlPreprocessor::preprocess(body);
         assert!(
             transformed.contains("SELECT RAISE(ABORT, 'val must be non-negative')"),
-            "RAISE EXCEPTION should become SELECT RAISE(ABORT, …), got: {transformed}"
+            "RAISE EXCEPTION should become SELECT RAISE(ABORT, ...), got: {transformed}"
         );
         assert!(!transformed.contains("RAISE EXCEPTION"), "Original form should be removed");
     }

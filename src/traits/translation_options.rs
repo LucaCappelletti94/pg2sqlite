@@ -168,11 +168,11 @@ pub trait TranslationOptions {
     #[must_use]
     /// Enables translation of PostGIS-equivalent SQL via the geolite SQLite
     /// extension. With this on, `ST_*` scalar functions whose `(name, arity)`
-    /// match geolite's published catalog pass through untouched; functions
+    /// match geolite's published catalog pass through untouched. Functions
     /// outside the catalog still error as unsupported.
     ///
     /// The caller is responsible for ensuring geolite's extension is loaded
-    /// on the destination SQLite connection at runtime; pg2sqlite only
+    /// on the destination SQLite connection at runtime. pg2sqlite only
     /// emits SQL.
     ///
     /// Default is `false`.

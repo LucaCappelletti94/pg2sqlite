@@ -248,7 +248,7 @@ fn translate_extract(
         return Err(crate::errors::Error::UnsupportedSQLiteFeature(
             "EXTRACT(WEEK) is not supported in SQLite. PostgreSQL uses ISO 8601 \
              week numbers (Monday-based) while SQLite's strftime('%W') uses \
-             Sunday-based week numbers — they diverge near year boundaries. \
+             Sunday-based week numbers - they diverge near year boundaries. \
              To compute ISO week number manually: \
              CAST((CAST(strftime('%j', date(ts, 'weekday 1', '-6 days')) AS INTEGER) \
              - 1) / 7 + 1 AS INTEGER)"
@@ -430,7 +430,7 @@ fn translate_position(
 /// Translate a TRIM expression to SQLite.
 ///
 /// PostgreSQL supports `TRIM(LEADING 'x' FROM str)`, `TRIM(TRAILING 'x' FROM
-/// str)`, and `TRIM(BOTH 'x' FROM str)`.  SQLite has no such syntax; the
+/// str)`, and `TRIM(BOTH 'x' FROM str)`.  SQLite has no such syntax. The
 /// equivalents are `LTRIM(str, 'x')`, `RTRIM(str, 'x')`, and `TRIM(str,
 /// 'x')` respectively.
 ///
@@ -495,7 +495,7 @@ fn translate_trim(
         }));
     }
 
-    // Plain TRIM(str) or TRIM(str, chars) — pass through with translated parts.
+    // Plain TRIM(str) or TRIM(str, chars) - pass through with translated parts.
     Ok(Expr::Trim {
         expr: Box::new(expr.translate(schema, options)?),
         trim_where,
@@ -1548,7 +1548,7 @@ mod tests {
         .expect("both trim should translate");
         assert_eq!(btrimmed.to_string(), "TRIM(str, 'x')");
 
-        // TRIM(LEADING FROM str) — no char → LTRIM(str)
+        // TRIM(LEADING FROM str) - no char → LTRIM(str)
         let ltrim_no_char = translate_trim(
             &parse_expr("str"),
             Some(sqlparser::ast::TrimWhereField::Leading),

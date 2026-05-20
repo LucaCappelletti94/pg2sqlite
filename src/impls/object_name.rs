@@ -13,8 +13,8 @@ pub(crate) fn last_ident(name: &ObjectName) -> Option<&Ident> {
     name.0.last().and_then(ObjectNamePart::as_ident)
 }
 
-/// Returns the last identifier's value if `name` ends in a bare identifier;
-/// otherwise falls back to the full `ObjectName`'s `Display` form. Useful when
+/// Returns the last identifier's value if `name` ends in a bare identifier.
+/// Otherwise falls back to the full `ObjectName`'s `Display` form. Useful when
 /// synthesizing single-quoted SQL string literals from a table or column
 /// reference (e.g. `SELECT CreateSpatialIndex('features', 'geom')`).
 #[must_use]

@@ -88,7 +88,7 @@ pub(crate) fn debug_variant_name(value: &impl std::fmt::Debug) -> String {
 /// structural recursion to
 /// [`crate::impls::expr_helpers::try_map_expr_children`].
 ///
-/// This handles the "boring" arms — variants that simply recurse into their
+/// This handles the "boring" arms - variants that simply recurse into their
 /// children.  Callers should match direction-specific semantic transforms
 /// **before** falling through to this function.
 pub(crate) fn translate_expr_recursive<D: TranslationDirection>(

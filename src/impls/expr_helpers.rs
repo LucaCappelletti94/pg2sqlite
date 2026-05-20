@@ -7,7 +7,7 @@
 use sqlparser::ast::{Expr, JsonPathElem};
 
 // ---------------------------------------------------------------------------
-// map_expr_children  –  immutable rebuild
+// map_expr_children  -  immutable rebuild
 // ---------------------------------------------------------------------------
 
 /// Apply `f` to every direct child [`Expr`] inside `expr` and rebuild the
@@ -307,7 +307,7 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
 }
 
 // ---------------------------------------------------------------------------
-// try_map_expr_children  –  fallible immutable rebuild
+// try_map_expr_children  -  fallible immutable rebuild
 // ---------------------------------------------------------------------------
 
 /// Fallible version of [`map_expr_children`].  Takes two closures:
@@ -317,7 +317,7 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
 ///   `Subquery`, `Exists`, `InSubquery`), may fail.
 ///
 /// **Leaf variants** (no child) are cloned as-is.  `Function` is **not**
-/// walked; callers must handle it separately (function name rewriting, argument
+/// walked. Callers must handle it separately (function name rewriting, argument
 /// translation, etc.).
 ///
 /// Unlike `map_expr_children`, this function also recurses into:
@@ -703,12 +703,12 @@ fn try_map_json_path<E>(
 }
 
 // ---------------------------------------------------------------------------
-// for_each_child_expr  –  read-only traversal
+// for_each_child_expr  -  read-only traversal
 // ---------------------------------------------------------------------------
 
 /// Call `f` on every direct child [`Expr`] inside `expr`.
 ///
-/// This is the read-only equivalent of [`map_expr_children`]; it does not
+/// This is the read-only equivalent of [`map_expr_children`]. It does not
 /// rebuild the tree.  Useful for collecting information (e.g. variable
 /// patterns).
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
@@ -886,7 +886,7 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             }
         }
 
-        // Function / Subquery / Exists – skip (callers handle separately)
+        // Function / Subquery / Exists - skip (callers handle separately)
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => {}
 
         // Remaining leaf-like variants
@@ -895,7 +895,7 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
 }
 
 // ---------------------------------------------------------------------------
-// any_child_expr  –  read-only predicate
+// any_child_expr  -  read-only predicate
 // ---------------------------------------------------------------------------
 
 /// Return `true` if `predicate` returns `true` for any direct child [`Expr`]
@@ -911,7 +911,7 @@ pub(crate) fn any_child_expr(expr: &Expr, predicate: &impl Fn(&Expr) -> bool) ->
 }
 
 // ---------------------------------------------------------------------------
-// mutate_expr_children  –  in-place mutation
+// mutate_expr_children  -  in-place mutation
 // ---------------------------------------------------------------------------
 
 /// Call `f` on every direct child `&mut Expr` inside `expr`, allowing in-place
@@ -1091,7 +1091,7 @@ pub(crate) fn mutate_expr_children(expr: &mut Expr, f: &mut impl FnMut(&mut Expr
             }
         }
 
-        // Function / Subquery / Exists – skip (callers handle separately)
+        // Function / Subquery / Exists - skip (callers handle separately)
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => {}
 
         // Remaining leaf-like variants

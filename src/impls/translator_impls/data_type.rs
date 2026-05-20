@@ -49,7 +49,7 @@ impl Translator for DataType {
             | DataType::DoublePrecision
             | DataType::Float8
             | DataType::Float4
-            // Numeric/Decimal: mapping is intentionally lossy — SQLite has no fixed-precision type
+            // Numeric/Decimal: mapping is intentionally lossy - SQLite has no fixed-precision type
             | DataType::Numeric(_)
             | DataType::Decimal(_) => Ok(DataType::Real),
             // JSON/JSONB, text aliases, and temporal types are stored as TEXT in SQLite.
@@ -158,7 +158,7 @@ mod tests {
         let schema = empty_schema();
         let options = Pg2SqliteOptions::default();
 
-        // Array types are still unsupported — use one as a representative unsupported
+        // Array types are still unsupported - use one as a representative unsupported
         // variant
         let err = DataType::Array(ArrayElemTypeDef::None)
             .translate(&schema, &options)

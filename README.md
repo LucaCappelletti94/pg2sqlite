@@ -9,15 +9,15 @@ A Rust library that translates PostgreSQL SQL into valid, runnable SQLite SQL.
 
 It parses PostgreSQL-dialect statements using [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and emits semantically equivalent SQLite SQL. Beyond basic type and syntax rewriting it handles complex PostgreSQL features that have no direct SQLite counterpart:
 
-- **Row-Level Security** - `CREATE POLICY` / `ALTER TABLE … ENABLE ROW LEVEL SECURITY` is translated to a renamed backing table, a view that enforces the `USING` clause, and `INSTEAD OF` triggers.
-- **Full-text search** - `CREATE INDEX … USING GIN (to_tsvector(…))` becomes an FTS5 virtual table with `AFTER INSERT / DELETE / UPDATE` sync triggers.
+- **Row-Level Security** - `CREATE POLICY` / `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` is translated to a renamed backing table, a view that enforces the `USING` clause, and `INSTEAD OF` triggers.
+- **Full-text search** - `CREATE INDEX ... USING GIN (to_tsvector(...))` becomes an FTS5 virtual table with `AFTER INSERT / DELETE / UPDATE` sync triggers.
 - **Vector search** - pgvector types (`vector`, `halfvec`) and distance operators (`<->`, `<=>`) are translated to [sqlite-vec](https://github.com/asg017/sqlite-vec) equivalents, including a `vec0` virtual table and sync triggers.
 - **PL/pgSQL triggers** - trigger function bodies are parsed and rewritten to SQLite trigger syntax, including `IF / ELSIF / ELSE`, `SELECT INTO`, `RAISE EXCEPTION`, and `NEW` / `OLD` references.
 - **Grant-based filtering** - when a session role is configured, tables and indices the role cannot access are omitted from the output entirely.
 - **Reverse translation** - SQLite DML (`INSERT`, `UPDATE`, `DELETE`, `SELECT`) can be translated back to PostgreSQL for syncing client-side replicas to a PostgreSQL server.
 
 > [!IMPORTANT]
-> **Translation guarantees:** every output statement is valid SQLite. If a construct can be translated, it is; if it cannot, the call returns an explicit `Err`. *Silently skipped* statements (`CREATE FUNCTION`, `GRANT`, `CREATE ROLE`, …) carry no SQLite-representable information; *silently dropped* column options (`COLLATION`, `CHARACTER SET`, `COMMENT`) have no SQLite equivalent. Everything else either translates or errors - there are no silent pass-throughs that look valid but fail at runtime.
+> **Translation guarantees:** every output statement is valid SQLite. If a construct can be translated, it is. If it cannot, the call returns an explicit `Err`. *Silently skipped* statements (`CREATE FUNCTION`, `GRANT`, `CREATE ROLE`, ...) carry no SQLite-representable information. *Silently dropped* column options (`COLLATION`, `CHARACTER SET`, `COMMENT`) have no SQLite equivalent. Everything else either translates or errors - there are no silent pass-throughs that look valid but fail at runtime.
 
 In our test suite, translated SQL is executed against SQLite via Diesel to verify runtime behavior, not just output SQL strings.
 
@@ -62,16 +62,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `CREATE TABLE`                                         | Translated with `STRICT` mode and automatic type mapping                            |
 | `CREATE INDEX`                                         | Translated (including `CREATE INDEX IF NOT EXISTS`)                                 |
 | `CREATE TRIGGER`                                       | PL/pgSQL function bodies translated to SQLite trigger syntax                        |
-| `CREATE VIEW`                                          | Translated; `CREATE OR REPLACE VIEW` becomes `DROP VIEW IF EXISTS` + `CREATE VIEW`  |
-| `INSERT`                                               | `ON CONFLICT DO NOTHING` → `OR IGNORE`; `ON CONFLICT DO UPDATE SET …` preserved as SQLite upsert (SQLite ≥ 3.24) |
+| `CREATE VIEW`                                          | Translated. `CREATE OR REPLACE VIEW` becomes `DROP VIEW IF EXISTS` + `CREATE VIEW`  |
+| `INSERT`                                               | `ON CONFLICT DO NOTHING` becomes `OR IGNORE`. `ON CONFLICT DO UPDATE SET ...` preserved as SQLite upsert (SQLite >= 3.24) |
 | `UPDATE` / `DELETE`                                    | Including `DELETE ... USING` syntax                                                 |
 | `DROP TABLE` / `DROP VIEW` / `DROP INDEX`              | Strips `CASCADE` / `RESTRICT`                                                       |
 | `ALTER TABLE ENABLE ROW LEVEL SECURITY`                | Translated to views + `INSTEAD OF` triggers (see [RLS](#row-level-security))        |
-| `CREATE POLICY` / `CREATE ROLE` / `GRANT` / `REVOKE`   | Consumed for RLS and grant-based filtering; no invalid output emitted               |
+| `CREATE POLICY` / `CREATE ROLE` / `GRANT` / `REVOKE`   | Consumed for RLS and grant-based filtering. No invalid output emitted               |
 
 Statements with no SQLite equivalent (`CREATE FUNCTION`, `CREATE EXTENSION`, `CREATE SEQUENCE`, `ALTER ROLE`, `COPY`, etc.) are silently skipped - they carry no information that can be represented in SQLite.
 
-Statements that *do* have a SQLite equivalent but that pg2sqlite does not yet translate (`STDDEV`, `PERCENTILE_CONT`, `ARRAY_AGG`, `REGEXP_REPLACE`, …) return an explicit `Err` with a descriptive message. A clear error is always better than output that silently computes the wrong result or fails at runtime.
+Statements that *do* have a SQLite equivalent but that pg2sqlite does not yet translate (`STDDEV`, `PERCENTILE_CONT`, `ARRAY_AGG`, `REGEXP_REPLACE`, ...) return an explicit `Err` with a descriptive message. A clear error is always better than output that silently computes the wrong result or fails at runtime.
 
 ### Type mapping
 
@@ -124,7 +124,7 @@ All `CREATE TABLE` output uses SQLite `STRICT` mode, and `NOT NULL` is automatic
 
 ### UUID generation
 
-**UUID translation requires explicit configuration.** Set `.with_uuid_representation(...)` to choose `UuidRepresentation::Blob` (16 bytes) or `UuidRepresentation::Text` (36-character strings). UUID default functions (`gen_random_uuid()`, `uuidv7()`, …) are always renamed to the function configured via `.with_uuid_function_name()`.
+**UUID translation requires explicit configuration.** Set `.with_uuid_representation(...)` to choose `UuidRepresentation::Blob` (16 bytes) or `UuidRepresentation::Text` (36-character strings). UUID default functions (`gen_random_uuid()`, `uuidv7()`, ...) are always renamed to the function configured via `.with_uuid_function_name()`.
 
 PostgreSQL UUID defaults (`gen_random_uuid()`, `uuidv4()`, `uuidv7()`) are translated to a configurable SQLite function call. Ensure that function exists at runtime (for example, a registered SQLite UDF), and that its runtime return type matches the selected UUID representation.
 
@@ -281,11 +281,11 @@ WHERE features.rowid IN (
 
 The rewrite is conservative: single-table FROM, flat AND in WHERE, bbox-overlap-narrowable predicates (`ST_Intersects`, `ST_Contains`, `ST_Within`, `ST_Covers`, `ST_CoveredBy`, `ST_Equals`, `ST_Touches`, `ST_Crosses`, `ST_Overlaps`), simple column reference as the predicate's first arg. Joins, subqueries, top-level `OR`/`NOT`, non-trivial first args, and predicates over unindexed columns all pass through unchanged.
 
-The caller is responsible for loading geolite onto the destination SQLite connection (for example via `SELECT load_extension('libgeolite_sqlite')` or `sqlite3_auto_extension`); pg2sqlite only emits the SQL. Without the runtime flag set, `geometry` and `geography` still map to `BLOB` for backward compatibility, `ST_*` calls keep their pre-existing passthrough behavior, and no rewriting fires.
+The caller is responsible for loading geolite onto the destination SQLite connection (for example via `SELECT load_extension('libgeolite_sqlite')` or `sqlite3_auto_extension`). pg2sqlite only emits the SQL. Without the runtime flag set, `geometry` and `geography` still map to `BLOB` for backward compatibility, `ST_*` calls keep their pre-existing passthrough behavior, and no rewriting fires.
 
 ### Full-text search
 
-`CREATE INDEX … USING GIN (to_tsvector('english', body))` is translated to an FTS5 virtual table plus three sync triggers that keep it current:
+`CREATE INDEX ... USING GIN (to_tsvector('english', body))` is translated to an FTS5 virtual table plus three sync triggers that keep it current:
 
 ```sql
 -- Input (PostgreSQL)
@@ -391,7 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Performance
 
 Measured with Criterion on an optimized release build (`cargo bench -- vs_polyglot`).
-pg2sqlite performs full semantic translation; polyglot-sql performs syntactic rewriting.
+pg2sqlite performs full semantic translation. polyglot-sql performs syntactic rewriting.
 
 | Input                 | pg2sqlite | polyglot-sql | speedup  |
 | --------------------- | --------: | -----------: | -------: |
