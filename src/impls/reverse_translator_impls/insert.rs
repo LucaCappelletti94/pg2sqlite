@@ -50,6 +50,7 @@ fn resolve_insert_table<'a>(
         return Err(Error::TableNotFoundInSchema { table_name: table_name.to_string() });
     }
 
+    let bare_table_name = bare_table_name.as_ref();
     let candidates = schema
         .tables()
         .filter(|candidate| candidate.table_name().eq_ignore_ascii_case(bare_table_name))
@@ -203,7 +204,7 @@ impl ReverseTranslator for Insert {
             .collect::<Result<Vec<_>, Error>>()?;
 
         let table = match &self.table {
-            TableObject::TableName(_) => self.table.clone(),
+            TableObject::TableName(_) | TableObject::TableQuery(_) => self.table.clone(),
             TableObject::TableFunction(func) => {
                 match super::function::reverse_translate_function(func, schema, options)? {
                     Expr::Function(f) => TableObject::TableFunction(f),
@@ -214,7 +215,7 @@ impl ReverseTranslator for Insert {
 
         let mut insert = Insert {
             insert_token: self.insert_token.clone(),
-            optimizer_hint: self.optimizer_hint.clone(),
+            optimizer_hints: self.optimizer_hints.clone(),
             or: None, // Will be set below based on conversion
             ignore: self.ignore,
             into: self.into,
@@ -229,6 +230,7 @@ impl ReverseTranslator for Insert {
             has_table_keyword: self.has_table_keyword,
             on: self.on.clone(),
             returning,
+            output: self.output.clone(),
             replace_into: self.replace_into,
             priority: self.priority,
             insert_alias: self.insert_alias.clone(),
@@ -256,8 +258,15 @@ impl ReverseTranslator for Insert {
                     let resolved_table = resolve_insert_table(schema, &self.table)?;
                     let table_name = resolved_table.table_name().to_string();
                     let pk_columns = get_primary_key_columns(schema, resolved_table);
+                    let column_idents: Vec<Ident> = self
+                        .columns
+                        .iter()
+                        .filter_map(|c| {
+                            c.0.last().and_then(sqlparser::ast::ObjectNamePart::as_ident).cloned()
+                        })
+                        .collect();
                     let insert_columns =
-                        resolve_insert_columns(schema, resolved_table, &self.columns);
+                        resolve_insert_columns(schema, resolved_table, &column_idents);
                     insert.on =
                         Some(build_upsert_on_conflict(&table_name, &pk_columns, &insert_columns)?);
                 }

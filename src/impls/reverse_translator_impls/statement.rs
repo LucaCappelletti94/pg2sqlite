@@ -61,7 +61,7 @@ fn check_table_object_for_rls(
 ) -> Result<(), Error> {
     match table {
         TableObject::TableName(name) => check_table_for_rls(name, options),
-        TableObject::TableFunction(_) => Ok(()),
+        TableObject::TableFunction(_) | TableObject::TableQuery(_) => Ok(()),
     }
 }
 
@@ -577,7 +577,7 @@ mod tests {
             columns: vec![sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new(
                 "body",
             )])],
-            match_value: sqlparser::ast::Value::SingleQuotedString("term".to_string()),
+            match_value: sqlparser::ast::Value::SingleQuotedString("term".to_string()).into(),
             opt_search_modifier: None,
         };
 

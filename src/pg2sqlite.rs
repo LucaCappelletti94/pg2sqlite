@@ -242,18 +242,24 @@ impl Pg2Sqlite {
         directory: &std::path::Path,
         paths: &mut Vec<PathBuf>,
     ) -> Result<(), crate::errors::Error> {
-        // We iterate recursively over the migrations directory.
+        // We iterate recursively over the migrations directory. Symlinks
+        // are skipped so a directory-symlink loop (or a copy alias) does
+        // not surface the same `up.sql` twice, which sql-traits now
+        // rejects with TableLookupConflict during schema build.
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
             let path = entry.path();
-            if path.is_file() {
-                // If the file name is `up.sql` we collect it
+            if file_type.is_file() {
                 if let Some(file_name) = path.file_name()
                     && file_name == "up.sql"
                 {
                     paths.push(path);
                 }
-            } else if path.is_dir() {
+            } else if file_type.is_dir() {
                 Self::collect_up_sql_paths(&path, paths)?;
             }
         }

@@ -289,6 +289,9 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
                                 JsonPathElem::Bracket { key } => {
                                     JsonPathElem::Bracket { key: f(key) }
                                 }
+                                JsonPathElem::ColonBracket { key } => {
+                                    JsonPathElem::ColonBracket { key: f(key) }
+                                }
                             }
                         })
                         .collect(),
@@ -696,6 +699,9 @@ fn try_map_json_path<E>(
                         JsonPathElem::Dot { key: key.clone(), quoted: *quoted }
                     }
                     JsonPathElem::Bracket { key } => JsonPathElem::Bracket { key: f(key)? },
+                    JsonPathElem::ColonBracket { key } => {
+                        JsonPathElem::ColonBracket { key: f(key)? }
+                    }
                 })
             })
             .collect::<Result<Vec<_>, E>>()?,

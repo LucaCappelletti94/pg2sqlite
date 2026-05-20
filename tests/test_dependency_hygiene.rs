@@ -1,24 +1,33 @@
 //! Build/dependency hygiene checks.
+//!
+//! Now that sqlparser ships releases on crates.io that we can consume
+//! directly (and that sql-traits' no_std refactor also pins via
+//! `sqlparser = { version = "0.62", default-features = false }`), we no
+//! longer need to track upstream `main`. The invariant we want to keep is
+//! that there's exactly one sqlparser version in the dep graph so AST
+//! types unify between this crate and sql-traits.
 
 #[test]
-fn lockfile_has_single_sqlparser_git_source() {
+fn lockfile_has_single_sqlparser_version() {
     let cargo_lock = include_str!("../Cargo.lock");
-    let sqlparser_git_sources = cargo_lock
-        .lines()
-        .filter(|line| {
-            line.contains("source = \"git+https://github.com/apache/datafusion-sqlparser-rs")
+    let sqlparser_versions = cargo_lock
+        .split("\n\n")
+        .filter(|chunk| chunk.contains("name = \"sqlparser\""))
+        .filter_map(|chunk| {
+            chunk.lines().find(|line| line.starts_with("version = ")).map(str::to_string)
         })
         .collect::<std::collections::BTreeSet<_>>();
 
     assert_eq!(
-        sqlparser_git_sources.len(),
+        sqlparser_versions.len(),
         1,
-        "Cargo.lock should contain exactly one unique sqlparser git source to avoid duplicate sqlparser types"
+        "Cargo.lock should contain exactly one sqlparser version so AST types \
+         unify between pg2sqlite and sql-traits (found: {sqlparser_versions:?})"
     );
 }
 
 #[test]
-fn cargo_toml_keeps_sqlparser_on_upstream_git_main() {
+fn cargo_toml_pins_sqlparser_to_062() {
     let cargo_toml = include_str!("../Cargo.toml");
     let sqlparser_line = cargo_toml
         .lines()
@@ -26,15 +35,8 @@ fn cargo_toml_keeps_sqlparser_on_upstream_git_main() {
         .expect("Cargo.toml must declare sqlparser dependency");
 
     assert!(
-        sqlparser_line.contains("git = \"https://github.com/apache/datafusion-sqlparser-rs\""),
-        "sqlparser must remain sourced from the datafusion-sqlparser-rs git repository"
-    );
-    assert!(
-        sqlparser_line.contains("branch = \"main\""),
-        "sqlparser must continue using the upstream `main` branch until a release is published"
-    );
-    assert!(
-        !sqlparser_line.contains("rev = \""),
-        "sqlparser dependency line should not drift between branch and rev pinning"
+        sqlparser_line.contains("version = \"0.62\""),
+        "sqlparser dependency must stay version-locked to 0.62 to match \
+         the sql-traits no_std baseline; line was: {sqlparser_line}"
     );
 }

@@ -458,15 +458,19 @@ fn reverse_translation_covers_uncommon_query_variants() {
         left: Box::new(SetExpr::Query(Box::new(parse_query("SELECT 1")))),
         right: Box::new(SetExpr::Values(sqlparser::ast::Values {
             explicit_row: false,
-            rows: vec![vec![Expr::Value(sqlparser::ast::ValueWithSpan::from(
-                sqlparser::ast::Value::Number("1".to_string(), false),
-            ))]],
+            rows: vec![sqlparser::ast::Parens {
+                opening_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                content: vec![Expr::Value(sqlparser::ast::ValueWithSpan::from(
+                    sqlparser::ast::Value::Number("1".to_string(), false),
+                ))],
+                closing_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+            }],
             value_keyword: false,
         })),
     };
     let _ = set_operation.reverse_translate(&schema, &options).expect("reverse set operation");
 
-    for passthrough in [
+    let passthroughs: Vec<SetExpr> = vec![
         SetExpr::Insert(parse_statement("INSERT INTO t VALUES (1)")),
         SetExpr::Update(parse_statement("UPDATE t SET c = 1")),
         SetExpr::Delete(parse_statement("DELETE FROM t")),
@@ -477,7 +481,8 @@ fn reverse_translation_covers_uncommon_query_variants() {
             table_name: Some("t".to_string()),
             schema_name: None,
         })),
-    ] {
+    ];
+    for passthrough in passthroughs {
         let out = passthrough.reverse_translate(&schema, &options).expect("reverse set expr");
         assert_eq!(out, passthrough);
     }

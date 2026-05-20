@@ -1,5 +1,7 @@
 //! Helpers for structured [`sqlparser::ast::ObjectName`] manipulation.
 
+use std::borrow::Cow;
+
 use sql_traits::{
     structs::ParserDB,
     traits::{DatabaseLike, TableLike},
@@ -7,6 +9,20 @@ use sql_traits::{
 use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
 
 use crate::errors::Error;
+
+/// Returns the lookup-form string for an identifier suitable for
+/// [`DatabaseLike::table`] calls. Quoted idents become `"<value>"` (with
+/// inner double quotes escaped as `""`); unquoted idents return their raw
+/// value. This matches the PostgreSQL identifier resolution rules
+/// implemented by `sql-traits`'s `stored_identifier_matches_lookup`.
+#[must_use]
+pub(crate) fn ident_lookup_str(ident: &Ident) -> Cow<'_, str> {
+    if ident.quote_style.is_some() {
+        Cow::Owned(format!("\"{}\"", ident.value.replace('"', "\"\"")))
+    } else {
+        Cow::Borrowed(ident.value.as_str())
+    }
+}
 
 /// Returns the last identifier segment of an object name.
 pub(crate) fn last_ident(name: &ObjectName) -> Option<&Ident> {
@@ -53,14 +69,13 @@ pub(crate) fn sqlite_unqualified_object_name(name: &ObjectName) -> ObjectName {
 /// - `schema.table`
 ///
 /// Any other shape returns `(None, None)`.
-pub(crate) fn schema_and_table_for_lookup(name: &ObjectName) -> (Option<&str>, Option<&str>) {
+pub(crate) fn schema_and_table_for_lookup(
+    name: &ObjectName,
+) -> (Option<Cow<'_, str>>, Option<Cow<'_, str>>) {
     match name.0.as_slice() {
-        [single] => (None, single.as_ident().map(|ident| ident.value.as_str())),
+        [single] => (None, single.as_ident().map(ident_lookup_str)),
         [schema, table] => {
-            (
-                schema.as_ident().map(|ident| ident.value.as_str()),
-                table.as_ident().map(|ident| ident.value.as_str()),
-            )
+            (schema.as_ident().map(ident_lookup_str), table.as_ident().map(ident_lookup_str))
         }
         _ => (None, None),
     }
@@ -74,8 +89,8 @@ fn unsupported_schema_qualification(name: &ObjectName, reason: &str) -> Error {
 }
 
 struct SchemaQualifiedNameParts<'a> {
-    explicit_schema: Option<&'a str>,
-    object_name: &'a str,
+    explicit_schema: Option<Cow<'a, str>>,
+    object_name: Cow<'a, str>,
     object_part: ObjectNamePart,
 }
 
@@ -89,7 +104,7 @@ fn parse_schema_qualified_name_parts(
             })?;
             Ok(SchemaQualifiedNameParts {
                 explicit_schema: None,
-                object_name: object_ident.value.as_str(),
+                object_name: ident_lookup_str(object_ident),
                 object_part: object.clone(),
             })
         }
@@ -101,8 +116,8 @@ fn parse_schema_qualified_name_parts(
                 unsupported_schema_qualification(name, "table segment must be an identifier")
             })?;
             Ok(SchemaQualifiedNameParts {
-                explicit_schema: Some(schema_ident.value.as_str()),
-                object_name: object_ident.value.as_str(),
+                explicit_schema: Some(ident_lookup_str(schema_ident)),
+                object_name: ident_lookup_str(object_ident),
                 object_part: object.clone(),
             })
         }
@@ -154,7 +169,7 @@ pub(crate) fn validate_schema_qualified_object_name_for_sqlite(
     name: &ObjectName,
 ) -> Result<(), Error> {
     let parts = parse_schema_qualified_name_parts(name)?;
-    ensure_schema_resolves(schema, name, parts.explicit_schema)
+    ensure_schema_resolves(schema, name, parts.explicit_schema.as_deref())
 }
 
 /// Normalizes an object name to SQLite output shape while enforcing that any
@@ -164,18 +179,23 @@ pub(crate) fn normalize_schema_qualified_object_name_for_sqlite(
     name: &ObjectName,
 ) -> Result<ObjectName, Error> {
     let parts = parse_schema_qualified_name_parts(name)?;
-    ensure_schema_resolves(schema, name, parts.explicit_schema)?;
+    ensure_schema_resolves(schema, name, parts.explicit_schema.as_deref())?;
     Ok(ObjectName(vec![parts.object_part]))
 }
 
+/// (`primary_schema`, `fallback_schema`, `bare_table_name`) returned by
+/// [`implicit_public_lookup_parts`].
+pub(crate) type ImplicitPublicLookupParts<'a> =
+    (Option<Cow<'a, str>>, Option<Cow<'a, str>>, Cow<'a, str>);
+
 pub(crate) fn implicit_public_lookup_parts(
     name: &ObjectName,
-) -> Result<(Option<&str>, Option<&str>, &str), Error> {
+) -> Result<ImplicitPublicLookupParts<'_>, Error> {
     let parts = parse_schema_qualified_name_parts(name)?;
     Ok(match parts.explicit_schema {
-        None => (None, Some("public"), parts.object_name),
+        None => (None, Some(Cow::Borrowed("public")), parts.object_name),
         Some(explicit_schema) if explicit_schema.eq_ignore_ascii_case("public") => {
-            (Some("public"), None, parts.object_name)
+            (Some(Cow::Borrowed("public")), None, parts.object_name)
         }
         Some(explicit_schema) => (Some(explicit_schema), None, parts.object_name),
     })
@@ -192,25 +212,26 @@ pub(crate) fn table_with_implicit_public_lookup<'a>(
     name: &ObjectName,
 ) -> Result<Option<&'a <ParserDB as DatabaseLike>::Table>, Error> {
     let parts = parse_schema_qualified_name_parts(name)?;
+    let object_lookup = parts.object_name.as_ref();
 
     Ok(match parts.explicit_schema {
         None => {
-            if let Some(table) = schema.table(None, parts.object_name) {
+            if let Some(table) = schema.table(None, object_lookup) {
                 Some(table)
             } else {
-                schema.table(Some("public"), parts.object_name)
+                schema.table(Some("public"), object_lookup)
             }
         }
         Some(explicit_schema) if explicit_schema.eq_ignore_ascii_case("public") => {
-            if let Some(table) = schema.table(Some("public"), parts.object_name) {
+            if let Some(table) = schema.table(Some("public"), object_lookup) {
                 Some(table)
             } else {
-                schema.table(None, parts.object_name)
+                schema.table(None, object_lookup)
             }
         }
         Some(explicit_schema) => {
-            ensure_schema_resolves(schema, name, Some(explicit_schema))?;
-            schema.table(Some(explicit_schema), parts.object_name)
+            ensure_schema_resolves(schema, name, Some(&explicit_schema))?;
+            schema.table(Some(&explicit_schema), object_lookup)
         }
     })
 }
@@ -286,13 +307,16 @@ mod tests {
     #[test]
     fn schema_and_table_lookup_supports_single_two_and_multi_part_names() {
         let single = name(&["users"]);
-        assert_eq!(schema_and_table_for_lookup(&single), (None, Some("users")));
+        let (s, t) = schema_and_table_for_lookup(&single);
+        assert!(s.is_none() && t.as_deref() == Some("users"));
 
         let two = name(&["public", "users"]);
-        assert_eq!(schema_and_table_for_lookup(&two), (Some("public"), Some("users")));
+        let (s, t) = schema_and_table_for_lookup(&two);
+        assert!(s.as_deref() == Some("public") && t.as_deref() == Some("users"));
 
         let three = name(&["catalog", "public", "users"]);
-        assert_eq!(schema_and_table_for_lookup(&three), (None, None));
+        let (s, t) = schema_and_table_for_lookup(&three);
+        assert!(s.is_none() && t.is_none());
     }
 
     #[test]
@@ -322,18 +346,17 @@ mod tests {
 
     #[test]
     fn implicit_public_lookup_parts_handle_unqualified_public_and_explicit_schema() {
-        assert_eq!(
-            implicit_public_lookup_parts(&name(&["users"])).unwrap(),
-            (None, Some("public"), "users")
-        );
-        assert_eq!(
-            implicit_public_lookup_parts(&name(&["public", "users"])).unwrap(),
-            (Some("public"), None, "users")
-        );
-        assert_eq!(
-            implicit_public_lookup_parts(&name(&["my_custom_app", "users"])).unwrap(),
-            (Some("my_custom_app"), None, "users")
-        );
+        let users = name(&["users"]);
+        let (s, p, t) = implicit_public_lookup_parts(&users).unwrap();
+        assert!(s.is_none() && p.as_deref() == Some("public") && t.as_ref() == "users");
+
+        let public_users = name(&["public", "users"]);
+        let (s, p, t) = implicit_public_lookup_parts(&public_users).unwrap();
+        assert!(s.as_deref() == Some("public") && p.is_none() && t.as_ref() == "users");
+
+        let my_app_users = name(&["my_custom_app", "users"]);
+        let (s, p, t) = implicit_public_lookup_parts(&my_app_users).unwrap();
+        assert!(s.as_deref() == Some("my_custom_app") && p.is_none() && t.as_ref() == "users");
     }
 
     #[test]

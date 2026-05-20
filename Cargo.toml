@@ -6,22 +6,22 @@ rust-version = "1.88"
 license = "MIT"
 
 [dependencies]
-sqlparser = { version = "0.61", git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main", features = ["visitor"] }
-sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "1d5a6d7e31358daf68362a2078a3a17cfdfed549" }
+sqlparser = { version = "0.62", features = ["visitor"] }
+sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "858e17e4561c2b80d779674192d242bcb12f8afa" }
 git2 = "0.20.4"
-tempfile = "3.25"
+tempfile = "3.27"
 thiserror = "2.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-diesel = { version = "2.3.5", features = ["sqlite"] }
-insta = "1.46.3"
+diesel = { version = "2.3.9", features = ["sqlite"] }
+insta = "1.47.2"
 polyglot-sql = "0.1.7"
-rosetta-uuid = { version = "0.1", features = ["diesel", "sqlite"] }
+rosetta-uuid = { version = "0.1.2", features = ["diesel", "sqlite"] }
 rusqlite = { version = "0.35", features = ["bundled"] }
-sqlite-vec = "0.1"
-zerocopy = "0.8"
-rand = "0.10"
+sqlite-vec = "0.1.9"
+zerocopy = "0.8.48"
+rand = "0.10.1"
 
 # Optional integrations gated by the `geolite` feature. Declared in
 # `[dependencies]` (not `[dev-dependencies]`) because Cargo only honors

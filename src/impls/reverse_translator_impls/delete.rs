@@ -40,12 +40,13 @@ impl ReverseTranslator for Delete {
 
         Ok(Delete {
             delete_token: self.delete_token.clone(),
-            optimizer_hint: self.optimizer_hint.clone(),
+            optimizer_hints: self.optimizer_hints.clone(),
             tables: self.tables.clone(),
             from,
             using,
             selection,
             returning,
+            output: self.output.clone(),
             order_by,
             limit,
         })

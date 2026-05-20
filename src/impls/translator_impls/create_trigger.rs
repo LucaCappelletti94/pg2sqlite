@@ -75,9 +75,11 @@ fn generate_maintenance_trigger_body(
             ])),
         }),
         returning: None,
+        output: None,
         or: None,
+        order_by: Vec::new(),
         limit: None,
-        optimizer_hint: None,
+        optimizer_hints: Vec::new(),
     });
 
     sqlparser::ast::BeginEndStatements {

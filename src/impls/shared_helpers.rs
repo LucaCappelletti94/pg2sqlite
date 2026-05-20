@@ -221,6 +221,9 @@ fn translate_function_arg_expr<D: TranslationDirection>(
             FunctionArgExpr::QualifiedWildcard(name.clone())
         }
         FunctionArgExpr::Wildcard => FunctionArgExpr::Wildcard,
+        FunctionArgExpr::WildcardWithOptions(opts) => {
+            FunctionArgExpr::WildcardWithOptions(opts.clone())
+        }
     })
 }
 
@@ -302,6 +305,13 @@ fn translate_table_version<D: TranslationDirection>(
         }
         TableVersion::Function(expr) => {
             TableVersion::Function(D::translate_expr(expr, schema, options)?)
+        }
+        TableVersion::Changes { changes, at, end } => {
+            TableVersion::Changes {
+                changes: D::translate_expr(changes, schema, options)?,
+                at: D::translate_expr(at, schema, options)?,
+                end: end.as_ref().map(|e| D::translate_expr(e, schema, options)).transpose()?,
+            }
         }
     })
 }
@@ -952,10 +962,17 @@ pub(crate) fn translate_values_rows<D: TranslationDirection>(
         rows: values
             .rows
             .iter()
-            .map(|row| {
-                row.iter()
+            .map(|row| -> Result<sqlparser::ast::Parens<Vec<Expr>>, Error> {
+                let translated = row
+                    .content
+                    .iter()
                     .map(|expr| D::translate_expr(expr, schema, options))
-                    .collect::<Result<Vec<_>, _>>()
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(sqlparser::ast::Parens {
+                    opening_token: row.opening_token.clone(),
+                    content: translated,
+                    closing_token: row.closing_token.clone(),
+                })
             })
             .collect::<Result<Vec<_>, _>>()?,
         value_keyword: values.value_keyword,
@@ -1053,13 +1070,15 @@ pub(crate) fn translate_update<D: TranslationDirection>(
 
     let translated = sqlparser::ast::Update {
         update_token: update.update_token.clone(),
-        optimizer_hint: update.optimizer_hint.clone(),
+        optimizer_hints: update.optimizer_hints.clone(),
         table: translate_table_with_joins::<D>(&update.table, schema, options)?,
         assignments,
         from,
         selection,
         returning,
+        output: update.output.clone(),
         or: update.or,
+        order_by: update.order_by.clone(),
         limit,
     };
 
@@ -1220,7 +1239,7 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         connect_by,
         flavor: select.flavor,
         exclude: select.exclude.clone(),
-        optimizer_hint: select.optimizer_hint.clone(),
+        optimizer_hints: select.optimizer_hints.clone(),
         select_modifiers: select.select_modifiers.clone(),
     };
 
@@ -1517,7 +1536,11 @@ pub(crate) fn map_join_operator<E>(
                 match_condition: f_expr(match_condition)?,
             }
         }
-        JoinOperator::CrossApply | JoinOperator::OuterApply => op.clone(),
+        JoinOperator::CrossApply
+        | JoinOperator::OuterApply
+        | JoinOperator::ArrayJoin
+        | JoinOperator::LeftArrayJoin
+        | JoinOperator::InnerArrayJoin => op.clone(),
     })
 }
 
@@ -1542,7 +1565,11 @@ pub(crate) fn join_constraint_ref(op: &JoinOperator) -> Option<&JoinConstraint> 
         | JoinOperator::RightAnti(c)
         | JoinOperator::StraightJoin(c)
         | JoinOperator::AsOf { constraint: c, .. } => Some(c),
-        JoinOperator::CrossApply | JoinOperator::OuterApply => None,
+        JoinOperator::CrossApply
+        | JoinOperator::OuterApply
+        | JoinOperator::ArrayJoin
+        | JoinOperator::LeftArrayJoin
+        | JoinOperator::InnerArrayJoin => None,
     }
 }
 
@@ -1566,7 +1593,11 @@ pub(crate) fn join_constraint_mut(op: &mut JoinOperator) -> Option<&mut JoinCons
         | JoinOperator::RightAnti(c)
         | JoinOperator::StraightJoin(c)
         | JoinOperator::AsOf { constraint: c, .. } => Some(c),
-        JoinOperator::CrossApply | JoinOperator::OuterApply => None,
+        JoinOperator::CrossApply
+        | JoinOperator::OuterApply
+        | JoinOperator::ArrayJoin
+        | JoinOperator::LeftArrayJoin
+        | JoinOperator::InnerArrayJoin => None,
     }
 }
 
@@ -1662,7 +1693,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 alias: alias.clone(),
             }
         }
-        TableFactor::Function { lateral, name, args, alias } => {
+        TableFactor::Function { lateral, name, args, with_ordinality, alias } => {
             // Detect PostgreSQL table-valued functions that have no SQLite equivalent
             if D::IS_FORWARD && is_generate_series_object_name(name) {
                 return Err(generate_series_not_supported_error());
@@ -1674,6 +1705,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                     .iter()
                     .map(|arg| translate_function_arg::<D>(arg, schema, options))
                     .collect::<Result<Vec<_>, _>>()?,
+                with_ordinality: *with_ordinality,
                 alias: alias.clone(),
             }
         }

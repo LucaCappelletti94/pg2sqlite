@@ -198,6 +198,17 @@ macro_rules! unsupported_statement_patterns {
         | Statement::CreateVirtualTable { .. }
         // Case statement (procedural, not supported)
         | Statement::Case(_)
+        // PostgreSQL/Snowflake collation DDL (sqlparser 0.62)
+        | Statement::CreateCollation(_)
+        | Statement::AlterCollation(_)
+        // PostgreSQL ALTER FUNCTION / ALTER AGGREGATE (sqlparser 0.62)
+        | Statement::AlterFunction(_)
+        // Locking and SHOW variants (sqlparser 0.62)
+        | Statement::Lock { .. }
+        | Statement::ShowCatalogs { .. }
+        | Statement::ShowProcessList { .. }
+        // MSSQL WAITFOR (sqlparser 0.62)
+        | Statement::WaitFor { .. }
     };
 }
 

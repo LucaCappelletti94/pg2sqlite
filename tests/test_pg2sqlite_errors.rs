@@ -35,7 +35,11 @@ fn build_schema_returns_valid_schema() {
 }
 
 #[test]
-fn build_schema_allows_non_public_schema_qualification_for_table_refs() {
+fn build_schema_rejects_index_on_unknown_schema_qualified_table() {
+    // sql-traits HEAD (no_std refactor) is strict during schema construction:
+    // an index referencing `my_custom_app.users` while the only `users` table
+    // is unqualified surfaces as TableNotFoundForIndex at build_schema time
+    // rather than only at translate time.
     let translator = Pg2Sqlite::default()
         .sql(
             "
@@ -45,8 +49,12 @@ fn build_schema_allows_non_public_schema_qualification_for_table_refs() {
         )
         .expect("sql should parse");
 
-    let schema = translator.build_schema();
-    assert!(schema.is_ok(), "build_schema should build schema without forward-translation checks");
+    let err =
+        translator.build_schema().expect_err("build_schema should reject mismatched index target");
+    assert!(
+        err.to_string().contains("TableNotFoundForIndex") || err.to_string().contains("users"),
+        "expected schema-side TableNotFoundForIndex error, got: {err}"
+    );
 }
 
 #[test]
@@ -60,19 +68,23 @@ fn build_schema_allows_non_public_schema_qualified_create_table() {
 }
 
 #[test]
-fn build_schema_and_translate_can_differ_on_schema_validation() {
+fn build_schema_and_translate_both_reject_mismatched_index_schema() {
+    // Under sql-traits HEAD, schema validation for index targets fires at
+    // build_schema time, so build_schema and translate now both reject the
+    // same SQL instead of diverging at the policy boundary.
     let sql = "
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
         CREATE INDEX idx_users_name ON my_custom_app.users(name);
     ";
     let translator = Pg2Sqlite::default().sql(sql).expect("sql should parse");
 
-    let build_schema_is_ok = translator.build_schema().is_ok();
-    let translate_is_err = translator.translate(&Pg2SqliteOptions::default()).is_err();
-
     assert!(
-        build_schema_is_ok && translate_is_err,
-        "build_schema should succeed while translate enforces schema-resolution policy"
+        translator.build_schema().is_err(),
+        "build_schema should reject mismatched index target"
+    );
+    assert!(
+        translator.translate(&Pg2SqliteOptions::default()).is_err(),
+        "translate should also reject mismatched index target"
     );
 }
 

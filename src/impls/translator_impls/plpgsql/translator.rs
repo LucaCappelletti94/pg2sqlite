@@ -422,6 +422,7 @@ impl PlPgSqlTranslator {
                         name: Ident::new(subquery_alias.to_string()),
                         columns: vec![],
                         explicit: false,
+                        at: None,
                     }),
                     sample: None,
                 },
@@ -735,7 +736,7 @@ impl PlPgSqlTranslator {
             }
             SetExpr::Values(values) => {
                 for row in &mut values.rows {
-                    for expr in row {
+                    for expr in &mut row.content {
                         Self::transform_expr(expr, context, options);
                     }
                 }
@@ -932,7 +933,7 @@ impl PlPgSqlTranslator {
                     })
                     .unwrap_or_default()
             }
-            TableObject::TableFunction(_) => {
+            TableObject::TableFunction(_) | TableObject::TableQuery(_) => {
                 return Err(Error::UnsupportedSQLiteFeature(
                     "INSERT into table function not supported".to_string(),
                 ));
@@ -940,7 +941,15 @@ impl PlPgSqlTranslator {
         };
 
         // Get column names from INSERT
-        let column_names: Vec<String> = insert.columns.iter().map(|c| c.value.clone()).collect();
+        let column_names: Vec<String> = insert
+            .columns
+            .iter()
+            .map(|c| {
+                c.0.last()
+                    .and_then(sqlparser::ast::ObjectNamePart::as_ident)
+                    .map_or_else(|| c.to_string(), |id| id.value.clone())
+            })
+            .collect();
 
         // Process bindings - check which UUID variables need the last_insert_rowid()
         // pattern
@@ -1298,7 +1307,7 @@ impl PlPgSqlTranslator {
         let mut projections = Vec::new();
 
         // Transform each value, substituting variable references
-        for expr in row {
+        for expr in &row.content {
             let substituted = Self::substitute_variables(expr, bindings);
             projections.push(SelectItem::UnnamedExpr(substituted));
         }
@@ -1346,6 +1355,7 @@ impl PlPgSqlTranslator {
                         name: Ident::new("_dummy".to_string()),
                         columns: vec![],
                         explicit: false,
+                        at: None,
                     }),
                 },
                 joins: vec![],
@@ -1530,7 +1540,7 @@ impl PlPgSqlTranslator {
             SetExpr::Values(values) => {
                 let mut rewritten = values.clone();
                 for row in &mut rewritten.rows {
-                    for expr in row {
+                    for expr in &mut row.content {
                         *expr = Self::substitute_variables(expr, bindings);
                     }
                 }

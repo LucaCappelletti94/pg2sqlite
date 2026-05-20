@@ -144,6 +144,13 @@ fn ensure_distinct_on_projection_is_rewriteable(
                         .to_string(),
                 ));
             }
+            SelectItem::ExprWithAliases { .. } => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "DISTINCT ON rewrite does not support multi-alias projections \
+                     (Spark `expr AS (a, b)` form)"
+                        .to_string(),
+                ));
+            }
             SelectItem::UnnamedExpr(other_expr) => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                     "DISTINCT ON rewrite supports only named/identifier projections. \
@@ -285,6 +292,7 @@ fn try_translate_distinct_on_query(
                 explicit: false,
                 name: derived_alias.clone(),
                 columns: vec![],
+                at: None,
             }),
             sample: None,
         },
@@ -331,7 +339,7 @@ fn try_translate_distinct_on_query(
         connect_by: Vec::new(),
         flavor: select.flavor,
         exclude: None,
-        optimizer_hint: None,
+        optimizer_hints: Vec::new(),
         select_modifiers: None,
     };
 
@@ -489,9 +497,11 @@ fn rewrite_projection_for_grouping_set(
             let (expr, alias) = match item {
                 SelectItem::UnnamedExpr(expr) => (expr, None),
                 SelectItem::ExprWithAlias { expr, alias } => (expr, Some(alias)),
-                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
+                SelectItem::Wildcard(_)
+                | SelectItem::QualifiedWildcard(_, _)
+                | SelectItem::ExprWithAliases { .. } => {
                     return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                        "{kind_name} rewrite supports explicit projection items only",
+                        "{kind_name} rewrite supports explicit single-alias projection items only",
                         kind_name = match kind {
                             GroupingRewriteKind::GroupingSets => "GROUPING SETS",
                             GroupingRewriteKind::Rollup => "ROLLUP",

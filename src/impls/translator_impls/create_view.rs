@@ -70,6 +70,7 @@ impl Translator for CreateView {
             or_replace: false,
             materialized: false,
             secure: false,
+            copy_grants: false,
             name: normalize_schema_qualified_object_name_for_sqlite(schema, &self.name)?,
             name_before_not_exists: self.name_before_not_exists,
             columns: self.columns.clone(),

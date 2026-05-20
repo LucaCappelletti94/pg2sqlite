@@ -72,7 +72,7 @@ impl Translator for Delete {
                     connect_by: vec![],
                     window_before_qualify: false,
                     exclude: None,
-                    optimizer_hint: None,
+                    optimizer_hints: Vec::new(),
                     value_table_mode: None,
                     prewhere: None,
                     flavor: SelectFlavor::Standard,

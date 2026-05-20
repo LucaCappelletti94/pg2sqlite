@@ -58,7 +58,7 @@ pub fn make_simple_select(
         connect_by: vec![],
         flavor: SelectFlavor::Standard,
         exclude: None,
-        optimizer_hint: None,
+        optimizer_hints: Vec::new(),
         prewhere: None,
         select_modifiers: None,
     }
@@ -83,6 +83,7 @@ impl CteBuilder {
                 name: Ident::new(binding.name.clone()),
                 columns: vec![TableAliasColumnDef::from_name("val")],
                 explicit: false,
+                at: None,
             },
             query: Box::new(query),
             from: None,
