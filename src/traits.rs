@@ -1,6 +1,17 @@
 //! Submodule for traits used in the translation between `PostgreSQL` and
 //! `SQLite`.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 pub mod translator;
 pub use translator::Translator;
 pub mod reverse_translator;

@@ -1,6 +1,17 @@
 //! Implementation of the [`ReverseTranslator`] trait for the
 //! `Delete` type.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::Delete;
 
@@ -53,7 +64,7 @@ impl ReverseTranslator for Delete {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

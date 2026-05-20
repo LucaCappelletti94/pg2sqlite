@@ -1,15 +1,25 @@
 //! Implementation of the [`ReverseTranslator`] trait for the
 //! `Statement` type.
 
+use alloc::collections::BTreeSet;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use core::ops::ControlFlow;
-use std::collections::HashSet;
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     Delete, Expr, Insert, ObjectName, Query, SetExpr, Statement, Table, TableObject, Update, Visit,
     Visitor,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 use sqlparser::ast::{LimitClause, TableFactor};
 
 use crate::{
@@ -89,7 +99,7 @@ fn table_command_name(table: &Table) -> Option<&str> {
 fn ensure_set_expr_supported_for_rls(
     set_expr: &SetExpr,
     options: &Pg2SqliteOptions,
-    cte_scopes: &[HashSet<String>],
+    cte_scopes: &[BTreeSet<String>],
 ) -> Result<(), Error> {
     match set_expr {
         SetExpr::SetOperation { left, right, .. } => {
@@ -121,7 +131,7 @@ fn ensure_set_expr_supported_for_rls(
 
 struct RlsAstVisitor<'a> {
     options: &'a Pg2SqliteOptions,
-    cte_scopes: Vec<HashSet<String>>,
+    cte_scopes: Vec<BTreeSet<String>>,
 }
 
 impl RlsAstVisitor<'_> {
@@ -145,7 +155,7 @@ impl Visitor for RlsAstVisitor<'_> {
                 with.cte_tables
                     .iter()
                     .map(|cte| cte.alias.name.value.to_ascii_lowercase())
-                    .collect::<HashSet<_>>()
+                    .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
         self.cte_scopes.push(current_scope);
@@ -194,7 +204,7 @@ fn run_rls_visitor<T: Visit>(node: &T, options: &Pg2SqliteOptions) -> Result<(),
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn check_table_factor_for_rls(
     factor: &TableFactor,
     options: &Pg2SqliteOptions,
@@ -203,18 +213,18 @@ fn check_table_factor_for_rls(
 }
 
 /// Check an expression tree for RLS table references in subqueries.
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Error> {
     run_rls_visitor(expr, options)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn check_set_expr_for_rls(set_expr: &SetExpr, options: &Pg2SqliteOptions) -> Result<(), Error> {
     ensure_set_expr_supported_for_rls(set_expr, options, &[])?;
     run_rls_visitor(set_expr, options)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn check_limit_clause_for_rls(
     limit_clause: &LimitClause,
     options: &Pg2SqliteOptions,
@@ -284,7 +294,7 @@ impl ReverseTranslator for Statement {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

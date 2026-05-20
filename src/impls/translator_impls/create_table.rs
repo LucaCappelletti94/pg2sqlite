@@ -1,7 +1,17 @@
 //! Implementation of the [`Translator`] trait for the
 //! `CreateTable` type.
 
-use std::collections::HashSet;
+use alloc::collections::BTreeSet;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, CreateTable, TableConstraint};
@@ -50,7 +60,7 @@ impl Translator for CreateTable {
             created_table.query = Some(Box::new(q.translate(schema, options)?));
         }
 
-        let mut pk_column_names = HashSet::new();
+        let mut pk_column_names = BTreeSet::new();
 
         for constraint in &created_table.constraints {
             if let TableConstraint::PrimaryKey(pk_constraint) = constraint {

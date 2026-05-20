@@ -1,6 +1,17 @@
 //! Submodule providing a trait to translate between a `PostgreSQL` entry and a
 //! `SQLite` entry.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use super::Schema;
 use crate::traits::TranslationOptions;
 

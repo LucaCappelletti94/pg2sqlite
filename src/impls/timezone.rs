@@ -1,5 +1,16 @@
 //! Shared timezone parsing helpers for forward and reverse translation.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 /// Returns `true` when `value` is a fixed UTC offset in `+HH:MM` / `-HH:MM`
 /// format.
 #[must_use]

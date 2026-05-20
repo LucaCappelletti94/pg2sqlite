@@ -4,6 +4,17 @@
 //! that each specific walker only needs to handle its "interesting" arms and
 //! can delegate the mechanical child-traversal to one of these functions.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sqlparser::ast::{Expr, JsonPathElem};
 
 // ---------------------------------------------------------------------------
@@ -1161,7 +1172,7 @@ fn mutate_subscript_expr(sub: &mut sqlparser::ast::Subscript, f: &mut impl FnMut
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sqlparser::ast::{Expr, Ident, Value, ValueWithSpan};
 

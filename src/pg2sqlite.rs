@@ -1,5 +1,15 @@
 //! Submodule defining the main translator struct.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 

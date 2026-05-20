@@ -1,6 +1,17 @@
 //! Shared helper functions for translating table references, joins, and select
 //! items. Generic over translation direction (forward or reverse).
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FromTable,
@@ -79,7 +90,7 @@ pub(crate) fn generate_series_not_supported_error() -> Error {
 
 /// Extracts a stable-ish variant name from debug output.
 #[must_use]
-pub(crate) fn debug_variant_name(value: &impl std::fmt::Debug) -> String {
+pub(crate) fn debug_variant_name(value: &impl core::fmt::Debug) -> String {
     let debug = format!("{value:?}");
     debug.split(['(', '{', ' ']).next().unwrap_or("Unknown").to_string()
 }
@@ -1915,7 +1926,7 @@ pub(crate) fn translate_returning<D: TranslationDirection>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

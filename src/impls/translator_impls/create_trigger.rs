@@ -1,4 +1,14 @@
-use std::collections::HashSet;
+use alloc::collections::BTreeSet;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use sql_traits::{
     structs::ParserDB,
@@ -118,7 +128,7 @@ fn generate_standard_trigger_body(
 fn collect_non_maintenance_update_columns(
     trigger: &CreateTrigger,
     schema: &ParserDB,
-    maintenance_columns: &HashSet<String>,
+    maintenance_columns: &BTreeSet<String>,
 ) -> Vec<Ident> {
     let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &trigger.table_name) else {
         return vec![];
@@ -141,7 +151,7 @@ fn rewrite_maintenance_update_events(
     let maintenance_columns = trigger
         .maintenance_assignments(schema)
         .map(|(column, _)| column.column_name().to_lowercase())
-        .collect::<HashSet<_>>();
+        .collect::<BTreeSet<_>>();
 
     if maintenance_columns.is_empty() {
         return events;
@@ -409,7 +419,7 @@ impl Translator for CreateTrigger {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

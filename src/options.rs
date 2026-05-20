@@ -1,5 +1,16 @@
 //! Submodule defining a struct providing options for the translation.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use crate::traits::{
     SessionVariableMapping, SessionVariablePattern, TranslationOptions, UuidRepresentation,
 };

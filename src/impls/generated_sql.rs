@@ -1,5 +1,16 @@
 //! Utilities for parsing generated SQL snippets into AST statements.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sqlparser::{ast::Statement, dialect::Dialect, parser::Parser};
 
 use crate::errors::Error;
@@ -33,7 +44,7 @@ pub(crate) fn parse_single_generated_sql(
     Ok(parsed.remove(0))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sqlparser::{ast::Statement, dialect::PostgreSqlDialect};
 

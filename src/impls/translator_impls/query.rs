@@ -1,6 +1,17 @@
 //! Implementation of the [`Translator`] trait for the
 //! `Query`, `SetExpr`, and `Select` types.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Fetch, Function, FunctionArgumentList, FunctionArguments,
@@ -120,7 +131,7 @@ fn build_query_envelope(
 fn ensure_distinct_on_projection_is_rewriteable(
     projection: &[SelectItem],
 ) -> Result<Vec<SelectItem>, crate::errors::Error> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = alloc::collections::BTreeSet::new();
     let mut named_projection = Vec::with_capacity(projection.len());
 
     for item in projection {
@@ -724,7 +735,7 @@ impl Translator for Select {
 }
 
 /// Test-only wrappers for internal helpers.
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn translate_group_by(
     group_by: &sqlparser::ast::GroupByExpr,
     schema: &ParserDB,
@@ -733,7 +744,7 @@ fn translate_group_by(
     crate::impls::shared_helpers::translate_group_by_expr::<Forward>(group_by, schema, options)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn translate_limit_clause(
     limit_clause: Option<&LimitClause>,
     schema: &ParserDB,
@@ -742,7 +753,7 @@ fn translate_limit_clause(
     translate_limit_clause_shared(limit_clause, schema, options)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn translate_fetch(
     fetch: Option<&Fetch>,
     schema: &ParserDB,
@@ -751,7 +762,7 @@ fn translate_fetch(
     translate_fetch_clause(fetch, schema, options)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn translate_distinct(
     distinct: Option<&Distinct>,
     schema: &ParserDB,
@@ -760,7 +771,7 @@ fn translate_distinct(
     crate::impls::shared_helpers::translate_distinct_shared::<Forward>(distinct, schema, options)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn translate_named_window(
     named_windows: &[sqlparser::ast::NamedWindowDefinition],
     schema: &ParserDB,
@@ -769,7 +780,7 @@ fn translate_named_window(
     crate::impls::shared_helpers::translate_named_windows::<Forward>(named_windows, schema, options)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

@@ -1,6 +1,17 @@
 //! Submodule defining a schema for the translation between `PostgreSQL` and
 //! `SQLite`.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::traits::{DatabaseLike, FunctionLike};
 use sqlparser::{
     ast::{
@@ -127,7 +138,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
 
 impl<S> Schema for S where S: DatabaseLike<Table = CreateTable, Function = CreateFunction> {}
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};

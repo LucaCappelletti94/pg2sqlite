@@ -1,6 +1,17 @@
 //! Shared helper functions for reverse translation of table references,
 //! joins, and select items.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Expr, Query, TableWithJoins, WindowType};
 

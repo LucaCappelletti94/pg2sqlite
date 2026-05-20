@@ -1,5 +1,16 @@
 //! Shared helpers for injecting IF-conditions into mutable DML statements.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sqlparser::ast::{BinaryOperator, Expr, Statement};
 
 use crate::errors::Error;

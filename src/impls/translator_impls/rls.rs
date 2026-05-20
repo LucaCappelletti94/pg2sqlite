@@ -6,6 +6,17 @@
 //! 2. A view with the original table name that filters rows based on policies
 //! 3. INSTEAD OF triggers on the view for INSERT, UPDATE, DELETE operations
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{
     CreatePolicyCommand, CreateTable, Expr, Function, FunctionArg, FunctionArgExpr,
@@ -2013,7 +2024,7 @@ pub fn generate_rls_audit_table(audit_table_name: &str) -> Result<Statement, Err
     parse_single_generated_sql(&dialect, &sql, "Failed to parse generated RLS audit table SQL")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::{structs::ParserDB, traits::DatabaseLike};
     use sqlparser::{

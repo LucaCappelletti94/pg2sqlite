@@ -3,6 +3,17 @@
 //! This module provides utilities for constructing CTEs that represent
 //! variable bindings and combining them into WITH clauses.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sqlparser::ast::{
     Cte, Expr, GroupByExpr, Ident, Query, Select, SelectFlavor, SelectItem, SetExpr, TableAlias,
     TableAliasColumnDef, TableWithJoins, With, helpers::attached_token::AttachedToken,
@@ -132,7 +143,7 @@ impl CteBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sqlparser::ast::{Expr, Value, ValueWithSpan};
 

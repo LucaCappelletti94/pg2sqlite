@@ -4,6 +4,17 @@
 //! This module handles the reversal of SQLite functions to their PostgreSQL
 //! equivalents.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
@@ -473,7 +484,7 @@ pub fn reverse_translate_function(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

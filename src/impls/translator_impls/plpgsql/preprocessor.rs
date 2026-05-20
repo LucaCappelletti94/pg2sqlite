@@ -12,7 +12,17 @@
 //! 3. **SELECT INTO**: `SELECT cols INTO vars FROM ...` → preserved for later
 //!    handling
 
-use std::fmt::Write;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+use core::fmt::Write;
 
 use super::context::{PlPgSqlContext, VariableBinding, VariableDeclaration};
 
@@ -541,7 +551,7 @@ impl PlPgSqlPreprocessor {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

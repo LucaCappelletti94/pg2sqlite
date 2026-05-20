@@ -1,6 +1,17 @@
 //! Implementation of the [`Translator`] trait for the
 //! `Expr` type.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, TableLike},
@@ -13,7 +24,7 @@ use sqlparser::ast::{
     helpers::attached_token::AttachedToken,
 };
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 use crate::impls::timezone::is_fixed_utc_offset;
 use crate::{
     impls::{
@@ -119,7 +130,7 @@ fn translate_fts_expression(
             if columns.is_empty() {
                 return false;
             }
-            let table_columns: std::collections::HashSet<_> =
+            let table_columns: alloc::collections::BTreeSet<_> =
                 table.columns(schema).map(|c| c.column_name().to_lowercase()).collect();
             columns.iter().all(|col| table_columns.contains(&col.to_lowercase()))
         })
@@ -633,7 +644,7 @@ fn translate_overlay(
 
 /// Return true when value is a SQLite-supported fixed UTC offset (`+HH:MM`,
 /// `-HH:MM`).
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 fn is_sqlite_fixed_offset(value: &str) -> bool {
     is_fixed_utc_offset(value)
 }
@@ -1343,7 +1354,7 @@ fn wrap_with_lower(expr: Expr) -> Expr {
     simple_function_expr("lower", vec![expr], None)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

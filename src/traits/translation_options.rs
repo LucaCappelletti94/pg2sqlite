@@ -1,5 +1,16 @@
 //! Submodule defining a set of translation options.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 /// Enum for defining the representation of UUIDs in `SQLite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UuidRepresentation {
@@ -32,8 +43,8 @@ pub enum SessionVariablePattern {
     },
 }
 
-impl std::fmt::Display for SessionVariablePattern {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for SessionVariablePattern {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::CurrentUser => write!(f, "current_user"),
             Self::CurrentSetting { name } => write!(f, "current_setting('{name}')"),

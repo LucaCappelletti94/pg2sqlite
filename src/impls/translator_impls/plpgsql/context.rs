@@ -3,7 +3,17 @@
 //! This module defines the `PlPgSqlContext` struct which tracks variable
 //! declarations, their types, and the current translation scope.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 /// Represents a variable declaration from a PL/pgSQL DECLARE block.
 #[derive(Debug, Clone)]
@@ -198,7 +208,7 @@ impl PlPgSqlContext {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{PlPgSqlContext, VariableBinding, VariableDeclaration};
 

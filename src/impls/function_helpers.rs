@@ -2,6 +2,17 @@
 //! and argument extraction. Used by both forward and reverse function
 //! translators to reduce boilerplate.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident,
     ObjectName, ObjectNamePart, Value, ValueWithSpan, WindowType,
@@ -94,7 +105,7 @@ pub(crate) fn extract_exactly<'a>(
     Ok(exprs)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments};
 

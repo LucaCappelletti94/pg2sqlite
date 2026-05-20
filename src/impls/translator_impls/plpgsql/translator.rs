@@ -3,6 +3,17 @@
 //! This module orchestrates the translation of PL/pgSQL function bodies
 //! to SQLite-compatible statements.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
@@ -1611,7 +1622,7 @@ impl PlPgSqlTranslator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

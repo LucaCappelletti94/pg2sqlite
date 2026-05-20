@@ -1,6 +1,17 @@
 //! Implementation of the [`Translator`] trait for the
 //! `CreateIndex` type.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
@@ -123,7 +134,7 @@ fn analyze_fts_index(create_index: &CreateIndex) -> FtsTranslation {
     }
 
     // Deduplicate columns while preserving order
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = alloc::collections::BTreeSet::new();
     fts_columns.retain(|col| seen.insert(col.clone()));
 
     FtsTranslation::Fts5 { table_name, columns: fts_columns }
@@ -425,7 +436,7 @@ impl Translator for CreateIndex {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

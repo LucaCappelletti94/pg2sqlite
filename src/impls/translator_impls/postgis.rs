@@ -12,6 +12,17 @@
 //! `tests/test_postgis_diesel.rs`, which assert that every geolite catalog
 //! entry has a matching `(name, arity)` here.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 /// `(lowercase-name, arity)` pairs implemented by geolite v0.1.0.
 ///
 /// Multiple entries with the same name encode overloaded arities (for

@@ -1,7 +1,17 @@
 //! Implementation of the [`ReverseTranslator`] trait for the
 //! `Insert` type.
 
-use std::collections::BTreeSet;
+use alloc::collections::BTreeSet;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use sql_traits::{
     structs::ParserDB,
@@ -293,7 +303,7 @@ impl ReverseTranslator for Insert {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::{structs::ParserDB, traits::TableLike};
     use sqlparser::{

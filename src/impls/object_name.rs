@@ -1,6 +1,16 @@
 //! Helpers for structured [`sqlparser::ast::ObjectName`] manipulation.
 
-use std::borrow::Cow;
+use alloc::borrow::Cow;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use sql_traits::{
     structs::ParserDB,
@@ -272,7 +282,7 @@ pub(crate) fn quoted_ident(name: &str) -> Ident {
     if quote_identifier(name) == name { Ident::new(name) } else { Ident::with_quote('"', name) }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

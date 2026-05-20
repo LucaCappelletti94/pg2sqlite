@@ -53,6 +53,17 @@
 //! WHERE NOT EXISTS (SELECT 1 FROM t WHERE col = NEW.col);
 //! ```
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 mod context;
 mod cte_builder;
 mod preprocessor;

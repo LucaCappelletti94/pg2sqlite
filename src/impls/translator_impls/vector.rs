@@ -23,6 +23,17 @@
 //! - Pre-filtering with WHERE clauses to reduce scan size
 //! - Keeping datasets under 100k vectors for acceptable latency
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
@@ -314,7 +325,7 @@ pub fn generate_vec0_statements(
     Ok(statements)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{

@@ -1,5 +1,16 @@
 //! Shared date/time mapping helpers for forward and reverse translation.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sqlparser::ast::{DataType, DateTimeField, Expr, WindowType};
 
 use super::function_helpers::{simple_function_expr, string_literal};

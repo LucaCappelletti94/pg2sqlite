@@ -1,6 +1,17 @@
 //! Submodule with the implementations of the [`crate::traits::Translator`]
 //! trait.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 mod column;
 mod column_option;
 mod condition_injection;

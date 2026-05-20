@@ -1,6 +1,17 @@
 //! Implementation of the [`Translator`] trait for the
 //! `DataType` type.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{DataType, ExactNumberInfo};
 
@@ -140,7 +151,7 @@ impl Translator for DataType {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::ast::DataType;

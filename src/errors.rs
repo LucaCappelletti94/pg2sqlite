@@ -1,6 +1,17 @@
 //! Submodule providing the error enumeration that may occur during the
 //! translation between `PostgreSQL` and `SQLite`.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use sqlparser::parser::ParserError;
 
 #[derive(Debug, thiserror::Error)]
