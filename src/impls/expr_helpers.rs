@@ -1230,4 +1230,176 @@ mod tests {
         });
         assert_eq!(expr.to_string(), "(A, B)");
     }
+
+    /// Parse a single SQL expression using the PostgreSQL dialect.
+    fn parse_expr(sql: &str) -> Expr {
+        let full = format!("SELECT {sql} FROM dummy");
+        let dialect = sqlparser::dialect::PostgreSqlDialect {};
+        let mut stmts = sqlparser::parser::Parser::parse_sql(&dialect, &full)
+            .unwrap_or_else(|e| panic!("parse failed for `{sql}`: {e}"));
+        let stmt = stmts.pop().expect("statement");
+        let sqlparser::ast::Statement::Query(query) = stmt else { panic!("not a query") };
+        let sqlparser::ast::SetExpr::Select(select) = *query.body else { panic!("not a select") };
+        let projection = select.projection.into_iter().next().expect("projection");
+        match projection {
+            sqlparser::ast::SelectItem::UnnamedExpr(e)
+            | sqlparser::ast::SelectItem::ExprWithAlias { expr: e, .. } => e,
+            other => panic!("non-Expr projection for `{sql}`: {other:?}"),
+        }
+    }
+
+    /// SQL expressions that produce a wide spread of `Expr` variants. Used
+    /// below to exercise every walker uniformly.
+    fn sample_expressions() -> Vec<(&'static str, &'static str)> {
+        vec![
+            // Leaves and value-like variants
+            ("identifier", "a"),
+            ("compound_identifier", "schema.tbl.col"),
+            ("number_value", "1"),
+            ("string_value", "'hi'"),
+            ("typed_string", "TIMESTAMP '2020-01-01'"),
+            // Single-child wrappers
+            ("is_false", "a IS FALSE"),
+            ("is_not_false", "a IS NOT FALSE"),
+            ("is_true", "a IS TRUE"),
+            ("is_not_true", "a IS NOT TRUE"),
+            ("is_null", "a IS NULL"),
+            ("is_not_null", "a IS NOT NULL"),
+            ("is_unknown", "a IS UNKNOWN"),
+            ("is_not_unknown", "a IS NOT UNKNOWN"),
+            ("is_normalized", "a IS NORMALIZED"),
+            ("nested", "(a + 1)"),
+            ("unary_op_not", "NOT a"),
+            ("unary_op_minus", "-a"),
+            ("cast", "CAST(a AS INTEGER)"),
+            ("try_cast", "TRY_CAST(a AS INTEGER)"),
+            ("extract", "EXTRACT(YEAR FROM a)"),
+            ("ceil_scale", "CEIL(a)"),
+            ("floor_scale", "FLOOR(a)"),
+            ("collate", "a COLLATE \"C\""),
+            ("convert", "CONVERT(a USING utf8)"),
+            // Two-child operators
+            ("binary_op_plus", "a + b"),
+            ("binary_op_eq", "a = b"),
+            ("binary_op_and", "a AND b"),
+            ("any_op", "a = ANY(b)"),
+            ("all_op", "a = ALL(b)"),
+            ("like", "a LIKE 'x%'"),
+            ("ilike", "a ILIKE 'x%'"),
+            ("similar_to", "a SIMILAR TO 'x%'"),
+            ("position", "POSITION('x' IN a)"),
+            ("at_time_zone", "a AT TIME ZONE 'UTC'"),
+            ("is_distinct_from", "a IS DISTINCT FROM b"),
+            ("is_not_distinct_from", "a IS NOT DISTINCT FROM b"),
+            // Lists, ranges, structured
+            ("tuple", "(a, b, c)"),
+            ("array_value", "ARRAY[a, b, c]"),
+            ("in_list", "a IN (1, 2, 3)"),
+            ("in_subquery", "a IN (SELECT id FROM t)"),
+            ("between", "a BETWEEN 1 AND 10"),
+            ("case_with_operand", "CASE a WHEN 1 THEN 'one' ELSE 'other' END"),
+            ("case_searched", "CASE WHEN a > 0 THEN 'pos' END"),
+            ("trim_chars", "TRIM(BOTH 'x' FROM a)"),
+            ("substring", "SUBSTRING(a FROM 1 FOR 3)"),
+            ("overlay", "OVERLAY(a PLACING 'z' FROM 2 FOR 1)"),
+            ("compound_field_access", "a.b.c"),
+            ("interval", "INTERVAL '1 day'"),
+            ("subquery", "(SELECT max(id) FROM t)"),
+            ("exists", "EXISTS (SELECT 1 FROM t)"),
+            ("subscript", "a[1]"),
+            ("subscript_slice", "a[1:3]"),
+            ("function", "now()"),
+            ("function_with_args", "concat(a, b, c)"),
+            ("json_access_arrow", "a -> 'k'"),
+            ("json_access_long_arrow", "a -> 'k' ->> 'v'"),
+        ]
+    }
+
+    /// Smoke-test that every walker handles every sampled `Expr` variant
+    /// without panicking and that `map_expr_children` with an identity
+    /// transform plus `mutate_expr_children` with a no-op are observably
+    /// no-ops. This is what lifts the per-variant arms above the
+    /// "never executed" baseline.
+    #[test]
+    fn walkers_handle_all_sampled_variants() {
+        for (label, sql) in sample_expressions() {
+            let expr = parse_expr(sql);
+
+            // map_expr_children with identity = same Display
+            let mapped = map_expr_children(&expr, &|e| e.clone());
+            assert_eq!(
+                mapped.to_string(),
+                expr.to_string(),
+                "{label}: map_expr_children identity changed Display",
+            );
+
+            // try_map_expr_children with identity = same Display
+            let tried: Result<Expr, ()> =
+                try_map_expr_children(&expr, &|e| Ok(e.clone()), &|q| Ok(q.clone()));
+            assert_eq!(
+                tried.expect("identity should not fail").to_string(),
+                expr.to_string(),
+                "{label}: try_map_expr_children identity changed Display",
+            );
+
+            // for_each_child_expr does not panic
+            let mut count = 0;
+            for_each_child_expr(&expr, &mut |_| count += 1);
+
+            // any_child_expr with always-false returns false (unless leaf has
+            // no children, in which case it also returns false). Always-true
+            // is true iff there is at least one child.
+            let any_true = any_child_expr(&expr, &|_| true);
+            assert_eq!(
+                any_true,
+                count > 0,
+                "{label}: any_child_expr(true) disagrees with for_each_child_expr count",
+            );
+            assert!(
+                !any_child_expr(&expr, &|_| false),
+                "{label}: any_child_expr(false) returned true",
+            );
+
+            // mutate_expr_children with no-op = same Display
+            let mut mutated = expr.clone();
+            mutate_expr_children(&mut mutated, &mut |_| {});
+            assert_eq!(
+                mutated.to_string(),
+                expr.to_string(),
+                "{label}: mutate_expr_children no-op changed Display",
+            );
+        }
+    }
+
+    #[test]
+    fn try_map_expr_children_propagates_error() {
+        let expr = Expr::BinaryOp {
+            left: Box::new(ident_expr("a")),
+            op: sqlparser::ast::BinaryOperator::Plus,
+            right: Box::new(num_expr("1")),
+        };
+        let result: Result<Expr, &'static str> =
+            try_map_expr_children(&expr, &|_| Err("boom"), &|q| Ok(q.clone()));
+        assert_eq!(result, Err("boom"));
+    }
+
+    #[test]
+    fn for_each_child_expr_counts_in_list() {
+        let expr = parse_expr("a IN (1, 2, 3)");
+        let mut count = 0;
+        for_each_child_expr(&expr, &mut |_| count += 1);
+        // Expected: 1 expr (a) + 3 list items
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn for_each_child_expr_counts_function_args_skip() {
+        // Function children are intentionally skipped by for_each_child_expr;
+        // callers handle the function name + args separately. The Display
+        // here just exercises the Function arm.
+        let expr = parse_expr("coalesce(a, b)");
+        let mut count = 0;
+        for_each_child_expr(&expr, &mut |_| count += 1);
+        assert_eq!(count, 0, "function children should be skipped");
+    }
 }
