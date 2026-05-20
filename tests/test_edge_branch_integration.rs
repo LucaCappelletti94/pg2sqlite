@@ -444,7 +444,7 @@ fn reverse_translation_covers_uncommon_query_variants() {
     }
     all_query.order_by = Some(sqlparser::ast::OrderBy {
         kind: sqlparser::ast::OrderByKind::All(sqlparser::ast::OrderByOptions {
-            asc: Some(true),
+            sort: Some(sqlparser::ast::OrderBySort::Asc),
             nulls_first: Some(false),
         }),
         interpolate: None,

@@ -839,7 +839,7 @@ mod tests {
             parse_query("SELECT DISTINCT ON (user_id) user_id, ts FROM events ORDER BY user_id");
         distinct_on_order_all.order_by = Some(sqlparser::ast::OrderBy {
             kind: sqlparser::ast::OrderByKind::All(sqlparser::ast::OrderByOptions {
-                asc: None,
+                sort: None,
                 nulls_first: None,
             }),
             interpolate: None,
@@ -909,7 +909,7 @@ mod tests {
 
         let order_by_all = Some(sqlparser::ast::OrderBy {
             kind: sqlparser::ast::OrderByKind::All(sqlparser::ast::OrderByOptions {
-                asc: Some(true),
+                sort: Some(sqlparser::ast::OrderBySort::Asc),
                 nulls_first: Some(false),
             }),
             interpolate: None,
@@ -1228,7 +1228,10 @@ mod tests {
         select.distribute_by = vec![parse_expr("now()")];
         select.sort_by = vec![sqlparser::ast::OrderByExpr {
             expr: parse_expr("now()"),
-            options: sqlparser::ast::OrderByOptions { asc: Some(true), nulls_first: Some(false) },
+            options: sqlparser::ast::OrderByOptions {
+                sort: Some(sqlparser::ast::OrderBySort::Asc),
+                nulls_first: Some(false),
+            },
             with_fill: None,
         }];
         select.connect_by = vec![

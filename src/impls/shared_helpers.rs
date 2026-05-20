@@ -418,7 +418,7 @@ pub(crate) fn translate_order_by_expr<D: TranslationDirection>(
     Ok(OrderByExpr {
         expr: D::translate_expr(&order_by_expr.expr, schema, options)?,
         options: sqlparser::ast::OrderByOptions {
-            asc: order_by_expr.options.asc,
+            sort: order_by_expr.options.sort.clone(),
             // Strip NULLS FIRST/LAST in forward direction: SQLite < 3.30 rejects
             // this syntax and the semantics differ from PostgreSQL defaults anyway.
             // Preserve it in reverse translation to maintain PostgreSQL round-trip.
@@ -480,7 +480,7 @@ fn translate_expr_with_alias_and_order_by<D: TranslationDirection>(
 ) -> Result<ExprWithAliasAndOrderBy, Error> {
     Ok(ExprWithAliasAndOrderBy {
         expr: translate_expr_with_alias::<D>(&expr_with_alias_and_order_by.expr, schema, options)?,
-        order_by: expr_with_alias_and_order_by.order_by,
+        order_by: expr_with_alias_and_order_by.order_by.clone(),
     })
 }
 
@@ -712,7 +712,7 @@ pub(crate) fn translate_order_by_clause<D: TranslationDirection>(
                             .collect::<Result<Vec<_>, _>>()?,
                     )
                 }
-                OrderByKind::All(all) => OrderByKind::All(*all),
+                OrderByKind::All(all) => OrderByKind::All(all.clone()),
             };
             Ok(OrderBy { kind, interpolate: ob.interpolate.clone() })
         })

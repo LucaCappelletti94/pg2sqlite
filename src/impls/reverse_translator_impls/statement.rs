@@ -521,7 +521,7 @@ mod tests {
             vec![Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1")))];
         select.sort_by = vec![sqlparser::ast::OrderByExpr {
             expr: Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1"))),
-            options: sqlparser::ast::OrderByOptions { asc: None, nulls_first: None },
+            options: sqlparser::ast::OrderByOptions { sort: None, nulls_first: None },
             with_fill: None,
         }];
 

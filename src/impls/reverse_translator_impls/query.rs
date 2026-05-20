@@ -179,7 +179,10 @@ mod tests {
         select.distribute_by = vec![parse_expr("datetime('now')")];
         select.sort_by = vec![sqlparser::ast::OrderByExpr {
             expr: parse_expr("datetime('now')"),
-            options: sqlparser::ast::OrderByOptions { asc: Some(true), nulls_first: Some(false) },
+            options: sqlparser::ast::OrderByOptions {
+                sort: Some(sqlparser::ast::OrderBySort::Asc),
+                nulls_first: Some(false),
+            },
             with_fill: None,
         }];
         select.connect_by = vec![

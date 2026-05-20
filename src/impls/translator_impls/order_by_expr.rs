@@ -24,7 +24,7 @@ impl Translator for OrderByExpr {
 
         Ok(OrderByExpr {
             expr: self.expr.translate(schema, options)?,
-            options: self.options,
+            options: self.options.clone(),
             with_fill: None,
         })
     }

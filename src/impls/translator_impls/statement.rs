@@ -209,6 +209,8 @@ macro_rules! unsupported_statement_patterns {
         | Statement::ShowProcessList { .. }
         // MSSQL WAITFOR (sqlparser 0.62)
         | Statement::WaitFor { .. }
+        // Snowflake PUT (post-0.62.0 upstream main)
+        | Statement::Put { .. }
     };
 }
 

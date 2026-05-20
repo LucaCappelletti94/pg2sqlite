@@ -409,6 +409,7 @@ impl Translator for CreateIndex {
                 .collect::<Result<_, _>>()?,
             unique: self.unique,
             concurrently: false,
+            r#async: false,
             if_not_exists: self.if_not_exists,
             include: vec![],
             nulls_distinct: None,
