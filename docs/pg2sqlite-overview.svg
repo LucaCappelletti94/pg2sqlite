@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 900 3010" width="900" height="3010">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 1740 1850" width="1740" height="1850">
   <defs>
     <linearGradient id="heroGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#1e3a5f"/>
@@ -20,37 +20,58 @@
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
       <feDropShadow dx="0" dy="3" stdDeviation="6" flood-opacity="0.07"/>
     </filter>
+    <symbol id="icon-postgres" viewBox="0 0 24 24">
+      <path fill="#87b1d4" fill-rule="evenodd" clip-rule="evenodd" d="M23.5594 14.7228a.5269.5269 0 0 0-.0563-.1191c-.139-.2632-.4768-.3418-1.0074-.2321-1.6533.3411-2.2935.1312-2.5256-.0191 1.342-2.0482 2.445-4.522 3.0411-6.8297.2714-1.0507.7982-3.5237.1222-4.7316a1.5641 1.5641 0 0 0-.1509-.235C21.6931.9086 19.8007.0248 17.5099.0005c-1.4947-.0158-2.7705.3461-3.1161.4794a9.449 9.449 0 0 0-.5159-.0816 8.044 8.044 0 0 0-1.3114-.1278c-1.1822-.0184-2.2038.2642-3.0498.8406-.8573-.3211-4.7888-1.645-7.2219.0788C.9359 2.1526.3086 3.8733.4302 6.3043c.0409.818.5069 3.334 1.2423 5.7436.4598 1.5065.9387 2.7019 1.4334 3.582.553.9942 1.1259 1.5933 1.7143 1.7895.4474.1491 1.1327.1441 1.8581-.7279.8012-.9635 1.5903-1.8258 1.9446-2.2069.4351.2355.9064.3625 1.39.3772a.0569.0569 0 0 0 .0004.0041 11.0312 11.0312 0 0 0-.2472.3054c-.3389.4302-.4094.5197-1.5002.7443-.3102.064-1.1344.2339-1.1464.8115-.0025.1224.0329.2309.0919.3268.2269.4231.9216.6097 1.015.6331 1.3345.3335 2.5044.092 3.3714-.6787-.017 2.231.0775 4.4174.3454 5.0874.2212.5529.7618 1.9045 2.4692 1.9043.2505 0 .5263-.0291.8296-.0941 1.7819-.3821 2.5557-1.1696 2.855-2.9059.1503-.8707.4016-2.8753.5388-4.1012.0169-.0703.0357-.1207.057-.1362.0007-.0005.0697-.0471.4272.0307a.3673.3673 0 0 0 .0443.0068l.2539.0223.0149.001c.8468.0384 1.9114-.1426 2.5312-.4308.6438-.2988 1.8057-1.0323 1.5951-1.6698zM2.371 11.8765c-.7435-2.4358-1.1779-4.8851-1.2123-5.5719-.1086-2.1714.4171-3.6829 1.5623-4.4927 1.8367-1.2986 4.8398-.5408 6.108-.13-.0032.0032-.0066.0061-.0098.0094-2.0238 2.044-1.9758 5.536-1.9708 5.7495-.0002.0823.0066.1989.0162.3593.0348.5873.0996 1.6804-.0735 2.9184-.1609 1.1504.1937 2.2764.9728 3.0892.0806.0841.1648.1631.2518.2374-.3468.3714-1.1004 1.1926-1.9025 2.1576-.5677.6825-.9597.5517-1.0886.5087-.3919-.1307-.813-.5871-1.2381-1.3223-.4796-.839-.9635-2.0317-1.4155-3.5126zm6.0072 5.0871c-.1711-.0428-.3271-.1132-.4322-.1772.0889-.0394.2374-.0902.4833-.1409 1.2833-.2641 1.4815-.4506 1.9143-1.0002.0992-.126.2116-.2687.3673-.4426a.3549.3549 0 0 0 .0737-.1298c.1708-.1513.2724-.1099.4369-.0417.156.0646.3078.26.3695.4752.0291.1016.0619.2945-.0452.4444-.9043 1.2658-2.2216 1.2494-3.1676 1.0128zm2.094-3.988-.0525.141c-.133.3566-.2567.6881-.3334 1.003-.6674-.0021-1.3168-.2872-1.8105-.8024-.6279-.6551-.9131-1.5664-.7825-2.5004.1828-1.3079.1153-2.4468.079-3.0586-.005-.0857-.0095-.1607-.0122-.2199.2957-.2621 1.6659-.9962 2.6429-.7724.4459.1022.7176.4057.8305.928.5846 2.7038.0774 3.8307-.3302 4.7363-.084.1866-.1633.3629-.2311.5454zm7.3637 4.5725c-.0169.1768-.0358.376-.0618.5959l-.146.4383a.3547.3547 0 0 0-.0182.1077c-.0059.4747-.054.6489-.115.8693-.0634.2292-.1353.4891-.1794 1.0575-.11 1.4143-.8782 2.2267-2.4172 2.5565-1.5155.3251-1.7843-.4968-2.0212-1.2217a6.5824 6.5824 0 0 0-.0769-.2266c-.2154-.5858-.1911-1.4119-.1574-2.5551.0165-.5612-.0249-1.9013-.3302-2.6462.0044-.2932.0106-.5909.019-.8918a.3529.3529 0 0 0-.0153-.1126 1.4927 1.4927 0 0 0-.0439-.208c-.1226-.4283-.4213-.7866-.7797-.9351-.1424-.059-.4038-.1672-.7178-.0869.067-.276.1831-.5875.309-.9249l.0529-.142c.0595-.16.134-.3257.213-.5012.4265-.9476 1.0106-2.2453.3766-5.1772-.2374-1.0981-1.0304-1.6343-2.2324-1.5098-.7207.0746-1.3799.3654-1.7088.5321a5.6716 5.6716 0 0 0-.1958.1041c.0918-1.1064.4386-3.1741 1.7357-4.4823a4.0306 4.0306 0 0 1 .3033-.276.3532.3532 0 0 0 .1447-.0644c.7524-.5706 1.6945-.8506 2.802-.8325.4091.0067.8017.0339 1.1742.081 1.939.3544 3.2439 1.4468 4.0359 2.3827.8143.9623 1.2552 1.9315 1.4312 2.4543-1.3232-.1346-2.2234.1268-2.6797.779-.9926 1.4189.543 4.1729 1.2811 5.4964.1353.2426.2522.4522.2889.5413.2403.5825.5515.9713.7787 1.2552.0696.087.1372.1714.1885.245-.4008.1155-1.1208.3825-1.0552 1.717-.0123.1563-.0423.4469-.0834.8148-.0461.2077-.0702.4603-.0994.7662zm.8905-1.6211c-.0405-.8316.2691-.9185.5967-1.0105a2.8566 2.8566 0 0 0 .135-.0406 1.202 1.202 0 0 0 .1342.103c.5703.3765 1.5823.4213 3.0068.1344-.2016.1769-.5189.3994-.9533.6011-.4098.1903-1.0957.333-1.7473.3636-.7197.0336-1.0859-.0807-1.1721-.151zm.5695-9.2712c-.0059.3508-.0542.6692-.1054 1.0017-.055.3576-.112.7274-.1264 1.1762-.0142.4368.0404.8909.0932 1.3301.1066.887.216 1.8003-.2075 2.7014a3.5272 3.5272 0 0 1-.1876-.3856c-.0527-.1276-.1669-.3326-.3251-.6162-.6156-1.1041-2.0574-3.6896-1.3193-4.7446.3795-.5427 1.3408-.5661 2.1781-.463zm.2284 7.0137a12.3762 12.3762 0 0 0-.0853-.1074l-.0355-.0444c.7262-1.1995.5842-2.3862.4578-3.4385-.0519-.4318-.1009-.8396-.0885-1.2226.0129-.4061.0666-.7543.1185-1.0911.0639-.415.1288-.8443.1109-1.3505.0134-.0531.0188-.1158.0118-.1902-.0457-.4855-.5999-1.938-1.7294-3.253-.6076-.7073-1.4896-1.4972-2.6889-2.0395.5251-.1066 1.2328-.2035 2.0244-.1859 2.0515.0456 3.6746.8135 4.8242 2.2824a.908.908 0 0 1 .0667.1002c.7231 1.3556-.2762 6.2751-2.9867 10.5405zm-8.8166-6.1162c-.025.1794-.3089.4225-.6211.4225a.5821.5821 0 0 1-.0809-.0056c-.1873-.026-.3765-.144-.5059-.3156-.0458-.0605-.1203-.178-.1055-.2844.0055-.0401.0261-.0985.0925-.1488.1182-.0894.3518-.1226.6096-.0867.3163.0441.6426.1938.6113.4186zm7.9305-.4114c.0111.0792-.049.201-.1531.3102-.0683.0717-.212.1961-.4079.2232a.5456.5456 0 0 1-.075.0052c-.2935 0-.5414-.2344-.5607-.3717-.024-.1765.2641-.3106.5611-.352.297-.0414.6111.0088.6356.1851z"/>
+    </symbol>
+    <symbol id="icon-sqlite" viewBox="0 0 24 24" overflow="hidden">
+      <path transform="translate(1.5 0) scale(0.82)" fill="#5eead4" fill-rule="evenodd" clip-rule="evenodd" d="M21.678.521c-1.032-.92-2.28-.55-3.513.544a8.71 8.71 0 0 0-.547.535c-2.109 2.237-4.066 6.38-4.674 9.544.237.48.422 1.093.544 1.561a13.044 13.044 0 0 1 .164.703s-.019-.071-.096-.296l-.05-.146a1.689 1.689 0 0 0-.033-.08c-.138-.32-.518-.995-.686-1.289-.143.423-.27.818-.376 1.176.484.884.778 2.4.778 2.4s-.025-.099-.147-.442c-.107-.303-.644-1.244-.772-1.464-.217.804-.304 1.346-.226 1.478.152.256.296.698.422 1.186.286 1.1.485 2.44.485 2.44l.017.224a22.41 22.41 0 0 0 .056 2.748c.095 1.146.273 2.13.5 2.657l.155-.084c-.334-1.038-.47-2.399-.41-3.967.09-2.398.642-5.29 1.661-8.304 1.723-4.55 4.113-8.201 6.3-9.945-1.993 1.8-4.692 7.63-5.5 9.788-.904 2.416-1.545 4.684-1.931 6.857.666-2.037 2.821-2.912 2.821-2.912s1.057-1.304 2.292-3.166c-.74.169-1.955.458-2.362.629-.6.251-.762.337-.762.337s1.945-1.184 3.613-1.72C21.695 7.9 24.195 2.767 21.678.521m-18.573.543A1.842 1.842 0 0 0 1.27 2.9v16.608a1.84 1.84 0 0 0 1.835 1.834h9.418a22.953 22.953 0 0 1-.052-2.707c-.006-.062-.011-.141-.016-.2a27.01 27.01 0 0 0-.473-2.378c-.121-.47-.275-.898-.369-1.057-.116-.197-.098-.31-.097-.432 0-.12.015-.245.037-.386a9.98 9.98 0 0 1 .234-1.045l.217-.028c-.017-.035-.014-.065-.031-.097l-.041-.381a32.8 32.8 0 0 1 .382-1.194l.2-.019c-.008-.016-.01-.038-.018-.053l-.043-.316c.63-3.28 2.587-7.443 4.8-9.791.066-.069.133-.128.198-.194Z"/>
+    </symbol>
   </defs>
 
   <!-- Background -->
-  <rect width="900" height="3010" fill="#f8fafc"/>
+  <rect width="1740" height="1850" fill="#f8fafc"/>
 
   <!-- ==================== HERO SECTION ==================== -->
-  <rect width="900" height="100" fill="url(#heroGrad)"/>
+  <rect width="1740" height="100" fill="url(#heroGrad)"/>
 
   <!-- Title and tagline -->
-  <text x="450" y="40" font-family="Inter, system-ui, sans-serif" font-size="28" font-weight="700" fill="white" text-anchor="middle" letter-spacing="-0.5">pg2sqlite</text>
-  <text x="450" y="65" font-family="Inter, sans-serif" font-size="13" fill="rgba(255,255,255,0.85)" text-anchor="middle">Define your schema once in PostgreSQL. Deploy anywhere with SQLite.</text>
+  <text x="870" y="40" font-family="Inter, system-ui, sans-serif" font-size="28" font-weight="700" fill="white" text-anchor="middle" letter-spacing="-0.5">pg2sqlite</text>
+  <text x="870" y="65" font-family="Inter, sans-serif" font-size="13" fill="rgba(255,255,255,0.85)" text-anchor="middle">Define your schema once in PostgreSQL. Deploy anywhere with SQLite.</text>
 
   <!-- ==================== ABSTRACT ==================== -->
   <g transform="translate(60, 120)">
-    <rect width="780" height="170" rx="12" fill="white" filter="url(#shadow)"/>
+    <rect width="1620" height="170" rx="12" fill="white" filter="url(#shadow)"/>
 
-    <foreignObject x="25" y="12" width="730" height="150">
+    <foreignObject x="25" y="12" width="1570" height="150">
       <xhtml:div xmlns="http://www.w3.org/1999/xhtml" style="font-family: Inter, system-ui, sans-serif; font-size: 13px; color: #475569; line-height: 1.55; text-align: justify;">
-        <xhtml:p style="margin: 0 0 12px 0;">
+        <xhtml:p style="margin: 0 0 8px 0;">
           <xhtml:strong style="color: #1e293b;">Your PostgreSQL schema is more than just tables.</xhtml:strong> It encodes
           <xhtml:span style="color: #336791; font-weight: 500;">data types</xhtml:span> (UUID, JSONB, TIMESTAMP),
           <xhtml:span style="color: #336791; font-weight: 500;">constraints</xhtml:span> (foreign keys, unique, check),
-          <xhtml:span style="color: #336791; font-weight: 500;">triggers</xhtml:span> with PL/pgSQL business logic, and
-          <xhtml:span style="color: #8b5cf6; font-weight: 500;">Row-Level Security</xhtml:span> policies that control exactly who can see and modify each row.
+          <xhtml:span style="color: #336791; font-weight: 500;">PL/pgSQL triggers</xhtml:span> with arbitrary business logic,
+          <xhtml:span style="color: #8b5cf6; font-weight: 500;">Row-Level Security</xhtml:span> policies that control exactly who can see and modify each row, and powerful extensions like
+          <xhtml:span style="color: #06b6d4; font-weight: 500;">pgvector</xhtml:span> for AI embeddings,
+          <xhtml:span style="color: #16a34a; font-weight: 500;">PostGIS</xhtml:span> for geospatial queries, and
+          <xhtml:span style="color: #336791; font-weight: 500;">tsvector</xhtml:span> for full-text search.
+        </xhtml:p>
+        <xhtml:p style="margin: 0 0 8px 0;">
+          <xhtml:strong style="color: #1e293b;">pg2sqlite ships the hard parts.</xhtml:strong>
+          <xhtml:span style="color: #8b5cf6; font-weight: 500;">RLS</xhtml:span> policies are compiled into views plus
+          <xhtml:code style="background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 11px;">INSTEAD OF</xhtml:code> write triggers. PL/pgSQL bodies are reshaped into SQLite trigger CTE chains.
+          <xhtml:span style="color: #06b6d4; font-weight: 500;">pgvector</xhtml:span>,
+          <xhtml:span style="color: #16a34a; font-weight: 500;">PostGIS</xhtml:span>, and tsvector are routed through
+          <xhtml:span style="color: #0891b2; font-weight: 500;">sqlite-vec</xhtml:span>,
+          <xhtml:span style="color: #16a34a; font-weight: 500;">geolite</xhtml:span>, and
+          <xhtml:span style="color: #336791; font-weight: 500;">FTS5</xhtml:span> with the sync triggers that keep them coherent. Role-based
+          <xhtml:code style="background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 11px;">GRANT</xhtml:code> permissions decide which tables and rows each device receives, and optional sync-time auditing detects rows that should have been invisible under the active RLS policy.
         </xhtml:p>
         <xhtml:p style="margin: 0;">
-          <xhtml:strong style="color: #1e293b;">pg2sqlite translates all of this</xhtml:strong> into equivalent SQLite constructs.
-          Types become SQLite-native types. Triggers become SQLite triggers with CTEs. RLS policies become views with
-          <xhtml:code style="background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 11px;">INSTEAD OF</xhtml:code> triggers.
-          You get the same schema semantics on mobile devices, edge servers, or in fast in-memory tests, without maintaining
-          two separate schemas or losing security guarantees.
+          <xhtml:strong style="color: #1e293b;">Correctness is held in place by a heavy verification stack:</xhtml:strong>
+          <xhtml:span style="color: #336791; font-weight: 500;">1,300+ integration tests across 131 files</xhtml:span>,
+          <xhtml:span style="color: #336791; font-weight: 500;">43 insta snapshots</xhtml:span> that lock the verbatim translated SQL,
+          <xhtml:span style="color: #336791; font-weight: 500;">reverse-translation round-trips</xhtml:span> that check SQLite output reparses to PostgreSQL, and
+          <xhtml:span style="color: #336791; font-weight: 500;">two honggfuzz harnesses</xhtml:span> (forward and reverse) whose past crashes are pinned as
+          <xhtml:span style="color: #336791; font-weight: 500;">55 regression fixtures</xhtml:span> that re-run on every commit.
         </xhtml:p>
       </xhtml:div>
     </foreignObject>
@@ -62,40 +83,35 @@
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">1. Data Types</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.7)" text-anchor="end">Every PostgreSQL type mapped to SQLite</text>
 
-    <g transform="translate(0, 60)">
-      <rect width="370" height="155" rx="10" fill="white" filter="url(#shadow)"/>
-      <rect width="370" height="32" rx="10" fill="url(#pgBlue)"/>
-      <text x="185" y="22" font-family="Inter, sans-serif" font-size="12" font-weight="600" fill="white" text-anchor="middle">PostgreSQL</text>
-      <rect x="12" y="44" width="346" height="100" rx="5" fill="#1e293b"/>
-      <text font-family="SF Mono, Consolas, monospace" font-size="11" fill="#e2e8f0">
-        <tspan x="22" y="66" fill="#7dd3fc">CREATE TABLE</tspan><tspan> users (</tspan>
-        <tspan x="22" y="84">  id </tspan><tspan fill="#fbbf24">SERIAL</tspan><tspan> PRIMARY KEY,</tspan>
-        <tspan x="22" y="102">  uuid </tspan><tspan fill="#fbbf24">UUID</tspan><tspan>,</tspan>
-        <tspan x="22" y="120">  active </tspan><tspan fill="#fbbf24">BOOLEAN</tspan><tspan>,</tspan>
-        <tspan x="22" y="138">  data </tspan><tspan fill="#fbbf24">JSONB</tspan><tspan> );</tspan>
+    <g transform="translate(0, 58)">
+      <rect width="370" height="100" rx="5" fill="#1e293b"/>
+      <use href="#icon-postgres" x="340" y="8" width="22" height="22"/>
+      <text font-family="SF Mono, Consolas, monospace" font-size="11" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="18" fill="#7dd3fc">CREATE TABLE</tspan><tspan> users (</tspan>
+        <tspan x="14" y="36">  id </tspan><tspan fill="#fbbf24">SERIAL</tspan><tspan> PRIMARY KEY,</tspan>
+        <tspan x="14" y="54">  uuid </tspan><tspan fill="#fbbf24">UUID</tspan><tspan>,</tspan>
+        <tspan x="14" y="72">  active </tspan><tspan fill="#fbbf24">BOOLEAN</tspan><tspan>,</tspan>
+        <tspan x="14" y="90">  data </tspan><tspan fill="#fbbf24">JSONB</tspan><tspan>);</tspan>
       </text>
     </g>
 
-    <g transform="translate(380, 127)">
-      <circle cx="10" cy="0" r="18" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1.5"/>
+    <g transform="translate(380, 108)">
       <path d="M5 0 L15 0 M11 -4 L15 0 L11 4" stroke="#64748b" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
     </g>
 
-    <g transform="translate(410, 60)">
-      <rect width="370" height="155" rx="10" fill="white" filter="url(#shadow)"/>
-      <rect width="370" height="32" rx="10" fill="url(#sqliteTeal)"/>
-      <text x="185" y="22" font-family="Inter, sans-serif" font-size="12" font-weight="600" fill="white" text-anchor="middle">SQLite</text>
-      <rect x="12" y="44" width="346" height="100" rx="5" fill="#1e293b"/>
-      <text font-family="SF Mono, Consolas, monospace" font-size="11" fill="#e2e8f0">
-        <tspan x="22" y="66" fill="#7dd3fc">CREATE TABLE</tspan><tspan> users (</tspan>
-        <tspan x="22" y="84">  id </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
-        <tspan x="22" y="102">  uuid </tspan><tspan fill="#4ade80">BLOB</tspan><tspan>,</tspan>
-        <tspan x="22" y="120">  active </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan>,</tspan>
-        <tspan x="22" y="138">  data </tspan><tspan fill="#4ade80">TEXT</tspan><tspan> ) STRICT;</tspan>
+    <g transform="translate(410, 58)">
+      <rect width="370" height="100" rx="5" fill="#1e293b"/>
+      <use href="#icon-sqlite" x="340" y="8" width="22" height="22"/>
+      <text font-family="SF Mono, Consolas, monospace" font-size="11" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="18" fill="#7dd3fc">CREATE TABLE</tspan><tspan> users (</tspan>
+        <tspan x="14" y="36">  id </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
+        <tspan x="14" y="54">  uuid </tspan><tspan fill="#4ade80">BLOB</tspan><tspan>,</tspan>
+        <tspan x="14" y="72">  active </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan>,</tspan>
+        <tspan x="14" y="90">  data </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>) STRICT;</tspan>
       </text>
     </g>
 
-    <g transform="translate(0, 230)">
+    <g transform="translate(0, 173)">
       <rect width="780" height="28" rx="6" fill="#f1f5f9"/>
       <text font-family="Inter, sans-serif" font-size="10" fill="#475569">
         <tspan x="15" y="18" font-weight="500">SERIAL</tspan><tspan fill="#94a3b8">→</tspan><tspan fill="#0891b2">INTEGER</tspan>
@@ -109,7 +125,7 @@
   </g>
 
   <!-- ==================== SECTION 2: FUNCTIONS ==================== -->
-  <g transform="translate(60, 600)">
+  <g transform="translate(60, 543)">
     <rect width="780" height="44" rx="10" fill="#336791"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">2. Functions</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.7)" text-anchor="end">PostgreSQL functions mapped to SQLite</text>
@@ -199,46 +215,41 @@
   </g>
 
   <!-- ==================== SECTION 3: TRIGGERS ==================== -->
-  <g transform="translate(60, 850)">
+  <g transform="translate(60, 793)">
     <rect width="780" height="44" rx="10" fill="#336791"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">3. PL/pgSQL Triggers</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.7)" text-anchor="end">PL/pgSQL logic becomes SQLite triggers</text>
 
     <g transform="translate(0, 58)">
-      <rect width="370" height="150" rx="10" fill="white" filter="url(#shadow)"/>
-      <rect width="370" height="32" rx="10" fill="url(#pgBlue)"/>
-      <text x="185" y="22" font-family="Inter, sans-serif" font-size="12" font-weight="600" fill="white" text-anchor="middle">PostgreSQL</text>
-      <rect x="12" y="44" width="346" height="95" rx="5" fill="#1e293b"/>
-      <text font-family="SF Mono, Consolas, monospace" font-size="10" fill="#e2e8f0">
-        <tspan x="20" y="62" fill="#7dd3fc">CREATE FUNCTION</tspan><tspan> set_id()</tspan>
-        <tspan x="20" y="78" fill="#7dd3fc">RETURNS</tspan><tspan> trigger </tspan><tspan fill="#7dd3fc">AS</tspan><tspan> $$ </tspan><tspan fill="#7dd3fc">BEGIN</tspan>
-        <tspan x="20" y="94">  </tspan><tspan fill="#7dd3fc">IF</tspan><tspan> NEW.id </tspan><tspan fill="#7dd3fc">IS NULL THEN</tspan>
-        <tspan x="20" y="110">    NEW.id := </tspan><tspan fill="#fbbf24">uuidv7()</tspan><tspan>; </tspan><tspan fill="#7dd3fc">END IF</tspan><tspan>;</tspan>
-        <tspan x="20" y="126">  </tspan><tspan fill="#7dd3fc">RETURN</tspan><tspan> NEW; </tspan><tspan fill="#7dd3fc">END</tspan><tspan>; $$;</tspan>
+      <rect width="370" height="95" rx="5" fill="#1e293b"/>
+      <use href="#icon-postgres" x="340" y="8" width="22" height="22"/>
+      <text font-family="SF Mono, Consolas, monospace" font-size="10" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="20" fill="#7dd3fc">CREATE FUNCTION</tspan><tspan> set_id()</tspan>
+        <tspan x="14" y="36" fill="#7dd3fc">RETURNS</tspan><tspan> trigger </tspan><tspan fill="#7dd3fc">AS</tspan><tspan> $$ </tspan><tspan fill="#7dd3fc">BEGIN</tspan>
+        <tspan x="14" y="52" fill="#7dd3fc">  IF</tspan><tspan> NEW.id </tspan><tspan fill="#7dd3fc">IS NULL THEN</tspan>
+        <tspan x="14" y="68">    NEW.id := </tspan><tspan fill="#fbbf24">uuidv7()</tspan><tspan>; </tspan><tspan fill="#7dd3fc">END IF</tspan><tspan>;</tspan>
+        <tspan x="14" y="84" fill="#7dd3fc">  RETURN</tspan><tspan> NEW; </tspan><tspan fill="#7dd3fc">END</tspan><tspan>; $$;</tspan>
       </text>
     </g>
 
-    <g transform="translate(380, 120)">
-      <circle cx="10" cy="0" r="18" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1.5"/>
+    <g transform="translate(380, 105)">
       <path d="M5 0 L15 0 M11 -4 L15 0 L11 4" stroke="#64748b" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
     </g>
 
     <g transform="translate(410, 58)">
-      <rect width="370" height="150" rx="10" fill="white" filter="url(#shadow)"/>
-      <rect width="370" height="32" rx="10" fill="url(#sqliteTeal)"/>
-      <text x="185" y="22" font-family="Inter, sans-serif" font-size="12" font-weight="600" fill="white" text-anchor="middle">SQLite</text>
-      <rect x="12" y="44" width="346" height="95" rx="5" fill="#1e293b"/>
-      <text font-family="SF Mono, monospace" font-size="8.5" fill="#e2e8f0">
-        <tspan x="18" y="58" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> set_id</tspan>
-        <tspan x="18" y="70" fill="#7dd3fc">BEFORE INSERT ON</tspan><tspan> items</tspan>
-        <tspan x="18" y="82" fill="#7dd3fc">WHEN</tspan><tspan> NEW.id </tspan><tspan fill="#7dd3fc">IS NULL</tspan>
-        <tspan x="18" y="94" fill="#7dd3fc">BEGIN</tspan>
-        <tspan x="18" y="106">  </tspan><tspan fill="#7dd3fc">UPDATE</tspan><tspan> items </tspan><tspan fill="#7dd3fc">SET</tspan><tspan> id=</tspan><tspan fill="#4ade80">uuidv7()</tspan>
-        <tspan x="18" y="118">  </tspan><tspan fill="#7dd3fc">WHERE</tspan><tspan> rowid=NEW.rowid; </tspan><tspan fill="#7dd3fc">END</tspan><tspan>;</tspan>
+      <rect width="370" height="95" rx="5" fill="#1e293b"/>
+      <use href="#icon-sqlite" x="340" y="8" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="8.5" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="24" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> set_id</tspan>
+        <tspan x="14" y="36" fill="#7dd3fc">BEFORE INSERT ON</tspan><tspan> items</tspan>
+        <tspan x="14" y="48" fill="#7dd3fc">WHEN</tspan><tspan> NEW.id </tspan><tspan fill="#7dd3fc">IS NULL</tspan>
+        <tspan x="14" y="60" fill="#7dd3fc">BEGIN</tspan>
+        <tspan x="14" y="72" fill="#7dd3fc">  UPDATE</tspan><tspan> items </tspan><tspan fill="#7dd3fc">SET</tspan><tspan> id=</tspan><tspan fill="#4ade80">uuidv7()</tspan>
+        <tspan x="14" y="84" fill="#7dd3fc">  WHERE</tspan><tspan> rowid=NEW.rowid; </tspan><tspan fill="#7dd3fc">END</tspan><tspan>;</tspan>
       </text>
     </g>
 
-    <g transform="translate(0, 220)">
+    <g transform="translate(0, 165)">
       <rect width="780" height="32" rx="6" fill="#fef3c7" stroke="#fcd34d"/>
       <text x="15" y="21" font-family="Inter, sans-serif" font-size="11" fill="#92400e">
         <tspan font-weight="600">IF</tspan><tspan> → </tspan><tspan font-weight="600">WHEN</tspan><tspan> clause   |   </tspan>
@@ -249,15 +260,15 @@
   </g>
 
   <!-- ==================== SECTION 4: ROLE-BASED TRANSLATION ==================== -->
-  <g transform="translate(60, 1130)">
+  <g transform="translate(60, 1018)">
     <rect width="780" height="44" rx="10" fill="#059669"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">4. Role-Based Table Translation</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">Grant-based filtering</text>
 
     <!-- Explanation -->
     <g transform="translate(0, 58)">
-      <rect width="780" height="75" rx="10" fill="white" filter="url(#shadow)"/>
-      <foreignObject x="15" y="8" width="750" height="62">
+      <rect width="780" height="50" rx="10" fill="white" filter="url(#shadow)"/>
+      <foreignObject x="15" y="6" width="750" height="38">
         <xhtml:div xmlns="http://www.w3.org/1999/xhtml" style="font-family: Inter, system-ui, sans-serif; font-size: 11px; color: #64748b; line-height: 1.55; text-align: justify;">
           Not every table needs to be on every device. pg2sqlite reads the PostgreSQL
           <xhtml:code style="background: #f1f5f9; padding: 1px 4px; border-radius: 3px;">GRANT</xhtml:code>
@@ -269,7 +280,7 @@
     </g>
 
     <!-- Three-column layout -->
-    <g transform="translate(0, 145)">
+    <g transform="translate(0, 120)">
       <!-- No Grants -->
       <g>
         <rect width="245" height="140" rx="10" fill="white" filter="url(#shadow)"/>
@@ -330,18 +341,18 @@
   </g>
 
   <!-- ==================== SECTION 5: RLS ==================== -->
-  <g transform="translate(60, 1435)">
+  <g transform="translate(60, 1298)">
     <rect width="780" height="44" rx="10" fill="#8b5cf6"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">5. Row-Level Security (RLS)</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">Per-row access control</text>
 
     <g transform="translate(0, 58)">
-      <rect width="780" height="75" rx="10" fill="white" filter="url(#shadow)"/>
+      <rect width="780" height="65" rx="10" fill="white" filter="url(#shadow)"/>
       <rect x="15" y="10" width="26" height="26" rx="6" fill="#8b5cf6" opacity="0.12"/>
       <g transform="translate(20, 14) scale(0.032)">
         <path d="M256 0c4.6 0 9.2 1 13.4 2.9L457.7 82.8c22 9.3 38.4 31 38.3 57.2c-.5 99.2-41.3 280.7-213.6 363.2c-16.7 8-36.1 8-52.8 0C57.3 420.7 16.5 239.2 16 140c-.1-26.2 16.3-47.9 38.3-57.2L242.7 2.9C246.8 1 251.4 0 256 0z" fill="#8b5cf6"/>
       </g>
-      <foreignObject x="48" y="6" width="720" height="62">
+      <foreignObject x="48" y="6" width="720" height="53">
         <xhtml:div xmlns="http://www.w3.org/1999/xhtml" style="font-family: Inter, system-ui, sans-serif; font-size: 11px; color: #64748b; line-height: 1.55;">
           In PostgreSQL, Row-Level Security policies control which rows each user can read, insert,
           update, or delete. pg2sqlite translates these policies into SQLite views and
@@ -352,114 +363,105 @@
     </g>
 
     <!-- PostgreSQL Policy -->
-    <g transform="translate(0, 145)">
-      <rect width="250" height="190" rx="10" fill="#faf5ff" stroke="#e9d5ff"/>
-      <text x="125" y="20" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#7c3aed" text-anchor="middle">PostgreSQL Policy</text>
-      <rect x="12" y="32" width="226" height="145" rx="6" fill="#1e293b"/>
-      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-        <tspan x="20" y="50" fill="#c084fc">CREATE POLICY</tspan><tspan> owner_rls</tspan>
-        <tspan x="20" y="64" fill="#c084fc">ON</tspan><tspan> items </tspan><tspan fill="#c084fc">FOR ALL</tspan>
-        <tspan x="20" y="86" fill="#c084fc">USING</tspan><tspan> (</tspan>
-        <tspan x="20" y="100">  owner_id = </tspan><tspan fill="#fbbf24">current_user_id()</tspan>
-        <tspan x="20" y="114">)</tspan>
-        <tspan x="20" y="134" fill="#c084fc">WITH CHECK</tspan><tspan> (</tspan>
-        <tspan x="20" y="148">  owner_id = </tspan><tspan fill="#fbbf24">current_user_id()</tspan>
-        <tspan x="20" y="162">);</tspan>
+    <g transform="translate(0, 135)">
+      <rect width="250" height="190" rx="6" fill="#1e293b"/>
+      <use href="#icon-postgres" x="222" y="8" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="40" fill="#c084fc">CREATE POLICY</tspan><tspan> owner_rls</tspan>
+        <tspan x="14" y="54" fill="#c084fc">ON</tspan><tspan> items </tspan><tspan fill="#c084fc">FOR ALL</tspan>
+        <tspan x="14" y="78" fill="#c084fc">USING</tspan><tspan> (</tspan>
+        <tspan x="14" y="92">  owner_id = </tspan><tspan fill="#fbbf24">current_user_id()</tspan>
+        <tspan x="14" y="106">)</tspan>
+        <tspan x="14" y="130" fill="#c084fc">WITH CHECK</tspan><tspan> (</tspan>
+        <tspan x="14" y="144">  owner_id = </tspan><tspan fill="#fbbf24">current_user_id()</tspan>
+        <tspan x="14" y="158">);</tspan>
       </text>
     </g>
 
     <!-- Arrow -->
-    <g transform="translate(258, 233)">
+    <g transform="translate(258, 223)">
       <path d="M0 0 L20 0" stroke="#c084fc" stroke-width="2"/>
       <polygon points="25,0 17,-4 17,4" fill="#c084fc"/>
     </g>
 
     <!-- SQLite Translations - 3 boxes -->
-    <g transform="translate(290, 145)">
-      <text x="245" y="-2" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#7c3aed" text-anchor="middle">SQLite Translation</text>
+    <g transform="translate(290, 135)">
 
       <!-- SELECT Policy → View -->
-      <rect width="490" height="58" rx="6" fill="white" stroke="#d8b4fe"/>
+      <rect width="490" height="58" rx="6" fill="#1e293b"/>
       <rect width="70" height="58" rx="6" fill="#10b981"/>
-      <text x="35" y="25" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">SELECT</text>
-      <text x="35" y="38" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">USING</text>
-      <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
-      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
+      <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">SELECT</text>
+      <text x="35" y="35" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">USING</text>
+      <use href="#icon-sqlite" x="458" y="18" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
         <tspan x="90" y="24" fill="#7dd3fc">CREATE VIEW</tspan><tspan> items </tspan><tspan fill="#7dd3fc">AS SELECT</tspan><tspan> * </tspan><tspan fill="#7dd3fc">FROM</tspan><tspan> items_rls</tspan>
         <tspan x="90" y="40" fill="#7dd3fc">WHERE</tspan><tspan> owner_id = </tspan><tspan fill="#4ade80">user_id()</tspan><tspan>;</tspan>
       </text>
 
       <!-- UPDATE Policy → Trigger -->
       <g transform="translate(0, 66)">
-        <rect width="490" height="58" rx="6" fill="white" stroke="#d8b4fe"/>
+        <rect width="490" height="58" rx="6" fill="#1e293b"/>
         <rect width="70" height="58" rx="6" fill="#f59e0b"/>
         <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">UPDATE</text>
         <text x="35" y="35" font-family="Inter, sans-serif" font-size="7" fill="rgba(255,255,255,0.8)" text-anchor="middle">WITH CHECK</text>
-        <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
-        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-          <tspan x="90" y="22" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> items_update </tspan><tspan fill="#7dd3fc">INSTEAD OF UPDATE ON</tspan><tspan> items</tspan>
-          <tspan x="90" y="36" fill="#7dd3fc">BEGIN SELECT RAISE</tspan><tspan>(ABORT,'denied') </tspan><tspan fill="#7dd3fc">WHERE</tspan><tspan> NEW.owner_id != </tspan><tspan fill="#4ade80">user_id()</tspan><tspan>;</tspan>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="90" y="24" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> items_update </tspan><tspan fill="#7dd3fc">INSTEAD OF UPDATE ON</tspan><tspan> items</tspan>
+          <tspan x="90" y="40" fill="#7dd3fc">BEGIN SELECT RAISE</tspan><tspan>(ABORT,'denied') </tspan><tspan fill="#7dd3fc">WHERE</tspan><tspan> NEW.owner_id != </tspan><tspan fill="#4ade80">user_id()</tspan><tspan>;</tspan>
         </text>
       </g>
 
       <!-- DELETE Policy → Trigger -->
       <g transform="translate(0, 132)">
-        <rect width="490" height="58" rx="6" fill="white" stroke="#d8b4fe"/>
+        <rect width="490" height="58" rx="6" fill="#1e293b"/>
         <rect width="70" height="58" rx="6" fill="#ef4444"/>
         <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">DELETE</text>
         <text x="35" y="35" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">USING</text>
-        <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
-        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-          <tspan x="90" y="22" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> items_delete </tspan><tspan fill="#7dd3fc">INSTEAD OF DELETE ON</tspan><tspan> items</tspan>
-          <tspan x="90" y="36" fill="#7dd3fc">BEGIN SELECT RAISE</tspan><tspan>(ABORT,'denied') </tspan><tspan fill="#7dd3fc">WHERE</tspan><tspan> OLD.owner_id != </tspan><tspan fill="#4ade80">user_id()</tspan><tspan>;</tspan>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="90" y="24" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> items_delete </tspan><tspan fill="#7dd3fc">INSTEAD OF DELETE ON</tspan><tspan> items</tspan>
+          <tspan x="90" y="40" fill="#7dd3fc">BEGIN SELECT RAISE</tspan><tspan>(ABORT,'denied') </tspan><tspan fill="#7dd3fc">WHERE</tspan><tspan> OLD.owner_id != </tspan><tspan fill="#4ade80">user_id()</tspan><tspan>;</tspan>
         </text>
       </g>
     </g>
   </g>
 
   <!-- ==================== SECTION 6: FULL-TEXT SEARCH ==================== -->
-  <g transform="translate(60, 1798)">
+  <g transform="translate(900, 310)">
     <rect width="780" height="44" rx="10" fill="#336791"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">6. Full-Text Search</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.7)" text-anchor="end">Text search translated to SQLite FTS5</text>
 
     <g transform="translate(0, 58)">
-      <rect width="370" height="90" rx="10" fill="white" filter="url(#shadow)"/>
-      <rect width="370" height="32" rx="10" fill="url(#pgBlue)"/>
-      <text x="185" y="22" font-family="Inter, sans-serif" font-size="12" font-weight="600" fill="white" text-anchor="middle">PostgreSQL</text>
-      <rect x="12" y="44" width="346" height="35" rx="5" fill="#1e293b"/>
-      <text font-family="SF Mono, monospace" font-size="10" fill="#e2e8f0">
-        <tspan x="20" y="60">WHERE </tspan><tspan fill="#fbbf24">to_tsvector</tspan><tspan>(body) </tspan><tspan fill="#fbbf24">@@</tspan><tspan> </tspan><tspan fill="#fbbf24">to_tsquery</tspan><tspan>('term')</tspan>
+      <rect width="370" height="40" rx="5" fill="#1e293b"/>
+      <use href="#icon-postgres" x="340" y="9" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="10" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="25">WHERE </tspan><tspan fill="#fbbf24">to_tsvector</tspan><tspan>(body) </tspan><tspan fill="#fbbf24">@@</tspan><tspan> </tspan><tspan fill="#fbbf24">to_tsquery</tspan><tspan>('term')</tspan>
       </text>
     </g>
 
-    <g transform="translate(380, 95)">
-      <circle cx="10" cy="0" r="18" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1.5"/>
+    <g transform="translate(380, 78)">
       <path d="M5 0 L15 0 M11 -4 L15 0 L11 4" stroke="#64748b" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
     </g>
 
     <g transform="translate(410, 58)">
-      <rect width="370" height="90" rx="10" fill="white" filter="url(#shadow)"/>
-      <rect width="370" height="32" rx="10" fill="url(#sqliteTeal)"/>
-      <text x="185" y="22" font-family="Inter, sans-serif" font-size="12" font-weight="600" fill="white" text-anchor="middle">SQLite FTS5</text>
-      <rect x="12" y="44" width="346" height="35" rx="5" fill="#1e293b"/>
-      <text font-family="SF Mono, monospace" font-size="10" fill="#e2e8f0">
-        <tspan x="20" y="60">WHERE id IN (SELECT rowid FROM </tspan><tspan fill="#4ade80">t_fts</tspan><tspan> WHERE </tspan><tspan fill="#4ade80">MATCH</tspan><tspan>)</tspan>
+      <rect width="370" height="40" rx="5" fill="#1e293b"/>
+      <use href="#icon-sqlite" x="340" y="9" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="10" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="25">WHERE id IN (SELECT rowid FROM </tspan><tspan fill="#4ade80">t_fts</tspan><tspan> WHERE </tspan><tspan fill="#4ade80">MATCH</tspan><tspan>)</tspan>
       </text>
     </g>
   </g>
 
   <!-- ==================== SECTION 7: VECTOR SEARCH ==================== -->
-  <g transform="translate(60, 1968)">
+  <g transform="translate(900, 425)">
     <rect width="780" height="44" rx="10" fill="#06b6d4"/>
     <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">7. Vector Search</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">pgvector → sqlite-vec</text>
 
     <g transform="translate(0, 58)">
-      <rect width="780" height="75" rx="10" fill="white" filter="url(#shadow)"/>
+      <rect width="780" height="50" rx="10" fill="white" filter="url(#shadow)"/>
       <rect x="15" y="10" width="26" height="26" rx="6" fill="#06b6d4" opacity="0.12"/>
       <text x="28" y="28" font-family="Inter, sans-serif" font-size="14" fill="#06b6d4" text-anchor="middle">∿</text>
-      <foreignObject x="48" y="6" width="720" height="62">
+      <foreignObject x="48" y="6" width="720" height="38">
         <xhtml:div xmlns="http://www.w3.org/1999/xhtml" style="font-family: Inter, system-ui, sans-serif; font-size: 11px; color: #64748b; line-height: 1.55;">
           AI-powered apps store embeddings (numeric representations of text, images, or other content)
           alongside regular data. pg2sqlite translates pgvector columns into sqlite-vec virtual tables
@@ -469,70 +471,66 @@
     </g>
 
     <!-- PostgreSQL Schema -->
-    <g transform="translate(0, 145)">
-      <rect width="250" height="190" rx="10" fill="#e0f2fe" stroke="#7dd3fc"/>
-      <text x="125" y="20" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#0284c7" text-anchor="middle">PostgreSQL pgvector</text>
-      <rect x="12" y="32" width="226" height="145" rx="6" fill="#1e293b"/>
-      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-        <tspan x="20" y="50" fill="#7dd3fc">CREATE TABLE</tspan><tspan> items (</tspan>
-        <tspan x="20" y="66">  id </tspan><tspan fill="#fbbf24">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
-        <tspan x="20" y="82">  embedding </tspan><tspan fill="#fbbf24">vector(384)</tspan>
-        <tspan x="20" y="98">);</tspan>
-        <tspan x="20" y="122" fill="#7dd3fc">SELECT</tspan><tspan> * </tspan><tspan fill="#7dd3fc">FROM</tspan><tspan> items</tspan>
-        <tspan x="20" y="138" fill="#7dd3fc">ORDER BY</tspan><tspan> embedding </tspan><tspan fill="#fbbf24">&lt;-&gt;</tspan><tspan> query</tspan>
-        <tspan x="20" y="154" fill="#7dd3fc">LIMIT</tspan><tspan> 10;</tspan>
+    <g transform="translate(0, 120)">
+      <rect width="250" height="190" rx="6" fill="#1e293b"/>
+      <use href="#icon-postgres" x="222" y="8" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="40" fill="#7dd3fc">CREATE TABLE</tspan><tspan> items (</tspan>
+        <tspan x="14" y="56">  id </tspan><tspan fill="#fbbf24">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
+        <tspan x="14" y="72">  embedding </tspan><tspan fill="#fbbf24">vector(384)</tspan>
+        <tspan x="14" y="88">);</tspan>
+        <tspan x="14" y="120" fill="#7dd3fc">SELECT</tspan><tspan> * </tspan><tspan fill="#7dd3fc">FROM</tspan><tspan> items</tspan>
+        <tspan x="14" y="136" fill="#7dd3fc">ORDER BY</tspan><tspan> embedding </tspan><tspan fill="#fbbf24">&lt;-&gt;</tspan><tspan> query</tspan>
+        <tspan x="14" y="152" fill="#7dd3fc">LIMIT</tspan><tspan> 10;</tspan>
       </text>
     </g>
 
     <!-- Arrow -->
-    <g transform="translate(258, 233)">
+    <g transform="translate(258, 208)">
       <path d="M0 0 L20 0" stroke="#06b6d4" stroke-width="2"/>
       <polygon points="25,0 17,-4 17,4" fill="#06b6d4"/>
     </g>
 
     <!-- SQLite Translations - 3 boxes -->
-    <g transform="translate(290, 145)">
-      <text x="245" y="-2" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#0284c7" text-anchor="middle">SQLite Translation</text>
+    <g transform="translate(290, 120)">
 
       <!-- Main Table with BLOB -->
-      <rect width="490" height="58" rx="6" fill="white" stroke="#7dd3fc"/>
+      <rect width="490" height="58" rx="6" fill="#1e293b"/>
       <rect width="70" height="58" rx="6" fill="#336791"/>
-      <text x="35" y="25" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">TABLE</text>
-      <text x="35" y="38" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">vector→BLOB</text>
-      <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
-      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-        <tspan x="90" y="22" fill="#7dd3fc">CREATE TABLE</tspan><tspan> items (id </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
-        <tspan x="90" y="38">  embedding </tspan><tspan fill="#4ade80">BLOB</tspan><tspan>) STRICT;</tspan>
+      <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">TABLE</text>
+      <text x="35" y="35" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">vector→BLOB</text>
+      <use href="#icon-sqlite" x="458" y="18" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="90" y="24" fill="#7dd3fc">CREATE TABLE</tspan><tspan> items (id </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
+        <tspan x="90" y="40">  embedding </tspan><tspan fill="#4ade80">BLOB</tspan><tspan>) STRICT;</tspan>
       </text>
 
       <!-- vec0 Virtual Table -->
       <g transform="translate(0, 66)">
-        <rect width="490" height="58" rx="6" fill="white" stroke="#7dd3fc"/>
+        <rect width="490" height="58" rx="6" fill="#1e293b"/>
         <rect width="70" height="58" rx="6" fill="#0891b2"/>
-        <text x="35" y="25" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">vec0</text>
-        <text x="35" y="38" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">KNN index</text>
-        <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
-        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-          <tspan x="90" y="22" fill="#7dd3fc">CREATE VIRTUAL TABLE</tspan><tspan> items_embedding_vec </tspan><tspan fill="#7dd3fc">USING</tspan><tspan> </tspan><tspan fill="#4ade80">vec0</tspan><tspan>(</tspan>
-          <tspan x="90" y="38">  id_id INTEGER PRIMARY KEY, embedding </tspan><tspan fill="#4ade80">float[384]</tspan><tspan>);</tspan>
+        <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">vec0</text>
+        <text x="35" y="35" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">KNN index</text>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="90" y="24" fill="#7dd3fc">CREATE VIRTUAL TABLE</tspan><tspan> items_embedding_vec </tspan><tspan fill="#7dd3fc">USING</tspan><tspan> </tspan><tspan fill="#4ade80">vec0</tspan><tspan>(</tspan>
+          <tspan x="90" y="40">  id_id INTEGER PRIMARY KEY, embedding </tspan><tspan fill="#4ade80">float[384]</tspan><tspan>);</tspan>
         </text>
       </g>
 
       <!-- Sync Triggers -->
       <g transform="translate(0, 132)">
-        <rect width="490" height="58" rx="6" fill="white" stroke="#7dd3fc"/>
+        <rect width="490" height="58" rx="6" fill="#1e293b"/>
         <rect width="70" height="58" rx="6" fill="#10b981"/>
         <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">TRIGGERS</text>
         <text x="35" y="35" font-family="Inter, sans-serif" font-size="7" fill="rgba(255,255,255,0.8)" text-anchor="middle">sync vec0</text>
-        <rect x="80" y="8" width="400" height="42" rx="4" fill="#1e293b"/>
-        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-          <tspan x="90" y="22" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> items_vec_ai </tspan><tspan fill="#7dd3fc">AFTER INSERT ON</tspan><tspan> items </tspan><tspan fill="#7dd3fc">BEGIN</tspan>
-          <tspan x="90" y="38">  </tspan><tspan fill="#7dd3fc">INSERT INTO</tspan><tspan> items_embedding_vec </tspan><tspan fill="#7dd3fc">VALUES</tspan><tspan> (NEW.id, NEW.embedding); </tspan><tspan fill="#7dd3fc">END</tspan><tspan>;</tspan>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="90" y="24" fill="#7dd3fc">CREATE TRIGGER</tspan><tspan> items_vec_ai </tspan><tspan fill="#7dd3fc">AFTER INSERT ON</tspan><tspan> items</tspan>
+          <tspan x="90" y="40" fill="#7dd3fc">BEGIN INSERT INTO</tspan><tspan> items_embedding_vec </tspan><tspan fill="#7dd3fc">VALUES</tspan><tspan>(NEW.id, NEW.embedding); </tspan><tspan fill="#7dd3fc">END</tspan><tspan>;</tspan>
         </text>
       </g>
     </g>
 
-    <g transform="translate(0, 343)">
+    <g transform="translate(0, 318)">
       <rect width="780" height="28" rx="6" fill="#fef3c7" stroke="#fcd34d"/>
       <text font-family="Inter, sans-serif" font-size="10" fill="#92400e">
         <tspan x="15" y="18" font-weight="600">⚠ Limitation:</tspan><tspan> sqlite-vec v0.1.x uses brute-force O(n). ANN indexing planned: </tspan><tspan fill="#0284c7" font-weight="500">github.com/asg017/sqlite-vec/issues/25</tspan>
@@ -540,20 +538,102 @@
     </g>
   </g>
 
-  <!-- ==================== SECTION 8: RLS VIOLATION MONITORING ==================== -->
-  <g transform="translate(60, 2361)">
+  <!-- ==================== SECTION 8: SPATIAL / POSTGIS ==================== -->
+  <g transform="translate(900, 793)">
+    <rect width="780" height="44" rx="10" fill="#16a34a"/>
+    <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">8. Spatial / PostGIS</text>
+    <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">PostGIS via geolite</text>
+
+    <g transform="translate(0, 58)">
+      <rect width="780" height="65" rx="10" fill="white" filter="url(#shadow)"/>
+      <rect x="15" y="10" width="26" height="26" rx="6" fill="#16a34a" opacity="0.12"/>
+      <text x="28" y="28" font-family="Inter, sans-serif" font-size="14" fill="#16a34a" text-anchor="middle" font-weight="700">G</text>
+      <foreignObject x="48" y="6" width="720" height="53">
+        <xhtml:div xmlns="http://www.w3.org/1999/xhtml" style="font-family: Inter, system-ui, sans-serif; font-size: 11px; color: #64748b; line-height: 1.55;">
+          PostGIS columns become BLOBs and ST_* calls are dispatched to the geolite SQLite extension. GiST indexes are
+          translated into <xhtml:code style="background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 10px;">CreateSpatialIndex</xhtml:code>
+          calls that build an rtree shadow table with sync triggers. Bbox-narrowable predicates like ST_Intersects are
+          rewritten to route through that rtree, so spatial queries hit a real index instead of a full table scan.
+        </xhtml:div>
+      </foreignObject>
+    </g>
+
+    <g transform="translate(0, 135)">
+      <rect width="250" height="190" rx="6" fill="#1e293b"/>
+      <use href="#icon-postgres" x="222" y="8" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="14" y="40" fill="#86efac">CREATE TABLE</tspan><tspan> places (</tspan>
+        <tspan x="14" y="56">  id </tspan><tspan fill="#fbbf24">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
+        <tspan x="14" y="72">  geom </tspan><tspan fill="#fbbf24">geometry</tspan>
+        <tspan x="14" y="88">);</tspan>
+        <tspan x="14" y="108" fill="#86efac">CREATE INDEX</tspan><tspan> places_geom_idx</tspan>
+        <tspan x="14" y="124" fill="#86efac">ON</tspan><tspan> places </tspan><tspan fill="#86efac">USING gist</tspan><tspan> (geom);</tspan>
+        <tspan x="14" y="144" fill="#86efac">SELECT</tspan><tspan> id </tspan><tspan fill="#86efac">FROM</tspan><tspan> places</tspan>
+        <tspan x="14" y="160" fill="#86efac">WHERE</tspan><tspan> </tspan><tspan fill="#fbbf24">ST_Intersects</tspan><tspan>(geom, env);</tspan>
+      </text>
+    </g>
+
+    <g transform="translate(258, 223)">
+      <path d="M0 0 L20 0" stroke="#16a34a" stroke-width="2"/>
+      <polygon points="25,0 17,-4 17,4" fill="#16a34a"/>
+    </g>
+
+    <g transform="translate(290, 135)">
+
+      <rect width="490" height="58" rx="6" fill="#1e293b"/>
+      <rect width="70" height="58" rx="6" fill="#336791"/>
+      <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">TABLE</text>
+      <text x="35" y="35" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">geometry to BLOB</text>
+      <use href="#icon-sqlite" x="458" y="18" width="22" height="22"/>
+      <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+        <tspan x="90" y="24" fill="#7dd3fc">CREATE TABLE</tspan><tspan> places (id </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
+        <tspan x="90" y="40">  geom </tspan><tspan fill="#4ade80">BLOB</tspan><tspan>) STRICT;</tspan>
+      </text>
+
+      <g transform="translate(0, 66)">
+        <rect width="490" height="58" rx="6" fill="#1e293b"/>
+        <rect width="70" height="58" rx="6" fill="#16a34a"/>
+        <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">rtree</text>
+        <text x="35" y="35" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">GiST to index</text>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="90" y="24" fill="#7dd3fc">SELECT</tspan><tspan> </tspan><tspan fill="#4ade80">CreateSpatialIndex</tspan><tspan>(</tspan><tspan fill="#fbbf24">'places'</tspan><tspan>, </tspan><tspan fill="#fbbf24">'geom'</tspan><tspan>);</tspan>
+          <tspan x="90" y="40" fill="#94a3b8">-- builds places_geom_rtree + sync triggers</tspan>
+        </text>
+      </g>
+
+      <g transform="translate(0, 132)">
+        <rect width="490" height="58" rx="6" fill="#1e293b"/>
+        <rect width="70" height="58" rx="6" fill="#0891b2"/>
+        <text x="35" y="22" font-family="Inter, sans-serif" font-size="9" font-weight="600" fill="white" text-anchor="middle">REWRITE</text>
+        <text x="35" y="35" font-family="Inter, sans-serif" font-size="8" fill="rgba(255,255,255,0.8)" text-anchor="middle">auto-routed</text>
+        <text font-family="SF Mono, monospace" font-size="7.5" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="90" y="24" fill="#7dd3fc">SELECT</tspan><tspan> id </tspan><tspan fill="#7dd3fc">FROM</tspan><tspan> places </tspan><tspan fill="#7dd3fc">WHERE</tspan><tspan> rowid </tspan><tspan fill="#7dd3fc">IN</tspan><tspan> (</tspan><tspan fill="#7dd3fc">SELECT</tspan><tspan> id</tspan>
+          <tspan x="90" y="40" fill="#7dd3fc">FROM</tspan><tspan> </tspan><tspan fill="#4ade80">places_geom_rtree</tspan><tspan> </tspan><tspan fill="#7dd3fc">WHERE</tspan><tspan> xmin&lt;=... </tspan><tspan fill="#7dd3fc">AND</tspan><tspan> xmax&gt;=...);</tspan>
+        </text>
+      </g>
+    </g>
+
+    <g transform="translate(0, 333)">
+      <rect width="780" height="44" rx="6" fill="#fef3c7" stroke="#fcd34d"/>
+      <text x="15" y="17" font-family="Inter, sans-serif" font-size="10" font-weight="600" fill="#92400e">9 bbox-narrowable predicates auto-route through the rtree shadow:</text>
+      <text x="15" y="34" font-family="SF Mono, monospace" font-size="9.5" fill="#92400e">ST_Intersects, ST_Contains, ST_Within, ST_Covers, ST_CoveredBy, ST_Equals, ST_Touches, ST_Crosses, ST_Overlaps</text>
+    </g>
+  </g>
+
+  <!-- ==================== SECTION 9: RLS VIOLATION MONITORING ==================== -->
+  <g transform="translate(900, 1191)">
     <rect width="780" height="44" rx="10" fill="#7c3aed"/>
-    <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">8. RLS Violation Monitoring</text>
+    <text x="20" y="28" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="white">9. RLS Violation Monitoring</text>
     <text x="760" y="28" font-family="Inter, sans-serif" font-size="11" fill="rgba(255,255,255,0.8)" text-anchor="end">Detect unauthorized synced rows</text>
 
     <!-- Explanation -->
     <g transform="translate(0, 58)">
-      <rect width="780" height="90" rx="10" fill="white" filter="url(#shadow)"/>
+      <rect width="780" height="70" rx="10" fill="white" filter="url(#shadow)"/>
       <rect x="15" y="10" width="26" height="26" rx="6" fill="#7c3aed" opacity="0.12"/>
       <g transform="translate(20, 14) scale(0.032)">
         <path d="M256 0c4.6 0 9.2 1 13.4 2.9L457.7 82.8c22 9.3 38.4 31 38.3 57.2c-.5 99.2-41.3 280.7-213.6 363.2c-16.7 8-36.1 8-52.8 0C57.3 420.7 16.5 239.2 16 140c-.1-26.2 16.3-47.9 38.3-57.2L242.7 2.9C246.8 1 251.4 0 256 0z" fill="#7c3aed"/>
       </g>
-      <foreignObject x="48" y="6" width="720" height="78">
+      <foreignObject x="48" y="6" width="720" height="58">
         <xhtml:div xmlns="http://www.w3.org/1999/xhtml" style="font-family: Inter, system-ui, sans-serif; font-size: 11px; color: #64748b; line-height: 1.55;">
           <xhtml:p style="margin: 0;">
             In local-first apps, a sync engine writes data directly into the local SQLite database.
@@ -568,24 +648,23 @@
     </g>
 
     <!-- Three-column layout -->
-    <g transform="translate(0, 160)">
+    <g transform="translate(0, 140)">
       <!-- Audit Table -->
       <g>
-        <rect width="245" height="248" rx="10" fill="white" filter="url(#shadow)"/>
         <rect width="245" height="32" rx="10" fill="#7c3aed"/>
         <text x="122" y="21" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="white" text-anchor="middle">Audit Table</text>
-        <rect x="12" y="44" width="221" height="155" rx="5" fill="#1e293b"/>
-        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-          <tspan x="20" y="60" fill="#c084fc">CREATE TABLE</tspan><tspan> rls_violations (</tspan>
-          <tspan x="20" y="74">  id </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
-          <tspan x="20" y="88">  table_name </tspan><tspan fill="#4ade80">TEXT</tspan><tspan> NOT NULL,</tspan>
-          <tspan x="20" y="102">  violation_type </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
-          <tspan x="20" y="116">  row_identifier </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
-          <tspan x="20" y="130">  severity </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
-          <tspan x="20" y="144">  detected_at </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
-          <tspan x="20" y="158">  details </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
-          <tspan x="20" y="172">  reported_at </tspan><tspan fill="#4ade80">TEXT</tspan>
-          <tspan x="20" y="186">) STRICT;</tspan>
+        <rect x="0" y="44" width="245" height="155" rx="5" fill="#1e293b"/>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="14" y="60" fill="#c084fc">CREATE TABLE</tspan><tspan> rls_violations (</tspan>
+          <tspan x="14" y="74">  id </tspan><tspan fill="#4ade80">INTEGER</tspan><tspan> PRIMARY KEY,</tspan>
+          <tspan x="14" y="88">  table_name </tspan><tspan fill="#4ade80">TEXT</tspan><tspan> NOT NULL,</tspan>
+          <tspan x="14" y="102">  violation_type </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
+          <tspan x="14" y="116">  row_identifier </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
+          <tspan x="14" y="130">  severity </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
+          <tspan x="14" y="144">  detected_at </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
+          <tspan x="14" y="158">  details </tspan><tspan fill="#4ade80">TEXT</tspan><tspan>,</tspan>
+          <tspan x="14" y="172">  reported_at </tspan><tspan fill="#4ade80">TEXT</tspan>
+          <tspan x="14" y="186">) STRICT;</tspan>
         </text>
         <text x="122" y="216" font-family="Inter, sans-serif" font-size="9" fill="#64748b" text-anchor="middle">Stores every detected violation with</text>
         <text x="122" y="230" font-family="Inter, sans-serif" font-size="9" fill="#64748b" text-anchor="middle">the affected table, row, and timestamp.</text>
@@ -593,23 +672,22 @@
 
       <!-- Monitoring Trigger -->
       <g transform="translate(265, 0)">
-        <rect width="245" height="248" rx="10" fill="white" filter="url(#shadow)"/>
         <rect width="245" height="32" rx="10" fill="#7c3aed"/>
         <text x="122" y="21" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="white" text-anchor="middle">Monitor Trigger</text>
-        <rect x="12" y="44" width="221" height="155" rx="5" fill="#1e293b"/>
-        <text font-family="SF Mono, monospace" font-size="7" fill="#e2e8f0">
-          <tspan x="18" y="57" fill="#c084fc">CREATE TRIGGER</tspan><tspan> t_monitor</tspan>
-          <tspan x="18" y="69" fill="#c084fc">AFTER INSERT ON</tspan><tspan> t_rls</tspan>
-          <tspan x="18" y="81" fill="#c084fc">BEGIN</tspan>
-          <tspan x="18" y="93">  </tspan><tspan fill="#c084fc">INSERT INTO</tspan><tspan> rls_violations</tspan>
-          <tspan x="18" y="105">    (table_name, severity,</tspan>
-          <tspan x="18" y="117">     row_identifier)</tspan>
-          <tspan x="18" y="129">  </tspan><tspan fill="#c084fc">SELECT</tspan><tspan> 't', </tspan><tspan fill="#fbbf24">'warning'</tspan><tspan>,</tspan>
-          <tspan x="18" y="141">    NEW.id</tspan>
-          <tspan x="18" y="153">  </tspan><tspan fill="#c084fc">WHERE NOT EXISTS</tspan><tspan> (</tspan>
-          <tspan x="18" y="165">    </tspan><tspan fill="#c084fc">SELECT</tspan><tspan> 1 </tspan><tspan fill="#c084fc">FROM</tspan><tspan> t</tspan>
-          <tspan x="18" y="177">    </tspan><tspan fill="#c084fc">WHERE</tspan><tspan> t.id = NEW.id);</tspan>
-          <tspan x="18" y="189" fill="#c084fc">END</tspan><tspan>;</tspan>
+        <rect x="0" y="44" width="245" height="155" rx="5" fill="#1e293b"/>
+        <text font-family="SF Mono, monospace" font-size="7" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="14" y="57" fill="#c084fc">CREATE TRIGGER</tspan><tspan> t_monitor</tspan>
+          <tspan x="14" y="69" fill="#c084fc">AFTER INSERT ON</tspan><tspan> t_rls</tspan>
+          <tspan x="14" y="81" fill="#c084fc">BEGIN</tspan>
+          <tspan x="14" y="93" fill="#c084fc">  INSERT INTO</tspan><tspan> rls_violations</tspan>
+          <tspan x="14" y="105">    (table_name, severity,</tspan>
+          <tspan x="14" y="117">     row_identifier)</tspan>
+          <tspan x="14" y="129" fill="#c084fc">  SELECT</tspan><tspan> 't', </tspan><tspan fill="#fbbf24">'warning'</tspan><tspan>,</tspan>
+          <tspan x="14" y="141">    NEW.id</tspan>
+          <tspan x="14" y="153" fill="#c084fc">  WHERE NOT EXISTS</tspan><tspan> (</tspan>
+          <tspan x="14" y="165" fill="#c084fc">    SELECT</tspan><tspan> 1 </tspan><tspan fill="#c084fc">FROM</tspan><tspan> t</tspan>
+          <tspan x="14" y="177" fill="#c084fc">    WHERE</tspan><tspan> t.id = NEW.id);</tspan>
+          <tspan x="14" y="189" fill="#c084fc">END</tspan><tspan>;</tspan>
         </text>
         <text x="122" y="216" font-family="Inter, sans-serif" font-size="9" fill="#64748b" text-anchor="middle">Fires after each synced row. Logs a</text>
         <text x="122" y="230" font-family="Inter, sans-serif" font-size="9" fill="#64748b" text-anchor="middle">violation if the row fails the RLS check.</text>
@@ -617,18 +695,17 @@
 
       <!-- Violations View -->
       <g transform="translate(530, 0)">
-        <rect width="250" height="248" rx="10" fill="white" filter="url(#shadow)"/>
         <rect width="250" height="32" rx="10" fill="#7c3aed"/>
         <text x="125" y="21" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="white" text-anchor="middle">Violations View</text>
-        <rect x="12" y="44" width="226" height="155" rx="5" fill="#1e293b"/>
-        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0">
-          <tspan x="20" y="64" fill="#c084fc">CREATE VIEW</tspan>
-          <tspan x="20" y="84">  t_rls_violations </tspan><tspan fill="#c084fc">AS</tspan>
-          <tspan x="20" y="104" fill="#c084fc">SELECT</tspan><tspan> * </tspan><tspan fill="#c084fc">FROM</tspan><tspan> t_rls</tspan>
-          <tspan x="20" y="124" fill="#c084fc">WHERE NOT EXISTS</tspan><tspan> (</tspan>
-          <tspan x="20" y="144">  </tspan><tspan fill="#c084fc">SELECT</tspan><tspan> 1 </tspan><tspan fill="#c084fc">FROM</tspan><tspan> t</tspan>
-          <tspan x="20" y="164">  </tspan><tspan fill="#c084fc">WHERE</tspan><tspan> t_rls.id = t.id</tspan>
-          <tspan x="20" y="184">);</tspan>
+        <rect x="0" y="44" width="250" height="155" rx="5" fill="#1e293b"/>
+        <text font-family="SF Mono, monospace" font-size="8" fill="#e2e8f0" xml:space="preserve">
+          <tspan x="14" y="64" fill="#c084fc">CREATE VIEW</tspan>
+          <tspan x="14" y="84">  t_rls_violations </tspan><tspan fill="#c084fc">AS</tspan>
+          <tspan x="14" y="104" fill="#c084fc">SELECT</tspan><tspan> * </tspan><tspan fill="#c084fc">FROM</tspan><tspan> t_rls</tspan>
+          <tspan x="14" y="124" fill="#c084fc">WHERE NOT EXISTS</tspan><tspan> (</tspan>
+          <tspan x="14" y="144" fill="#c084fc">  SELECT</tspan><tspan> 1 </tspan><tspan fill="#c084fc">FROM</tspan><tspan> t</tspan>
+          <tspan x="14" y="164" fill="#c084fc">  WHERE</tspan><tspan> t_rls.id = t.id</tspan>
+          <tspan x="14" y="184">);</tspan>
         </text>
         <text x="125" y="216" font-family="Inter, sans-serif" font-size="9" fill="#64748b" text-anchor="middle">Query this view to find all synced rows</text>
         <text x="125" y="230" font-family="Inter, sans-serif" font-size="9" fill="#64748b" text-anchor="middle">the current user should not access.</text>
@@ -636,7 +713,7 @@
     </g>
 
     <!-- Mode comparison -->
-    <g transform="translate(0, 420)">
+    <g transform="translate(0, 400)">
       <rect width="385" height="32" rx="6" fill="#fef3c7" stroke="#fcd34d"/>
       <text x="15" y="21" font-family="Inter, sans-serif" font-size="10" fill="#92400e">
         <tspan font-weight="600">Monitor Mode</tspan><tspan>: logs with severity='warning', continues</tspan>
@@ -651,8 +728,8 @@
     </g>
   </g>
 
-  <!-- ==================== SECTION 9: SUPPORT STATUS ==================== -->
-  <g transform="translate(60, 2831)">
+  <!-- ==================== SUPPORT STATUS ==================== -->
+  <g transform="translate(480, 1660)">
     <!-- Future Work box -->
     <rect width="380" height="130" rx="10" fill="white" filter="url(#shadow)"/>
     <rect width="380" height="38" rx="10" fill="#f59e0b"/>
@@ -664,8 +741,8 @@
       <!-- Column 1 -->
       <g>
         <circle cx="8" cy="8" r="6" fill="#fef3c7"/>
-        <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">PostGIS</text>
-        <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">geolite</text>
+        <text x="20" y="11" font-family="Inter, sans-serif" font-size="10" font-weight="500" fill="#1e293b">JSONB operators</text>
+        <text x="20" y="22" font-family="Inter, sans-serif" font-size="9" fill="#94a3b8">@&gt;, ?, ?|</text>
       </g>
       <g transform="translate(0, 34)">
         <circle cx="8" cy="8" r="6" fill="#fef3c7"/>
@@ -724,6 +801,6 @@
   </g>
 
   <!-- ==================== FOOTER ==================== -->
-  <text x="450" y="2981" font-family="Inter, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">github.com/LucaCappelletti94/pg2sqlite · February 2026</text>
+  <text x="870" y="1820" font-family="Inter, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">github.com/LucaCappelletti94/pg2sqlite · May 2026</text>
 
 </svg>
