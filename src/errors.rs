@@ -19,9 +19,6 @@ pub enum Error {
     /// Error that may occur during git operations.
     #[error("Git error: {0}")]
     GitError(String),
-    /// Error when a function is not available in the schema.
-    #[error("Undefined function: {0}")]
-    UndefinedFunction(String),
     /// Error when a feature is not supported in `PostgreSQL`.
     #[error("Unknown PostgreSQL feature: {0}")]
     UnknownPostgresFeature(String),

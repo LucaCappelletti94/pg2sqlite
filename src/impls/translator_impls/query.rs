@@ -393,61 +393,63 @@ fn aggregate_function_name(func: &Function) -> Option<String> {
     func.name.0.last().and_then(|part| part.as_ident()).map(|ident| ident.value.to_lowercase())
 }
 
+/// Aggregate function names that mark an `Expr::Function` as an aggregate
+/// (and not a scalar) when no `OVER` clause is present.
+const AGGREGATE_NAMES: &[&str] = &[
+    "sum",
+    "count",
+    "avg",
+    "min",
+    "max",
+    "total",
+    "group_concat",
+    "string_agg",
+    "json_group_array",
+    "json_group_object",
+    "array_agg",
+    "bool_and",
+    "bool_or",
+    "every",
+    "json_agg",
+    "jsonb_agg",
+    "json_object_agg",
+    "jsonb_object_agg",
+    "bit_and",
+    "bit_or",
+    "stddev",
+    "stddev_pop",
+    "stddev_samp",
+    "variance",
+    "var_pop",
+    "var_samp",
+    "corr",
+    "covar_pop",
+    "covar_samp",
+    "percentile_cont",
+    "percentile_disc",
+    "mode",
+    "regr_slope",
+    "regr_intercept",
+    "regr_r2",
+    "regr_avgx",
+    "regr_avgy",
+    "regr_sxx",
+    "regr_syy",
+    "regr_sxy",
+    "regr_count",
+    "xmlagg",
+    "range_agg",
+    "multirange_agg",
+];
+
 fn is_aggregate_expression(expr: &Expr) -> bool {
     match expr {
         Expr::Function(func) => {
             if func.over.is_some() {
                 return false;
             }
-            matches!(
-                aggregate_function_name(func).as_deref(),
-                Some(
-                    "sum"
-                        | "count"
-                        | "avg"
-                        | "min"
-                        | "max"
-                        | "total"
-                        | "group_concat"
-                        | "string_agg"
-                        | "json_group_array"
-                        | "json_group_object"
-                        | "array_agg"
-                        | "bool_and"
-                        | "bool_or"
-                        | "every"
-                        | "json_agg"
-                        | "jsonb_agg"
-                        | "json_object_agg"
-                        | "jsonb_object_agg"
-                        | "bit_and"
-                        | "bit_or"
-                        | "stddev"
-                        | "stddev_pop"
-                        | "stddev_samp"
-                        | "variance"
-                        | "var_pop"
-                        | "var_samp"
-                        | "corr"
-                        | "covar_pop"
-                        | "covar_samp"
-                        | "percentile_cont"
-                        | "percentile_disc"
-                        | "mode"
-                        | "regr_slope"
-                        | "regr_intercept"
-                        | "regr_r2"
-                        | "regr_avgx"
-                        | "regr_avgy"
-                        | "regr_sxx"
-                        | "regr_syy"
-                        | "regr_sxy"
-                        | "regr_count"
-                        | "xmlagg"
-                        | "range_agg"
-                        | "multirange_agg"
-                )
-            )
+            aggregate_function_name(func)
+                .is_some_and(|name| AGGREGATE_NAMES.contains(&name.as_str()))
         }
         Expr::BinaryOp { left, right, .. } => {
             is_aggregate_expression(left) || is_aggregate_expression(right)
