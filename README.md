@@ -336,13 +336,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Migration loading
 
-| Method                              | Description                                                  |
-| ----------------------------------- | ------------------------------------------------------------ |
-| `.sql(str)`                         | Parse a SQL string                                           |
-| `.file(path)`                       | Read and parse a SQL file                                    |
-| `Pg2Sqlite::ups(dir)`               | Recursively load all `up.sql` migration files (sorted)       |
-| `Pg2Sqlite::ups_until(dir, stop)`   | Load migrations up to a specific file                        |
-| `Pg2Sqlite::from_git(url)`          | Clone a git repository and load its `up.sql` migrations      |
+| Method                              | Description                                                  | Requires `std` feature |
+| ----------------------------------- | ------------------------------------------------------------ | :--------------------: |
+| `.sql(str)`                         | Parse a SQL string                                           | no                     |
+| `.file(path)`                       | Read and parse a SQL file                                    | yes                    |
+| `Pg2Sqlite::ups(dir)`               | Recursively load all `up.sql` migration files (sorted)       | yes                    |
+| `Pg2Sqlite::ups_until(dir, stop)`   | Load migrations up to a specific file                        | yes                    |
+| `Pg2Sqlite::from_git(url)`          | Clone a git repository and load its `up.sql` migrations      | yes                    |
+
+The filesystem- and git-backed loaders are gated behind the default-on `std` feature because they depend on `std::fs`, `git2`, and `tempfile`. The string entry point and the translator pipeline are alloc-clean and work under `--no-default-features` (see [WASM / no_std support](#wasm--no_std-support)).
+
+### WASM / no_std support
+
+pg2sqlite compiles for `wasm32-unknown-unknown` as a `no_std + alloc` crate, so the same translator can run in a browser tab — paste PostgreSQL on the left, get SQLite on the right, hand the output to `sql.js` or `sqlite-wasm` for in-page execution — or on any embedded target that ships an `alloc` allocator.
+
+```toml
+[dependencies]
+pg2sqlite = { version = "0.1", default-features = false }
+```
+
+What `--no-default-features` strips:
+
+- Filesystem and git loaders (`Pg2Sqlite::file`, `ups`, `ups_until`, `from_git`) — see the table above.
+- The `Error::IoError` variant.
+- Internal `std::path` / `std::fs` / `git2` / `tempfile` references (everything else is `core::*` / `alloc::*`).
+
+What stays available:
+
+- Full forward translation: `.sql(...)` → `.translate(...)` / `.translate_to_sql(...)`.
+- Reverse translation: `.reverse_translate(...)` / `.reverse_sql(...)`.
+- Schema construction: `.build_schema()`.
+- All RLS, FTS5, vector-search, PostGIS, and PL/pgSQL trigger translation.
+
+> [!NOTE]
+> Until the upstream PR adding `no_std` support to `sqlparser`'s `visitor` feature merges and the patched releases ship, WASM consumers need a `[patch.crates-io]` entry that redirects `sqlparser` and `sqlparser_derive` to the no_std-compatible fork. See [`docs/sqlparser_derive_no_std_fix.md`](docs/sqlparser_derive_no_std_fix.md) for the bug writeup, the two-line `::std` → `::core` fix, and the patch-table snippet to copy into your own `Cargo.toml`.
 
 ## Full RLS example
 
@@ -390,20 +417,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Performance
 
-Measured with Criterion on an optimized release build (`cargo bench -- vs_polyglot`).
-pg2sqlite performs full semantic translation. polyglot-sql performs syntactic rewriting.
+Measured with Criterion on an optimized release build (`cargo bench --bench translation vs_polyglot`) against `polyglot-sql 0.3.11`. pg2sqlite performs full semantic translation. polyglot-sql performs syntactic rewriting.
 
-| Input                 | pg2sqlite | polyglot-sql | speedup  |
-| --------------------- | --------: | -----------: | -------: |
-| `select_simple`       |  19.6 µs  |   56.7 µs    | **2.9×** |
-| `select_join`         |  37.5 µs  |   69.5 µs    | **1.9×** |
-| `select_subquery`     |  28.3 µs  |   62.9 µs    | **2.2×** |
-| `select_cte`          |  33.8 µs  |   67.7 µs    | **2.0×** |
-| `insert_simple`       |  16.0 µs  |   54.4 µs    | **3.4×** |
-| `insert_on_conflict`  |  27.2 µs  |   65.6 µs    | **2.4×** |
-| `update_multi_column` |  19.3 µs  |   60.9 µs    | **3.2×** |
-| `delete_subquery`     |  25.4 µs  |   60.3 µs    | **2.4×** |
-| `create_table_ddl`    |  24.3 µs  |   57.8 µs    | **2.4×** |
+| Input                 | pg2sqlite | polyglot-sql | polyglot is      |
+| --------------------- | --------: | -----------: | ---------------: |
+| `select_simple`       |  21.9 µs  |   33.5 µs    | **1.53× slower** |
+| `select_join`         |  41.7 µs  |   52.7 µs    | **1.26× slower** |
+| `select_subquery`     |  34.1 µs  |   47.5 µs    | **1.39× slower** |
+| `select_cte`          |  37.9 µs  |   73.1 µs    | **1.93× slower** |
+| `insert_simple`       |  23.3 µs  |   27.1 µs    | **1.16× slower** |
+| `insert_on_conflict`  |  28.3 µs  |   38.6 µs    | **1.36× slower** |
+| `update_multi_column` |  21.1 µs  |   39.4 µs    | **1.87× slower** |
+| `delete_subquery`     |  30.9 µs  |   44.4 µs    | **1.44× slower** |
+| `create_table_ddl`    |  25.4 µs  |   29.2 µs    | **1.15× slower** |
+| **Mean**              | **29.4 µs** | **42.8 µs** | **1.46×**        |
+
+On correctness, the same `cargo run --example compare_polyglot` benchmark across **87 cases** spanning function renames, NULL semantics, AT TIME ZONE, DDL types, aggregates, JSON, pgvector, window functions, DML, RLS, PL/pgSQL triggers, JSON operators, string functions, extended DDL, date/time, PG-specific idioms, role/permission DDL, and GIN/FTS indices reports (runtime harness loads `sqlite-vec` so pgvector translations execute):
+
+| Tool                | ✓ runs in SQLite | ✗ runtime error | — translation error |
+| ------------------- | ---------------: | --------------: | ------------------: |
+| **pg2sqlite**       | **63 (72%)**     | **0**           | 21                  |
+| **polyglot 0.3.11** | 44 (51%)         | 34              | 4                   |
+
+The headline gap is **runtime errors**: polyglot accepts ~15 cases at translation time (`FLOOR`, `CEIL`, `BOOL_AND`, `STDDEV`, `ARRAY_AGG`, `SPLIT_PART`, `REGEXP_REPLACE`, `TO_CHAR`, `PERCENTILE_CONT`, `BIT_AND`, pgvector `<->`, `AT TIME ZONE`, PL/pgSQL `IF/ELSIF/ELSE`, `RAISE EXCEPTION`, ...) by passing them through to SQLite verbatim, where they then fail at execution. pg2sqlite errors at translation time with `Error::UnsupportedSQLiteFeature(...)` so callers see the failure with full context instead of a downstream `no such function: FLOOR`. pg2sqlite emits **zero runtime errors** across the whole corpus, enforced by `tests/test_json_build_silent_passthrough.rs` and friends.
 
 ## Why pg2sqlite?
 
@@ -419,7 +455,7 @@ Most PostgreSQL-to-SQLite translators are best-effort: they pass unknown constru
 | Reverse translation (SQLite → PostgreSQL)           | Only DML  | partial               | partial               |
 | `GRANT` / `REVOKE` / `CREATE ROLE` silently skipped | ✓         | ✗ (emits invalid SQL) | ✗ (emits invalid SQL) |
 
-See [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs) for a full side-by-side comparison across 80+ test cases including runtime execution checks.
+See [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs) for the full side-by-side comparison across all 87 test cases (categories A–W) including runtime execution against an in-memory SQLite database.
 
 ## License
 

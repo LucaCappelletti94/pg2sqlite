@@ -16,7 +16,7 @@ thiserror = { version = "2.0", default-features = false }
 criterion = { version = "0.5", features = ["html_reports"] }
 diesel = { version = "2.3.9", features = ["sqlite"] }
 insta = "1.47.2"
-polyglot-sql = "0.1.7"
+polyglot-sql = "0.3.11"
 rosetta-uuid = { version = "0.1.2", features = ["diesel", "sqlite"] }
 rusqlite = { version = "0.35", features = ["bundled"] }
 sqlite-vec = "0.1.9"

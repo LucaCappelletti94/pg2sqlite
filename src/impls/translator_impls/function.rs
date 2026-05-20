@@ -92,6 +92,7 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     ("jsonb_agg", "json_group_array"),
     ("json_object_agg", "json_group_object"),
     ("jsonb_object_agg", "json_group_object"),
+    ("json_build_array", "json_array"),
     ("json_build_object", "json_object"),
     ("btrim", "trim"),
     ("jsonb_array_length", "json_array_length"),

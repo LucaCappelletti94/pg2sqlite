@@ -1254,12 +1254,13 @@ dependencies = [
 
 [[package]]
 name = "polyglot-sql"
-version = "0.1.7"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0fce2c1c99daf415558d4b931284ec11219def5f83feaca28b552b76e8014c0"
+checksum = "8464ec03a4ab3e35f73433e341fad8e8cc3f748cc7f3ceb958175ce120cb1672"
 dependencies = [
  "serde",
  "serde_json",
+ "stacker",
  "thiserror 1.0.69",
  "unicode-segmentation",
 ]

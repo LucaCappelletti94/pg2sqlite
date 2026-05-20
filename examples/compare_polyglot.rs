@@ -30,7 +30,25 @@
 
 use pg2sqlite::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite};
 use polyglot_sql::{DialectType, transpile};
-use rusqlite::Connection;
+use rusqlite::{Connection, ffi::sqlite3_auto_extension};
+use sqlite_vec::sqlite3_vec_init;
+
+/// Register sqlite-vec globally so every `Connection::open_in_memory()` in
+/// this benchmark has the `vec_distance_*` family available. Must be called
+/// once before the first connection is opened. Mirrors the pattern in
+/// `tests/test_vector_semantic.rs::register_sqlite_vec`.
+fn register_sqlite_vec() {
+    unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite3_vec_init as *const ())));
+    }
+}
 
 // ── Sentinel used when there is nothing to translate or test ─────────────────
 
@@ -67,16 +85,22 @@ struct TranslationRow {
 
 /// Schema pre-populated before every non-DDL test so SELECT/UPDATE/DELETE have
 /// tables and columns to reference.
+// `id` is declared `INTEGER PRIMARY KEY` (rather than just `id`) so that
+// `INSERT ... ON CONFLICT (id) DO UPDATE` cases (S2 and friends) find a
+// uniqueness constraint to bind to. The other columns stay
+// affinity-less so the catch-all keeps accepting arbitrary literal
+// shapes from the test corpus.
 const CATCH_ALL_SCHEMA: &str = "
     CREATE TABLE t (
-        id, a, b, c, str, x, ts, name, val, k, v,
+        id INTEGER PRIMARY KEY,
+        a, b, c, str, x, ts, name, val, k, v,
         active, created_at, updated_at, type, owner,
         department, salary, qty, data
     );
-    CREATE TABLE emp  (id, department, salary);
-    CREATE TABLE events (id, created_at);
-    CREATE TABLE log  (id, val);
-    CREATE TABLE mv   (id, qty);
+    CREATE TABLE emp    (id INTEGER PRIMARY KEY, department, salary);
+    CREATE TABLE events (id INTEGER PRIMARY KEY, created_at);
+    CREATE TABLE log    (id INTEGER PRIMARY KEY, val);
+    CREATE TABLE mv     (id INTEGER PRIMARY KEY, qty);
 ";
 
 // ── Forward translators ──────────────────────────────────────────────────────
@@ -308,6 +332,14 @@ fn print_row(case: &Case, row: &TranslationRow) {
 
 #[allow(clippy::too_many_lines)]
 fn main() {
+    // Register sqlite-vec as an auto-extension BEFORE the first
+    // `Connection::open_in_memory()` below, so every connection that the
+    // runtime harness opens has `vec_distance_L2`, `vec_distance_cosine`,
+    // `vec_distance_hamming`, and the `vec0` virtual-table family available.
+    // Without this the pgvector cases (J1-J3) fail at runtime even though
+    // the translation is correct.
+    register_sqlite_vec();
+
     // Print the bundled SQLite version so the reader knows what "✓" means.
     let sqlite_ver: String = {
         let conn = Connection::open_in_memory().unwrap();

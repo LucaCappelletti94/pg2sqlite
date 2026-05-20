@@ -272,3 +272,108 @@ fn split_part_still_errors() {
     let err = translate_err("SELECT SPLIT_PART(col, ',', 1) FROM t;");
     assert!(!err.is_empty(), "Expected error for SPLIT_PART, got empty");
 }
+
+// ---------------------------------------------------------------------------
+// Audit follow-up: lock in the "expected error" behavior for cases that
+// surfaced in `examples/compare_polyglot.rs` as pg2sqlite translation
+// errors but had no unit test enforcing that outcome. If any of these
+// quietly regressed to a passthrough, the translated SQL would compile
+// but fail at SQLite runtime - the exact failure mode the no-silent-
+// passthrough invariant rules out (see
+// `tests/test_json_build_silent_passthrough.rs`).
+// ---------------------------------------------------------------------------
+
+/// `array_agg` is fundamentally untranslatable: SQLite has no array type.
+/// The translator must fail rather than emit a passthrough that errors
+/// downstream with `no such function: ARRAY_AGG`.
+#[test]
+fn array_agg_must_fail_with_clear_error() {
+    let sql = format!("{SIMPLE_TABLE}\nSELECT ARRAY_AGG(val) FROM t;");
+    let err = translate_err(&sql);
+    assert!(
+        err.to_lowercase().contains("array_agg"),
+        "error must name the offending function, got: {err}"
+    );
+}
+
+/// `ARRAY_AGG(... ORDER BY ...)` shares the same root cause as
+/// [`array_agg_must_fail_with_clear_error`] (no SQLite array type); the
+/// `WITHIN GROUP`-style ordered form must error identically rather than
+/// stripping the ORDER BY and producing wrong output.
+#[test]
+fn array_agg_with_order_by_must_fail() {
+    let sql = "CREATE TABLE t (name TEXT);\nSELECT ARRAY_AGG(name ORDER BY name) FROM t;";
+    let err = translate_err(sql);
+    assert!(
+        err.to_lowercase().contains("array_agg"),
+        "error must name the offending function, got: {err}"
+    );
+}
+
+/// `LPAD` is not part of standard SQLite. We refuse to translate it
+/// rather than emit a passthrough call that fails at runtime; the error
+/// message must direct callers to a `printf`-based workaround.
+#[test]
+fn lpad_must_fail_with_workaround_hint() {
+    let sql = "CREATE TABLE t (str TEXT);\nSELECT LPAD(str, 10, '0') FROM t;";
+    let err = translate_err(sql);
+    assert!(err.to_lowercase().contains("lpad"), "error must name LPAD, got: {err}");
+    assert!(
+        err.to_lowercase().contains("printf") || err.to_lowercase().contains("substr"),
+        "error should hint at a printf/substr workaround, got: {err}"
+    );
+}
+
+/// Symmetric to LPAD: RPAD must error with a workaround hint rather than
+/// passing through to an undefined SQLite function.
+#[test]
+fn rpad_must_fail_with_workaround_hint() {
+    let sql = "CREATE TABLE t (str TEXT);\nSELECT RPAD(str, 10, ' ') FROM t;";
+    let err = translate_err(sql);
+    assert!(err.to_lowercase().contains("rpad"), "error must name RPAD, got: {err}");
+    assert!(
+        err.to_lowercase().contains("printf") || err.to_lowercase().contains("substr"),
+        "error should hint at a printf/substr workaround, got: {err}"
+    );
+}
+
+/// `INITCAP` has no built-in SQLite equivalent (Unicode title-casing is
+/// not trivial); the translator should refuse with an
+/// application-level-handling hint rather than silently dropping the
+/// transformation or passing through to an undefined function.
+#[test]
+fn initcap_must_fail() {
+    let sql = "CREATE TABLE t (str TEXT);\nSELECT INITCAP(str) FROM t;";
+    let err = translate_err(sql);
+    assert!(err.to_lowercase().contains("initcap"), "error must name INITCAP, got: {err}");
+}
+
+/// `nextval('seq')` (PostgreSQL sequences) has no SQLite analogue. The
+/// translator must error rather than emit a passthrough that fails at
+/// runtime, and the message must reference sequences or the
+/// `INTEGER PRIMARY KEY AUTOINCREMENT` alternative.
+#[test]
+fn nextval_must_fail() {
+    let err = translate_err("SELECT nextval('my_seq');");
+    assert!(
+        err.to_lowercase().contains("nextval") || err.to_lowercase().contains("sequence"),
+        "error must reference nextval/sequence, got: {err}"
+    );
+}
+
+/// `CREATE INDEX ... USING GIN (<non-tsvector-expr>)` is not translatable
+/// because pg2sqlite only knows how to route GIN-on-`to_tsvector()` to
+/// FTS5. A jsonb / bare-column GIN must error rather than emit invalid
+/// SQLite DDL.
+#[test]
+fn gin_index_on_non_tsvector_must_fail() {
+    let sql = "
+        CREATE TABLE docs (id INT PRIMARY KEY, data JSONB);
+        CREATE INDEX docs_data ON docs USING GIN (data);
+    ";
+    let err = translate_err(sql);
+    assert!(
+        err.to_lowercase().contains("gin") || err.to_lowercase().contains("to_tsvector"),
+        "error must reference GIN or to_tsvector, got: {err}"
+    );
+}
