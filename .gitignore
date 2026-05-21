@@ -31,3 +31,6 @@ tarpaulin-report.json
 
 # Playwright MCP session artifacts
 .playwright-mcp/
+
+# Dioxus bundle output for the browser playground
+examples/web-playground/dist/

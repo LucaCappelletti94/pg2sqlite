@@ -1,0 +1,234 @@
+//! Collapsed `<details>` form exposing the live `WebOptions`.
+//!
+//! Most users never open this: the sample picker pre-configures the
+//! options it needs, and the defaults work for typical schemas. Power
+//! users who need a UUID rep, RLS audit table name, or a custom
+//! session-variable mapping open the details and tweak from there.
+//!
+//! The form binds to the playground's mutable `WebOptions`
+//! shadow (`state.rs`) rather than `Pg2SqliteOptions` directly, since
+//! the upstream type has no public unsetters and the form needs to be
+//! able to clear knobs.
+
+use dioxus::prelude::*;
+use pg2sqlite::prelude::{SessionVariableMapping, UuidRepresentation};
+
+use crate::state::AppState;
+
+#[component]
+pub fn OptionsPanel() -> Element {
+    rsx! {
+        details { class: "options-panel",
+            summary { "Advanced options" }
+            div { class: "options-grid",
+                UuidRepRow {}
+                UuidFunctionRow {}
+                GeoliteRow {}
+                RlsAuditRow {}
+                SessionVarsRow {}
+            }
+        }
+    }
+}
+
+#[component]
+fn UuidRepRow() -> Element {
+    let state: AppState = use_context();
+    let current = state.options.read().uuid_representation;
+
+    let set_rep = move |rep: Option<UuidRepresentation>| {
+        let mut options = state.options;
+        let mut opts = options.read().clone();
+        opts.uuid_representation = rep;
+        options.set(opts);
+    };
+
+    rsx! {
+        div { class: "options-row",
+            span { class: "options-label", "UUID representation" }
+            div { class: "options-control",
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "uuid-rep",
+                        checked: current.is_none(),
+                        onchange: move |_| set_rep(None),
+                    }
+                    " (none - errors on UUID columns)"
+                }
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "uuid-rep",
+                        checked: current == Some(UuidRepresentation::Blob),
+                        onchange: move |_| set_rep(Some(UuidRepresentation::Blob)),
+                    }
+                    " Blob (16 bytes)"
+                }
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "uuid-rep",
+                        checked: current == Some(UuidRepresentation::Text),
+                        onchange: move |_| set_rep(Some(UuidRepresentation::Text)),
+                    }
+                    " Text (36-char string)"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn UuidFunctionRow() -> Element {
+    let state: AppState = use_context();
+    let current = state.options.read().uuid_function_name.clone();
+
+    rsx! {
+        div { class: "options-row",
+            span { class: "options-label", "UUID function name" }
+            div { class: "options-control",
+                input {
+                    r#type: "text",
+                    placeholder: "uuidv7",
+                    value: current,
+                    oninput: move |evt| {
+                        let mut options = state.options;
+                        let mut opts = options.read().clone();
+                        opts.uuid_function_name = evt.value();
+                        options.set(opts);
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn GeoliteRow() -> Element {
+    let state: AppState = use_context();
+    let enabled = state.options.read().geolite_enabled;
+
+    rsx! {
+        div { class: "options-row",
+            span { class: "options-label", "geolite (PostGIS)" }
+            div { class: "options-control",
+                label {
+                    input {
+                        r#type: "checkbox",
+                        checked: enabled,
+                        onchange: move |evt| {
+                            let mut options = state.options;
+                            let mut opts = options.read().clone();
+                            opts.geolite_enabled = evt.value() == "true";
+                            options.set(opts);
+                        },
+                    }
+                    " Enable ST_* / GEOMETRY routing to geolite"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RlsAuditRow() -> Element {
+    let state: AppState = use_context();
+    let current = state.options.read().rls_audit_table_name.clone();
+
+    rsx! {
+        div { class: "options-row",
+            span { class: "options-label", "RLS audit table" }
+            div { class: "options-control",
+                input {
+                    r#type: "text",
+                    placeholder: "rls_violations",
+                    value: current,
+                    oninput: move |evt| {
+                        let mut options = state.options;
+                        let mut opts = options.read().clone();
+                        opts.rls_audit_table_name = evt.value();
+                        options.set(opts);
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Lists the current session-variable mappings and lets the user add
+/// or remove `current_setting('<pattern>') -> <sqlite_fn>()` pairs.
+#[component]
+fn SessionVarsRow() -> Element {
+    let state: AppState = use_context();
+    let mappings: Vec<SessionVariableMapping> = state.options.read().session_variables.clone();
+    let mut new_pattern = use_signal(String::new);
+    let mut new_function = use_signal(String::new);
+
+    rsx! {
+        div { class: "options-row",
+            span { class: "options-label", "Session variables" }
+            div { class: "options-control session-vars",
+                if mappings.is_empty() {
+                    span { class: "options-muted", "None configured." }
+                }
+                for (idx, mapping) in mappings.iter().enumerate() {
+                    div { class: "session-var-row",
+                        code { "current_setting('{mapping.pg_pattern.to_string()}')" }
+                        span { " → " }
+                        code { "{mapping.sqlite_function}()" }
+                        button {
+                            r#type: "button",
+                            class: "session-var-remove",
+                            title: "Remove this mapping",
+                            onclick: move |_| {
+                                let mut options = state.options;
+                                let mut opts = options.read().clone();
+                                opts.session_variables.remove(idx);
+                                options.set(opts);
+                            },
+                            "×"
+                        }
+                    }
+                }
+                div { class: "session-var-form",
+                    input {
+                        r#type: "text",
+                        placeholder: "app.user_id",
+                        value: new_pattern(),
+                        oninput: move |evt| new_pattern.set(evt.value()),
+                    }
+                    input {
+                        r#type: "text",
+                        placeholder: "current_app_user",
+                        value: new_function(),
+                        oninput: move |evt| new_function.set(evt.value()),
+                    }
+                    button {
+                        r#type: "button",
+                        disabled: new_pattern().is_empty() || new_function().is_empty(),
+                        onclick: move |_| {
+                            let pattern = new_pattern();
+                            let function = new_function();
+                            if pattern.is_empty() || function.is_empty() {
+                                return;
+                            }
+                            let mut options = state.options;
+                            let mut opts = options.read().clone();
+                            opts.session_variables.push(
+                                SessionVariableMapping::current_setting(
+                                    pattern.clone(),
+                                    function.clone(),
+                                ),
+                            );
+                            options.set(opts);
+                            new_pattern.set(String::new());
+                            new_function.set(String::new());
+                        },
+                        "Add"
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,7 @@
+# Default to wasm32-unknown-unknown for plain `cargo check`, `cargo build`,
+# and IDE integrations. The playground depends on `sqlite-wasm-rs`, whose
+# build.rs compiles SQLite's C code against a wasm-only shim header; it
+# does not support native targets. `dx serve --platform web` overrides
+# this with its own target arg, so dev flow is unaffected.
+[build]
+target = "wasm32-unknown-unknown"

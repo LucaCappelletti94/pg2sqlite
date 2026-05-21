@@ -1,0 +1,96 @@
+[package]
+name = "pg2sqlite-web-playground"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Browser playground for pg2sqlite: paste PostgreSQL, see SQLite, run it in-page."
+
+# Kept out of the main pg2sqlite workspace on purpose. Dioxus drags in
+# hundreds of transitive crates that would slow down workspace
+# precommit / audit; isolating this here mirrors the
+# `geolite/examples/web-demo` pattern.
+[workspace]
+
+[[bin]]
+name = "pg2sqlite-web-playground"
+path = "src/main.rs"
+
+[dependencies]
+# pg2sqlite as a path-dep so the playground always tracks live source.
+# `default-features = false` drops git2 / tempfile / std::fs and lets
+# the crate build for wasm32-unknown-unknown. The `[patch.crates-io]`
+# table in pg2sqlite's Cargo.toml routes sqlparser / sqlparser_derive
+# through the no_std-compatible fork; we inherit that patch via the
+# path dep.
+pg2sqlite = { path = "../..", default-features = false }
+
+# Dioxus 0.7 web framework.
+dioxus = { version = "0.7", features = ["web"] }
+
+# Syntax-highlighted SQL editor. `dioxus-code` provides the
+# highlighter behind per-language features so we only ship the SQL
+# grammar. Build note: these crates pull in `arborium-tree-sitter`,
+# whose C grammars don't link cleanly under cargo's `dev` profile
+# (undefined `stderr` symbol from the wasm-shim header set). They
+# link fine under the `release` profile, which is what `dx bundle`
+# and `dx build --release` use. Recommended dev flow: `dx serve
+# --release` for the playground - debug iteration is fine because
+# the playground's Rust code is small; the time cost is in the
+# `arborium-*` C build, which only happens once.
+dioxus-code = { version = "0.1", default-features = false, features = ["lang-sql"] }
+dioxus-code-editor = "0.1"
+
+# Font Awesome icons as inline SVG components.
+dioxus-free-icons = { version = "0.10", features = ["font-awesome-solid", "font-awesome-brands"] }
+
+# WASM-side SQLite + Diesel SQLite backend.
+diesel = { version = "2", default-features = false, features = ["sqlite"] }
+sqlite-wasm-rs = "0.5"
+
+# Browser interop.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "Clipboard",
+    "Navigator",
+    "Element",
+    "DomRect",
+    "Blob",
+    "BlobPropertyBag",
+    "HtmlAnchorElement",
+    "Url",
+    "Performance",
+] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+# Logging.
+log = "0.4"
+console_log = { version = "1", features = ["color"] }
+console_error_panic_hook = "0.1"
+
+# `[patch.crates-io]` doesn't inherit across workspace boundaries.
+# pg2sqlite (one level up) has the same patch; we duplicate it here
+# because this crate is intentionally *not* a workspace member of
+# pg2sqlite (Dioxus's transitive dep graph would slow the main
+# workspace's precommit / audit). When the upstream PR adding no_std
+# support to sqlparser's `visitor` feature merges and patched releases
+# ship, both copies of this block can be deleted.
+[patch.crates-io]
+sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "b14285d1d03e8f859f403b5430843c933531be9e" }
+sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "b14285d1d03e8f859f403b5430843c933531be9e" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+# Strip DWARF info. dx 0.7 defaults to embedding debug symbols in WASM
+# (--debug-symbols=true), which makes binaryen abort during wasm-opt
+# with "compile unit size was incorrect". Stripping in the linker
+# keeps wasm-opt happy without losing release-grade optimisation.
+strip = "debuginfo"
+debug = false

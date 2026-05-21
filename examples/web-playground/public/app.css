@@ -1,0 +1,652 @@
+/* pg2sqlite web demo - landing page + live translator. */
+
+:root {
+    --bg: #FBFCFD;
+    --bg-panel: #FFFFFF;
+    --bg-muted: #F4F5F7;
+    --border: #E1E4E8;
+    --border-strong: #C8CDD3;
+    --text: #1F2328;
+    --text-muted: #57606A;
+    --accent: #336791;          /* PostgreSQL navy */
+    --accent-strong: #1F4060;
+    --accent-soft: #E3EAF1;
+    --sqlite: #0F80CC;          /* SQLite blue */
+    --sqlite-soft: #E1F0FB;
+    --error: #B91C1C;
+    --error-soft: #FEF2F2;
+    --warn-soft: #FEF3C7;
+    --warn: #92400E;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    --shadow-strong: 0 4px 12px rgba(0, 0, 0, 0.08);
+    --radius: 8px;
+    --space: 16px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+        Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.875rem;
+}
+
+main.app {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: calc(var(--space) * 2) var(--space);
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--space) * 1.5);
+}
+
+/* -------- Header (project name + tagline + sample + options) -------- */
+
+.app-header {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.app-header-titles {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.app-title {
+    margin: 0;
+    font-size: 2rem;
+    letter-spacing: -0.01em;
+}
+
+.app-tagline {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 1.05rem;
+}
+
+.app-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.sample-picker {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.sample-picker-label {
+    font-weight: 500;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
+.sample-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.sample-badge {
+    border: 1px solid var(--accent-soft);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    transition: background 120ms, border-color 120ms, color 120ms,
+        transform 80ms;
+}
+
+.sample-badge:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.sample-badge:active {
+    transform: scale(0.97);
+}
+
+/* -------- Side-by-side editors -------- */
+
+.editors-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space);
+    align-items: start;
+}
+
+@media (max-width: 880px) {
+    /* Stack vertically on narrow screens. */
+    .editors-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.pane {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space);
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;  /* allow the grid track to shrink so editors stay inside */
+}
+
+.pane-input {
+    border-top: 3px solid var(--accent);
+}
+
+.pane-output {
+    border-top: 3px solid var(--sqlite);
+}
+
+.pane-header {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.pane-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space);
+}
+
+.pane-title {
+    margin: 0;
+    font-size: 1.1rem;
+    color: var(--accent-strong);
+}
+
+.pane-output .pane-title {
+    color: var(--sqlite);
+}
+
+.pane-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.pane-status {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.pane-placeholder {
+    background: var(--bg-muted);
+    color: var(--text-muted);
+    border: 1px dashed var(--border-strong);
+    border-radius: 6px;
+    padding: 18px;
+    font-size: 0.9rem;
+    min-height: 220px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+
+/* -------- Editor (dioxus-code-editor host) -------- */
+
+.editor {
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    min-height: 280px;
+    max-height: 540px;
+    overflow: auto;
+    background: var(--bg-panel);
+}
+
+.editor.editor-readonly {
+    background: var(--bg-muted);
+}
+
+/* -------- Error card (translation error) -------- */
+
+.error-card {
+    background: var(--error-soft);
+    border: 1px solid #FECACA;
+    border-radius: 6px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.error-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.error-icon {
+    color: var(--error);
+}
+
+.error-badge {
+    background: var(--error);
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.error-message {
+    margin: 0;
+    color: var(--error);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* -------- Apply error (translation OK but SQLite refused) -------- */
+
+.apply-error-card {
+    background: var(--warn-soft);
+    border: 1px solid #FDE68A;
+    border-radius: 6px;
+    padding: 10px 12px;
+}
+
+.apply-error-header {
+    color: var(--warn);
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.apply-error-message {
+    margin: 0 0 6px 0;
+    color: var(--warn);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.apply-error-hint {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+/* -------- Buttons -------- */
+
+button {
+    border: 1px solid var(--border-strong);
+    background: var(--bg-panel);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    transition: background 120ms;
+}
+
+button:hover:not(:disabled) {
+    background: var(--bg-muted);
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+button.primary {
+    background: var(--accent);
+    border-color: var(--accent-strong);
+    color: #fff;
+}
+
+button.primary:hover:not(:disabled) {
+    background: var(--accent-strong);
+}
+
+.btn-icon {
+    color: currentColor;
+}
+
+/* -------- Options panel (collapsed details) -------- */
+
+.options-panel {
+    background: var(--bg-muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+}
+
+.options-panel summary {
+    cursor: pointer;
+    user-select: none;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.options-panel[open] summary {
+    color: var(--text);
+    margin-bottom: 10px;
+}
+
+.options-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.options-row {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: var(--space);
+    align-items: start;
+}
+
+.options-label {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    padding-top: 4px;
+}
+
+.options-control {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.options-control label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.options-control input[type="text"] {
+    padding: 4px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 0.9rem;
+    max-width: 260px;
+}
+
+.options-muted {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 0.875rem;
+}
+
+.session-vars {
+    gap: 6px;
+}
+
+.session-var-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.875rem;
+}
+
+.session-var-form {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+.session-var-form input {
+    max-width: 160px;
+}
+
+.session-var-remove {
+    margin-left: 6px;
+    padding: 0 6px;
+    font-size: 0.9rem;
+    line-height: 1;
+}
+
+/* -------- Panels below the editors (query + reverse) -------- */
+
+.panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space);
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space);
+}
+
+.panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space);
+}
+
+.panel-title {
+    margin: 0;
+    font-size: 1.1rem;
+    color: var(--accent-strong);
+}
+
+.query-panel-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space);
+}
+
+.dialect-toggle {
+    display: inline-flex;
+    gap: 12px;
+    font-size: 0.9rem;
+}
+
+.dialect-toggle label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.query-display {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.query-rewrite {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    background: var(--bg-muted);
+    border-radius: 6px;
+    font-size: 0.875rem;
+}
+
+.query-rewrite-label {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.query-rewrite-sql {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.query-stats {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.results-table-wrap {
+    overflow-x: auto;
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.results-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.875rem;
+}
+
+.results-table th,
+.results-table td {
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.results-table th {
+    background: var(--bg-muted);
+    position: sticky;
+    top: 0;
+    font-weight: 600;
+    color: var(--accent-strong);
+}
+
+.results-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.results-empty {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.query-error {
+    background: var(--error-soft);
+    border: 1px solid #FECACA;
+    border-radius: 6px;
+    padding: 10px 12px;
+}
+
+.query-error-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.query-error-badge {
+    background: var(--error);
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.query-error-message {
+    margin: 0;
+    color: var(--error);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* -------- Reverse panel -------- */
+
+.reverse-panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    box-shadow: var(--shadow);
+}
+
+.reverse-panel summary {
+    cursor: pointer;
+    user-select: none;
+    font-weight: 500;
+    color: var(--accent-strong);
+}
+
+.reverse-panel[open] summary {
+    margin-bottom: 12px;
+}
+
+.reverse-panel-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.reverse-panel-actions {
+    display: flex;
+    justify-content: flex-start;
+}
+
+.reverse-result {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.reverse-result-title {
+    margin: 0;
+    font-size: 0.95rem;
+    color: var(--accent-strong);
+}
+
+/* -------- Map (PostGIS-only, embedded in query results) -------- */
+
+.map-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.map-canvas {
+    width: 100%;
+    height: auto;
+    max-width: 720px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-muted);
+}
+
+.map-caption {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.map-caption code {
+    background: var(--bg-muted);
+    padding: 1px 4px;
+    border-radius: 3px;
+}
