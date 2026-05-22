@@ -11,7 +11,7 @@
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     Icon,
-    icons::fa_solid_icons::{FaPlay, FaTerminal, FaTriangleExclamation},
+    icons::fa_solid_icons::{FaBan, FaCircleCheck, FaPlay, FaTerminal, FaTriangleExclamation},
 };
 
 use crate::{
@@ -237,6 +237,14 @@ fn SampleQueryChip(
             class: class,
             title: "{sql}",
             onclick: on_click,
+            match kind {
+                SampleQueryKind::Positive => rsx! {
+                    Icon { width: 12, height: 12, icon: FaCircleCheck, class: "chip-icon".to_string() }
+                },
+                SampleQueryKind::Negative => rsx! {
+                    Icon { width: 12, height: 12, icon: FaBan, class: "chip-icon".to_string() }
+                },
+            }
             "{label}"
         }
     }

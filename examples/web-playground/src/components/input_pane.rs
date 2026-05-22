@@ -7,13 +7,10 @@
 //! this pane is just an editor + an error card.
 
 use dioxus::prelude::*;
-use dioxus_free_icons::{
-    Icon,
-    icons::fa_solid_icons::{FaDatabase, FaTriangleExclamation},
-};
+use dioxus_free_icons::{Icon, icons::fa_solid_icons::FaTriangleExclamation};
 
 use crate::{
-    components::editor::SqlEditor,
+    components::{brand::PostgresLogo, editor::SqlEditor},
     state::{AppState, TranslationError},
 };
 
@@ -27,12 +24,7 @@ pub fn InputPane() -> Element {
         section { class: "pane pane-input",
             header { class: "pane-header",
                 h2 { class: "pane-title",
-                    Icon {
-                        width: 18,
-                        height: 18,
-                        icon: FaDatabase,
-                        class: "title-icon".to_string(),
-                    }
+                    PostgresLogo {}
                     "PostgreSQL"
                 }
             }

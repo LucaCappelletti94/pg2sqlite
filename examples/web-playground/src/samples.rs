@@ -20,6 +20,13 @@ pub struct Sample {
     pub sql: &'static str,
     pub apply_options: fn(&mut WebOptions),
     pub queries: &'static [SampleQuery],
+    /// Curated SQLite snippets the reverse panel renders as chips
+    /// while the editor still holds an unedited copy of `sql`. Each
+    /// chip loads the snippet into the reverse-input editor and fires
+    /// `reverse_translate(sqlite, pg_schema, options)`. Empty when the
+    /// sample has no compelling reverse demo (e.g. when SQLite syntax
+    /// and PG syntax overlap for that schema's idioms).
+    pub reverse_queries: &'static [ReverseSampleQuery],
 }
 
 /// A single canned follow-up query attached to a sample.
@@ -38,6 +45,24 @@ pub struct SampleQuery {
     /// blocked by a policy / constraint / generated column. Drives
     /// the chip's styling so negative demos are visually distinct.
     pub kind: SampleQueryKind,
+}
+
+/// A canned SQLite snippet the reverse panel renders as a chip. Input
+/// is always SQLite (the reverse panel is one-directional), so there
+/// is no dialect field. The `expect` substring asserts something
+/// recognisable in the produced PG output so the test suite can pin
+/// each chip's behaviour end-to-end.
+pub struct ReverseSampleQuery {
+    pub label: &'static str,
+    pub sql: &'static str,
+    pub kind: SampleQueryKind,
+    /// Case-sensitive substring that must appear in the reverse-
+    /// translated PG SQL for positive chips. Ignored for negative
+    /// chips, which are expected to error. Consumed by the native
+    /// `test_playground_sample_queries` end-to-end checks, not by
+    /// the UI itself.
+    #[allow(dead_code)]
+    pub expect_pg_contains: &'static str,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -327,6 +352,57 @@ const CONSTRAINTS_QUERIES: &[SampleQuery] = &[
     },
 ];
 
+// SQLite-shaped snippets the reverse panel can lift back into
+// PostgreSQL. Only chips with a non-trivial reverse output land here -
+// samples whose SQLite and PG dialects overlap (PostGIS ST_*, plain
+// Constraints CRUD) intentionally omit reverse chips because the
+// reverse-translated output would equal the input, which is not a
+// useful demo.
+
+const SIMPLE_REVERSE_QUERIES: &[ReverseSampleQuery] = &[
+    ReverseSampleQuery {
+        label: "datetime('now') back to NOW()",
+        sql: "INSERT INTO users (name, created_at) VALUES ('alice', datetime('now'))",
+        kind: SampleQueryKind::Positive,
+        expect_pg_contains: "NOW()",
+    },
+    ReverseSampleQuery {
+        label: "unicode() back to ascii()",
+        sql: "SELECT unicode('A')",
+        kind: SampleQueryKind::Positive,
+        expect_pg_contains: "ascii(",
+    },
+];
+
+const PGVECTOR_REVERSE_QUERIES: &[ReverseSampleQuery] = &[
+    ReverseSampleQuery {
+        label: "vec_f32() back to ::vector cast",
+        sql: "INSERT INTO items (id, embedding) VALUES (4, vec_f32('[0.5, 0.5, 0.5]'))",
+        kind: SampleQueryKind::Positive,
+        expect_pg_contains: "::vector",
+    },
+    ReverseSampleQuery {
+        label: "vec_distance back to <-> operator",
+        sql: "SELECT id FROM items ORDER BY vec_distance_L2(embedding, vec_f32('[0.5, 0.5, 0.5]')) LIMIT 3",
+        kind: SampleQueryKind::Positive,
+        expect_pg_contains: "<->",
+    },
+];
+
+const RLS_REVERSE_QUERIES: &[ReverseSampleQuery] = &[
+    // The reverse translator refuses to translate raw backing-table
+    // access because the `_rls` suffix is an implementation detail of
+    // pg2sqlite's RLS translation, not part of the PG schema. Shipping
+    // a negative chip here documents that contract for users who
+    // expect to round-trip through the backing-table name.
+    ReverseSampleQuery {
+        label: "Backing-table access (rejected by reverse)",
+        sql: "SELECT id, owner_id, title FROM documents_rls",
+        kind: SampleQueryKind::Negative,
+        expect_pg_contains: "",
+    },
+];
+
 /// All samples, in dropdown order.
 pub const SAMPLES: &[Sample] = &[
     Sample {
@@ -334,26 +410,42 @@ pub const SAMPLES: &[Sample] = &[
         sql: SIMPLE_SQL,
         apply_options: simple_options,
         queries: SIMPLE_QUERIES,
+        reverse_queries: SIMPLE_REVERSE_QUERIES,
     },
-    Sample { name: "FTS5", sql: FTS5_SQL, apply_options: simple_options, queries: FTS5_QUERIES },
+    Sample {
+        name: "FTS5",
+        sql: FTS5_SQL,
+        apply_options: simple_options,
+        queries: FTS5_QUERIES,
+        reverse_queries: &[],
+    },
     Sample {
         name: "pgvector",
         sql: PGVECTOR_SQL,
         apply_options: simple_options,
         queries: PGVECTOR_QUERIES,
+        reverse_queries: PGVECTOR_REVERSE_QUERIES,
     },
     Sample {
         name: "PostGIS",
         sql: POSTGIS_SQL,
         apply_options: postgis_options,
         queries: POSTGIS_QUERIES,
+        reverse_queries: &[],
     },
-    Sample { name: "RLS", sql: RLS_SQL, apply_options: rls_options, queries: RLS_QUERIES },
+    Sample {
+        name: "RLS",
+        sql: RLS_SQL,
+        apply_options: rls_options,
+        queries: RLS_QUERIES,
+        reverse_queries: RLS_REVERSE_QUERIES,
+    },
     Sample {
         name: "Constraints",
         sql: CONSTRAINTS_SQL,
         apply_options: simple_options,
         queries: CONSTRAINTS_QUERIES,
+        reverse_queries: &[],
     },
 ];
 

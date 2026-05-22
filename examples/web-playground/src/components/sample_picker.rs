@@ -7,7 +7,13 @@
 //! updates without any additional click.
 
 use dioxus::prelude::*;
-use dioxus_free_icons::{Icon, icons::fa_solid_icons::FaWandSparkles};
+use dioxus_free_icons::{
+    Icon,
+    icons::fa_solid_icons::{
+        FaBrain, FaListCheck, FaMagnifyingGlass, FaMapLocationDot, FaShieldHalved, FaTable,
+        FaWandSparkles,
+    },
+};
 
 use crate::{
     samples::{SAMPLES, find_sample},
@@ -61,7 +67,22 @@ fn SampleBadge(name: &'static str) -> Element {
             r#type: "button",
             class: "sample-badge",
             onclick: on_click,
+            SampleBadgeIcon { name: name }
             "{name}"
         }
+    }
+}
+
+#[component]
+fn SampleBadgeIcon(name: &'static str) -> Element {
+    let class = "badge-icon".to_string();
+    match name {
+        "Simple" => rsx! { Icon { width: 14, height: 14, icon: FaTable, class: class } },
+        "FTS5" => rsx! { Icon { width: 14, height: 14, icon: FaMagnifyingGlass, class: class } },
+        "pgvector" => rsx! { Icon { width: 14, height: 14, icon: FaBrain, class: class } },
+        "PostGIS" => rsx! { Icon { width: 14, height: 14, icon: FaMapLocationDot, class: class } },
+        "RLS" => rsx! { Icon { width: 14, height: 14, icon: FaShieldHalved, class: class } },
+        "Constraints" => rsx! { Icon { width: 14, height: 14, icon: FaListCheck, class: class } },
+        _ => rsx! {},
     }
 }

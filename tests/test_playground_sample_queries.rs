@@ -527,6 +527,124 @@ fn postgis_sample_queries() {
     run_queries_twice(&conn, POSTGIS_SCHEMA, POSTGIS_QUERIES, &opts);
 }
 
+// -----------------------------------------------------------------------
+// Reverse-chip coverage
+//
+// Each reverse chip exposed in `examples/web-playground/src/samples.rs`
+// must round-trip cleanly through `reverse_sql`. The chip catalogue is
+// duplicated here for the same reason as the forward chips: the
+// playground crate is wasm-only, so the test mirrors the literal SQL
+// strings + expected PG substrings. Any change in `samples.rs` must be
+// reflected here or the test will fail loudly.
+// -----------------------------------------------------------------------
+
+struct ReverseCanned {
+    label: &'static str,
+    sqlite_sql: &'static str,
+    expectation: Expectation,
+    expect_pg_contains: &'static str,
+}
+
+fn reverse_translate(
+    pg_schema: &str,
+    sqlite_sql: &str,
+    options: &Pg2SqliteOptions,
+) -> Result<String, pg2sqlite::errors::Error> {
+    let translator = Pg2Sqlite::default().sql(pg_schema)?;
+    let schema = translator.build_schema()?;
+    let stmts = translator.reverse_sql(sqlite_sql, &schema, options)?;
+    Ok(stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+}
+
+fn run_reverse_chips(pg_schema: &str, chips: &[ReverseCanned], options: &Pg2SqliteOptions) {
+    for chip in chips {
+        let result = reverse_translate(pg_schema, chip.sqlite_sql, options);
+        match (chip.expectation, &result) {
+            (Expectation::Positive, Ok(pg)) => {
+                assert!(
+                    pg.contains(chip.expect_pg_contains),
+                    "[reverse / {}] expected output to contain `{}`, got:\n{pg}",
+                    chip.label,
+                    chip.expect_pg_contains,
+                );
+            }
+            (Expectation::Negative, Err(_)) => {}
+            (Expectation::Positive, Err(e)) => {
+                panic!("[reverse / {}] expected success but got error: {e}", chip.label);
+            }
+            (Expectation::Negative, Ok(pg)) => {
+                panic!("[reverse / {}] expected failure but reverse succeeded:\n{pg}", chip.label);
+            }
+        }
+    }
+}
+
+const SIMPLE_REVERSE_CHIPS: &[ReverseCanned] = &[
+    ReverseCanned {
+        label: "datetime('now') back to NOW()",
+        sqlite_sql: "INSERT INTO users (name, created_at) VALUES ('alice', datetime('now'))",
+        expectation: Expectation::Positive,
+        expect_pg_contains: "NOW()",
+    },
+    ReverseCanned {
+        label: "unicode() back to ascii()",
+        sqlite_sql: "SELECT unicode('A')",
+        expectation: Expectation::Positive,
+        expect_pg_contains: "ascii(",
+    },
+];
+
+const PGVECTOR_REVERSE_CHIPS: &[ReverseCanned] = &[
+    ReverseCanned {
+        label: "vec_f32() back to ::vector cast",
+        sqlite_sql: "INSERT INTO items (id, embedding) VALUES (4, vec_f32('[0.5, 0.5, 0.5]'))",
+        expectation: Expectation::Positive,
+        expect_pg_contains: "::vector",
+    },
+    ReverseCanned {
+        label: "vec_distance back to <-> operator",
+        sqlite_sql: "SELECT id FROM items ORDER BY vec_distance_L2(embedding, vec_f32('[0.5, 0.5, 0.5]')) LIMIT 3",
+        expectation: Expectation::Positive,
+        expect_pg_contains: "<->",
+    },
+];
+
+const RLS_REVERSE_CHIPS: &[ReverseCanned] = &[ReverseCanned {
+    label: "Backing-table access (rejected by reverse)",
+    sqlite_sql: "SELECT id, owner_id, title FROM documents_rls",
+    expectation: Expectation::Negative,
+    expect_pg_contains: "",
+}];
+
+#[test]
+fn simple_sample_reverse_queries() {
+    let opts = Pg2SqliteOptions::default()
+        .with_sqlitegis_enabled()
+        .with_uuid_representation(UuidRepresentation::Blob);
+    run_reverse_chips(SIMPLE_SCHEMA, SIMPLE_REVERSE_CHIPS, &opts);
+}
+
+#[test]
+fn pgvector_sample_reverse_queries() {
+    let opts = Pg2SqliteOptions::default()
+        .with_sqlitegis_enabled()
+        .with_uuid_representation(UuidRepresentation::Blob);
+    run_reverse_chips(PGVECTOR_SCHEMA, PGVECTOR_REVERSE_CHIPS, &opts);
+}
+
+#[test]
+fn rls_sample_reverse_queries() {
+    let opts = Pg2SqliteOptions::default()
+        .with_sqlitegis_enabled()
+        .with_uuid_representation(UuidRepresentation::Blob)
+        .with_rls_audit_table_name("rls_violations")
+        .with_session_variable(SessionVariableMapping::current_setting(
+            "app.user_id",
+            "current_app_user",
+        ));
+    run_reverse_chips(RLS_SCHEMA, RLS_REVERSE_CHIPS, &opts);
+}
+
 #[cfg(feature = "sqlitegis")]
 unsafe extern "C" fn sqlitegis_init(
     db: *mut libsqlite3_sys::sqlite3,

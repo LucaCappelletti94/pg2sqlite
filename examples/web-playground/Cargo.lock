@@ -1197,6 +1197,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "dx_icons"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "721d85cd58f5457b07de4bd52cf383ab6ecfe143b813710164efdbf6e05e15e8"
+dependencies = [
+ "dx_icons_feather",
+ "dx_icons_simple",
+]
+
+[[package]]
+name = "dx_icons_feather"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6079c65e9c002361a3108a2639e5ab67f054ef425db5a06dde8032e4e5c69a59"
+dependencies = [
+ "dioxus",
+ "serde_json",
+]
+
+[[package]]
+name = "dx_icons_simple"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa36304ba522ed749083608fa1bfc756cad5a8179910cf2819abd2426d74ba5a"
+dependencies = [
+ "dioxus",
+ "serde_json",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2421,6 +2451,7 @@ dependencies = [
  "dioxus-code",
  "dioxus-code-editor",
  "dioxus-free-icons",
+ "dx_icons",
  "gloo-timers",
  "js-sys",
  "log",

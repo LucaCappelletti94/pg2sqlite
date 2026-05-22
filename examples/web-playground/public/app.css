@@ -105,6 +105,9 @@ main.app {
 }
 
 .sample-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     border: 1px solid var(--accent-soft);
     background: var(--accent-soft);
     color: var(--accent-strong);
@@ -116,6 +119,10 @@ main.app {
     cursor: pointer;
     transition: background 120ms, border-color 120ms, color 120ms,
         transform 80ms;
+}
+
+.sample-badge .badge-icon {
+    flex-shrink: 0;
 }
 
 .sample-badge:hover {
@@ -233,6 +240,13 @@ main.app {
 
 .editor.editor-readonly {
     background: var(--bg-muted);
+}
+
+/* The dxc-editor-input textarea sits invisibly on top of the highlight
+   overlay; the library sets caret-color: transparent on it, so override
+   with !important to keep the cursor visible when the user clicks in. */
+.dxc-editor-input {
+    caret-color: var(--text) !important;
 }
 
 /* -------- Error card (translation error) -------- */
@@ -372,6 +386,34 @@ button.primary:hover:not(:disabled) {
 
 .brand-link:hover .brand-icon {
     color: var(--accent-strong);
+}
+
+/* Brand logos (PostgreSQL elephant, SQLite feather). Inline <svg>
+   produced by dx_icons_simple; sized to match the surrounding glyphs
+   and spaced like the .title-icon class. */
+.brand-logo {
+    display: inline-block;
+    width: 1.1em;
+    height: 1.1em;
+    vertical-align: -0.2em;
+    margin-right: 8px;
+}
+
+.app-title .brand-logo {
+    width: 1.4em;
+    height: 1.4em;
+    vertical-align: -0.3em;
+    margin: 0 6px;
+}
+
+.app-title .title-arrow {
+    color: var(--text-muted);
+    vertical-align: -2px;
+    margin: 0 4px;
+}
+
+.app-title-text {
+    margin-left: 6px;
 }
 
 /* -------- Options panel (collapsed details) -------- */
@@ -520,6 +562,9 @@ button.primary:hover:not(:disabled) {
 }
 
 .sample-query-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     border: 1px solid var(--accent-soft);
     background: var(--accent-soft);
     color: var(--accent-strong);
@@ -529,6 +574,10 @@ button.primary:hover:not(:disabled) {
     font-weight: 500;
     cursor: pointer;
     transition: background 120ms, border-color 120ms, color 120ms, transform 80ms;
+}
+
+.sample-query-chip .chip-icon {
+    flex-shrink: 0;
 }
 
 .sample-query-chip:hover {

@@ -2,6 +2,7 @@
 //! its own module so the file boundaries match the visual sections
 //! in `main.rs`'s layout.
 
+pub mod brand;
 pub mod editor;
 pub mod input_pane;
 pub mod map;

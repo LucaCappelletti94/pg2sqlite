@@ -10,11 +10,15 @@
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     Icon,
-    icons::fa_solid_icons::{FaDatabase, FaPlay, FaRightLeft, FaTriangleExclamation},
+    icons::fa_solid_icons::{FaBan, FaCircleCheck, FaPlay, FaRightLeft, FaTriangleExclamation},
 };
 
 use crate::{
-    components::editor::{SqlEditor, SqlViewer},
+    components::{
+        brand::PostgresLogo,
+        editor::{SqlEditor, SqlViewer},
+    },
+    samples::{SampleQueryKind, find_sample_by_sql},
     state::{AppState, ReverseOutcome},
     translator,
 };
@@ -49,6 +53,8 @@ pub fn ReversePanel() -> Element {
                 "Reverse translation (SQLite to PostgreSQL)"
             }
             div { class: "reverse-panel-body",
+                ReverseSampleQueriesStrip {}
+
                 SqlEditor {
                     value: sqlite_input,
                     aria_label: "SQLite DML to reverse-translate".to_string(),
@@ -80,12 +86,7 @@ fn ReverseResult(outcome: ReverseOutcome) -> Element {
             rsx! {
                 div { class: "reverse-result",
                     h3 { class: "reverse-result-title",
-                        Icon {
-                            width: 14,
-                            height: 14,
-                            icon: FaDatabase,
-                            class: "title-icon".to_string(),
-                        }
+                        PostgresLogo {}
                         "PostgreSQL output"
                     }
                     SqlViewer {
@@ -116,4 +117,70 @@ fn run_reverse(state: AppState) {
 
     let result = translator::reverse_translate(&sqlite_input, &pg_schema, &options);
     state.reverse_output.clone().set(Some(result));
+}
+
+/// Renders one chip per curated reverse query attached to the
+/// currently-loaded sample. Hides itself as soon as the user edits the
+/// PG input (because the lookup is exact-equality), so once the schema
+/// has drifted the suggestions can no longer be assumed to match.
+#[component]
+fn ReverseSampleQueriesStrip() -> Element {
+    let state: AppState = use_context();
+    let pg_input = state.pg_input.read().clone();
+    let Some(sample) = find_sample_by_sql(&pg_input) else {
+        return rsx! {};
+    };
+    if sample.reverse_queries.is_empty() {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "sample-queries",
+            span { class: "sample-queries-label", "Try a reverse translation" }
+            div { class: "sample-queries-chips",
+                for query in sample.reverse_queries.iter() {
+                    ReverseSampleQueryChip {
+                        label: query.label,
+                        sql: query.sql,
+                        kind: query.kind,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ReverseSampleQueryChip(
+    label: &'static str,
+    sql: &'static str,
+    kind: SampleQueryKind,
+) -> Element {
+    let state: AppState = use_context();
+    let class = match kind {
+        SampleQueryKind::Positive => "sample-query-chip",
+        SampleQueryKind::Negative => "sample-query-chip negative",
+    };
+    let on_click = move |_| {
+        state.reverse_input.clone().set(sql.to_string());
+        run_reverse(state);
+    };
+
+    rsx! {
+        button {
+            r#type: "button",
+            class: class,
+            title: "{sql}",
+            onclick: on_click,
+            match kind {
+                SampleQueryKind::Positive => rsx! {
+                    Icon { width: 12, height: 12, icon: FaCircleCheck, class: "chip-icon".to_string() }
+                },
+                SampleQueryKind::Negative => rsx! {
+                    Icon { width: 12, height: 12, icon: FaBan, class: "chip-icon".to_string() }
+                },
+            }
+            "{label}"
+        }
+    }
 }

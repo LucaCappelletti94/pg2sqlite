@@ -9,13 +9,16 @@
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     Icon,
-    icons::fa_solid_icons::{FaCopy, FaDatabase, FaDownload, FaTriangleExclamation},
+    icons::fa_solid_icons::{FaCopy, FaDownload, FaTriangleExclamation},
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url};
 
-use crate::{components::editor::SqlViewer, state::AppState};
+use crate::{
+    components::{brand::SqliteLogo, editor::SqlViewer},
+    state::AppState,
+};
 
 #[component]
 pub fn OutputPane() -> Element {
@@ -33,12 +36,7 @@ pub fn OutputPane() -> Element {
             header { class: "pane-header",
                 div { class: "pane-title-row",
                     h2 { class: "pane-title",
-                        Icon {
-                            width: 18,
-                            height: 18,
-                            icon: FaDatabase,
-                            class: "title-icon".to_string(),
-                        }
+                        SqliteLogo {}
                         "SQLite"
                     }
                     div { class: "pane-actions",

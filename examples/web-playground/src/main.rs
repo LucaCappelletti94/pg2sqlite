@@ -33,8 +33,13 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::{
     components::{
-        input_pane::InputPane, options_panel::OptionsPanel, output_pane::OutputPane,
-        query_panel::QueryPanel, reverse_panel::ReversePanel, sample_picker::SamplePicker,
+        brand::{PostgresLogo, SqliteLogo},
+        input_pane::InputPane,
+        options_panel::OptionsPanel,
+        output_pane::OutputPane,
+        query_panel::QueryPanel,
+        reverse_panel::ReversePanel,
+        sample_picker::SamplePicker,
     },
     state::AppState,
 };
@@ -98,13 +103,15 @@ fn AppHeader() -> Element {
         header { class: "app-header",
             div { class: "app-header-titles",
                 h1 { class: "app-title",
+                    PostgresLogo {}
                     Icon {
-                        width: 28,
-                        height: 28,
+                        width: 22,
+                        height: 22,
                         icon: FaArrowRightArrowLeft,
-                        class: "title-icon".to_string(),
+                        class: "title-arrow".to_string(),
                     }
-                    "pg2sqlite"
+                    SqliteLogo {}
+                    span { class: "app-title-text", "pg2sqlite" }
                 }
                 p { class: "app-tagline",
                     "Translate PostgreSQL to SQLite. In your browser. No backend."
