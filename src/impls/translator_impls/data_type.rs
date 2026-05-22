@@ -119,7 +119,7 @@ impl Translator for DataType {
                         // EWKB-encoded values produced by the `geolite` SQLite extension
                         // (https://github.com/LucaCappelletti94/geolite) round-trip
                         // through the column. The blob is opaque to SQLite without the
-                        // extension loaded; see `Pg2SqliteOptions::with_geolite_enabled`
+                        // extension loaded; see `Pg2SqliteOptions::with_sqlitegis_enabled`
                         // for runtime `ST_*` function passthrough.
                         Ok(DataType::Blob(None))
                     }

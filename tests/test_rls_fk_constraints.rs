@@ -16,7 +16,7 @@ use pg2sqlite::{
 use rosetta_uuid::Uuid;
 
 mod helpers;
-use helpers::{Count, establish_connection};
+use helpers::{Count, establish_connection, set_session_user_id};
 
 fn translation_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -75,10 +75,13 @@ fn test_fk_constraint_enforcement() -> Result<(), Box<dyn std::error::Error>> {
         sql_query(stmt.to_string()).execute(&mut conn)?;
     }
 
-    // Insert a valid user (directly into backing table to bypass RLS triggers)
+    // Insert a valid user. With the deny-by-default + backing-table guard
+    // trigger fix, direct backing-table inserts now hit the WITH CHECK
+    // trigger too. Set the session user so `id = current_app_user()` passes.
     let user_id = Uuid::new_v4();
     let user_id_bytes = user_id.as_bytes();
     let user_id_hex = user_id_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    set_session_user_id(&user_id);
     sql_query(format!(
         "INSERT INTO users_rls (id, username, email) VALUES (x'{}', 'testuser', 'test@example.com')",
         user_id_hex
@@ -148,17 +151,22 @@ fn test_fk_both_tables_rls() -> Result<(), Box<dyn std::error::Error>> {
         sql_query(stmt.to_string()).execute(&mut conn)?;
     }
 
-    // Insert a user
+    // Insert a user. The backing-table BEFORE INSERT guard trigger now
+    // enforces the WITH CHECK predicate `id = current_app_user()`, so the
+    // session user must match the row's id.
     let user_id = Uuid::new_v4();
     let user_id_bytes = user_id.as_bytes();
     let user_id_hex = user_id_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    set_session_user_id(&user_id);
     sql_query(format!(
         "INSERT INTO users_rls (id, username, email) VALUES (x'{}', 'alice', 'alice@example.com')",
         user_id_hex
     ))
     .execute(&mut conn)?;
 
-    // Insert a post
+    // Insert a post. posts has `WITH CHECK (author_id = current_app_user())`
+    // so the session user must be the post's author. Reusing the same
+    // user_id keeps both inserts consistent.
     let post_id = Uuid::new_v4();
     let post_id_bytes = post_id.as_bytes();
     let post_id_hex = post_id_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();

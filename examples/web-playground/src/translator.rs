@@ -50,6 +50,35 @@ pub fn translate(
     })
 }
 
+/// Translate a follow-up query in the context of the live PG schema.
+///
+/// The query panel runs single statements (a chip's `SELECT`,
+/// `INSERT`, etc.) that need the same schema awareness the initial
+/// apply translation had, so the vector-insert wrapper and other
+/// schema-driven rewrites fire correctly. There is no public
+/// `translate_statement_against_schema` API on pg2sqlite, so we
+/// translate `schema_sql + ";\n" + query_sql` together and discard
+/// the leading statements that came from the schema. The translator
+/// preserves input order, so the tail is exactly the query's
+/// translated output.
+pub fn translate_query(
+    pg_query: &str,
+    pg_schema_sql: &str,
+    options: &Pg2SqliteOptions,
+) -> Result<String, TranslationError> {
+    let schema_stmts = Pg2Sqlite::default()
+        .sql(pg_schema_sql)
+        .and_then(|t| t.translate(options))
+        .map_err(classify_error)?;
+    let combined_sql = format!("{pg_schema_sql};\n{pg_query}");
+    let combined_stmts = Pg2Sqlite::default()
+        .sql(&combined_sql)
+        .and_then(|t| t.translate(options))
+        .map_err(classify_error)?;
+    let tail = combined_stmts.into_iter().skip(schema_stmts.len()).collect::<Vec<_>>();
+    Ok(tail.iter().map(ToString::to_string).collect::<Vec<_>>().join(";\n"))
+}
+
 /// Reverse-translate `sqlite_sql` to PostgreSQL using the schema
 /// implied by `pg_schema_sql` (re-parsed every call - the playground
 /// keeps PG input + options as the source of truth and rebuilds the

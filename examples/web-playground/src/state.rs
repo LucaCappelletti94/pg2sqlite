@@ -66,15 +66,25 @@ pub struct TranslationStats {
 /// set. By owning a plain struct here and rebuilding
 /// `Pg2SqliteOptions` from scratch every translation, the UI gets
 /// unrestricted edit semantics.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct WebOptions {
     pub uuid_representation: Option<UuidRepresentation>,
     /// Empty means "leave at the crate default" (currently `uuidv7`).
     pub uuid_function_name: String,
-    pub geolite_enabled: bool,
     /// Empty means "don't configure", which is fine for non-RLS schemas.
     pub rls_audit_table_name: String,
     pub session_variables: Vec<SessionVariableMapping>,
+}
+
+impl Default for WebOptions {
+    fn default() -> Self {
+        Self {
+            uuid_representation: Some(UuidRepresentation::Blob),
+            uuid_function_name: String::new(),
+            rls_audit_table_name: String::new(),
+            session_variables: Vec::new(),
+        }
+    }
 }
 
 impl WebOptions {
@@ -82,15 +92,16 @@ impl WebOptions {
     /// at every translation. Skips knobs whose value is the "leave
     /// alone" sentinel so they keep their crate-default behaviour.
     pub fn to_options(&self) -> Pg2SqliteOptions {
-        let mut opts = Pg2SqliteOptions::default();
+        // SQLiteGIS and sqlite-vec are always registered as auto-extensions
+        // on the in-memory connection (see `db.rs`), so ST_* / GEOMETRY
+        // routing is unconditionally on. The UI used to expose a toggle
+        // here, but that just confused which add-ons are actually optional.
+        let mut opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
         if let Some(rep) = self.uuid_representation {
             opts = opts.with_uuid_representation(rep);
         }
         if !self.uuid_function_name.is_empty() {
             opts = opts.with_uuid_function_name(self.uuid_function_name.clone());
-        }
-        if self.geolite_enabled {
-            opts = opts.with_geolite_enabled();
         }
         if !self.rls_audit_table_name.is_empty() {
             opts = opts.with_rls_audit_table_name(self.rls_audit_table_name.clone());

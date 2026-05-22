@@ -122,6 +122,7 @@ fn translate_fts_expression(
     tsvector_func: &Function,
     tsquery_func: &Function,
     schema: &ParserDB,
+    options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
     let columns = extract_columns_from_function(tsvector_func);
     let table = schema
@@ -142,6 +143,22 @@ fn translate_fts_expression(
             )
         })?;
     let table_name = table.table_name().to_string();
+
+    // Gate the rewrite on the column having a declared GIN / GiST
+    // `to_tsvector(...)` index in the same translation unit. Without
+    // this guard, querying a column with no FTS5 index emitted a
+    // SELECT against a non-existent `<table>_fts` vtable that
+    // runtime-errored with "no such table".
+    let missing_index = !columns.iter().any(|col| options.has_fts_index(&table_name, col));
+    if missing_index {
+        let cols_joined = columns.join(", ");
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "FTS5 index over column(s) `{cols_joined}` in table `{table_name}` is not declared. \
+             Add `CREATE INDEX <name> ON {table_name} USING GIN (to_tsvector('<lang>', \
+             {first_col}))` to the schema to enable the `@@ to_tsquery(...)` rewrite.",
+            first_col = columns.first().map_or("<col>", String::as_str),
+        )));
+    }
 
     let pk_columns: Vec<_> = table.primary_key_columns(schema).collect();
     if pk_columns.len() != 1 {
@@ -1037,7 +1054,7 @@ fn translate_binary_op(
             && is_to_tsvector(tsvector_func)
             && is_to_tsquery(tsquery_func)
         {
-            return translate_fts_expression(tsvector_func, tsquery_func, schema);
+            return translate_fts_expression(tsvector_func, tsquery_func, schema, options);
         }
         return Err(crate::errors::Error::UnsupportedSQLiteFeature(
             "The @@ operator is only supported for to_tsvector(...) @@ to_tsquery(...) \
@@ -1141,6 +1158,18 @@ impl Translator for Expr {
                 //                 '[1,2,3]'::halfvec -> vec_f16('[1,2,3]')
                 if is_vector_type(data_type) {
                     return translate_vector_cast(expr, data_type, schema, options);
+                }
+                // PG `'...'::uuid` under Blob representation: lower to the
+                // same text-to-blob expression used for INSERT/UPDATE wraps.
+                // Without this branch the cast would emit invalid
+                // `'...'::BLOB` SQLite syntax via the generic Cast path.
+                if matches!(data_type, sqlparser::ast::DataType::Uuid)
+                    && crate::impls::translator_impls::uuid::is_blob_uuid_representation(options)
+                {
+                    let translated = expr.translate(schema, options)?;
+                    return Ok(crate::impls::translator_impls::uuid::make_uuid_conversion_call(
+                        translated, options,
+                    ));
                 }
                 Expr::Cast {
                     expr: Box::new(expr.translate(schema, options)?),

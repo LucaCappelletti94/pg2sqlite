@@ -18,29 +18,21 @@ diesel = { version = "2.3.9", features = ["sqlite"] }
 insta = "1.47.2"
 polyglot-sql = "0.3.11"
 rosetta-uuid = { version = "0.1.2", features = ["diesel", "sqlite"] }
-rusqlite = { version = "0.35", features = ["bundled"] }
+rusqlite = { version = "0.35", features = ["bundled", "functions"] }
 sqlite-vec = "0.1.9"
 zerocopy = "0.8.48"
 rand = "0.10.1"
 
-# Optional integrations gated by the `geolite` feature. Declared in
+# Optional integration gated by the `sqlitegis` feature. Declared in
 # `[dependencies]` (not `[dev-dependencies]`) because Cargo only honors
-# `optional = true` on regular dependencies. They are still test-only:
-# nothing in `src/` references them unless `feature = "geolite"` is set.
-[dependencies.geolite-core]
-git = "https://github.com/LucaCappelletti94/geolite"
-rev = "53cdc1123837bd2e91bcb33c5fa904ecebcd955a"
-optional = true
-
-[dependencies.geolite-sqlite]
-git = "https://github.com/LucaCappelletti94/geolite"
-rev = "53cdc1123837bd2e91bcb33c5fa904ecebcd955a"
-optional = true
-
-[dependencies.geolite-diesel]
-git = "https://github.com/LucaCappelletti94/geolite"
-rev = "53cdc1123837bd2e91bcb33c5fa904ecebcd955a"
-features = ["sqlite"]
+# `optional = true` on regular dependencies. Still test-only: nothing
+# in `src/` references it unless `feature = "sqlitegis"` is set. The
+# crate replaces the older `geolite-core`/`geolite-sqlite`/`geolite-diesel`
+# split now that SQLiteGIS ships as a single published crate.
+[dependencies.sqlitegis]
+version = "0.1.0"
+default-features = false
+features = ["sqlite", "diesel-sqlite"]
 optional = true
 
 [dependencies.libsqlite3-sys]
@@ -63,13 +55,11 @@ std = [
     "dep:git2",
     "dep:tempfile",
 ]
-# `geolite` (Diesel + sqlite-vec spatial integration) is native-only,
+# SQLiteGIS Diesel + native-SQLite spatial integration is native-only,
 # so it implies `std`.
-geolite = [
+sqlitegis = [
     "std",
-    "dep:geolite-core",
-    "dep:geolite-sqlite",
-    "dep:geolite-diesel",
+    "dep:sqlitegis",
     "dep:libsqlite3-sys",
 ]
 

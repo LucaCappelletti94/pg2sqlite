@@ -247,17 +247,17 @@ fn test_user_cannot_update_others() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test delete behavior when no explicit DELETE policy exists.
-/// Without a DELETE policy, deletes work on visible rows (view filters by
-/// SELECT policy).
+/// Test delete behavior when no explicit DELETE policy exists. Per the
+/// deny-by-default semantics PostgreSQL applies once RLS is enabled, a DELETE
+/// against a table that has no `FOR DELETE` policy must be rejected -
+/// regardless of whether the user could `SELECT` the row.
 #[test]
 fn test_delete_without_explicit_policy() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
 
     let alice_id = Uuid::new_v4();
-    let bob_id = Uuid::new_v4();
 
-    // Create Alice and Bob
+    // Seed a row Alice owns by going through the INSERT policy.
     set_session_user_id(&alice_id);
     diesel::insert_into(app_users::table)
         .values(AppUser {
@@ -268,30 +268,20 @@ fn test_delete_without_explicit_policy() -> Result<(), Box<dyn std::error::Error
         })
         .execute(&mut connection)?;
 
-    set_session_user_id(&bob_id);
-    diesel::insert_into(app_users::table)
-        .values(AppUser {
-            id: bob_id.as_bytes().to_vec(),
-            email: "bob@example.com".to_string(),
-            display_name: Some("Bob".to_string()),
-            settings: None,
-        })
-        .execute(&mut connection)?;
+    // Even the row owner cannot DELETE through the view when no FOR DELETE
+    // policy is declared. pg2sqlite emits a RAISE(ABORT) inside the INSTEAD
+    // OF DELETE trigger that mirrors PostgreSQL's "permission denied" deny.
+    let result =
+        diesel::delete(app_users::table.filter(app_users::id.eq(alice_id.as_bytes().to_vec())))
+            .execute(&mut connection);
+    assert!(
+        result.is_err(),
+        "DELETE must be rejected when no FOR DELETE policy is declared, got Ok({result:?})"
+    );
 
-    // Bob tries to delete Alice's record (should affect 0 rows - can't see it)
-    diesel::delete(app_users::table.filter(app_users::id.eq(alice_id.as_bytes().to_vec())))
-        .execute(&mut connection)?;
-
-    // Alice's record should still exist (Bob couldn't see it to delete)
-    set_session_user_id(&alice_id);
+    // Row must still exist.
     let count = app_users::table.count().get_result::<i64>(&mut connection)?;
-    assert_eq!(count, 1, "Alice's record should still exist");
-
-    // Alice can delete her own record (she can see it)
-    diesel::delete(app_users::table.filter(app_users::id.eq(alice_id.as_bytes().to_vec())))
-        .execute(&mut connection)?;
-    let count = app_users::table.count().get_result::<i64>(&mut connection)?;
-    assert_eq!(count, 0, "Alice should be able to delete her own record");
+    assert_eq!(count, 1, "row must survive the rejected DELETE");
 
     Ok(())
 }

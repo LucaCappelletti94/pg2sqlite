@@ -51,7 +51,7 @@ The page is a single column with three stacked sections.
 
 1. **Header**: project name + tagline + sample dropdown + Advanced
    options `<details>`. Picking a sample replaces the editor + the
-   options that sample needs (PostGIS enables geolite, RLS adds a
+   options that sample needs (PostGIS enables SQLiteGIS, RLS adds a
    session-variable mapping, etc.). The auto-translate watcher
    picks up the change and re-renders the right pane after the
    usual debounce.
@@ -71,7 +71,7 @@ The page is a single column with three stacked sections.
      been applied to the in-memory SQLite. PG / SQLite dialect
      toggle (default: PG, with a "Translated as: ..." line showing
      what actually ran). Result rows render as a table; if the
-     query result has `lon` / `lat` columns and geolite is
+     query result has `lon` / `lat` columns and SQLiteGIS is
      enabled, an equirectangular **PostGIS map** appears below the
      table with the points highlighted.
    - The **Reverse translation `<details>`** at the bottom takes a

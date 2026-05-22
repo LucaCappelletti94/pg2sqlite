@@ -217,10 +217,18 @@ main.app {
 .editor {
     border: 1px solid var(--border-strong);
     border-radius: 6px;
-    min-height: 280px;
-    max-height: 540px;
+    min-height: 360px;
+    max-height: 75vh;
     overflow: auto;
     background: var(--bg-panel);
+    /* dioxus-code-editor draws a focus-ring box-shadow when the editor
+       has keyboard focus. The panes already carry a border and a panel
+       shadow, so the extra ring reads as visual noise. Suppress it. */
+    --dxc-editor-focus-ring: none;
+}
+
+.editor .dxc-editor:focus-within {
+    box-shadow: none;
 }
 
 .editor.editor-readonly {
@@ -333,6 +341,37 @@ button.primary:hover:not(:disabled) {
 
 .btn-icon {
     color: currentColor;
+}
+
+.title-icon {
+    color: var(--accent-strong);
+    margin-right: 8px;
+    vertical-align: -2px;
+}
+
+.pane-output .title-icon {
+    color: var(--sqlite);
+}
+
+.summary-icon {
+    color: var(--text-muted);
+    margin-right: 8px;
+    vertical-align: -2px;
+}
+
+.label-icon {
+    color: var(--text-muted);
+    margin-right: 6px;
+    vertical-align: -2px;
+}
+
+.brand-icon {
+    color: var(--text-muted);
+    transition: color 120ms ease;
+}
+
+.brand-link:hover .brand-icon {
+    color: var(--accent-strong);
 }
 
 /* -------- Options panel (collapsed details) -------- */
@@ -462,6 +501,58 @@ button.primary:hover:not(:disabled) {
     gap: var(--space);
 }
 
+.sample-queries {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.sample-queries-label {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.sample-queries-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.sample-query-chip {
+    border: 1px solid var(--accent-soft);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 120ms, border-color 120ms, color 120ms, transform 80ms;
+}
+
+.sample-query-chip:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.sample-query-chip:active {
+    transform: scale(0.97);
+}
+
+.sample-query-chip.negative {
+    border-color: #fecaca;
+    background: var(--error-soft);
+    color: var(--error);
+}
+
+.sample-query-chip.negative:hover {
+    background: var(--error);
+    border-color: var(--error);
+    color: #fff;
+}
+
 .dialect-toggle {
     display: inline-flex;
     gap: 12px;
@@ -483,10 +574,7 @@ button.primary:hover:not(:disabled) {
 .query-rewrite {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 8px 10px;
-    background: var(--bg-muted);
-    border-radius: 6px;
+    gap: 6px;
     font-size: 0.875rem;
 }
 
@@ -495,9 +583,14 @@ button.primary:hover:not(:disabled) {
     font-weight: 500;
 }
 
-.query-rewrite-sql {
-    white-space: pre-wrap;
-    word-break: break-word;
+/* Tighter editor host for the inline rewrite preview: the regular
+   .editor min-height (360px) is for full-pane editing and would
+   dwarf a one-line translated SELECT. The viewer still scrolls
+   internally when the rewrite expands (e.g. RLS view + IN-subquery
+   rewrites). */
+.query-rewrite-viewer .editor {
+    min-height: 0;
+    max-height: 240px;
 }
 
 .query-stats {

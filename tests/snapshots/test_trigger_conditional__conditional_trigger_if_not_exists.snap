@@ -2,6 +2,6 @@
 source: tests/test_trigger_conditional.rs
 expression: translated_sql
 ---
-CREATE TABLE customer_orders (id BLOB PRIMARY KEY NOT NULL, customer_email TEXT NOT NULL, total_amount REAL NOT NULL) STRICT
-CREATE TABLE notifications (id BLOB PRIMARY KEY NOT NULL, order_id BLOB NOT NULL, notification_type TEXT NOT NULL, message TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0) STRICT
+CREATE TABLE customer_orders (id BLOB PRIMARY KEY CHECK (length(id) = 16) NOT NULL, customer_email TEXT NOT NULL, total_amount REAL NOT NULL) STRICT
+CREATE TABLE notifications (id BLOB PRIMARY KEY CHECK (length(id) = 16) NOT NULL, order_id BLOB NOT NULL CHECK (length(order_id) = 16), notification_type TEXT NOT NULL, message TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0) STRICT
 CREATE TRIGGER notify_new_order_trigger AFTER INSERT ON customer_orders FOR EACH ROW BEGIN INSERT INTO notifications (id, order_id, notification_type, message, priority) WITH v_notif_id (val) AS (SELECT uuidv7()) SELECT v_notif_id.val, NEW.id, 'ORDER_RECEIVED', 'Order confirmation sent', 1 FROM v_notif_id WHERE (NOT EXISTS (SELECT 1 FROM notifications WHERE order_id = NEW.id AND notification_type = 'ORDER_RECEIVED')); END

@@ -17,7 +17,7 @@ fn translate(sql: &str, opts: &Pg2SqliteOptions) -> Result<Vec<String>, Error> {
 }
 
 fn translate_with_geolite(sql: &str) -> Result<Vec<String>, Error> {
-    translate(sql, &Pg2SqliteOptions::default().with_geolite_enabled())
+    translate(sql, &Pg2SqliteOptions::default().with_sqlitegis_enabled())
 }
 
 #[test]

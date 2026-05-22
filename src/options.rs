@@ -25,6 +25,11 @@ pub struct Pg2SqliteOptions {
     /// The name of the function to use for UUID generation.
     /// Its runtime return type must match `uuid_representation`.
     uuid_function_name: String,
+    /// Optional UDF name for converting text UUID literals to 16-byte
+    /// BLOBs at INSERT/UPDATE time. `None` means "emit
+    /// `unhex(replace(literal, '-', ''))` inline" (pure SQLite, no UDF
+    /// setup). Set via `with_uuid_text_to_blob_function_name`.
+    uuid_text_to_blob_function_name: Option<String>,
     /// The suffix to append to table names when renaming them for RLS views.
     rls_table_suffix: String,
     /// The role name to use when filtering policies.
@@ -45,6 +50,16 @@ pub struct Pg2SqliteOptions {
     /// shadow table. Intentionally not exposed in the public builder API:
     /// the catalog is derived from translation context, not user config.
     pub(crate) spatial_indexes: Vec<(String, String)>,
+    /// FTS5-indexed `(table, column)` pairs, both lowercased, populated
+    /// automatically by `Pg2Sqlite::translate` from `CREATE INDEX ... USING
+    /// GIN (to_tsvector(...))` (or GiST equivalent) statements in the input.
+    /// Consumed by the query-time `@@ to_tsquery(...)` rewrite to validate
+    /// that the matched column has a declared FTS5 index before emitting
+    /// the IN-subquery against `<table>_fts`. Without this gate the
+    /// rewrite produced SQL that runtime-errored with "no such table".
+    /// Intentionally not exposed in the public builder API: the catalog
+    /// is derived from translation context, not user config.
+    pub(crate) fts_indexes: Vec<(String, String)>,
 }
 
 impl Default for Pg2SqliteOptions {
@@ -53,6 +68,7 @@ impl Default for Pg2SqliteOptions {
             remove_unsupported_check_constraints: false,
             uuid_representation: None,
             uuid_function_name: "uuid".to_string(),
+            uuid_text_to_blob_function_name: None,
             rls_table_suffix: "_rls".to_string(),
             session_user_role: None,
             session_variables: Vec::new(),
@@ -60,6 +76,7 @@ impl Default for Pg2SqliteOptions {
             strict_rls_validation: false,
             enable_geolite: false,
             spatial_indexes: Vec::new(),
+            fts_indexes: Vec::new(),
         }
     }
 }
@@ -90,6 +107,26 @@ impl Pg2SqliteOptions {
         let column = column.to_ascii_lowercase();
         self.spatial_indexes.iter().any(|(t, c)| *t == table && *c == column)
     }
+
+    /// Records `(table, column)` as having a translated FTS5 index. Same
+    /// case-folded, idempotent shape as [`Self::add_spatial_index`].
+    pub(crate) fn add_fts_index(&mut self, table: impl Into<String>, column: impl Into<String>) {
+        let entry = (table.into().to_ascii_lowercase(), column.into().to_ascii_lowercase());
+        if !self.fts_indexes.contains(&entry) {
+            self.fts_indexes.push(entry);
+        }
+    }
+
+    /// Returns whether the given `(table, column)` pair was registered as an
+    /// FTS5 index in the same translation unit. Case-insensitive on both
+    /// inputs. Drives the `to_tsvector(...) @@ to_tsquery(...)` rewrite gate
+    /// in `translate_fts_expression`.
+    #[must_use]
+    pub(crate) fn has_fts_index(&self, table: &str, column: &str) -> bool {
+        let table = table.to_ascii_lowercase();
+        let column = column.to_ascii_lowercase();
+        self.fts_indexes.iter().any(|(t, c)| *t == table && *c == column)
+    }
 }
 
 impl TranslationOptions for Pg2SqliteOptions {
@@ -118,6 +155,15 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn get_uuid_function_name(&self) -> &str {
         &self.uuid_function_name
+    }
+
+    fn with_uuid_text_to_blob_function_name(mut self, name: impl Into<String>) -> Self {
+        self.uuid_text_to_blob_function_name = Some(name.into());
+        self
+    }
+
+    fn get_uuid_text_to_blob_function_name(&self) -> Option<&str> {
+        self.uuid_text_to_blob_function_name.as_deref()
     }
 
     // ==================== RLS Options ====================
@@ -190,12 +236,12 @@ impl TranslationOptions for Pg2SqliteOptions {
         self.strict_rls_validation
     }
 
-    fn with_geolite_enabled(mut self) -> Self {
+    fn with_sqlitegis_enabled(mut self) -> Self {
         self.enable_geolite = true;
         self
     }
 
-    fn is_geolite_enabled(&self) -> bool {
+    fn is_sqlitegis_enabled(&self) -> bool {
         self.enable_geolite
     }
 }

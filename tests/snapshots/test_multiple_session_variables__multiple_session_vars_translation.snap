@@ -1,14 +1,13 @@
 ---
 source: tests/test_multiple_session_variables.rs
-assertion_line: 46
 expression: sql_output
 ---
 CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
-CREATE TABLE messages_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, sender_id BLOB NOT NULL, recipient_username TEXT NOT NULL, content TEXT NOT NULL) STRICT
+CREATE TABLE messages_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, sender_id BLOB NOT NULL CHECK (length(sender_id) = 16), recipient_username TEXT NOT NULL, content TEXT NOT NULL) STRICT
 CREATE VIEW messages AS SELECT id, sender_id, recipient_username, content FROM messages_rls WHERE (sender_id = current_app_user() OR recipient_username = current_app_username())
 CREATE TRIGGER messages_insert_trigger INSTEAD OF INSERT ON messages FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE NOT ((NEW.sender_id = current_app_user())); INSERT INTO messages_rls (id, sender_id, recipient_username, content) VALUES (NEW.id, NEW.sender_id, NEW.recipient_username, NEW.content); END
-CREATE TRIGGER messages_update_trigger INSTEAD OF UPDATE ON messages FOR EACH ROW BEGIN UPDATE messages_rls SET id = COALESCE(NEW.id, OLD.id), sender_id = COALESCE(NEW.sender_id, OLD.sender_id), recipient_username = COALESCE(NEW.recipient_username, OLD.recipient_username), content = COALESCE(NEW.content, OLD.content) WHERE id = OLD.id; END
-CREATE TRIGGER messages_delete_trigger INSTEAD OF DELETE ON messages FOR EACH ROW BEGIN DELETE FROM messages_rls WHERE id = OLD.id; END
+CREATE TRIGGER messages_update_trigger INSTEAD OF UPDATE ON messages FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'permission denied: no UPDATE policy on messages'); END
+CREATE TRIGGER messages_delete_trigger INSTEAD OF DELETE ON messages FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'permission denied: no DELETE policy on messages'); END
 CREATE TRIGGER messages_rls_rls_monitor_insert AFTER INSERT ON messages_rls FOR EACH ROW BEGIN INSERT INTO rls_audit (table_name, violation_type, row_identifier, policy_name, detected_at, severity, details, reported_at) SELECT 'messages', 'rls_policy_violation', 'id=' || quote(NEW.id), 'INSERT policy', datetime('now'), 'warning', 'Row inserted into backing table but not visible through RLS view', NULL WHERE NOT (EXISTS (SELECT 1 FROM messages WHERE messages.id = NEW.id)); END
 CREATE TRIGGER messages_rls_rls_monitor_update AFTER UPDATE ON messages_rls FOR EACH ROW BEGIN INSERT INTO rls_audit (table_name, violation_type, row_identifier, policy_name, detected_at, severity, details, reported_at) SELECT 'messages', 'rls_policy_violation', 'id=' || quote(NEW.id), 'UPDATE policy', datetime('now'), 'warning', 'Row updated in backing table but not visible through RLS view', NULL WHERE NOT (EXISTS (SELECT 1 FROM messages WHERE messages.id = NEW.id)); END
 CREATE VIEW messages_rls_violations AS SELECT id, sender_id, recipient_username, content FROM messages_rls WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages_rls.id = messages.id)

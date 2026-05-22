@@ -7,6 +7,7 @@
 //! updates without any additional click.
 
 use dioxus::prelude::*;
+use dioxus_free_icons::{Icon, icons::fa_solid_icons::FaWandSparkles};
 
 use crate::{
     samples::{SAMPLES, find_sample},
@@ -17,7 +18,15 @@ use crate::{
 pub fn SamplePicker() -> Element {
     rsx! {
         div { class: "sample-picker",
-            span { class: "sample-picker-label", "Try a sample" }
+            span { class: "sample-picker-label",
+                Icon {
+                    width: 14,
+                    height: 14,
+                    icon: FaWandSparkles,
+                    class: "label-icon".to_string(),
+                }
+                "Try a sample"
+            }
             div { class: "sample-badges",
                 for sample in SAMPLES {
                     SampleBadge { name: sample.name }

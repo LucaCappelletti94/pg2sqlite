@@ -491,13 +491,13 @@ fn maybe_geolite_passthrough(
     args: &FunctionArguments,
     options: &Pg2SqliteOptions,
 ) -> FunctionTranslation {
-    if !options.is_geolite_enabled() {
+    if !options.is_sqlitegis_enabled() {
         return FunctionTranslation::PassThrough;
     }
     let Some(arity) = function_arg_count(args) else {
         return FunctionTranslation::PassThrough;
     };
-    if postgis::is_geolite_function(name, arity) {
+    if postgis::is_sqlitegis_function(name, arity) {
         return FunctionTranslation::PassThrough;
     }
     let known_arities = postgis::geolite_function_arities(name);

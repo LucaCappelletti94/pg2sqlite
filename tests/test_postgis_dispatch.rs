@@ -25,7 +25,7 @@ fn st_point_passthrough_when_geolite_disabled() {
 
 #[test]
 fn st_point_passthrough_when_geolite_enabled_and_arity_matches() {
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
     let translated = helpers::translate_pg("SELECT ST_Point(0, 0) AS p;", &opts)
         .expect("ST_Point/2 is in geolite catalog and should pass through");
     let joined = translated.join("\n").to_ascii_uppercase();
@@ -34,7 +34,7 @@ fn st_point_passthrough_when_geolite_enabled_and_arity_matches() {
 
 #[test]
 fn st_point_wrong_arity_errors_when_geolite_enabled() {
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
     let result = helpers::translate_pg("SELECT ST_Point(1) AS x;", &opts);
     let err = result.expect_err("ST_Point/1 is not in geolite catalog, must error");
     let msg = format!("{err:?}");
@@ -48,7 +48,7 @@ fn st_point_wrong_arity_errors_when_geolite_enabled() {
 fn st_transform_errors_when_geolite_enabled() {
     // ST_Transform is a real PostGIS function but is NOT in geolite's catalog
     // (no SRID reprojection yet). Hard error so users notice setup gaps.
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
     let result = helpers::translate_pg("SELECT ST_Transform(geom, 4326) AS x FROM t;", &opts);
     let err = result.expect_err("ST_Transform must error when geolite is enabled");
     assert!(
@@ -59,30 +59,30 @@ fn st_transform_errors_when_geolite_enabled() {
 
 #[test]
 fn catalog_lookup_finds_st_point_with_known_arities() {
-    assert!(postgis::is_geolite_function("st_point", 2));
-    assert!(postgis::is_geolite_function("st_point", 3));
-    assert!(!postgis::is_geolite_function("st_point", 1));
-    assert!(!postgis::is_geolite_function("st_point", 4));
+    assert!(postgis::is_sqlitegis_function("st_point", 2));
+    assert!(postgis::is_sqlitegis_function("st_point", 3));
+    assert!(!postgis::is_sqlitegis_function("st_point", 1));
+    assert!(!postgis::is_sqlitegis_function("st_point", 4));
 }
 
 #[test]
 fn catalog_lookup_is_case_insensitive_on_supplied_name() {
     // Callers may pass mixed case from the parser. Catalog stores lowercase,
     // and lookups should treat the input as case-insensitive.
-    assert!(postgis::is_geolite_function("ST_Point", 2));
-    assert!(postgis::is_geolite_function("st_POINT", 2));
+    assert!(postgis::is_sqlitegis_function("ST_Point", 2));
+    assert!(postgis::is_sqlitegis_function("st_POINT", 2));
 }
 
 #[test]
 fn catalog_lookup_rejects_unknown_names() {
-    assert!(!postgis::is_geolite_function("st_transform", 2));
-    assert!(!postgis::is_geolite_function("st_simplify", 2));
-    assert!(!postgis::is_geolite_function("now", 0)); // not PostGIS
+    assert!(!postgis::is_sqlitegis_function("st_transform", 2));
+    assert!(!postgis::is_sqlitegis_function("st_simplify", 2));
+    assert!(!postgis::is_sqlitegis_function("now", 0)); // not PostGIS
 }
 
 #[test]
 fn catalog_includes_spatial_index_helpers() {
     // SQLite-side DDL helpers from geolite's DIRECT_ONLY catalog.
-    assert!(postgis::is_geolite_function("createspatialindex", 2));
-    assert!(postgis::is_geolite_function("dropspatialindex", 2));
+    assert!(postgis::is_sqlitegis_function("createspatialindex", 2));
+    assert!(postgis::is_sqlitegis_function("dropspatialindex", 2));
 }

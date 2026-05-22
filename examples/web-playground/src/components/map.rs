@@ -2,17 +2,12 @@
 //! query result whenever the result exposes `lon` / `lat` columns.
 //!
 //! Why not parse WKB BLOBs directly? Two reasons. (1) WKB / EWKB
-//! parsing inside the playground would duplicate logic that's already
-//! the responsibility of geolite (`ST_X`, `ST_Y`); (2) it matches the
-//! pattern sqlitegis uses - the user writes
-//! `SELECT id, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM places`
-//! and the map renders the projected columns. This keeps the
-//! playground side free of geometry-decoding code.
-//!
-//! The map is gated on `geolite_enabled` purely as a UX cue: it's
-//! the option that signals "I have spatial data". Users can still
-//! project lon/lat without geolite if they're just doing plain
-//! double columns.
+//! parsing inside the playground would duplicate logic that is already
+//! the responsibility of SQLiteGIS (`ST_X`, `ST_Y`). (2) It matches the
+//! pattern SQLiteGIS uses: the user writes
+//! `SELECT id, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM places` and
+//! the map renders the projected columns. This keeps the playground
+//! side free of geometry-decoding code.
 
 use dioxus::prelude::*;
 use wasm_bindgen::JsCast;

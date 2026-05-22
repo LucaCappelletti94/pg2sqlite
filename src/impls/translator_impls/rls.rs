@@ -1400,7 +1400,14 @@ where
         }
     }
 
-    let trigger_body = if check_conditions.is_empty() {
+    let trigger_body = if insert_policies.is_empty() {
+        // Deny-by-default: PostgreSQL RLS rejects an INSERT when no FOR
+        // INSERT (or FOR ALL) policy is declared. Mirror that by raising
+        // before the forwarding INSERT.
+        format!(
+            "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no INSERT policy on {table_name}');\nEND"
+        )
+    } else if check_conditions.is_empty() {
         format!(
             "BEGIN\n    INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});\nEND"
         )
@@ -1414,6 +1421,59 @@ where
     format!(
         "CREATE TRIGGER {trigger_name} INSTEAD OF INSERT ON {table_name_quoted} FOR EACH ROW {trigger_body}"
     )
+}
+
+/// Generates a BEFORE INSERT trigger on the **backing table** that fires
+/// `RAISE(ABORT, ...)` when the configured FOR INSERT policy's WITH CHECK
+/// expression is not satisfied. This is the second half of the
+/// `INSERT INTO <view> ... RETURNING ...` fix: the view-side INSTEAD OF
+/// trigger forwards the INSERT, but RETURNING reads from the view's
+/// NEW row and never sees the backing-table-assigned PK. The
+/// translator's INSERT-rewrite in `insert.rs` redirects RETURNING-bearing
+/// INSERTs straight to the backing table; this trigger preserves policy
+/// enforcement on that rewritten path.
+///
+/// Returns `None` when no FOR INSERT (or FOR ALL) policy is declared:
+/// the deny-by-default RAISE in the INSTEAD OF view trigger already
+/// covers that case for the view path, and no rewrite happens for the
+/// backing-table path (since the rewrite is gated on a real policy that
+/// can be checked).
+fn generate_insert_check_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
+    table: &DB::Table,
+    schema: &DB,
+    options: &O,
+) -> Option<String>
+where
+    DB::Table: TableLike<DB = DB>,
+    DB::Policy: PolicyLike<DB = DB>,
+{
+    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+    let _ = ctx.table_name; // suppress unused-variable warning; we only need
+    // `inner_table_name` and the rename tuple here.
+    let inner_table_name = &ctx.inner_table_name;
+    let table_rename = Some(ctx.as_rename_tuple());
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
+    let trigger_name = quote_identifier(&format!("{inner_table_name}_insert_check"));
+
+    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert]);
+    let mut check_conditions = Vec::new();
+    for policy in &insert_policies {
+        if let Some(expr) = policy.check_expression(schema) {
+            let transformed =
+                transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
+            check_conditions.push(format!("({transformed})"));
+        }
+    }
+    if check_conditions.is_empty() {
+        return None;
+    }
+    let check = check_conditions.join(" OR ");
+
+    Some(format!(
+        "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
+         WHEN NOT ({check}) \
+         BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+    ))
 }
 
 /// Generates INSTEAD OF UPDATE trigger SQL.
@@ -1490,7 +1550,14 @@ where
         format!("({pk_where}) AND ({using})")
     };
 
-    let trigger_body = if check_conditions.is_empty() {
+    let trigger_body = if update_policies.is_empty() {
+        // Deny-by-default: PostgreSQL RLS rejects an UPDATE when no FOR
+        // UPDATE (or FOR ALL) policy is declared. Mirror that by raising
+        // before the forwarding UPDATE.
+        format!(
+            "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no UPDATE policy on {table_name}');\nEND"
+        )
+    } else if check_conditions.is_empty() {
         format!(
             "BEGIN\n    UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {full_where};\nEND"
         )
@@ -1554,8 +1621,16 @@ where
         format!("({pk_where}) AND ({using})")
     };
 
-    let trigger_body =
-        format!("BEGIN\n    DELETE FROM {inner_table_name_quoted} WHERE {full_where};\nEND");
+    let trigger_body = if delete_policies.is_empty() {
+        // Deny-by-default: PostgreSQL RLS rejects a DELETE when no FOR
+        // DELETE (or FOR ALL) policy is declared. Mirror that by raising
+        // before the forwarding DELETE.
+        format!(
+            "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no DELETE policy on {table_name}');\nEND"
+        )
+    } else {
+        format!("BEGIN\n    DELETE FROM {inner_table_name_quoted} WHERE {full_where};\nEND")
+    };
 
     format!(
         "CREATE TRIGGER {trigger_name} INSTEAD OF DELETE ON {table_name_quoted} FOR EACH ROW {trigger_body}"
@@ -1603,6 +1678,34 @@ where
             "Failed to parse generated RLS INSERT trigger SQL",
         )?;
         statements.extend(insert_stmts);
+
+        // Generate BEFORE INSERT guard trigger on the backing table.
+        // Paired with the insert.rs rewrite that redirects
+        // RETURNING-bearing INSERTs straight to the backing table; this
+        // trigger keeps WITH CHECK enforcement on that path.
+        //
+        // Gated on `is_strict_rls_validation()`: the default monitor
+        // mode is designed to LOG violations via the AFTER INSERT
+        // audit trigger, not BLOCK them. Emitting a blocking BEFORE
+        // INSERT guard in monitor mode would break the audit-monitor
+        // contract (and existing test scenarios that exploit
+        // backing-table direct inserts to validate the audit log).
+        //
+        // Strict mode unlocks the RETURNING-through-view rewrite in
+        // `insert.rs` because the guard is what makes the rewrite
+        // policy-safe; the rewrite itself is symmetrically gated.
+        // Skipped when no INSERT policy declares a WITH CHECK
+        // expression.
+        if options.is_strict_rls_validation()
+            && let Some(check_sql) = generate_insert_check_trigger_sql(table, schema, options)
+        {
+            let check_stmts = parse_generated_sql(
+                &dialect,
+                &check_sql,
+                "Failed to parse generated RLS backing-table BEFORE INSERT guard SQL",
+            )?;
+            statements.extend(check_stmts);
+        }
 
         // Generate UPDATE trigger
         let update_sql = generate_update_trigger_sql(table, schema, options);
@@ -1849,9 +1952,16 @@ fn generate_monitoring_trigger_sql(
         let message = format!(
             "{RLS_VALIDATION_ERROR}: row violates row-level security policy for table '{table_name}'"
         );
+        // Same qualifying predicate as the INSERT-into-audit above:
+        // only abort when the row is NOT visible through the view.
+        // The previous shape was an unconditional `SELECT RAISE`,
+        // which aborted every backing-table insert in strict mode
+        // (including compliant ones) - a real regression masked by
+        // tests that only exercised the violation case.
         format!(
             r"
-        SELECT RAISE(ABORT, {});",
+    SELECT RAISE(ABORT, {})
+    WHERE NOT ({visibility_check});",
             sql_string_literal(&message)
         )
     } else {

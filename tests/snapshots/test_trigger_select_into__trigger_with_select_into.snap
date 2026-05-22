@@ -2,7 +2,7 @@
 source: tests/test_trigger_select_into.rs
 expression: translated_sql
 ---
-CREATE TABLE projects (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, name TEXT NOT NULL, owner_id BLOB NOT NULL, priority INTEGER NOT NULL DEFAULT 1) STRICT
-CREATE TABLE tasks (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, project_id BLOB NOT NULL REFERENCES projects (id) ON DELETE CASCADE, title TEXT NOT NULL) STRICT
-CREATE TABLE task_logs (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, task_id BLOB NOT NULL, project_owner_id BLOB NOT NULL, project_priority INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP) STRICT
+CREATE TABLE projects (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, name TEXT NOT NULL, owner_id BLOB NOT NULL CHECK (length(owner_id) = 16), priority INTEGER NOT NULL DEFAULT 1) STRICT
+CREATE TABLE tasks (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, project_id BLOB NOT NULL REFERENCES projects (id) ON DELETE CASCADE CHECK (length(project_id) = 16), title TEXT NOT NULL) STRICT
+CREATE TABLE task_logs (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, task_id BLOB NOT NULL CHECK (length(task_id) = 16), project_owner_id BLOB NOT NULL CHECK (length(project_owner_id) = 16), project_priority INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP) STRICT
 CREATE TRIGGER after_insert_tasks AFTER INSERT ON tasks FOR EACH ROW BEGIN INSERT INTO task_logs (id, task_id, project_owner_id, project_priority) WITH v_log_id (val) AS (SELECT uuidv7()), v_owner_id (val) AS (SELECT (SELECT p.owner_id FROM projects p WHERE p.id = NEW.project_id LIMIT 1)), v_priority (val) AS (SELECT (SELECT p.priority FROM projects p WHERE p.id = NEW.project_id LIMIT 1)) SELECT v_log_id.val, NEW.id, v_owner_id.val, v_priority.val FROM v_log_id, v_owner_id, v_priority WHERE (NOT EXISTS (SELECT 1 FROM task_logs WHERE task_id = NEW.id)); END

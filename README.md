@@ -247,7 +247,7 @@ Translates [PostGIS](https://postgis.net/) types, functions, and GiST indexes to
 use pg2sqlite::prelude::*;
 
 fn main() {
-    let options = Pg2SqliteOptions::default().with_geolite_enabled();
+    let options = Pg2SqliteOptions::default().with_sqlitegis_enabled();
     let _ = options;
 }
 ```

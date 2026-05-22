@@ -9,7 +9,7 @@
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     Icon,
-    icons::fa_solid_icons::{FaCopy, FaDownload},
+    icons::fa_solid_icons::{FaCopy, FaDatabase, FaDownload, FaTriangleExclamation},
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -32,7 +32,15 @@ pub fn OutputPane() -> Element {
         section { class: "pane pane-output",
             header { class: "pane-header",
                 div { class: "pane-title-row",
-                    h2 { class: "pane-title", "SQLite" }
+                    h2 { class: "pane-title",
+                        Icon {
+                            width: 18,
+                            height: 18,
+                            icon: FaDatabase,
+                            class: "title-icon".to_string(),
+                        }
+                        "SQLite"
+                    }
                     div { class: "pane-actions",
                         button {
                             class: "secondary",
@@ -84,7 +92,15 @@ fn StatusLine(
 
         if let Some(apply_err) = apply_error {
             div { class: "apply-error-card",
-                div { class: "apply-error-header", "In-memory apply failed" }
+                div { class: "apply-error-header",
+                    Icon {
+                        width: 14,
+                        height: 14,
+                        icon: FaTriangleExclamation,
+                        class: "error-icon".to_string(),
+                    }
+                    " In-memory apply failed"
+                }
                 pre { class: "apply-error-message", "{apply_err}" }
             }
         }

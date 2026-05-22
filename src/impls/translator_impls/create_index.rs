@@ -38,7 +38,7 @@ use crate::{
 
 /// Represents the result of translating a GIN/GiST index - either an FTS5
 /// virtual table or an error if the index pattern isn't supported.
-enum FtsTranslation {
+pub(crate) enum FtsTranslation {
     /// FTS5 virtual table for full-text search
     Fts5 { table_name: ObjectName, columns: Vec<String> },
     /// Index pattern not supported (e.g., JSONB, arrays, spatial data)
@@ -103,7 +103,7 @@ fn analyze_fts_expression(expr: &Expr) -> Option<Vec<String>> {
 
 /// Analyze a GIN/GiST index to determine how it should be translated.
 /// Both GIN and GiST can be used for full-text search with to_tsvector().
-fn analyze_fts_index(create_index: &CreateIndex) -> FtsTranslation {
+pub(crate) fn analyze_fts_index(create_index: &CreateIndex) -> FtsTranslation {
     let table_name = create_index.table_name.clone();
     let index_type = match create_index.using {
         Some(IndexType::GIN) => "GIN",
@@ -370,7 +370,7 @@ impl Translator for CreateIndex {
         // PostGIS GiST on geometry/geography -> geolite's CreateSpatialIndex.
         // Routed before the FTS5 path so spatial columns don't fall into the
         // tsvector-only analyzer below.
-        if options.is_geolite_enabled()
+        if options.is_sqlitegis_enabled()
             && matches!(self.using, Some(IndexType::GiST))
             && let Some(spatial_stmts) =
                 try_spatial_index_routing(self, &sqlite_table_name, schema)?

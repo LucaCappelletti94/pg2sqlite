@@ -2,11 +2,11 @@
 source: tests/test_groups.rs
 expression: translated_sql
 ---
-CREATE TABLE owners (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL) STRICT
-CREATE TABLE groups (id BLOB PRIMARY KEY REFERENCES owners (id) ON DELETE CASCADE NOT NULL, parent_group_id BLOB REFERENCES groups (id) ON DELETE CASCADE, name TEXT NOT NULL) STRICT
+CREATE TABLE owners (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL) STRICT
+CREATE TABLE groups (id BLOB PRIMARY KEY REFERENCES owners (id) ON DELETE CASCADE CHECK (length(id) = 16) NOT NULL, parent_group_id BLOB REFERENCES groups (id) ON DELETE CASCADE CHECK (length(parent_group_id) = 16), name TEXT NOT NULL) STRICT
 CREATE TRIGGER groups_insert_trigger BEFORE INSERT ON groups FOR EACH ROW BEGIN INSERT INTO owners (id) VALUES (NEW.id); END
-CREATE TABLE users (id BLOB PRIMARY KEY REFERENCES owners (id) ON DELETE CASCADE NOT NULL, name TEXT NOT NULL) STRICT
+CREATE TABLE users (id BLOB PRIMARY KEY REFERENCES owners (id) ON DELETE CASCADE CHECK (length(id) = 16) NOT NULL, name TEXT NOT NULL) STRICT
 CREATE TRIGGER users_insert_trigger BEFORE INSERT ON users FOR EACH ROW BEGIN INSERT INTO owners (id) VALUES (NEW.id); END
-CREATE TABLE group_memberships (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, group_id BLOB NOT NULL REFERENCES groups (id) ON DELETE CASCADE, user_id BLOB NOT NULL REFERENCES users (id) ON DELETE CASCADE, UNIQUE (group_id, user_id)) STRICT
+CREATE TABLE group_memberships (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, group_id BLOB NOT NULL REFERENCES groups (id) ON DELETE CASCADE CHECK (length(group_id) = 16), user_id BLOB NOT NULL REFERENCES users (id) ON DELETE CASCADE CHECK (length(user_id) = 16), UNIQUE (group_id, user_id)) STRICT
 CREATE TRIGGER group_membership_insert_trigger AFTER INSERT ON group_memberships FOR EACH ROW BEGIN INSERT OR IGNORE INTO group_memberships (group_id, user_id) SELECT recursive_cte_subquery.id, recursive_cte_subquery.user_id FROM (WITH RECURSIVE parent_groups AS (SELECT parent_group_id AS id FROM groups WHERE id = NEW.group_id UNION ALL SELECT g.parent_group_id FROM groups g JOIN parent_groups pg ON g.id = pg.id) SELECT id, NEW.user_id FROM parent_groups WHERE id IS NOT NULL) recursive_cte_subquery; END
 CREATE TRIGGER group_membership_delete_trigger AFTER DELETE ON group_memberships FOR EACH ROW BEGIN DELETE FROM group_memberships WHERE user_id = OLD.user_id AND group_id IN (WITH RECURSIVE child_groups AS (SELECT id FROM groups WHERE parent_group_id = OLD.group_id UNION ALL SELECT g.id FROM groups g JOIN child_groups cg ON g.parent_group_id = cg.id) SELECT id FROM child_groups); END

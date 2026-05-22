@@ -10,7 +10,7 @@
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     Icon,
-    icons::fa_solid_icons::{FaPlay, FaTriangleExclamation},
+    icons::fa_solid_icons::{FaDatabase, FaPlay, FaRightLeft, FaTriangleExclamation},
 };
 
 use crate::{
@@ -40,7 +40,13 @@ pub fn ReversePanel() -> Element {
     rsx! {
         details { class: "reverse-panel",
             summary {
-                "Reverse translation (SQLite \u{2192} PostgreSQL)"
+                Icon {
+                    width: 14,
+                    height: 14,
+                    icon: FaRightLeft,
+                    class: "summary-icon".to_string(),
+                }
+                "Reverse translation (SQLite to PostgreSQL)"
             }
             div { class: "reverse-panel-body",
                 SqlEditor {
@@ -73,7 +79,15 @@ fn ReverseResult(outcome: ReverseOutcome) -> Element {
         Ok(pg_sql) => {
             rsx! {
                 div { class: "reverse-result",
-                    h3 { class: "reverse-result-title", "PostgreSQL output" }
+                    h3 { class: "reverse-result-title",
+                        Icon {
+                            width: 14,
+                            height: 14,
+                            icon: FaDatabase,
+                            class: "title-icon".to_string(),
+                        }
+                        "PostgreSQL output"
+                    }
                     SqlViewer {
                         value: pg_sql,
                         aria_label: "Reverse-translated PostgreSQL SQL".to_string(),

@@ -1,15 +1,16 @@
-//! PostGIS-equivalent function catalog mirrored from the geolite SQLite
-//! extension (<https://github.com/LucaCappelletti94/geolite>).
+//! PostGIS-equivalent function catalog mirrored from the SQLiteGIS extension
+//! (<https://github.com/LucaCappelletti94/sqlitegis>, published as `sqlitegis`
+//! on crates.io).
 //!
 //! Used by the function dispatcher in `function.rs` to decide whether an
 //! `ST_*`-shaped call should pass through unchanged (when
-//! [`crate::traits::TranslationOptions::with_geolite_enabled`] is on) or
+//! [`crate::traits::TranslationOptions::with_sqlitegis_enabled`] is on) or
 //! fail with a precise `UnsupportedSQLiteFeature` error.
 //!
-//! The list MUST stay in sync with geolite's
-//! `geolite_core::function_catalog::SQLITE_DETERMINISTIC_FUNCTIONS` and
+//! The list MUST stay in sync with SQLiteGIS's
+//! `sqlitegis::core::function_catalog::SQLITE_DETERMINISTIC_FUNCTIONS` and
 //! `SQLITE_DIRECT_ONLY_FUNCTIONS`. Drift is caught by the parity tests in
-//! `tests/test_postgis_diesel.rs`, which assert that every geolite catalog
+//! `tests/test_postgis_diesel.rs`, which assert that every SQLiteGIS catalog
 //! entry has a matching `(name, arity)` here.
 
 #[cfg(not(feature = "std"))]
@@ -136,7 +137,7 @@ pub(crate) const POSTGIS_FUNCTION_CATALOG: &[(&str, i32)] = &[
 /// Returns `true` when `(name, arity)` is implemented by geolite. `name`
 /// is matched case-insensitively against the lowercase catalog entries.
 #[must_use]
-pub fn is_geolite_function(name: &str, arity: i32) -> bool {
+pub fn is_sqlitegis_function(name: &str, arity: i32) -> bool {
     let lower = name.to_ascii_lowercase();
     POSTGIS_FUNCTION_CATALOG.iter().any(|&(n, a)| n == lower && a == arity)
 }

@@ -115,6 +115,23 @@ pub trait TranslationOptions {
     /// Returns the name of the function to use for UUID generation.
     fn get_uuid_function_name(&self) -> &str;
 
+    #[must_use]
+    /// Sets a SQLite UDF name that converts a text UUID literal (e.g.
+    /// `'550e8400-e29b-41d4-a716-446655440000'`) into its 16-byte binary
+    /// representation. Used by the translator under
+    /// [`UuidRepresentation::Blob`] to wrap text-literal values at INSERT
+    /// and UPDATE positions targeting a UUID column, so the BLOB STRICT
+    /// column accepts them.
+    ///
+    /// If unset, the translator emits a pure-SQLite
+    /// `unhex(replace(literal, '-', ''))` expression instead. Pass a
+    /// function name when the application has registered a custom
+    /// converter UDF (e.g. one that also validates the UUID format).
+    fn with_uuid_text_to_blob_function_name(self, name: impl Into<String>) -> Self;
+
+    /// Returns the configured UUID text-to-blob UDF name, if set.
+    fn get_uuid_text_to_blob_function_name(&self) -> Option<&str>;
+
     // ==================== RLS Options ====================
 
     #[must_use]
@@ -187,10 +204,10 @@ pub trait TranslationOptions {
     /// emits SQL.
     ///
     /// Default is `false`.
-    fn with_geolite_enabled(self) -> Self;
+    fn with_sqlitegis_enabled(self) -> Self;
 
     /// Returns whether geolite-backed PostGIS translation is enabled.
-    fn is_geolite_enabled(&self) -> bool;
+    fn is_sqlitegis_enabled(&self) -> bool;
 
     #[must_use]
     /// Enables strict RLS validation mode.

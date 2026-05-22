@@ -39,11 +39,11 @@ fn geography_column_translates_to_blob() {
 #[test]
 fn enable_geolite_defaults_to_false() {
     let opts = Pg2SqliteOptions::default();
-    assert!(!opts.is_geolite_enabled(), "enable_geolite should default to false");
+    assert!(!opts.is_sqlitegis_enabled(), "enable_geolite should default to false");
 }
 
 #[test]
-fn with_geolite_enabled_flips_flag() {
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
-    assert!(opts.is_geolite_enabled());
+fn with_sqlitegis_enabled_flips_flag() {
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
+    assert!(opts.is_sqlitegis_enabled());
 }

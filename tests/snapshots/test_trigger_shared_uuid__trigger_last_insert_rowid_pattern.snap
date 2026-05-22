@@ -2,7 +2,7 @@
 source: tests/test_trigger_shared_uuid.rs
 expression: "&sqlite_sql"
 ---
-CREATE TABLE entities (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, name TEXT NOT NULL) STRICT;
-CREATE TABLE ownables (id BLOB PRIMARY KEY REFERENCES entities (id) NOT NULL, owner TEXT NOT NULL) STRICT;
-CREATE TABLE parent_relations (id BLOB PRIMARY KEY DEFAULT (uuidv7()) NOT NULL, entity_id BLOB NOT NULL REFERENCES entities (id), parent_name TEXT NOT NULL) STRICT;
+CREATE TABLE entities (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, name TEXT NOT NULL) STRICT;
+CREATE TABLE ownables (id BLOB PRIMARY KEY REFERENCES entities (id) CHECK (length(id) = 16) NOT NULL, owner TEXT NOT NULL) STRICT;
+CREATE TABLE parent_relations (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, entity_id BLOB NOT NULL REFERENCES entities (id) CHECK (length(entity_id) = 16), parent_name TEXT NOT NULL) STRICT;
 CREATE TRIGGER trigger_create_entity BEFORE INSERT ON entities FOR EACH ROW BEGIN INSERT INTO entities (id, name) WITH v_new_id (val) AS (SELECT uuidv7()) SELECT v_new_id.val, NEW.name FROM v_new_id; INSERT INTO ownables (id, owner) WITH v_new_id (val) AS (SELECT (SELECT id FROM entities WHERE rowid = last_insert_rowid())) SELECT v_new_id.val, 'system' FROM v_new_id; INSERT INTO parent_relations (entity_id, parent_name) WITH v_new_id (val) AS (SELECT (SELECT id FROM entities WHERE rowid = last_insert_rowid())) SELECT v_new_id.val, 'root' FROM v_new_id; END

@@ -11,6 +11,7 @@
 //! able to clear knobs.
 
 use dioxus::prelude::*;
+use dioxus_free_icons::{Icon, icons::fa_solid_icons::FaSliders};
 use pg2sqlite::prelude::{SessionVariableMapping, UuidRepresentation};
 
 use crate::state::AppState;
@@ -19,11 +20,18 @@ use crate::state::AppState;
 pub fn OptionsPanel() -> Element {
     rsx! {
         details { class: "options-panel",
-            summary { "Advanced options" }
+            summary {
+                Icon {
+                    width: 14,
+                    height: 14,
+                    icon: FaSliders,
+                    class: "summary-icon".to_string(),
+                }
+                "Advanced options"
+            }
             div { class: "options-grid",
                 UuidRepRow {}
                 UuidFunctionRow {}
-                GeoliteRow {}
                 RlsAuditRow {}
                 SessionVarsRow {}
             }
@@ -98,33 +106,6 @@ fn UuidFunctionRow() -> Element {
                         opts.uuid_function_name = evt.value();
                         options.set(opts);
                     },
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn GeoliteRow() -> Element {
-    let state: AppState = use_context();
-    let enabled = state.options.read().geolite_enabled;
-
-    rsx! {
-        div { class: "options-row",
-            span { class: "options-label", "geolite (PostGIS)" }
-            div { class: "options-control",
-                label {
-                    input {
-                        r#type: "checkbox",
-                        checked: enabled,
-                        onchange: move |evt| {
-                            let mut options = state.options;
-                            let mut opts = options.read().clone();
-                            opts.geolite_enabled = evt.value() == "true";
-                            options.set(opts);
-                        },
-                    }
-                    " Enable ST_* / GEOMETRY routing to geolite"
                 }
             }
         }

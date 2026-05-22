@@ -2,8 +2,8 @@
 
 #![allow(dead_code)]
 
-#[cfg(feature = "geolite")]
-pub mod geolite;
+#[cfg(feature = "sqlitegis")]
+pub mod sqlitegis;
 
 use std::cell::RefCell;
 

@@ -38,7 +38,10 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
 };
-use sqlparser::ast::{CreateTable, DataType, Ident, ObjectName, ObjectNamePart, Statement};
+use sqlparser::ast::{
+    CreateTable, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+    FunctionArguments, Ident, ObjectName, ObjectNamePart, Statement, Value, ValueWithSpan,
+};
 
 use crate::{
     errors::Error,
@@ -66,7 +69,7 @@ pub struct VectorColumnInfo {
 }
 
 /// Check if a data type is a pgvector type (vector or halfvec).
-fn is_vector_data_type(data_type: &DataType) -> bool {
+pub(crate) fn is_vector_data_type(data_type: &DataType) -> bool {
     if let DataType::Custom(name, _) = data_type
         && let Some(ident) = last_ident(name)
     {
@@ -77,7 +80,7 @@ fn is_vector_data_type(data_type: &DataType) -> bool {
 }
 
 /// Check if a data type is the halfvec (16-bit float) type.
-fn is_halfvec_data_type(data_type: &DataType) -> bool {
+pub(crate) fn is_halfvec_data_type(data_type: &DataType) -> bool {
     if let DataType::Custom(name, _) = data_type
         && let Some(ident) = last_ident(name)
     {
@@ -323,6 +326,59 @@ pub fn generate_vec0_statements(
     }
 
     Ok(statements)
+}
+
+/// Build a `vec_f32(expr)` or `vec_f16(expr)` function call.
+fn make_vec_conversion_call(arg: Expr, is_halfvec: bool) -> Expr {
+    let func_name = if is_halfvec { "vec_f16" } else { "vec_f32" };
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(func_name))]),
+        uses_odbc_syntax: false,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+        parameters: FunctionArguments::None,
+    })
+}
+
+/// If `expr` is a single-quoted string literal, wrap it with the matching
+/// sqlite-vec conversion function so SQLite STRICT tables accept it in the
+/// BLOB column. Other expression shapes pass through unchanged. NULL,
+/// DEFAULT, identifiers, casts, and existing function calls (including
+/// the `vec_f32` / `vec_f16` calls the cast translator already lowers
+/// `'[...]'::vector` to) are left alone, so this helper is idempotent.
+pub(crate) fn maybe_wrap_text_vector_literal(expr: Expr, is_halfvec: bool) -> Expr {
+    if matches!(&expr, Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(_), .. })) {
+        make_vec_conversion_call(expr, is_halfvec)
+    } else {
+        expr
+    }
+}
+
+/// Collect `(column_name, is_halfvec)` pairs for every pgvector column on
+/// the resolved schema table, preserving column ordinal order. Returns an
+/// empty `Vec` when the table has no vector columns.
+pub(crate) fn vector_columns_of_table(
+    table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
+    schema: &ParserDB,
+) -> Vec<(String, bool)> {
+    table
+        .columns(schema)
+        .filter_map(|col| {
+            let dt = &col.attribute().data_type;
+            if is_vector_data_type(dt) {
+                Some((col.column_name().to_string(), is_halfvec_data_type(dt)))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(all(test, feature = "std"))]

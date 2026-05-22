@@ -11,7 +11,7 @@ use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
 mod helpers;
 
 fn translate_to_text(pg: &str) -> String {
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
     helpers::translate_pg(pg, &opts).expect("translate").join("\n")
 }
 

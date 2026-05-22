@@ -14,19 +14,31 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    Assignment, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FromTable,
-    FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments,
-    GroupByExpr, HavingBound, Join, JoinConstraint, JoinOperator, LateralView, LimitClause,
-    ListAggOnOverflow, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart,
-    OrderBy, OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, Setting,
-    Statement, SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
-    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, UpdateTableFromKind,
-    Values, WindowFrame, WindowFrameBound, WindowSpec, WindowType, With, WithFill,
-    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
+    Assignment, AssignmentTarget, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy,
+    Fetch, FromTable, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
+    FunctionArguments, GroupByExpr, HavingBound, Join, JoinConstraint, JoinOperator, LateralView,
+    LimitClause, ListAggOnOverflow, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName,
+    ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query,
+    SelectItem, Setting, Statement, SymbolDefinition, TableFactor, TableFunctionArgs, TableSample,
+    TableSampleBucket, TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins,
+    UpdateTableFromKind, Values, WindowFrame, WindowFrameBound, WindowSpec, WindowType, With,
+    WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
     XmlTableColumnOption,
 };
 
-use crate::{errors::Error, prelude::Pg2SqliteOptions};
+use crate::{
+    errors::Error,
+    impls::{
+        object_name::{last_ident, table_with_implicit_public_lookup},
+        translator_impls::{
+            uuid::{
+                is_blob_uuid_representation, maybe_wrap_text_uuid_literal, uuid_columns_of_table,
+            },
+            vector::{maybe_wrap_text_vector_literal, vector_columns_of_table},
+        },
+    },
+    prelude::Pg2SqliteOptions,
+};
 
 /// Abstracts the direction of translation so that shared helper functions
 /// can work for both forward (`Translator`) and reverse (`ReverseTranslator`)
@@ -1048,14 +1060,61 @@ pub(crate) fn translate_update<D: TranslationDirection>(
         ));
     }
 
+    // Resolve the target table once so we can identify which assignment
+    // targets land in `vector` / `halfvec` columns (vector wrap) or in
+    // UUID-Blob columns (UUID wrap). The lookup is best-effort: if the
+    // table is not in the schema (e.g. transient CTEs or unknown
+    // targets) we fall back to passthrough. Both wraps are forward-only
+    // since reverse translation receives an already-rewritten input.
+    let (vector_cols, uuid_cols): (Vec<(String, bool)>, Vec<String>) = if D::IS_FORWARD {
+        match &update.table.relation {
+            TableFactor::Table { name, .. } => {
+                table_with_implicit_public_lookup(schema, name)
+                    .ok()
+                    .flatten()
+                    .map(|table| {
+                        let v = vector_columns_of_table(table, schema);
+                        let u = if is_blob_uuid_representation(options) {
+                            uuid_columns_of_table(table, schema)
+                        } else {
+                            Vec::new()
+                        };
+                        (v, u)
+                    })
+                    .unwrap_or_default()
+            }
+            _ => (Vec::new(), Vec::new()),
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     let assignments = update
         .assignments
         .iter()
         .map(|a| {
-            Ok(Assignment {
-                target: a.target.clone(),
-                value: D::translate_expr(&a.value, schema, options)?,
-            })
+            let translated_value = D::translate_expr(&a.value, schema, options)?;
+            let column_name = match &a.target {
+                AssignmentTarget::ColumnName(name) => last_ident(name).map(|i| i.value.clone()),
+                AssignmentTarget::Tuple(_) => None,
+            };
+            let final_value = match column_name.as_deref() {
+                Some(name) => {
+                    if let Some(is_halfvec) = vector_cols
+                        .iter()
+                        .find(|(col, _)| col.eq_ignore_ascii_case(name))
+                        .map(|(_, is_halfvec)| *is_halfvec)
+                    {
+                        maybe_wrap_text_vector_literal(translated_value, is_halfvec)
+                    } else if uuid_cols.iter().any(|col| col.eq_ignore_ascii_case(name)) {
+                        maybe_wrap_text_uuid_literal(translated_value, options)
+                    } else {
+                        translated_value
+                    }
+                }
+                None => translated_value,
+            };
+            Ok(Assignment { target: a.target.clone(), value: final_value })
         })
         .collect::<Result<Vec<_>, Error>>()?;
 

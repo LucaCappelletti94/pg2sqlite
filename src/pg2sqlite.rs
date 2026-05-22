@@ -23,7 +23,11 @@ use tempfile::TempDir;
 use crate::{
     impls::{
         object_name::last_ident_value_or_display,
-        translator_impls::{postgis, rls::generate_rls_audit_table},
+        translator_impls::{
+            create_index::{FtsTranslation, analyze_fts_index},
+            postgis,
+            rls::generate_rls_audit_table,
+        },
     },
     options::Pg2SqliteOptions,
     prelude::{ReverseTranslator, Translator},
@@ -38,6 +42,34 @@ use crate::{
 /// Classification errors are deliberately swallowed here: the per-statement
 /// translation in the main loop will re-run the same classifier and surface
 /// the error with full context.
+/// Pre-walks the input statements for GIN / GiST indexes whose expressions
+/// are `to_tsvector(...)` calls and registers each `(table, column)` pair
+/// in the options' internal FTS-index catalog. Consumed by
+/// `translate_fts_expression` to gate the `@@ to_tsquery(...)` rewrite on
+/// the column having a declared FTS5 index. Without this catalog the
+/// rewrite produced a SELECT against a `<table>_fts` vtable that the
+/// schema never declared, which runtime-errored with "no such table".
+fn populate_fts_index_catalog(statements: &[Statement], options: &mut Pg2SqliteOptions) {
+    for stmt in statements {
+        let Statement::CreateIndex(create_index) = stmt else {
+            continue;
+        };
+        if !matches!(
+            create_index.using,
+            Some(sqlparser::ast::IndexType::GIN | sqlparser::ast::IndexType::GiST)
+        ) {
+            continue;
+        }
+        let FtsTranslation::Fts5 { columns, .. } = analyze_fts_index(create_index) else {
+            continue;
+        };
+        let table_name = last_ident_value_or_display(&create_index.table_name);
+        for col in columns {
+            options.add_fts_index(&table_name, &col);
+        }
+    }
+}
+
 fn populate_spatial_index_catalog(
     statements: &[Statement],
     schema: &ParserDB,
@@ -337,9 +369,13 @@ impl Pg2Sqlite {
         // skips errors (an unsupported GiST will surface its own error when
         // the statement itself is translated below).
         let mut options = options.clone();
-        if options.is_geolite_enabled() {
+        if options.is_sqlitegis_enabled() {
             populate_spatial_index_catalog(&normalized_statements, &schema, &mut options);
         }
+        // Always-on: FTS5 rewrite gating doesn't depend on a runtime
+        // extension toggle, only on the schema's declared GIN/GiST
+        // indexes. Populates `options.fts_indexes`.
+        populate_fts_index_catalog(&normalized_statements, &mut options);
         let options = options;
 
         let mut result: Vec<Statement> = normalized_statements

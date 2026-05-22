@@ -275,11 +275,16 @@ fn test_strict_mode_blocks_violations() -> Result<(), Box<dyn std::error::Error>
     .bind::<diesel::sql_types::Text, _>("Content")
     .execute(&mut conn);
 
-    // Should fail with abort error
+    // Should fail with abort error. Either the new BEFORE INSERT guard
+    // ("new row violates row-level security policy") or the AFTER INSERT
+    // validation trigger ("RLS validation: ...") fires first; both are
+    // valid strict-mode aborts.
     assert!(result.is_err(), "Strict mode should abort on violation");
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("RLS validation") || err.contains("abort"),
+        err.contains("RLS validation")
+            || err.contains("abort")
+            || err.contains("row-level security policy"),
         "Expected RLS validation error, got: {}",
         err
     );

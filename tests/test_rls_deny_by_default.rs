@@ -1,0 +1,228 @@
+//! Red tests: PostgreSQL Row-Level Security is deny-by-default. Once
+//! a table has any policy, an action without a matching policy is
+//! forbidden. pg2sqlite currently emits INSTEAD OF DELETE/UPDATE
+//! triggers on the view that forward to the backing table without
+//! consulting any policy, so DELETE and UPDATE succeed silently when
+//! the schema only declared FOR SELECT / FOR INSERT policies.
+//!
+//! This is a **security regression** vs PostgreSQL behaviour: an
+//! application that relies on RLS to gate writes will get the writes
+//! through pg2sqlite's translated schema.
+//!
+//! These tests pin the expected deny-by-default behaviour. They are
+//! intentionally RED until pg2sqlite either (a) emits a RAISE(ABORT)
+//! at the top of any INSTEAD OF trigger whose action has no policy,
+//! or (b) skips emitting that INSTEAD OF trigger entirely so SQLite
+//! errors with the standard "cannot modify view" message.
+
+use pg2sqlite::prelude::{
+    Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions, UuidRepresentation,
+};
+use rusqlite::Connection;
+
+fn rls_opts() -> Pg2SqliteOptions {
+    Pg2SqliteOptions::default()
+        .with_sqlitegis_enabled()
+        .with_uuid_representation(UuidRepresentation::Blob)
+        .with_rls_audit_table_name("rls_violations")
+        .with_session_variable(SessionVariableMapping::current_setting(
+            "app.user_id",
+            "current_app_user",
+        ))
+}
+
+const SCHEMA_SELECT_INSERT_ONLY: &str = "\
+CREATE TABLE documents (
+    id INTEGER PRIMARY KEY,
+    owner_id INTEGER NOT NULL,
+    title TEXT NOT NULL
+);
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY documents_select_policy ON documents
+    FOR SELECT
+    USING (owner_id = current_setting('app.user_id')::integer);
+CREATE POLICY documents_insert_policy ON documents
+    FOR INSERT
+    WITH CHECK (owner_id = current_setting('app.user_id')::integer);
+INSERT INTO documents (id, owner_id, title) VALUES (1, 42, 'First'), (2, 42, 'Second');
+";
+
+fn open_with_session_user() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.create_scalar_function(
+        "current_app_user",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |_| Ok(42i64),
+    )
+    .unwrap();
+    conn
+}
+
+fn translate(schema: &str, opts: &Pg2SqliteOptions) -> String {
+    Pg2Sqlite::default()
+        .sql(schema)
+        .expect("parse")
+        .translate(opts)
+        .expect("translate")
+        .iter()
+        .map(|s| format!("{s};"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn delete_is_blocked_when_no_delete_policy_is_defined() {
+    let opts = rls_opts();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(SCHEMA_SELECT_INSERT_ONLY, &opts)).expect("apply schema");
+
+    let before: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    assert_eq!(before, 2);
+    let result = conn.execute("DELETE FROM documents WHERE id = 1", []);
+    let after: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+
+    assert!(
+        result.is_err(),
+        "DELETE on a table with no DELETE policy must raise; got Ok ({result:?})"
+    );
+    assert_eq!(
+        after, before,
+        "DELETE must not remove rows when the schema has no DELETE policy; \
+         row count changed {before} -> {after}"
+    );
+}
+
+#[test]
+fn update_is_blocked_when_no_update_policy_is_defined() {
+    let opts = rls_opts();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(SCHEMA_SELECT_INSERT_ONLY, &opts)).expect("apply schema");
+
+    let result = conn.execute("UPDATE documents SET title = 'Hijacked' WHERE id = 1", []);
+    let title: String =
+        conn.query_row("SELECT title FROM documents WHERE id = 1", [], |r| r.get(0)).unwrap();
+
+    assert!(
+        result.is_err(),
+        "UPDATE on a table with no UPDATE policy must raise; got Ok ({result:?})"
+    );
+    assert_ne!(title, "Hijacked", "title must not change when there is no UPDATE policy");
+}
+
+const SCHEMA_FULL_POLICIES: &str = "\
+CREATE TABLE documents (
+    id INTEGER PRIMARY KEY,
+    owner_id INTEGER NOT NULL,
+    title TEXT NOT NULL
+);
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY documents_select_policy ON documents
+    FOR SELECT USING (owner_id = current_setting('app.user_id')::integer);
+CREATE POLICY documents_insert_policy ON documents
+    FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id')::integer);
+CREATE POLICY documents_update_policy ON documents
+    FOR UPDATE USING (owner_id = current_setting('app.user_id')::integer);
+CREATE POLICY documents_delete_policy ON documents
+    FOR DELETE USING (owner_id = current_setting('app.user_id')::integer);
+INSERT INTO documents (id, owner_id, title) VALUES (1, 42, 'First'), (2, 42, 'Second');
+";
+
+#[test]
+fn delete_with_matching_policy_succeeds() {
+    // Positive sanity check: once a FOR DELETE policy IS declared,
+    // and the current row passes its USING predicate, DELETE must
+    // succeed. This test must already pass today and must keep
+    // passing after the deny-by-default fix lands.
+    let opts = rls_opts();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(SCHEMA_FULL_POLICIES, &opts)).expect("apply schema");
+
+    let result = conn.execute("DELETE FROM documents WHERE id = 1", []);
+    assert!(result.is_ok(), "DELETE with a matching FOR DELETE policy must succeed: {result:?}");
+    let remaining: i64 =
+        conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    assert_eq!(remaining, 1, "exactly one row should have been deleted");
+}
+
+#[test]
+fn update_with_matching_policy_succeeds() {
+    let opts = rls_opts();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(SCHEMA_FULL_POLICIES, &opts)).expect("apply schema");
+
+    let result = conn.execute("UPDATE documents SET title = 'Updated' WHERE id = 1", []);
+    assert!(result.is_ok(), "UPDATE with a matching FOR UPDATE policy must succeed: {result:?}");
+    let title: String =
+        conn.query_row("SELECT title FROM documents WHERE id = 1", [], |r| r.get(0)).unwrap();
+    assert_eq!(title, "Updated");
+}
+
+const SCHEMA_SELECT_ONLY: &str = "\
+CREATE TABLE documents (
+    id INTEGER PRIMARY KEY,
+    owner_id INTEGER NOT NULL,
+    title TEXT NOT NULL
+);
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY documents_select_policy ON documents
+    FOR SELECT
+    USING (owner_id = current_setting('app.user_id')::integer);
+";
+
+#[test]
+fn insert_is_blocked_when_no_insert_policy_is_defined() {
+    // Symmetric coverage for INSERT: with a FOR SELECT policy only, every
+    // INSERT must raise. Seeded rows are intentionally absent here so we
+    // exercise the post-apply INSERT path directly.
+    let opts = rls_opts();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(SCHEMA_SELECT_ONLY, &opts)).expect("apply schema");
+
+    let result =
+        conn.execute("INSERT INTO documents (id, owner_id, title) VALUES (1, 42, 'mine')", []);
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    assert!(
+        result.is_err(),
+        "INSERT must be rejected when no FOR INSERT policy is declared; got Ok ({result:?})"
+    );
+    assert_eq!(count, 0, "no row may be written when INSERT is denied");
+}
+
+#[test]
+fn select_only_table_blocks_all_writes() {
+    // The strongest deny-by-default test: a table whose only policy is FOR
+    // SELECT must block INSERT, UPDATE, and DELETE through the translated
+    // view. We seed one row directly into the backing table so the
+    // INSTEAD OF UPDATE / DELETE triggers actually fire (per SQLite
+    // FOR-EACH-ROW semantics, an UPDATE that matches zero rows does not
+    // invoke the trigger at all).
+    let opts = rls_opts();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(SCHEMA_SELECT_ONLY, &opts)).expect("apply schema");
+    conn.execute("INSERT INTO documents_rls (id, owner_id, title) VALUES (1, 42, 'seed')", [])
+        .expect("seed via backing table");
+
+    let insert_err = conn
+        .execute("INSERT INTO documents (id, owner_id, title) VALUES (2, 42, 't')", [])
+        .expect_err("INSERT must be rejected");
+    let update_err = conn
+        .execute("UPDATE documents SET title = 't' WHERE id = 1", [])
+        .expect_err("UPDATE must be rejected");
+    let delete_err = conn
+        .execute("DELETE FROM documents WHERE id = 1", [])
+        .expect_err("DELETE must be rejected");
+
+    assert!(
+        insert_err.to_string().contains("INSERT") && insert_err.to_string().contains("policy"),
+        "INSERT error must reference policy: {insert_err:?}"
+    );
+    assert!(
+        update_err.to_string().contains("UPDATE") && update_err.to_string().contains("policy"),
+        "UPDATE error must reference policy: {update_err:?}"
+    );
+    assert!(
+        delete_err.to_string().contains("DELETE") && delete_err.to_string().contains("policy"),
+        "DELETE error must reference policy: {delete_err:?}"
+    );
+}

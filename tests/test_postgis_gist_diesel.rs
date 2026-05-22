@@ -1,11 +1,11 @@
-//! Step 4 (geolite-gated): the translated GiST->CreateSpatialIndex DDL
-//! executes against a real geolite-loaded SQLite, producing the rtree
+//! Step 4 (sqlitegis-gated): the translated GiST->CreateSpatialIndex DDL
+//! executes against a real SQLiteGIS-loaded SQLite, producing the rtree
 //! shadow table at `<table>_<col>_rtree`, and subsequent spatial queries
 //! work against the indexed column.
 //!
-//! Run with: `cargo test --features geolite --test test_postgis_gist_diesel`
+//! Run with: `cargo test --features sqlitegis --test test_postgis_gist_diesel`
 
-#![cfg(feature = "geolite")]
+#![cfg(feature = "sqlitegis")]
 
 mod helpers;
 
@@ -13,7 +13,7 @@ use diesel::{
     QueryableByName, RunQueryDsl, SqliteConnection, sql_query,
     sql_types::{Integer, Text},
 };
-use helpers::geolite::geolite_connection;
+use helpers::sqlitegis::sqlitegis_connection;
 use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
 
 #[derive(QueryableByName)]
@@ -60,8 +60,8 @@ fn populate_grid_points(conn: &mut SqliteConnection, table: &str) {
 
 #[test]
 fn gist_geometry_index_round_trips_via_diesel() {
-    let mut conn = geolite_connection();
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let mut conn = sqlitegis_connection();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
 
     let pg_sql = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
                   CREATE INDEX features_geom_idx ON features USING gist (geom);";
@@ -83,7 +83,7 @@ fn gist_geometry_index_round_trips_via_diesel() {
     assert_eq!(rows[0].name, "features_geom_rtree");
 
     // Insert one row and verify the spatial predicate finds it. The AFTER INSERT
-    // trigger installed by geolite's CreateSpatialIndex also populates the rtree
+    // trigger installed by SQLiteGIS's CreateSpatialIndex also populates the rtree
     // shadow, but this test focuses on translation shape only; the full-grid
     // acceleration test below covers rtree sync and planner usage explicitly.
     sql_query("INSERT INTO features (id, geom) VALUES (1, ST_Point(0.5, 0.5))")
@@ -116,8 +116,8 @@ fn gist_geometry_index_round_trips_via_diesel() {
 ///    rtree virtual table.
 #[test]
 fn gist_geometry_index_accelerates_spatial_queries() {
-    let mut conn = geolite_connection();
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let mut conn = sqlitegis_connection();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
 
     // 1. Translate and execute the PG-shaped DDL.
     let pg_sql = "CREATE TABLE perf_grid (id INTEGER PRIMARY KEY, geom geometry); \
@@ -136,7 +136,7 @@ fn gist_geometry_index_accelerates_spatial_queries() {
     assert_eq!(rtree_initial[0].n, 0, "rtree must start empty on a freshly-translated GiST index");
 
     // 3. Insert 10k points on a 100x100 grid. The AFTER INSERT triggers installed
-    //    by geolite's CreateSpatialIndex must populate the rtree transparently;
+    //    by SQLiteGIS's CreateSpatialIndex must populate the rtree transparently;
     //    pg2sqlite emits no extra sync SQL of its own.
     sql_query("BEGIN").execute(&mut conn).expect("begin tx");
     populate_grid_points(&mut conn, "perf_grid");
@@ -219,8 +219,8 @@ fn gist_geometry_index_accelerates_spatial_queries() {
 /// without the user writing the JOIN explicitly.
 #[test]
 fn st_intersects_on_indexed_column_uses_rtree_via_translation() {
-    let mut conn = geolite_connection();
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let mut conn = sqlitegis_connection();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
 
     // Translate the schema together with the user's spatial query so that
     // pg2sqlite's spatial-index catalog sees the GiST DDL before reaching
@@ -271,8 +271,8 @@ fn st_intersects_on_indexed_column_uses_rtree_via_translation() {
 /// plans differ accordingly while both return the same correct row count.
 #[test]
 fn acceleration_is_conditional_on_index_presence() {
-    let mut conn = geolite_connection();
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let mut conn = sqlitegis_connection();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
 
     // Both tables share the same shape; only the indexed one gets a
     // CREATE INDEX USING gist. The two SELECTs are byte-identical apart
@@ -367,8 +367,8 @@ fn acceleration_is_conditional_on_index_presence() {
 /// the indexed table while both updates touch the same row set.
 #[test]
 fn update_acceleration_is_conditional_on_index_presence() {
-    let mut conn = geolite_connection();
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let mut conn = sqlitegis_connection();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
 
     let full_sql = "\
         CREATE TABLE indexed_grid (id INTEGER PRIMARY KEY, geom geometry, marker text); \
@@ -448,8 +448,8 @@ fn update_acceleration_is_conditional_on_index_presence() {
 /// the unindexed one full-scans, both end up with the same surviving rows.
 #[test]
 fn delete_acceleration_is_conditional_on_index_presence() {
-    let mut conn = geolite_connection();
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+    let mut conn = sqlitegis_connection();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
 
     let full_sql = "\
         CREATE TABLE indexed_grid (id INTEGER PRIMARY KEY, geom geometry); \

@@ -24,6 +24,10 @@ mod state;
 mod translator;
 
 use dioxus::prelude::*;
+use dioxus_free_icons::{
+    Icon,
+    icons::{fa_brands_icons::FaGithub, fa_solid_icons::FaArrowRightArrowLeft},
+};
 use gloo_timers::future::TimeoutFuture;
 use wasm_bindgen_futures::spawn_local;
 
@@ -93,13 +97,34 @@ fn AppHeader() -> Element {
     rsx! {
         header { class: "app-header",
             div { class: "app-header-titles",
-                h1 { class: "app-title", "pg2sqlite" }
+                h1 { class: "app-title",
+                    Icon {
+                        width: 28,
+                        height: 28,
+                        icon: FaArrowRightArrowLeft,
+                        class: "title-icon".to_string(),
+                    }
+                    "pg2sqlite"
+                }
                 p { class: "app-tagline",
                     "Translate PostgreSQL to SQLite. In your browser. No backend."
                 }
             }
             div { class: "app-header-controls",
                 SamplePicker {}
+                a {
+                    class: "brand-link",
+                    href: "https://github.com/LucaCappelletti94/pg2sqlite",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    title: "View pg2sqlite on GitHub",
+                    Icon {
+                        width: 22,
+                        height: 22,
+                        icon: FaGithub,
+                        class: "brand-icon".to_string(),
+                    }
+                }
             }
             OptionsPanel {}
         }
@@ -133,7 +158,10 @@ fn run_translate(state: AppState, pg_sql: &str, opts: &state::WebOptions) {
             state.stats.clone().set(Some(output.stats));
             state.query_result.clone().set(None);
 
-            let apply_result = db::reopen().and_then(|()| db::run_script(&sqlite_sql));
+            let session_var_funcs: Vec<String> =
+                opts.session_variables.iter().map(|m| m.sqlite_function.clone()).collect();
+            let apply_result =
+                db::reopen(&session_var_funcs).and_then(|()| db::run_script(&sqlite_sql));
             match apply_result {
                 Ok(()) => {
                     state.apply_error.clone().set(None);

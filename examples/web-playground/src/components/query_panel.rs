@@ -11,16 +11,17 @@
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     Icon,
-    icons::fa_solid_icons::{FaPlay, FaTriangleExclamation},
+    icons::fa_solid_icons::{FaPlay, FaTerminal, FaTriangleExclamation},
 };
 
 use crate::{
     components::{
-        editor::SqlEditor,
+        editor::{SqlEditor, SqlViewer},
         map::{Map, extract_lonlat},
         results_table::ResultsTable,
     },
     runner::{self, QueryOutcome},
+    samples::{SampleQueryKind, find_sample_by_sql},
     state::{AppState, QueryDialect, QueryDisplay},
     translator,
 };
@@ -45,9 +46,19 @@ pub fn QueryPanel() -> Element {
     rsx! {
         section { class: "panel query-panel",
             div { class: "panel-header",
-                h2 { class: "panel-title", "Query the populated database" }
+                h2 { class: "panel-title",
+                    Icon {
+                        width: 16,
+                        height: 16,
+                        icon: FaTerminal,
+                        class: "title-icon".to_string(),
+                    }
+                    "Query the populated database"
+                }
                 DialectToggle {}
             }
+
+            SampleQueriesStrip {}
 
             SqlEditor {
                 value: query,
@@ -119,22 +130,20 @@ fn QueryDisplayCard(display: QueryDisplay) -> Element {
             if show_rewrite {
                 div { class: "query-rewrite",
                     span { class: "query-rewrite-label", "Translated as:" }
-                    code { class: "query-rewrite-sql", "{display.effective_sql}" }
+                    div { class: "query-rewrite-viewer",
+                        SqlViewer {
+                            value: display.effective_sql.clone(),
+                            aria_label: "Translated SQLite SQL".to_string(),
+                        }
+                    }
                 }
             }
             match display.outcome {
                 QueryOutcome::Rows { result, elapsed_ms } => {
-                    // Map plots only when geolite is configured (the
-                    // PostGIS flag in the Options form is a clean cue
-                    // that the user is doing spatial work) and the
-                    // result actually exposes `lon` / `lat` columns.
-                    // Otherwise we'd be plotting random numeric pairs.
-                    let geolite = state.options.read().geolite_enabled;
-                    let points = if geolite {
-                        extract_lonlat(&result.columns, &result.rows)
-                    } else {
-                        Vec::new()
-                    };
+                    // Map plots when the result actually exposes
+                    // lon / lat columns; otherwise we would be drawing
+                    // arbitrary numeric pairs.
+                    let points = extract_lonlat(&result.columns, &result.rows);
                     rsx! {
                         p { class: "query-stats",
                             "Returned {result.rows.len()} row"
@@ -172,6 +181,67 @@ fn format_ms(ms: f64) -> String {
     if ms < 1.0 { format!("{ms:.2}") } else { format!("{ms:.1}") }
 }
 
+/// Renders one chip per curated query attached to the currently-loaded
+/// sample. The chips disappear as soon as the user edits the PG input
+/// (because the lookup is exact-equality), so once the schema has
+/// drifted the suggestions can no longer be assumed to match.
+#[component]
+fn SampleQueriesStrip() -> Element {
+    let state: AppState = use_context();
+    let pg_input = state.pg_input.read().clone();
+    let Some(sample) = find_sample_by_sql(&pg_input) else {
+        return rsx! {};
+    };
+    if sample.queries.is_empty() {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "sample-queries",
+            span { class: "sample-queries-label", "Try these queries" }
+            div { class: "sample-queries-chips",
+                for query in sample.queries.iter() {
+                    SampleQueryChip {
+                        label: query.label,
+                        sql: query.sql,
+                        dialect: query.dialect,
+                        kind: query.kind,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SampleQueryChip(
+    label: &'static str,
+    sql: &'static str,
+    dialect: QueryDialect,
+    kind: SampleQueryKind,
+) -> Element {
+    let state: AppState = use_context();
+    let class = match kind {
+        SampleQueryKind::Positive => "sample-query-chip",
+        SampleQueryKind::Negative => "sample-query-chip negative",
+    };
+    let on_click = move |_| {
+        state.query_dialect.clone().set(dialect);
+        state.query_input.clone().set(sql.to_string());
+        run_query(state);
+    };
+
+    rsx! {
+        button {
+            r#type: "button",
+            class: class,
+            title: "{sql}",
+            onclick: on_click,
+            "{label}"
+        }
+    }
+}
+
 /// Run the user's query against the in-memory connection, dispatching
 /// PG inputs through pg2sqlite first.
 fn run_query(state: AppState) {
@@ -184,11 +254,14 @@ fn run_query(state: AppState) {
             // Reuse the same options the schema was translated under.
             // Without this, PG queries that depend on session-variable
             // mappings or geolite enablement would silently behave
-            // differently from the schema they're querying.
+            // differently from the schema they're querying. We also
+            // pass the live PG schema so schema-driven rewrites (the
+            // pgvector `vec_f32` text-literal wrap, the RLS view
+            // resolution, ...) fire against the actual table shapes.
             let options = state.options.read().to_options();
-            let now = || web_sys::window().and_then(|w| w.performance()).map_or(0.0, |p| p.now());
-            match translator::translate(&raw_query, &options, now) {
-                Ok(translated) => translated.sqlite_sql,
+            let pg_schema = state.pg_input.read().clone();
+            match translator::translate_query(&raw_query, &pg_schema, &options) {
+                Ok(sql) => sql,
                 Err(err) => {
                     state.query_result.clone().set(Some(QueryDisplay {
                         effective_sql: raw_query.clone(),

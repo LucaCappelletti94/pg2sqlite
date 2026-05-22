@@ -1,60 +1,60 @@
-//! Step 3 (geolite-gated): catalog parity + end-to-end execution of every
-//! `ST_*` smoke statement against a Diesel `SqliteConnection` with geolite's
-//! extension loaded.
+//! Step 3 (sqlitegis-gated): catalog parity + end-to-end execution of every
+//! `ST_*` smoke statement against a Diesel `SqliteConnection` with the
+//! SQLiteGIS extension loaded.
 //!
-//! Run with: `cargo test --features geolite --test test_postgis_diesel`
+//! Run with: `cargo test --features sqlitegis --test test_postgis_diesel`
 
-#![cfg(feature = "geolite")]
+#![cfg(feature = "sqlitegis")]
 
 mod helpers;
 
 use diesel::{RunQueryDsl, sql_query};
-use geolite_core::function_catalog::{
-    SQLITE_DETERMINISTIC_FUNCTIONS, SQLITE_DIRECT_ONLY_FUNCTIONS,
-};
-use helpers::geolite::geolite_connection;
+use helpers::sqlitegis::sqlitegis_connection;
 use pg2sqlite::{
     impls::translator_impls::postgis,
     pg2sqlite::Pg2Sqlite,
     prelude::{Pg2SqliteOptions, TranslationOptions},
 };
+use sqlitegis::core::function_catalog::{
+    SQLITE_DETERMINISTIC_FUNCTIONS, SQLITE_DIRECT_ONLY_FUNCTIONS,
+};
 
 #[test]
-fn pg2sqlite_catalog_covers_every_geolite_deterministic_function() {
+fn pg2sqlite_catalog_covers_every_sqlitegis_deterministic_function() {
     let mut missing = Vec::new();
     for spec in SQLITE_DETERMINISTIC_FUNCTIONS {
-        if !postgis::is_geolite_function(&spec.name.to_ascii_lowercase(), spec.n_arg) {
+        if !postgis::is_sqlitegis_function(&spec.name.to_ascii_lowercase(), spec.n_arg) {
             missing.push(format!("{}/{}", spec.name, spec.n_arg));
         }
     }
     assert!(
         missing.is_empty(),
-        "pg2sqlite's PostGIS catalog is missing {} geolite deterministic entries:\n{}",
+        "pg2sqlite's PostGIS catalog is missing {} SQLiteGIS deterministic entries:\n{}",
         missing.len(),
         missing.join(", ")
     );
 }
 
 #[test]
-fn pg2sqlite_catalog_covers_every_geolite_direct_only_function() {
+fn pg2sqlite_catalog_covers_every_sqlitegis_direct_only_function() {
     let mut missing = Vec::new();
     for spec in SQLITE_DIRECT_ONLY_FUNCTIONS {
-        if !postgis::is_geolite_function(&spec.name.to_ascii_lowercase(), spec.n_arg) {
+        if !postgis::is_sqlitegis_function(&spec.name.to_ascii_lowercase(), spec.n_arg) {
             missing.push(format!("{}/{}", spec.name, spec.n_arg));
         }
     }
     assert!(
         missing.is_empty(),
-        "pg2sqlite's PostGIS catalog is missing {} geolite direct-only entries:\n{}",
+        "pg2sqlite's PostGIS catalog is missing {} SQLiteGIS direct-only entries:\n{}",
         missing.len(),
         missing.join(", ")
     );
 }
 
 #[test]
-fn every_geolite_smoke_sql_translates_and_executes() {
-    let mut conn = geolite_connection();
-    let opts = Pg2SqliteOptions::default().with_geolite_enabled();
+fn every_sqlitegis_smoke_sql_translates_and_executes() {
+    let mut conn = sqlitegis_connection();
+    let opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
 
     // DIRECT-ONLY helpers (CreateSpatialIndex / DropSpatialIndex) need a real
     // table to bind to; skip them in this generic smoke loop (Step 4 covers

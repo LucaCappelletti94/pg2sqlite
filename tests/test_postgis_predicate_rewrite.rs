@@ -13,7 +13,7 @@ use pg2sqlite::{
 mod helpers;
 
 fn translate_with_geolite(sql: &str) -> Result<Vec<String>, Error> {
-    helpers::translate_pg(sql, &Pg2SqliteOptions::default().with_geolite_enabled())
+    helpers::translate_pg(sql, &Pg2SqliteOptions::default().with_sqlitegis_enabled())
 }
 
 fn user_select(stmts: &[String]) -> String {
