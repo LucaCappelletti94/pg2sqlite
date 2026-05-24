@@ -15,7 +15,7 @@ cargo fuzz run fuzz_sql_translation
 cargo fuzz run fuzz_reverse_translation
 ```
 
-Append `-- -max_total_time=60` (or similar libfuzzer flags) to time-cap a session. Crashes land in `fuzz/artifacts/<target>/<hash>`; reproduce a single artefact with `cargo fuzz run <target> fuzz/artifacts/<target>/<hash>`.
+Append `-- -max_total_time=60` (or similar libfuzzer flags) to time-cap a session. Crashes land in `fuzz/artifacts/<target>/<hash>`. Reproduce a single artefact with `cargo fuzz run <target> fuzz/artifacts/<target>/<hash>`.
 
 ## Run every target in parallel
 
@@ -33,7 +33,7 @@ Defaults passed to every libFuzzer instance (overridable via `--`):
 |------|-------|--------|
 | `-timeout=15` | 15 s | abort a single input that runs longer (defense in depth against new sqlparser exponentials). |
 | `-max_len=65536` | 64 KiB | cap generated input size, so the artefact directory does not fill with low-signal multi-MB cases. |
-| `-rss_limit_mb=8192` | 8 GiB | raise libFuzzer's 2 GiB RSS ceiling. ASAN's allocator fragments and total RSS drifts past 2 GiB after tens of thousands of iterations; the previous OOM artefacts (`35c504`, `0c50`) all replayed in <100 ms / <50 MB on a fresh process, attributable to this drift. |
+| `-rss_limit_mb=8192` | 8 GiB | raise libFuzzer's 2 GiB RSS ceiling. ASAN's allocator fragments and total RSS drifts past 2 GiB after tens of thousands of iterations. The previous OOM artefacts (`35c504`, `0c50`) all replayed in <100 ms / <50 MB on a fresh process, attributable to this drift. |
 
 ## Coverage
 

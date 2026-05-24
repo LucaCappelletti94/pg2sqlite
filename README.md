@@ -348,7 +348,7 @@ The filesystem- and git-backed loaders are gated behind the default-on `std` fea
 
 ### WASM / no_std support
 
-pg2sqlite compiles for `wasm32-unknown-unknown` as a `no_std + alloc` crate, so the same translator can run in a browser tab — paste PostgreSQL on the left, get SQLite on the right, hand the output to `sql.js` or `sqlite-wasm` for in-page execution — or on any embedded target that ships an `alloc` allocator.
+pg2sqlite compiles for `wasm32-unknown-unknown` as a `no_std + alloc` crate, so the same translator can run in a browser tab (paste PostgreSQL on the left, get SQLite on the right, hand the output to `sql.js` or `sqlite-wasm` for in-page execution) or on any embedded target that ships an `alloc` allocator.
 
 ```toml
 [dependencies]
@@ -357,7 +357,7 @@ pg2sqlite = { version = "0.1", default-features = false }
 
 What `--no-default-features` strips:
 
-- Filesystem and git loaders (`Pg2Sqlite::file`, `ups`, `ups_until`, `from_git`) — see the table above.
+- Filesystem and git loaders (`Pg2Sqlite::file`, `ups`, `ups_until`, `from_git`). See the feature table above.
 - The `Error::IoError` variant.
 - Internal `std::path` / `std::fs` / `git2` / `tempfile` references (everything else is `core::*` / `alloc::*`).
 
@@ -434,7 +434,7 @@ Measured with Criterion on an optimized release build (`cargo bench --bench tran
 
 On correctness, the same `cargo run --example compare_polyglot` benchmark across **87 cases** spanning function renames, NULL semantics, AT TIME ZONE, DDL types, aggregates, JSON, pgvector, window functions, DML, RLS, PL/pgSQL triggers, JSON operators, string functions, extended DDL, date/time, PG-specific idioms, role/permission DDL, and GIN/FTS indices reports (runtime harness loads `sqlite-vec` so pgvector translations execute):
 
-| Tool                | ✓ runs in SQLite | ✗ runtime error | — translation error |
+| Tool                | ✓ runs in SQLite | ✗ runtime error | Translation error |
 | ------------------- | ---------------: | --------------: | ------------------: |
 | **pg2sqlite**       | **63 (72%)**     | **0**           | 21                  |
 | **polyglot 0.3.11** | 44 (51%)         | 34              | 4                   |
@@ -455,7 +455,7 @@ Most PostgreSQL-to-SQLite translators are best-effort: they pass unknown constru
 | Reverse translation (SQLite → PostgreSQL)           | Only DML  | partial               | partial               |
 | `GRANT` / `REVOKE` / `CREATE ROLE` silently skipped | ✓         | ✗ (emits invalid SQL) | ✗ (emits invalid SQL) |
 
-See [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs) for the full side-by-side comparison across all 87 test cases (categories A–W) including runtime execution against an in-memory SQLite database.
+See [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs) for the full side-by-side comparison across all 87 test cases (categories A through W) including runtime execution against an in-memory SQLite database.
 
 ## License
 
