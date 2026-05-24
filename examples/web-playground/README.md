@@ -29,7 +29,7 @@ build (and the `[patch.crates-io]` sqlparser fork that makes the
 dx serve --platform web --release
 ```
 
-Then visit <http://localhost:8080>. Hot reload is on for `src/` and
+Then visit `http://localhost:8080`. Hot reload is on for `src/` and
 `public/`.
 
 Use the `--release` profile: `dioxus-code-editor` pulls in
