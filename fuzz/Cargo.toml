@@ -14,13 +14,23 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
-libfuzzer-sys = "0.4"
-pg2sqlite = { path = ".." }
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+pg2sqlite = { path = "..", features = ["arbitrary"] }
+arbitrary = { version = "1", features = ["derive"] }
 # Needed so the reverse fuzz target can name `ParserDB` in the static
 # context type. The git rev must match the one in pg2sqlite's own
 # Cargo.toml; otherwise cargo resolves two distinct copies and the
 # trait bounds stop lining up.
 sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "858e17e4561c2b80d779674192d242bcb12f8afa", default-features = false, features = ["std"] }
+# Direct dep so the round-trip harness can name `Statement` for its
+# render helper. Routed through the `[patch.crates-io]` block at the
+# bottom of this file to the same fork rev pg2sqlite uses.
+sqlparser = "0.62"
+# In-memory SQLite for the apply-side fuzz target. `bundled` so the
+# fuzzer build is self-contained and doesn't depend on the host's
+# libsqlite3 version, which could otherwise mask or shift dialect
+# behaviour between developers.
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [profile.release]
 debug = 1
@@ -35,6 +45,20 @@ bench = false
 [[bin]]
 name = "fuzz_reverse_translation"
 path = "fuzz_targets/fuzz_reverse_translation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_translate_apply"
+path = "fuzz_targets/fuzz_translate_apply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_roundtrip_equivalence"
+path = "fuzz_targets/fuzz_roundtrip_equivalence.rs"
 test = false
 doc = false
 bench = false

@@ -1,9 +1,11 @@
 //! Fuzz target for reverse SQL translation (SQLite to PostgreSQL).
 //!
-//! Feeds arbitrary byte sequences through the reverse translation
-//! pipeline to find crashes or panics. The schema is parsed once on
-//! first iteration via `LazyLock` so each fuzzing step only pays for
-//! `reverse_sql` itself.
+//! Feeds an `Arbitrary`-derived (options, sql) pair through the
+//! reverse translation pipeline to find crashes or panics. The
+//! schema is parsed once on first iteration via `LazyLock` so each
+//! fuzzing step only pays for `reverse_sql` itself. Options are
+//! randomised per iteration so every `with_*` toggle gets exercised
+//! through the reverse path.
 
 #![no_main]
 
@@ -42,22 +44,24 @@ const SCHEMA_SQL: &str = r#"
     );
 "#;
 
-type FuzzCtx = (Pg2Sqlite, sql_traits::structs::ParserDB, Pg2SqliteOptions);
+type FuzzCtx = (Pg2Sqlite, sql_traits::structs::ParserDB);
 
 static CTX: LazyLock<FuzzCtx> = LazyLock::new(|| {
     let translator = Pg2Sqlite::default().sql(SCHEMA_SQL).expect("schema parse");
     let schema = translator.build_schema().expect("schema build");
-    let options = Pg2SqliteOptions::default();
-    (translator, schema, options)
+    (translator, schema)
 });
 
-fuzz_target!(|data: &[u8]| {
-    if data.len() > 500 {
+#[derive(Debug, arbitrary::Arbitrary)]
+struct FuzzInput {
+    options: Pg2SqliteOptions,
+    sql: String,
+}
+
+fuzz_target!(|input: FuzzInput| {
+    if input.sql.len() > 500 {
         return;
     }
-    let Ok(sql) = std::str::from_utf8(data) else {
-        return;
-    };
-    let (translator, schema, options) = &*CTX;
-    let _ = translator.reverse_sql(sql, schema, options);
+    let (translator, schema) = &*CTX;
+    let _ = translator.reverse_sql(&input.sql, schema, &input.options);
 });

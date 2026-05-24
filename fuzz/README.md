@@ -33,7 +33,7 @@ Defaults passed to every libFuzzer instance (overridable via `--`):
 |------|-------|--------|
 | `-timeout=15` | 15 s | abort a single input that runs longer (defense in depth against new sqlparser exponentials). |
 | `-max_len=65536` | 64 KiB | cap generated input size, so the artefact directory does not fill with low-signal multi-MB cases. |
-| `-rss_limit_mb=8192` | 8 GiB | raise libFuzzer's 2 GiB RSS ceiling. ASAN's allocator fragments and total RSS drifts past 2 GiB after tens of thousands of iterations. |
+| `-rss_limit_mb=8192` | 8 GiB | raise libFuzzer's 2 GiB RSS ceiling. ASAN's allocator fragments and total RSS drifts past 2 GiB after tens of thousands of iterations; the previous OOM artefacts (`35c504`, `0c50`) all replayed in <100 ms / <50 MB on a fresh process, attributable to this drift. |
 
 ## Coverage
 
