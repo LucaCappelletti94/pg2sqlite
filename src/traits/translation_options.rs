@@ -13,6 +13,7 @@ use alloc::{
 
 /// Enum for defining the representation of UUIDs in `SQLite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum UuidRepresentation {
     /// Represent UUIDs as BLOBs.
     Blob,
@@ -33,6 +34,7 @@ pub enum UuidVersion {
 /// Enum representing PostgreSQL session variable patterns that can be mapped
 /// to SQLite functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum SessionVariablePattern {
     /// Matches `current_user` in PostgreSQL.
     CurrentUser,
@@ -54,6 +56,7 @@ impl core::fmt::Display for SessionVariablePattern {
 
 /// A mapping from a PostgreSQL session variable pattern to a SQLite function.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct SessionVariableMapping {
     /// The PostgreSQL pattern to match.
     pub pg_pattern: SessionVariablePattern,

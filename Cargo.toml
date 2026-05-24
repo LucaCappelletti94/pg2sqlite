@@ -11,6 +11,11 @@ sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits"
 git2 = { version = "0.20.4", optional = true }
 tempfile = { version = "3.27", optional = true }
 thiserror = { version = "2.0", default-features = false }
+# Optional Arbitrary impls on the public option types so fuzz harnesses
+# can drive `Pg2SqliteOptions` (and its dependent enums) from libfuzzer
+# input bytes. Gated behind the `arbitrary` feature so production
+# builds don't pull the dep.
+arbitrary = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -62,6 +67,11 @@ sqlitegis = [
     "dep:sqlitegis",
     "dep:libsqlite3-sys",
 ]
+# Derives `Arbitrary` on `Pg2SqliteOptions`, `UuidRepresentation`,
+# `SessionVariablePattern`, and `SessionVariableMapping`. Consumed by
+# the fuzz harnesses; not used by production code.
+arbitrary = ["dep:arbitrary"]
+
 # Temporary patch: redirect sqlparser + sqlparser_derive to
 # LucaCappelletti94's fork at the `pathological-combined` branch (rev
 # ce62a47474...). The branch bundles four still-in-flight upstream

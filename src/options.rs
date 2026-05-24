@@ -62,6 +62,31 @@ pub struct Pg2SqliteOptions {
     pub(crate) fts_indexes: Vec<(String, String)>,
 }
 
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
+    /// Randomises only the user-facing configuration fields. The
+    /// `spatial_indexes` and `fts_indexes` catalogs are populated by
+    /// the translator from `CREATE INDEX` statements in the input and
+    /// must start empty - randomising them would feed the translator
+    /// bogus catalog state that no real caller could produce.
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            remove_unsupported_check_constraints: bool::arbitrary(u)?,
+            uuid_representation: Option::<UuidRepresentation>::arbitrary(u)?,
+            uuid_function_name: String::arbitrary(u)?,
+            uuid_text_to_blob_function_name: Option::<String>::arbitrary(u)?,
+            rls_table_suffix: String::arbitrary(u)?,
+            session_user_role: Option::<String>::arbitrary(u)?,
+            session_variables: Vec::<SessionVariableMapping>::arbitrary(u)?,
+            rls_audit_table_name: Option::<String>::arbitrary(u)?,
+            strict_rls_validation: bool::arbitrary(u)?,
+            enable_geolite: bool::arbitrary(u)?,
+            spatial_indexes: Vec::new(),
+            fts_indexes: Vec::new(),
+        })
+    }
+}
+
 impl Default for Pg2SqliteOptions {
     fn default() -> Self {
         Self {
