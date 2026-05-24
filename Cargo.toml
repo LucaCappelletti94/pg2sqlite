@@ -62,26 +62,21 @@ sqlitegis = [
     "dep:sqlitegis",
     "dep:libsqlite3-sys",
 ]
-
 # Temporary patch: redirect sqlparser + sqlparser_derive to
-# LucaCappelletti94's fork at the `visitor-wasm` branch (rev
-# b14285d1d03e8f859f403b5430843c933531be9e) while
-# https://github.com/LucaCappelletti94/sqlparser-rs/tree/visitor-wasm is
-# under review upstream. The fork makes the `visitor` feature
-# wasm32-unknown-unknown-buildable via two fixes:
-#   1. derive/src/visit.rs: emit `::core::ops::ControlFlow` instead of
-#      `::std::ops::ControlFlow`.
-#   2. src/ast/visitor.rs: bring `alloc::{Box, String, Vec}` into scope
-#      under `#[cfg(not(feature = "std"))]` so the blanket `Visit`/`VisitMut`
-#      impls on those types resolve under no_std.
-# The branch also carries upstream-main drift past the v0.62.0 release;
-# we pin to a specific rev so cargo cannot silently roll the branch
-# forward. See docs/sqlparser_derive_no_std_fix.md. Remove this block
-# once a patched sqlparser (>= 0.63 with the no_std fix backported)
-# lands on crates.io.
+# LucaCappelletti94's fork at the `pathological-combined` branch (rev
+# ce62a47474...). The branch bundles four still-in-flight upstream
+# improvements that we depend on:
+#   1. PR #2343 (MERGED) - make the `visitor` feature `no_std`-compatible
+#      so the crate builds for wasm32-unknown-unknown.
+#   2. PR #2344 (MERGED) - fix exponential parse time on compound chains.
+#   3. PR #2349 (OPEN)   - fix exponential parse time on named-arg chains.
+#   4. PR #2350 (OPEN)   - fix exponential parse time on compound keyword chains.
+# We pin a specific rev so cargo cannot silently roll the branch forward.
+# Remove this block once a patched sqlparser release ships with all four
+# upstream. See docs/sqlparser_derive_no_std_fix.md.
 [patch.crates-io]
-sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "b14285d1d03e8f859f403b5430843c933531be9e" }
-sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "b14285d1d03e8f859f403b5430843c933531be9e" }
+sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
+sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
 
 [[bench]]
 name = "translation"

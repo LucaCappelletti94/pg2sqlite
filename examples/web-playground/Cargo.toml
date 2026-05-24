@@ -90,8 +90,8 @@ dx_icons = { version = "0.1.0", features = ["simple"] }
 # support to sqlparser's `visitor` feature merges and patched releases
 # ship, both copies of this block can be deleted.
 [patch.crates-io]
-sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "b14285d1d03e8f859f403b5430843c933531be9e" }
-sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "b14285d1d03e8f859f403b5430843c933531be9e" }
+sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
+sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
 
 [profile.release]
 opt-level = "z"
