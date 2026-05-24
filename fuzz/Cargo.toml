@@ -4,9 +4,26 @@ version = "0.0.0"
 publish = false
 edition = "2024"
 
+[package.metadata]
+cargo-fuzz = true
+
+# Keep this crate out of any parent workspace. libfuzzer-sys pulls in
+# nightly-only build flags and instrumentation; bundling it into the
+# main pg2sqlite workspace would slow precommit / audit for everyone
+# else. Mirrors the pattern examples/web-playground/Cargo.toml uses.
+[workspace]
+
 [dependencies]
-honggfuzz = "0.5"
+libfuzzer-sys = "0.4"
 pg2sqlite = { path = ".." }
+# Needed so the reverse fuzz target can name `ParserDB` in the static
+# context type. The git rev must match the one in pg2sqlite's own
+# Cargo.toml; otherwise cargo resolves two distinct copies and the
+# trait bounds stop lining up.
+sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "858e17e4561c2b80d779674192d242bcb12f8afa", default-features = false, features = ["std"] }
+
+[profile.release]
+debug = 1
 
 [[bin]]
 name = "fuzz_sql_translation"
@@ -21,3 +38,13 @@ path = "fuzz_targets/fuzz_reverse_translation.rs"
 test = false
 doc = false
 bench = false
+
+# `[patch.crates-io]` doesn't inherit across workspace boundaries.
+# pg2sqlite (one level up) has the same patch; we duplicate it here
+# because this crate is intentionally *not* a workspace member of
+# pg2sqlite. When the upstream PR adding no_std support to sqlparser's
+# `visitor` feature merges and patched releases ship, both copies of
+# this block can be deleted. Mirrors examples/web-playground/Cargo.toml.
+[patch.crates-io]
+sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
+sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
