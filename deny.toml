@@ -22,7 +22,14 @@ wildcards = "allow"
 
 [advisories]
 # Check for known security vulnerabilities.
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0172: diesel `SqliteConnection::deserialize_readonly_database`
+    # may operate on freed memory when the buffer is dropped before the
+    # connection. We do not call that API anywhere in this crate (verified
+    # via grep), so the advisory does not apply. Drop this entry when a
+    # fixed diesel release ships and the lockfile picks it up.
+    { id = "RUSTSEC-2026-0172", reason = "API not used in this crate" },
+]
 
 [sources]
 # Allow git sources since the project uses git dependencies for sqlparser and sql-traits.
