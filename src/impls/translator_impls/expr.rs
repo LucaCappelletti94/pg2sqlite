@@ -18,8 +18,8 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     Array, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, ObjectName,
-    ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, TableAlias,
+    FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, Interval,
+    ObjectName, ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, TableAlias,
     TableAliasColumnDef, TableFactor, TableWithJoins, UnaryOperator, Value, ValueWithSpan,
     helpers::attached_token::AttachedToken,
 };
@@ -31,7 +31,7 @@ use crate::{
         datetime_helpers::{
             DatePartKey, build_strftime_call, datetime_field_key, strftime_mapping_for_key,
         },
-        function_helpers::{integer_literal, simple_function_expr},
+        function_helpers::{integer_literal, simple_function_expr, string_literal},
         shared_helpers::function_argument_exprs,
         timezone::normalize_timezone_modifier_for_sqlite,
     },
@@ -569,6 +569,38 @@ fn boolean_literal(value: bool) -> Expr {
 /// window specification).
 fn function_call(name: &str, args: Vec<Expr>) -> Expr {
     simple_function_expr(name, args, None)
+}
+
+/// Split a PG `INTERVAL` value into SQLite date-modifier strings, signed
+/// for addition (`+`) or subtraction (`-`). Returns `None` when the
+/// interval shape is not yet supported (non-literal body, odd token
+/// count, etc.) so the caller can fall through to the existing
+/// standalone-INTERVAL error path.
+///
+/// Examples:
+/// - `INTERVAL '7 days'` with `+` becomes `["+7 days"]`.
+/// - `INTERVAL '1 year 2 months'` with `+` becomes `["+1 year", "+2 months"]`.
+/// - `INTERVAL '7' DAY` (unit in `leading_field`) with `-` becomes `["-7
+///   day"]`.
+fn interval_to_modifiers(interval: &Interval, sign: char) -> Option<Vec<String>> {
+    let body = match interval.value.as_ref() {
+        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => s.clone(),
+        _ => return None,
+    };
+    let trimmed = body.trim();
+
+    if let Some(field) = &interval.leading_field {
+        if trimmed.split_whitespace().count() != 1 {
+            return None;
+        }
+        return Some(vec![format!("{sign}{trimmed} {}", field.to_string().to_lowercase())]);
+    }
+
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if tokens.is_empty() || !tokens.len().is_multiple_of(2) {
+        return None;
+    }
+    Some(tokens.chunks(2).map(|chunk| format!("{sign}{} {}", chunk[0], chunk[1])).collect())
 }
 
 /// Translate PostgreSQL IS DISTINCT FROM / IS NOT DISTINCT FROM semantics
@@ -1122,6 +1154,35 @@ fn translate_binary_op(
                 ));
             }
             _ => {}
+        }
+    }
+
+    // PG INTERVAL arithmetic: `target + INTERVAL 'N unit'` becomes
+    // `datetime(target, '+N unit', ...)`, and `-` propagates as `-N`.
+    // Only the right-hand interval case is handled here. Standalone
+    // intervals (comparisons, projections) fall through to the
+    // Expr::Interval arm and stay unsupported.
+    if matches!(op, BinaryOperator::Plus | BinaryOperator::Minus) {
+        let interval_rhs = match right {
+            Expr::Interval(i) => Some(i),
+            Expr::Nested(inner) => {
+                match inner.as_ref() {
+                    Expr::Interval(i) => Some(i),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(interval) = interval_rhs {
+            let sign = if matches!(op, BinaryOperator::Plus) { '+' } else { '-' };
+            if let Some(modifiers) = interval_to_modifiers(interval, sign) {
+                let target = left.translate(schema, options)?;
+                let mut args = vec![target];
+                for m in modifiers {
+                    args.push(string_literal(&m));
+                }
+                return Ok(function_call("datetime", args));
+            }
         }
     }
 

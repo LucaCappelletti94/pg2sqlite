@@ -1,6 +1,6 @@
 //! Red tests for PG INTERVAL arithmetic to SQLite date modifiers.
 //!
-//! `ts + INTERVAL 'N unit'` becomes `datetime(ts, '+N unit')`; minus
+//! `ts + INTERVAL 'N unit'` becomes `datetime(ts, '+N unit')`, and minus
 //! becomes `'-N unit'`. Multi-unit intervals emit one modifier per unit.
 //! Standalone INTERVAL stays unsupported (no SQLite target).
 
@@ -10,8 +10,10 @@ fn translate(sql: &str) -> String {
     Pg2Sqlite::default()
         .sql(sql)
         .and_then(|t| t.translate(&Pg2SqliteOptions::default()))
-        .map(|stmts| stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
-        .unwrap_or_else(|e| panic!("translation failed: {e}"))
+        .map_or_else(
+            |e| panic!("translation failed: {e}"),
+            |stmts| stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"),
+        )
 }
 
 fn try_translate(sql: &str) -> Result<String, pg2sqlite::errors::Error> {
