@@ -57,8 +57,19 @@ fn p1_apply_var_pop_known_dataset() {
 
 #[test]
 fn p1_apply_stddev_pop_known_dataset() {
-    use rusqlite::Connection;
+    use rusqlite::{Connection, functions::FunctionFlags};
+    // Bundled SQLite is compiled without SQLITE_ENABLE_MATH_FUNCTIONS, so
+    // `sqrt` is not built in. Register it as a UDF to exercise the full
+    // translation. A real deployment either compiles SQLite with math
+    // functions enabled or registers a UDF the same way.
     let conn = Connection::open_in_memory().unwrap();
+    conn.create_scalar_function(
+        "sqrt",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(ctx.get::<f64>(0)?.sqrt()),
+    )
+    .unwrap();
     conn.execute_batch(&translate("CREATE TABLE m (id INTEGER PRIMARY KEY, v REAL);")).unwrap();
     conn.execute_batch("INSERT INTO m (id, v) VALUES (1,1),(2,2),(3,3),(4,4),(5,5);").unwrap();
     let q = translate("SELECT stddev_pop(v) FROM m;");
