@@ -117,11 +117,9 @@ fn stddev_causes_error() {
     assert!(err.to_lowercase().contains("stddev"), "Error should mention stddev: {err}");
 }
 
-#[test]
-fn stddev_pop_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT stddev_pop(val) FROM t;"));
-    assert!(err.to_lowercase().contains("stddev"), "Error should mention stddev: {err}");
-}
+// stddev_pop now translates to sqrt(avg(v*v) - avg(v)*avg(v)) and
+// var_pop to that closed form, so they no longer error. See
+// tests/test_statistical_aggregates.rs for the new pinned behavior.
 
 #[test]
 fn stddev_samp_causes_error() {
@@ -132,12 +130,6 @@ fn stddev_samp_causes_error() {
 #[test]
 fn variance_causes_error() {
     let err = translate_err(&format!("{SIMPLE_TABLE} SELECT variance(val) FROM t;"));
-    assert!(err.to_lowercase().contains("variance"), "Error should mention variance: {err}");
-}
-
-#[test]
-fn var_pop_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT var_pop(val) FROM t;"));
     assert!(err.to_lowercase().contains("variance"), "Error should mention variance: {err}");
 }
 

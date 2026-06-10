@@ -74,6 +74,10 @@ enum FunctionTranslation {
     ToMakePrintf { format: &'static str, arg_count: usize, func_label: &'static str },
     /// Transform json_extract_path(j, keys...) to json_extract(j, '$.k1.k2...')
     ToJsonExtractPath,
+    /// Population variance: var_pop(x) becomes avg(x*x) - avg(x)*avg(x).
+    VarPop,
+    /// Population standard deviation: stddev_pop(x) becomes sqrt(var_pop(x)).
+    StddevPop,
     /// No translation needed
     PassThrough,
 }
@@ -169,14 +173,16 @@ fn translate_function(
             "{original_name} is not supported as an aggregate in SQLite. \
              Consider loading a custom extension or rewriting with bitwise expressions."
         )),
-        "stddev" | "stddev_pop" | "stddev_samp" => FunctionTranslation::Unsupported(
-            "stddev/stddev_pop/stddev_samp are not supported in SQLite. \
-             Consider loading the statistics1 extension or computing manually."
+        "stddev_pop" => FunctionTranslation::StddevPop,
+        "stddev" | "stddev_samp" => FunctionTranslation::Unsupported(
+            "stddev/stddev_samp (sample form) are not yet supported in SQLite. \
+             Use stddev_pop for population standard deviation, or compute manually."
                 .to_string(),
         ),
-        "variance" | "var_pop" | "var_samp" => FunctionTranslation::Unsupported(
-            "variance/var_pop/var_samp are not supported in SQLite. \
-             Consider loading the statistics1 extension or computing manually."
+        "var_pop" => FunctionTranslation::VarPop,
+        "variance" | "var_samp" => FunctionTranslation::Unsupported(
+            "variance/var_samp (sample form) are not yet supported in SQLite. \
+             Use var_pop for population variance, or compute manually."
                 .to_string(),
         ),
         "corr" => FunctionTranslation::Unsupported(
@@ -579,6 +585,47 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
         }
     }
     Ok(result)
+}
+
+/// Extract and translate the single argument of an aggregate like
+/// `var_pop(x)` or `stddev_pop(x)`. Errors when the call has no positional
+/// argument expression.
+fn single_aggregate_arg(
+    args: &FunctionArguments,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+    func_name: &str,
+) -> Result<Expr, crate::errors::Error> {
+    let exprs = function_argument_exprs(args);
+    let first = exprs.into_iter().next().ok_or_else(|| {
+        crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "{func_name} requires one argument expression"
+        ))
+    })?;
+    first.translate(schema, options)
+}
+
+/// Build the population-variance closed form `avg(x*x) - avg(x) * avg(x)`.
+/// `x` is cloned twice for the squared term and twice more for the mean
+/// product, so the caller passes the already-translated expression.
+fn var_pop_closed_form(x: Expr) -> Expr {
+    let x_squared = Expr::BinaryOp {
+        left: Box::new(x.clone()),
+        op: BinaryOperator::Multiply,
+        right: Box::new(x.clone()),
+    };
+    let avg_x_squared = simple_function_expr("avg", vec![x_squared], None);
+    let avg_x = simple_function_expr("avg", vec![x], None);
+    let avg_x_times_avg_x = Expr::BinaryOp {
+        left: Box::new(avg_x.clone()),
+        op: BinaryOperator::Multiply,
+        right: Box::new(avg_x),
+    };
+    Expr::BinaryOp {
+        left: Box::new(avg_x_squared),
+        op: BinaryOperator::Minus,
+        right: Box::new(avg_x_times_avg_x),
+    }
 }
 
 /// Wrap an expression with COALESCE(expr, '') to handle NULL semantics.
@@ -1108,6 +1155,14 @@ impl Translator for Function {
                     vec![json_expr, string_literal(&path)],
                     None,
                 ))
+            }
+            FunctionTranslation::VarPop => {
+                let x = single_aggregate_arg(&func.args, schema, options, "var_pop")?;
+                Ok(var_pop_closed_form(x))
+            }
+            FunctionTranslation::StddevPop => {
+                let x = single_aggregate_arg(&func.args, schema, options, "stddev_pop")?;
+                Ok(simple_function_expr("sqrt", vec![var_pop_closed_form(x)], None))
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
