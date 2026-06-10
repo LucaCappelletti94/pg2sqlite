@@ -77,18 +77,8 @@ fn p1_apply_stddev_pop_known_dataset() {
     assert!((r - 2.0_f64.sqrt()).abs() < 1e-9, "stddev_pop should be sqrt(2), got {r}");
 }
 
-// Guards: later phases stay unsupported until they ship
-
-#[test]
-fn stddev_samp_stays_unsupported_in_phase_1() {
-    assert!(try_translate("SELECT stddev_samp(v) FROM m;").is_err());
-}
-
-#[test]
-fn variance_alias_stays_unsupported_in_phase_1() {
-    // PG `variance` aliases to var_samp (sample form), part of Phase 2.
-    assert!(try_translate("SELECT variance(v) FROM m;").is_err());
-}
+// stddev_samp / variance / stddev now translate via Phase 2. corr stays
+// unsupported until a later phase.
 
 #[test]
 fn corr_stays_unsupported_in_phase_1() {

@@ -111,33 +111,9 @@ fn every_causes_error() {
 // Statistical aggregates
 // ---------------------------------------------------------------------------
 
-#[test]
-fn stddev_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT stddev(val) FROM t;"));
-    assert!(err.to_lowercase().contains("stddev"), "Error should mention stddev: {err}");
-}
-
-// stddev_pop now translates to sqrt(avg(v*v) - avg(v)*avg(v)) and
-// var_pop to that closed form, so they no longer error. See
-// tests/test_statistical_aggregates.rs for the new pinned behavior.
-
-#[test]
-fn stddev_samp_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT stddev_samp(val) FROM t;"));
-    assert!(err.to_lowercase().contains("stddev"), "Error should mention stddev: {err}");
-}
-
-#[test]
-fn variance_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT variance(val) FROM t;"));
-    assert!(err.to_lowercase().contains("variance"), "Error should mention variance: {err}");
-}
-
-#[test]
-fn var_samp_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT var_samp(val) FROM t;"));
-    assert!(err.to_lowercase().contains("variance"), "Error should mention variance: {err}");
-}
+// stddev_pop, var_pop, stddev/stddev_samp, variance/var_samp now translate
+// to closed-form expressions. See tests/test_statistical_aggregates.rs
+// (Phase 1) and tests/test_statistical_aggregates_phase_2.rs (Phase 2).
 
 #[test]
 fn corr_causes_error() {
@@ -247,11 +223,8 @@ fn percentile_cont_still_errors() {
     assert!(!err.is_empty(), "Expected error for PERCENTILE_CONT, got empty");
 }
 
-#[test]
-fn stddev_still_errors() {
-    let err = translate_err("SELECT STDDEV(val) FROM t;");
-    assert!(!err.is_empty(), "Expected error for STDDEV, got empty");
-}
+// STDDEV now translates to a closed-form sample standard deviation.
+// See tests/test_statistical_aggregates_phase_2.rs.
 
 #[test]
 fn regexp_replace_still_errors() {
