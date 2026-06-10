@@ -99,6 +99,30 @@ fn p2_minus_propagates_to_each_modifier() {
     assert!(out.contains("-1 day") && out.contains("-2 hour"), "{out}");
 }
 
+// Other parse shapes the helper handles
+
+#[test]
+fn leading_field_form_uses_unit_from_field() {
+    // SQL-standard `INTERVAL 'N' UNIT` parses with the unit in `leading_field`.
+    let out = translate("SELECT NOW() + INTERVAL '7' DAY AS deadline;");
+    assert!(out.contains("datetime(") && out.contains("+7 day"), "{out}");
+}
+
+#[test]
+fn parenthesized_interval_is_unwrapped() {
+    // `(INTERVAL '5 days')` parses as Nested(Interval); the rewrite peels it.
+    let out = translate("SELECT NOW() + (INTERVAL '5 days') AS later;");
+    assert!(out.contains("datetime(") && out.contains("+5 day"), "{out}");
+}
+
+#[test]
+fn non_literal_interval_value_stays_unsupported() {
+    // `INTERVAL (col || 'days')` is a non-literal body; the helper returns
+    // None and the standalone-INTERVAL error path takes over.
+    let res = try_translate("SELECT NOW() + INTERVAL (col) DAY FROM t;");
+    assert!(res.is_err(), "non-literal interval body should fall through, got: {res:?}");
+}
+
 // Guards (green now, must stay green)
 
 #[test]
