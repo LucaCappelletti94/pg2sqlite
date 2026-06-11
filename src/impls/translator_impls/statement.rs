@@ -141,8 +141,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::AlterSchema(_)
         | Statement::AlterSession { .. }
         // PostgreSQL-specific types/domains/sequences
-        | Statement::CreateType { .. }
-        | Statement::CreateDomain(_)
         | Statement::CreateSequence { .. }
         | Statement::CreateProcedure { .. }
         | Statement::CreateMacro { .. }
@@ -190,7 +188,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::DropConnector { .. }
         | Statement::CreateSecret { .. }
         | Statement::DropSecret { .. }
-        | Statement::CreateServer(_)
         | Statement::CreateStage { .. }
         | Statement::Cache { .. }
         | Statement::UNCache { .. }
@@ -527,6 +524,27 @@ impl Translator for Statement {
                 crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
                     construct: "NOTIFY",
                     reason: "SQLite has no pub/sub channel, so the statement was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::CreateType { .. } => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "CREATE TYPE",
+                    reason: "SQLite has no composite or enum types, so the type definition was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::CreateDomain(_) => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "CREATE DOMAIN",
+                    reason: "SQLite has no domain types, so the domain definition was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::CreateServer(_) => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "CREATE SERVER",
+                    reason: "SQLite has no foreign-data-wrapper layer, so the server definition was dropped.",
                 });
                 Vec::new()
             }

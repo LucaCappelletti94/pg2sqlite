@@ -77,3 +77,31 @@ fn mixed_statements_collect_warnings_in_order() {
     assert_lossy_drop(&warns[0], "LISTEN");
     assert_lossy_drop(&warns[1], "NOTIFY");
 }
+
+#[test]
+fn create_type_emits_lossy_drop_warning() {
+    let warns = warnings_for("CREATE TYPE address AS (street TEXT, city TEXT);");
+    assert_eq!(warns.len(), 1);
+    assert_lossy_drop(&warns[0], "CREATE TYPE");
+}
+
+#[test]
+fn create_type_enum_emits_lossy_drop_warning() {
+    let warns = warnings_for("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');");
+    assert_eq!(warns.len(), 1);
+    assert_lossy_drop(&warns[0], "CREATE TYPE");
+}
+
+#[test]
+fn create_domain_emits_lossy_drop_warning() {
+    let warns = warnings_for("CREATE DOMAIN positive AS INTEGER CHECK (VALUE > 0);");
+    assert_eq!(warns.len(), 1);
+    assert_lossy_drop(&warns[0], "CREATE DOMAIN");
+}
+
+#[test]
+fn create_server_emits_lossy_drop_warning() {
+    let warns = warnings_for("CREATE SERVER remote FOREIGN DATA WRAPPER postgres_fdw;");
+    assert_eq!(warns.len(), 1);
+    assert_lossy_drop(&warns[0], "CREATE SERVER");
+}
