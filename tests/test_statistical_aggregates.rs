@@ -1,29 +1,71 @@
-//! Red tests for PG statistical aggregates lowered to SQLite closed forms.
-//!
-//! Phase 1: `var_pop` becomes `avg(x*x) - avg(x)*avg(x)`, `stddev_pop`
-//! wraps that in `sqrt`. Sample-form (`var_samp`, `stddev_samp`,
-//! `variance`, `stddev`), `covar_*`, and `corr` come in later phases.
+//! Phase 1 statistical aggregates: `var_pop` becomes `avg(x*x) -
+//! avg(x)*avg(x)`, `stddev_pop` wraps that in `sqrt`. Sample-form
+//! aggregates and bivariate aggregates live in the Phase 2 and Phase 3
+//! test files.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
 
-fn translate(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .and_then(|t| t.translate(&Pg2SqliteOptions::default()))
-        .map_or_else(
-            |e| panic!("translation failed: {e}"),
-            |stmts| stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"),
-        )
+use diesel::{
+    Insertable, QueryableByName, connection::SimpleConnection, insert_into, prelude::*, sql_query,
+    sql_types::Double, sqlite::SqliteConnection, table,
+};
+use helpers::{establish_connection, translate_pg};
+use pg2sqlite::prelude::Pg2SqliteOptions;
+
+table! {
+    /// Univariate test data for Phase 1.
+    m (id) {
+        /// Row identifier.
+        id -> Integer,
+        /// Numeric column the aggregates run over.
+        v -> Double,
+    }
 }
 
-fn try_translate(sql: &str) -> Result<String, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .and_then(|t| t.translate(&Pg2SqliteOptions::default()))
-        .map(|stmts| stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+/// Insertable row used to seed the univariate test data.
+#[derive(Insertable)]
+#[diesel(table_name = m)]
+struct NewRow {
+    /// Row identifier.
+    id: i32,
+    /// Numeric value.
+    v: f64,
 }
 
-// Phase 1: var_pop and stddev_pop closed forms
+/// Scalar aggregate result, bound by the `r` alias in each test query.
+#[derive(QueryableByName)]
+struct Scalar {
+    /// Aggregate value.
+    #[diesel(sql_type = Double)]
+    r: f64,
+}
+
+fn translate(pg: &str) -> String {
+    translate_pg(pg, &Pg2SqliteOptions::default()).expect("translation failed").join("\n")
+}
+
+fn try_translate(pg: &str) -> Result<String, pg2sqlite::errors::Error> {
+    translate_pg(pg, &Pg2SqliteOptions::default()).map(|v| v.join("\n"))
+}
+
+/// v in 1..=5. var_pop = 2, stddev_pop = sqrt(2).
+fn seed(conn: &mut SqliteConnection) {
+    conn.batch_execute(&translate("CREATE TABLE m (id INTEGER PRIMARY KEY, v REAL NOT NULL);"))
+        .expect("apply schema");
+    let rows: Vec<NewRow> = (1..=5).map(|i| NewRow { id: i, v: f64::from(i) }).collect();
+    insert_into(m::table).values(&rows).execute(conn).expect("seed");
+}
+
+fn aggregate(conn: &mut SqliteConnection, pg_sql: &str) -> f64 {
+    sql_query(translate(pg_sql)).get_result::<Scalar>(conn).expect("aggregate").r
+}
+
+fn open_with_sqrt() -> SqliteConnection {
+    let mut conn = establish_connection();
+    conn.register_sql_function::<Double, Double, _, _, _>("sqrt", true, |x: f64| x.sqrt())
+        .expect("register sqrt");
+    conn
+}
 
 #[test]
 fn p1_var_pop_to_avg_closed_form() {
@@ -45,40 +87,19 @@ fn p1_var_pop_with_group_by() {
 
 #[test]
 fn p1_apply_var_pop_known_dataset() {
-    use rusqlite::Connection;
-    // var_pop(1..5) = mean((x - mean)^2) = (4+1+0+1+4)/5 = 2
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(&translate("CREATE TABLE m (id INTEGER PRIMARY KEY, v REAL);")).unwrap();
-    conn.execute_batch("INSERT INTO m (id, v) VALUES (1,1),(2,2),(3,3),(4,4),(5,5);").unwrap();
-    let q = translate("SELECT var_pop(v) FROM m;");
-    let r: f64 = conn.query_row(&q, [], |row| row.get(0)).unwrap();
+    let mut conn = establish_connection();
+    seed(&mut conn);
+    let r = aggregate(&mut conn, "SELECT var_pop(v) AS r FROM m;");
     assert!((r - 2.0).abs() < 1e-9, "var_pop should be 2.0, got {r}");
 }
 
 #[test]
 fn p1_apply_stddev_pop_known_dataset() {
-    use rusqlite::{Connection, functions::FunctionFlags};
-    // Bundled SQLite is compiled without SQLITE_ENABLE_MATH_FUNCTIONS, so
-    // `sqrt` is not built in. Register it as a UDF to exercise the full
-    // translation. A real deployment either compiles SQLite with math
-    // functions enabled or registers a UDF the same way.
-    let conn = Connection::open_in_memory().unwrap();
-    conn.create_scalar_function(
-        "sqrt",
-        1,
-        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| Ok(ctx.get::<f64>(0)?.sqrt()),
-    )
-    .unwrap();
-    conn.execute_batch(&translate("CREATE TABLE m (id INTEGER PRIMARY KEY, v REAL);")).unwrap();
-    conn.execute_batch("INSERT INTO m (id, v) VALUES (1,1),(2,2),(3,3),(4,4),(5,5);").unwrap();
-    let q = translate("SELECT stddev_pop(v) FROM m;");
-    let r: f64 = conn.query_row(&q, [], |row| row.get(0)).unwrap();
+    let mut conn = open_with_sqrt();
+    seed(&mut conn);
+    let r = aggregate(&mut conn, "SELECT stddev_pop(v) AS r FROM m;");
     assert!((r - 2.0_f64.sqrt()).abs() < 1e-9, "stddev_pop should be sqrt(2), got {r}");
 }
-
-// stddev_samp / variance / stddev now translate via Phase 2. corr stays
-// unsupported until a later phase.
 
 #[test]
 fn corr_stays_unsupported_in_phase_1() {
