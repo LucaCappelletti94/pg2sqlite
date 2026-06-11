@@ -78,6 +78,13 @@ enum FunctionTranslation {
     VarPop,
     /// Population standard deviation: stddev_pop(x) becomes sqrt(var_pop(x)).
     StddevPop,
+    /// Sample variance: var_samp(x) becomes
+    /// (sum(x*x) - sum(x)*sum(x)/count(x)) / (count(x) - 1).
+    /// PG `variance` aliases to this.
+    VarSamp,
+    /// Sample standard deviation: stddev_samp(x) becomes sqrt(var_samp(x)).
+    /// PG `stddev` aliases to this.
+    StddevSamp,
     /// No translation needed
     PassThrough,
 }
@@ -174,17 +181,9 @@ fn translate_function(
              Consider loading a custom extension or rewriting with bitwise expressions."
         )),
         "stddev_pop" => FunctionTranslation::StddevPop,
-        "stddev" | "stddev_samp" => FunctionTranslation::Unsupported(
-            "stddev/stddev_samp (sample form) are not yet supported in SQLite. \
-             Use stddev_pop for population standard deviation, or compute manually."
-                .to_string(),
-        ),
+        "stddev" | "stddev_samp" => FunctionTranslation::StddevSamp,
         "var_pop" => FunctionTranslation::VarPop,
-        "variance" | "var_samp" => FunctionTranslation::Unsupported(
-            "variance/var_samp (sample form) are not yet supported in SQLite. \
-             Use var_pop for population variance, or compute manually."
-                .to_string(),
-        ),
+        "variance" | "var_samp" => FunctionTranslation::VarSamp,
         "corr" => FunctionTranslation::Unsupported(
             "corr (correlation) is not supported in SQLite. \
              Consider loading the statistics1 extension or computing manually."
@@ -625,6 +624,47 @@ fn var_pop_closed_form(x: Expr) -> Expr {
         left: Box::new(avg_x_squared),
         op: BinaryOperator::Minus,
         right: Box::new(avg_x_times_avg_x),
+    }
+}
+
+/// Build the sample-variance closed form
+/// `(sum(x*x) - sum(x) * sum(x) / count(x)) / (count(x) - 1)`. Numerator
+/// and denominator are wrapped in `Nested` so the rendered SQL keeps the
+/// correct precedence around the outer division.
+fn var_samp_closed_form(x: Expr) -> Expr {
+    let x_squared = Expr::BinaryOp {
+        left: Box::new(x.clone()),
+        op: BinaryOperator::Multiply,
+        right: Box::new(x.clone()),
+    };
+    let sum_x_squared = simple_function_expr("sum", vec![x_squared], None);
+    let sum_x = simple_function_expr("sum", vec![x.clone()], None);
+    let count_x = simple_function_expr("count", vec![x], None);
+
+    let sum_x_times_sum_x = Expr::BinaryOp {
+        left: Box::new(sum_x.clone()),
+        op: BinaryOperator::Multiply,
+        right: Box::new(sum_x),
+    };
+    let correction = Expr::BinaryOp {
+        left: Box::new(sum_x_times_sum_x),
+        op: BinaryOperator::Divide,
+        right: Box::new(count_x.clone()),
+    };
+    let numerator = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(sum_x_squared),
+        op: BinaryOperator::Minus,
+        right: Box::new(correction),
+    }));
+    let denominator = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(count_x),
+        op: BinaryOperator::Minus,
+        right: Box::new(number_literal("1")),
+    }));
+    Expr::BinaryOp {
+        left: Box::new(numerator),
+        op: BinaryOperator::Divide,
+        right: Box::new(denominator),
     }
 }
 
@@ -1163,6 +1203,14 @@ impl Translator for Function {
             FunctionTranslation::StddevPop => {
                 let x = single_aggregate_arg(&func.args, schema, options, "stddev_pop")?;
                 Ok(simple_function_expr("sqrt", vec![var_pop_closed_form(x)], None))
+            }
+            FunctionTranslation::VarSamp => {
+                let x = single_aggregate_arg(&func.args, schema, options, "var_samp")?;
+                Ok(var_samp_closed_form(x))
+            }
+            FunctionTranslation::StddevSamp => {
+                let x = single_aggregate_arg(&func.args, schema, options, "stddev_samp")?;
+                Ok(simple_function_expr("sqrt", vec![var_samp_closed_form(x)], None))
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
