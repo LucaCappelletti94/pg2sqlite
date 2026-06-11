@@ -105,3 +105,57 @@ fn create_server_emits_lossy_drop_warning() {
     assert_eq!(warns.len(), 1);
     assert_lossy_drop(&warns[0], "CREATE SERVER");
 }
+
+#[test]
+fn create_role_emits_lossy_drop_warning() {
+    let warns = warnings_for("CREATE ROLE alice;");
+    assert_eq!(warns.len(), 1);
+    assert_lossy_drop(&warns[0], "CREATE ROLE");
+}
+
+#[test]
+fn create_user_emits_lossy_drop_warning() {
+    let warns = warnings_for("CREATE USER bob;");
+    assert_eq!(warns.len(), 1);
+    assert_lossy_drop(&warns[0], "CREATE USER");
+}
+
+#[test]
+fn grant_emits_lossy_drop_warning() {
+    // GRANT requires the role to exist in the schema, so seed it.
+    let warns = warnings_for(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);\n\
+         CREATE ROLE alice;\n\
+         GRANT SELECT ON t TO alice;",
+    );
+    assert_eq!(warns.len(), 2);
+    assert_lossy_drop(&warns[0], "CREATE ROLE");
+    assert_lossy_drop(&warns[1], "GRANT");
+}
+
+#[test]
+fn revoke_emits_lossy_drop_warning() {
+    // REVOKE requires a matching GRANT, so seed both.
+    let warns = warnings_for(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);\n\
+         CREATE ROLE alice;\n\
+         GRANT SELECT ON t TO alice;\n\
+         REVOKE SELECT ON t FROM alice;",
+    );
+    assert_eq!(warns.len(), 3);
+    assert_lossy_drop(&warns[0], "CREATE ROLE");
+    assert_lossy_drop(&warns[1], "GRANT");
+    assert_lossy_drop(&warns[2], "REVOKE");
+}
+
+#[test]
+fn alter_role_emits_lossy_drop_warning() {
+    let warns = warnings_for("CREATE ROLE alice;\nALTER ROLE alice WITH SUPERUSER;");
+    assert_eq!(warns.len(), 2);
+    assert_lossy_drop(&warns[0], "CREATE ROLE");
+    assert_lossy_drop(&warns[1], "ALTER ROLE");
+}
+
+// ALTER USER syntax does not parse in the pinned sqlparser fork yet, so
+// there is no end-to-end test. The translator arm above stays in place
+// so the warning fires the moment the fork picks the construct up.
