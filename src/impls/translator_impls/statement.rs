@@ -115,10 +115,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::CreateFunction(_)
         | Statement::CreateExtension(_)
         | Statement::CreatePolicy(_)
-        | Statement::CreateRole(_)
-        | Statement::CreateUser(_)
-        | Statement::Grant(_)
-        | Statement::Revoke(_)
         | Statement::Set(_)
         | Statement::Pragma { .. }
         | Statement::Call(_)
@@ -133,8 +129,10 @@ macro_rules! unsupported_statement_patterns {
         | Statement::ShowSchemas { .. }
         | Statement::ShowCharset { .. }
         | Statement::ShowColumns { .. }
-        // User/Role/Schema management (no SQLite equivalent)
-        | Statement::AlterRole { .. }
+        // User/Role/Schema management (no SQLite equivalent). ALTER USER
+        // is here rather than as an instrumented arm because the pinned
+        // sqlparser fork does not parse any ALTER USER form yet, so no
+        // test exercises it.
         | Statement::AlterUser(_)
         | Statement::CreateSchema { .. }
         | Statement::CreateDatabase { .. }
@@ -545,6 +543,41 @@ impl Translator for Statement {
                 crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
                     construct: "CREATE SERVER",
                     reason: "SQLite has no foreign-data-wrapper layer, so the server definition was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::CreateRole(_) => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "CREATE ROLE",
+                    reason: "SQLite has no role or access-control layer, so the role definition was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::CreateUser(_) => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "CREATE USER",
+                    reason: "SQLite has no user or access-control layer, so the user definition was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::AlterRole { .. } => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "ALTER ROLE",
+                    reason: "SQLite has no role or access-control layer, so the role change was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::Grant(_) => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "GRANT",
+                    reason: "SQLite has no privilege model, so the GRANT statement was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::Revoke(_) => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "REVOKE",
+                    reason: "SQLite has no privilege model, so the REVOKE statement was dropped.",
                 });
                 Vec::new()
             }
