@@ -429,6 +429,26 @@ impl Pg2Sqlite {
         self.translate_internal(options)
     }
 
+    /// Translates the loaded PostgreSQL statements to SQLite and returns
+    /// a [`TranslationReport`] containing both the statements and any
+    /// warnings collected during translation. Warnings flag constructs
+    /// that have no SQLite equivalent and were dropped or downgraded.
+    ///
+    /// # Errors
+    ///
+    /// * If parsing or translation fails.
+    ///
+    /// [`TranslationReport`]: crate::warnings::TranslationReport
+    pub fn translate_with_report(
+        self,
+        options: &Pg2SqliteOptions,
+    ) -> Result<crate::warnings::TranslationReport, crate::errors::Error> {
+        let scope = crate::warnings::CollectorScope::install();
+        let statements = self.translate_internal(options)?;
+        let warnings = scope.take();
+        Ok(crate::warnings::TranslationReport { statements, warnings })
+    }
+
     /// Convenience method: translates to a `Vec<String>` of SQL strings.
     ///
     /// Equivalent to `translate()` followed by mapping each statement to its

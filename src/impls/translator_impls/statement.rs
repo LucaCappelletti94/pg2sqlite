@@ -107,9 +107,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::ExplainTable { .. }
         | Statement::Explain { .. }
         | Statement::Kill { .. }
-        | Statement::LISTEN { .. }
-        | Statement::UNLISTEN { .. }
-        | Statement::NOTIFY { .. }
         | Statement::ShowTables { .. }
         | Statement::Analyze { .. }
         | Statement::Deallocate { .. }
@@ -511,6 +508,27 @@ impl Translator for Statement {
                     table_name: None, // SQLite doesn't use ON table_name
                     option: None,     // SQLite doesn't support CASCADE/RESTRICT
                 })]
+            }
+            Statement::LISTEN { .. } => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "LISTEN",
+                    reason: "SQLite has no pub/sub channel, so the statement was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::UNLISTEN { .. } => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "UNLISTEN",
+                    reason: "SQLite has no pub/sub channel, so the statement was dropped.",
+                });
+                Vec::new()
+            }
+            Statement::NOTIFY { .. } => {
+                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                    construct: "NOTIFY",
+                    reason: "SQLite has no pub/sub channel, so the statement was dropped.",
+                });
+                Vec::new()
             }
             unsupported_statement_patterns!() => Vec::new(),
         })
