@@ -115,3 +115,15 @@ fn p3_apply_corr_perfectly_correlated() {
     let r = aggregate(&mut conn, "SELECT corr(x, y) AS r FROM m;");
     assert!((r - 1.0).abs() < 1e-9, "corr should be 1.0 (perfectly linear), got {r}");
 }
+
+// Cover the two arity-check branches in `two_aggregate_args`.
+
+#[test]
+fn corr_with_no_args_errors() {
+    assert!(translate_pg("SELECT corr() FROM m;", &Pg2SqliteOptions::default()).is_err());
+}
+
+#[test]
+fn corr_with_one_arg_errors() {
+    assert!(translate_pg("SELECT corr(x) FROM m;", &Pg2SqliteOptions::default()).is_err());
+}
