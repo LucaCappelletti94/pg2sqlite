@@ -155,7 +155,3 @@ fn alter_role_emits_lossy_drop_warning() {
     assert_lossy_drop(&warns[0], "CREATE ROLE");
     assert_lossy_drop(&warns[1], "ALTER ROLE");
 }
-
-// ALTER USER syntax does not parse in the pinned sqlparser fork yet, so
-// there is no end-to-end test. The translator arm above stays in place
-// so the warning fires the moment the fork picks the construct up.

@@ -129,7 +129,11 @@ macro_rules! unsupported_statement_patterns {
         | Statement::ShowSchemas { .. }
         | Statement::ShowCharset { .. }
         | Statement::ShowColumns { .. }
-        // User/Role/Schema management (no SQLite equivalent)
+        // User/Role/Schema management (no SQLite equivalent). ALTER USER
+        // is here rather than as an instrumented arm because the pinned
+        // sqlparser fork does not parse any ALTER USER form yet, so no
+        // test exercises it.
+        | Statement::AlterUser(_)
         | Statement::CreateSchema { .. }
         | Statement::CreateDatabase { .. }
         | Statement::AlterSchema(_)
@@ -560,13 +564,6 @@ impl Translator for Statement {
                 crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
                     construct: "ALTER ROLE",
                     reason: "SQLite has no role or access-control layer, so the role change was dropped.",
-                });
-                Vec::new()
-            }
-            Statement::AlterUser(_) => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "ALTER USER",
-                    reason: "SQLite has no user or access-control layer, so the user change was dropped.",
                 });
                 Vec::new()
             }
