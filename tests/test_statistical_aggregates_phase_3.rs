@@ -49,10 +49,6 @@ fn translate(pg: &str) -> String {
     translate_pg(pg, &Pg2SqliteOptions::default()).expect("translation failed").join("\n")
 }
 
-fn try_translate(pg: &str) -> Result<String, pg2sqlite::errors::Error> {
-    translate_pg(pg, &Pg2SqliteOptions::default()).map(|v| v.join("\n"))
-}
-
 /// y = 2*x for x in 1..=5. covar_pop = 4, covar_samp = 5, corr = 1
 /// (perfectly correlated).
 fn seed(conn: &mut SqliteConnection) {

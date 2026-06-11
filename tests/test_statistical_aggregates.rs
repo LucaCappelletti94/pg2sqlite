@@ -44,10 +44,6 @@ fn translate(pg: &str) -> String {
     translate_pg(pg, &Pg2SqliteOptions::default()).expect("translation failed").join("\n")
 }
 
-fn try_translate(pg: &str) -> Result<String, pg2sqlite::errors::Error> {
-    translate_pg(pg, &Pg2SqliteOptions::default()).map(|v| v.join("\n"))
-}
-
 /// v in 1..=5. var_pop = 2, stddev_pop = sqrt(2).
 fn seed(conn: &mut SqliteConnection) {
     conn.batch_execute(&translate("CREATE TABLE m (id INTEGER PRIMARY KEY, v REAL NOT NULL);"))
@@ -101,7 +97,5 @@ fn p1_apply_stddev_pop_known_dataset() {
     assert!((r - 2.0_f64.sqrt()).abs() < 1e-9, "stddev_pop should be sqrt(2), got {r}");
 }
 
-#[test]
-fn corr_stays_unsupported_in_phase_1() {
-    assert!(try_translate("SELECT corr(v, w) FROM m;").is_err());
-}
+// corr/covar_pop/covar_samp translate via Phase 3. See
+// tests/test_statistical_aggregates_phase_3.rs.

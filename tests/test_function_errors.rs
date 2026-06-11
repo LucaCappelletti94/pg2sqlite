@@ -112,26 +112,10 @@ fn every_causes_error() {
 // ---------------------------------------------------------------------------
 
 // stddev_pop, var_pop, stddev/stddev_samp, variance/var_samp now translate
-// to closed-form expressions. See tests/test_statistical_aggregates.rs
-// (Phase 1) and tests/test_statistical_aggregates_phase_2.rs (Phase 2).
-
-#[test]
-fn corr_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT corr(id, val) FROM t;"));
-    assert!(err.to_lowercase().contains("corr"), "Error should mention corr: {err}");
-}
-
-#[test]
-fn covar_pop_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT covar_pop(id, val) FROM t;"));
-    assert!(err.to_lowercase().contains("covar"), "Error should mention covar: {err}");
-}
-
-#[test]
-fn covar_samp_causes_error() {
-    let err = translate_err(&format!("{SIMPLE_TABLE} SELECT covar_samp(id, val) FROM t;"));
-    assert!(err.to_lowercase().contains("covar"), "Error should mention covar: {err}");
-}
+// to closed-form expressions. corr/covar_pop/covar_samp also translate
+// (Phase 3). See tests/test_statistical_aggregates.rs (Phase 1),
+// tests/test_statistical_aggregates_phase_2.rs (Phase 2), and
+// tests/test_statistical_aggregates_phase_3.rs (Phase 3).
 
 // ---------------------------------------------------------------------------
 // bit_and / bit_or
