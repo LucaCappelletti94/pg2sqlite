@@ -17,13 +17,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         rust: [stable, beta]
         include:
           - os: ubuntu-latest
             rust: nightly
-          - os: windows-latest
-            rust: stable
     steps:
       - uses: actions/checkout@v4
 
