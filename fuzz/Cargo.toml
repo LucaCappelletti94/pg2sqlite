@@ -18,13 +18,13 @@ libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
 pg2sqlite = { path = "..", features = ["arbitrary"] }
 arbitrary = { version = "1", features = ["derive"] }
 # Needed so the reverse fuzz target can name `ParserDB` in the static
-# context type. The git rev must match the one in pg2sqlite's own
-# Cargo.toml; otherwise cargo resolves two distinct copies and the
-# trait bounds stop lining up.
-sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "858e17e4561c2b80d779674192d242bcb12f8afa", default-features = false, features = ["std"] }
+# context type. Track the same `main` branch pg2sqlite does; the two
+# committed lockfiles keep both copies on one commit so the trait
+# bounds line up.
+sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", branch = "main", default-features = false, features = ["std"] }
 # Direct dep so the round-trip harness can name `Statement` for its
 # render helper. Routed through the `[patch.crates-io]` block at the
-# bottom of this file to the same fork rev pg2sqlite uses.
+# bottom of this file onto the same apache main sqlparser pg2sqlite uses.
 sqlparser = "0.62"
 # In-memory SQLite for the apply-side fuzz target. `bundled` so the
 # fuzzer build is self-contained and doesn't depend on the host's
@@ -66,9 +66,6 @@ bench = false
 # `[patch.crates-io]` doesn't inherit across workspace boundaries.
 # pg2sqlite (one level up) has the same patch; we duplicate it here
 # because this crate is intentionally *not* a workspace member of
-# pg2sqlite. When the upstream PR adding no_std support to sqlparser's
-# `visitor` feature merges and patched releases ship, both copies of
-# this block can be deleted. Mirrors examples/web-playground/Cargo.toml.
+# pg2sqlite. Mirrors examples/web-playground/Cargo.toml.
 [patch.crates-io]
-sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
-sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }

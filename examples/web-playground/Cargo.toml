@@ -19,8 +19,8 @@ path = "src/main.rs"
 # pg2sqlite as a path-dep so the playground always tracks live source.
 # `default-features = false` drops git2 / tempfile / std::fs and lets
 # the crate build for wasm32-unknown-unknown. The `[patch.crates-io]`
-# table in pg2sqlite's Cargo.toml routes sqlparser / sqlparser_derive
-# through the no_std-compatible fork; we inherit that patch via the
+# table in pg2sqlite's Cargo.toml routes sqlparser through apache main
+# (for the no_std-compatible `visitor`); we inherit that patch via the
 # path dep.
 pg2sqlite = { path = "../..", default-features = false }
 
@@ -86,12 +86,9 @@ dx_icons = { version = "0.1.0", features = ["simple"] }
 # pg2sqlite (one level up) has the same patch; we duplicate it here
 # because this crate is intentionally *not* a workspace member of
 # pg2sqlite (Dioxus's transitive dep graph would slow the main
-# workspace's precommit / audit). When the upstream PR adding no_std
-# support to sqlparser's `visitor` feature merges and patched releases
-# ship, both copies of this block can be deleted.
+# workspace's precommit / audit).
 [patch.crates-io]
-sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
-sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 
 [profile.release]
 opt-level = "z"

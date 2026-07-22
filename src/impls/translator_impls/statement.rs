@@ -129,10 +129,11 @@ macro_rules! unsupported_statement_patterns {
         | Statement::ShowSchemas { .. }
         | Statement::ShowCharset { .. }
         | Statement::ShowColumns { .. }
-        // User/Role/Schema management (no SQLite equivalent). ALTER USER
-        // is here rather than as an instrumented arm because the pinned
-        // sqlparser fork does not parse any ALTER USER form yet, so no
-        // test exercises it.
+        // User/Role/Schema management (no SQLite equivalent). Postgres
+        // `ALTER USER` now parses as `Statement::AlterRole` on apache
+        // main (upstream #2374) and is handled by the ALTER ROLE arm
+        // below; the `AlterUser` variant here covers dialects such as
+        // Snowflake that still emit it.
         | Statement::AlterUser(_)
         | Statement::CreateSchema { .. }
         | Statement::CreateDatabase { .. }
@@ -214,6 +215,12 @@ macro_rules! unsupported_statement_patterns {
         | Statement::WaitFor { .. }
         // Snowflake PUT (post-0.62.0 upstream main)
         | Statement::Put { .. }
+        // Post-0.62.0 upstream main: Postgres text-search DDL plus
+        // Snowflake file-format and warehouse DDL.
+        | Statement::CreateTextSearch(_)
+        | Statement::AlterTextSearch(_)
+        | Statement::CreateFileFormat { .. }
+        | Statement::CreateWarehouse(_)
     };
 }
 

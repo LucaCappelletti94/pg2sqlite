@@ -17,18 +17,19 @@ allow = [
 # Warn on multiple versions of the same crate rather than blocking CI.
 multiple-versions = "warn"
 # Git dependencies without a version specifier are intentionally used in this
-# project (sqlparser and sql-traits are pinned via git rev / branch).
+# project (sqlparser and sql-traits track upstream git branches).
 wildcards = "allow"
 
 [advisories]
 # Check for known security vulnerabilities.
 ignore = [
-    # RUSTSEC-2026-0172: diesel `SqliteConnection::deserialize_readonly_database`
-    # may operate on freed memory when the buffer is dropped before the
-    # connection. We do not call that API anywhere in this crate (verified
-    # via grep), so the advisory does not apply. Drop this entry when a
-    # fixed diesel release ships and the lockfile picks it up.
-    { id = "RUSTSEC-2026-0172", reason = "API not used in this crate" },
+    # RUSTSEC-2026-0183 / -0184: git2 `Remote::list()` and buffer-created
+    # `BlameHunk` signatures can dereference null pointers. pg2sqlite only
+    # uses `git2::Repository` (verified via grep) and never calls those
+    # APIs, and sql-traits still pins git2 0.20 so bumping ours alone
+    # cannot clear them. Drop these once the tree moves to a fixed git2.
+    { id = "RUSTSEC-2026-0183", reason = "Remote::list not used in this tree" },
+    { id = "RUSTSEC-2026-0184", reason = "Blame APIs not used in this tree" },
 ]
 
 [sources]

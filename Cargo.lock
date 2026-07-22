@@ -40,9 +40,9 @@ checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
 
 [[package]]
 name = "anyhow"
-version = "1.0.101"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "approx"
@@ -287,9 +287,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -373,9 +373,9 @@ dependencies = [
 
 [[package]]
 name = "diesel"
-version = "2.3.9"
+version = "2.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9940fb8467a0a06312218ed384185cb8536aa10d8ec017d0ce7fad2c1bd882d5"
+checksum = "e54d1f576cd3a3460f212a4615fd12ce1b6303c095b79a44449ffbe627753dc1"
 dependencies = [
  "diesel_derives",
  "downcast-rs",
@@ -1587,14 +1587,12 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/sql-traits?rev=858e17e4561c2b80d779674192d242bcb12f8afa#858e17e4561c2b80d779674192d242bcb12f8afa"
+source = "git+https://github.com/earth-metabolome-initiative/sql-traits?branch=main#e9e31c3063f7e89bcea7afb00005bd34a3c46fa3"
 dependencies = [
  "geometric-traits",
- "git2",
  "sha2",
  "sql_docs",
  "sqlparser",
- "tempfile",
  "thiserror 2.0.18",
  "unicode-normalization",
 ]
@@ -1646,7 +1644,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.62.0"
-source = "git+https://github.com/LucaCappelletti94/sqlparser-rs?rev=306abb569fcb64b84c79ab2284c71d69a4854307#306abb569fcb64b84c79ab2284c71d69a4854307"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#bef86dd6826ea0d87143f59403b12aa3a588bd4f"
 dependencies = [
  "log",
  "recursive",
@@ -1656,7 +1654,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.5.0"
-source = "git+https://github.com/LucaCappelletti94/sqlparser-rs?rev=306abb569fcb64b84c79ab2284c71d69a4854307#306abb569fcb64b84c79ab2284c71d69a4854307"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#bef86dd6826ea0d87143f59403b12aa3a588bd4f"
 dependencies = [
  "proc-macro2",
  "quote",
