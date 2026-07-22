@@ -155,3 +155,14 @@ fn alter_role_emits_lossy_drop_warning() {
     assert_lossy_drop(&warns[0], "CREATE ROLE");
     assert_lossy_drop(&warns[1], "ALTER ROLE");
 }
+
+#[test]
+fn alter_user_emits_lossy_drop_warning() {
+    // Postgres `ALTER USER` is a synonym for `ALTER ROLE` and parses as
+    // `Statement::AlterRole` on apache main (upstream #2374), so it
+    // collapses onto the ALTER ROLE warning.
+    let warns = warnings_for("CREATE USER alice;\nALTER USER alice WITH SUPERUSER;");
+    assert_eq!(warns.len(), 2);
+    assert_lossy_drop(&warns[0], "CREATE USER");
+    assert_lossy_drop(&warns[1], "ALTER ROLE");
+}

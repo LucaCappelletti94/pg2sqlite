@@ -17,7 +17,7 @@ allow = [
 # Warn on multiple versions of the same crate rather than blocking CI.
 multiple-versions = "warn"
 # Git dependencies without a version specifier are intentionally used in this
-# project (sqlparser and sql-traits are pinned via git rev / branch).
+# project (sqlparser and sql-traits track upstream git branches).
 wildcards = "allow"
 
 [advisories]

@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 sqlparser = { version = "0.62", default-features = false, features = ["visitor"] }
-sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", rev = "858e17e4561c2b80d779674192d242bcb12f8afa", default-features = false }
+sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", branch = "main", default-features = false }
 git2 = { version = "0.20.4", optional = true }
 tempfile = { version = "3.27", optional = true }
 thiserror = { version = "2.0", default-features = false }
@@ -72,21 +72,15 @@ sqlitegis = [
 # the fuzz harnesses; not used by production code.
 arbitrary = ["dep:arbitrary"]
 
-# Temporary patch: redirect sqlparser + sqlparser_derive to
-# LucaCappelletti94's fork at the `pathological-combined` branch (rev
-# ce62a47474...). The branch bundles four still-in-flight upstream
-# improvements that we depend on:
-#   1. PR #2343 (MERGED) - make the `visitor` feature `no_std`-compatible
-#      so the crate builds for wasm32-unknown-unknown.
-#   2. PR #2344 (MERGED) - fix exponential parse time on compound chains.
-#   3. PR #2349 (OPEN)   - fix exponential parse time on named-arg chains.
-#   4. PR #2350 (OPEN)   - fix exponential parse time on compound keyword chains.
-# We pin a specific rev so cargo cannot silently roll the branch forward.
-# Remove this block once a patched sqlparser release ships with all four
-# upstream. See docs/sqlparser_derive_no_std_fix.md.
+# sqlparser 0.62.0 on crates.io predates several merged upstream fixes we rely
+# on: the no_std-compatible `visitor` feature, the speculative-prefix parse-time
+# fixes, and `ALTER USER` parsing as a synonym for `ALTER ROLE`. Track apache
+# main until a release ships them. Patching at the workspace root unifies every
+# dependent (sql-traits, sql_docs) onto a single sqlparser so dialect types stay
+# compatible across crate boundaries. `sqlparser_derive` follows automatically
+# as a path dependency of the git sqlparser, so it needs no separate patch.
 [patch.crates-io]
-sqlparser = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
-sqlparser_derive = { git = "https://github.com/LucaCappelletti94/sqlparser-rs", rev = "306abb569fcb64b84c79ab2284c71d69a4854307" }
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 
 [[bench]]
 name = "translation"
