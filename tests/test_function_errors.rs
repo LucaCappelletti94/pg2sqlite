@@ -224,8 +224,8 @@ fn split_part_still_errors() {
 
 // ---------------------------------------------------------------------------
 // Audit follow-up: lock in the "expected error" behavior for cases that
-// surfaced in `examples/compare_polyglot.rs` as pg2sqlite translation
-// errors but had no unit test enforcing that outcome. If any of these
+// surfaced as pg2sqlite translation errors but had no unit test
+// enforcing that outcome. If any of these
 // quietly regressed to a passthrough, the translated SQL would compile
 // but fail at SQLite runtime - the exact failure mode the no-silent-
 // passthrough invariant rules out (see

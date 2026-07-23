@@ -43,8 +43,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For a category-by-category comparison against other translators, including runtime execution against an in-memory SQLite database, run [`cargo run --example compare_polyglot`](examples/compare_polyglot.rs).
-
 ## License
 
 This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).

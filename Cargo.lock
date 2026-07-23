@@ -1193,7 +1193,6 @@ dependencies = [
  "git2",
  "insta",
  "libsqlite3-sys",
- "polyglot-sql",
  "rand",
  "rosetta-uuid",
  "rusqlite",
@@ -1238,31 +1237,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
-]
-
-[[package]]
-name = "polyglot-sql"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "009cbd62f8c82de46697221ee66b0cf3a6dacbda16f8c5a2ce25853940073bd5"
-dependencies = [
- "polyglot-sql-ast-derive",
- "serde",
- "serde_json",
- "stacker",
- "thiserror 1.0.69",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "polyglot-sql-ast-derive"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3250a6ffcd1d39670eb532e2b1877ad430799c49cb91b243d63c9425b868161"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -1865,12 +1839,6 @@ checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
 dependencies = [
  "tinyvec",
 ]
-
-[[package]]
-name = "unicode-segmentation"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6ccf251212114b54433ec949fd6a7841275f9ada20dddd2f29e9ceea4501493"
 
 [[package]]
 name = "unicode-xid"
