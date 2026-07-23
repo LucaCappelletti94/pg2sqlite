@@ -25,7 +25,10 @@ use sqlparser::ast::{LimitClause, TableFactor};
 use super::ident_quoting::normalize_identifier_quotes;
 use crate::{
     errors::Error,
-    impls::{object_name::last_ident, shared_helpers::debug_variant_name},
+    impls::{
+        object_name::last_ident, placeholder::rewrite_placeholders_for_postgres,
+        shared_helpers::debug_variant_name,
+    },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
     traits::TranslationOptions,
 };
@@ -292,6 +295,11 @@ impl ReverseTranslator for Statement {
                 return Err(Error::UnsupportedReverseStatement { statement_type: variant_name });
             }
         };
+
+        // PostgreSQL accepts only numbered `$N` bind parameters, so map the
+        // SQLite placeholder tokens the parse produced. Runs before identifier
+        // normalization; a named placeholder aborts with a typed error.
+        rewrite_placeholders_for_postgres(&mut translated)?;
 
         // Reverse output is presented as PostgreSQL, which accepts only
         // double-quoted identifiers. Rewrite any backtick or bracket quoting

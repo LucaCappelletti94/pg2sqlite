@@ -95,6 +95,20 @@ pub enum Error {
         /// The type of statement that was attempted.
         statement_type: String,
     },
+    /// Error when reverse translation encounters a SQLite named bind
+    /// placeholder.
+    ///
+    /// SQLite accepts the named forms `:name`, `@name`, and `$name`, but the
+    /// PostgreSQL wire protocol has only numbered `$N` parameters, so a named
+    /// placeholder cannot be translated. diesel never emits these forms.
+    #[error(
+        "Named bind placeholder '{placeholder}' is not supported in reverse translation. \
+         PostgreSQL accepts only numbered parameters ($N); use positional (?) or numbered (?N)."
+    )]
+    UnsupportedNamedPlaceholder {
+        /// The named placeholder token that was encountered.
+        placeholder: String,
+    },
     /// Error when a table referenced in reverse translation is not found in the
     /// schema.
     #[error(
