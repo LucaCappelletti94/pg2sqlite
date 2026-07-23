@@ -16,9 +16,8 @@
 //!
 //! As of writing, only the leading `JSON_BUILD_ARRAY` case is missing from
 //! the rename table in `src/impls/translator_impls/function.rs` and
-//! therefore passes through unchanged, surfacing as the lone runtime ✗ in
-//! `examples/compare_polyglot.rs` (case P4). The other three are present;
-//! their tests below are green-on-write and act as regression coverage.
+//! therefore passes through unchanged. The other three are present, and their
+//! tests below are green-on-write and act as regression coverage.
 
 #![allow(missing_docs)]
 #![cfg(feature = "std")]

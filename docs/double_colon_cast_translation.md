@@ -6,7 +6,7 @@
 
 PostgreSQL spells a cast either as `CAST(expr AS type)` or with the `::` operator (`expr::type`). SQLite supports only the `CAST(expr AS type)` form. The translator used to map the target type of a `::` cast correctly but leave the cast rendered as `::`, producing SQL that SQLite rejects at parse time. That broke the crate's guarantee that every emitted statement runs in SQLite.
 
-The comparison harness in `examples/compare_polyglot.rs` (category Z) surfaced it: pg2sqlite emitted invalid SQLite for the `::` cases (`SELECT id::text FROM t` came out as `SELECT id::TEXT FROM t`, which SQLite rejects with `unrecognized token ":"`).
+The `::` cases produced invalid SQLite: `SELECT id::text FROM t` came out as `SELECT id::TEXT FROM t`, which SQLite rejects with `unrecognized token ":"`.
 
 ## Root cause
 

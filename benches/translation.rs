@@ -5,7 +5,6 @@ use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
     traits::TranslationOptions,
 };
-use polyglot_sql::{DialectType, transpile};
 
 // Schema fixtures loaded at compile time (non-RLS)
 const DATA_TYPES_EXTENDED_SQL: &str = include_str!("../tests/fixtures/data_types_extended.sql");
@@ -204,9 +203,9 @@ fn bench_delete_statements(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_vs_polyglot(c: &mut Criterion) {
+fn bench_translation_samples(c: &mut Criterion) {
     let options = Pg2SqliteOptions::default();
-    let mut group = c.benchmark_group("vs_polyglot");
+    let mut group = c.benchmark_group("translation_samples");
 
     let statements: &[(&str, &str)] = &[
         ("select_simple", SELECT_SIMPLE),
@@ -230,11 +229,6 @@ fn bench_vs_polyglot(c: &mut Criterion) {
                 black_box(parsed.translate(&options).unwrap())
             });
         });
-        group.bench_with_input(BenchmarkId::new("polyglot", name), *sql, |b, sql| {
-            b.iter(|| {
-                black_box(transpile(black_box(sql), DialectType::PostgreSQL, DialectType::SQLite))
-            });
-        });
     }
     group.finish();
 }
@@ -247,6 +241,6 @@ criterion_group!(
     bench_insert_statements,
     bench_update_statements,
     bench_delete_statements,
-    bench_vs_polyglot,
+    bench_translation_samples,
 );
 criterion_main!(benches);

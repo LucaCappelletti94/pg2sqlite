@@ -2,9 +2,6 @@
   "version": "0.2",
   "language": "en",
   "words": [
-    "sqlglot",
-    "sqlg",
-    "polyglot",
     "pg2sqlite",
     "pg2s",
     "plpgsql",
