@@ -177,6 +177,21 @@ fn try_sqlite(sql: &str) -> String {
         return SKIPPED.to_string();
     };
 
+    // pg2sqlite lowers stddev/variance/corr to closed forms that call
+    // sqrt(), which standard SQLite lacks. Register it the way a real
+    // consumer would, matching tests/test_statistical_aggregates*.rs, so
+    // valid translations are executed rather than counted as runtime errors.
+    let _ = conn.create_scalar_function(
+        "sqrt",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let v: Option<f64> = ctx.get(0)?;
+            Ok(v.map(f64::sqrt))
+        },
+    );
+
     // Detect CREATE TABLE as first statement — pre-populating would create a
     // conflicting `t`.  For every other form (SELECT, UPDATE, DELETE, CREATE
     // VIEW, CREATE TRIGGER, CREATE FUNCTION, …) we seed the catch-all tables
@@ -462,7 +477,6 @@ fn main() {
             "I1 BOOL_AND",
             "SELECT BOOL_AND(active) FROM t",
         ),
-        Case::new("I: Unsupported \u{2192} Explicit Error", "I2 STDDEV", "SELECT STDDEV(x) FROM t"),
         Case::new(
             "I: Unsupported \u{2192} Explicit Error",
             "I3 ARRAY_AGG",
@@ -586,11 +600,6 @@ fn main() {
             "O: polyglot-only candidates",
             "O2 ARRAY_AGG ORDER BY",
             "SELECT ARRAY_AGG(name ORDER BY name) FROM t",
-        ),
-        Case::new(
-            "O: polyglot-only candidates",
-            "O3 STDDEV formula",
-            "SELECT STDDEV(salary) FROM emp",
         ),
         Case::new(
             "O: polyglot-only candidates",
@@ -743,6 +752,88 @@ fn main() {
             "W4 plain BTREE index",
             "CREATE TABLE t2 (id INT PRIMARY KEY, name TEXT); CREATE INDEX t2_name ON t2 (name);",
         ),
+        // ── Category X: INTERVAL Arithmetic ──────────────────────────────────
+        Case::new(
+            "X: INTERVAL Arithmetic",
+            "X1 timestamp + interval",
+            "SELECT ts + INTERVAL '1 day' FROM t",
+        ),
+        Case::new(
+            "X: INTERVAL Arithmetic",
+            "X2 now minus interval",
+            "SELECT NOW() - INTERVAL '1 hour'",
+        ),
+        Case::new(
+            "X: INTERVAL Arithmetic",
+            "X3 interval multi-field",
+            "SELECT ts + INTERVAL '2 hours 30 minutes' FROM t",
+        ),
+        // ── Category Y: Statistical Aggregates ───────────────────────────────
+        Case::new("Y: Statistical Aggregates", "Y1 var_pop", "SELECT var_pop(x) FROM t"),
+        Case::new("Y: Statistical Aggregates", "Y2 var_samp", "SELECT var_samp(x) FROM t"),
+        Case::new("Y: Statistical Aggregates", "Y3 stddev", "SELECT stddev(x) FROM t"),
+        Case::new("Y: Statistical Aggregates", "Y4 stddev_samp", "SELECT stddev_samp(x) FROM t"),
+        Case::new("Y: Statistical Aggregates", "Y5 covar_pop", "SELECT covar_pop(x, val) FROM t"),
+        Case::new("Y: Statistical Aggregates", "Y6 covar_samp", "SELECT covar_samp(x, val) FROM t"),
+        Case::new("Y: Statistical Aggregates", "Y7 corr", "SELECT corr(x, val) FROM t"),
+        // ── Category Z: Casts & DISTINCT ON ──────────────────────────────────
+        Case::new("Z: Casts & DISTINCT ON", "Z1 cast to text", "SELECT id::text FROM t"),
+        Case::new("Z: Casts & DISTINCT ON", "Z2 cast literal to int", "SELECT '1'::int"),
+        Case::new(
+            "Z: Casts & DISTINCT ON",
+            "Z3 cast to numeric",
+            "SELECT val::numeric(10, 2) FROM t",
+        ),
+        Case::new(
+            "Z: Casts & DISTINCT ON",
+            "Z4 DISTINCT ON",
+            "SELECT DISTINCT ON (owner) owner, val FROM t ORDER BY owner, val DESC",
+        ),
+        // ── Category AA: Common Table Expressions ────────────────────────────
+        Case::new(
+            "AA: Common Table Expressions",
+            "AA1 WITH",
+            "WITH active_rows AS (SELECT id FROM t WHERE active) SELECT id FROM active_rows",
+        ),
+        Case::new(
+            "AA: Common Table Expressions",
+            "AA2 WITH RECURSIVE",
+            "WITH RECURSIVE cnt(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM cnt WHERE n < 5) SELECT n FROM cnt",
+        ),
+        // ── Category AB: Boolean Literals ────────────────────────────────────
+        Case::new(
+            "AB: Boolean Literals",
+            "AB1 WHERE = TRUE",
+            "SELECT id FROM t WHERE active = TRUE",
+        ),
+        Case::new(
+            "AB: Boolean Literals",
+            "AB2 DEFAULT TRUE",
+            "CREATE TABLE flags (id INT PRIMARY KEY, enabled BOOLEAN DEFAULT TRUE)",
+        ),
+        // ── Category AC: Constraints & Generated Columns ─────────────────────
+        Case::new(
+            "AC: Constraints & Generated",
+            "AC1 CHECK / FK / UNIQUE / DEFAULT now()",
+            "CREATE TABLE orders (id INT PRIMARY KEY, qty INT CHECK (qty > 0), code TEXT UNIQUE, user_id INT REFERENCES users (id), created_at TIMESTAMPTZ DEFAULT now())",
+        ),
+        Case::new(
+            "AC: Constraints & Generated",
+            "AC2 GENERATED STORED",
+            "CREATE TABLE line (id INT PRIMARY KEY, price NUMERIC, qty INT, total NUMERIC GENERATED ALWAYS AS (price * qty) STORED)",
+        ),
+        // ── Category AD: Enums & Arrays ──────────────────────────────────────
+        Case::new(
+            "AD: Enums & Arrays",
+            "AD1 CREATE TYPE ENUM + column",
+            "CREATE TYPE mood AS ENUM ('happy', 'sad'); CREATE TABLE person (id INT PRIMARY KEY, current_mood mood)",
+        ),
+        Case::new(
+            "AD: Enums & Arrays",
+            "AD2 array column",
+            "CREATE TABLE t (id INT PRIMARY KEY, tags TEXT[])",
+        ),
+        Case::new("AD: Enums & Arrays", "AD3 array literal", "SELECT ARRAY[1, 2, 3]"),
     ];
 
     let mut current_cat = "";
