@@ -49,8 +49,8 @@ optional = true
 # (filesystem-backed loaders, git-backed loaders, std-bound error variants,
 # and the `recursive-protection` stack guard from sqlparser). Drop this with
 # `--no-default-features` to build for `wasm32-unknown-unknown` or other
-# no_std targets. See docs/sqlparser_derive_no_std_fix.md for the upstream
-# patch that makes `sqlparser/visitor` no_std-compatible.
+# no_std targets. The `[patch.crates-io]` block below tracks apache main,
+# which makes `sqlparser/visitor` no_std-compatible.
 default = ["std"]
 std = [
     "sqlparser/std",

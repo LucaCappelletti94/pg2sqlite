@@ -369,7 +369,7 @@ What stays available:
 - All RLS, FTS5, vector-search, PostGIS, and PL/pgSQL trigger translation.
 
 > [!NOTE]
-> Until the upstream PR adding `no_std` support to `sqlparser`'s `visitor` feature merges and the patched releases ship, WASM consumers need a `[patch.crates-io]` entry that redirects `sqlparser` and `sqlparser_derive` to the no_std-compatible fork. See [`docs/sqlparser_derive_no_std_fix.md`](docs/sqlparser_derive_no_std_fix.md) for the bug writeup, the two-line `::std` → `::core` fix, and the patch-table snippet to copy into your own `Cargo.toml`.
+> The published `sqlparser 0.62.0` predates the `no_std`-compatible `visitor` feature, so WASM consumers need a `[patch.crates-io]` entry redirecting `sqlparser` to `apache/datafusion-sqlparser-rs` `main` (as this crate's own `Cargo.toml` does) until a release ships it.
 
 ## Full RLS example
 

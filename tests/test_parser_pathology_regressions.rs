@@ -24,8 +24,7 @@
 //! - CASE-arm extension of the same `failed_prefix_positions` cache (`306abb56`
 //!   on `pathological-combined`) - included via the pin. Fixes the
 //!   `If-c=case<TAB>-...` exponential the fuzz harness found after the
-//!   function-call branch was closed. See
-//!   docs/sqlparser_if_keyword_call_chain_exponential.md.
+//!   function-call branch was closed.
 //!
 //! The parse work runs on a worker thread; if it does not signal back
 //! within the budget, the assertion fires immediately so cargo test
@@ -112,8 +111,6 @@ fn forward_if_keyword_chain_depth_25_under_budget() {
 // is well over the 500 ms budget so the test goes RED today and
 // turns GREEN once the upstream parser path is fixed (the chain
 // should drop into single-digit milliseconds at any depth).
-//
-// See docs/sqlparser_if_keyword_call_chain_exponential.md.
 #[test]
 fn forward_if_current_time_chain_depth_20_under_budget() {
     let sql = String::from("if(") + &"current_time(".repeat(20) + "x";
@@ -173,8 +170,7 @@ fn reverse_fuzz_artefact_slow_if_current_time_9c5f() {
 // Stripping the leading `If-` makes the same `c=case` chain flat at
 // ~500 us at any depth, so the trigger is the same speculative-prefix
 // descent into a different keyword-expression form (CASE rather than
-// IF-call). Documented in
-// docs/sqlparser_if_keyword_call_chain_exponential.md.
+// IF-call).
 #[test]
 fn reverse_if_case_chain_synthetic_depth_20_under_budget() {
     let sqlite_sql = String::from("If-") + &"c=case\t-".repeat(20) + "c";
