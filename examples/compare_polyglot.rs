@@ -801,7 +801,11 @@ fn main() {
             "WITH RECURSIVE cnt(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM cnt WHERE n < 5) SELECT n FROM cnt",
         ),
         // ── Category AB: Boolean Literals ────────────────────────────────────
-        Case::new("AB: Boolean Literals", "AB1 WHERE = TRUE", "SELECT id FROM t WHERE active = TRUE"),
+        Case::new(
+            "AB: Boolean Literals",
+            "AB1 WHERE = TRUE",
+            "SELECT id FROM t WHERE active = TRUE",
+        ),
         Case::new(
             "AB: Boolean Literals",
             "AB2 DEFAULT TRUE",
