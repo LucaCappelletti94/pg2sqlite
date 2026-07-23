@@ -13,6 +13,7 @@ use std::sync::LazyLock;
 
 use libfuzzer_sys::fuzz_target;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 const SCHEMA_SQL: &str = r#"
     CREATE TABLE users (
@@ -63,5 +64,15 @@ fuzz_target!(|input: FuzzInput| {
         return;
     }
     let (translator, schema) = &*CTX;
-    let _ = translator.reverse_sql(&input.sql, schema, &input.options);
+    let Ok(stmts) = translator.reverse_sql(&input.sql, schema, &input.options) else {
+        return;
+    };
+    // Contract: reverse output is presented as PostgreSQL, so every rendered
+    // statement must reparse under PostgreSqlDialect without error.
+    for stmt in &stmts {
+        let rendered = stmt.to_string();
+        if let Err(e) = Parser::parse_sql(&PostgreSqlDialect {}, &rendered) {
+            panic!("reverse output is not valid PostgreSQL: {e}\nSQL: {rendered}");
+        }
+    }
 });

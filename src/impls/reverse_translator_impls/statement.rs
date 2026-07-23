@@ -22,6 +22,7 @@ use sqlparser::ast::{
 #[cfg(all(test, feature = "std"))]
 use sqlparser::ast::{LimitClause, TableFactor};
 
+use super::ident_quoting::normalize_identifier_quotes;
 use crate::{
     errors::Error,
     impls::{object_name::last_ident, shared_helpers::debug_variant_name},
@@ -258,39 +259,45 @@ impl ReverseTranslator for Statement {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        match self {
+        let mut translated = match self {
             Statement::Insert(insert) => {
                 check_insert_for_rls(insert, options)?;
 
-                Ok(Statement::Insert(insert.reverse_translate(schema, options)?))
+                Statement::Insert(insert.reverse_translate(schema, options)?)
             }
             Statement::Update(update) => {
                 check_update_for_rls(update, options)?;
 
-                Ok(Statement::Update(update.reverse_translate(schema, options)?))
+                Statement::Update(update.reverse_translate(schema, options)?)
             }
             Statement::Delete(delete) => {
                 check_delete_for_rls(delete, options)?;
 
-                Ok(Statement::Delete(delete.reverse_translate(schema, options)?))
+                Statement::Delete(delete.reverse_translate(schema, options)?)
             }
             Statement::Query(query) => {
                 check_query_for_rls(query, options)?;
 
-                Ok(Statement::Query(Box::new(query.reverse_translate(schema, options)?)))
+                Statement::Query(Box::new(query.reverse_translate(schema, options)?))
             }
             // Transaction control statements pass through unchanged
             Statement::Commit { .. }
             | Statement::Rollback { .. }
             | Statement::StartTransaction { .. }
             | Statement::Savepoint { .. }
-            | Statement::ReleaseSavepoint { .. } => Ok(self.clone()),
+            | Statement::ReleaseSavepoint { .. } => self.clone(),
             // Non-DML statements are not supported for reverse translation
             other => {
                 let variant_name = debug_variant_name(other);
-                Err(Error::UnsupportedReverseStatement { statement_type: variant_name })
+                return Err(Error::UnsupportedReverseStatement { statement_type: variant_name });
             }
-        }
+        };
+
+        // Reverse output is presented as PostgreSQL, which accepts only
+        // double-quoted identifiers. Rewrite any backtick or bracket quoting
+        // the SQLite parse produced.
+        normalize_identifier_quotes(&mut translated);
+        Ok(translated)
     }
 }
 

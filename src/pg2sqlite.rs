@@ -544,6 +544,12 @@ impl Pg2Sqlite {
     /// This is a convenience method that parses a SQLite SQL string and
     /// reverse translates all statements to PostgreSQL.
     ///
+    /// Identifiers are re-quoted to PostgreSQL double quotes (SQLite also
+    /// accepts backtick and bracket quoting). Only the quote style changes: the
+    /// identifier text is preserved verbatim, so a mixed-case SQLite identifier
+    /// becomes a case-sensitive PostgreSQL identifier with the same spelling,
+    /// which lines up only under a shared schema.
+    ///
     /// # Arguments
     ///
     /// * `sqlite_sql` - The SQLite SQL string to parse and reverse translate.
