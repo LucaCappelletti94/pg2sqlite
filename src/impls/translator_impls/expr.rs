@@ -1214,7 +1214,7 @@ impl Translator for Expr {
                 translate_binary_op(left, op, right, schema, options)?
             }
             // Handle type casts (e.g., value::text)
-            Expr::Cast { expr, data_type, format, kind, array } => {
+            Expr::Cast { expr, data_type, format, array, .. } => {
                 // pgvector casts: '[1,2,3]'::vector -> vec_f32('[1,2,3]'),
                 //                 '[1,2,3]'::halfvec -> vec_f16('[1,2,3]')
                 if is_vector_type(data_type) {
@@ -1232,11 +1232,14 @@ impl Translator for Expr {
                         translated, options,
                     ));
                 }
+                // SQLite only accepts the `CAST(x AS type)` spelling, not
+                // PostgreSQL's `x::type` operator nor TRY_CAST / SAFE_CAST, so
+                // force `CastKind::Cast` regardless of how the source wrote it.
                 Expr::Cast {
                     expr: Box::new(expr.translate(schema, options)?),
                     data_type: data_type.translate(schema, options)?,
                     format: format.clone(),
-                    kind: kind.clone(),
+                    kind: CastKind::Cast,
                     array: *array,
                 }
             }
