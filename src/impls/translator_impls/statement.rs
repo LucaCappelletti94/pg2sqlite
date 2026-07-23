@@ -25,6 +25,7 @@ use crate::{
             normalize_schema_qualified_object_name_for_sqlite, sqlite_unqualified_object_name,
             table_with_implicit_public_lookup,
         },
+        placeholder::rewrite_placeholders_for_sqlite,
         translator_impls::{
             condition_injection::inject_condition_into_dml_statement,
             rls::{
@@ -355,7 +356,7 @@ impl Translator for Statement {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        Ok(match self {
+        let mut translated: Vec<Statement> = match self {
             Self::CreateTable(create_table) => {
                 translate_create_table(create_table, schema, options)?
             }
@@ -589,7 +590,24 @@ impl Translator for Statement {
                 Vec::new()
             }
             unsupported_statement_patterns!() => Vec::new(),
-        })
+        };
+
+        // PostgreSQL numbered parameters (`$N`) become SQLite `?N` placeholders,
+        // preserving the number so the bind index survives a round trip. Only
+        // DML carries placeholders, so DDL output skips the walk.
+        for statement in &mut translated {
+            if matches!(
+                statement,
+                Statement::Query(_)
+                    | Statement::Insert(_)
+                    | Statement::Update(_)
+                    | Statement::Delete(_)
+            ) {
+                rewrite_placeholders_for_sqlite(statement);
+            }
+        }
+
+        Ok(translated)
     }
 }
 
