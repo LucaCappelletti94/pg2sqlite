@@ -237,13 +237,13 @@ pub fn reverse_function(
 /// Build a reverse-translated function: translate args, params, window, filter
 /// and within_group, then wrap in `Expr::Function` with the given name.
 fn build_reverse_function(
-    new_name: &str,
+    name: ObjectName,
     func: &Function,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, Error> {
     Ok(Expr::Function(Function {
-        name: ObjectName::from(vec![Ident::new(new_name)]),
+        name,
         uses_odbc_syntax: func.uses_odbc_syntax,
         parameters: translate_function_arguments::<Reverse>(&func.parameters, schema, options)?,
         args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
@@ -274,7 +274,12 @@ pub fn reverse_translate_function(
 ) -> Result<Expr, Error> {
     match reverse_function(&func.name, &func.args, options) {
         FunctionReversal::Rename(new_name) => {
-            build_reverse_function(&new_name, func, schema, options)
+            build_reverse_function(
+                ObjectName::from(vec![Ident::new(new_name)]),
+                func,
+                schema,
+                options,
+            )
         }
         FunctionReversal::ToNow => {
             // datetime('now') -> NOW()
@@ -425,7 +430,9 @@ pub fn reverse_translate_function(
             }
             Err(Error::UnsupportedSQLiteFeature("vec_f16 requires exactly 1 argument".to_string()))
         }
-        FunctionReversal::ToChr => build_reverse_function("chr", func, schema, options),
+        FunctionReversal::ToChr => {
+            build_reverse_function(ObjectName::from(vec![Ident::new("chr")]), func, schema, options)
+        }
         FunctionReversal::ToTrimDirectional(field) => {
             // LTRIM/RTRIM(str, chars) or TRIM(str, chars)
             // -> TRIM(LEADING|TRAILING|BOTH chars FROM str)
@@ -479,7 +486,7 @@ pub fn reverse_translate_function(
             ))
         }
         FunctionReversal::PassThrough => {
-            build_reverse_function(&func.name.to_string(), func, schema, options)
+            build_reverse_function(func.name.clone(), func, schema, options)
         }
     }
 }
