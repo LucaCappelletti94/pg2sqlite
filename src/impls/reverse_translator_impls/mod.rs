@@ -17,6 +17,7 @@ mod delete;
 mod expr;
 mod function;
 mod helpers;
+mod ident_quoting;
 mod insert;
 mod query;
 mod statement;
