@@ -313,11 +313,11 @@ const READONLY_DENY_TRIGGERS: [(&str, &str); 3] =
 /// Appends `RAISE(ABORT)` deny triggers so interactive writes to a read-only
 /// non-RLS table fail synchronously at the statement. Names are
 /// `<table><marker>_<verb>`, where the marker is
-/// [`TranslationOptions::get_readonly_deny_trigger_suffix`]; errors on a name
+/// [`TranslationOptions::get_readonly_deny_trigger_suffix`]. Errors on a name
 /// collision so a clashing schema fails loudly instead of emitting broken SQL.
 ///
 /// Authoritative changeset applies must run with triggers disabled (see
-/// [`TranslationOptions::with_session_user_role`](crate::traits::TranslationOptions::with_session_user_role)).
+/// [`TranslationOptions::with_session_user_role`]).
 fn append_readonly_deny_triggers(
     statements: &mut Vec<Statement>,
     options: &Pg2SqliteOptions,
