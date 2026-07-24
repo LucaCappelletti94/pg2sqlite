@@ -32,6 +32,9 @@ pub struct Pg2SqliteOptions {
     uuid_text_to_blob_function_name: Option<String>,
     /// The suffix to append to table names when renaming them for RLS views.
     rls_table_suffix: String,
+    /// The reserved marker used to name deny triggers for read-only non-RLS
+    /// tables (`<table><marker>_insert` and so on).
+    readonly_deny_trigger_suffix: String,
     /// The role name to use when filtering policies.
     session_user_role: Option<String>,
     /// Mappings from PostgreSQL session variable patterns to SQLite functions.
@@ -60,6 +63,15 @@ pub struct Pg2SqliteOptions {
     /// Intentionally not exposed in the public builder API: the catalog
     /// is derived from translation context, not user config.
     pub(crate) fts_indexes: Vec<(String, String)>,
+    /// SQLite-unqualified names of every table, index, trigger, and view
+    /// declared in the translation unit, lowercased. Prewalked from the input
+    /// statements by `Pg2Sqlite::translate` and consumed by the read-only
+    /// deny-trigger pass to reject a generated trigger name that would collide
+    /// with an existing object. The translation schema omits index and trigger
+    /// definitions, so this catalog is the authoritative name source.
+    /// Intentionally not exposed in the public builder API: it is derived from
+    /// translation context, not user config.
+    pub(crate) declared_object_names: Vec<String>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -76,6 +88,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             uuid_function_name: String::arbitrary(u)?,
             uuid_text_to_blob_function_name: Option::<String>::arbitrary(u)?,
             rls_table_suffix: String::arbitrary(u)?,
+            readonly_deny_trigger_suffix: String::arbitrary(u)?,
             session_user_role: Option::<String>::arbitrary(u)?,
             session_variables: Vec::<SessionVariableMapping>::arbitrary(u)?,
             rls_audit_table_name: Option::<String>::arbitrary(u)?,
@@ -83,6 +96,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             enable_geolite: bool::arbitrary(u)?,
             spatial_indexes: Vec::new(),
             fts_indexes: Vec::new(),
+            declared_object_names: Vec::new(),
         })
     }
 }
@@ -95,6 +109,7 @@ impl Default for Pg2SqliteOptions {
             uuid_function_name: "uuid".to_string(),
             uuid_text_to_blob_function_name: None,
             rls_table_suffix: "_rls".to_string(),
+            readonly_deny_trigger_suffix: "__readonly".to_string(),
             session_user_role: None,
             session_variables: Vec::new(),
             rls_audit_table_name: None,
@@ -102,6 +117,7 @@ impl Default for Pg2SqliteOptions {
             enable_geolite: false,
             spatial_indexes: Vec::new(),
             fts_indexes: Vec::new(),
+            declared_object_names: Vec::new(),
         }
     }
 }
@@ -152,6 +168,24 @@ impl Pg2SqliteOptions {
         let column = column.to_ascii_lowercase();
         self.fts_indexes.iter().any(|(t, c)| *t == table && *c == column)
     }
+
+    /// Records `name` as a declared SQLite object name, lowercased and
+    /// idempotent so [`Self::has_declared_object_name`] matches
+    /// case-insensitively as SQLite does.
+    pub(crate) fn add_declared_object_name(&mut self, name: impl Into<String>) {
+        let name = name.into().to_ascii_lowercase();
+        if !self.declared_object_names.contains(&name) {
+            self.declared_object_names.push(name);
+        }
+    }
+
+    /// Returns whether `name` collides with an object already declared in the
+    /// translation unit. Case-insensitive, matching SQLite name resolution.
+    #[must_use]
+    pub(crate) fn has_declared_object_name(&self, name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        self.declared_object_names.contains(&name)
+    }
 }
 
 impl TranslationOptions for Pg2SqliteOptions {
@@ -200,6 +234,15 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn get_rls_table_suffix(&self) -> &str {
         &self.rls_table_suffix
+    }
+
+    fn with_readonly_deny_trigger_suffix(mut self, suffix: impl Into<String>) -> Self {
+        self.readonly_deny_trigger_suffix = suffix.into();
+        self
+    }
+
+    fn get_readonly_deny_trigger_suffix(&self) -> &str {
+        &self.readonly_deny_trigger_suffix
     }
 
     fn with_session_user_role(mut self, role: impl Into<String>) -> Self {

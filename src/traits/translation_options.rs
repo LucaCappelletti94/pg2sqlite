@@ -146,8 +146,33 @@ pub trait TranslationOptions {
     fn get_rls_table_suffix(&self) -> &str;
 
     #[must_use]
-    /// Sets the role name to use when filtering policies. Only policies that
-    /// apply to PUBLIC or this role will be translated.
+    /// Sets the reserved marker used to name the deny triggers emitted for a
+    /// read-only non-RLS table. Deny triggers are named
+    /// `<table><marker>_insert` / `_update` / `_delete`. Default is
+    /// `"__readonly"`. Change it if the default collides with an object your
+    /// schema already defines.
+    fn with_readonly_deny_trigger_suffix(self, suffix: impl Into<String>) -> Self;
+
+    /// Returns the reserved marker used to name read-only deny triggers.
+    fn get_readonly_deny_trigger_suffix(&self) -> &str;
+
+    #[must_use]
+    /// Sets the role name used for role-aware translation. Only policies for
+    /// PUBLIC or this role are translated, and each table is emitted per the
+    /// role's grants: omitted when not selectable, read-only when selectable
+    /// but not writable, writable otherwise.
+    ///
+    /// A read-only table without row-level security gets deny triggers that
+    /// `RAISE(ABORT)` on `INSERT`/`UPDATE`/`DELETE`, failing interactive writes
+    /// synchronously at the statement.
+    ///
+    /// Apply contract: consumers applying authoritative changesets to a
+    /// role-translated replica MUST disable triggers
+    /// (`SQLITE_DBCONFIG_ENABLE_TRIGGER` off). A server patch replays
+    /// statements whose triggers already ran server-side, so the deny
+    /// triggers are for interactive statements only; applying with them
+    /// enabled would abort patch delivery to the read-only tables that
+    /// receive their data that way.
     fn with_session_user_role(self, role: impl Into<String>) -> Self;
 
     /// Returns the session user role for policy filtering.

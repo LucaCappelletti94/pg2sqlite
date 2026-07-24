@@ -16,14 +16,18 @@ use sql_traits::{
     structs::ParserDB,
     traits::{DatabaseLike, TableLike},
 };
-use sqlparser::ast::{BinaryOperator, Expr, ObjectType, Statement, UnaryOperator};
+use sqlparser::{
+    ast::{BinaryOperator, Expr, ObjectType, Statement, UnaryOperator},
+    dialect::SQLiteDialect,
+};
 
 use crate::{
     errors::Error,
     impls::{
+        generated_sql::parse_generated_sql,
         object_name::{
-            normalize_schema_qualified_object_name_for_sqlite, sqlite_unqualified_object_name,
-            table_with_implicit_public_lookup,
+            last_ident, normalize_schema_qualified_object_name_for_sqlite, quote_identifier,
+            sql_string_literal, sqlite_unqualified_object_name, table_with_implicit_public_lookup,
         },
         placeholder::rewrite_placeholders_for_sqlite,
         translator_impls::{
@@ -273,7 +277,8 @@ fn translate_create_table_for_role(
     }
 
     if is_readonly {
-        let statements = build_create_table_statements(create_table, schema, options, None)?;
+        let mut statements = build_create_table_statements(create_table, schema, options, None)?;
+        append_readonly_deny_triggers(&mut statements, options)?;
         return Ok(Some(statements));
     }
 
@@ -298,6 +303,76 @@ fn build_create_table_statements(
 
     append_vec0_statements_if_needed(&mut statements, create_table, schema, options)?;
     Ok(statements)
+}
+
+/// Trigger event per read-only deny trigger, keyed by the verb appended after
+/// the configured reserved marker.
+const READONLY_DENY_TRIGGERS: [(&str, &str); 3] =
+    [("insert", "BEFORE INSERT"), ("update", "BEFORE UPDATE"), ("delete", "BEFORE DELETE")];
+
+/// Appends `RAISE(ABORT)` deny triggers so interactive writes to a read-only
+/// non-RLS table fail synchronously at the statement. Names are
+/// `<table><marker>_<verb>`, where the marker is
+/// [`TranslationOptions::get_readonly_deny_trigger_suffix`]; errors on a name
+/// collision so a clashing schema fails loudly instead of emitting broken SQL.
+///
+/// Authoritative changeset applies must run with triggers disabled (see
+/// [`TranslationOptions::with_session_user_role`](crate::traits::TranslationOptions::with_session_user_role)).
+fn append_readonly_deny_triggers(
+    statements: &mut Vec<Statement>,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
+    let Some(Statement::CreateTable(create_table)) = statements.first() else {
+        return Ok(());
+    };
+    let sqlite_name = sqlite_unqualified_object_name(&create_table.name);
+    let table_ident = last_ident(&sqlite_name)
+        .map_or_else(|| sqlite_name.to_string(), |ident| ident.value.clone());
+
+    let marker = options.get_readonly_deny_trigger_suffix();
+    let table_name_quoted = quote_identifier(&table_ident);
+    let deny_message =
+        sql_string_literal(&format!("permission denied: {table_ident} is read-only for this role"));
+
+    let dialect = SQLiteDialect {};
+    let mut triggers = Vec::with_capacity(READONLY_DENY_TRIGGERS.len());
+    for (verb, event) in READONLY_DENY_TRIGGERS {
+        let trigger_name = format!("{table_ident}{marker}_{verb}");
+        reject_reserved_name_collision(options, &table_ident, &trigger_name)?;
+
+        let trigger_sql = format!(
+            "CREATE TRIGGER {} {event} ON {table_name_quoted} \
+             BEGIN SELECT RAISE(ABORT, {deny_message}); END",
+            quote_identifier(&trigger_name)
+        );
+        triggers.extend(parse_generated_sql(
+            &dialect,
+            &trigger_sql,
+            "Failed to parse generated read-only deny trigger SQL",
+        )?);
+    }
+
+    statements.extend(triggers);
+    Ok(())
+}
+
+/// Errors when the translation unit already declares a table, index, trigger,
+/// or view whose SQLite-unqualified name collides with a reserved deny-trigger
+/// name. The declared-name catalog is prewalked from the input statements
+/// (see `populate_declared_object_names`) because the translation schema omits
+/// index and trigger definitions.
+fn reject_reserved_name_collision(
+    options: &Pg2SqliteOptions,
+    table_name: &str,
+    trigger_name: &str,
+) -> Result<(), Error> {
+    if options.has_declared_object_name(trigger_name) {
+        return Err(Error::ReadonlyDenyTriggerNameCollision {
+            table_name: table_name.to_string(),
+            trigger_name: trigger_name.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn append_vec0_statements_if_needed(

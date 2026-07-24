@@ -94,6 +94,27 @@ fn populate_spatial_index_catalog(
     }
 }
 
+/// Pre-walks the input statements and registers the SQLite-unqualified name of
+/// every declared table, index, trigger, and view in the options' declared-name
+/// catalog. Consumed by the read-only deny-trigger pass to reject a generated
+/// trigger name that would collide with an existing object. The translation
+/// schema omits index and trigger definitions, so the raw statements are the
+/// authoritative name source here.
+fn populate_declared_object_names(statements: &[Statement], options: &mut Pg2SqliteOptions) {
+    for stmt in statements {
+        let name = match stmt {
+            Statement::CreateTable(create_table) => Some(&create_table.name),
+            Statement::CreateView(create_view) => Some(&create_view.name),
+            Statement::CreateTrigger(create_trigger) => Some(&create_trigger.name),
+            Statement::CreateIndex(create_index) => create_index.name.as_ref(),
+            _ => None,
+        };
+        if let Some(name) = name {
+            options.add_declared_object_name(last_ident_value_or_display(name));
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 /// Struct to translate between a `PostgreSQL` entry and a `SQLite` entry.
 pub struct Pg2Sqlite {
@@ -376,6 +397,7 @@ impl Pg2Sqlite {
         // extension toggle, only on the schema's declared GIN/GiST
         // indexes. Populates `options.fts_indexes`.
         populate_fts_index_catalog(&normalized_statements, &mut options);
+        populate_declared_object_names(&normalized_statements, &mut options);
         let options = options;
 
         let mut result: Vec<Statement> = normalized_statements

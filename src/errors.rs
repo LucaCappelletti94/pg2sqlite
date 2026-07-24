@@ -182,4 +182,17 @@ pub enum Error {
         /// Reason why this qualification is unsupported.
         reason: String,
     },
+    /// Error when a generated read-only deny trigger would collide with an
+    /// object that the input schema already defines.
+    #[error(
+        "Cannot generate read-only deny trigger '{trigger_name}' for table '{table_name}': \
+         the input schema already defines an object with that name. \
+         Rename the conflicting object."
+    )]
+    ReadonlyDenyTriggerNameCollision {
+        /// The read-only table the deny triggers protect.
+        table_name: String,
+        /// The reserved trigger name that collides with an existing object.
+        trigger_name: String,
+    },
 }
