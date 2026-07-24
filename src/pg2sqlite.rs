@@ -514,6 +514,65 @@ impl Pg2Sqlite {
             .map_err(crate::errors::Error::from)
     }
 
+    /// Logical to physical table map this translator produces under `options`,
+    /// one [`TableManifestEntry`](crate::manifest::TableManifestEntry) per
+    /// emitted table. Derived from the same
+    /// classification [`translate`](Self::translate) uses, so it matches the
+    /// objects that call emits. A role-configured `options` omits tables the
+    /// role cannot SELECT.
+    ///
+    /// # Errors
+    ///
+    /// * If the schema could not be constructed from the statements.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use pg2sqlite::{pg2sqlite::Pg2Sqlite, options::Pg2SqliteOptions, manifest::WrapperKind};
+    /// let manifest = Pg2Sqlite::default()
+    ///     .sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")
+    ///     .unwrap()
+    ///     .translation_manifest(&Pg2SqliteOptions::default())
+    ///     .unwrap();
+    /// assert_eq!(manifest[0].logical, "users");
+    /// assert_eq!(manifest[0].wrapper, WrapperKind::Plain);
+    /// ```
+    pub fn translation_manifest(
+        &self,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<crate::manifest::TableManifestEntry>, crate::errors::Error> {
+        use sql_traits::traits::{DatabaseLike, TableLike};
+
+        use crate::{
+            impls::translator_impls::rls::resolve_trigger_table_name,
+            manifest::{TableManifestEntry, WrapperKind},
+        };
+
+        let schema = self.build_schema()?;
+        let role = options.get_session_user_role().and_then(|name| schema.role(name));
+
+        let mut entries = Vec::new();
+        for table in schema.tables() {
+            if role.is_some_and(|role| !table.can_select(role, &schema)) {
+                continue;
+            }
+
+            let logical = table.table_name().to_string();
+            let physical = resolve_trigger_table_name(&logical, table, &schema, options);
+            let wrapper = if table.has_row_level_security(&schema) {
+                WrapperKind::RlsView
+            } else if role.is_some_and(|role| !table.can_write(role, &schema)) {
+                WrapperKind::ReadOnly
+            } else {
+                WrapperKind::Plain
+            };
+
+            entries.push(TableManifestEntry { logical, physical, wrapper });
+        }
+
+        Ok(entries)
+    }
+
     /// Reverse translates a single SQLite statement to PostgreSQL.
     ///
     /// This method converts a SQLite DML statement (INSERT, UPDATE, DELETE,
