@@ -370,6 +370,8 @@ fn translation_options() -> Pg2SqliteOptions {
 }
 
 fn setup_database(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    use pg2sqlite::traits::TranslationOptions;
+
     let options = translation_options();
 
     // Load and translate groups.sql first
@@ -379,9 +381,11 @@ fn setup_database(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::
         diesel::sql_query(stmt.to_string()).execute(connection)?;
     }
 
-    // Load and translate rls_grants.sql
+    // Partial fragment: FKs to `owners`/`users` resolve in groups.sql, a
+    // separate unit above, so opt out of the reference-closure check.
     let grants_sql = include_str!("fixtures/rls_grants.sql");
-    let grants_translated = Pg2Sqlite::default().sql(grants_sql)?.translate(&options)?;
+    let grants_options = translation_options().with_dangling_foreign_keys_allowed();
+    let grants_translated = Pg2Sqlite::default().sql(grants_sql)?.translate(&grants_options)?;
     for stmt in &grants_translated {
         diesel::sql_query(stmt.to_string()).execute(connection)?;
     }
