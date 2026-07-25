@@ -384,6 +384,10 @@ impl Pg2Sqlite {
         let schema_statements = Self::schema_statements_for_translation(&normalized_statements);
         let schema = ParserDB::from_statements(schema_statements, "translation_db".to_owned())?;
 
+        if !options.is_dangling_foreign_keys_allowed() {
+            schema.validate_foreign_key_targets()?;
+        }
+
         // Pre-walk for spatial-index DDL so that the same translation unit's
         // SELECTs can rewrite `ST_*` predicates over indexed columns through
         // the rtree shadow. Only fires when geolite translation is enabled;
@@ -549,6 +553,11 @@ impl Pg2Sqlite {
         };
 
         let schema = self.build_schema()?;
+
+        if !options.is_dangling_foreign_keys_allowed() {
+            schema.validate_foreign_key_targets()?;
+        }
+
         let role = options.get_session_user_role().and_then(|name| schema.role(name));
 
         let mut entries = Vec::new();

@@ -72,6 +72,9 @@ pub struct Pg2SqliteOptions {
     /// Intentionally not exposed in the public builder API: it is derived from
     /// translation context, not user config.
     pub(crate) declared_object_names: Vec<String>,
+    /// Permit foreign keys whose target table or columns do not resolve in the
+    /// document. Default `false`, matching Postgres at DDL apply.
+    allow_dangling_foreign_keys: bool,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -97,6 +100,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             spatial_indexes: Vec::new(),
             fts_indexes: Vec::new(),
             declared_object_names: Vec::new(),
+            allow_dangling_foreign_keys: bool::arbitrary(u)?,
         })
     }
 }
@@ -118,6 +122,7 @@ impl Default for Pg2SqliteOptions {
             spatial_indexes: Vec::new(),
             fts_indexes: Vec::new(),
             declared_object_names: Vec::new(),
+            allow_dangling_foreign_keys: false,
         }
     }
 }
@@ -311,5 +316,14 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn is_sqlitegis_enabled(&self) -> bool {
         self.enable_geolite
+    }
+
+    fn with_dangling_foreign_keys_allowed(mut self) -> Self {
+        self.allow_dangling_foreign_keys = true;
+        self
+    }
+
+    fn is_dangling_foreign_keys_allowed(&self) -> bool {
+        self.allow_dangling_foreign_keys
     }
 }

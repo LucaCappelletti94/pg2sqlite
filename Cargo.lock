@@ -12,6 +12,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "aliasable"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "250f629c0161ad8107cf89319e990051fae62832fd343083bea452d93e2205fd"
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -78,10 +84,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "barnes-hut-tree"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e722517096156bfb9854089d365d0066892b613ee79579b570e4585687bb52"
+dependencies = [
+ "num-traits",
+ "rayon",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+
+[[package]]
+name = "bitvec"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddcec3d12c579d40898fe0a9a358a803c23e9c52ca3c425707f81c9436211837"
+dependencies = [
+ "funty",
+ "radium",
+ "tap",
+ "wyz",
+]
 
 [[package]]
 name = "block-buffer"
@@ -534,6 +562,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "funty"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -607,13 +641,15 @@ dependencies = [
 [[package]]
 name = "geometric-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/geometric-traits?branch=main#ddaad2a298103fab1f8760ec5e433ebbb595831d"
+source = "git+https://github.com/earth-metabolome-initiative/geometric-traits?branch=main#59f580bcf10f357e81f606db693dfc49f20ee863"
 dependencies = [
- "hashbrown 0.16.1",
+ "barnes-hut-tree",
+ "bitvec",
+ "hashbrown 0.17.1",
  "lender",
  "multi_ranged",
  "num-traits",
- "serde",
+ "rand",
  "thiserror 2.0.18",
 ]
 
@@ -720,6 +756,15 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -1016,11 +1061,13 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lender"
-version = "0.4.2"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c150e24afda8f769930a339cb5ad6e182101fdf1165c30c157b33ce5050fd7ad"
+checksum = "aeed4888de4544bf3ba2e111326978dbcc37f57bf2c7d6a6a78ed6c01f77ef93"
 dependencies = [
+ "aliasable",
  "fallible-iterator",
+ "maybe-dangling",
  "stable_try_trait_v2",
 ]
 
@@ -1106,6 +1153,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "maybe-dangling"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59dbb09ed53f8e4f314e353dc6c1853ae5b4c480a668a422657804a544ea9f65"
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1113,12 +1166,11 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "multi_ranged"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9809fbd1a12e6b2303cedb9bff55196574b4d0c9b40209ba0d39aa1bb780cc69"
+checksum = "62ab5d66e0b5838b06db54cc27d1061959725ad3ca240f26daa4a055038b4429"
 dependencies = [
  "num-traits",
- "serde",
  "thiserror 2.0.18",
 ]
 
@@ -1297,6 +1349,12 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
+name = "radium"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
@@ -1573,7 +1631,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/sql-traits?branch=main#e9e31c3063f7e89bcea7afb00005bd34a3c46fa3"
+source = "git+https://github.com/earth-metabolome-initiative/sql-traits?branch=main#7f3598add255a4559d7a5b9b6c4552d01cddd980"
 dependencies = [
  "geometric-traits",
  "sha2",
@@ -1699,6 +1757,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "tap"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tempfile"
@@ -2267,6 +2331,15 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "wyz"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
+dependencies = [
+ "tap",
+]
 
 [[package]]
 name = "yoke"

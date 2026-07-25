@@ -104,7 +104,9 @@ fn bench_rls_translation(c: &mut Criterion) {
             "app.tenant_id",
             "current_tenant",
         ))
-        .with_rls_audit_table_name("rls_violations");
+        .with_rls_audit_table_name("rls_violations")
+        // rls_grants.sql is a partial fragment with FKs into groups.sql.
+        .with_dangling_foreign_keys_allowed();
 
     let mut group = c.benchmark_group("rls_translation");
 
