@@ -4,8 +4,11 @@
 [![Security Audit](https://github.com/LucaCappelletti94/pg2sqlite/workflows/Security%20Audit/badge.svg)](https://github.com/LucaCappelletti94/pg2sqlite/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Codecov](https://codecov.io/gh/LucaCappelletti94/pg2sqlite/branch/main/graph/badge.svg)](https://codecov.io/gh/LucaCappelletti94/pg2sqlite)
+[![Pages](https://github.com/LucaCappelletti94/pg2sqlite/workflows/Pages/badge.svg)](https://github.com/LucaCappelletti94/pg2sqlite/actions/workflows/pages.yml)
 
 A Rust library that translates PostgreSQL SQL into valid, runnable SQLite SQL. It parses PostgreSQL-dialect statements with [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and emits semantically equivalent SQLite, going well beyond type and syntax rewriting.
+
+A live playground at [`pg2sqlite.luca.phd`](https://pg2sqlite.luca.phd) runs the translator entirely client-side as WebAssembly, with an in-page SQLite so the translated schema is actually executed and queried in the browser. Paste PostgreSQL DDL, watch the SQLite translation update as you type, and run queries against the populated schema in either dialect.
 
 The translation contract is strict. Every statement pg2sqlite returns is valid SQLite. If a construct can be translated, it is. If it has a SQLite equivalent that is not yet implemented, the call returns an explicit `Err` instead of SQL that fails at runtime. Constructs that carry no SQLite-representable information (`CREATE FUNCTION`, `GRANT`, `CREATE ROLE`, and similar) are dropped rather than passed through, as are column options with no SQLite counterpart (`COLLATION`, `CHARACTER SET`, `COMMENT`). There are no silent pass-throughs that look valid but fail on execution, and the test suite runs the translated SQL against SQLite through Diesel to check real runtime behavior rather than output strings.
 
