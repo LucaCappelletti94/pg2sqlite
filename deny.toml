@@ -22,15 +22,7 @@ wildcards = "allow"
 
 [advisories]
 # Check for known security vulnerabilities.
-ignore = [
-    # RUSTSEC-2026-0183 / -0184: git2 `Remote::list()` and buffer-created
-    # `BlameHunk` signatures can dereference null pointers. pg2sqlite only
-    # uses `git2::Repository` (verified via grep) and never calls those
-    # APIs, and sql-traits still pins git2 0.20 so bumping ours alone
-    # cannot clear them. Drop these once the tree moves to a fixed git2.
-    { id = "RUSTSEC-2026-0183", reason = "Remote::list not used in this tree" },
-    { id = "RUSTSEC-2026-0184", reason = "Blame APIs not used in this tree" },
-]
+ignore = []
 
 [sources]
 # Allow git sources since the project uses git dependencies for sqlparser and sql-traits.

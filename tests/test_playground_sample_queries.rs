@@ -502,21 +502,16 @@ fn postgis_sample_queries() {
     // sqlite3_auto_extension, so the chip queries (ST_X, ST_Y,
     // ST_Within, ST_MakeEnvelope, ...) execute against the rusqlite
     // connection the same way they do in the browser playground.
+    //
+    // `rusqlite::ffi` is a re-export of the same `libsqlite3-sys` this crate
+    // depends on, so the init signatures are one type and the pointer needs no
+    // cast. Passing it directly makes the compiler enforce that: if the two ever
+    // resolve to different versions, this stops building instead of transmuting
+    // across an ABI mismatch.
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            unsafe extern "C" fn(
-                *mut libsqlite3_sys::sqlite3,
-                *mut *mut std::ffi::c_char,
-                *const libsqlite3_sys::sqlite3_api_routines,
-            ) -> std::ffi::c_int,
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::ffi::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> std::ffi::c_int,
-        >(sqlitegis_init)));
+        rusqlite::ffi::sqlite3_auto_extension(Some(sqlitegis_init));
     });
 
     let opts = Pg2SqliteOptions::default()
