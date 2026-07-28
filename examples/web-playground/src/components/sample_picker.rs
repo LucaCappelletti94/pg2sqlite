@@ -1,10 +1,6 @@
-//! Sample-picker badges that seed the PG editor + Options form from
-//! a curated list. Each badge ("Simple" / "FTS5" / "pgvector" /
-//! "PostGIS" / "RLS") is a button; clicking replaces both the
-//! editor contents and the option-form state in one go. The
-//! auto-translate watcher in `App` notices the input change and
-//! runs a translation after the usual debounce, so the SQLite pane
-//! updates without any additional click.
+//! Sample-picker badges that seed the PG editor and Options form from a curated
+//! list. The active badge is derived from the editor contents, so it
+//! self-clears when the user types.
 
 use dioxus::prelude::*;
 use dioxus_free_icons::{
@@ -16,12 +12,15 @@ use dioxus_free_icons::{
 };
 
 use crate::{
-    samples::{SAMPLES, find_sample},
+    samples::{SAMPLES, SampleIcon, find_sample, find_sample_by_sql},
     state::AppState,
 };
 
 #[component]
 pub fn SamplePicker() -> Element {
+    let state: AppState = use_context();
+    let active = find_sample_by_sql(&state.pg_input.read()).map(|s| s.name);
+
     rsx! {
         div { class: "sample-picker",
             span { class: "sample-picker-label",
@@ -35,7 +34,11 @@ pub fn SamplePicker() -> Element {
             }
             div { class: "sample-badges",
                 for sample in SAMPLES {
-                    SampleBadge { name: sample.name }
+                    SampleBadge {
+                        name: sample.name,
+                        icon: sample.icon,
+                        active: active == Some(sample.name),
+                    }
                 }
             }
         }
@@ -43,7 +46,7 @@ pub fn SamplePicker() -> Element {
 }
 
 #[component]
-fn SampleBadge(name: &'static str) -> Element {
+fn SampleBadge(name: &'static str, icon: SampleIcon, active: bool) -> Element {
     let state: AppState = use_context();
 
     let on_click = move |_| {
@@ -60,29 +63,36 @@ fn SampleBadge(name: &'static str) -> Element {
         // sample's pre-configured options.
         options.set(opts);
         pg_input.set(sample.sql.to_string());
+        // The editor no longer holds the uploaded migrations, so drop the file
+        // list rather than leave a stale order the user could drag.
+        state.input_files.clone().set(Vec::new());
     };
 
     rsx! {
         button {
             r#type: "button",
-            class: "sample-badge",
+            class: if active { "sample-badge is-active" } else { "sample-badge" },
+            "aria-pressed": active,
             onclick: on_click,
-            SampleBadgeIcon { name: name }
+            SampleBadgeIcon { icon }
             "{name}"
         }
     }
 }
 
 #[component]
-fn SampleBadgeIcon(name: &'static str) -> Element {
+fn SampleBadgeIcon(icon: SampleIcon) -> Element {
     let class = "badge-icon".to_string();
-    match name {
-        "Simple" => rsx! { Icon { width: 14, height: 14, icon: FaTable, class: class } },
-        "FTS5" => rsx! { Icon { width: 14, height: 14, icon: FaMagnifyingGlass, class: class } },
-        "pgvector" => rsx! { Icon { width: 14, height: 14, icon: FaBrain, class: class } },
-        "PostGIS" => rsx! { Icon { width: 14, height: 14, icon: FaMapLocationDot, class: class } },
-        "RLS" => rsx! { Icon { width: 14, height: 14, icon: FaShieldHalved, class: class } },
-        "Constraints" => rsx! { Icon { width: 14, height: 14, icon: FaListCheck, class: class } },
-        _ => rsx! {},
+    match icon {
+        SampleIcon::Table => rsx! { Icon { width: 14, height: 14, icon: FaTable, class } },
+        SampleIcon::FullText => {
+            rsx! { Icon { width: 14, height: 14, icon: FaMagnifyingGlass, class } }
+        }
+        SampleIcon::Vector => rsx! { Icon { width: 14, height: 14, icon: FaBrain, class } },
+        SampleIcon::Geometry => {
+            rsx! { Icon { width: 14, height: 14, icon: FaMapLocationDot, class } }
+        }
+        SampleIcon::Policy => rsx! { Icon { width: 14, height: 14, icon: FaShieldHalved, class } },
+        SampleIcon::Constraint => rsx! { Icon { width: 14, height: 14, icon: FaListCheck, class } },
     }
 }

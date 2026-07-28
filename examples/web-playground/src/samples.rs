@@ -1,66 +1,48 @@
 //! Curated sample schemas surfaced in the Step 1 dropdown.
-//!
-//! Each `Sample` carries an inline SQL string + an option-preset function
-//! that the picker invokes on the live `Pg2SqliteOptions` signal so the
-//! sample's translation has everything it needs to succeed without
-//! requiring the user to open the Advanced options form first.
 
 use pg2sqlite::prelude::SessionVariableMapping;
 
 use crate::state::{QueryDialect, WebOptions};
 
-/// A picker entry. `name` is what the user sees on the badge; `sql`
-/// is what fills the editor when clicked; `apply_options` is run
-/// against the current options state so RLS / PostGIS / UUID samples
-/// pre-configure their dependencies. `queries` is the curated set
-/// of follow-up SQL the query panel renders as chips while the
-/// editor still holds an unedited copy of `sql`.
+/// A picker entry.
 pub struct Sample {
     pub name: &'static str,
+    /// An enum so renaming a badge cannot silently drop its icon.
+    pub icon: SampleIcon,
     pub sql: &'static str,
     pub apply_options: fn(&mut WebOptions),
     pub queries: &'static [SampleQuery],
-    /// Curated SQLite snippets the reverse panel renders as chips
-    /// while the editor still holds an unedited copy of `sql`. Each
-    /// chip loads the snippet into the reverse-input editor and fires
-    /// `reverse_translate(sqlite, pg_schema, options)`. Empty when the
-    /// sample has no compelling reverse demo (e.g. when SQLite syntax
-    /// and PG syntax overlap for that schema's idioms).
     pub reverse_queries: &'static [ReverseSampleQuery],
 }
 
-/// A single canned follow-up query attached to a sample.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SampleIcon {
+    Table,
+    FullText,
+    Vector,
+    Geometry,
+    Policy,
+    Constraint,
+}
+
 pub struct SampleQuery {
-    /// Short label shown on the chip.
     pub label: &'static str,
-    /// SQL loaded into the query editor and run on click.
+    /// SQL run verbatim if `dialect` is `Sqlite`, or forward-translated if
+    /// `Postgres`.
     pub sql: &'static str,
-    /// Which dialect the query is authored in. Postgres input goes
-    /// through pg2sqlite's forward translator before it hits the
-    /// in-memory connection; SQLite input is run verbatim. FTS5
-    /// `MATCH`, raw `vec0`/`docs_fts` access, and other SQLite-only
-    /// syntax must use `Sqlite` so they bypass the PG parser.
     pub dialect: QueryDialect,
-    /// Whether running this query is expected to succeed or to be
-    /// blocked by a policy / constraint / generated column. Drives
-    /// the chip's styling so negative demos are visually distinct.
+    /// Drives chip styling: negative chips show expected-failure demos.
     pub kind: SampleQueryKind,
 }
 
-/// A canned SQLite snippet the reverse panel renders as a chip. Input
-/// is always SQLite (the reverse panel is one-directional), so there
-/// is no dialect field. The `expect` substring asserts something
-/// recognisable in the produced PG output so the test suite can pin
-/// each chip's behaviour end-to-end.
+/// A canned SQLite snippet the reverse panel renders as a chip.
 pub struct ReverseSampleQuery {
     pub label: &'static str,
     pub sql: &'static str,
     pub kind: SampleQueryKind,
-    /// Case-sensitive substring that must appear in the reverse-
-    /// translated PG SQL for positive chips. Ignored for negative
-    /// chips, which are expected to error. Consumed by the native
-    /// `test_playground_sample_queries` end-to-end checks, not by
-    /// the UI itself.
+    /// Substring that must appear in the reverse-translated PG SQL. Consumed by
+    /// `test_playground_sample_queries` in the parent repo, not the UI. The
+    /// catalogue here and that test file must be kept in sync.
     #[allow(dead_code)]
     pub expect_pg_contains: &'static str,
 }
@@ -71,20 +53,15 @@ pub enum SampleQueryKind {
     Negative,
 }
 
-/// Look up a sample by its `name`. Used by the badge component to
-/// avoid passing `Sample` itself as a Dioxus prop - Dioxus props
-/// need PartialEq, and deriving PartialEq on a struct with an `fn`
-/// field triggers `unpredictable_function_pointer_comparisons`.
-/// Names are unique within `SAMPLES`, so the lookup is exact.
+/// Looks up by name because deriving `PartialEq` on a struct with an `fn` field
+/// trips `unpredictable_function_pointer_comparisons`. Names are unique within
+/// `SAMPLES`.
 #[must_use]
 pub fn find_sample(name: &str) -> Option<&'static Sample> {
     SAMPLES.iter().find(|s| s.name == name)
 }
 
-/// Look up a sample by exact source-SQL match. Used by the query
-/// panel to decide whether to render canned-query chips: as soon as
-/// the user edits the PG input, the match breaks and the chips
-/// disappear (since the curated queries no longer fit the schema).
+/// Looks up by exact source SQL to decide whether to render canned-query chips.
 #[must_use]
 pub fn find_sample_by_sql(pg_sql: &str) -> Option<&'static Sample> {
     SAMPLES.iter().find(|s| s.sql == pg_sql)
@@ -230,10 +207,6 @@ const SIMPLE_QUERIES: &[SampleQuery] = &[
     },
 ];
 
-// pg2sqlite translates `to_tsvector(...) @@ to_tsquery(...)` into a
-// SQLite FTS5 `... IN (SELECT rowid FROM docs_fts WHERE docs_fts
-// MATCH '...')` subquery, so the chip queries are authored in PG
-// syntax and let the translator rewrite them at click time.
 const FTS5_QUERIES: &[SampleQuery] = &[
     SampleQuery {
         label: "All docs",
@@ -272,8 +245,8 @@ const PGVECTOR_QUERIES: &[SampleQuery] = &[
         label: "Insert a vector",
         // Omit `id` so SQLite auto-assigns the integer primary key.
         // A hardcoded id would trip the UNIQUE constraint the second
-        // time the user clicks this chip; the auto-assigned rowid
-        // makes the chip re-runnable.
+        // time the user clicks this chip. The auto-assigned rowid keeps
+        // the chip re-runnable.
         sql: "INSERT INTO items (embedding) VALUES ('[0.5, 0.5, 0.5]')",
         dialect: QueryDialect::Postgres,
         kind: SampleQueryKind::Positive,
@@ -352,12 +325,8 @@ const CONSTRAINTS_QUERIES: &[SampleQuery] = &[
     },
 ];
 
-// SQLite-shaped snippets the reverse panel can lift back into
-// PostgreSQL. Only chips with a non-trivial reverse output land here -
-// samples whose SQLite and PG dialects overlap (PostGIS ST_*, plain
-// Constraints CRUD) intentionally omit reverse chips because the
-// reverse-translated output would equal the input, which is not a
-// useful demo.
+// Reverse chips only for samples where SQLite and PG syntax meaningfully
+// differ.
 
 const SIMPLE_REVERSE_QUERIES: &[ReverseSampleQuery] = &[
     ReverseSampleQuery {
@@ -390,11 +359,7 @@ const PGVECTOR_REVERSE_QUERIES: &[ReverseSampleQuery] = &[
 ];
 
 const RLS_REVERSE_QUERIES: &[ReverseSampleQuery] = &[
-    // The reverse translator refuses to translate raw backing-table
-    // access because the `_rls` suffix is an implementation detail of
-    // pg2sqlite's RLS translation, not part of the PG schema. Shipping
-    // a negative chip here documents that contract for users who
-    // expect to round-trip through the backing-table name.
+    // Negative chip: the reverse translator rejects `_rls`-suffixed backing-table names.
     ReverseSampleQuery {
         label: "Backing-table access (rejected by reverse)",
         sql: "SELECT id, owner_id, title FROM documents_rls",
@@ -403,45 +368,52 @@ const RLS_REVERSE_QUERIES: &[ReverseSampleQuery] = &[
     },
 ];
 
-/// All samples, in dropdown order.
+/// All samples, in dropdown order. Each `name` pairs the PG construct with the
+/// SQLite construct.
 pub const SAMPLES: &[Sample] = &[
     Sample {
-        name: "Simple",
+        name: "SERIAL → INTEGER",
+        icon: SampleIcon::Table,
         sql: SIMPLE_SQL,
         apply_options: simple_options,
         queries: SIMPLE_QUERIES,
         reverse_queries: SIMPLE_REVERSE_QUERIES,
     },
     Sample {
-        name: "FTS5",
+        name: "GIN → FTS5",
+        icon: SampleIcon::FullText,
         sql: FTS5_SQL,
         apply_options: simple_options,
         queries: FTS5_QUERIES,
         reverse_queries: &[],
     },
     Sample {
-        name: "pgvector",
+        name: "pgvector → sqlite-vec",
+        icon: SampleIcon::Vector,
         sql: PGVECTOR_SQL,
         apply_options: simple_options,
         queries: PGVECTOR_QUERIES,
         reverse_queries: PGVECTOR_REVERSE_QUERIES,
     },
     Sample {
-        name: "PostGIS",
+        name: "PostGIS → SQLiteGIS",
+        icon: SampleIcon::Geometry,
         sql: POSTGIS_SQL,
         apply_options: postgis_options,
         queries: POSTGIS_QUERIES,
         reverse_queries: &[],
     },
     Sample {
-        name: "RLS",
+        name: "RLS → INSTEAD OF",
+        icon: SampleIcon::Policy,
         sql: RLS_SQL,
         apply_options: rls_options,
         queries: RLS_QUERIES,
         reverse_queries: RLS_REVERSE_QUERIES,
     },
     Sample {
-        name: "Constraints",
+        name: "NUMERIC → REAL",
+        icon: SampleIcon::Constraint,
         sql: CONSTRAINTS_SQL,
         apply_options: simple_options,
         queries: CONSTRAINTS_QUERIES,
@@ -458,11 +430,8 @@ fn postgis_options(opts: &mut WebOptions) {
 }
 
 fn rls_options(opts: &mut WebOptions) {
-    // The `current_setting('app.user_id')` references in the policies need
-    // to be rewritten into a SQLite function call. We map them to
-    // `current_app_user()`, which the user is expected to provide as a
-    // UDF in real deployments; for the playground demo it would be a no-op
-    // until query execution lands.
+    // Maps `current_setting('app.user_id')` to a SQLite UDF call
+    // `current_app_user()`.
     *opts = WebOptions {
         rls_audit_table_name: "rls_violations".to_string(),
         session_variables: vec![SessionVariableMapping::current_setting(

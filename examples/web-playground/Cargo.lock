@@ -225,6 +225,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "barnes-hut-tree"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e722517096156bfb9854089d365d0066892b613ee79579b570e4585687bb52"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1503,8 +1512,9 @@ dependencies = [
 [[package]]
 name = "geometric-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/geometric-traits?branch=main#ccc7cba3c0301626406cf495c0f280d8e9c52fe3"
+source = "git+https://github.com/earth-metabolome-initiative/geometric-traits?branch=main#59f580bcf10f357e81f606db693dfc49f20ee863"
 dependencies = [
+ "barnes-hut-tree",
  "bitvec",
  "hashbrown 0.17.1",
  "lender",
@@ -2453,7 +2463,6 @@ dependencies = [
  "dioxus-free-icons",
  "dx_icons",
  "gloo-timers",
- "js-sys",
  "log",
  "pg2sqlite",
  "sqlite-wasm-rs",
@@ -3169,7 +3178,7 @@ checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/sql-traits?branch=main#e9e31c3063f7e89bcea7afb00005bd34a3c46fa3"
+source = "git+https://github.com/earth-metabolome-initiative/sql-traits?branch=main#c315d2cfd7df00f62a64b49ee42858871eeaf505"
 dependencies = [
  "geometric-traits",
  "sha2",

@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
+description = "Translates PostgreSQL SQL into valid runnable SQLite SQL, emitting semantically equivalent output for types, RLS, FTS5, pgvector, and PostGIS constructs."
+homepage = "https://pg2sqlite.luca.phd"
+repository = "https://github.com/LucaCappelletti94/pg2sqlite"
+documentation = "https://docs.rs/pg2sqlite"
+readme = "README.md"
+keywords = ["postgresql", "sqlite", "sql", "translation", "migration"]
+categories = ["database", "parser-implementations"]
 
 [dependencies]
 sqlparser = { version = "0.62", default-features = false, features = ["visitor"] }

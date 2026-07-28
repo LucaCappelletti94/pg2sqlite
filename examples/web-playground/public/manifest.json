@@ -1,0 +1,15 @@
+{
+  "name": "pg2sqlite: PostgreSQL to SQLite",
+  "short_name": "pg2sqlite",
+  "description": "Translate PostgreSQL DDL and queries into runnable SQLite, execute the result against an in-page database, and translate SQLite DML back to PostgreSQL. Entirely in the browser.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FBFCFD",
+  "theme_color": "#336791",
+  "icons": [
+    { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192" },
+    { "src": "/icon-512.png", "type": "image/png", "sizes": "512x512" },
+    { "src": "/apple-touch-icon.png", "type": "image/png", "sizes": "180x180" },
+    { "src": "/pg2sqlite.svg", "type": "image/svg+xml", "sizes": "any" }
+  ]
+}

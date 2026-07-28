@@ -1,12 +1,6 @@
 //! Step 3: query the populated in-memory SQLite.
-//!
-//! Reveals after the Step 1 translation + apply both succeeded. The
-//! user types SQL into the query box, picks a dialect (PG default,
-//! SQLite alternative), and hits Run. PG inputs go through
-//! `pg2sqlite::Pg2Sqlite::translate` first so `current_setting(...)`,
-//! `ST_*`, etc. just work; SQLite inputs are passed verbatim. A
-//! "Translated as:" line above the result table shows what actually
-//! ran whenever the PG path rewrote the input.
+//! PG inputs go through `pg2sqlite::Pg2Sqlite::translate` first. SQLite inputs
+//! are passed verbatim.
 
 use dioxus::prelude::*;
 use dioxus_free_icons::{
@@ -83,9 +77,6 @@ pub fn QueryPanel() -> Element {
     }
 }
 
-/// PG / SQLite dialect toggle. Borrowed from `<input type="radio">`
-/// rather than a button group so the active state shows obviously
-/// even without bespoke styling.
 #[component]
 fn DialectToggle() -> Element {
     let state: AppState = use_context();
@@ -115,9 +106,6 @@ fn DialectToggle() -> Element {
     }
 }
 
-/// Renders the "Translated as: ..." line (PG dialect only) plus
-/// either a results table, an "Affected N rows" line, or an error
-/// card.
 #[component]
 fn QueryDisplayCard(display: QueryDisplay) -> Element {
     let state: AppState = use_context();
@@ -140,9 +128,9 @@ fn QueryDisplayCard(display: QueryDisplay) -> Element {
             }
             match display.outcome {
                 QueryOutcome::Rows { result, elapsed_ms } => {
-                    // Map plots when the result actually exposes
-                    // lon / lat columns; otherwise we would be drawing
-                    // arbitrary numeric pairs.
+                    // Only plot when the result actually exposes lon / lat
+                    // columns, otherwise the map would show arbitrary
+                    // numeric pairs.
                     let points = extract_lonlat(&result.columns, &result.rows);
                     rsx! {
                         p { class: "query-stats",
@@ -181,10 +169,6 @@ fn format_ms(ms: f64) -> String {
     if ms < 1.0 { format!("{ms:.2}") } else { format!("{ms:.1}") }
 }
 
-/// Renders one chip per curated query attached to the currently-loaded
-/// sample. The chips disappear as soon as the user edits the PG input
-/// (because the lookup is exact-equality), so once the schema has
-/// drifted the suggestions can no longer be assumed to match.
 #[component]
 fn SampleQueriesStrip() -> Element {
     let state: AppState = use_context();
@@ -250,8 +234,6 @@ fn SampleQueryChip(
     }
 }
 
-/// Run the user's query against the in-memory connection, dispatching
-/// PG inputs through pg2sqlite first.
 fn run_query(state: AppState) {
     let raw_query = state.query_input.read().clone();
     let dialect = *state.query_dialect.read();
@@ -259,13 +241,6 @@ fn run_query(state: AppState) {
     let effective_sql = match dialect {
         QueryDialect::Sqlite => raw_query.clone(),
         QueryDialect::Postgres => {
-            // Reuse the same options the schema was translated under.
-            // Without this, PG queries that depend on session-variable
-            // mappings or geolite enablement would silently behave
-            // differently from the schema they're querying. We also
-            // pass the live PG schema so schema-driven rewrites (the
-            // pgvector `vec_f32` text-literal wrap, the RLS view
-            // resolution, ...) fire against the actual table shapes.
             let options = state.options.read().to_options();
             let pg_schema = state.pg_input.read().clone();
             match translator::translate_query(&raw_query, &pg_schema, &options) {

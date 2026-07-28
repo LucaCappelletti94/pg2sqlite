@@ -1,14 +1,6 @@
 //! Collapsed `<details>` form exposing the live `WebOptions`.
-//!
-//! Most users never open this: the sample picker pre-configures the
-//! options it needs, and the defaults work for typical schemas. Power
-//! users who need a UUID rep, RLS audit table name, or a custom
-//! session-variable mapping open the details and tweak from there.
-//!
-//! The form binds to the playground's mutable `WebOptions`
-//! shadow (`state.rs`) rather than `Pg2SqliteOptions` directly, since
-//! the upstream type has no public unsetters and the form needs to be
-//! able to clear knobs.
+//! Binds to `WebOptions` rather than `Pg2SqliteOptions` directly because the
+//! upstream builder can only set, never clear, a field.
 
 use dioxus::prelude::*;
 use dioxus_free_icons::{Icon, icons::fa_solid_icons::FaSliders};

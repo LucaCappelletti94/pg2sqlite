@@ -1,11 +1,6 @@
 //! Step 4 (collapsed): reverse-translate SQLite DML back to PostgreSQL.
-//!
-//! Sits at the bottom of the page inside a `<details>` so it doesn't
-//! distract first-time visitors. Becomes available once Step 2
-//! succeeded (we need a schema to reverse against). The schema is
-//! rebuilt from the live PG editor contents every time the user hits
-//! Run rather than carried through state - the PG editor + options
-//! form is the single source of truth.
+//! The schema is rebuilt from the live PG editor contents on each run, not
+//! carried through state.
 
 use dioxus::prelude::*;
 use dioxus_free_icons::{
@@ -27,10 +22,8 @@ use crate::{
 pub fn ReversePanel() -> Element {
     let state: AppState = use_context();
 
-    // Available once a forward translation has succeeded - we need a
-    // schema to reverse against. If the PG side is currently in an
-    // error state, the most recent successful schema is gone, so the
-    // panel hides itself rather than reverse against stale data.
+    // Hidden when no successful forward translation exists (no schema to reverse
+    // against).
     if state.sqlite_output.read().is_none() {
         return rsx! {};
     }
@@ -119,10 +112,6 @@ fn run_reverse(state: AppState) {
     state.reverse_output.clone().set(Some(result));
 }
 
-/// Renders one chip per curated reverse query attached to the
-/// currently-loaded sample. Hides itself as soon as the user edits the
-/// PG input (because the lookup is exact-equality), so once the schema
-/// has drifted the suggestions can no longer be assumed to match.
 #[component]
 fn ReverseSampleQueriesStrip() -> Element {
     let state: AppState = use_context();

@@ -9,21 +9,13 @@ title = "pg2sqlite playground - translate PostgreSQL to SQLite in your browser"
 reload_html = true
 watch_path = ["src", "public"]
 
-# Static stylesheet link injected into index.html's <head> at build
-# time so the browser fetches CSS in parallel with the WASM bundle.
-# Without this, the stylesheet is appended at runtime by Dioxus and
-# the first paint is unstyled (FOUC). public/app.css is the source of
-# truth.
+# Linked at build time to avoid a flash of unstyled content (FOUC).
 [web.resource]
 style = ["/app.css"]
 
 [web.resource.dev]
 
-# wasm-opt was failing on the sqlitegis demo with "compile unit size
-# was incorrect (this may be an unsupported version of DWARF)" because
-# binaryen does not handle the DWARF version emitted by current rustc.
-# Stripping debug info before optimisation sidesteps the parse and
-# lets the size pass run.
+# binaryen aborts on the DWARF rustc emits, so strip debug info before wasm-opt.
 [web.wasm_opt]
 debug = false
 level = "4"

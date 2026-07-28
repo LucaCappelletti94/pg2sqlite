@@ -1,20 +1,5 @@
-//! pg2sqlite - PostgreSQL to SQLite, in your browser.
-//!
-//! This is the project's demo + landing page, served as a single
-//! static WASM bundle (`dx bundle --platform web --release`). Layout:
-//!
-//! - Header bar: project name + tagline + sample picker + Advanced options
-//!   `<details>`.
-//! - Two-column body: PostgreSQL editor on the left, SQLite output on the
-//!   right. Translation fires 700ms after the last edit; the right pane updates
-//!   in place.
-//! - Below, when the translated SQL has been applied to the in-memory SQLite:
-//!   the Query panel, with a PG / SQLite dialect toggle. PG queries are
-//!   forward-translated by pg2sqlite before they hit the in-page database.
-//! - Below that, when a forward translation has succeeded: the
-//!   reverse-translation `<details>` (SQLite -> PG).
-//! - Inside the query results: the PostGIS map appears whenever the result row
-//!   carries `lon` / `lat` columns.
+//! Browser WASM playground for pg2sqlite: translate, execute, and reverse
+//! PostgreSQL/SQLite SQL in the browser.
 
 mod components;
 mod db;
@@ -26,7 +11,10 @@ mod translator;
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     Icon,
-    icons::{fa_brands_icons::FaGithub, fa_solid_icons::FaArrowRightArrowLeft},
+    icons::{
+        fa_brands_icons::FaGithub,
+        fa_solid_icons::{FaArrowRightArrowLeft, FaHeart},
+    },
 };
 use gloo_timers::future::TimeoutFuture;
 use wasm_bindgen_futures::spawn_local;
@@ -45,6 +33,8 @@ use crate::{
 };
 
 const DEBOUNCE_MS: u32 = 700;
+const REPO_URL: &str = "https://github.com/LucaCappelletti94/pg2sqlite";
+const SPONSOR_URL: &str = "https://github.com/sponsors/LucaCappelletti94";
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -55,26 +45,20 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    // Constructed once at mount; `use_context_provider` makes the
-    // bag of signals reachable from any descendant without
+    // `use_context_provider` makes state reachable from any descendant without
     // prop-drilling.
     let state = use_context_provider(AppState::new);
 
-    // Auto-translate watcher. Every time the PG input or the options
-    // change, schedule a translation 700ms later. If another change
-    // arrives before the timer fires, the snapshot comparison inside
-    // the spawned task supersedes the older attempt - so only the
-    // edit-stable input ever reaches pg2sqlite.
+    // Auto-translate: schedule a translation 700ms after the last edit. The
+    // snapshot comparison in the spawned task discards a stale run if another
+    // edit arrived first.
     use_effect(move || {
-        // Read each signal so the effect re-runs when either changes.
         let input_snapshot = state.pg_input.read().clone();
         let opts_snapshot = state.options.read().clone();
 
         spawn_local(async move {
             TimeoutFuture::new(DEBOUNCE_MS).await;
-            // Re-read; if the user has typed more in the interim, a
-            // newer effect run has scheduled its own task and this
-            // one is stale.
+            // If the user typed more since the timer was set, a newer task owns this input.
             let current_input = state.pg_input.peek().clone();
             let current_opts = state.options.peek().clone();
             if current_input != input_snapshot || current_opts != opts_snapshot {
@@ -85,6 +69,18 @@ fn App() -> Element {
     });
 
     rsx! {
+        // Icons and manifest live here rather than a custom index.html so dx keeps generating the head.
+        document::Link { rel: "icon", href: "/favicon.ico", sizes: "any" }
+        document::Link { rel: "icon", r#type: "image/svg+xml", href: "/pg2sqlite.svg" }
+        document::Link { rel: "icon", r#type: "image/png", sizes: "32x32", href: "/favicon-32.png" }
+        document::Link { rel: "icon", r#type: "image/png", sizes: "16x16", href: "/favicon-16.png" }
+        document::Link { rel: "apple-touch-icon", sizes: "180x180", href: "/apple-touch-icon.png" }
+        document::Link { rel: "manifest", href: "/manifest.json" }
+        document::Meta { name: "theme-color", content: "#336791" }
+        document::Meta {
+            name: "description",
+            content: "Translate PostgreSQL DDL and queries into runnable SQLite, execute the result against an in-page database, and translate SQLite DML back to PostgreSQL. Entirely in the browser.",
+        }
         main { class: "app",
             AppHeader {}
             div { class: "editors-row",
@@ -99,48 +95,57 @@ fn App() -> Element {
 
 #[component]
 fn AppHeader() -> Element {
+    let state: AppState = use_context();
+    // Sponsor heart pulses after a translation lands, so the ask follows the tool
+    // doing something.
+    let translated = state.sqlite_output.read().is_some();
+
     rsx! {
         header { class: "app-header",
             div { class: "app-header-titles",
-                h1 { class: "app-title",
-                    PostgresLogo {}
-                    Icon {
-                        width: 22,
-                        height: 22,
-                        icon: FaArrowRightArrowLeft,
-                        class: "title-arrow".to_string(),
+                div { class: "app-title-row",
+                    h1 { class: "app-title",
+                        PostgresLogo {}
+                        Icon {
+                            width: 22,
+                            height: 22,
+                            icon: FaArrowRightArrowLeft,
+                            class: "title-arrow".to_string(),
+                        }
+                        SqliteLogo {}
+                        span { class: "app-title-text", "pg2sqlite" }
                     }
-                    SqliteLogo {}
-                    span { class: "app-title-text", "pg2sqlite" }
+                    nav { class: "topbar-actions", aria_label: "Project resources",
+                        a {
+                            class: "icon-link",
+                            href: REPO_URL,
+                            target: "_blank",
+                            rel: "noopener noreferrer",
+                            title: "pg2sqlite on GitHub. Opens in a new tab.",
+                            "aria-label": "pg2sqlite on GitHub. Opens in a new tab.",
+                            Icon { width: 16, height: 16, icon: FaGithub }
+                        }
+                        a {
+                            class: if translated { "icon-link heartbtn heart-attention" } else { "icon-link heartbtn" },
+                            href: SPONSOR_URL,
+                            target: "_blank",
+                            rel: "noopener noreferrer",
+                            title: "Support this project. Opens in a new tab.",
+                            "aria-label": "Support this project. Opens in a new tab.",
+                            Icon { width: 16, height: 16, icon: FaHeart }
+                        }
+                    }
                 }
                 p { class: "app-tagline",
-                    "Translate PostgreSQL to SQLite. In your browser. No backend."
+                    "Translate PostgreSQL to SQLite and execute the result in the browser."
                 }
             }
-            div { class: "app-header-controls",
-                SamplePicker {}
-                a {
-                    class: "brand-link",
-                    href: "https://github.com/LucaCappelletti94/pg2sqlite",
-                    target: "_blank",
-                    rel: "noopener noreferrer",
-                    title: "View pg2sqlite on GitHub",
-                    Icon {
-                        width: 22,
-                        height: 22,
-                        icon: FaGithub,
-                        class: "brand-icon".to_string(),
-                    }
-                }
-            }
+            SamplePicker {}
             OptionsPanel {}
         }
     }
 }
 
-/// Single-pass forward translation + in-memory apply. Mirrors what
-/// the explicit Translate button used to do, just driven by the
-/// debounce effect instead of a click handler.
 fn run_translate(state: AppState, pg_sql: &str, opts: &state::WebOptions) {
     // Empty input clears any prior output but doesn't drive an error.
     if pg_sql.trim().is_empty() {

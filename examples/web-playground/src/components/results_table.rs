@@ -1,9 +1,4 @@
-//! Renders a `QueryRows` (Vec<Vec<String>>) as an HTML table.
-//!
-//! Deliberately minimal: no virtualisation, no sorting, no column
-//! resizing. The use case is "run a SELECT against your translated
-//! schema, see what comes back" — for genuinely large result sets
-//! users should `LIMIT` in their query.
+//! Renders a `QueryRows` as an HTML table.
 
 use dioxus::prelude::*;
 use dioxus_free_icons::{Icon, icons::fa_solid_icons::FaInbox};

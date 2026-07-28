@@ -1,17 +1,5 @@
-//! Run user-typed SQL against the live Diesel connection and read
-//! rows generically. We use `LoadConnection::load` to get a cursor of
-//! dynamic `Row`s, then read each cell by inspecting its `SqliteType`
-//! and calling the matching `SqliteValue::read_*` accessor.
-//!
-//! For statements that don't produce rows (CREATE, INSERT, UPDATE, ...)
-//! Diesel's `load` still works - it just yields zero rows - and we
-//! follow up with a `changes()` query to report the affected row
-//! count. This is ported almost verbatim from
-//! `geolite/examples/web-demo/src/runner.rs`; the only deletions are
-//! the sqlitegis-specific `:lon`/`:lat` placeholder substitution and
-//! the `extract_lonlat` helper. The latter moves to `geom.rs` in
-//! Step 4 once we know whether the result row carried a geometry
-//! BLOB.
+//! Run user SQL against the in-memory Diesel connection and return rows or
+//! affected-row count.
 
 use diesel::{
     RunQueryDsl,
@@ -32,29 +20,30 @@ pub struct QueryRows {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryOutcome {
-    /// A SELECT-style result with column headers and row data.
-    Rows { result: QueryRows, elapsed_ms: f64 },
-    /// A DDL / DML statement that produced no rows. `rows` is
-    /// SQLite's `changes()` count for the last statement.
-    Affected { rows: i64, elapsed_ms: f64 },
-    /// Anything went wrong: parse error, constraint violation,
-    /// missing function, ...
+    /// SELECT-style result.
+    Rows {
+        result: QueryRows,
+        elapsed_ms: f64,
+    },
+    /// DDL/DML with no rows. `rows` is SQLite `changes()` for the last
+    /// statement.
+    Affected {
+        rows: i64,
+        elapsed_ms: f64,
+    },
     Error(String),
 }
 
-/// Run a SQL script (one or many `;`-separated statements) against
-/// the in-memory connection. If the script's last statement produced
-/// rows, return them; otherwise return the affected-row count from
-/// SQLite's `changes()`.
+/// Run a SQL script against the in-memory connection, returning rows or an
+/// affected-row count.
 pub fn run(sql: &str) -> QueryOutcome {
     let start = performance_now();
 
     type RawCapture = Result<(Option<Vec<String>>, Vec<Vec<String>>), String>;
 
     let outcome = db::with_conn(|conn| -> Result<QueryOutcome, String> {
-        // The cursor holds a `&mut` borrow on `conn`; drain it in a
-        // nested scope and drop it before touching `conn` again for
-        // the changes() fallback.
+        // Drain the cursor in a nested scope to drop the `&mut conn` borrow before the
+        // `changes()` fallback re-borrows it.
         let captured: RawCapture = {
             let cursor = LoadConnection::<diesel::connection::DefaultLoadingMode>::load(
                 conn,
@@ -99,9 +88,8 @@ pub fn run(sql: &str) -> QueryOutcome {
             });
         }
 
-        // No row-producing statement. Re-run as a batch so the
-        // statement's side effects are applied, then ask SQLite how
-        // many rows the last statement touched.
+        // No rows produced. Re-run to apply side effects, then ask SQLite for
+        // changes().
         conn.batch_execute(sql).map_err(|e| format!("{e}"))?;
         let changes: ChangesRow = diesel::sql_query("SELECT changes() AS n")
             .get_result(conn)

@@ -1,19 +1,11 @@
-//! Right-hand pane: read-only SQLite output + Copy + Download +
-//! apply status.
-//!
-//! Always rendered. When there's no successful translation yet, the
-//! pane shows a placeholder so the page layout doesn't jump around as
-//! the user types in the left editor. Once a translation lands the
-//! editor populates and the action buttons activate.
+//! Right-hand pane: read-only SQLite output, a copy button, and apply status.
 
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     Icon,
-    icons::fa_solid_icons::{FaCopy, FaDownload, FaTriangleExclamation},
+    icons::fa_solid_icons::{FaCopy, FaTriangleExclamation},
 };
-use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url};
 
 use crate::{
     components::{brand::SqliteLogo, editor::SqlViewer},
@@ -29,7 +21,6 @@ pub fn OutputPane() -> Element {
 
     let has_output = sqlite_sql.is_some();
     let copy_sql = sqlite_sql.clone().unwrap_or_default();
-    let download_sql = sqlite_sql.clone().unwrap_or_default();
 
     rsx! {
         section { class: "pane pane-output",
@@ -41,20 +32,15 @@ pub fn OutputPane() -> Element {
                     }
                     div { class: "pane-actions",
                         button {
-                            class: "secondary",
+                            class: "icon-link",
+                            r#type: "button",
                             disabled: !has_output,
-                            title: "Copy SQLite SQL to clipboard",
+                            title: "Copy the SQLite SQL to the clipboard",
+                            // The button carries no text, so it needs its own
+                            // accessible name.
+                            "aria-label": "Copy the SQLite SQL to the clipboard",
                             onclick: move |_| copy_to_clipboard(copy_sql.clone()),
-                            Icon { width: 14, height: 14, icon: FaCopy, class: "btn-icon".to_string() }
-                            " Copy"
-                        }
-                        button {
-                            class: "secondary",
-                            disabled: !has_output,
-                            title: "Download as pg2sqlite-output.sql",
-                            onclick: move |_| download_blob(&download_sql, "pg2sqlite-output.sql"),
-                            Icon { width: 14, height: 14, icon: FaDownload, class: "btn-icon".to_string() }
-                            " Download"
+                            Icon { width: 16, height: 16, icon: FaCopy }
                         }
                     }
                 }
@@ -109,10 +95,7 @@ fn format_ms(ms: f64) -> String {
     if ms < 1.0 { format!("{ms:.2}") } else { format!("{ms:.1}") }
 }
 
-/// Async copy via the Clipboard API. Fire-and-forget: failure is
-/// logged but not surfaced (rejections are usually permission-related
-/// and the user can manually select the editor contents as a
-/// fallback).
+/// Fire-and-forget clipboard write. Failures are logged, not surfaced.
 fn copy_to_clipboard(text: String) {
     let Some(window) = web_sys::window() else {
         log::error!("no window object");
@@ -127,46 +110,4 @@ fn copy_to_clipboard(text: String) {
             log::info!("copied {} bytes to clipboard", text.len());
         }
     });
-}
-
-/// Build a Blob, hand it a temporary object URL, click a synthetic
-/// `<a download>` to trigger the file save, then revoke the URL.
-fn download_blob(text: &str, filename: &str) {
-    let document = web_sys::window().and_then(|w| w.document());
-    let Some(document) = document else {
-        log::error!("no document object");
-        return;
-    };
-
-    let bytes = js_sys::Array::new();
-    bytes.push(&wasm_bindgen::JsValue::from_str(text));
-    let bag = BlobPropertyBag::new();
-    bag.set_type("application/sql;charset=utf-8");
-
-    let blob = match Blob::new_with_str_sequence_and_options(&bytes, &bag) {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!("blob construction failed: {e:?}");
-            return;
-        }
-    };
-    let url = match Url::create_object_url_with_blob(&blob) {
-        Ok(u) => u,
-        Err(e) => {
-            log::error!("object URL creation failed: {e:?}");
-            return;
-        }
-    };
-
-    let anchor =
-        document.create_element("a").ok().and_then(|el| el.dyn_into::<HtmlAnchorElement>().ok());
-    if let Some(anchor) = anchor {
-        anchor.set_href(&url);
-        anchor.set_download(filename);
-        anchor.click();
-    } else {
-        log::error!("could not create <a> for download");
-    }
-
-    let _ = Url::revoke_object_url(&url);
 }

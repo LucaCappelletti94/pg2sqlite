@@ -13,14 +13,51 @@
     --accent-soft: #E3EAF1;
     --sqlite: #0F80CC;          /* SQLite blue */
     --sqlite-soft: #E1F0FB;
+    --pg-brand: #336791;        /* PostgreSQL elephant */
+    --sqlite-brand: #003B57;    /* SQLite feather */
     --error: #B91C1C;
     --error-soft: #FEF2F2;
+    --error-line: #FECACA;
     --warn-soft: #FEF3C7;
     --warn: #92400E;
+    --warn-line: #FDE68A;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
     --shadow-strong: 0 4px 12px rgba(0, 0, 0, 0.08);
     --radius: 8px;
     --space: 16px;
+    color-scheme: light dark;
+}
+
+/* Dark mode is a palette swap only. Every rule below draws from these
+   variables, so the layout, the brand accents, and the editor keep their
+   identity while the canvas inverts. The soft tints become translucent washes
+   rather than pale pastels, which is the only way they stay legible on a dark
+   panel. */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #0D1117;
+        --bg-panel: #161B22;
+        --bg-muted: #1C222B;
+        --border: #30363D;
+        --border-strong: #484F58;
+        --text: #E6EDF3;
+        --text-muted: #9198A1;
+        --accent: #5A9BD4;
+        --accent-strong: #8CC2F0;
+        --accent-soft: rgba(90, 155, 212, 0.16);
+        --sqlite: #4FB3F0;
+        --sqlite-soft: rgba(79, 179, 240, 0.16);
+        --pg-brand: #6E9CC4;
+        --sqlite-brand: #48A7DC;
+        --error: #FF7B72;
+        --error-soft: rgba(248, 81, 73, 0.12);
+        --error-line: rgba(248, 81, 73, 0.4);
+        --warn-soft: rgba(210, 153, 34, 0.14);
+        --warn: #E3B341;
+        --warn-line: rgba(210, 153, 34, 0.42);
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+        --shadow-strong: 0 4px 12px rgba(0, 0, 0, 0.6);
+    }
 }
 
 * {
@@ -43,10 +80,12 @@ code, pre {
     font-size: 0.875rem;
 }
 
+/* Page frame sized to match the sibling rls2fga site: a wider column with
+   tighter side padding, so the two editors get real width on a large screen. */
 main.app {
-    max-width: 1280px;
+    max-width: 1500px;
     margin: 0 auto;
-    padding: calc(var(--space) * 2) var(--space);
+    padding: 28px 20px 48px;
     display: flex;
     flex-direction: column;
     gap: calc(var(--space) * 1.5);
@@ -66,6 +105,98 @@ main.app {
     gap: 4px;
 }
 
+/* Title on the left, icon-only project links pinned to the far right of the
+   same row. Wraps rather than crushes the title on narrow viewports. */
+.app-title-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* Element agnostic on purpose: this class is worn by an <a> in the header, a
+   <label> wrapping a file input, and a <button> in the output pane. The global
+   `button` rule contributes padding and a border, so both are zeroed here or a
+   button variant ends up with a 6px content box that squashes its glyph. */
+.icon-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    text-decoration: none;
+    cursor: pointer;
+    opacity: 0.7;
+    transition:
+        opacity 120ms ease,
+        color 120ms ease,
+        transform 120ms ease;
+}
+
+/* The glyph is a flex item in a fixed-size box, so pin it against any future
+   constraint rather than letting it shrink. */
+.icon-link > svg {
+    flex: none;
+}
+
+.icon-link:hover {
+    opacity: 1;
+    color: var(--accent-strong);
+}
+
+/* The copy button is an .icon-link that can be disabled, which an <a> never is,
+   so it needs its own inert state. */
+.icon-link:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.icon-link:disabled:hover {
+    opacity: 0.3;
+    color: var(--text);
+}
+
+/* Sponsor heart: reddens on hover, and pulses a few times once a translation
+   has landed, to draw the eye without nagging. */
+.heartbtn:hover {
+    color: #E2264D;
+    opacity: 1;
+}
+
+.heart-attention {
+    animation: pg2s-heart-pulse 1s ease-in-out 0.6s 3;
+    transform-origin: center;
+}
+
+@keyframes pg2s-heart-pulse {
+    0%,
+    100% {
+        color: var(--text);
+        transform: scale(1);
+    }
+    50% {
+        color: #E5102D;
+        transform: scale(1.28);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .heart-attention {
+        animation: none;
+    }
+}
+
 .app-title {
     margin: 0;
     font-size: 2rem;
@@ -76,13 +207,6 @@ main.app {
     margin: 0;
     color: var(--text-muted);
     font-size: 1.05rem;
-}
-
-.app-header-controls {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
 }
 
 .sample-picker {
@@ -112,11 +236,13 @@ main.app {
     background: var(--accent-soft);
     color: var(--accent-strong);
     border-radius: 999px;
-    padding: 4px 12px;
-    font-size: 0.85rem;
+    padding: 4px 10px;
+    font-size: 0.75rem;
     font-weight: 600;
     letter-spacing: 0.01em;
     cursor: pointer;
+    /* The labels name a construct pair, so never break one across the arrow. */
+    white-space: nowrap;
     transition: background 120ms, border-color 120ms, color 120ms,
         transform 80ms;
 }
@@ -133,6 +259,14 @@ main.app {
 
 .sample-badge:active {
     transform: scale(0.97);
+}
+
+/* The badge whose sample the editor still holds verbatim. Filled rather than
+   tinted so the landing state says which sample is on screen at a glance. */
+.sample-badge.is-active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
 }
 
 /* -------- Side-by-side editors -------- */
@@ -199,6 +333,77 @@ main.app {
     gap: 8px;
 }
 
+/* -------- Migration upload (input pane) -------- */
+
+/* The real input is hidden and driven by its wrapping label, which is styled as
+   one of the header icon buttons. A bare file input cannot be restyled. */
+.file-input {
+    display: none;
+}
+
+.field-label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* Ordered upload list with drag-to-reorder. */
+.file-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.file-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    cursor: grab;
+}
+
+.file-list .drag-handle {
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.file-list .file-order {
+    color: var(--text-muted);
+    min-width: 1.4em;
+    text-align: right;
+}
+
+.file-list .file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-list .file-remove {
+    margin-left: auto;
+    padding: 0 2px;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    line-height: 1;
+    cursor: pointer;
+}
+
+.file-list .file-remove:hover {
+    color: var(--error);
+}
+
 .pane-status {
     margin: 0;
     color: var(--text-muted);
@@ -253,7 +458,7 @@ main.app {
 
 .error-card {
     background: var(--error-soft);
-    border: 1px solid #FECACA;
+    border: 1px solid var(--error-line);
     border-radius: 6px;
     padding: 12px;
     display: flex;
@@ -293,7 +498,7 @@ main.app {
 
 .apply-error-card {
     background: var(--warn-soft);
-    border: 1px solid #FDE68A;
+    border: 1px solid var(--warn-line);
     border-radius: 6px;
     padding: 10px 12px;
 }
@@ -379,24 +584,24 @@ button.primary:hover:not(:disabled) {
     vertical-align: -2px;
 }
 
-.brand-icon {
-    color: var(--text-muted);
-    transition: color 120ms ease;
-}
-
-.brand-link:hover .brand-icon {
-    color: var(--accent-strong);
-}
-
-/* Brand logos (PostgreSQL elephant, SQLite feather). Inline <svg>
-   produced by dx_icons_simple; sized to match the surrounding glyphs
-   and spaced like the .title-icon class. */
+/* Brand logos (PostgreSQL elephant, SQLite feather). Inline <svg> produced by
+   dx_icons_simple, filled with currentColor so the palette lives here and the
+   marks lighten in dark mode instead of sinking into the panel. Sized to match
+   the surrounding glyphs and spaced like the .title-icon class. */
 .brand-logo {
     display: inline-block;
     width: 1.1em;
     height: 1.1em;
     vertical-align: -0.2em;
     margin-right: 8px;
+}
+
+.brand-logo-postgres {
+    color: var(--pg-brand);
+}
+
+.brand-logo-sqlite {
+    color: var(--sqlite-brand);
 }
 
 .app-title .brand-logo {
@@ -591,7 +796,7 @@ button.primary:hover:not(:disabled) {
 }
 
 .sample-query-chip.negative {
-    border-color: #fecaca;
+    border-color: var(--error-line);
     background: var(--error-soft);
     color: var(--error);
 }
@@ -690,7 +895,7 @@ button.primary:hover:not(:disabled) {
 
 .query-error {
     background: var(--error-soft);
-    border: 1px solid #FECACA;
+    border: 1px solid var(--error-line);
     border-radius: 6px;
     padding: 10px 12px;
 }
@@ -791,4 +996,48 @@ button.primary:hover:not(:disabled) {
     background: var(--bg-muted);
     padding: 1px 4px;
     border-radius: 3px;
+}
+
+/* -------- Panel entrance -------- */
+
+/* Boxes rise into place instead of snapping in. This matters most for the
+   panels that are conditionally rendered: the query panel appears once the
+   translated schema has been applied, the map once a result carries lon / lat,
+   and the animation reads as the page filling itself in rather than a jump.
+   `backwards` fill keeps a staggered box hidden until its delay elapses. */
+@keyframes fade-in-up {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+.editors-row > .pane,
+.panel,
+.reverse-panel,
+.map-wrap {
+    animation: fade-in-up 0.4s ease-out backwards;
+}
+
+/* The SQLite pane trails the PostgreSQL pane, mirroring the direction of the
+   translation the page is about to show. */
+.editors-row > .pane-output {
+    animation-delay: 80ms;
+}
+
+.map-wrap {
+    animation-delay: 120ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .editors-row > .pane,
+    .panel,
+    .reverse-panel,
+    .map-wrap {
+        animation: none;
+    }
 }

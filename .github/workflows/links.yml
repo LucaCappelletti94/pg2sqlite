@@ -14,11 +14,17 @@ jobs:
       - name: Link Checker
         uses: lycheeverse/lychee-action@v2
         with:
-          # Check all markdown and rust files
+          # Check all markdown and rust files.
+          #
+          # pg2sqlite.luca.phd is excluded because the custom domain does not
+          # resolve until the Pages site is created and the DNS record added
+          # under repo Settings > Pages. Drop this exclusion once the first
+          # Pages deploy is live.
           args: >-
             --verbose
             --no-progress
             --exclude '^https://codecov\.io/gh/LucaCappelletti94/pg2sqlite(?:/.*)?$'
+            --exclude '^https://pg2sqlite\.luca\.phd(?:/.*)?$'
             './**/*.md'
             './**/*.rs'
           # Fail the action if broken links are found

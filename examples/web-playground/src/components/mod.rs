@@ -1,6 +1,4 @@
-//! UI components for the web app. Each functional surface lives in
-//! its own module so the file boundaries match the visual sections
-//! in `main.rs`'s layout.
+//! UI components, one module per visual section.
 
 pub mod brand;
 pub mod editor;

@@ -1,13 +1,8 @@
-//! PostGIS map panel: equirectangular canvas that plots points from a
-//! query result whenever the result exposes `lon` / `lat` columns.
-//!
-//! Why not parse WKB BLOBs directly? Two reasons. (1) WKB / EWKB
-//! parsing inside the playground would duplicate logic that is already
-//! the responsibility of SQLiteGIS (`ST_X`, `ST_Y`). (2) It matches the
-//! pattern SQLiteGIS uses: the user writes
-//! `SELECT id, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM places` and
-//! the map renders the projected columns. This keeps the playground
-//! side free of geometry-decoding code.
+//! PostGIS map: plots `lon`/`lat` columns from a query result on an
+//! equirectangular canvas. WKB is not decoded here because `ST_X`/`ST_Y` in
+//! SQLiteGIS already project to lon/lat. Colours are translucent so the canvas
+//! needs no knowledge of the colour scheme (clear before fill avoids darkening
+//! on redraw).
 
 use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
@@ -17,9 +12,9 @@ const CANVAS_ID: &str = "pg2sqlite-map";
 const CANVAS_W: u32 = 720;
 const CANVAS_H: u32 = 360;
 const POINT_RADIUS: f64 = 3.0;
-const DOT_FILL: &str = "#F97316"; // amber/orange
-const GRID_STROKE: &str = "#E5E7EB";
-const COASTLINE_FILL: &str = "#F1F5F9";
+const DOT_FILL: &str = "#F97316"; // amber/orange, legible on either scheme
+const GRID_STROKE: &str = "rgba(148, 163, 184, 0.38)";
+const OCEAN_FILL: &str = "rgba(148, 163, 184, 0.14)";
 
 #[component]
 pub fn Map(points: Vec<(f64, f64)>) -> Element {
@@ -49,14 +44,13 @@ pub fn Map(points: Vec<(f64, f64)>) -> Element {
     }
 }
 
-/// Render the equirectangular world background + the supplied points.
-/// Coordinate convention: lon in `[-180, 180]`, lat in `[-90, 90]`,
-/// projected to canvas pixels with the standard equirectangular map
-/// formula (x = (lon + 180) / 360 * W, y = (90 - lat) / 180 * H).
 fn draw(points: &[(f64, f64)]) {
     let Some(ctx) = canvas_context() else { return };
 
-    ctx.set_fill_style_str(COASTLINE_FILL);
+    // Clear first: the ocean wash is translucent, so redrawing without a clear
+    // would darken the panel a shade on every query.
+    ctx.clear_rect(0.0, 0.0, f64::from(CANVAS_W), f64::from(CANVAS_H));
+    ctx.set_fill_style_str(OCEAN_FILL);
     ctx.fill_rect(0.0, 0.0, f64::from(CANVAS_W), f64::from(CANVAS_H));
 
     // Reference grid: equator + prime meridian + 30 degree lines.
@@ -103,10 +97,8 @@ fn canvas_context() -> Option<CanvasRenderingContext2d> {
     canvas.get_context("2d").ok()??.dyn_into().ok()
 }
 
-/// Pull `(lon, lat)` tuples out of a query result by inspecting its
-/// column headers. Returns an empty Vec if either column is missing
-/// or its cells don't parse as f64. The query panel uses this to
-/// decide whether to render the map at all.
+/// Pull `(lon, lat)` tuples from a query result. Empty if the columns are
+/// missing or non-numeric.
 pub fn extract_lonlat(columns: &[String], rows: &[Vec<String>]) -> Vec<(f64, f64)> {
     let lon_idx = columns.iter().position(|c| c.eq_ignore_ascii_case("lon"));
     let lat_idx = columns.iter().position(|c| c.eq_ignore_ascii_case("lat"));

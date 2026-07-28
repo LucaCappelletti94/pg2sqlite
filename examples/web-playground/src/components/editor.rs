@@ -1,24 +1,15 @@
-//! Thin wrappers around `dioxus_code_editor::CodeEditor` so every SQL
-//! pane in the playground has the same theme, line-numbers, and
-//! spellcheck-off defaults without each call site repeating them.
-//!
-//! Build note: `dioxus-code-editor` pulls in `arborium-tree-sitter`,
-//! which links cleanly only under cargo's `release` profile - the
-//! `dev` profile's debug-info emission triggers an undefined-symbol
-//! error from the SQL grammar's C wasm-shim. Use `dx serve --release`
-//! / `dx build --release` when developing locally.
+//! SQL editor/viewer wrappers. arborium fails to link under the dev profile
+//! (undefined `stderr`), use `--release`.
 
 use dioxus::prelude::*;
 use dioxus_code::{CodeTheme, Theme};
 use dioxus_code_editor::{CodeEditor, Language};
 
 fn sql_theme() -> CodeTheme {
-    CodeTheme::fixed(Theme::GITHUB_LIGHT)
+    CodeTheme::system(Theme::GITHUB_LIGHT, Theme::GITHUB_DARK)
 }
 
-/// Read-write SQL editor. The parent owns the `Signal<String>` and
-/// passes `value: signal()` + `oninput: move |v| signal.set(v)` in
-/// the usual Dioxus pattern.
+/// Read-write SQL editor backed by `CodeEditor`.
 #[component]
 pub fn SqlEditor(value: String, aria_label: String, oninput: EventHandler<String>) -> Element {
     rsx! {
@@ -35,11 +26,8 @@ pub fn SqlEditor(value: String, aria_label: String, oninput: EventHandler<String
     }
 }
 
-/// Read-only SQL viewer for the Step 2 output and the reverse panel.
-/// `dioxus_code_editor`'s `CodeEditor` doesn't expose an explicit
-/// read-only flag in 0.1, so we drop the `oninput` callback - edits
-/// never reach the parent signal, and the parent never feeds the
-/// editor a new value other than the freshly translated SQL.
+/// Read-only SQL viewer. `dioxus_code_editor` 0.1 has no read-only flag, so
+/// `oninput` is dropped.
 #[component]
 pub fn SqlViewer(value: String, aria_label: String) -> Element {
     rsx! {

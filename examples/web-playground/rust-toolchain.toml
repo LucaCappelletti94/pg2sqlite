@@ -1,0 +1,5 @@
+# Pin to stable: arborium's sysroot shim links on stable but fails on nightly
+# with `undefined symbol: stderr`.
+[toolchain]
+channel = "stable"
+targets = ["wasm32-unknown-unknown"]
