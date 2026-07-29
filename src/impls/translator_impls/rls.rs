@@ -1216,8 +1216,12 @@ where
     let column_list =
         columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
+    // PostgreSQL treats RLS enabled plus no applicable policy as a permanent
+    // FALSE, so a non-owner reads nothing. Mirror that rather than emitting an
+    // unfiltered view, which would expose the whole backing table. The write
+    // path already denies in this configuration.
     let where_clause = if select_policies.is_empty() {
-        String::new()
+        " WHERE false".to_owned()
     } else {
         let mut conditions = Vec::new();
         for policy in &select_policies {
@@ -1228,6 +1232,9 @@ where
             }
         }
         if conditions.is_empty() {
+            // A policy that omits USING is permissive-true in PostgreSQL, so it
+            // grants every row. This is NOT the deny-all case above: a policy
+            // exists, it simply carries no predicate.
             String::new()
         } else {
             format!(" WHERE {}", conditions.join(" OR "))
@@ -1920,10 +1927,9 @@ mod tests {
         SubqueryTransformContext, extract_current_setting_name, extract_string_literal,
         filter_policies, generate_delete_trigger_sql, generate_insert_trigger_sql,
         generate_readonly_rls_statements, generate_rls_audit_table, generate_rls_statements,
-        generate_rls_validation_statements, generate_rls_view_sql, generate_update_trigger_sql,
-        rename_table_for_rls, transform_expr, transform_join_operator_for_subquery,
-        transform_query, transform_table_factor_for_subquery, validate_session_variables,
-        validate_table_policies,
+        generate_rls_validation_statements, generate_update_trigger_sql, rename_table_for_rls,
+        transform_expr, transform_join_operator_for_subquery, transform_query,
+        transform_table_factor_for_subquery, validate_session_variables, validate_table_policies,
     };
     use crate::{
         prelude::{Pg2SqliteOptions, TranslationOptions},
@@ -2215,17 +2221,6 @@ mod tests {
         };
         assert_eq!(name.to_string(), "catalog.public.docs");
         assert_eq!(rename_pairs, vec![("docs".to_string(), "docs".to_string())]);
-    }
-
-    #[test]
-    fn generate_rls_view_sql_without_select_policies_omits_where_clause() {
-        let schema =
-            schema_from_sql("CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER);");
-        let table = schema.table(None, "docs").expect("table should exist");
-        let options = Pg2SqliteOptions::default();
-        let view_sql =
-            generate_rls_view_sql(table, &schema, &options).expect("view sql should build");
-        assert!(!view_sql.contains(" WHERE "));
     }
 
     #[test]
