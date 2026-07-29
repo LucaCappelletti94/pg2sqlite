@@ -4,10 +4,10 @@ expression: translated_sql
 ---
 CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
 CREATE TABLE embeddings_rls (id INTEGER PRIMARY KEY NOT NULL, content TEXT NOT NULL, embedding BLOB) STRICT
-CREATE VIEW embeddings AS SELECT id, content, embedding FROM embeddings_rls WHERE (true)
+CREATE VIEW embeddings AS SELECT id, content, embedding FROM embeddings_rls
 CREATE TRIGGER embeddings_insert_trigger INSTEAD OF INSERT ON embeddings FOR EACH ROW BEGIN INSERT INTO embeddings_rls (id, content, embedding) VALUES (NEW.id, NEW.content, NEW.embedding); END
-CREATE TRIGGER embeddings_update_trigger INSTEAD OF UPDATE ON embeddings FOR EACH ROW BEGIN UPDATE embeddings_rls SET id = NEW.id, content = NEW.content, embedding = NEW.embedding WHERE (id = OLD.id) AND ((true)); END
-CREATE TRIGGER embeddings_delete_trigger INSTEAD OF DELETE ON embeddings FOR EACH ROW BEGIN DELETE FROM embeddings_rls WHERE (id = OLD.id) AND ((true)); END
+CREATE TRIGGER embeddings_update_trigger INSTEAD OF UPDATE ON embeddings FOR EACH ROW BEGIN UPDATE embeddings_rls SET id = NEW.id, content = NEW.content, embedding = NEW.embedding WHERE id = OLD.id; END
+CREATE TRIGGER embeddings_delete_trigger INSTEAD OF DELETE ON embeddings FOR EACH ROW BEGIN DELETE FROM embeddings_rls WHERE id = OLD.id; END
 CREATE TRIGGER embeddings_rls_rls_monitor_insert AFTER INSERT ON embeddings_rls FOR EACH ROW BEGIN INSERT INTO rls_audit (table_name, violation_type, row_identifier, policy_name, detected_at, severity, details, reported_at) SELECT 'embeddings', 'rls_policy_violation', 'id=' || quote(NEW.id), 'INSERT policy', datetime('now'), 'warning', 'Row inserted into backing table but not visible through RLS view', NULL WHERE NOT (EXISTS (SELECT 1 FROM embeddings WHERE embeddings.id = NEW.id)); END
 CREATE TRIGGER embeddings_rls_rls_monitor_update AFTER UPDATE ON embeddings_rls FOR EACH ROW BEGIN INSERT INTO rls_audit (table_name, violation_type, row_identifier, policy_name, detected_at, severity, details, reported_at) SELECT 'embeddings', 'rls_policy_violation', 'id=' || quote(NEW.id), 'UPDATE policy', datetime('now'), 'warning', 'Row updated in backing table but not visible through RLS view', NULL WHERE NOT (EXISTS (SELECT 1 FROM embeddings WHERE embeddings.id = NEW.id)); END
 CREATE VIEW embeddings_rls_violations AS SELECT id, content, embedding FROM embeddings_rls WHERE NOT EXISTS (SELECT 1 FROM embeddings WHERE embeddings_rls.id = embeddings.id)

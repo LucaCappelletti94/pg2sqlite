@@ -42,6 +42,16 @@ use crate::{
 
 const RLS_VIOLATION_ERROR: &str = "new row violates row-level security policy";
 
+/// True when `expr` is the boolean literal `true`, possibly wrapped in
+/// redundant parentheses. Such a predicate constrains nothing.
+fn is_true_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Value(value) => matches!(value.value, Value::Boolean(true)),
+        Expr::Nested(inner) => is_true_literal(inner),
+        _ => false,
+    }
+}
+
 /// Which clause of a policy supplies the predicate.
 #[derive(Clone, Copy)]
 enum PolicyClause {
@@ -96,10 +106,29 @@ where
         }
         let expr = match clause {
             PolicyClause::Using => policy.using_expression(schema),
-            PolicyClause::Check => policy.check_expression(schema),
+            // PostgreSQL: "If no WITH CHECK expression is defined, then the
+            // USING expression will be used both to determine which rows are
+            // visible and which new rows will be allowed to be added." So an
+            // UPDATE that moves a row out of the USING predicate is rejected.
+            //
+            // The policy set reaching this arm is filtered to INSERT, UPDATE,
+            // and ALL commands, so a SELECT or DELETE policy's USING can never
+            // leak into a write guard.
+            PolicyClause::Check => {
+                policy.check_expression(schema).or_else(|| policy.using_expression(schema))
+            }
         };
         let Some(expr) = expr else { continue };
         let transformed = transform_expr(expr, options, table, schema, prefix, table_rename);
+        // A literally-true predicate constrains nothing, so it contributes no
+        // conjunct. `USING (true)` is the idiomatic public-access policy, and
+        // without this fold it emits dead SQL such as
+        // `WHERE ((true)) AND NOT ((true))`. Dropping a true permissive
+        // predicate leaves the permissive list empty, which the caller reads as
+        // "grants everything", so the meaning is preserved.
+        if is_true_literal(&transformed) {
+            continue;
+        }
         if is_restrictive {
             restrictive.push(format!("({transformed})"));
         } else {
@@ -1521,9 +1550,17 @@ where
         table_rename,
     );
 
-    let row_filter = match &using {
-        PolicyPredicate::AllowAll | PolicyPredicate::DenyAll => pk_where.clone(),
-        PolicyPredicate::Expr(predicate) => format!("({pk_where}) AND ({predicate})"),
+    // USING selects which existing rows are updatable at all. A row that fails
+    // it is skipped, not rejected: PostgreSQL leaves the statement affecting
+    // zero rows. So the predicate appears twice, once narrowing the forwarded
+    // UPDATE and once gating the WITH CHECK guard below.
+    let using_predicate = match &using {
+        PolicyPredicate::Expr(predicate) => Some(predicate.clone()),
+        PolicyPredicate::AllowAll | PolicyPredicate::DenyAll => None,
+    };
+    let row_filter = match &using_predicate {
+        Some(predicate) => format!("({pk_where}) AND ({predicate})"),
+        None => pk_where.clone(),
     };
     let forward = format!("UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {row_filter};");
 
@@ -1538,9 +1575,16 @@ where
         format!(
             "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no UPDATE policy on {table_name}');\nEND"
         )
-    } else if let PolicyPredicate::Expr(predicate) = check {
+    } else if let PolicyPredicate::Expr(check_predicate) = check {
+        // Raise only for a row that IS updatable but whose new value violates
+        // WITH CHECK. Without the USING conjunct, a row merely visible through
+        // the view would abort the statement instead of being skipped.
+        let guard = match &using_predicate {
+            Some(predicate) => format!("({predicate}) AND NOT ({check_predicate})"),
+            None => format!("NOT ({check_predicate})"),
+        };
         format!(
-            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({predicate});\n    {forward}\nEND"
+            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE {guard};\n    {forward}\nEND"
         )
     } else {
         // AllowAll: every applicable WITH CHECK omitted its predicate, which is
