@@ -19,9 +19,10 @@ use alloc::{
 
 use sql_traits::traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{
-    CreatePolicyCommand, CreateTable, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentClause, FunctionArgumentList, FunctionArguments, HavingBound, Ident,
-    JoinConstraint, JoinOperator, ListAggOnOverflow, Statement, TableFactor, Value, WindowType,
+    CreatePolicyCommand, CreatePolicyType, CreateTable, Expr, Function, FunctionArg,
+    FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments, HavingBound,
+    Ident, JoinConstraint, JoinOperator, ListAggOnOverflow, Statement, TableFactor, Value,
+    WindowType,
 };
 
 use crate::{
@@ -40,6 +41,97 @@ use crate::{
 };
 
 const RLS_VIOLATION_ERROR: &str = "new row violates row-level security policy";
+
+/// Which clause of a policy supplies the predicate.
+#[derive(Clone, Copy)]
+enum PolicyClause {
+    /// `USING`, which selects the existing rows a command may touch.
+    Using,
+    /// `WITH CHECK`, which constrains the row a command writes.
+    Check,
+}
+
+/// How a policy set constrains rows once permissive and restrictive policies
+/// are combined.
+enum PolicyPredicate {
+    /// No permissive policy grants access, so no row qualifies.
+    DenyAll,
+    /// Nothing narrows the row set, so every row qualifies.
+    AllowAll,
+    /// Rows satisfying this SQL boolean expression qualify.
+    Expr(String),
+}
+
+/// Combines a policy set the way PostgreSQL does:
+/// `(PERMISSIVE_1 OR PERMISSIVE_2 OR ...) AND RESTRICTIVE_1 AND RESTRICTIVE_2`.
+///
+/// Permissive policies OR together to grant access. Restrictive policies AND on
+/// top to remove it. Two consequences the caller must honour:
+///
+/// * A set with no permissive policy denies every row, because nothing granted
+///   access. That covers both an empty set and a restrictive-only set.
+/// * A permissive policy carrying no predicate grants every row, so it
+///   contributes TRUE rather than nothing. Same for a restrictive one.
+fn combine_policy_predicates<O: TranslationOptions, DB: DatabaseLike>(
+    policies: &[&DB::Policy],
+    clause: PolicyClause,
+    prefix: Option<&str>,
+    options: &O,
+    table: &DB::Table,
+    schema: &DB,
+    table_rename: Option<(&str, &str)>,
+) -> PolicyPredicate
+where
+    DB::Table: TableLike<DB = DB>,
+    DB::Policy: PolicyLike<DB = DB>,
+{
+    let mut permissive = Vec::new();
+    let mut restrictive = Vec::new();
+    let mut has_permissive = false;
+
+    for policy in policies {
+        let is_restrictive = policy.policy_type() == CreatePolicyType::Restrictive;
+        if !is_restrictive {
+            has_permissive = true;
+        }
+        let expr = match clause {
+            PolicyClause::Using => policy.using_expression(schema),
+            PolicyClause::Check => policy.check_expression(schema),
+        };
+        let Some(expr) = expr else { continue };
+        let transformed = transform_expr(expr, options, table, schema, prefix, table_rename);
+        if is_restrictive {
+            restrictive.push(format!("({transformed})"));
+        } else {
+            permissive.push(format!("({transformed})"));
+        }
+    }
+
+    if !has_permissive {
+        return PolicyPredicate::DenyAll;
+    }
+
+    // Each condition is already parenthesised, so a grouping paren is only
+    // needed when several permissive conditions are ORed together AND a
+    // restrictive conjunct follows. Adding it unconditionally would churn every
+    // snapshot with semantically identical output.
+    let mut conjuncts = Vec::new();
+    if !permissive.is_empty() {
+        let joined = permissive.join(" OR ");
+        if permissive.len() > 1 && !restrictive.is_empty() {
+            conjuncts.push(format!("({joined})"));
+        } else {
+            conjuncts.push(joined);
+        }
+    }
+    conjuncts.extend(restrictive);
+
+    if conjuncts.is_empty() {
+        PolicyPredicate::AllowAll
+    } else {
+        PolicyPredicate::Expr(conjuncts.join(" AND "))
+    }
+}
 
 fn collect_column_names<DB: DatabaseLike>(table: &DB::Table, schema: &DB) -> Vec<String>
 where
@@ -1216,29 +1308,22 @@ where
     let column_list =
         columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
-    // PostgreSQL treats RLS enabled plus no applicable policy as a permanent
-    // FALSE, so a non-owner reads nothing. Mirror that rather than emitting an
-    // unfiltered view, which would expose the whole backing table. The write
-    // path already denies in this configuration.
-    let where_clause = if select_policies.is_empty() {
-        " WHERE false".to_owned()
-    } else {
-        let mut conditions = Vec::new();
-        for policy in &select_policies {
-            if let Some(using_expr) = policy.using_expression(schema) {
-                let transformed =
-                    transform_expr(using_expr, options, table, schema, None, table_rename);
-                conditions.push(format!("({transformed})"));
-            }
-        }
-        if conditions.is_empty() {
-            // A policy that omits USING is permissive-true in PostgreSQL, so it
-            // grants every row. This is NOT the deny-all case above: a policy
-            // exists, it simply carries no predicate.
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.join(" OR "))
-        }
+    let where_clause = match combine_policy_predicates(
+        &select_policies,
+        PolicyClause::Using,
+        None,
+        options,
+        table,
+        schema,
+        table_rename,
+    ) {
+        // No permissive policy grants access, so no row is readable. Covers both
+        // an empty policy set and a restrictive-only one.
+        PolicyPredicate::DenyAll => " WHERE false".to_owned(),
+        // Every applicable policy omitted its predicate, which is
+        // permissive-true in PostgreSQL, so no filter is needed.
+        PolicyPredicate::AllowAll => String::new(),
+        PolicyPredicate::Expr(predicate) => format!(" WHERE {predicate}"),
     };
 
     Ok(format!(
@@ -1276,15 +1361,18 @@ where
         .collect::<Vec<_>>()
         .join(", ");
 
-    // Build WITH CHECK expression - transform AST with NEW. prefix
-    let mut check_conditions = Vec::new();
-    for policy in &insert_policies {
-        if let Some(expr) = policy.check_expression(schema) {
-            let transformed =
-                transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
-            check_conditions.push(format!("({transformed})"));
-        }
-    }
+    let check = combine_policy_predicates(
+        &insert_policies,
+        PolicyClause::Check,
+        Some("NEW"),
+        options,
+        table,
+        schema,
+        table_rename,
+    );
+
+    let forward =
+        format!("INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});");
 
     let trigger_body = if insert_policies.is_empty() {
         // Deny-by-default: PostgreSQL RLS rejects an INSERT when no FOR
@@ -1293,15 +1381,20 @@ where
         format!(
             "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no INSERT policy on {table_name}');\nEND"
         )
-    } else if check_conditions.is_empty() {
-        format!(
-            "BEGIN\n    INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});\nEND"
-        )
     } else {
-        let check = check_conditions.join(" OR ");
-        format!(
-            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({check});\n    INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});\nEND"
-        )
+        match check {
+            // Policies exist but none is permissive, so nothing grants the
+            // write. Reject unconditionally.
+            PolicyPredicate::DenyAll => {
+                format!("BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}');\nEND")
+            }
+            PolicyPredicate::AllowAll => format!("BEGIN\n    {forward}\nEND"),
+            PolicyPredicate::Expr(predicate) => {
+                format!(
+                    "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({predicate});\n    {forward}\nEND"
+                )
+            }
+        }
     };
 
     format!(
@@ -1406,51 +1499,54 @@ where
     // Build PK WHERE clause
     let pk_where = build_row_identity_clause(&columns, &pk_columns);
 
-    // Build USING expression (filter which rows can be updated) - use OLD. prefix
-    let mut using_conditions = Vec::new();
-    for policy in &update_policies {
-        if let Some(expr) = policy.using_expression(schema) {
-            let transformed =
-                transform_expr(expr, options, table, schema, Some("OLD"), table_rename);
-            using_conditions.push(format!("({transformed})"));
-        }
-    }
-
-    // WITH CHECK constrains the NEW row, so column references resolve against
+    // USING selects which existing rows may be updated, so it resolves against
+    // OLD. WITH CHECK constrains the row being written, so it resolves against
     // NEW. See the SET clause above for why no COALESCE is involved.
-    let mut check_conditions = Vec::new();
-    for policy in &update_policies {
-        if let Some(expr) = policy.check_expression(schema) {
-            let transformed =
-                transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
-            check_conditions.push(format!("({transformed})"));
-        }
-    }
+    let using = combine_policy_predicates(
+        &update_policies,
+        PolicyClause::Using,
+        Some("OLD"),
+        options,
+        table,
+        schema,
+        table_rename,
+    );
+    let check = combine_policy_predicates(
+        &update_policies,
+        PolicyClause::Check,
+        Some("NEW"),
+        options,
+        table,
+        schema,
+        table_rename,
+    );
 
-    // Combine WHERE clause
-    let full_where = if using_conditions.is_empty() {
-        pk_where
-    } else {
-        let using = using_conditions.join(" OR ");
-        format!("({pk_where}) AND ({using})")
+    let row_filter = match &using {
+        PolicyPredicate::AllowAll | PolicyPredicate::DenyAll => pk_where.clone(),
+        PolicyPredicate::Expr(predicate) => format!("({pk_where}) AND ({predicate})"),
     };
+    let forward = format!("UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {row_filter};");
 
-    let trigger_body = if update_policies.is_empty() {
-        // Deny-by-default: PostgreSQL RLS rejects an UPDATE when no FOR
-        // UPDATE (or FOR ALL) policy is declared. Mirror that by raising
-        // before the forwarding UPDATE.
+    let denied = update_policies.is_empty()
+        || matches!(using, PolicyPredicate::DenyAll)
+        || matches!(check, PolicyPredicate::DenyAll);
+
+    let trigger_body = if denied {
+        // Deny-by-default: PostgreSQL RLS rejects an UPDATE when no permissive
+        // FOR UPDATE (or FOR ALL) policy grants it, whether because none is
+        // declared or because every applicable one is restrictive.
         format!(
             "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no UPDATE policy on {table_name}');\nEND"
         )
-    } else if check_conditions.is_empty() {
+    } else if let PolicyPredicate::Expr(predicate) = check {
         format!(
-            "BEGIN\n    UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {full_where};\nEND"
+            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({predicate});\n    {forward}\nEND"
         )
     } else {
-        let check = check_conditions.join(" OR ");
-        format!(
-            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({check});\n    UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {full_where};\nEND"
-        )
+        // AllowAll: every applicable WITH CHECK omitted its predicate, which is
+        // permissive-true, so the write needs no guard. DenyAll was already
+        // handled above.
+        format!("BEGIN\n    {forward}\nEND")
     };
 
     format!(
@@ -1488,33 +1584,31 @@ where
     // Build PK WHERE clause
     let pk_where = build_row_identity_clause(&columns, &pk_columns);
 
-    // Build USING expression - use OLD. prefix for delete
-    let mut using_conditions = Vec::new();
-    for policy in &delete_policies {
-        if let Some(expr) = policy.using_expression(schema) {
-            let transformed =
-                transform_expr(expr, options, table, schema, Some("OLD"), table_rename);
-            using_conditions.push(format!("({transformed})"));
-        }
-    }
+    // USING selects which existing rows may be deleted, so it resolves against
+    // OLD. DELETE has no WITH CHECK clause.
+    let using = combine_policy_predicates(
+        &delete_policies,
+        PolicyClause::Using,
+        Some("OLD"),
+        options,
+        table,
+        schema,
+        table_rename,
+    );
 
-    // Combine WHERE clause
-    let full_where = if using_conditions.is_empty() {
-        pk_where
-    } else {
-        let using = using_conditions.join(" OR ");
-        format!("({pk_where}) AND ({using})")
-    };
-
-    let trigger_body = if delete_policies.is_empty() {
-        // Deny-by-default: PostgreSQL RLS rejects a DELETE when no FOR
-        // DELETE (or FOR ALL) policy is declared. Mirror that by raising
-        // before the forwarding DELETE.
+    let trigger_body = if delete_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll) {
+        // Deny-by-default: PostgreSQL RLS rejects a DELETE when no permissive
+        // FOR DELETE (or FOR ALL) policy grants it, whether because none is
+        // declared or because every applicable one is restrictive.
         format!(
             "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no DELETE policy on {table_name}');\nEND"
         )
     } else {
-        format!("BEGIN\n    DELETE FROM {inner_table_name_quoted} WHERE {full_where};\nEND")
+        let row_filter = match &using {
+            PolicyPredicate::AllowAll | PolicyPredicate::DenyAll => pk_where.clone(),
+            PolicyPredicate::Expr(predicate) => format!("({pk_where}) AND ({predicate})"),
+        };
+        format!("BEGIN\n    DELETE FROM {inner_table_name_quoted} WHERE {row_filter};\nEND")
     };
 
     format!(
