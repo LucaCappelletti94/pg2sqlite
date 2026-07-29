@@ -80,10 +80,6 @@ fn rls_policy_preserves_non_session_casts() -> Result<(), Box<dyn std::error::Er
 
 /// Regression: quoted table names must remain quoted in UPDATE trigger DML.
 #[test]
-#[ignore = "blocked on upstream: sql-traits CreatePolicy::table panics on \
-            quoted target tables (last_str drops quote_style); re-enable \
-            when sql-traits routes CREATE POLICY lookups through the \
-            quoted-aware identifier resolver"]
 fn rls_quoted_table_update_trigger_executes_in_sqlite() -> Result<(), Box<dyn std::error::Error>> {
     let sql = r#"
         CREATE TABLE "Order Items"(
@@ -100,6 +96,27 @@ fn rls_quoted_table_update_trigger_executes_in_sqlite() -> Result<(), Box<dyn st
 
     // Should apply cleanly in SQLite.
     // Buggy code generates `UPDATE Order Items_rls ...`, causing parse error.
+    let _conn = apply_all(&translated)?;
+    Ok(())
+}
+
+/// Regression: a schema-qualified policy target must resolve.
+/// `PolicyLike::table` used to pass `None` as the schema and truncate the name
+/// to its last part, so `CREATE POLICY p ON app.docs` looked up `(None,
+/// "docs")` and aborted the process. Sibling of the quoted case above: both
+/// came from the same discarded identifier information, but only the quoted one
+/// had a test.
+#[test]
+fn rls_schema_qualified_policy_target_resolves() -> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+        CREATE SCHEMA app;
+        CREATE TABLE app.docs (id INTEGER PRIMARY KEY, owner_id INTEGER, body TEXT);
+        ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY psel ON app.docs FOR SELECT USING (owner_id > 0);
+        CREATE POLICY pupd ON app.docs FOR UPDATE USING (owner_id > 0) WITH CHECK (owner_id > 0);
+    ";
+
+    let translated = translate(sql)?;
     let _conn = apply_all(&translated)?;
     Ok(())
 }

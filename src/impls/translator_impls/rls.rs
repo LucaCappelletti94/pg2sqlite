@@ -444,33 +444,24 @@ where
     Ok(())
 }
 
-/// Strategy for handling column references in expression transformation.
+/// How column references are rewritten during expression transformation.
 ///
-/// - `Prefix`: Prefixes bare column references with `NEW.`/`OLD.` and renames
-///   qualified table refs. Used in most trigger contexts.
-/// - `Coalesce`: Wraps column references in `COALESCE(NEW.col, OLD.col)`. Used
-///   in UPDATE WITH CHECK clauses where NEW.column is only defined for columns
-///   in the SET clause.
-enum ColumnRefStrategy<'a> {
-    Prefix { prefix: Option<&'a str>, table_rename: Option<(&'a str, &'a str)> },
-    Coalesce { table_rename: Option<(&'a str, &'a str)> },
+/// `prefix` qualifies bare column references, typically with `NEW` or `OLD`
+/// depending on which row the surrounding trigger clause constrains. `None`
+/// leaves them bare. `table_rename` rewrites a qualified reference to the
+/// renamed backing table.
+struct ColumnRefStrategy<'a> {
+    prefix: Option<&'a str>,
+    table_rename: Option<(&'a str, &'a str)>,
 }
 
 impl ColumnRefStrategy<'_> {
     fn table_rename(&self) -> Option<(&str, &str)> {
-        match self {
-            ColumnRefStrategy::Prefix { table_rename, .. }
-            | ColumnRefStrategy::Coalesce { table_rename, .. } => *table_rename,
-        }
+        self.table_rename
     }
 
-    /// The prefix to use when transforming subqueries. Coalesce strategy
-    /// always uses `Some("NEW")` for subqueries.
     fn subquery_prefix(&self) -> Option<&str> {
-        match self {
-            ColumnRefStrategy::Prefix { prefix, .. } => *prefix,
-            ColumnRefStrategy::Coalesce { .. } => Some("NEW"),
-        }
+        self.prefix
     }
 }
 
@@ -715,20 +706,10 @@ where
                 return make_function_call(sqlite_func);
             }
 
-            match strategy {
-                ColumnRefStrategy::Prefix { prefix: Some(pfx), .. } => {
-                    if table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower)
-                    {
-                        return Expr::CompoundIdentifier(vec![Ident::new(*pfx), ident.clone()]);
-                    }
-                }
-                ColumnRefStrategy::Coalesce { .. } => {
-                    if table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower)
-                    {
-                        return make_coalesce_expr(ident);
-                    }
-                }
-                ColumnRefStrategy::Prefix { prefix: None, .. } => {}
+            if let Some(pfx) = strategy.prefix
+                && table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower)
+            {
+                return Expr::CompoundIdentifier(vec![Ident::new(pfx), ident.clone()]);
             }
 
             Expr::Identifier(ident.clone())
@@ -740,21 +721,9 @@ where
                 && idents.len() >= 2
                 && idents[0].value.to_lowercase() == old_name.to_lowercase()
             {
-                match strategy {
-                    ColumnRefStrategy::Prefix { prefix: Some(pfx), .. } => {
-                        let mut new_idents = idents.clone();
-                        new_idents[0] = Ident::new(*pfx);
-                        return Expr::CompoundIdentifier(new_idents);
-                    }
-                    ColumnRefStrategy::Prefix { prefix: None, .. } => {
-                        let mut new_idents = idents.clone();
-                        new_idents[0] = Ident::new(new_name);
-                        return Expr::CompoundIdentifier(new_idents);
-                    }
-                    ColumnRefStrategy::Coalesce { .. } => {
-                        return make_coalesce_expr(&idents[1]);
-                    }
-                }
+                let mut new_idents = idents.clone();
+                new_idents[0] = Ident::new(strategy.prefix.unwrap_or(new_name));
+                return Expr::CompoundIdentifier(new_idents);
             }
             Expr::CompoundIdentifier(idents.clone())
         }
@@ -821,37 +790,8 @@ where
         options,
         table,
         schema,
-        &ColumnRefStrategy::Prefix { prefix, table_rename },
+        &ColumnRefStrategy { prefix, table_rename },
     )
-}
-
-/// Transforms an expression for UPDATE WITH CHECK clauses.
-/// Uses COALESCE(NEW.column, OLD.column) for column references to handle
-/// partial updates, since in SQLite INSTEAD OF triggers, NEW.column is only
-/// defined for columns in the SET clause.
-fn transform_expr_for_update_check<O: TranslationOptions, DB: DatabaseLike>(
-    expr: &Expr,
-    options: &O,
-    table: &DB::Table,
-    schema: &DB,
-    table_rename: Option<(&str, &str)>,
-) -> Expr
-where
-    DB::Table: TableLike<DB = DB>,
-{
-    transform_expr_generic(
-        expr,
-        options,
-        table,
-        schema,
-        &ColumnRefStrategy::Coalesce { table_rename },
-    )
-}
-
-fn make_coalesce_expr(column: &Ident) -> Expr {
-    let new_ref = Expr::CompoundIdentifier(vec![Ident::new("NEW"), column.clone()]);
-    let old_ref = Expr::CompoundIdentifier(vec![Ident::new("OLD"), column.clone()]);
-    simple_function_expr("COALESCE", vec![new_ref, old_ref], None)
 }
 
 fn transform_query<O: TranslationOptions, DB: DatabaseLike>(
@@ -1442,16 +1382,16 @@ where
     // Get primary key columns
     let pk_columns = collect_pk_column_names(table, schema);
 
-    // Build SET clause - use COALESCE to handle partial updates
-    // In SQLite INSTEAD OF triggers, NEW.column is only defined for columns in the
-    // SET clause
+    // SQLite populates NEW fully in an INSTEAD OF UPDATE trigger: a column
+    // absent from the statement's SET clause already carries its OLD value. So
+    // assigning NEW.col forwards a partial update correctly, and it is the only
+    // form that can store NULL when the caller asks for it.
     let set_clause = columns
         .iter()
         .map(|column| {
             let quoted_column = quote_identifier(column);
             let new_column = prefixed_quoted_identifier("NEW", column);
-            let old_column = prefixed_quoted_identifier("OLD", column);
-            format!("{quoted_column} = COALESCE({new_column}, {old_column})")
+            format!("{quoted_column} = {new_column}")
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -1469,14 +1409,13 @@ where
         }
     }
 
-    // Build WITH CHECK expression - use COALESCE(NEW.col, OLD.col) for partial
-    // updates In SQLite INSTEAD OF triggers, NEW.column is only defined for
-    // columns in SET clause
+    // WITH CHECK constrains the NEW row, so column references resolve against
+    // NEW. See the SET clause above for why no COALESCE is involved.
     let mut check_conditions = Vec::new();
     for policy in &update_policies {
         if let Some(expr) = policy.check_expression(schema) {
             let transformed =
-                transform_expr_for_update_check(expr, options, table, schema, table_rename);
+                transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
             check_conditions.push(format!("({transformed})"));
         }
     }
@@ -1982,9 +1921,9 @@ mod tests {
         filter_policies, generate_delete_trigger_sql, generate_insert_trigger_sql,
         generate_readonly_rls_statements, generate_rls_audit_table, generate_rls_statements,
         generate_rls_validation_statements, generate_rls_view_sql, generate_update_trigger_sql,
-        rename_table_for_rls, transform_expr, transform_expr_for_update_check,
-        transform_join_operator_for_subquery, transform_query, transform_table_factor_for_subquery,
-        validate_session_variables, validate_table_policies,
+        rename_table_for_rls, transform_expr, transform_join_operator_for_subquery,
+        transform_query, transform_table_factor_for_subquery, validate_session_variables,
+        validate_table_policies,
     };
     use crate::{
         prelude::{Pg2SqliteOptions, TranslationOptions},
@@ -2095,7 +2034,7 @@ mod tests {
     }
 
     #[test]
-    fn transform_expr_covers_current_user_cast_and_coalesce_paths() {
+    fn transform_expr_covers_current_user_cast_and_rename_paths() {
         let schema = schema_from_sql(
             "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, title TEXT);",
         );
@@ -2134,23 +2073,9 @@ mod tests {
         );
         assert_eq!(renamed.to_string(), "docs_rls.owner_id");
 
-        let coalesced = transform_expr_for_update_check(
-            &parse_expr("docs.owner_id"),
-            &options,
-            table,
-            &schema,
-            Some(("docs", "docs_rls")),
-        );
-        assert!(coalesced.to_string().contains("COALESCE"));
-
-        let coalesced_identifier = transform_expr_for_update_check(
-            &parse_expr("owner_id"),
-            &options,
-            table,
-            &schema,
-            None,
-        );
-        assert!(coalesced_identifier.to_string().contains("COALESCE"));
+        let prefixed_identifier =
+            transform_expr(&parse_expr("owner_id"), &options, table, &schema, Some("NEW"), None);
+        assert_eq!(prefixed_identifier.to_string(), "NEW.owner_id");
     }
 
     #[test]
@@ -2304,22 +2229,19 @@ mod tests {
     }
 
     #[test]
-    fn transform_expr_explicitly_covers_coalesce_and_rename_strategy_variants() {
+    fn transform_expr_covers_prefix_and_rename_strategy_combinations() {
         let schema = schema_from_sql(
             "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, body TEXT);",
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
 
-        let coalesced_ident = transform_expr_for_update_check(
-            &parse_expr("owner_id"),
-            &options,
-            table,
-            &schema,
-            None,
-        );
-        assert!(coalesced_ident.to_string().starts_with("COALESCE("));
+        // Bare identifier, prefix applied.
+        let prefixed_ident =
+            transform_expr(&parse_expr("owner_id"), &options, table, &schema, Some("NEW"), None);
+        assert_eq!(prefixed_ident.to_string(), "NEW.owner_id");
 
+        // Qualified identifier, rename applied with no prefix.
         let renamed_compound = transform_expr(
             &parse_expr("docs.owner_id"),
             &options,
@@ -2330,14 +2252,18 @@ mod tests {
         );
         assert_eq!(renamed_compound.to_string(), "docs_inner.owner_id");
 
-        let coalesced_compound = transform_expr_for_update_check(
+        // Qualified identifier with BOTH a prefix and a rename: the prefix wins,
+        // which is the branch the collapsed strategy resolves via
+        // `prefix.unwrap_or(new_name)`.
+        let prefixed_over_rename = transform_expr(
             &parse_expr("docs.owner_id"),
             &options,
             table,
             &schema,
+            Some("NEW"),
             Some(("docs", "docs_inner")),
         );
-        assert_eq!(coalesced_compound.to_string(), "COALESCE(NEW.owner_id, OLD.owner_id)");
+        assert_eq!(prefixed_over_rename.to_string(), "NEW.owner_id");
     }
 
     #[test]
@@ -2348,14 +2274,15 @@ mod tests {
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
 
-        let coalesced_identifier = transform_expr_for_update_check(
+        let prefixed_identifier = transform_expr(
             &Expr::Identifier(Ident::new("owner_id")),
             &options,
             table,
             &schema,
+            Some("OLD"),
             None,
         );
-        assert_eq!(coalesced_identifier.to_string(), "COALESCE(NEW.owner_id, OLD.owner_id)");
+        assert_eq!(prefixed_identifier.to_string(), "OLD.owner_id");
 
         let renamed_compound = transform_expr(
             &Expr::CompoundIdentifier(vec![Ident::new("docs"), Ident::new("owner_id")]),
@@ -2367,14 +2294,15 @@ mod tests {
         );
         assert_eq!(renamed_compound.to_string(), "docs_inner.owner_id");
 
-        let coalesced_compound = transform_expr_for_update_check(
+        let prefixed_compound = transform_expr(
             &Expr::CompoundIdentifier(vec![Ident::new("docs"), Ident::new("owner_id")]),
             &options,
             table,
             &schema,
+            Some("OLD"),
             Some(("docs", "docs_inner")),
         );
-        assert_eq!(coalesced_compound.to_string(), "COALESCE(NEW.owner_id, OLD.owner_id)");
+        assert_eq!(prefixed_compound.to_string(), "OLD.owner_id");
     }
 
     #[test]
@@ -2478,7 +2406,11 @@ mod tests {
 
         let update_trigger_sql = generate_update_trigger_sql(table, &schema, &options);
         assert!(update_trigger_sql.contains("docs_update_trigger"));
-        assert!(update_trigger_sql.contains("COALESCE(NEW.owner_id, OLD.owner_id)"));
+        assert!(update_trigger_sql.contains("owner_id = NEW.owner_id"));
+        assert!(
+            !update_trigger_sql.contains("COALESCE"),
+            "the SET clause must assign NEW.col directly, not COALESCE(NEW.col, OLD.col)"
+        );
 
         let delete_trigger_sql = generate_delete_trigger_sql(table, &schema, &options);
         assert!(delete_trigger_sql.contains("docs_delete_trigger"));
@@ -2546,10 +2478,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "blocked on upstream: sql-traits CreatePolicy::table panics \
-                on quoted target tables because it uses last_str without \
-                forwarding the quote_style; re-enable when sql-traits routes \
-                CREATE POLICY lookups through ident_lookup_str"]
     fn rls_generation_supports_quoted_identifiers() {
         let schema = schema_from_sql(
             r#"

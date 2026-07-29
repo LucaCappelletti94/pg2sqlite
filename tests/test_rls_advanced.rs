@@ -105,7 +105,7 @@ fn in_subquery_in_policy() {
 }
 
 #[test]
-fn update_with_check_generates_coalesce() {
+fn update_with_check_resolves_against_new_row() {
     let sql = r#"
         CREATE TABLE items (
             id INT PRIMARY KEY,
@@ -127,8 +127,12 @@ fn update_with_check_generates_coalesce() {
             USING (owner_id = CAST(current_setting('app.user_id') AS INT));
     "#;
     let output = translate(sql);
-    // The UPDATE trigger should use COALESCE for WITH CHECK
-    assert!(output.contains("COALESCE"), "Expected COALESCE in update trigger: {output}");
+    // WITH CHECK constrains the NEW row, so its column refs resolve against NEW,
+    // and the forwarding SET clause assigns NEW.col directly. Neither uses
+    // COALESCE, which used to make `SET owner_id = NULL` a silent no-op.
+    assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
+    assert!(output.contains("owner_id = NEW.owner_id"), "SET must assign NEW: {output}");
+    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
 }
 
 #[test]
@@ -648,10 +652,9 @@ fn update_check_with_not_operator() {
             USING (owner_id = CAST(current_setting('app.user_id') AS INT));
     "#;
     let output = translate(sql);
-    assert!(
-        output.contains("COALESCE") || output.contains("NOT"),
-        "Expected NOT or COALESCE: {output}"
-    );
+    assert!(output.contains("NOT NEW.is_archived"), "NOT must apply to NEW: {output}");
+    assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
+    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
 }
 
 #[test]
@@ -679,7 +682,10 @@ fn update_check_with_nested_expr() {
             USING (owner_id = CAST(current_setting('app.user_id') AS INT));
     "#;
     let output = translate(sql);
-    assert!(output.contains("COALESCE"), "Expected COALESCE in update check: {output}");
+    assert!(output.contains("NEW.category"), "nested OR arm must reference NEW: {output}");
+    assert!(output.contains("NEW.status"), "nested OR arm must reference NEW: {output}");
+    assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
+    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
 }
 
 #[test]
@@ -848,10 +854,11 @@ fn update_check_with_compound_identifier() {
             USING (check_compound.owner_id = CAST(current_setting('app.user_id') AS INT));
     "#;
     let output = translate(sql);
-    assert!(
-        output.contains("COALESCE"),
-        "Expected COALESCE for compound id in update check: {output}"
-    );
+    // The policy qualifies the column as `check_compound.owner_id`. In the WITH
+    // CHECK context the prefix wins over the backing-table rename, so it becomes
+    // NEW.owner_id rather than check_compound_rls.owner_id.
+    assert!(output.contains("NEW.owner_id"), "compound ref must become NEW: {output}");
+    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
 }
 
 #[test]
@@ -1074,7 +1081,10 @@ fn update_check_with_subquery() {
             USING (owner_id = CAST(current_setting('app.user_id') AS INT));
     "#;
     let output = translate(sql);
-    assert!(output.contains("COALESCE"), "Expected COALESCE in update with subquery: {output}");
+    assert!(output.contains("NEW.max_allowed"), "WITH CHECK must reference NEW: {output}");
+    assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
+    assert!(output.contains("SELECT MAX(max_val) FROM limits"), "subquery preserved: {output}");
+    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
 }
 
 #[test]
