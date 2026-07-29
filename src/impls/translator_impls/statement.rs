@@ -19,8 +19,9 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         AlterTable, AlterTableOperation, BinaryOperator, CascadeOption, ColumnDef, ColumnOption,
-        Delete, Expr, FromTable, ObjectType, Statement, TableFactor, TableWithJoins, Truncate,
-        TruncateIdentityOption, UnaryOperator, helpers::attached_token::AttachedToken,
+        CopySource, CopyTarget, Delete, Expr, FromTable, ObjectType, Statement, TableFactor,
+        TableWithJoins, Truncate, TruncateIdentityOption, UnaryOperator,
+        helpers::attached_token::AttachedToken,
     },
     dialect::SQLiteDialect,
 };
@@ -165,7 +166,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::DropOperatorClass { .. }
         | Statement::DropOperatorFamily { .. }
         | Statement::Comment { .. }
-        | Statement::Copy { .. }
         | Statement::CopyIntoSnowflake { .. }
         | Statement::Merge(_)
         | Statement::LockTables { .. }
@@ -662,6 +662,39 @@ fn reject_untranslatable_truncate_options(truncate: &Truncate) -> Result<(), Err
     }
 }
 
+/// Rejects `COPY`, which SQLite has no statement for in any of its forms.
+///
+/// Refusing rather than dropping matters most for `COPY ... FROM stdin`, whose
+/// rows are carried inline in the migration file, so a silent drop loses data.
+///
+/// Translating that form into multi-row `INSERT`s would be the better answer
+/// for a migration translator, and it is blocked upstream rather than merely
+/// unimplemented. `Parser::parse_tab_value` flattens the payload into a
+/// `Vec<Option<String>>` holding no row boundaries, since a tab and a newline
+/// both just push a value, and a `\N` null leaves a phantom empty field that
+/// desynchronises the list. Row structure cannot be recovered from the AST, and
+/// the raw text is consumed by then. Pinned by
+/// `sqlparser_still_flattens_copy_payload_rows` so this is revisited if fixed.
+fn reject_copy(source: &CopySource, to: bool, target: &CopyTarget) -> Error {
+    let subject = match source {
+        CopySource::Table { table_name, .. } => format!("COPY {table_name}"),
+        CopySource::Query(_) => "COPY (query)".to_owned(),
+    };
+
+    let advice = if to {
+        "SQLite has no COPY statement, and the translator cannot write the destination. Export the \
+         rows with your client instead."
+    } else if matches!(target, CopyTarget::Stdin) {
+        "SQLite has no COPY statement. The rows are carried inline in this statement, so they \
+         would be lost outright. Rewrite the payload as INSERT statements."
+    } else {
+        "SQLite has no COPY statement, and the translator cannot read the source. Load the rows \
+         with INSERT statements instead."
+    };
+
+    Error::UnsupportedSQLiteFeature(format!("{subject} cannot be translated. {advice}"))
+}
+
 impl Translator for Statement {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -910,6 +943,9 @@ impl Translator for Statement {
                 translate_alter_table(alter_table, schema, options)?
             }
             Statement::Truncate(truncate) => translate_truncate(truncate, schema, options)?,
+            Statement::Copy { source, to, target, .. } => {
+                return Err(reject_copy(source, *to, target));
+            }
             unsupported_statement_patterns!() => Vec::new(),
         };
 
