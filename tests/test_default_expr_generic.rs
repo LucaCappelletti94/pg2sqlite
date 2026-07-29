@@ -1,18 +1,8 @@
 //! Tests for generic fallback translation of DEFAULT expressions.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-
-fn translate(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
+use translate_helpers::translate_default as translate;
 
 #[test]
 fn test_default_case_when() {

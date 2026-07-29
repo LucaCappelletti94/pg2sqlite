@@ -568,7 +568,7 @@ fn function_call(name: &str, args: Vec<Expr>) -> Expr {
 ///
 /// Unquoted keys are used as-is. Double-quoted keys (e.g. `"a b"`) have their
 /// outer quotes stripped. Returns `None` when the outer braces are missing.
-fn pg_text_path_to_sqlite_json_path(s: &str) -> Option<String> {
+pub(crate) fn pg_text_path_to_sqlite_json_path(s: &str) -> Option<String> {
     let inner = s.strip_prefix('{')?.strip_suffix('}')?;
     if inner.is_empty() {
         return Some("$".to_string());
@@ -585,6 +585,21 @@ fn pg_text_path_to_sqlite_json_path(s: &str) -> Option<String> {
         path.push_str(key);
     }
     Some(path)
+}
+
+/// Convert a SQLite JSON path `$.a.b` to a PostgreSQL text-array path `{a,b}`.
+///
+/// Only handles simple dotted-key paths produced by the forward translator.
+/// Returns `None` for paths that contain array-index steps (`$[0]`), bare `$`
+/// with no key, or any other shape that cannot round-trip through text-array
+/// notation.
+pub(crate) fn sqlite_json_path_to_pg_text_path(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("$.")?;
+    let keys: Vec<&str> = rest.split('.').collect();
+    if keys.is_empty() || keys.iter().any(|k| k.is_empty() || k.contains('[')) {
+        return None;
+    }
+    Some(format!("{{{}}}", keys.join(",")))
 }
 
 /// Extract a slice of string key literals from an `ARRAY[...]` expression.

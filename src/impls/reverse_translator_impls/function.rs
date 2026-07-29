@@ -14,8 +14,9 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, ObjectName, ObjectNamePart, TrimWhereField, Value, ValueWithSpan,
+    BinaryOperator, CastKind, DataType, DateTimeField, Expr, ExtractSyntax, Function, FunctionArg,
+    FunctionArgExpr, FunctionArguments, Ident, ObjectName, ObjectNamePart, TrimWhereField, Value,
+    ValueWithSpan,
 };
 
 use super::helpers::{Reverse, reverse_translate_window_type};
@@ -23,9 +24,15 @@ use crate::{
     errors::Error,
     impls::{
         datetime_helpers::datetime_field_from_strftime_format,
-        function_helpers::{function_arg_expr_or_err, simple_function_expr, string_literal},
-        shared_helpers::{translate_function_arguments, translate_order_by_expr},
+        function_helpers::{
+            extract_exactly, function_arg_expr_or_err, integer_literal, simple_function_expr,
+            string_literal,
+        },
+        shared_helpers::{
+            function_argument_exprs, translate_function_arguments, translate_order_by_expr,
+        },
         timezone::normalize_timezone_modifier_for_postgres,
+        translator_impls::expr::sqlite_json_path_to_pg_text_path,
     },
     prelude::Pg2SqliteOptions,
     traits::TranslationOptions,
@@ -44,6 +51,8 @@ const REVERSE_RENAMES: &[(&str, &str)] = &[
     ("json_array_length", "jsonb_array_length"),
     ("sqlite_version", "version"),
     ("quote", "quote_nullable"),
+    ("json_quote", "to_jsonb"),
+    ("ifnull", "COALESCE"),
 ];
 
 pub enum FunctionReversal {
@@ -72,8 +81,40 @@ pub enum FunctionReversal {
     ToTimestampFromEpoch,
     /// Transform strftime(composite_fmt, ts) to date_trunc(field, ts)
     ToDateTrunc(String),
+    /// Transform json(x) to CAST(x AS JSONB)
+    ToCastAsJsonb,
+    /// Transform json_set/json_insert to their PG equivalents with path
+    /// conversion.
+    ///
+    /// The string names the PostgreSQL target function (`jsonb_set` or
+    /// `jsonb_insert`).
+    ToJsonbPathFunc(String),
+    /// Transform json_remove(j, '$.path') to j #- '{path}'
+    ToJsonPathRemove,
+    /// Transform json_extract(j, '$.path') to j #> '{path}'
+    ToJsonPathExtract,
+    /// Transform json_valid(x) to x IS JSON
+    ToIsJson,
+    /// Transform json_patch(a, b) to a || b (jsonb concatenation)
+    ToJsonbConcat,
     /// No translation needed
     PassThrough,
+    /// Translate iif(cond, then, else) to CASE WHEN cond THEN then ELSE else
+    /// END.
+    ToIif,
+    /// Translate total(x) to COALESCE(SUM(x), 0).
+    ///
+    /// SQLite's total always returns 0 for no rows; SUM returns NULL, so the
+    /// COALESCE is required for a faithful round-trip.
+    ToTotal,
+    /// Translate hex(x) to encode(x, 'hex').
+    ToEncodeHex,
+    /// Translate unhex(x) to decode(x, 'hex').
+    ToDecodeHex,
+    /// Translate unixepoch(x) to EXTRACT(EPOCH FROM x).
+    ToExtractEpoch,
+    /// Reject the named SQLite-only construct with the reason string.
+    Reject(String),
 }
 
 /// Reverse a composite strftime format string back to a `date_trunc` field
@@ -223,6 +264,90 @@ pub fn reverse_function(
         // uuid() / custom UUID function -> gen_random_uuid()
         name if name == options.get_uuid_function_name() => {
             FunctionReversal::Rename("gen_random_uuid".to_string())
+        }
+
+        // json(x) -> CAST(x AS JSONB)
+        "json" => FunctionReversal::ToCastAsJsonb,
+        // json_set(j, '$.path', v) -> jsonb_set(j, '{path}', v)
+        "json_set" => FunctionReversal::ToJsonbPathFunc("jsonb_set".to_string()),
+        // json_insert(j, '$.path', v) -> jsonb_insert(j, '{path}', v)
+        "json_insert" => FunctionReversal::ToJsonbPathFunc("jsonb_insert".to_string()),
+        // json_remove(j, '$.path') -> j #- '{path}'
+        "json_remove" => FunctionReversal::ToJsonPathRemove,
+        // json_extract(j, '$.path') -> j #> '{path}'
+        "json_extract" => FunctionReversal::ToJsonPathExtract,
+        // json_valid(x) -> x IS JSON
+        "json_valid" => FunctionReversal::ToIsJson,
+        // json_patch(a, b) -> a || b
+        "json_patch" => FunctionReversal::ToJsonbConcat,
+
+        // iif(c, t, f) -> CASE WHEN c THEN t ELSE f END
+        "iif" => FunctionReversal::ToIif,
+        // total(x) -> COALESCE(SUM(x), 0)
+        "total" => FunctionReversal::ToTotal,
+        // hex(x) -> encode(x, 'hex')
+        "hex" => FunctionReversal::ToEncodeHex,
+        // unhex(x) -> decode(x, 'hex')
+        "unhex" => FunctionReversal::ToDecodeHex,
+        // unixepoch(x) -> EXTRACT(EPOCH FROM x)
+        "unixepoch" => FunctionReversal::ToExtractEpoch,
+        // typeof(x): pg_typeof returns a registered type name; SQLite returns a
+        // storage-class string. The values differ, so this is not a translation.
+        "typeof" => {
+            FunctionReversal::Reject(
+                "typeof: PostgreSQL's pg_typeof returns a registered type name, \
+             not a storage-class string, so there is no faithful translation"
+                    .to_string(),
+            )
+        }
+        // printf(fmt, ...): SQLite uses C-style format specifiers; PostgreSQL's
+        // format uses %s, %I, %L which are incompatible.
+        "printf" => {
+            FunctionReversal::Reject(
+                "printf: SQLite uses C-style format specifiers incompatible with \
+             PostgreSQL format's %s, %I, %L specifiers"
+                    .to_string(),
+            )
+        }
+        // randomblob(n): needs pgcrypto's gen_random_bytes, an extension.
+        "randomblob" => {
+            FunctionReversal::Reject(
+                "randomblob: requires the pgcrypto extension's gen_random_bytes, \
+             which may not be installed"
+                    .to_string(),
+            )
+        }
+        // changes(): connection-scoped SQLite state with no PostgreSQL equivalent.
+        "changes" => {
+            FunctionReversal::Reject(
+                "changes: connection-scoped SQLite state with no PostgreSQL equivalent".to_string(),
+            )
+        }
+        // last_insert_rowid(): connection-scoped SQLite state with no PostgreSQL equivalent.
+        "last_insert_rowid" => {
+            FunctionReversal::Reject(
+                "last_insert_rowid: connection-scoped SQLite state with no PostgreSQL equivalent"
+                    .to_string(),
+            )
+        }
+        // julianday(x): no PostgreSQL equivalent.
+        "julianday" => {
+            FunctionReversal::Reject(
+                "julianday: no PostgreSQL equivalent; use date arithmetic or EXTRACT instead"
+                    .to_string(),
+            )
+        }
+        // random(): SQLite returns a signed 64-bit integer; PostgreSQL returns a double
+        // in [0, 1). Passing through silently changes the value range.
+        // The forward translator emits (CAST(random() AS REAL) + 9223372036854775808.0)
+        // / 18446744073709551616.0, which the expression reverse translator recognises
+        // and converts back to random().
+        "random" => {
+            FunctionReversal::Reject(
+                "random: SQLite returns a signed 64-bit integer; PostgreSQL returns a \
+             double in [0, 1); passing through silently changes the value range"
+                    .to_string(),
+            )
         }
 
         _ => FunctionReversal::PassThrough,
@@ -477,6 +602,194 @@ pub fn reverse_translate_function(
                 translated_over,
             ))
         }
+        FunctionReversal::ToCastAsJsonb => {
+            // json(x) -> CAST(x AS JSONB)
+            let exprs = extract_exactly(&func.args, 1, "json")?;
+            let reversed =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            Ok(Expr::Cast {
+                expr: Box::new(reversed),
+                data_type: DataType::Custom(
+                    ObjectName(vec![ObjectNamePart::Identifier(Ident::new("JSONB"))]),
+                    vec![],
+                ),
+                format: None,
+                kind: CastKind::Cast,
+            })
+        }
+        FunctionReversal::ToJsonbPathFunc(pg_func) => {
+            // json_set(j, '$.a', v, ...) -> jsonb_set(j, '{a}', v)
+            // json_insert(j, '$.a', v) -> jsonb_insert(j, '{a}', v)
+            let exprs = function_argument_exprs(&func.args);
+            if exprs.len() < 3 {
+                return Err(Error::UnsupportedSQLiteFeature(format!(
+                    "{pg_func} requires at least 3 arguments"
+                )));
+            }
+            let json_expr =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            let path_str = match exprs[1] {
+                Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
+                    sqlite_json_path_to_pg_text_path(s).ok_or_else(|| {
+                        Error::UnsupportedSQLiteFeature(format!(
+                            "{pg_func} JSON path must be a simple dotted literal like '$.a.b'; \
+                         paths with array indices or non-dot separators cannot be converted"
+                        ))
+                    })?
+                }
+                _ => {
+                    return Err(Error::UnsupportedSQLiteFeature(format!(
+                        "{pg_func} JSON path must be a string literal; \
+                         non-literal paths cannot be converted at translation time"
+                    )));
+                }
+            };
+            let value_expr =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[2], schema, options)?;
+            Ok(simple_function_expr(
+                &pg_func,
+                vec![json_expr, string_literal(&path_str), value_expr],
+                None,
+            ))
+        }
+        FunctionReversal::ToJsonPathRemove => {
+            // json_remove(j, '$.a') -> j #- '{a}'
+            let exprs = function_argument_exprs(&func.args);
+            if exprs.len() < 2 {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "json_remove requires at least 2 arguments".to_string(),
+                ));
+            }
+            let json_expr =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            let path_str = match exprs[1] {
+                Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
+                    sqlite_json_path_to_pg_text_path(s).ok_or_else(|| {
+                        Error::UnsupportedSQLiteFeature(
+                            "json_remove path must be a simple dotted literal like '$.a'; \
+                         paths with array indices cannot be converted"
+                                .to_string(),
+                        )
+                    })?
+                }
+                _ => {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        "json_remove JSON path must be a string literal; \
+                         non-literal paths cannot be converted at translation time"
+                            .to_string(),
+                    ));
+                }
+            };
+            Ok(Expr::BinaryOp {
+                left: Box::new(json_expr),
+                op: BinaryOperator::HashMinus,
+                right: Box::new(string_literal(&path_str)),
+            })
+        }
+        FunctionReversal::ToJsonPathExtract => {
+            // json_extract(j, '$.a') -> j #> '{a}'
+            let exprs = function_argument_exprs(&func.args);
+            if exprs.len() < 2 {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "json_extract requires at least 2 arguments".to_string(),
+                ));
+            }
+            let json_expr =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            let path_str = match exprs[1] {
+                Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
+                    sqlite_json_path_to_pg_text_path(s).ok_or_else(|| {
+                        Error::UnsupportedSQLiteFeature(
+                            "json_extract path must be a simple dotted literal like '$.a'; \
+                         paths with array indices cannot be converted"
+                                .to_string(),
+                        )
+                    })?
+                }
+                _ => {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        "json_extract JSON path must be a string literal; \
+                         non-literal paths cannot be converted at translation time"
+                            .to_string(),
+                    ));
+                }
+            };
+            Ok(Expr::BinaryOp {
+                left: Box::new(json_expr),
+                op: BinaryOperator::HashArrow,
+                right: Box::new(string_literal(&path_str)),
+            })
+        }
+        FunctionReversal::ToIsJson => {
+            // json_valid(x) -> x IS JSON
+            let exprs = extract_exactly(&func.args, 1, "json_valid")?;
+            let reversed =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            Ok(Expr::IsJson {
+                expr: Box::new(reversed),
+                negated: false,
+                kind: None,
+                unique_keys: None,
+            })
+        }
+        FunctionReversal::ToJsonbConcat => {
+            // json_patch(a, b) -> a || b
+            let exprs = extract_exactly(&func.args, 2, "json_patch")?;
+            let left =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            let right =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[1], schema, options)?;
+            Ok(Expr::BinaryOp {
+                left: Box::new(left),
+                op: BinaryOperator::StringConcat,
+                right: Box::new(right),
+            })
+        }
+        FunctionReversal::ToIif => {
+            // iif(cond, then, else) -> CASE WHEN cond THEN then ELSE else END
+            let exprs = extract_exactly(&func.args, 3, "iif")?;
+            let cond =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            let then =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[1], schema, options)?;
+            let else_result =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[2], schema, options)?;
+            Ok(crate::impls::expr_helpers::case_when(cond, then, Some(else_result)))
+        }
+        FunctionReversal::ToTotal => {
+            // total(x) -> COALESCE(SUM(x), 0)
+            let exprs = extract_exactly(&func.args, 1, "total")?;
+            let inner =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            let sum = simple_function_expr("SUM", vec![inner], None);
+            Ok(simple_function_expr("COALESCE", vec![sum, integer_literal(0)], None))
+        }
+        FunctionReversal::ToEncodeHex => {
+            // hex(x) -> encode(x, 'hex')
+            let exprs = extract_exactly(&func.args, 1, "hex")?;
+            let inner =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            Ok(simple_function_expr("encode", vec![inner, string_literal("hex")], None))
+        }
+        FunctionReversal::ToDecodeHex => {
+            // unhex(x) -> decode(x, 'hex')
+            let exprs = extract_exactly(&func.args, 1, "unhex")?;
+            let inner =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            Ok(simple_function_expr("decode", vec![inner, string_literal("hex")], None))
+        }
+        FunctionReversal::ToExtractEpoch => {
+            // unixepoch(x) -> EXTRACT(EPOCH FROM x)
+            let exprs = extract_exactly(&func.args, 1, "unixepoch")?;
+            let inner =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            Ok(Expr::Extract {
+                field: DateTimeField::Epoch,
+                syntax: ExtractSyntax::From,
+                expr: Box::new(inner),
+            })
+        }
+        FunctionReversal::Reject(msg) => Err(Error::UnsupportedSQLiteFeature(msg)),
         FunctionReversal::PassThrough => {
             build_reverse_function(func.name.clone(), func, schema, options)
         }

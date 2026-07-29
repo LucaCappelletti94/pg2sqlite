@@ -385,6 +385,13 @@ fn translate_function(
              in SQLite. Use INTEGER PRIMARY KEY (ROWID alias) or application-level sequences."
                 .to_string(),
         ),
+        // reverse: not in standard SQLite; passing through would cause a runtime
+        // crash on "no such function: reverse".
+        "reverse" => FunctionTranslation::Unsupported(
+            "reverse is not available in standard SQLite. \
+             Consider using application-level string reversal or a custom extension."
+                .to_string(),
+        ),
         // repeat: no simple SQLite equivalent
         "repeat" => FunctionTranslation::Unsupported(
             "repeat is not available in standard SQLite. \
@@ -762,17 +769,14 @@ fn two_aggregate_args(
     func_name: &str,
 ) -> Result<(Expr, Expr), crate::errors::Error> {
     let exprs = function_argument_exprs(args);
+    if exprs.len() < 2 {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "{func_name} requires two argument expressions"
+        )));
+    }
     let mut iter = exprs.into_iter();
-    let x = iter.next().ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(format!(
-            "{func_name} requires two argument expressions"
-        ))
-    })?;
-    let y = iter.next().ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(format!(
-            "{func_name} requires two argument expressions"
-        ))
-    })?;
+    let x = iter.next().unwrap();
+    let y = iter.next().unwrap();
     Ok((x.translate(schema, options)?, y.translate(schema, options)?))
 }
 

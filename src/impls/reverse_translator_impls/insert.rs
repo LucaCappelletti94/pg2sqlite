@@ -105,12 +105,23 @@ fn resolve_insert_columns(
     table.columns(schema).map(|column| Ident::new(column.column_name().to_string())).collect()
 }
 
-/// Build ON CONFLICT DO UPDATE SET clause for all non-PK columns.
-/// Returns an error if the insert columns don't include all PK columns.
+/// Build the `ON CONFLICT DO UPDATE SET` clause for an `INSERT OR REPLACE`.
+///
+/// `insert_columns` is the explicit column list (or all columns when none was
+/// given). `all_table_columns` is every column in schema order: it drives the
+/// SET clause so that omitted columns get `DEFAULT` rather than being silently
+/// left at their old values. That mirrors SQLite's DELETE-then-INSERT semantics
+/// where any column not named in the INSERT reverts to its column default.
+///
+/// # Errors
+///
+/// Returns `Error::MissingPrimaryKeyInUpsert` when the table has no primary key
+/// or when the insert columns omit a primary key column.
 fn build_upsert_on_conflict(
     table_name: &str,
     pk_columns: &[String],
     insert_columns: &[Ident],
+    all_table_columns: &[String],
 ) -> Result<OnInsert, Error> {
     if pk_columns.is_empty() {
         return Err(Error::MissingPrimaryKeyInUpsert {
@@ -120,7 +131,6 @@ fn build_upsert_on_conflict(
         });
     }
 
-    // Validate that all PK columns are present in insert_columns
     let has_missing_pk = pk_columns
         .iter()
         .any(|pk| !insert_columns.iter().any(|ic| ic.value.eq_ignore_ascii_case(pk)));
@@ -133,26 +143,40 @@ fn build_upsert_on_conflict(
         });
     }
 
-    // Build conflict target from primary key columns
     let conflict_target =
         ConflictTarget::Columns(pk_columns.iter().map(|c| Ident::new(c.clone())).collect());
 
-    // Build SET assignments for non-PK columns
-    let assignments: Vec<Assignment> = insert_columns
+    // Iterate all non-PK columns in schema order. Named columns get
+    // EXCLUDED.<col> so the incoming value wins. Omitted columns get DEFAULT
+    // so they reset to the column default, matching SQLite's DELETE-then-INSERT
+    // where the old value is gone and the new row uses defaults for any
+    // unspecified column.
+    let assignments: Vec<Assignment> = all_table_columns
         .iter()
-        .filter(|col| !pk_columns.iter().any(|pk| pk.eq_ignore_ascii_case(&col.value)))
+        .filter(|col| !pk_columns.iter().any(|pk| pk.eq_ignore_ascii_case(col)))
         .map(|col| {
+            let col_ident = Ident::new(col.clone());
+            let is_named = insert_columns.iter().any(|ic| ic.value.eq_ignore_ascii_case(col));
+            let value = if is_named {
+                Expr::CompoundIdentifier(vec![Ident::new("EXCLUDED"), col_ident.clone()])
+            } else {
+                // Column was omitted from the INSERT list: SQLite's replace
+                // deletes the old row, so the column gets its default (NULL
+                // when there is none). PostgreSQL's DEFAULT keyword resolves
+                // the same way inside ON CONFLICT DO UPDATE SET.
+                Expr::Identifier(Ident::new("DEFAULT"))
+            };
             Assignment {
                 target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
-                    col.clone(),
+                    col_ident,
                 )])),
-                value: Expr::CompoundIdentifier(vec![Ident::new("EXCLUDED"), col.clone()]),
+                value,
             }
         })
         .collect();
 
-    // PK-only tables have no non-PK columns to update; fall back to DO NOTHING
-    // to avoid generating an empty (invalid) DO UPDATE SET clause.
+    // PK-only tables have no non-PK columns; DO NOTHING is safe because there
+    // is nothing to reset and the row is already present with the right key.
     if assignments.is_empty() {
         return Ok(OnInsert::OnConflict(OnConflict {
             conflict_target: Some(conflict_target),
@@ -262,8 +286,10 @@ impl ReverseTranslator for Insert {
                     }));
                 }
                 SqliteOnConflict::Replace => {
-                    // INSERT OR REPLACE → INSERT ... ON CONFLICT (pk) DO UPDATE SET ...
-                    // Look up the primary key from the schema
+                    // INSERT OR REPLACE deletes the conflicting row and inserts a new
+                    // one, so every column not named in the INSERT list reverts to its
+                    // default. We must set those columns to DEFAULT in the DO UPDATE
+                    // clause; DO NOTHING would silently preserve the old values.
                     let resolved_table = resolve_insert_table(schema, &self.table)?;
                     let table_name = resolved_table.table_name().to_string();
                     let pk_columns = get_primary_key_columns(schema, resolved_table);
@@ -276,13 +302,25 @@ impl ReverseTranslator for Insert {
                         .collect();
                     let insert_columns =
                         resolve_insert_columns(schema, resolved_table, &column_idents);
-                    insert.on =
-                        Some(build_upsert_on_conflict(&table_name, &pk_columns, &insert_columns)?);
+                    let all_table_columns: Vec<String> = resolved_table
+                        .columns(schema)
+                        .map(|c| c.column_name().to_string())
+                        .collect();
+                    insert.on = Some(build_upsert_on_conflict(
+                        &table_name,
+                        &pk_columns,
+                        &insert_columns,
+                        &all_table_columns,
+                    )?);
                 }
-                SqliteOnConflict::Rollback | SqliteOnConflict::Abort | SqliteOnConflict::Fail => {
-                    // These don't have direct PostgreSQL equivalents
-                    // Leave on as-is (from above)
-                }
+                // INSERT OR FAIL and INSERT OR ABORT abort on conflict, which is
+                // exactly what a plain PostgreSQL INSERT does, so the OR clause is
+                // dropped and `insert.on` stays None. INSERT OR ROLLBACK also
+                // aborts but additionally rolls back any enclosing transaction,
+                // a behaviour that cannot be replicated in PostgreSQL from within a
+                // single statement, yet the safest translation is still a plain
+                // INSERT rather than a silent mutation.
+                SqliteOnConflict::Rollback | SqliteOnConflict::Abort | SqliteOnConflict::Fail => {}
             }
         }
 

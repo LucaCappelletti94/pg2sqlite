@@ -3,30 +3,11 @@
 //! Covers PostgreSQL functions that were previously falling through to
 //! `PassThrough` and should instead be explicitly renamed or rejected.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
+use translate_helpers::{translate_default as translate, translate_default_err as translate_err};
 
 const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, val TEXT);";
-
-fn translate(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn translate_err(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap_err()
-        .to_string()
-}
 
 #[test]
 fn test_ascii_renamed_to_unicode() {

@@ -1,19 +1,10 @@
 //! Tests for forward index translation covering FTS and other index types
 //! in `src/impls/translator_impls/create_index.rs`.
 
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-
-fn translate(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+use translate_helpers::translate_default as translate;
 
 fn translate_result(sql: &str) -> Result<Vec<String>, String> {
     Pg2Sqlite::default()

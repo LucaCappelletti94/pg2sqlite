@@ -1,19 +1,9 @@
 //! Tests for forward expression translation covering FTS and other paths
 //! in `src/impls/translator_impls/expr.rs`.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-
-fn translate(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
+use translate_helpers::translate_default as translate;
 
 const SCHEMA: &str = "
     CREATE TABLE articles (id INT PRIMARY KEY, title TEXT, body TEXT, category TEXT);

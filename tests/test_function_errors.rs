@@ -4,18 +4,12 @@
 //! equivalent produce clear, actionable error messages rather than silently
 //! producing incorrect SQL.
 
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use translate_helpers::translate_default_err as translate_err;
 
 const SIMPLE_TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, val INT, flag BOOLEAN);";
-
-fn translate_err(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap_err()
-        .to_string()
-}
 
 /// `ts_rank` has no direct SQLite equivalent.  The translator should fail
 /// with a message that directs the user to FTS5's `bm25()`.

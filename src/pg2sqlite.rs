@@ -626,9 +626,11 @@ impl Pg2Sqlite {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
-        let stmts =
-            sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, sqlite_sql)
-                .map_err(|e| crate::errors::Error::ParserError(sqlite_sql.to_owned(), e))?;
+        let stmts = sqlparser::parser::Parser::parse_sql(
+            &crate::impls::reverse_translator_impls::glob_dialect::SqliteGlobDialect::default(),
+            sqlite_sql,
+        )
+        .map_err(|e| crate::errors::Error::ParserError(sqlite_sql.to_owned(), e))?;
 
         stmts.iter().map(|stmt| self.reverse_translate(stmt, schema, options)).collect()
     }

@@ -23,7 +23,7 @@ mod create_trigger;
 mod create_view;
 mod data_type;
 mod delete;
-mod expr;
+pub(crate) mod expr;
 mod function;
 mod helpers;
 mod index_column;

@@ -5,14 +5,9 @@
 //! SQLite has no equivalent coercion, so the translator has to insert the
 //! conversion call explicitly.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-
-fn translate(sql: &str) -> String {
-    let options = Pg2SqliteOptions::default();
-    let stmts =
-        Pg2Sqlite::default().sql(sql).expect("parse").translate(&options).expect("translate");
-    stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
-}
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
+use translate_helpers::translate_default as translate;
 
 fn find_insert(out: &str) -> String {
     out.lines()

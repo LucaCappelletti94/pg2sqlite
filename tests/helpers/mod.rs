@@ -201,14 +201,6 @@ pub fn set_session_user_id(user_id: &Uuid) {
     });
 }
 
-/// Clears the current session user ID.
-#[allow(dead_code)]
-fn clear_session_user_id() {
-    SESSION_USER_ID.with(|u| {
-        *u.borrow_mut() = None;
-    });
-}
-
 /// Sets the current session username for RLS filtering (for current_user
 /// mapping).
 #[allow(dead_code)]
@@ -284,14 +276,6 @@ pub fn establish_connection() -> SqliteConnection {
 pub struct Count {
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     pub count: i64,
-}
-
-/// Common query result type for UUID id fields.
-#[allow(dead_code)]
-#[derive(QueryableByName, Debug)]
-pub struct IdResult {
-    #[diesel(sql_type = diesel::sql_types::Binary)]
-    pub id: Vec<u8>,
 }
 
 /// Inserts a user into the backing table (simulating sync from server).

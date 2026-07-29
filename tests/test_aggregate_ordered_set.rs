@@ -8,19 +8,13 @@
 //! - string_agg with nested expressions and ORDER BY clause
 //! - COUNT/SUM DISTINCT passthrough
 
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sqlparser::ast::Statement;
+use translate_helpers::translate_default_err as translate_err;
 
 const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY, val FLOAT, label TEXT, flag BOOLEAN);";
-
-fn translate_err(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap_err()
-        .to_string()
-}
 
 fn translate_ok(sql: &str) -> String {
     Pg2Sqlite::default()

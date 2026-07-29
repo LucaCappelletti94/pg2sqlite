@@ -4,22 +4,13 @@
 //! Covers: Default with UnaryOp, Nested, BinaryOp, Cast, generated columns
 //! (ALWAYS), generated column (BY DEFAULT) error, and FK to RLS table.
 
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
     traits::TranslationOptions,
 };
-
-fn translate(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+use translate_helpers::translate_default as translate;
 
 fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
     Pg2Sqlite::default()

@@ -6,23 +6,14 @@
 //! DELETE, SetOperation in query body, inject_condition_into_statement
 //! (UPDATE/DELETE).
 
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     traits::TranslationOptions,
 };
-
-fn translate(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+use translate_helpers::translate_default as translate;
 
 fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
     Pg2Sqlite::default()

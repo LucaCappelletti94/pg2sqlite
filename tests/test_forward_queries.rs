@@ -2,6 +2,8 @@
 //! paths in `src/impls/translator_impls/query.rs`.
 
 mod helpers;
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
 
 use diesel::{RunQueryDsl, SqliteConnection, prelude::*};
 use helpers::translate_statements;
@@ -12,18 +14,7 @@ use pg2sqlite::{
 };
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Expr, Ident, OrderByExpr, OrderByOptions, Value, ValueWithSpan, WithFill};
-
-fn translate(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+use translate_helpers::translate_default as translate;
 
 const SCHEMA: &str = "
     CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
