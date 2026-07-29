@@ -13,9 +13,10 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef};
+use sqlparser::ast::{CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, DataType};
 
 use crate::{
+    errors::Error,
     impls::translator_impls::uuid::{
         is_blob_uuid_representation, is_uuid_data_type, uuid_blob_length_check_expr,
     },
@@ -32,6 +33,48 @@ impl Translator for ColumnDef {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // GENERATED AS IDENTITY (identity columns) must be handled here because we
+        // need to know both the data type and whether the column is a PRIMARY KEY,
+        // information that is only available at the ColumnDef level.
+        let has_identity = self
+            .options
+            .iter()
+            .any(|o| matches!(&o.option, ColumnOption::Generated { generation_expr: None, .. }));
+
+        if has_identity {
+            let translated_type = self.data_type.translate(schema, options)?;
+            let is_integer_pk = matches!(translated_type, DataType::Integer(None))
+                && self.options.iter().any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)));
+
+            if is_integer_pk {
+                // INTEGER PRIMARY KEY is a rowid alias in SQLite and already auto-assigns.
+                // Drop the identity clause entirely, which is exactly how SERIAL translates.
+                let translated_options = self
+                    .options
+                    .iter()
+                    .filter(|o| {
+                        !matches!(o.option, ColumnOption::Generated { generation_expr: None, .. })
+                    })
+                    .map(|o| o.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                return Ok(ColumnDef {
+                    name: self.name.clone(),
+                    data_type: translated_type,
+                    options: translated_options,
+                });
+            }
+
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "GENERATED AS IDENTITY on column '{}' cannot be expressed in SQLite. \
+                 Only INTEGER PRIMARY KEY columns are rowid aliases that auto-assign. \
+                 Use an INTEGER PRIMARY KEY column or manage sequencing in the application.",
+                self.name
+            )));
+        }
+
         let mut translated_options: Vec<ColumnOptionDef> = self
             .options
             .iter()

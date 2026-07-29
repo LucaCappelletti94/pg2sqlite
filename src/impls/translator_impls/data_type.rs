@@ -119,8 +119,8 @@ impl Translator for DataType {
                     }
                     Some("geometry" | "geography") => {
                         // PostGIS `geometry` and `geography` translate to BLOB so that
-                        // EWKB-encoded values produced by the `geolite` SQLite extension
-                        // (https://github.com/LucaCappelletti94/geolite) round-trip
+                        // EWKB-encoded values produced by the `SQLiteGIS` SQLite extension
+                        // (https://github.com/LucaCappelletti94/sqlitegis) round-trip
                         // through the column. The blob is opaque to SQLite without the
                         // extension loaded; see `Pg2SqliteOptions::with_sqlitegis_enabled`
                         // for runtime `ST_*` function passthrough.

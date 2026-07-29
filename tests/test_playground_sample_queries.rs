@@ -4,9 +4,9 @@
 //! this test:
 //!
 //! 1. Translates the sample's PG schema through `Pg2Sqlite::translate` using
-//!    the same options the playground configures (UUID = Blob, geolite enabled,
-//!    RLS audit table for the RLS sample, session variable mapping where
-//!    applicable).
+//!    the same options the playground configures (UUID = Blob, SQLiteGIS
+//!    enabled, RLS audit table for the RLS sample, session variable mapping
+//!    where applicable).
 //! 2. Applies the translated SQL to an in-memory `rusqlite` connection that
 //!    registers the same auxiliary surface the playground's `db::reopen` does:
 //!    the `sqlite-vec` auto-extension and a `current_app_user()` UDF returning
@@ -411,7 +411,7 @@ fn constraints_sample_queries() {
     run_queries_twice(&conn, CONSTRAINTS_SCHEMA, CONSTRAINTS_QUERIES, &opts);
 }
 
-// PostGIS (translation-only without the `geolite` feature; full apply
+// PostGIS (translation-only without the `SQLiteGIS` feature; full apply
 // behind the feature flag, since ST_GeomFromText / ST_X / ST_Within
 // need SQLiteGIS at runtime.)
 

@@ -24,7 +24,7 @@ use alloc::{
     vec::Vec,
 };
 
-/// `(lowercase-name, arity)` pairs implemented by geolite v0.1.0.
+/// `(lowercase-name, arity)` pairs implemented by SQLiteGIS v0.1.0.
 ///
 /// Multiple entries with the same name encode overloaded arities (for
 /// example `st_point` takes either 2 or 3 args).
@@ -134,7 +134,7 @@ pub(crate) const POSTGIS_FUNCTION_CATALOG: &[(&str, i32)] = &[
     ("dropspatialindex", 2),
 ];
 
-/// Returns `true` when `(name, arity)` is implemented by geolite. `name`
+/// Returns `true` when `(name, arity)` is implemented by SQLiteGIS. `name`
 /// is matched case-insensitively against the lowercase catalog entries.
 #[must_use]
 pub fn is_sqlitegis_function(name: &str, arity: i32) -> bool {
@@ -142,16 +142,16 @@ pub fn is_sqlitegis_function(name: &str, arity: i32) -> bool {
     POSTGIS_FUNCTION_CATALOG.iter().any(|&(n, a)| n == lower && a == arity)
 }
 
-/// Returns the set of arities geolite implements for `name`, lowercased
+/// Returns the set of arities SQLiteGIS implements for `name`, lowercased
 /// case-insensitively. Empty when the function is unknown.
 #[must_use]
-pub fn geolite_function_arities(name: &str) -> Vec<i32> {
+pub fn sqlitegis_function_arities(name: &str) -> Vec<i32> {
     let lower = name.to_ascii_lowercase();
     POSTGIS_FUNCTION_CATALOG.iter().filter_map(|&(n, a)| (n == lower).then_some(a)).collect()
 }
 
 /// Returns `true` if `name` is shaped like a PostGIS scalar, used to flag
-/// calls that look spatial but are absent from geolite's catalog.
+/// calls that look spatial but are absent from SQLiteGIS's catalog.
 #[must_use]
 pub fn is_postgis_shaped_name(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("st_")
@@ -182,7 +182,7 @@ use crate::{
 ///   handles those cases).
 /// - `Err` when the index mixes spatial and non-spatial columns (the rewrite
 ///   semantics break), or when a `WHERE` partial-index predicate is set
-///   (geolite's `CreateSpatialIndex` rebuilds the rtree from every row).
+///   (SQLiteGIS's `CreateSpatialIndex` rebuilds the rtree from every row).
 ///
 /// The caller is expected to have already gated on
 /// `create_index.using == Some(IndexType::GiST)`.
@@ -213,7 +213,7 @@ pub(crate) fn classify_gist_spatial_columns(
     if !non_spatial_columns.is_empty() {
         return Err(Error::UnsupportedSQLiteFeature(format!(
             "GiST index on {} mixes spatial columns ({}) with non-spatial entries ({}); \
-             geolite's CreateSpatialIndex operates on a single geometry/geography column at a time.",
+             SQLiteGIS's CreateSpatialIndex operates on a single geometry/geography column at a time.",
             create_index.table_name,
             spatial_columns.join(", "),
             non_spatial_columns.join(", ")
@@ -222,7 +222,7 @@ pub(crate) fn classify_gist_spatial_columns(
     if create_index.predicate.is_some() {
         return Err(Error::UnsupportedSQLiteFeature(format!(
             "GiST partial-index `WHERE` predicate is not supported on spatial columns; \
-             geolite's CreateSpatialIndex rebuilds the rtree from every row of {}.",
+             SQLiteGIS's CreateSpatialIndex rebuilds the rtree from every row of {}.",
             create_index.table_name
         )));
     }

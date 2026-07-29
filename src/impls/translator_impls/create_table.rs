@@ -19,6 +19,7 @@ use sqlparser::ast::{ColumnOption, ColumnOptionDef, CreateTable, TableConstraint
 use crate::{
     impls::object_name::normalize_schema_qualified_object_name_for_sqlite,
     prelude::{Pg2SqliteOptions, Translator},
+    warnings::{TranslationWarning, emit as emit_warning},
 };
 
 impl Translator for CreateTable {
@@ -31,8 +32,47 @@ impl Translator for CreateTable {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // LIKE t is the most dangerous unsupported clause: SQLite would parse it as
+        // a column named LIKE of type t and silently create a table with the wrong
+        // schema. Reject before emitting anything.
+        if self.like.is_some() {
+            let table_name = self.name.to_string();
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "CREATE TABLE {table_name} (LIKE ...) cannot be translated to SQLite. \
+                 SQLite would silently accept LIKE as a column name and create a table \
+                 with a completely wrong schema. Spell out the columns explicitly instead."
+            )));
+        }
+
+        // INHERITS has no SQLite equivalent.
+        if self.inherits.is_some() {
+            let table_name = self.name.to_string();
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "CREATE TABLE {table_name} ... INHERITS (...) cannot be translated to SQLite. \
+                 SQLite has no table inheritance. Spell out the inherited columns explicitly."
+            )));
+        }
+
+        // PARTITION OF has no SQLite equivalent.
+        if self.partition_of.is_some() {
+            let table_name = self.name.to_string();
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "CREATE TABLE {table_name} PARTITION OF ... cannot be translated to SQLite. \
+                 SQLite has no partitioned tables."
+            )));
+        }
+
+        // UNLOGGED is a durability hint with no SQLite equivalent. Drop it and warn.
+        if self.unlogged {
+            emit_warning(TranslationWarning::LossyDrop {
+                construct: "UNLOGGED",
+                reason: "SQLite has no UNLOGGED durability setting so the modifier was dropped \
+                         and the table is created as a regular table.",
+            });
+        }
+
         // STRICT mode is only valid for regular CREATE TABLE, not CREATE TABLE AS
-        // SELECT
+        // SELECT.
         let is_ctas = self.query.is_some();
 
         let mut created_table = Self {
@@ -50,8 +90,10 @@ impl Translator for CreateTable {
                 .into_iter()
                 .flatten()
                 .collect(),
-            // SQLite STRICT mode enforces type checking (not valid on CTAS)
+            // SQLite STRICT mode enforces type checking (not valid on CTAS).
             strict: !is_ctas,
+            // Drop the UNLOGGED flag so the emitted SQL is valid SQLite.
+            unlogged: false,
             ..self.clone()
         };
 

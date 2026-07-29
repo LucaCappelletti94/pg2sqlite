@@ -11,7 +11,7 @@ use diesel::{
     sql_types::Double, sqlite::SqliteConnection, table,
 };
 use helpers::{establish_connection, translate_pg};
-use pg2sqlite::prelude::Pg2SqliteOptions;
+use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
 
 table! {
     /// Bivariate test data for covariance and correlation aggregates.
@@ -46,7 +46,9 @@ struct Scalar {
 }
 
 fn translate(pg: &str) -> String {
-    translate_pg(pg, &Pg2SqliteOptions::default()).expect("translation failed").join("\n")
+    translate_pg(pg, &Pg2SqliteOptions::default().with_math_functions_available())
+        .expect("translation failed")
+        .join("\n")
 }
 
 /// y = 2*x for x in 1..=5. covar_pop = 4, covar_samp = 5, corr = 1

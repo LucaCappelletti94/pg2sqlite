@@ -12,7 +12,7 @@ use pg2sqlite::{
 
 mod helpers;
 
-fn translate_with_geolite(sql: &str) -> Result<Vec<String>, Error> {
+fn translate_with_sqlitegis(sql: &str) -> Result<Vec<String>, Error> {
     helpers::translate_pg(sql, &Pg2SqliteOptions::default().with_sqlitegis_enabled())
 }
 
@@ -30,7 +30,7 @@ fn st_intersects_on_indexed_column_rewrites_with_rtree_join() {
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               SELECT id FROM features \
                WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let select = user_select(&stmts);
     assert!(
         select.contains("features_geom_rtree"),
@@ -66,7 +66,7 @@ fn each_bbox_narrowable_predicate_rewrites() {
              SELECT id FROM features \
               WHERE {predicate}(geom, ST_MakeEnvelope(0, 0, 10, 10));"
         );
-        let stmts = translate_with_geolite(&pg).expect("translate");
+        let stmts = translate_with_sqlitegis(&pg).expect("translate");
         let select = user_select(&stmts);
         assert!(
             select.contains("features_geom_rtree"),
@@ -84,7 +84,7 @@ fn st_disjoint_does_not_rewrite() {
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               SELECT id FROM features \
                WHERE ST_Disjoint(geom, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let select = user_select(&stmts);
     assert!(
         !select.contains("features_geom_rtree"),
@@ -98,7 +98,7 @@ fn intersects_on_unindexed_column_does_not_rewrite() {
     let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, g geometry); \
               SELECT id FROM features \
                WHERE ST_Intersects(g, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let select = user_select(&stmts);
     assert!(
         !select.to_ascii_lowercase().contains("_rtree"),
@@ -114,7 +114,7 @@ fn or_in_where_disables_rewrite() {
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               SELECT id FROM features \
                WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10)) OR kind = 'pinned';";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let select = user_select(&stmts);
     assert!(
         !select.contains("features_geom_rtree"),
@@ -130,7 +130,7 @@ fn join_in_from_disables_rewrite() {
               CREATE TABLE tags (feature_id INTEGER, label text); \
               SELECT f.id FROM features f JOIN tags t ON t.feature_id = f.id \
                WHERE ST_Intersects(f.geom, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let select = user_select(&stmts);
     assert!(
         !select.contains("features_geom_rtree"),
@@ -148,7 +148,7 @@ fn non_simple_first_arg_disables_rewrite() {
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               SELECT id FROM features \
                WHERE ST_Intersects(ST_Buffer(geom, 1.0), ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let select = user_select(&stmts);
     assert!(
         !select.contains("features_geom_rtree"),
@@ -167,7 +167,7 @@ fn distinct_on_select_also_reaches_the_rewrite() {
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               SELECT DISTINCT ON (kind) id, kind FROM features \
                WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let select = user_select(&stmts);
     assert!(
         select.contains("features_geom_rtree"),
@@ -181,7 +181,7 @@ fn update_indexed_column_rewrites_via_rtree() {
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               UPDATE features SET name = 'hit' \
                WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let update = user_dml(&stmts, "UPDATE");
     assert!(
         update.contains("features_geom_rtree"),
@@ -198,7 +198,7 @@ fn delete_indexed_column_rewrites_via_rtree() {
     let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               DELETE FROM features WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let delete = user_dml(&stmts, "DELETE");
     assert!(
         delete.contains("features_geom_rtree"),
@@ -215,7 +215,7 @@ fn update_without_where_does_not_rewrite() {
     let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry, name text); \
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               UPDATE features SET name = 'all';";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let update = user_dml(&stmts, "UPDATE");
     assert!(
         !update.contains("_rtree"),
@@ -228,7 +228,7 @@ fn delete_without_where_does_not_rewrite() {
     let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               DELETE FROM features;";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let delete = user_dml(&stmts, "DELETE");
     assert!(
         !delete.contains("_rtree"),
@@ -242,7 +242,7 @@ fn update_with_or_in_where_does_not_rewrite() {
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               UPDATE features SET name = 'hit' \
                WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10)) OR kind = 'pinned';";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let update = user_dml(&stmts, "UPDATE");
     assert!(
         !update.contains("features_geom_rtree"),
@@ -256,7 +256,7 @@ fn delete_with_or_in_where_does_not_rewrite() {
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               DELETE FROM features \
                WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10)) OR kind = 'pinned';";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let delete = user_dml(&stmts, "DELETE");
     assert!(
         !delete.contains("features_geom_rtree"),
@@ -269,7 +269,7 @@ fn update_on_unindexed_column_does_not_rewrite() {
     let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, g geometry, name text); \
               UPDATE features SET name = 'hit' \
                WHERE ST_Intersects(g, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let update = user_dml(&stmts, "UPDATE");
     assert!(
         !update.to_ascii_lowercase().contains("_rtree"),
@@ -281,7 +281,7 @@ fn update_on_unindexed_column_does_not_rewrite() {
 fn delete_on_unindexed_column_does_not_rewrite() {
     let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, g geometry); \
               DELETE FROM features WHERE ST_Intersects(g, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let delete = user_dml(&stmts, "DELETE");
     assert!(
         !delete.to_ascii_lowercase().contains("_rtree"),
@@ -301,7 +301,7 @@ fn delete_with_using_does_not_rewrite() {
               DELETE FROM features USING tags \
                WHERE features.id = tags.feature_id \
                  AND ST_Intersects(features.geom, ST_MakeEnvelope(0, 0, 10, 10));";
-    let stmts = translate_with_geolite(pg).expect("translate");
+    let stmts = translate_with_sqlitegis(pg).expect("translate");
     let delete = user_dml(&stmts, "DELETE");
     assert!(
         !delete.contains("features_geom_rtree"),
@@ -310,16 +310,16 @@ fn delete_with_using_does_not_rewrite() {
 }
 
 #[test]
-fn rewrite_disabled_without_geolite_flag() {
-    // Same DDL + query, but without enable_geolite. The rewrite (and the
+fn rewrite_disabled_without_sqlitegis_flag() {
+    // Same DDL + query, but without sqlitegis_enabled. The rewrite (and the
     // CreateSpatialIndex DDL) must not fire; the SELECT translates verbatim.
     let pg = "CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry); \
               CREATE INDEX features_geom_idx ON features USING gist (geom); \
               SELECT id FROM features \
                WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 10, 10));";
-    // Without enable_geolite the CREATE INDEX USING gist errors out today,
+    // Without sqlitegis_enabled the CREATE INDEX USING gist errors out today,
     // so this assertion just checks the option-gating is consistent; if Step 4
     // ever relaxes, the test should also assert no rtree JOIN appears.
     let result = helpers::translate_pg(pg, &Pg2SqliteOptions::default());
-    assert!(result.is_err(), "without enable_geolite the GiST DDL still errors");
+    assert!(result.is_err(), "without sqlitegis_enabled the GiST DDL still errors");
 }

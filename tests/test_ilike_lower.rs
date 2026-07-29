@@ -43,11 +43,9 @@ fn not_ilike_output_uses_lower_wrapping() {
     assert!(select.to_uppercase().contains("NOT LIKE"), "Expected NOT LIKE, got: {select}");
 }
 
-// ── 2. Semantic / Diesel test ────────────────────────────────────────────────
-
-/// With `case_sensitive_like = ON`, plain `LIKE` becomes case-sensitive and
-/// ILIKE semantics are broken.  `lower(expr) LIKE lower(pattern)` must match
-/// all case variants regardless of the pragma.
+/// `lower(expr) LIKE lower(pattern)` must match every case variant even though
+/// the translator now emits `PRAGMA case_sensitive_like = ON` alongside any
+/// LIKE, which makes plain `LIKE` case-sensitive.
 #[test]
 fn ilike_matches_case_insensitively_with_case_sensitive_like_pragma() {
     let schema_sql = "CREATE TABLE words (id INTEGER PRIMARY KEY, word TEXT NOT NULL)";
@@ -56,7 +54,16 @@ fn ilike_matches_case_insensitively_with_case_sensitive_like_pragma() {
     let options = Pg2SqliteOptions::default();
     let ddl = Pg2Sqlite::default().sql(schema_sql).unwrap().translate(&options).unwrap();
     let query_stmts = Pg2Sqlite::default().sql(query_sql).unwrap().translate(&options).unwrap();
-    let select_sql = query_stmts[0].to_string();
+    // The translation leads with the pragma, so pick the query out by kind.
+    assert!(
+        query_stmts.iter().any(|s| matches!(s, sqlparser::ast::Statement::Pragma { .. })),
+        "an ILIKE translation still carries the case-sensitive LIKE pragma"
+    );
+    let select_sql = query_stmts
+        .iter()
+        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+        .expect("a query statement")
+        .to_string();
 
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
 

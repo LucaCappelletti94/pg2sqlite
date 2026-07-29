@@ -302,11 +302,11 @@ fn create_fts5_statements(
 /// Inspects a GiST `CreateIndex` and, if every indexed column resolves to a
 /// `geometry` or `geography` data type in `schema`, returns
 /// `SELECT CreateSpatialIndex('tbl','col')` statements (one per column) for
-/// geolite to execute at runtime. Returns `Ok(None)` when no indexed column
+/// SQLiteGIS to execute at runtime. Returns `Ok(None)` when no indexed column
 /// is spatial so the caller can fall through to the FTS5 / error path.
 ///
 /// Errors when:
-/// - the GiST has a `WHERE` predicate (geolite's `CreateSpatialIndex` doesn't
+/// - the GiST has a `WHERE` predicate (SQLiteGIS's `CreateSpatialIndex` doesn't
 ///   honor partial indexes).
 /// - the GiST mixes spatial and non-spatial columns (silently dropping the
 ///   non-spatial side would change query semantics).
@@ -348,7 +348,7 @@ impl Translator for CreateIndex {
         let sqlite_table_name =
             normalize_schema_qualified_object_name_for_sqlite(schema, &self.table_name)?;
 
-        // PostGIS GiST on geometry/geography -> geolite's CreateSpatialIndex.
+        // PostGIS GiST on geometry/geography -> SQLiteGIS's CreateSpatialIndex.
         // Routed before the FTS5 path so spatial columns don't fall into the
         // tsvector-only analyzer below.
         if options.is_sqlitegis_enabled()

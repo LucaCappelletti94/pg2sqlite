@@ -221,14 +221,30 @@ pub trait TranslationOptions {
     fn get_rls_audit_table_name(&self) -> Option<&str>;
 
     #[must_use]
-    /// Enables passthrough of `ST_*` scalar functions via the geolite SQLite
-    /// extension; functions outside geolite's catalog still error as
+    /// Enables passthrough of `ST_*` scalar functions via the SQLiteGIS SQLite
+    /// extension; functions outside SQLiteGIS's catalog still error as
     /// unsupported. The caller must load the extension on the destination
     /// connection at runtime.
     fn with_sqlitegis_enabled(self) -> Self;
 
-    /// Returns whether geolite-backed PostGIS translation is enabled.
+    /// Returns whether SQLiteGIS-backed PostGIS translation is enabled.
     fn is_sqlitegis_enabled(&self) -> bool;
+
+    #[must_use]
+    /// Declares that the destination SQLite provides the math functions
+    /// (`sqrt`, `pow`, `ln`, `exp`, and friends). They ship only when SQLite is
+    /// built with `SQLITE_ENABLE_MATH_FUNCTIONS`, so the translator assumes
+    /// they are absent by default.
+    ///
+    /// With this off, `sqrt(x)` and the aggregates whose closed form needs it
+    /// (`stddev`, `stddev_pop`, `stddev_samp`, `corr`) are rejected. With it on
+    /// they translate, and the caller is responsible for the destination
+    /// actually having the functions, whether from the build flag or a
+    /// registered UDF.
+    fn with_math_functions_available(self) -> Self;
+
+    /// Returns whether the destination is declared to have the math functions.
+    fn are_math_functions_available(&self) -> bool;
 
     #[must_use]
     /// Enables strict RLS validation (abort on violation instead of logging

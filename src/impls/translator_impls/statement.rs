@@ -17,7 +17,9 @@ use sql_traits::{
     traits::{DatabaseLike, TableLike},
 };
 use sqlparser::{
-    ast::{BinaryOperator, Expr, ObjectType, Statement, UnaryOperator},
+    ast::{
+        AlterTable, AlterTableOperation, BinaryOperator, Expr, ObjectType, Statement, UnaryOperator,
+    },
     dialect::SQLiteDialect,
 };
 
@@ -93,7 +95,6 @@ fn append_translated_create_trigger_statements(
 
 macro_rules! unsupported_statement_patterns {
     () => {
-        Statement::AlterTable(_)
         | Statement::ShowVariable { .. }
         | Statement::Raise { .. }
         | Statement::Print { .. }
@@ -411,6 +412,31 @@ fn role_access_for_object_name(
     }
 }
 
+/// Translates `ALTER TABLE` operations to SQLite.
+///
+/// SQLite supports `RENAME TO` and `RENAME COLUMN` natively. Operations it does
+/// not support (ADD CONSTRAINT, etc.) are silently dropped so the caller
+/// receives an empty vec, which is the same outcome as other unsupported DDL.
+fn translate_alter_table(
+    alter_table: &AlterTable,
+    schema: &ParserDB,
+) -> Result<Vec<Statement>, Error> {
+    if alter_table.operations.len() != 1 {
+        return Ok(Vec::new());
+    }
+    let normalized_name =
+        normalize_schema_qualified_object_name_for_sqlite(schema, &alter_table.name)?;
+    match &alter_table.operations[0] {
+        AlterTableOperation::RenameTable { .. } | AlterTableOperation::RenameColumn { .. } => {
+            Ok(vec![Statement::AlterTable(AlterTable {
+                name: normalized_name,
+                ..alter_table.clone()
+            })])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
 impl Translator for Statement {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -654,6 +680,9 @@ impl Translator for Statement {
                     reason: "SQLite has no privilege model, so the REVOKE statement was dropped.",
                 });
                 Vec::new()
+            }
+            Statement::AlterTable(alter_table) => {
+                translate_alter_table(alter_table, schema)?
             }
             unsupported_statement_patterns!() => Vec::new(),
         };

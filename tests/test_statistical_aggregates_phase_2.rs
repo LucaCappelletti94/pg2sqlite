@@ -9,7 +9,7 @@ use diesel::{
     sql_types::Double, sqlite::SqliteConnection, table,
 };
 use helpers::{establish_connection, translate_pg};
-use pg2sqlite::prelude::Pg2SqliteOptions;
+use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
 
 table! {
     /// Univariate test data for Phase 2.
@@ -40,7 +40,9 @@ struct Scalar {
 }
 
 fn translate(pg: &str) -> String {
-    translate_pg(pg, &Pg2SqliteOptions::default()).expect("translation failed").join("\n")
+    translate_pg(pg, &Pg2SqliteOptions::default().with_math_functions_available())
+        .expect("translation failed")
+        .join("\n")
 }
 
 /// v in 1..=5. var_samp = 2.5, stddev_samp = sqrt(2.5).

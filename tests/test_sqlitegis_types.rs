@@ -1,6 +1,6 @@
 //! Step 2: PostGIS-equivalent types (`geometry`, `geography`) translate to
-//! `BLOB` so that geolite's EWKB-encoded values can be stored and queried
-//! at runtime, and the new `enable_geolite` option plumbs through
+//! `BLOB` so that SQLiteGIS's EWKB-encoded values can be stored and queried
+//! at runtime, and the new `sqlitegis_enabled` option plumbs through
 //! `Pg2SqliteOptions` for use by later steps.
 
 use pg2sqlite::{
@@ -37,9 +37,9 @@ fn geography_column_translates_to_blob() {
 }
 
 #[test]
-fn enable_geolite_defaults_to_false() {
+fn sqlitegis_enabled_defaults_to_false() {
     let opts = Pg2SqliteOptions::default();
-    assert!(!opts.is_sqlitegis_enabled(), "enable_geolite should default to false");
+    assert!(!opts.is_sqlitegis_enabled(), "sqlitegis_enabled should default to false");
 }
 
 #[test]

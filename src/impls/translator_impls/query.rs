@@ -15,19 +15,18 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Fetch, Function, FunctionArgumentList, FunctionArguments,
-    GroupByExpr, GroupByWithModifier, Ident, LimitClause, ObjectName, ObjectNamePart, OrderBy,
-    OrderByExpr, OrderByKind, PipeOperator, Query, Select, SelectItem, SetExpr, SetOperator,
-    SetQuantifier, Setting, TableAlias, TableFactor, TableWithJoins, Value, ValueWithSpan,
-    WindowSpec, WindowType, helpers::attached_token::AttachedToken,
+    GroupByExpr, GroupByWithModifier, Ident, LimitClause, ObjectName, ObjectNamePart, Offset,
+    OffsetRows, OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query, Select, SelectItem,
+    SetExpr, SetOperator, SetQuantifier, Setting, TableAlias, TableFactor, TableWithJoins, Value,
+    ValueWithSpan, WindowSpec, WindowType, helpers::attached_token::AttachedToken,
 };
 
 use super::helpers::{
-    Forward, translate_fetch_clause, translate_limit_clause as translate_limit_clause_shared,
-    translate_order_by_clause, translate_pipe_operators, translate_query_settings,
+    Forward, translate_order_by_clause, translate_pipe_operators, translate_query_settings,
     translate_with_clause,
 };
 use crate::{
-    impls::function_helpers::integer_literal,
+    impls::{function_helpers::integer_literal, shared_helpers::TranslationDirection},
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -46,9 +45,12 @@ impl Translator for Query {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         let with = translate_with_clause(self.with.as_ref(), schema, options)?;
         let order_by = translate_order_by(self.order_by.as_ref(), schema, options)?;
-        let limit_clause =
-            translate_limit_clause_shared(self.limit_clause.as_ref(), schema, options)?;
-        let fetch = translate_fetch_clause(self.fetch.as_ref(), schema, options)?;
+        let (limit_clause, fetch) = forward_translate_limit_and_fetch(
+            self.limit_clause.as_ref(),
+            self.fetch.as_ref(),
+            schema,
+            options,
+        )?;
         let settings = translate_query_settings(self.settings.as_ref(), schema, options)?;
         let pipe_operators = translate_pipe_operators(&self.pipe_operators, schema, options)?;
 
@@ -126,6 +128,110 @@ fn build_query_envelope(
         format_clause,
         pipe_operators,
     }
+}
+/// Converts a PostgreSQL FETCH/OFFSET pair into a SQLite LIMIT/OFFSET clause.
+///
+/// SQLite accepts only `LIMIT m` and `LIMIT m OFFSET n`. It understands neither
+/// the SQL-standard `FETCH FIRST m ROWS ONLY` form nor the `ROW`/`ROWS` keyword
+/// on `OFFSET`. This function performs the following rewrites:
+///
+/// * `FETCH FIRST m ROWS ONLY` (no offset) -> `LIMIT m`
+/// * `OFFSET n ROWS FETCH FIRST m ROWS ONLY` -> `LIMIT m OFFSET n`
+/// * Bare `OFFSET n ROWS` (no FETCH, no LIMIT) -> `LIMIT -1 OFFSET n` (SQLite
+///   requires a LIMIT before OFFSET; -1 means no upper bound)
+/// * Existing `LIMIT m OFFSET n` is preserved, with `ROWS`/`ROW` stripped.
+///
+/// # Errors
+///
+/// Returns `Error::UnsupportedSQLiteFeature` for `FETCH ... WITH TIES` (no
+/// SQLite equivalent) and for `FETCH FIRST ... PERCENT ROWS ONLY` (SQLite has
+/// no percentage limit).
+fn forward_translate_limit_and_fetch(
+    limit_clause: Option<&LimitClause>,
+    fetch: Option<&Fetch>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(Option<LimitClause>, Option<Fetch>), crate::errors::Error> {
+    use crate::errors::Error;
+
+    if let Some(f) = fetch {
+        if f.with_ties {
+            return Err(Error::UnsupportedSQLiteFeature(
+                "FETCH ... WITH TIES is not supported in SQLite. SQLite has no equivalent. \
+                 Use a window function with ROW_NUMBER() to emulate it."
+                    .to_string(),
+            ));
+        }
+        if f.percent {
+            return Err(Error::UnsupportedSQLiteFeature(
+                "FETCH FIRST ... PERCENT ROWS is not supported in SQLite. \
+                 Compute the count explicitly and pass it as LIMIT."
+                    .to_string(),
+            ));
+        }
+        // FETCH FIRST m ROWS ONLY -> LIMIT m [OFFSET n]
+        let quantity =
+            f.quantity.as_ref().map(|q| Forward::translate_expr(q, schema, options)).transpose()?;
+        let offset = match limit_clause {
+            Some(LimitClause::LimitOffset { offset: Some(o), .. }) => {
+                Some(Offset {
+                    value: Forward::translate_expr(&o.value, schema, options)?,
+                    rows: OffsetRows::None,
+                })
+            }
+            _ => None,
+        };
+        return Ok((
+            Some(LimitClause::LimitOffset {
+                limit: Some(quantity.unwrap_or_else(|| integer_literal(0))),
+                offset,
+                limit_by: vec![],
+            }),
+            None,
+        ));
+    }
+
+    // No FETCH clause. Normalize the existing limit clause: translate
+    // expressions and strip the ROW/ROWS keyword from OFFSET, which
+    // SQLite does not accept. Also add LIMIT -1 when only OFFSET is
+    // present, because SQLite requires a LIMIT before OFFSET.
+    let new_lc = match limit_clause {
+        None => None,
+        Some(LimitClause::LimitOffset { limit, offset, limit_by }) => {
+            let translated_limit =
+                limit.as_ref().map(|e| Forward::translate_expr(e, schema, options)).transpose()?;
+            let translated_offset = offset
+                .as_ref()
+                .map(|o| {
+                    Ok::<_, crate::errors::Error>(Offset {
+                        value: Forward::translate_expr(&o.value, schema, options)?,
+                        rows: OffsetRows::None,
+                    })
+                })
+                .transpose()?;
+            let translated_limit_by = limit_by
+                .iter()
+                .map(|e| Forward::translate_expr(e, schema, options))
+                .collect::<Result<Vec<_>, _>>()?;
+            let final_limit = if translated_limit.is_none() && translated_offset.is_some() {
+                Some(integer_literal(-1))
+            } else {
+                translated_limit
+            };
+            Some(LimitClause::LimitOffset {
+                limit: final_limit,
+                offset: translated_offset,
+                limit_by: translated_limit_by,
+            })
+        }
+        Some(LimitClause::OffsetCommaLimit { offset, limit }) => {
+            Some(LimitClause::OffsetCommaLimit {
+                offset: Forward::translate_expr(offset, schema, options)?,
+                limit: Forward::translate_expr(limit, schema, options)?,
+            })
+        }
+    };
+    Ok((new_lc, None))
 }
 
 fn ensure_distinct_on_projection_is_rewriteable(
@@ -750,7 +856,7 @@ fn translate_limit_clause(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<LimitClause>, crate::errors::Error> {
-    translate_limit_clause_shared(limit_clause, schema, options)
+    crate::impls::shared_helpers::translate_limit_clause::<Forward>(limit_clause, schema, options)
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -759,7 +865,7 @@ fn translate_fetch(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<Fetch>, crate::errors::Error> {
-    translate_fetch_clause(fetch, schema, options)
+    crate::impls::shared_helpers::translate_fetch_clause::<Forward>(fetch, schema, options)
 }
 
 #[cfg(all(test, feature = "std"))]

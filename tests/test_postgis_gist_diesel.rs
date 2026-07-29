@@ -73,7 +73,7 @@ fn gist_geometry_index_round_trips_via_diesel() {
             .unwrap_or_else(|e| panic!("execute failed for `{s}`: {e:?}"));
     }
 
-    // geolite names the rtree shadow as `<table>_<col>_rtree`.
+    // SQLiteGIS names the rtree shadow as `<table>_<col>_rtree`.
     let rows: Vec<NameRow> = sql_query(
         "SELECT name FROM sqlite_master WHERE name = 'features_geom_rtree' AND type = 'table'",
     )
@@ -101,10 +101,10 @@ fn gist_geometry_index_round_trips_via_diesel() {
 
 /// Verifies that pg2sqlite's translation of `CREATE INDEX ... USING gist
 /// (geom)` produces a maintained, query-accelerating rtree shadow when the
-/// geolite extension is loaded:
+/// SQLiteGIS extension is loaded:
 ///
 /// 1. After the translated DDL runs, the rtree shadow exists and is empty.
-/// 2. AFTER INSERT triggers installed by geolite's `CreateSpatialIndex`
+/// 2. AFTER INSERT triggers installed by SQLiteGIS's `CreateSpatialIndex`
 ///    populate the rtree as rows are written, with no manual sync.
 /// 3. A bounding-box probe of the rtree alone narrows the candidate set to a
 ///    tiny fraction of the base table, demonstrating that the index is
@@ -151,7 +151,7 @@ fn gist_geometry_index_accelerates_spatial_queries() {
         .expect("rtree count (after writes)");
     assert_eq!(
         rtree_after[0].n, 10_000,
-        "geolite triggers must keep the rtree synchronized with inserts; \
+        "SQLiteGIS triggers must keep the rtree synchronized with inserts; \
          got {} entries against {} base rows",
         rtree_after[0].n, base_count[0].n
     );

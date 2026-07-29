@@ -11,6 +11,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::ops::ControlFlow;
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
@@ -19,11 +20,11 @@ use sqlparser::ast::{
     FunctionArguments, GroupByExpr, HavingBound, Join, JoinConstraint, JoinOperator, LateralView,
     LimitClause, ListAggOnOverflow, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName,
     ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query,
-    SelectItem, Setting, Statement, SymbolDefinition, TableFactor, TableFunctionArgs, TableSample,
-    TableSampleBucket, TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins,
-    UpdateTableFromKind, Values, WindowFrame, WindowFrameBound, WindowSpec, WindowType, With,
-    WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
-    XmlTableColumnOption,
+    SelectItem, SetExpr, Setting, Statement, SymbolDefinition, TableFactor, TableFunctionArgs,
+    TableSample, TableSampleBucket, TableSampleKind, TableSampleQuantity, TableVersion,
+    TableWithJoins, UpdateTableFromKind, Values, WindowFrame, WindowFrameBound, WindowSpec,
+    WindowType, With, WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause,
+    XmlTableColumn, XmlTableColumnOption, visit_expressions,
 };
 
 use crate::{
@@ -1664,6 +1665,35 @@ pub(crate) fn translate_join_constraint<D: TranslationDirection>(
     })
 }
 
+/// Returns `true` when a derived subquery contains no FROM clause and no
+/// column references, making it safe to drop a LATERAL keyword.
+///
+/// SQLite has no LATERAL join. A correlated lateral cannot be expressed and
+/// a derived table referencing an outer column would fail at runtime with
+/// "no such column". We only drop LATERAL when the subquery is trivially
+/// self-contained: its body is a plain SELECT with an empty FROM list and
+/// there are no Identifier or CompoundIdentifier nodes anywhere inside it.
+///
+/// The pattern follows `array.rs::references_a_column`, which uses the same
+/// `visit_expressions` walk to detect column references in UNNEST operands.
+fn subquery_is_trivially_uncorrelated(query: &Query) -> bool {
+    let from_is_empty = match query.body.as_ref() {
+        SetExpr::Select(sel) => sel.from.is_empty(),
+        _ => false,
+    };
+    if !from_is_empty {
+        return false;
+    }
+    !visit_expressions(query, |expr| {
+        if matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_)) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn translate_table_factor<D: TranslationDirection>(
     table_factor: &TableFactor,
@@ -1686,6 +1716,13 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             // generate_series with args parses as TableFactor::Table (not Function).
             if D::IS_FORWARD && args.is_some() && is_generate_series_object_name(name) {
                 return Err(generate_series_not_supported_error());
+            }
+            if D::IS_FORWARD && sample.is_some() {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "TABLESAMPLE is not supported in SQLite. \
+                     Use ORDER BY random() LIMIT n as an approximation."
+                        .to_string(),
+                ));
             }
             TableFactor::Table {
                 name: D::translate_object_name(name, schema, options)?,
@@ -1713,9 +1750,43 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             }
         }
         TableFactor::Derived { subquery, lateral, alias, sample } => {
+            if D::IS_FORWARD {
+                // SQLite grammar has no column list on a table alias.
+                // The same limitation forces the derived-table shape in
+                // array.rs::translate_unnest_factor.
+                if alias.as_ref().is_some_and(|a| !a.columns.is_empty()) {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        "Table alias with a column list (AS alias(col1, col2, ...)) is not \
+                         supported in SQLite grammar. Project the column names instead, for \
+                         example: SELECT column1 AS a FROM (VALUES (1),(2)) AS v"
+                            .to_string(),
+                    ));
+                }
+                // SQLite has no LATERAL join. Drop the keyword only when the
+                // subquery is trivially uncorrelated (no FROM clause, no column
+                // references). Any other case would fail at runtime with
+                // "no such column" because the outer scope is invisible.
+                if *lateral && !subquery_is_trivially_uncorrelated(subquery) {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        "LATERAL on a correlated subquery is not supported in SQLite. SQLite \
+                         has no LATERAL join. A correlated lateral cannot be expressed and a \
+                         derived table would fail at runtime with no such column."
+                            .to_string(),
+                    ));
+                }
+                if sample.is_some() {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        "TABLESAMPLE is not supported in SQLite. \
+                         Use ORDER BY random() LIMIT n as an approximation."
+                            .to_string(),
+                    ));
+                }
+            }
             TableFactor::Derived {
                 subquery: Box::new(D::translate_query(subquery, schema, options)?),
-                lateral: *lateral,
+                // Drop LATERAL; uncorrelated subqueries are safe without it and
+                // correlated ones are rejected above.
+                lateral: false,
                 alias: alias.clone(),
                 sample: sample
                     .as_ref()

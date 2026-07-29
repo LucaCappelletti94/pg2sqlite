@@ -10,13 +10,17 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::ops::ControlFlow;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
 #[cfg(feature = "std")]
 use git2::Repository;
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{IndexType, Statement};
+use sqlparser::ast::{
+    AlterTableOperation, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement, Value,
+    ValueWithSpan, visit_expressions,
+};
 #[cfg(feature = "std")]
 use tempfile::TempDir;
 
@@ -88,6 +92,32 @@ fn populate_spatial_index_catalog(
     }
 }
 
+/// `PRAGMA case_sensitive_like = ON`, which makes SQLite's `LIKE` match
+/// PostgreSQL's case-sensitive behaviour.
+fn case_sensitive_like_pragma() -> Statement {
+    Statement::Pragma {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("case_sensitive_like"))]),
+        value: Some(ValueWithSpan {
+            value: Value::Boolean(true),
+            span: sqlparser::tokenizer::Span::empty(),
+        }),
+        is_eq: true,
+    }
+}
+
+/// True when `statement` contains a `LIKE`, whose matching in SQLite depends on
+/// the connection's case sensitivity.
+fn statement_contains_like(statement: &Statement) -> bool {
+    visit_expressions(statement, |expr| {
+        if matches!(expr, Expr::Like { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
 /// Registers every declared object name in `statements` so the read-only
 /// deny-trigger pass can reject names that collide with existing objects. Uses
 /// raw statements because the translation schema omits index and trigger
@@ -123,6 +153,19 @@ impl Pg2Sqlite {
         statements
             .iter()
             .filter(|statement| {
+                // AlterTable with RenameTable triggers a bug in sql-traits: after the
+                // rename the internal column arcs still reference the old CreateTable,
+                // so a subsequent rls_enabled() call panics on table-not-found. Keep
+                // AlterTable statements that only carry non-rename operations (e.g.
+                // ENABLE ROW LEVEL SECURITY) so they can update the schema correctly.
+                // The rename itself is translated at the statement level without
+                // schema mutation.
+                if let Statement::AlterTable(alter_table) = statement {
+                    return !alter_table
+                        .operations
+                        .iter()
+                        .any(|op| matches!(op, AlterTableOperation::RenameTable { .. }));
+                }
                 !matches!(
                     statement,
                     Statement::CreateIndex(_)
@@ -322,7 +365,7 @@ impl Pg2Sqlite {
 
         // Pre-walk for spatial-index DDL so that the same translation unit's
         // SELECTs can rewrite `ST_*` predicates over indexed columns through
-        // the rtree shadow. Only fires when geolite translation is enabled;
+        // the rtree shadow. Only fires when SQLiteGIS translation is enabled;
         // skips errors (an unsupported GiST will surface its own error when
         // the statement itself is translated below).
         let mut options = options.clone();
@@ -351,6 +394,21 @@ impl Pg2Sqlite {
         if has_rls_tables && let Some(audit_table_name) = options.get_rls_audit_table_name() {
             let audit_table_stmt = generate_rls_audit_table(audit_table_name)?;
             result.insert(0, audit_table_stmt);
+        }
+
+        // PostgreSQL's LIKE is case-sensitive. SQLite's is case-insensitive for
+        // ASCII unless the connection says otherwise, and no expression-level
+        // rewrite fixes that: a BLOB operand stops matching wildcards entirely
+        // and GLOB cannot express a pattern computed at runtime or an ESCAPE
+        // clause. So the script configures the connection it is applied to.
+        // ILIKE is unaffected because it lowercases both operands.
+        //
+        // The pragma is connection state, not database state, so a LIKE that is
+        // evaluated later than the script (inside a CHECK constraint, a trigger
+        // body, or a view) still depends on the pragma being set on whichever
+        // connection runs the write.
+        if result.iter().any(statement_contains_like) {
+            result.insert(0, case_sensitive_like_pragma());
         }
 
         Ok(result)

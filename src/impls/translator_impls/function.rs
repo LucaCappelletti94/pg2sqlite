@@ -28,7 +28,8 @@ use crate::{
         datetime_helpers::{build_strftime_call, parse_date_part_key, strftime_mapping_for_key},
         expr_helpers::case_when,
         function_helpers::{
-            extract_exactly, number_literal, simple_function_expr, string_literal, unnamed_arg,
+            extract_exactly, integer_literal, number_literal, simple_function_expr, string_literal,
+            unnamed_arg,
         },
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, function_argument_exprs,
@@ -101,6 +102,9 @@ enum FunctionTranslation {
     /// An array function whose body is rewritten over `json_each` /
     /// `json_group_array`. See [`super::array`].
     Array(ArrayFunction),
+    /// `cbrt(x)` translated to `pow(x, (1.0 / 3.0))` when math functions are
+    /// available.
+    ToCbrt,
 }
 
 /// Simple name-only renames: `(pg_name, sqlite_name)`.
@@ -208,11 +212,47 @@ fn translate_function(
             "{original_name} is not supported as an aggregate in SQLite. \
              Consider loading a custom extension or rewriting with bitwise expressions."
         )),
-        "stddev_pop" => FunctionTranslation::StddevPop,
-        "stddev" | "stddev_samp" => FunctionTranslation::StddevSamp,
+        "stddev_pop" => {
+            if options.are_math_functions_available() {
+                FunctionTranslation::StddevPop
+            } else {
+                FunctionTranslation::Unsupported(
+                    "stddev_pop() needs sqrt() to compute the closed-form result, \
+                     which is not available in standard SQLite. \
+                     Call with_math_functions_available() on Pg2SqliteOptions when \
+                     your SQLite build includes SQLITE_ENABLE_MATH_FUNCTIONS."
+                        .to_string(),
+                )
+            }
+        }
+        "stddev" | "stddev_samp" => {
+            if options.are_math_functions_available() {
+                FunctionTranslation::StddevSamp
+            } else {
+                FunctionTranslation::Unsupported(
+                    "stddev/stddev_samp() needs sqrt() to compute the closed-form result, \
+                     which is not available in standard SQLite. \
+                     Call with_math_functions_available() on Pg2SqliteOptions when \
+                     your SQLite build includes SQLITE_ENABLE_MATH_FUNCTIONS."
+                        .to_string(),
+                )
+            }
+        }
         "var_pop" => FunctionTranslation::VarPop,
         "variance" | "var_samp" => FunctionTranslation::VarSamp,
-        "corr" => FunctionTranslation::Corr,
+        "corr" => {
+            if options.are_math_functions_available() {
+                FunctionTranslation::Corr
+            } else {
+                FunctionTranslation::Unsupported(
+                    "corr() needs sqrt() to compute the closed-form result, \
+                     which is not available in standard SQLite. \
+                     Call with_math_functions_available() on Pg2SqliteOptions when \
+                     your SQLite build includes SQLITE_ENABLE_MATH_FUNCTIONS."
+                        .to_string(),
+                )
+            }
+        }
         "covar_pop" => FunctionTranslation::CovarPop,
         "covar_samp" => FunctionTranslation::CovarSamp,
         "regr_slope" | "regr_intercept" | "regr_r2" | "regr_avgx" | "regr_avgy"
@@ -426,12 +466,24 @@ fn translate_function(
             "{original_name}() character encoding conversion is not available in SQLite."
         )),
 
-        // Math functions requiring extensions
-        "log" | "ln" | "exp" | "sqrt" | "cbrt" | "power" => {
-            FunctionTranslation::Unsupported(format!(
-                "{original_name}() is not available in standard SQLite. \
-                 Consider using the math extension or application-level computation."
-            ))
+        // Math functions that require SQLITE_ENABLE_MATH_FUNCTIONS. When the
+        // option is declared, scalars pass through and power/cbrt get faithful
+        // translations. When it is not declared, all are rejected with a clear
+        // message pointing to the opt-in.
+        "log" | "ln" | "exp" | "sqrt" | "log10" | "pow" | "power" | "cbrt" => {
+            if options.are_math_functions_available() {
+                match original_name.as_str() {
+                    "power" => FunctionTranslation::Rename("pow".to_string()),
+                    "cbrt" => FunctionTranslation::ToCbrt,
+                    _ => FunctionTranslation::PassThrough,
+                }
+            } else {
+                FunctionTranslation::Unsupported(format!(
+                    "{original_name}() is not available in standard SQLite. \
+                     Call with_math_functions_available() on Pg2SqliteOptions when \
+                     your SQLite build includes SQLITE_ENABLE_MATH_FUNCTIONS."
+                ))
+            }
         }
         "sign" | "factorial" | "gcd" | "lcm" | "pi" | "degrees" | "radians" | "setseed"
         | "width_bucket" => FunctionTranslation::Unsupported(format!(
@@ -461,6 +513,13 @@ fn translate_function(
                 "{original_name}() is not available in SQLite (no record/row types)."
             ))
         }
+        // ROW(a, b) is a row-value constructor. SQLite has no row type.
+        // Tuple comparison (a, b) = (c, d) is supported via Expr::Tuple and already works.
+        "row" => FunctionTranslation::Unsupported(
+            "ROW(a, b) as a standalone value is not supported in SQLite (no row type). \
+             For tuple comparison, use (a, b) = (c, d) instead."
+                .to_string(),
+        ),
 
         // Array functions with no faithful json1 form. `json_each` hands a
         // nested element back as JSON text, so anything that inspects or
@@ -507,17 +566,16 @@ fn translate_function(
             "{original_name}() is a PostgreSQL size function not available in SQLite."
         )),
 
-        _ => maybe_geolite_passthrough(&original_name, args, options),
+        _ => maybe_sqlitegis_passthrough(&original_name, args, options),
     }
 }
 
-/// When `enable_geolite` is on, validate `ST_*`-shaped calls against the
-/// catalog mirrored from geolite (`super::postgis`). Functions in the
-/// catalog with matching arity pass through. Arity mismatches and unknown
-/// `st_*` names error with a precise message. With `enable_geolite` off
-/// this is a no-op and unknown functions keep their pre-existing
+/// When SQLiteGIS translation is enabled, validate `ST_*`-shaped calls against
+/// the catalog mirrored from the extension (`super::postgis`). Names in the
+/// catalog with a matching arity pass through, everything else errors. With
+/// SQLiteGIS off this is a no-op and unknown functions keep their pre-existing
 /// passthrough behavior.
-fn maybe_geolite_passthrough(
+fn maybe_sqlitegis_passthrough(
     name: &str,
     args: &FunctionArguments,
     options: &Pg2SqliteOptions,
@@ -531,16 +589,17 @@ fn maybe_geolite_passthrough(
     if postgis::is_sqlitegis_function(name, arity) {
         return FunctionTranslation::PassThrough;
     }
-    let known_arities = postgis::geolite_function_arities(name);
+    let known_arities = postgis::sqlitegis_function_arities(name);
     if !known_arities.is_empty() {
         return FunctionTranslation::Unsupported(format!(
-            "{name}/{arity} is not in the geolite catalog; geolite implements arities {known_arities:?} for this name."
+            "{name}/{arity} is not in the SQLiteGIS catalog; SQLiteGIS implements arities \
+             {known_arities:?} for this name."
         ));
     }
     if postgis::is_postgis_shaped_name(name) {
         return FunctionTranslation::Unsupported(format!(
-            "{name}() looks like a PostGIS function but is not implemented by the geolite SQLite extension; \
-             see https://github.com/LucaCappelletti94/geolite for the supported list."
+            "{name}() looks like a PostGIS function but is not implemented by the SQLiteGIS \
+             extension, see https://github.com/LucaCappelletti94/sqlitegis for the supported list."
         ));
     }
     FunctionTranslation::PassThrough
@@ -802,10 +861,81 @@ fn corr_closed_form(x: Expr, y: Expr) -> Expr {
     }
 }
 
+/// `left(s, n)`: the first `n` characters, or all but the last `|n|` when `n`
+/// is negative.
+///
+/// SQLite's `substr(s, 1, n)` returns the empty string for a negative length,
+/// so the negative case has to be converted into a length measured from the
+/// front. `n` is read twice, which is only observable for a volatile count.
+fn left_closed_form(s: Expr, n: Expr) -> Expr {
+    let from_end = simple_function_expr(
+        "max",
+        vec![
+            Expr::BinaryOp {
+                left: Box::new(simple_function_expr("length", vec![s.clone()], None)),
+                op: BinaryOperator::Plus,
+                right: Box::new(n.clone()),
+            },
+            integer_literal(0),
+        ],
+        None,
+    );
+    let length = case_when(
+        Expr::BinaryOp {
+            left: Box::new(n.clone()),
+            op: BinaryOperator::Lt,
+            right: Box::new(integer_literal(0)),
+        },
+        from_end,
+        Some(n),
+    );
+    simple_function_expr("substr", vec![s, integer_literal(1), length], None)
+}
+
+/// `right(s, n)`: the last `n` characters, or all but the first `|n|` when `n`
+/// is negative.
+///
+/// SQLite's `substr(s, -n)` gives the last `n` characters only for a positive
+/// `n`. For a negative `n` it reads as a positive offset from the start, which
+/// is off by one from PostgreSQL, and for `n = 0` it returns the whole string
+/// rather than nothing, so both cases are computed as an explicit start offset.
+fn right_closed_form(s: Expr, n: Expr) -> Expr {
+    let drop_from_front = Expr::BinaryOp {
+        left: Box::new(integer_literal(1)),
+        op: BinaryOperator::Minus,
+        right: Box::new(n.clone()),
+    };
+    let last_n = simple_function_expr(
+        "max",
+        vec![
+            Expr::BinaryOp {
+                left: Box::new(Expr::BinaryOp {
+                    left: Box::new(simple_function_expr("length", vec![s.clone()], None)),
+                    op: BinaryOperator::Minus,
+                    right: Box::new(n.clone()),
+                }),
+                op: BinaryOperator::Plus,
+                right: Box::new(integer_literal(1)),
+            },
+            integer_literal(1),
+        ],
+        None,
+    );
+    let start = case_when(
+        Expr::BinaryOp {
+            left: Box::new(n),
+            op: BinaryOperator::Lt,
+            right: Box::new(integer_literal(0)),
+        },
+        drop_from_front,
+        Some(last_n),
+    );
+    simple_function_expr("substr", vec![s, start], None)
+}
+
 /// Wrap an expression with COALESCE(expr, '') to handle NULL semantics.
 ///
 /// PostgreSQL's CONCAT ignores NULL arguments. SQLite's `||` propagates them.
-/// Wrapping with COALESCE ensures consistent behaviour.
 fn wrap_with_coalesce(expr: Expr) -> Expr {
     simple_function_expr("COALESCE", vec![expr, string_literal("")], None)
 }
@@ -1202,20 +1332,16 @@ impl Translator for Function {
                 })
             }
             FunctionTranslation::ToSubstrLeft => {
-                // left(s, n) → substr(s, 1, n)
                 let exprs = extract_exactly(&func.args, 2, "left")?;
                 let s = exprs[0].translate(schema, options)?;
                 let n = exprs[1].translate(schema, options)?;
-                Ok(simple_function_expr("substr", vec![s, number_literal("1"), n], None))
+                Ok(left_closed_form(s, n))
             }
             FunctionTranslation::ToSubstrRight => {
-                // right(s, n) → substr(s, -n)
                 let exprs = extract_exactly(&func.args, 2, "right")?;
                 let s = exprs[0].translate(schema, options)?;
                 let n = exprs[1].translate(schema, options)?;
-                let neg_n =
-                    Expr::UnaryOp { op: sqlparser::ast::UnaryOperator::Minus, expr: Box::new(n) };
-                Ok(simple_function_expr("substr", vec![s, neg_n], None))
+                Ok(right_closed_form(s, n))
             }
             FunctionTranslation::ToTimestampEpoch => {
                 // to_timestamp(epoch) → datetime(epoch, 'unixepoch')
@@ -1330,6 +1456,17 @@ impl Translator for Function {
             FunctionTranslation::StddevSamp => {
                 let x = single_aggregate_arg(&func.args, schema, options, "stddev_samp")?;
                 Ok(simple_function_expr("sqrt", vec![var_samp_closed_form(x)], None))
+            }
+            FunctionTranslation::ToCbrt => {
+                // cbrt(x) -> pow(x, (1.0 / 3.0))
+                let exprs = extract_exactly(&func.args, 1, "cbrt")?;
+                let x = exprs[0].translate(schema, options)?;
+                let exponent = Expr::Nested(Box::new(Expr::BinaryOp {
+                    left: Box::new(number_literal("1.0")),
+                    op: BinaryOperator::Divide,
+                    right: Box::new(number_literal("3.0")),
+                }));
+                Ok(simple_function_expr("pow", vec![x, exponent], None))
             }
             FunctionTranslation::CovarPop => {
                 let (x, y) = two_aggregate_args(&func.args, schema, options, "covar_pop")?;

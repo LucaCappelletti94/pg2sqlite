@@ -47,9 +47,12 @@ pub struct Pg2SqliteOptions {
     rls_audit_table_name: Option<String>,
     /// Whether to enable strict RLS validation (abort on violations).
     strict_rls_validation: bool,
-    /// Whether to enable geolite-backed PostGIS translation (passthrough of
-    /// `ST_*` scalar functions in geolite's catalog).
-    enable_geolite: bool,
+    /// Whether to enable SQLiteGIS-backed PostGIS translation (passthrough of
+    /// `ST_*` scalar functions in SQLiteGIS's catalog).
+    sqlitegis_enabled: bool,
+    /// Whether the destination SQLite is declared to provide the math
+    /// functions, which ship only under `SQLITE_ENABLE_MATH_FUNCTIONS`.
+    math_functions_available: bool,
     /// Spatially-indexed `(table, column)` pairs, both lowercased, populated
     /// automatically by `Pg2Sqlite::translate` from `CREATE INDEX ... USING
     /// gist (...)` statements in the input. Consumed by the query-time
@@ -101,7 +104,8 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             session_variables: Vec::<SessionVariableMapping>::arbitrary(u)?,
             rls_audit_table_name: Option::<String>::arbitrary(u)?,
             strict_rls_validation: bool::arbitrary(u)?,
-            enable_geolite: bool::arbitrary(u)?,
+            sqlitegis_enabled: bool::arbitrary(u)?,
+            math_functions_available: bool::arbitrary(u)?,
             spatial_indexes: Vec::new(),
             fts_indexes: Vec::new(),
             declared_object_names: Vec::new(),
@@ -124,7 +128,8 @@ impl Default for Pg2SqliteOptions {
             session_variables: Vec::new(),
             rls_audit_table_name: None,
             strict_rls_validation: false,
-            enable_geolite: false,
+            sqlitegis_enabled: false,
+            math_functions_available: false,
             spatial_indexes: Vec::new(),
             fts_indexes: Vec::new(),
             declared_object_names: Vec::new(),
@@ -321,12 +326,21 @@ impl TranslationOptions for Pg2SqliteOptions {
     }
 
     fn with_sqlitegis_enabled(mut self) -> Self {
-        self.enable_geolite = true;
+        self.sqlitegis_enabled = true;
         self
     }
 
     fn is_sqlitegis_enabled(&self) -> bool {
-        self.enable_geolite
+        self.sqlitegis_enabled
+    }
+
+    fn with_math_functions_available(mut self) -> Self {
+        self.math_functions_available = true;
+        self
+    }
+
+    fn are_math_functions_available(&self) -> bool {
+        self.math_functions_available
     }
 
     fn with_dangling_foreign_keys_allowed(mut self) -> Self {

@@ -37,9 +37,7 @@ rand = "0.10.1"
 # Optional integration gated by the `sqlitegis` feature. Declared in
 # `[dependencies]` (not `[dev-dependencies]`) because Cargo only honors
 # `optional = true` on regular dependencies. Still test-only: nothing
-# in `src/` references it unless `feature = "sqlitegis"` is set. The
-# crate replaces the older `geolite-core`/`geolite-sqlite`/`geolite-diesel`
-# split now that SQLiteGIS ships as a single published crate.
+# in `src/` references it unless `feature = "sqlitegis"` is set.
 [dependencies.sqlitegis]
 version = "0.1.0"
 default-features = false
