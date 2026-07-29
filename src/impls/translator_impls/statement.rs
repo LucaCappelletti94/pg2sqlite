@@ -415,31 +415,52 @@ fn role_access_for_object_name(
 
 /// Translates `ALTER TABLE` operations to SQLite.
 ///
-/// SQLite supports `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` (since 3.1.1),
-/// and `DROP COLUMN` (since 3.35.0), all at or below the declared 3.46.0 floor.
-/// Remaining operations are dropped, which is tracked as plan item R7.
+/// PostgreSQL accepts several operations in one statement while SQLite accepts
+/// one, so each operation becomes a statement of its own.
 fn translate_alter_table(
     alter_table: &AlterTable,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Vec<Statement>, Error> {
-    if alter_table.operations.len() != 1 {
-        return Ok(Vec::new());
-    }
     let normalized_name =
         normalize_schema_qualified_object_name_for_sqlite(schema, &alter_table.name)?;
-    let rebuilt = |operation: AlterTableOperation| {
-        Ok(vec![Statement::AlterTable(AlterTable {
-            name: normalized_name.clone(),
-            operations: vec![operation],
-            ..alter_table.clone()
-        })])
-    };
 
-    match &alter_table.operations[0] {
-        operation @ (AlterTableOperation::RenameTable { .. }
+    let mut statements = Vec::with_capacity(alter_table.operations.len());
+    for operation in &alter_table.operations {
+        let Some(translated) =
+            translate_alter_table_operation(operation, alter_table, schema, options)?
+        else {
+            continue;
+        };
+        statements.push(Statement::AlterTable(AlterTable {
+            name: normalized_name.clone(),
+            operations: vec![translated],
+            ..alter_table.clone()
+        }));
+    }
+
+    Ok(statements)
+}
+
+/// Translates a single `ALTER TABLE` operation.
+///
+/// SQLite supports `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` (since 3.1.1),
+/// and `DROP COLUMN` (since 3.35.0), all at or below the declared 3.46.0 floor.
+///
+/// `Ok(None)` means the operation is consumed elsewhere in the pipeline and
+/// correctly contributes no `ALTER TABLE` of its own. Anything with no SQLite
+/// form is an error rather than a silent drop, because dropping it would change
+/// which rows the database accepts or returns.
+fn translate_alter_table_operation(
+    operation: &AlterTableOperation,
+    alter_table: &AlterTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<AlterTableOperation>, Error> {
+    match operation {
+        AlterTableOperation::RenameTable { .. }
         | AlterTableOperation::RenameColumn { .. }
-        | AlterTableOperation::DropColumn { .. }) => rebuilt(operation.clone()),
+        | AlterTableOperation::DropColumn { .. } => Ok(Some(operation.clone())),
         AlterTableOperation::AddColumn {
             column_keyword,
             if_not_exists,
@@ -447,7 +468,7 @@ fn translate_alter_table(
             column_position,
         } => {
             reject_unsupported_added_column(column_def, alter_table.name.to_string().as_str())?;
-            rebuilt(AlterTableOperation::AddColumn {
+            Ok(Some(AlterTableOperation::AddColumn {
                 column_keyword: *column_keyword,
                 if_not_exists: *if_not_exists,
                 // Route through the same translator the CREATE TABLE path uses so
@@ -455,9 +476,23 @@ fn translate_alter_table(
                 // SQLite requires of a non-literal DEFAULT all apply.
                 column_def: column_def.translate(schema, options)?,
                 column_position: column_position.clone(),
-            })
+            }))
         }
-        _ => Ok(Vec::new()),
+        // Row level security is realised as the view and trigger set built from
+        // the schema, which already records these, so they carry no ALTER TABLE.
+        AlterTableOperation::EnableRowLevelSecurity
+        | AlterTableOperation::DisableRowLevelSecurity
+        | AlterTableOperation::ForceRowLevelSecurity
+        | AlterTableOperation::NoForceRowLevelSecurity => Ok(None),
+        other => {
+            Err(Error::UnsupportedSQLiteFeature(format!(
+                "ALTER TABLE {} {other} has no SQLite equivalent. SQLite can only rename a table or \
+             column, add a column, and drop a column, so this operation cannot be applied to an \
+             existing table without rebuilding it. Express the intent in the table's CREATE TABLE \
+             definition instead.",
+                alter_table.name
+            )))
+        }
     }
 }
 

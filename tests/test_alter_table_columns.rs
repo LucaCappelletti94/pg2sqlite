@@ -11,11 +11,19 @@
 //! An added column definition must route through the same column translator the
 //! `CREATE TABLE` path uses, so PostgreSQL type mapping and the
 //! parenthesisation SQLite requires of non-literal defaults both apply.
+//!
+//! A multi-operation `ALTER TABLE` becomes one SQLite statement per operation,
+//! since SQLite permits only one. It used to be discarded whole by an
+//! `operations.len() != 1` early return, so `ADD COLUMN a, ADD COLUMN b` lost
+//! both columns silently.
 
 mod helpers;
 
 use diesel::{QueryableByName, prelude::*, sql_types::Text};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::{
+    prelude::{Pg2Sqlite, Pg2SqliteOptions},
+    traits::TranslationOptions,
+};
 
 mod schema {
     diesel::table! {
@@ -174,4 +182,100 @@ fn add_column_with_unique_is_rejected() {
         error.to_lowercase().contains("unique"),
         "the error must name the offending constraint, got: {error}"
     );
+}
+
+/// PostgreSQL allows several operations in one `ALTER TABLE`. SQLite permits
+/// one per statement, so the translation fans out. It used to be discarded
+/// whole.
+#[test]
+fn multi_operation_alter_adds_every_column() -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = apply(
+        "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT NOT NULL);
+        ALTER TABLE t ADD COLUMN s TEXT, ADD COLUMN flag BOOLEAN, ADD COLUMN created TIMESTAMP;
+    ",
+    )?;
+
+    let names: Vec<String> = table_info(&mut conn)?.into_iter().map(|c| c.name).collect();
+    assert_eq!(names, ["id", "a", "s", "flag", "created"].map(String::from).to_vec());
+
+    Ok(())
+}
+
+/// Operations of different kinds in one statement all apply, in order.
+#[test]
+fn multi_operation_alter_mixes_add_and_drop() -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = apply(
+        "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT NOT NULL);
+        ALTER TABLE t ADD COLUMN s TEXT, DROP COLUMN a;
+    ",
+    )?;
+
+    let names: Vec<String> = table_info(&mut conn)?.into_iter().map(|c| c.name).collect();
+    assert_eq!(names, ["id", "s"].map(String::from).to_vec(), "both operations must apply");
+
+    Ok(())
+}
+
+/// An operation with no SQLite translation is a hard error rather than a silent
+/// drop, per the reporting policy in D2. `ADD CONSTRAINT` cannot be applied to
+/// an existing SQLite table without rebuilding it, and losing a CHECK
+/// constraint changes which rows the database accepts.
+#[test]
+fn unsupported_single_operation_is_rejected() {
+    let Err(error) = apply(&format!("{BASE} ALTER TABLE t ADD CONSTRAINT c CHECK (id > 0);"))
+    else {
+        panic!("an untranslatable ALTER TABLE operation must not be silently dropped");
+    };
+    let error = error.to_string();
+    assert!(
+        error.to_lowercase().contains("alter table"),
+        "the error must name the statement, got: {error}"
+    );
+}
+
+/// A multi-operation statement containing one untranslatable operation fails
+/// whole. Applying the translatable half would leave the database in a state
+/// neither PostgreSQL nor the migration author intended.
+#[test]
+fn unsupported_operation_inside_a_multi_operation_alter_rejects_the_whole_statement() {
+    let result =
+        apply(&format!("{BASE} ALTER TABLE t ADD COLUMN s TEXT, ADD CONSTRAINT c CHECK (id > 0);"));
+    assert!(
+        result.is_err(),
+        "a partially translatable multi-operation ALTER must not apply its translatable half"
+    );
+}
+
+/// `ENABLE ROW LEVEL SECURITY` is not untranslatable, it is consumed by the
+/// schema and realised as the RLS view and trigger set, so it correctly emits
+/// no `ALTER TABLE`. Guards the hard-error rule above against swallowing it:
+/// the suite has well over a hundred uses.
+#[test]
+fn enable_row_level_security_emits_no_alter_and_still_builds_the_wrapper()
+-> Result<(), Box<dyn std::error::Error>> {
+    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+    let sql = "
+        CREATE TABLE docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
+        ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY p ON docs FOR SELECT USING (owner_id > 0);
+    ";
+    let emitted: Vec<String> = Pg2Sqlite::default()
+        .sql(sql)?
+        .translate(&options)?
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+    assert!(
+        !emitted.iter().any(|s| s.contains("ALTER TABLE")),
+        "RLS enablement must not emit an ALTER TABLE: {emitted:?}"
+    );
+    assert!(
+        emitted.iter().any(|s| s.starts_with("CREATE VIEW docs")),
+        "the RLS view must still be built: {emitted:?}"
+    );
+
+    Ok(())
 }
