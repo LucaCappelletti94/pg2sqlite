@@ -54,6 +54,14 @@ struct BackingRow {
     body: String,
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = docs)]
+struct ViewRow {
+    id: i32,
+    is_public: i32,
+    body: String,
+}
+
 #[derive(Queryable, Selectable, Debug, PartialEq, Eq)]
 #[diesel(table_name = docs_rls)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -225,6 +233,92 @@ fn select_policy_using_does_not_constrain_updates() -> Result<(), Box<dyn std::e
         .execute(&mut conn)?;
 
     assert_eq!(stored(&mut conn)?.body, "hidden");
+
+    Ok(())
+}
+
+/// `FOR ALL USING (p)` with no `WITH CHECK` must also constrain an INSERT: the
+/// USING expression doubles as the check on the new row. This is the INSERT
+/// half of the same rule the UPDATE tests above cover.
+#[test]
+fn for_all_using_rejects_an_insert_violating_the_predicate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = setup("CREATE POLICY every ON docs FOR ALL USING (is_public = 1);")?;
+
+    let rejected = diesel::insert_into(docs::table)
+        .values(ViewRow { id: 2, is_public: 0, body: "private".to_owned() })
+        .execute(&mut conn);
+
+    assert!(rejected.is_err(), "the USING expression also gates the inserted row");
+    assert_eq!(
+        docs_rls::table.count().get_result::<i64>(&mut conn)?,
+        1,
+        "only the seeded row remains, the rejected insert stored nothing"
+    );
+
+    Ok(())
+}
+
+/// The same policy accepts an INSERT that satisfies the predicate.
+#[test]
+fn for_all_using_accepts_an_insert_satisfying_the_predicate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = setup("CREATE POLICY every ON docs FOR ALL USING (is_public = 1);")?;
+
+    diesel::insert_into(docs::table)
+        .values(ViewRow { id: 2, is_public: 1, body: "public".to_owned() })
+        .execute(&mut conn)?;
+
+    assert_eq!(docs_rls::table.count().get_result::<i64>(&mut conn)?, 2);
+
+    Ok(())
+}
+
+/// An explicit `FOR INSERT WITH CHECK` is unaffected by the fallback.
+#[test]
+fn explicit_insert_with_check_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = setup(
+        "
+        CREATE POLICY sel ON docs FOR SELECT USING (true);
+        CREATE POLICY ins ON docs FOR INSERT WITH CHECK (is_public = 1);
+    ",
+    )?;
+
+    let rejected = diesel::insert_into(docs::table)
+        .values(ViewRow { id: 2, is_public: 0, body: "private".to_owned() })
+        .execute(&mut conn);
+    assert!(rejected.is_err());
+
+    diesel::insert_into(docs::table)
+        .values(ViewRow { id: 3, is_public: 1, body: "public".to_owned() })
+        .execute(&mut conn)?;
+    assert_eq!(docs_rls::table.count().get_result::<i64>(&mut conn)?, 2);
+
+    Ok(())
+}
+
+/// A `FOR INSERT` policy carrying neither `WITH CHECK` nor `USING` has no
+/// predicate to apply, so it grants the insert.
+///
+/// PostgreSQL forbids `USING` on an INSERT-only policy, so the documented
+/// fallback chain has nothing to fall back to and the policy imposes no
+/// restriction. Characterization test: it pins that a missing predicate reads
+/// as permissive-true rather than as a denial.
+#[test]
+fn insert_policy_without_any_predicate_grants_the_insert() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut conn = setup(
+        "
+        CREATE POLICY sel ON docs FOR SELECT USING (true);
+        CREATE POLICY ins ON docs FOR INSERT;
+    ",
+    )?;
+
+    diesel::insert_into(docs::table)
+        .values(ViewRow { id: 2, is_public: 0, body: "anything".to_owned() })
+        .execute(&mut conn)?;
+
+    assert_eq!(docs_rls::table.count().get_result::<i64>(&mut conn)?, 2);
 
     Ok(())
 }
