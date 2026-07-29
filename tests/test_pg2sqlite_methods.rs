@@ -199,13 +199,14 @@ fn test_on_conflict_do_update() {
 }
 
 #[test]
-fn test_alter_table_is_dropped() {
+fn test_alter_table_add_column_is_translated() {
     let stmts = Pg2Sqlite::default()
-        .sql("ALTER TABLE t ADD COLUMN name TEXT;")
+        .sql("CREATE TABLE t (id INT PRIMARY KEY); ALTER TABLE t ADD COLUMN name TEXT;")
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
         .unwrap();
-    assert!(stmts.is_empty(), "ALTER TABLE should produce no output");
+    assert_eq!(stmts.len(), 2, "ADD COLUMN must be emitted alongside CREATE TABLE");
+    assert!(stmts[1].to_string().contains("ADD COLUMN name TEXT"), "got: {}", stmts[1]);
 }
 
 #[test]

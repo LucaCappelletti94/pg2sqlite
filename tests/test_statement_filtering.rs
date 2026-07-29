@@ -113,10 +113,15 @@ fn drop_sequence_produces_empty() {
     assert_eq!(count, 0, "DROP SEQUENCE should produce no output");
 }
 
+/// `ALTER TABLE ... ADD COLUMN` is translated. The table must be declared so
+/// the column definition can be routed through the schema-aware column
+/// translator.
 #[test]
-fn alter_table_filtered() {
-    let count = translate_count("ALTER TABLE t ADD COLUMN name TEXT;").unwrap();
-    assert_eq!(count, 0, "ALTER TABLE should be filtered");
+fn alter_table_add_column_is_translated() {
+    let count =
+        translate_count("CREATE TABLE t (id INT PRIMARY KEY); ALTER TABLE t ADD COLUMN name TEXT;")
+            .unwrap();
+    assert_eq!(count, 2, "CREATE TABLE and ADD COLUMN should both be emitted");
 }
 
 #[test]
@@ -215,12 +220,12 @@ fn mixed_statements_filters_correctly() {
     ";
     let stmts =
         Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
-    // Should get: CREATE TABLE, CREATE INDEX, DROP INDEX (3 statements)
-    // CREATE EXTENSION and ALTER TABLE should be filtered
+    // CREATE TABLE, CREATE INDEX, ALTER TABLE, DROP INDEX. Only CREATE EXTENSION
+    // is filtered: ALTER TABLE ADD COLUMN is now translated.
     assert_eq!(
         stmts.len(),
-        3,
-        "Expected 3 statements, got: {} - {:?}",
+        4,
+        "Expected 4 statements, got: {} - {:?}",
         stmts.len(),
         stmts.iter().map(ToString::to_string).collect::<Vec<_>>()
     );

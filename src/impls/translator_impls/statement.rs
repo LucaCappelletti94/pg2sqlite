@@ -18,7 +18,8 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        AlterTable, AlterTableOperation, BinaryOperator, Expr, ObjectType, Statement, UnaryOperator,
+        AlterTable, AlterTableOperation, BinaryOperator, ColumnDef, ColumnOption, Expr, ObjectType,
+        Statement, UnaryOperator,
     },
     dialect::SQLiteDialect,
 };
@@ -414,27 +415,74 @@ fn role_access_for_object_name(
 
 /// Translates `ALTER TABLE` operations to SQLite.
 ///
-/// SQLite supports `RENAME TO` and `RENAME COLUMN` natively. Operations it does
-/// not support (ADD CONSTRAINT, etc.) are silently dropped so the caller
-/// receives an empty vec, which is the same outcome as other unsupported DDL.
+/// SQLite supports `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` (since 3.1.1),
+/// and `DROP COLUMN` (since 3.35.0), all at or below the declared 3.46.0 floor.
+/// Remaining operations are dropped, which is tracked as plan item R7.
 fn translate_alter_table(
     alter_table: &AlterTable,
     schema: &ParserDB,
+    options: &Pg2SqliteOptions,
 ) -> Result<Vec<Statement>, Error> {
     if alter_table.operations.len() != 1 {
         return Ok(Vec::new());
     }
     let normalized_name =
         normalize_schema_qualified_object_name_for_sqlite(schema, &alter_table.name)?;
+    let rebuilt = |operation: AlterTableOperation| {
+        Ok(vec![Statement::AlterTable(AlterTable {
+            name: normalized_name.clone(),
+            operations: vec![operation],
+            ..alter_table.clone()
+        })])
+    };
+
     match &alter_table.operations[0] {
-        AlterTableOperation::RenameTable { .. } | AlterTableOperation::RenameColumn { .. } => {
-            Ok(vec![Statement::AlterTable(AlterTable {
-                name: normalized_name,
-                ..alter_table.clone()
-            })])
+        operation @ (AlterTableOperation::RenameTable { .. }
+        | AlterTableOperation::RenameColumn { .. }
+        | AlterTableOperation::DropColumn { .. }) => rebuilt(operation.clone()),
+        AlterTableOperation::AddColumn {
+            column_keyword,
+            if_not_exists,
+            column_def,
+            column_position,
+        } => {
+            reject_unsupported_added_column(column_def, alter_table.name.to_string().as_str())?;
+            rebuilt(AlterTableOperation::AddColumn {
+                column_keyword: *column_keyword,
+                if_not_exists: *if_not_exists,
+                // Route through the same translator the CREATE TABLE path uses so
+                // type mapping, STRICT-legal types, and the parenthesisation
+                // SQLite requires of a non-literal DEFAULT all apply.
+                column_def: column_def.translate(schema, options)?,
+                column_position: column_position.clone(),
+            })
         }
         _ => Ok(Vec::new()),
     }
+}
+
+/// SQLite rejects `ALTER TABLE ... ADD COLUMN` carrying a PRIMARY KEY or UNIQUE
+/// constraint regardless of the table's contents, so emitting one would produce
+/// SQL that cannot execute. Both are visible in the column definition alone.
+///
+/// A `NOT NULL` column without a default is deliberately NOT rejected here: it
+/// succeeds on an empty table and fails on a populated one, exactly as it does
+/// in PostgreSQL, so the runtime error is the faithful outcome.
+fn reject_unsupported_added_column(column_def: &ColumnDef, table_name: &str) -> Result<(), Error> {
+    for option in &column_def.options {
+        let constraint = match &option.option {
+            ColumnOption::PrimaryKey(_) => "PRIMARY KEY",
+            ColumnOption::Unique(_) => "UNIQUE",
+            _ => continue,
+        };
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "ALTER TABLE {table_name} ADD COLUMN {} cannot carry a {constraint} constraint: \
+             SQLite rejects it because enforcing the constraint would require rewriting the \
+             table. Declare the column without it, then add a separate unique index.",
+            column_def.name
+        )));
+    }
+    Ok(())
 }
 
 impl Translator for Statement {
@@ -682,7 +730,7 @@ impl Translator for Statement {
                 Vec::new()
             }
             Statement::AlterTable(alter_table) => {
-                translate_alter_table(alter_table, schema)?
+                translate_alter_table(alter_table, schema, options)?
             }
             unsupported_statement_patterns!() => Vec::new(),
         };

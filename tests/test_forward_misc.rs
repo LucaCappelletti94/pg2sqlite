@@ -394,14 +394,20 @@ fn table_with_foreign_key() {
     assert!(output.contains("REFERENCES"), "Expected REFERENCES: {output}");
 }
 
+/// `ALTER TABLE ... ADD COLUMN` is translated, not filtered. SQLite has
+/// supported it since 3.1.1. Semantic coverage (type mapping, defaults,
+/// execution) lives in `tests/test_alter_table_columns.rs`.
 #[test]
-fn alter_table_is_filtered() {
+fn alter_table_add_column_is_translated() {
     let sql = "
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
         ALTER TABLE users ADD COLUMN age INT;
     ";
     let output = translate(sql);
-    assert!(!output.contains("ALTER TABLE"), "ALTER TABLE should be filtered: {output}");
+    assert!(
+        output.contains("ALTER TABLE users ADD COLUMN age INTEGER"),
+        "ADD COLUMN must be emitted with the mapped type: {output}"
+    );
 }
 
 #[test]

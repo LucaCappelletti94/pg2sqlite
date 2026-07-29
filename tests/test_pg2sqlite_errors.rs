@@ -155,9 +155,9 @@ fn translate_filters_non_translatable_statements() {
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    // Only CREATE TABLE should survive; CREATE EXTENSION and ALTER TABLE are
-    // filtered
-    assert_eq!(result.len(), 1, "Expected 1 statement, got: {}", result.len());
+    // CREATE TABLE and ALTER TABLE survive. Only CREATE EXTENSION is filtered:
+    // SQLite supports ADD COLUMN, so it is translated rather than dropped.
+    assert_eq!(result.len(), 2, "Expected 2 statements, got: {}", result.len());
 }
 
 #[test]
