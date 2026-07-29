@@ -18,8 +18,9 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        AlterTable, AlterTableOperation, BinaryOperator, ColumnDef, ColumnOption, Expr, ObjectType,
-        Statement, UnaryOperator,
+        AlterTable, AlterTableOperation, BinaryOperator, CascadeOption, ColumnDef, ColumnOption,
+        Delete, Expr, FromTable, ObjectType, Statement, TableFactor, TableWithJoins, Truncate,
+        TruncateIdentityOption, UnaryOperator, helpers::attached_token::AttachedToken,
     },
     dialect::SQLiteDialect,
 };
@@ -30,7 +31,8 @@ use crate::{
         generated_sql::parse_generated_sql,
         object_name::{
             last_ident, normalize_schema_qualified_object_name_for_sqlite, quote_identifier,
-            sql_string_literal, sqlite_unqualified_object_name, table_with_implicit_public_lookup,
+            sql_string_literal, sqlite_unqualified_object_name, table_has_implicit_public_rls,
+            table_with_implicit_public_lookup,
         },
         placeholder::rewrite_placeholders_for_sqlite,
         translator_impls::{
@@ -124,7 +126,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::Pragma { .. }
         | Statement::Call(_)
         | Statement::Reset(_)
-        | Statement::Truncate(_)
         | Statement::Directory { .. }
         | Statement::Discard { .. }
         | Statement::ShowViews { .. }
@@ -520,6 +521,147 @@ fn reject_unsupported_added_column(column_def: &ColumnDef, table_name: &str) -> 
     Ok(())
 }
 
+/// Translates `TRUNCATE` to one `DELETE FROM` per named table.
+///
+/// Each table is routed through the `DELETE` translator rather than emitting
+/// the statement directly, so row level security rewriting, table renaming, and
+/// role access checks apply exactly as they do to a hand-written `DELETE FROM`.
+///
+/// The identity options need no special handling, which is not the obvious
+/// conclusion. This crate emits `AUTOINCREMENT` only for the RLS audit table,
+/// so a translated table's primary key is a plain rowid alias with no stored
+/// counter. Emptying such a table restarts its identifiers, which is what
+/// `RESTART IDENTITY` asks for, so that option matches SQLite exactly. It is
+/// `CONTINUE IDENTITY` that cannot be honoured, and since it names PostgreSQL's
+/// default it is warned about rather than rejected: refusing it while accepting
+/// a bare `TRUNCATE` would reject a statement for spelling out the behaviour it
+/// already requested.
+fn translate_truncate(
+    truncate: &Truncate,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<Statement>, Error> {
+    reject_untranslatable_truncate_options(truncate)?;
+
+    if matches!(truncate.identity, Some(TruncateIdentityOption::Continue)) {
+        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+            construct: "TRUNCATE ... CONTINUE IDENTITY",
+            reason: "SQLite keeps no sequence counter for a rowid alias, so the identifiers \
+                     restart rather than continuing. The rows are still deleted.",
+        });
+    }
+
+    let mut statements = Vec::with_capacity(truncate.table_names.len());
+    for target in &truncate.table_names {
+        reject_truncate_of_rls_table(target, schema)?;
+
+        // ONLY and the trailing asterisk both concern table inheritance, which
+        // CREATE TABLE ... INHERITS rejects outright, so no descendants can exist
+        // and either spelling names just this table.
+        let delete = Delete {
+            tables: Vec::new(),
+            from: FromTable::WithFromKeyword(vec![TableWithJoins {
+                relation: TableFactor::Table {
+                    name: target.name.clone(),
+                    alias: None,
+                    args: None,
+                    with_hints: vec![],
+                    version: None,
+                    partitions: vec![],
+                    json_path: None,
+                    sample: None,
+                    index_hints: vec![],
+                    with_ordinality: false,
+                },
+                joins: vec![],
+            }]),
+            using: None,
+            selection: None,
+            returning: None,
+            output: None,
+            order_by: Vec::new(),
+            limit: None,
+            delete_token: AttachedToken::empty(),
+            optimizer_hints: Vec::new(),
+        };
+
+        statements.push(delete.translate(schema, options)?);
+    }
+
+    Ok(statements)
+}
+
+/// Rejects `TRUNCATE` against a table whose rows are guarded by row level
+/// security.
+///
+/// PostgreSQL's policies do not apply to `TRUNCATE`, which needs the TRUNCATE
+/// privilege and then removes every row. An RLS table is translated as a view
+/// over a renamed backing table, and the view's `INSTEAD OF DELETE` trigger
+/// carries the policy predicate, so deleting through it would remove only the
+/// rows the policy admits and silently leave the rest. Emptying the backing
+/// table instead would match PostgreSQL but bypass the wrapper the caller asked
+/// for, and it is the wrapper that the validation monitor watches.
+///
+/// Neither reading is safe to pick silently, so the statement is refused with
+/// both spelled out.
+fn reject_truncate_of_rls_table(
+    target: &sqlparser::ast::TruncateTableTarget,
+    schema: &ParserDB,
+) -> Result<(), Error> {
+    if !table_has_implicit_public_rls(schema, &target.name)? {
+        return Ok(());
+    }
+
+    Err(Error::UnsupportedSQLiteFeature(format!(
+        "TRUNCATE {} cannot be translated because the table has row level security enabled. \
+         PostgreSQL ignores policies for TRUNCATE and removes every row, but the translated table \
+         is a view whose DELETE trigger applies the policy, so a translated TRUNCATE would delete \
+         only the rows the policy admits and silently leave the rest. Write the DELETE you mean: \
+         against the view to respect the policy, or against the backing table to empty it.",
+        target.name
+    )))
+}
+
+/// Rejects the `TRUNCATE` options with no SQLite form, per the reporting policy
+/// in D2. Each would change which rows survive, so none may be dropped quietly.
+fn reject_untranslatable_truncate_options(truncate: &Truncate) -> Result<(), Error> {
+    let names = truncate
+        .table_names
+        .iter()
+        .map(|target| target.name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let unsupported = if matches!(truncate.cascade, Some(CascadeOption::Cascade)) {
+        Some((
+            "CASCADE",
+            "it also empties every table holding a foreign key reference to the target, which \
+             SQLite cannot express in one statement. Truncate those tables explicitly.",
+        ))
+    } else if truncate.partitions.is_some() {
+        Some(("PARTITION", "SQLite has no table partitioning."))
+    } else if truncate.on_cluster.is_some() {
+        Some(("ON CLUSTER", "SQLite is not a clustered database."))
+    } else if truncate.if_exists {
+        Some((
+            "IF EXISTS",
+            "SQLite's DELETE has no such guard, so a missing table would raise an error rather \
+             than being skipped.",
+        ))
+    } else {
+        None
+    };
+
+    match unsupported {
+        Some((option, reason)) => {
+            Err(Error::UnsupportedSQLiteFeature(format!(
+                "TRUNCATE {names} ... {option} cannot be translated to SQLite because {reason}"
+            )))
+        }
+        None => Ok(()),
+    }
+}
+
 impl Translator for Statement {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -767,6 +909,7 @@ impl Translator for Statement {
             Statement::AlterTable(alter_table) => {
                 translate_alter_table(alter_table, schema, options)?
             }
+            Statement::Truncate(truncate) => translate_truncate(truncate, schema, options)?,
             unsupported_statement_patterns!() => Vec::new(),
         };
 
