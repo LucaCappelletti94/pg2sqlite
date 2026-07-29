@@ -12,9 +12,6 @@ fn default_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
 }
 
-// ==================== L1: PK column expressions translated
-// ====================
-
 #[test]
 fn pk_constraint_columns_translated() {
     // A simple PRIMARY KEY constraint should pass through correctly
@@ -35,9 +32,6 @@ fn pk_constraint_columns_translated() {
     assert!(lower.contains("primary key"), "PRIMARY KEY should appear in output: {sql}");
 }
 
-// ==================== L1: UNIQUE constraint columns translated
-// ====================
-
 #[test]
 fn unique_constraint_columns_translated() {
     // A UNIQUE constraint with expression should translate the expression
@@ -57,9 +51,6 @@ fn unique_constraint_columns_translated() {
 
     assert!(lower.contains("unique"), "UNIQUE should appear in output: {sql}");
 }
-
-// ==================== L1: PK + UNIQUE with characteristics
-// ====================
 
 #[test]
 fn pk_with_deferrable_characteristics_errors() {

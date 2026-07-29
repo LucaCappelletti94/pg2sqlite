@@ -5,10 +5,6 @@
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// =============================================================================
-// Section 3: #> / #>> must error
-// =============================================================================
-
 #[test]
 fn test_hash_arrow_returns_error() {
     let result = Pg2Sqlite::default()
@@ -36,10 +32,6 @@ fn test_regular_arrow_still_passes_through() -> Result<(), Box<dyn std::error::E
     assert!(!translated.is_empty());
     Ok(())
 }
-
-// =============================================================================
-// Section 4: JsonAccess in PL/pgSQL trigger bodies
-// =============================================================================
 
 #[test]
 fn test_json_access_in_trigger_body() -> Result<(), Box<dyn std::error::Error>> {

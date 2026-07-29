@@ -15,29 +15,21 @@ use alloc::{
 use super::Schema;
 use crate::traits::TranslationOptions;
 
-/// Trait to reverse translate between a `SQLite` entry and a `PostgreSQL`
-/// entry.
-///
-/// This is the inverse of the [`crate::traits::Translator`] trait, converting
-/// SQLite DML statements back to their PostgreSQL equivalents.
+/// Trait for reverse translating SQLite DML statements to PostgreSQL,
+/// the inverse of [`crate::traits::Translator`].
 pub trait ReverseTranslator {
-    /// The schema type to be used for the translation.
+    /// Schema type for the translation.
     type Schema: Schema;
-    /// The translation options to be used for the translation.
+    /// Translation options type.
     type Options: TranslationOptions;
-    /// The `PostgreSQL` entry type to be used for the translation.
+    /// Produced PostgreSQL entry type.
     type PostgresEntry;
 
-    /// Reverse translate a `SQLite` entry to a `PostgreSQL` entry.
-    ///
-    /// # Arguments
-    ///
-    /// * `schema` - The schema to be used for the translation.
-    /// * `options` - The translation options to be used for the translation.
+    /// Reverse translates a SQLite entry to its PostgreSQL equivalent.
     ///
     /// # Errors
     ///
-    /// * `crate::errors::Error` - If the reverse translation fails.
+    /// Returns an error if the reverse translation fails.
     fn reverse_translate(
         &self,
         schema: &Self::Schema,

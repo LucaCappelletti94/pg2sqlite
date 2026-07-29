@@ -99,7 +99,6 @@ fn translate_and_setup()
     Ok((connection, options))
 }
 
-/// Snapshot test for tenant isolation RLS translation.
 #[test]
 fn test_tenant_isolation_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let sql = include_str!("fixtures/rls_tenant_isolation.sql");
@@ -123,7 +122,6 @@ fn test_tenant_isolation_translation_snapshot() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-/// Test that a user sees projects only from their own tenant.
 #[test]
 fn test_user_sees_own_tenant_only() -> Result<(), Box<dyn std::error::Error>> {
     let (mut connection, _) = translate_and_setup()?;
@@ -198,7 +196,6 @@ fn test_user_sees_own_tenant_only() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that a user cannot see projects in another tenant.
 #[test]
 fn test_user_cannot_see_other_tenant() -> Result<(), Box<dyn std::error::Error>> {
     let (mut connection, _) = translate_and_setup()?;
@@ -243,7 +240,6 @@ fn test_user_cannot_see_other_tenant() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Test that a user in multiple tenants sees projects from all their tenants.
 #[test]
 fn test_multi_tenant_user_sees_both() -> Result<(), Box<dyn std::error::Error>> {
     let (mut connection, _) = translate_and_setup()?;
@@ -305,7 +301,6 @@ fn test_multi_tenant_user_sees_both() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Test that only tenant admins can delete projects.
 #[test]
 fn test_admin_can_delete() -> Result<(), Box<dyn std::error::Error>> {
     let (mut connection, _) = translate_and_setup()?;
@@ -350,7 +345,6 @@ fn test_admin_can_delete() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that non-admin members cannot delete projects.
 #[test]
 fn test_member_cannot_delete() -> Result<(), Box<dyn std::error::Error>> {
     let (mut connection, _) = translate_and_setup()?;

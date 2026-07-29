@@ -77,8 +77,6 @@ fn test_fts5_external_content_search_works() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-// ==================== Bug 6: backfill pre-existing rows ====================
-
 #[test]
 fn test_fts5_backfill_insert_is_generated() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -141,9 +139,6 @@ fn test_fts5_backfill_populates_preexisting_rows() -> Result<(), Box<dyn std::er
 
     Ok(())
 }
-
-// ==================== Bug 7: partial-index WHERE predicate in WHEN clause
-// ====================
 
 #[test]
 fn test_fts5_partial_index_generates_when_clause_in_triggers()

@@ -12,7 +12,6 @@ diesel::table! {
     }
 }
 
-/// User record with UUID.
 #[derive(Queryable, Selectable, Insertable, Debug)]
 #[diesel(table_name = users)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]

@@ -18,10 +18,6 @@ use pg2sqlite::{
 };
 use rosetta_uuid::Uuid;
 
-// =============================================================================
-// DIESEL SCHEMA
-// =============================================================================
-
 diesel::table! {
     use diesel::sql_types::*;
     use rosetta_uuid::diesel_impls::Uuid;
@@ -69,10 +65,6 @@ diesel::joinable!(group_memberships -> groups (group_id));
 diesel::joinable!(group_memberships -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(groups, users, group_memberships,);
-
-// =============================================================================
-// DIESEL MODELS
-// =============================================================================
 
 /// A group entity with optional parent for hierarchy.
 #[derive(Queryable, Selectable, Debug, Insertable, PartialEq)]
@@ -256,11 +248,6 @@ fn setup_database(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-// =============================================================================
-// TESTS
-// =============================================================================
-
-/// Test that the groups.sql fixture translates to valid SQLite.
 #[test]
 fn test_groups_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let sql = include_str!("fixtures/groups.sql");
@@ -283,7 +270,6 @@ fn test_groups_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Test that the translated schema can be executed in SQLite.
 #[test]
 fn test_groups_schema_execution() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = establish_connection();
@@ -299,7 +285,6 @@ fn test_groups_schema_execution() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test basic CRUD operations using Diesel models.
 #[test]
 fn test_diesel_crud_operations() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = establish_connection();
@@ -391,7 +376,6 @@ fn test_membership_removal_cascades_to_children() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// Test unique constraint on group memberships.
 #[test]
 fn test_duplicate_membership_prevented() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = establish_connection();
@@ -412,7 +396,6 @@ fn test_duplicate_membership_prevented() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Test cascade delete: deleting a group removes its memberships.
 #[test]
 fn test_cascade_delete_group_removes_memberships() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = establish_connection();
@@ -441,7 +424,6 @@ fn test_cascade_delete_group_removes_memberships() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Test cascade delete: deleting a parent group removes child groups.
 #[test]
 fn test_cascade_delete_parent_group_removes_children() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = establish_connection();

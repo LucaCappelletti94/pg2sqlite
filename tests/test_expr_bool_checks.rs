@@ -5,10 +5,6 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema for tests
-// ============================================================================
-
 mod schema {
     diesel::table! {
         /// Flags table for boolean check tests.
@@ -38,11 +34,6 @@ struct Flag {
     active: Option<bool>,
 }
 
-// ============================================================================
-// IS TRUE Tests
-// ============================================================================
-
-/// Test that IS TRUE expressions are translated correctly.
 #[test]
 fn test_is_true_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -71,7 +62,6 @@ fn test_is_true_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test IS TRUE semantic execution using diesel.
 #[test]
 fn test_is_true_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -114,11 +104,6 @@ fn test_is_true_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// IS FALSE Tests
-// ============================================================================
-
-/// Test that IS FALSE expressions are translated correctly.
 #[test]
 fn test_is_false_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -147,7 +132,6 @@ fn test_is_false_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test IS FALSE semantic execution.
 #[test]
 fn test_is_false_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -187,11 +171,6 @@ fn test_is_false_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// IS NOT TRUE / IS NOT FALSE Tests
-// ============================================================================
-
-/// Test that IS NOT TRUE expressions are translated correctly.
 #[test]
 fn test_is_not_true_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -219,7 +198,6 @@ fn test_is_not_true_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that IS NOT FALSE expressions are translated correctly.
 #[test]
 fn test_is_not_false_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

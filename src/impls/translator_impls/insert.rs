@@ -44,11 +44,9 @@ impl Translator for Insert {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        // Translate the source (VALUES or SELECT)
         let source =
             self.source.as_ref().map(|q| q.translate(schema, options)).transpose()?.map(Box::new);
 
-        // Translate RETURNING expressions
         let returning = translate_returning::<Forward>(self.returning.as_ref(), schema, options)?;
 
         let mut insert = Insert { source, returning, ..self.clone() };
@@ -79,7 +77,6 @@ impl Translator for Insert {
             wrap_uuid_text_literals(&mut insert, schema, options);
         }
 
-        // Handle ON CONFLICT
         if let Some(on_insert) = &self.on {
             match on_insert {
                 sqlparser::ast::OnInsert::OnConflict(on_conflict) => {

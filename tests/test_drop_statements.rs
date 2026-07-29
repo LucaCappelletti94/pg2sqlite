@@ -7,10 +7,6 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, Translator};
 mod helpers;
 use helpers::Count;
 
-// ============================================================================
-// Schema Definitions
-// ============================================================================
-
 diesel::table! {
     /// Test table for users.
     users (id) {
@@ -48,10 +44,6 @@ diesel::table! {
         id -> Integer,
     }
 }
-
-// ============================================================================
-// Model Structs
-// ============================================================================
 
 /// A user record.
 #[derive(Queryable, Selectable, Insertable)]
@@ -175,11 +167,6 @@ fn trigger_exists(conn: &mut SqliteConnection, trigger_name: &str) -> bool {
     result.is_ok_and(|c| c.count > 0)
 }
 
-// ============================================================================
-// DROP TABLE Tests
-// ============================================================================
-
-/// Test basic DROP TABLE translation.
 #[test]
 fn test_drop_table_translation() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP TABLE users;")?;
@@ -192,7 +179,6 @@ fn test_drop_table_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test DROP TABLE IF EXISTS translation.
 #[test]
 fn test_drop_table_if_exists_translation() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP TABLE IF EXISTS users;")?;
@@ -204,7 +190,6 @@ fn test_drop_table_if_exists_translation() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Test DROP TABLE IF EXISTS execution when table does not exist.
 #[test]
 fn test_drop_table_if_exists_nonexistent() -> Result<(), Box<dyn std::error::Error>> {
     // Create a minimal setup, then execute DROP TABLE IF EXISTS
@@ -226,7 +211,6 @@ fn test_drop_table_if_exists_nonexistent() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Test DROP TABLE CASCADE is stripped for SQLite.
 #[test]
 fn test_drop_table_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP TABLE users CASCADE;")?;
@@ -238,7 +222,6 @@ fn test_drop_table_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Test DROP TABLE RESTRICT is stripped for SQLite.
 #[test]
 fn test_drop_table_restrict_stripped() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP TABLE users RESTRICT;")?;
@@ -250,7 +233,6 @@ fn test_drop_table_restrict_stripped() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Test DROP TABLE execution in SQLite.
 #[test]
 fn test_drop_table_execution() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -271,11 +253,6 @@ fn test_drop_table_execution() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// DROP VIEW Tests
-// ============================================================================
-
-/// Test basic DROP VIEW translation and execution.
 #[test]
 fn test_drop_view() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -296,7 +273,6 @@ fn test_drop_view() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test DROP VIEW IF EXISTS.
 #[test]
 fn test_drop_view_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -310,7 +286,6 @@ fn test_drop_view_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test DROP VIEW CASCADE is stripped.
 #[test]
 fn test_drop_view_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -333,11 +308,6 @@ fn test_drop_view_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// DROP INDEX Tests
-// ============================================================================
-
-/// Test basic DROP INDEX translation and execution.
 #[test]
 fn test_drop_index() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -354,7 +324,6 @@ fn test_drop_index() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test DROP INDEX IF EXISTS.
 #[test]
 fn test_drop_index_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -368,7 +337,6 @@ fn test_drop_index_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test DROP INDEX translation.
 #[test]
 fn test_drop_index_translation() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP INDEX idx_name;")?;
@@ -380,11 +348,8 @@ fn test_drop_index_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// DROP TRIGGER Tests
-// ============================================================================
-
-/// Test DROP TRIGGER translation - verifies ON table_name is stripped.
+/// SQLite's DROP TRIGGER takes no `ON <table>`, so the clause has to be
+/// stripped.
 #[test]
 fn test_drop_trigger_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -421,7 +386,6 @@ fn test_drop_trigger_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test DROP TRIGGER IF EXISTS translation.
 #[test]
 fn test_drop_trigger_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP TRIGGER IF EXISTS nonexistent_trigger ON users;")?;
@@ -437,7 +401,6 @@ fn test_drop_trigger_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test DROP TRIGGER CASCADE is stripped.
 #[test]
 fn test_drop_trigger_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP TRIGGER my_trigger ON my_table CASCADE;")?;
@@ -451,7 +414,6 @@ fn test_drop_trigger_cascade_stripped() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Test DROP TRIGGER execution with SQLite.
 #[test]
 fn test_drop_trigger_execution() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -486,11 +448,6 @@ fn test_drop_trigger_execution() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// PostgreSQL-specific DROP statements (should be ignored)
-// ============================================================================
-
-/// Test that DROP ROLE produces no output (ignored).
 #[test]
 fn test_drop_role_ignored() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP ROLE some_role;")?;
@@ -498,7 +455,6 @@ fn test_drop_role_ignored() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that DROP SCHEMA produces no output (ignored).
 #[test]
 fn test_drop_schema_ignored() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP SCHEMA my_schema CASCADE;")?;
@@ -506,7 +462,6 @@ fn test_drop_schema_ignored() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that DROP DATABASE produces no output (ignored).
 #[test]
 fn test_drop_database_ignored() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP DATABASE my_database;")?;
@@ -514,7 +469,6 @@ fn test_drop_database_ignored() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that DROP SEQUENCE produces no output (ignored).
 #[test]
 fn test_drop_sequence_ignored() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP SEQUENCE my_sequence;")?;
@@ -522,17 +476,12 @@ fn test_drop_sequence_ignored() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that DROP TYPE produces no output (ignored).
 #[test]
 fn test_drop_type_ignored() -> Result<(), Box<dyn std::error::Error>> {
     let translated = translate_statement("DROP TYPE my_custom_type;")?;
     assert!(translated.is_empty(), "DROP TYPE should produce no output");
     Ok(())
 }
-
-// ============================================================================
-// Snapshot Tests
-// ============================================================================
 
 /// Snapshot test for DROP statement translations.
 #[test]

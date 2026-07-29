@@ -48,16 +48,13 @@ impl Translator for Delete {
             // Convert DELETE FROM T USING U WHERE cond
             // to DELETE FROM T WHERE EXISTS (SELECT 1 FROM U WHERE cond)
 
-            // Translate USING tables
             let translated_using = using
                 .iter()
                 .map(|twj| translate_table_with_joins(twj, schema, options))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            // Keep the already-translated selection (WHERE clause)
             let original_selection = delete.selection;
 
-            // Create the subquery
             let mut subquery = Query {
                 with: None,
                 body: Box::new(SetExpr::Select(Box::new(Select {
@@ -106,14 +103,12 @@ impl Translator for Delete {
 
             if let SetExpr::Select(ref mut select) = *subquery.body {
                 for table_with_joins in &mut select.from {
-                    // Update main table reference
                     if let TableFactor::Table { name, .. } = &mut table_with_joins.relation
                         && table_has_implicit_public_rls(schema, name)?
                     {
                         *name = append_suffix(name, rls_suffix);
                     }
 
-                    // Update JOINed table references
                     for join in &mut table_with_joins.joins {
                         if let TableFactor::Table { name, .. } = &mut join.relation
                             && table_has_implicit_public_rls(schema, name)?
@@ -124,10 +119,8 @@ impl Translator for Delete {
                 }
             }
 
-            // New selection is EXISTS(subquery)
             delete.selection = Some(Expr::Exists { subquery: Box::new(subquery), negated: false });
 
-            // Clear USING
             delete.using = None;
         }
 

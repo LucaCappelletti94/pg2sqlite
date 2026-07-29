@@ -11,10 +11,6 @@ use pg2sqlite::{
     traits::TranslationOptions,
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn make_options_with_suffix(suffix: &str) -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
@@ -27,10 +23,6 @@ fn make_options_with_suffix(suffix: &str) -> Pg2SqliteOptions {
             "current_app_user",
         ))
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 /// The backing table must carry the custom suffix; the view retains the
 /// original table name.

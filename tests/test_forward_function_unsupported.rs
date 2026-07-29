@@ -13,8 +13,6 @@ fn expect_unsupported(sql: &str) {
     assert!(result.is_err(), "Expected unsupported error for: {sql}, got: {result:?}");
 }
 
-// ==================== String functions ====================
-
 #[test]
 fn regexp_split_to_array_unsupported() {
     expect_unsupported("SELECT regexp_split_to_array('hello world', '\\s+')");
@@ -49,8 +47,6 @@ fn convert_from_unsupported() {
 fn convert_to_unsupported() {
     expect_unsupported("SELECT convert_to('hello', 'UTF8')");
 }
-
-// ==================== Math functions ====================
 
 #[test]
 fn log_unsupported() {
@@ -127,8 +123,6 @@ fn width_bucket_unsupported() {
     expect_unsupported("SELECT width_bucket(5.35, 0.024, 10.06, 5)");
 }
 
-// ==================== Date/time functions ====================
-
 #[test]
 fn make_timestamptz_unsupported() {
     expect_unsupported("SELECT make_timestamptz(2024, 1, 1, 12, 0, 0)");
@@ -164,8 +158,6 @@ fn timeofday_unsupported() {
     expect_unsupported("SELECT timeofday()");
 }
 
-// ==================== JSON functions ====================
-
 #[test]
 fn json_strip_nulls_unsupported() {
     expect_unsupported("SELECT json_strip_nulls('{\"a\": null}')");
@@ -200,8 +192,6 @@ fn jsonb_to_record_unsupported() {
 fn row_to_json_unsupported() {
     expect_unsupported("SELECT row_to_json(row(1, 'hello'))");
 }
-
-// ==================== Array functions ====================
 
 #[test]
 fn array_append_unsupported() {
@@ -268,8 +258,6 @@ fn cardinality_unsupported() {
     expect_unsupported("SELECT cardinality(ARRAY[1,2,3])");
 }
 
-// ==================== Network functions ====================
-
 #[test]
 fn host_unsupported() {
     expect_unsupported("SELECT host('192.168.1.0/24')");
@@ -314,8 +302,6 @@ fn network_unsupported() {
 fn set_masklen_unsupported() {
     expect_unsupported("SELECT set_masklen('192.168.1.0/24', 16)");
 }
-
-// ==================== System catalog functions ====================
 
 #[test]
 fn current_schemas_unsupported() {

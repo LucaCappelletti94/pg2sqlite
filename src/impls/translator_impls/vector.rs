@@ -91,14 +91,13 @@ pub(crate) fn is_halfvec_data_type(data_type: &DataType) -> bool {
 
 /// Extract dimension count from a vector type like vector(384).
 fn extract_dimensions(data_type: &DataType) -> Option<u32> {
-    if let DataType::Custom(_, modifiers) = data_type {
-        // modifiers contains the type arguments like (384)
-        if let Some(first_mod) = modifiers.first() {
-            // Try to parse the modifier as a dimension count
-            if let Ok(dim) = first_mod.parse::<u32>() {
-                return Some(dim);
-            }
-        }
+    // The modifier list carries the type arguments, so `vector(384)` arrives
+    // as the single modifier "384".
+    if let DataType::Custom(_, modifiers) = data_type
+        && let Some(first_mod) = modifiers.first()
+        && let Ok(dim) = first_mod.parse::<u32>()
+    {
+        return Some(dim);
     }
     None
 }
@@ -128,7 +127,6 @@ pub fn extract_vector_columns(create_table: &CreateTable) -> Vec<VectorColumnInf
 
 /// Find the primary key column(s) for a table.
 fn find_pk_column(create_table: &CreateTable, schema: &ParserDB) -> Option<String> {
-    // First check table-level constraints
     for constraint in &create_table.constraints {
         if let sqlparser::ast::TableConstraint::PrimaryKey(pk) = constraint
             && let Some(first_col) = pk.columns.first()
@@ -138,7 +136,6 @@ fn find_pk_column(create_table: &CreateTable, schema: &ParserDB) -> Option<Strin
         }
     }
 
-    // Then check column-level PRIMARY KEY constraints
     for col in &create_table.columns {
         for opt in &col.options {
             if matches!(opt.option, sqlparser::ast::ColumnOption::PrimaryKey(_)) {
@@ -147,7 +144,6 @@ fn find_pk_column(create_table: &CreateTable, schema: &ParserDB) -> Option<Strin
         }
     }
 
-    // Try to look up from schema
     if let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &create_table.name) {
         let pk_cols: Vec<_> = table.primary_key_columns(schema).collect();
         if pk_cols.len() == 1 {
@@ -204,14 +200,12 @@ fn create_vec0_triggers(
     let update_trigger_name = quote_identifier(&format!("{vec_table_name}_au"));
 
     vec![
-        // AFTER INSERT trigger
         format!(
             "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON {trigger_table_quoted} BEGIN \
              INSERT INTO {vec_table_quoted} ({vec_pk_column_quoted}, {column_name_quoted}) \
              VALUES ({new_pk}, {new_vec_col}); \
              END"
         ),
-        // AFTER DELETE trigger
         format!(
             "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON {trigger_table_quoted} BEGIN \
              DELETE FROM {vec_table_quoted} WHERE {vec_pk_column_quoted} = {old_pk}; \
@@ -235,38 +229,6 @@ fn create_vec0_triggers(
 ///
 /// Returns an error if the table has vector columns but no single-column
 /// primary key, as this is required for the synchronization triggers.
-///
-/// # Example output
-///
-/// For input:
-/// ```sql
-/// CREATE TABLE items (
-///     id INTEGER PRIMARY KEY,
-///     embedding vector(384)
-/// );
-/// ```
-///
-/// Generates:
-/// ```sql
-/// CREATE VIRTUAL TABLE items_embedding_vec USING vec0(
-///     id_id INTEGER PRIMARY KEY,
-///     embedding float[384]
-/// );
-///
-/// CREATE TRIGGER items_embedding_vec_ai AFTER INSERT ON items BEGIN
-///     INSERT INTO items_embedding_vec (id_id, embedding)
-///     VALUES (NEW.id, NEW.embedding);
-/// END;
-///
-/// CREATE TRIGGER items_embedding_vec_au AFTER UPDATE OF embedding ON items BEGIN
-///     UPDATE items_embedding_vec SET embedding = NEW.embedding
-///     WHERE id_id = NEW.id;
-/// END;
-///
-/// CREATE TRIGGER items_embedding_vec_ad AFTER DELETE ON items BEGIN
-///     DELETE FROM items_embedding_vec WHERE id_id = OLD.id;
-/// END;
-/// ```
 pub fn generate_vec0_statements(
     create_table: &CreateTable,
     schema: &ParserDB,
@@ -286,7 +248,6 @@ pub fn generate_vec0_statements(
         ))
     })?;
 
-    // Look up the table in schema to check for RLS
     let table_obj =
         table_with_implicit_public_lookup(schema, &create_table.name)?.ok_or_else(|| {
             Error::UnsupportedSQLiteFeature(format!(
@@ -294,22 +255,17 @@ pub fn generate_vec0_statements(
             ))
         })?;
 
-    // Determine the correct table for trigger attachment (accounts for RLS)
     let trigger_table_name = resolve_trigger_table_name(&table_name, table_obj, schema, options);
 
     let dialect = sqlparser::dialect::SQLiteDialect {};
     let mut statements = Vec::new();
 
-    // Generate statements for each vector column
-    // If there are multiple vector columns, we create one vec0 table for each
     for vec_col in &vector_cols {
         let vec_table_name = format!("{table_name}_{}_vec", vec_col.column_name);
 
-        // Generate CREATE VIRTUAL TABLE using proper AST
         let create_vec0 = create_vec0_virtual_table(&vec_table_name, &pk_column, vec_col);
         statements.push(create_vec0);
 
-        // Generate triggers (use trigger_table_name for RLS support)
         for trigger_sql in create_vec0_triggers(
             &trigger_table_name,
             &vec_table_name,

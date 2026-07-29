@@ -30,7 +30,6 @@ fn translation_options() -> Pg2SqliteOptions {
         .with_rls_audit_table_name("rls_audit".to_string())
 }
 
-/// Test that verifies FK metadata points to the correct backing table
 #[test]
 fn test_fk_points_to_rls_backing_table() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_sql = include_str!("fixtures/rls_fk_simple.sql");
@@ -61,7 +60,6 @@ fn test_fk_points_to_rls_backing_table() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Test that foreign keys are enforced correctly in SQLite
 #[test]
 fn test_fk_constraint_enforcement() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -124,7 +122,6 @@ fn test_fk_constraint_enforcement() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test FK constraint behavior when both tables have RLS
 #[test]
 fn test_fk_both_tables_rls() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -196,7 +193,6 @@ fn test_fk_both_tables_rls() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test translation snapshot for FK with RLS
 #[test]
 fn test_rls_fk_simple_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_sql = include_str!("fixtures/rls_fk_simple.sql");

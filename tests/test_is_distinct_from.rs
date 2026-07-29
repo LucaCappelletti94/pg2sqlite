@@ -99,10 +99,6 @@ fn test_is_not_distinct_from_semantic() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-// ============================================================================
-// IS UNKNOWN / IS NOT UNKNOWN tests (from test_expr_overlay_extract.rs)
-// ============================================================================
-
 mod expr_overlay_schema {
     diesel::table! {
         pair_values (id) {

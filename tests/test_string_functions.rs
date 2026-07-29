@@ -6,10 +6,6 @@ use diesel::prelude::*;
 use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema for tests
-// ============================================================================
-
 diesel::table! {
     /// Table for testing string functions.
     texts (id) {
@@ -44,7 +40,6 @@ diesel::table! {
     }
 }
 
-/// A text record for testing string functions.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = texts)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -55,7 +50,6 @@ struct Text {
     content: String,
 }
 
-/// A code record for testing chr function.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = codes)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -66,7 +60,6 @@ struct Code {
     code: i32,
 }
 
-/// A name record for testing CONCAT_WS function.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = names)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -170,7 +163,6 @@ fn test_strpos_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that chr(n) is translated to char(n).
 #[test]
 fn test_chr_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -404,10 +396,6 @@ fn test_concat_ws_semantic_skips_nulls() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-// ============================================================================
-// left() -> substr()
-// ============================================================================
-
 #[test]
 fn left_function_to_substr() {
     let options = Pg2SqliteOptions::default();
@@ -436,10 +424,6 @@ fn left_function_semantic() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-// ============================================================================
-// right() -> substr()
-// ============================================================================
 
 #[test]
 fn right_function_to_substr() {

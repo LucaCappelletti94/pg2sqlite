@@ -17,10 +17,6 @@ fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
 }
 
-// ============================================================================
-// 3a: IsTrue / IsFalse / IsUnknown variants
-// ============================================================================
-
 #[test]
 fn test_plpgsql_is_true_transform() {
     let options = uuid_options();
@@ -76,10 +72,6 @@ fn test_plpgsql_is_not_false_transform() {
     );
 }
 
-// ============================================================================
-// 3b: CrossJoin — gen_random_uuid() in WHERE with CROSS JOIN
-// ============================================================================
-
 #[test]
 fn test_plpgsql_cross_join_transform() {
     let options = uuid_options();
@@ -108,10 +100,6 @@ fn test_plpgsql_cross_join_transform() {
     );
 }
 
-// ============================================================================
-// 3c: LIMIT expression transform in trigger body
-// ============================================================================
-
 #[test]
 fn test_plpgsql_limit_expr_transform() {
     // Use gen_random_uuid() as a LIMIT expression — artificial but tests the
@@ -139,10 +127,6 @@ fn test_plpgsql_limit_expr_transform() {
         "gen_random_uuid should be translated in query with LIMIT: {sql}"
     );
 }
-
-// ============================================================================
-// 3d: Derived subquery with ORDER BY — uses full transform_cte_query
-// ============================================================================
 
 #[test]
 fn test_plpgsql_derived_subquery_full_transform() {

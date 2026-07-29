@@ -46,7 +46,6 @@ pub(crate) enum FtsTranslation {
 }
 
 /// Extract column identifiers from an expression.
-/// This recursively walks the expression tree to find all column references.
 fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
     match expr {
         Expr::Identifier(ident) => vec![ident.value.clone()],
@@ -61,7 +60,6 @@ fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
         }
         Expr::Nested(inner) => extract_columns_from_expr(inner),
         Expr::Function(func) => {
-            // Extract columns from function arguments
             function_argument_exprs(&func.args)
                 .into_iter()
                 .flat_map(extract_columns_from_expr)
@@ -73,8 +71,7 @@ fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
     }
 }
 
-/// Check if an expression is a to_tsvector function call and extract its
-/// columns.
+/// Check if `expr` contains a `to_tsvector` call and return its column list.
 fn analyze_fts_expression(expr: &Expr) -> Option<Vec<String>> {
     match expr {
         Expr::Function(func) => {
@@ -84,7 +81,6 @@ fn analyze_fts_expression(expr: &Expr) -> Option<Vec<String>> {
             if func_name == "to_tsvector" {
                 // to_tsvector can have 1 or 2 arguments:
                 // to_tsvector(text) or to_tsvector('config', text)
-                // We need to extract columns from the text argument(s)
                 let columns: Vec<String> = function_argument_exprs(&func.args)
                     .into_iter()
                     .flat_map(extract_columns_from_expr)
@@ -95,14 +91,12 @@ fn analyze_fts_expression(expr: &Expr) -> Option<Vec<String>> {
                 None
             }
         }
-        // Could also be a nested expression containing to_tsvector
         Expr::Nested(inner) => analyze_fts_expression(inner),
         _ => None,
     }
 }
 
-/// Analyze a GIN/GiST index to determine how it should be translated.
-/// Both GIN and GiST can be used for full-text search with to_tsvector().
+/// Analyze a GIN/GiST index and return how to translate it as FTS5.
 pub(crate) fn analyze_fts_index(create_index: &CreateIndex) -> FtsTranslation {
     let table_name = create_index.table_name.clone();
     let index_type = match create_index.using {
@@ -171,7 +165,6 @@ fn create_fts5_virtual_table(
 
 /// Generate FTS5 sync triggers for external content mode.
 ///
-/// These triggers keep the FTS5 index in sync with the source table.
 /// The DELETE and UPDATE triggers use the FTS5 `'delete'` command (inserting
 /// the special string into the table's own name column) rather than a plain
 /// `DELETE`, which is required when the FTS5 table is in external content mode.
@@ -199,18 +192,15 @@ fn create_fts5_triggers(
     let delete_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ad"));
     let update_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_au"));
 
-    // Build optional WHEN clause; placed between ON <table> and BEGIN.
     let when_clause = predicate_sql.map(|p| format!(" WHEN {p}")).unwrap_or_default();
 
     vec![
-        // AFTER INSERT trigger - attach to the actual table (may be RLS backing table)
         format!(
             "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON \
              {trigger_table_quoted}{when_clause} BEGIN \
              INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
              END"
         ),
-        // AFTER DELETE trigger - use FTS5 'delete' command (external content mode)
         format!(
             "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON \
              {trigger_table_quoted}{when_clause} BEGIN \
@@ -218,7 +208,6 @@ fn create_fts5_triggers(
              VALUES ('delete', {old_pk}, {old_values}); \
              END"
         ),
-        // AFTER UPDATE trigger - delete old entry then insert new (external content mode)
         format!(
             "CREATE TRIGGER {update_trigger_name} AFTER UPDATE ON \
              {trigger_table_quoted}{when_clause} BEGIN \
@@ -245,7 +234,6 @@ fn create_fts5_statements(
         .and_then(|p| p.as_ident())
         .map_or_else(|| "unknown".to_string(), |i| i.value.clone());
 
-    // Look up the table to get its primary key column
     let table = table_with_implicit_public_lookup(schema, table_name)?.ok_or_else(|| {
         Error::UnsupportedSQLiteFeature(format!(
             "Could not find table '{base_name}' in schema for FTS5 index creation"
@@ -275,10 +263,6 @@ fn create_fts5_statements(
              Use an INTEGER or BIGINT primary key, or add a surrogate INTEGER rowid column."
         )));
     }
-
-    // Determine the correct table for trigger attachment (accounts for RLS).
-    // In external content mode the content table is the same as the trigger
-    // table (i.e. the RLS backing table when applicable).
     let trigger_table_name = resolve_trigger_table_name(&base_name, table, schema, options);
 
     let fts_name = format!("{base_name}_fts");
@@ -290,7 +274,6 @@ fn create_fts5_statements(
     let mut statements =
         vec![create_fts5_virtual_table(&base_name, &trigger_table_name, pk_column, columns)];
 
-    // Add sync triggers as raw SQL statements (parsed to Statement objects).
     for trigger_sql in
         create_fts5_triggers(&trigger_table_name, &base_name, pk_column, columns, predicate_sql)
     {
@@ -302,8 +285,6 @@ fn create_fts5_statements(
         statements.extend(parsed);
     }
 
-    // Backfill pre-existing rows into the FTS5 index so they are searchable
-    // immediately after the index is created.
     let backfill_sql = format!(
         "INSERT INTO {fts_name_quoted}(rowid, {columns_list}) \
          SELECT {pk_column_quoted}, {columns_list} FROM {trigger_table_quoted}"
@@ -378,8 +359,6 @@ impl Translator for CreateIndex {
             return Ok(spatial_stmts);
         }
 
-        // Handle GIN/GiST indices - may translate to FTS5 for full-text search
-        // Both GIN and GiST can be used with to_tsvector() in PostgreSQL
         if matches!(self.using, Some(IndexType::GIN | IndexType::GiST)) {
             // Translate the partial-index predicate (if any) to a SQLite SQL string
             // so that FTS5 sync triggers can include a WHEN clause.

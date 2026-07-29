@@ -168,10 +168,6 @@ fn run_queries_twice(
     }
 }
 
-// -----------------------------------------------------------------------
-// Simple
-// -----------------------------------------------------------------------
-
 const SIMPLE_SCHEMA: &str = "\
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
@@ -212,10 +208,6 @@ fn simple_sample_queries() {
     conn.execute_batch(&translate(SIMPLE_SCHEMA, &opts)).expect("apply Simple schema");
     run_queries_twice(&conn, SIMPLE_SCHEMA, SIMPLE_QUERIES, &opts);
 }
-
-// -----------------------------------------------------------------------
-// FTS5
-// -----------------------------------------------------------------------
 
 const FTS5_SCHEMA: &str = "\
 CREATE TABLE docs (
@@ -262,10 +254,6 @@ fn fts5_sample_queries() {
     run_queries_twice(&conn, FTS5_SCHEMA, FTS5_QUERIES, &opts);
 }
 
-// -----------------------------------------------------------------------
-// pgvector
-// -----------------------------------------------------------------------
-
 const PGVECTOR_SCHEMA: &str = "\
 CREATE EXTENSION vector;
 
@@ -310,10 +298,6 @@ fn pgvector_sample_queries() {
     conn.execute_batch(&translate(PGVECTOR_SCHEMA, &opts)).expect("apply pgvector schema");
     run_queries_twice(&conn, PGVECTOR_SCHEMA, PGVECTOR_QUERIES, &opts);
 }
-
-// -----------------------------------------------------------------------
-// RLS
-// -----------------------------------------------------------------------
 
 const RLS_SCHEMA: &str = "\
 CREATE TABLE documents (
@@ -375,10 +359,6 @@ fn rls_sample_queries() {
     run_queries_twice(&conn, RLS_SCHEMA, RLS_QUERIES, &opts);
 }
 
-// -----------------------------------------------------------------------
-// Constraints (CHECK, GENERATED ALWAYS STORED, DEFAULT NOW)
-// -----------------------------------------------------------------------
-
 const CONSTRAINTS_SCHEMA: &str = "\
 CREATE TABLE orders (
     id SERIAL PRIMARY KEY,
@@ -431,11 +411,9 @@ fn constraints_sample_queries() {
     run_queries_twice(&conn, CONSTRAINTS_SCHEMA, CONSTRAINTS_QUERIES, &opts);
 }
 
-// -----------------------------------------------------------------------
 // PostGIS (translation-only without the `geolite` feature; full apply
 // behind the feature flag, since ST_GeomFromText / ST_X / ST_Within
 // need SQLiteGIS at runtime.)
-// -----------------------------------------------------------------------
 
 const POSTGIS_SCHEMA: &str = "\
 CREATE TABLE places (
@@ -522,7 +500,6 @@ fn postgis_sample_queries() {
     run_queries_twice(&conn, POSTGIS_SCHEMA, POSTGIS_QUERIES, &opts);
 }
 
-// -----------------------------------------------------------------------
 // Reverse-chip coverage
 //
 // Each reverse chip exposed in `examples/web-playground/src/samples.rs`
@@ -531,7 +508,6 @@ fn postgis_sample_queries() {
 // playground crate is wasm-only, so the test mirrors the literal SQL
 // strings + expected PG substrings. Any change in `samples.rs` must be
 // reflected here or the test will fail loudly.
-// -----------------------------------------------------------------------
 
 struct ReverseCanned {
     label: &'static str,

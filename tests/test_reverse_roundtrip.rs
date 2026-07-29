@@ -84,20 +84,12 @@ fn forward_execute_reverse(pg_ddl: &str, pg_query: &str, options: &Pg2SqliteOpti
     pg_sql
 }
 
-// =============================================================================
-// String assertion tests (quick, targeted)
-// =============================================================================
-
-// ==================== A1: datetime(epoch, 'unixepoch') -> to_timestamp(epoch)
-
 #[test]
 fn reverse_datetime_unixepoch_to_to_timestamp() {
     let pg = reverse(SCHEMA, "SELECT datetime(num, 'unixepoch') FROM t;");
     assert!(pg.contains("to_timestamp"), "Expected to_timestamp: {pg}");
     assert!(!pg.contains("datetime"), "Should not contain datetime: {pg}");
 }
-
-// ==================== A2: uuid() -> gen_random_uuid()
 
 #[test]
 fn reverse_uuid_to_gen_random_uuid() {
@@ -115,8 +107,6 @@ fn reverse_custom_uuid_function_name() {
     let pg = stmts[0].to_string();
     assert!(pg.contains("gen_random_uuid"), "Expected gen_random_uuid: {pg}");
 }
-
-// ==================== A3: strftime composite patterns -> date_trunc
 
 #[test]
 fn reverse_strftime_year_to_date_trunc() {
@@ -139,8 +129,6 @@ fn reverse_strftime_day_to_date_trunc() {
     assert!(pg.contains("day"), "Expected 'day' field: {pg}");
 }
 
-// ==================== Regression: EXTRACT still works
-
 #[test]
 fn reverse_strftime_extract_still_works() {
     // Single-token formats like %Y must still reverse to EXTRACT, not date_trunc
@@ -148,10 +136,6 @@ fn reverse_strftime_extract_still_works() {
     assert!(pg.contains("EXTRACT(YEAR"), "Expected EXTRACT(YEAR): {pg}");
     assert!(!pg.contains("date_trunc"), "Should not contain date_trunc: {pg}");
 }
-
-// =============================================================================
-// Functional diesel tests (forward → execute in SQLite → reverse → parse as PG)
-// =============================================================================
 
 #[test]
 fn functional_to_timestamp_roundtrip() {

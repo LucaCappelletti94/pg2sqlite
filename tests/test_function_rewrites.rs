@@ -7,10 +7,6 @@ use diesel::{RunQueryDsl, SqliteConnection, prelude::*};
 use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// H1: random() semantic mismatch and ABS(min-int) overflow edge in SQLite.
-// ============================================================================
-
 #[test]
 fn random_translates_to_float_range() {
     let options = Pg2SqliteOptions::default();
@@ -132,10 +128,6 @@ fn random_semantic_uniform_distribution() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-// ============================================================================
-// H2: WithArgs (NOW()) preserves window OVER clause
-// ============================================================================
-
 #[test]
 fn with_args_preserves_window_over() {
     let options = Pg2SqliteOptions::default();
@@ -161,10 +153,6 @@ fn now_over_partition_translation_preserves_structure() {
     assert!(lower.contains("over (partition by"), "OVER PARTITION BY should be preserved: {sql}");
     assert!(lower.contains("department_id"), "partition column should be preserved: {sql}");
 }
-
-// ============================================================================
-// M: to_timestamp(epoch) → datetime(val, 'unixepoch')
-// ============================================================================
 
 #[test]
 fn to_timestamp_epoch() {
@@ -222,21 +210,12 @@ fn to_timestamp_epoch_semantic_nonzero() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-// ============================================================================
-// M: to_timestamp(text, format) → Unsupported
-// ============================================================================
-
 #[test]
 fn to_timestamp_with_format_unsupported() {
     let options = Pg2SqliteOptions::default();
     let result = translate_sql("SELECT to_timestamp('2023-01-01', 'YYYY-MM-DD')", &options);
     assert!(result.is_err(), "to_timestamp with format should be unsupported");
 }
-
-// ============================================================================
-// M: transaction_timestamp / statement_timestamp / clock_timestamp →
-// datetime('now')
-// ============================================================================
 
 #[test]
 fn timestamp_variants_are_now() {

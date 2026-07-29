@@ -76,7 +76,6 @@ fn test_elsif_else_translation_snapshot() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Test that IF branch works correctly.
 #[test]
 fn test_if_branch_error() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -93,7 +92,6 @@ fn test_if_branch_error() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that first ELSIF branch works correctly.
 #[test]
 fn test_elsif_branch_warning() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -110,7 +108,6 @@ fn test_elsif_branch_warning() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that second ELSIF branch works correctly.
 #[test]
 fn test_elsif_branch_info() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -127,7 +124,6 @@ fn test_elsif_branch_info() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that ELSE branch works correctly.
 #[test]
 fn test_else_branch_unknown() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -144,7 +140,6 @@ fn test_else_branch_unknown() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test multiple events in sequence.
 #[test]
 fn test_multiple_events() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;

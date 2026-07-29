@@ -74,7 +74,6 @@ pub(crate) fn make_uuid_conversion_call(arg: Expr, options: &Pg2SqliteOptions) -
     if let Some(udf) = options.get_uuid_text_to_blob_function_name() {
         return single_arg_function(udf, arg);
     }
-    // unhex(replace(arg, '-', ''))
     let dash_literal = string_literal_expr("-");
     let empty_literal = string_literal_expr("");
     let replace_call = three_arg_function("replace", arg, dash_literal, empty_literal);

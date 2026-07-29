@@ -56,25 +56,9 @@ extern "SQL" {
     fn current_app_department() -> diesel::sql_types::Text;
 }
 
-// ============================================================================
-// Diesel Schema Definitions for RLS backing tables
-// ============================================================================
-//
 // IMPORTANT: The `*_rls` backing table schemas defined below are ONLY for
-// testing the RLS translation implementation. Real applications should NOT
-// define schemas for backing tables - they are implementation details of the
-// RLS translation.
-//
-// In production code, only define schemas for the VIEWS (e.g., `users`,
-// `posts`), not the backing tables (e.g., `users_rls`, `posts_rls`). The view
-// schemas provide transparent RLS enforcement through INSTEAD OF triggers.
-//
-// These backing table schemas are included here to:
-// - Simulate direct server-side data insertion (bypassing RLS)
-// - Verify that triggers correctly synchronize data between views and backing
-//   tables
-// - Test the internal mechanics of the RLS translation
-// ============================================================================
+// testing. Real applications should define schemas for views, not backing
+// tables, which are implementation details.
 
 diesel::table! {
     /// The backing table for users (read-only via view).
@@ -129,10 +113,6 @@ diesel::table! {
 diesel::joinable!(posts_rls -> users_rls (author_id));
 diesel::joinable!(posts -> users (author_id));
 diesel::allow_tables_to_appear_in_same_query!(users_rls, posts_rls, users, posts);
-
-// ============================================================================
-// Model Structs
-// ============================================================================
 
 /// A user in the system.
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, PartialEq, Eq)]
@@ -205,10 +185,6 @@ impl Post {
         Uuid::from(bytes)
     }
 }
-
-// ============================================================================
-// Session User Management
-// ============================================================================
 
 // Thread-local storage for the current session user ID
 thread_local! {
@@ -317,10 +293,6 @@ pub struct IdResult {
     #[diesel(sql_type = diesel::sql_types::Binary)]
     pub id: Vec<u8>,
 }
-
-// ============================================================================
-// Database Operations
-// ============================================================================
 
 /// Inserts a user into the backing table (simulating sync from server).
 ///

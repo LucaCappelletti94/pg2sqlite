@@ -31,7 +31,6 @@ impl Translator for CreateView {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        // Check for unsupported PostgreSQL features
         if self.materialized {
             return Err(Error::UnsupportedSQLiteFeature(
                 "MATERIALIZED VIEW is not supported in SQLite".into(),
@@ -75,7 +74,6 @@ impl Translator for CreateView {
             ));
         }
 
-        // Pass through supported properties
         Ok(CreateView {
             or_alter: false,
             or_replace: false,

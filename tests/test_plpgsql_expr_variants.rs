@@ -12,8 +12,6 @@ fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
 }
 
-// ==================== F1+F2: Multiple expression types in single trigger
-// ==================== Note: Collate can't parse inside PL/pgSQL body
 // (sqlparser limitation). Note: AT TIME ZONE time_zone field is always a
 // literal, making the F2 recursion fix a defensive code change not easily
 // tested end-to-end. Instead, test that gen_random_uuid is translated alongside
@@ -46,8 +44,6 @@ fn plpgsql_combined_expr_types_transformed() {
     );
 }
 
-// ==================== F1: Position ====================
-
 #[test]
 fn plpgsql_position_expr_transformed() {
     let options = uuid_options();
@@ -73,8 +69,6 @@ fn plpgsql_position_expr_transformed() {
     );
 }
 
-// ==================== F1: Ceil/Floor ====================
-
 #[test]
 fn plpgsql_ceil_floor_expr_transformed() {
     let options = uuid_options();
@@ -99,8 +93,6 @@ fn plpgsql_ceil_floor_expr_transformed() {
         "gen_random_uuid should be translated alongside CEIL: {sql}"
     );
 }
-
-// ==================== F2: AtTimeZone time_zone field ====================
 
 #[test]
 fn plpgsql_at_time_zone_time_zone_field_transformed() {

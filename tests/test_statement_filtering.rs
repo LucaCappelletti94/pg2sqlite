@@ -23,8 +23,6 @@ fn translate_count(sql: &str) -> Result<usize, String> {
     helpers::translate_count(sql, &Pg2SqliteOptions::default())
 }
 
-// ==================== Passthrough statements ====================
-
 #[test]
 fn vacuum_passes_through() {
     let output = translate("VACUUM;").unwrap();
@@ -65,8 +63,6 @@ fn release_savepoint_passes_through() {
     let output = translate("RELEASE SAVEPOINT sp1;").unwrap();
     assert!(output.contains("RELEASE"), "RELEASE SAVEPOINT should pass through, got: {output}");
 }
-
-// ==================== DROP statements ====================
 
 #[test]
 fn drop_table_strips_cascade() {
@@ -116,8 +112,6 @@ fn drop_sequence_produces_empty() {
     let count = translate_count("DROP SEQUENCE my_seq;").unwrap();
     assert_eq!(count, 0, "DROP SEQUENCE should produce no output");
 }
-
-// ==================== Filtered/skipped statements ====================
 
 #[test]
 fn alter_table_filtered() {
@@ -209,8 +203,6 @@ fn create_sequence_filtered() {
     let count = translate_count(sql).unwrap();
     assert_eq!(count, 0, "CREATE SEQUENCE should be filtered");
 }
-
-// ==================== Multiple statement types together ====================
 
 #[test]
 fn mixed_statements_filters_correctly() {

@@ -102,7 +102,6 @@ fn test_public_access_translation_snapshot() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Test that public table (categories) is visible to all users.
 #[test]
 fn test_public_table_visible_to_all() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -128,7 +127,6 @@ fn test_public_table_visible_to_all() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Test that featured items are visible to all users.
 #[test]
 fn test_featured_items_visible_to_all() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -157,7 +155,6 @@ fn test_featured_items_visible_to_all() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Test that non-featured items are only visible to their owner.
 #[test]
 fn test_non_featured_visible_only_to_owner() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -189,7 +186,6 @@ fn test_non_featured_visible_only_to_owner() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Test mixed visibility query - owner sees own + featured.
 #[test]
 fn test_mixed_visibility_query() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -262,7 +258,6 @@ fn test_mixed_visibility_query() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that owner can update their own items.
 #[test]
 fn test_owner_can_update_own_items() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -295,7 +290,6 @@ fn test_owner_can_update_own_items() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that non-owner cannot update items (even featured ones).
 #[test]
 fn test_non_owner_cannot_update() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -333,7 +327,6 @@ fn test_non_owner_cannot_update() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that owner can delete their own items.
 #[test]
 fn test_owner_can_delete_own_items() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -362,7 +355,6 @@ fn test_owner_can_delete_own_items() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that non-owner cannot delete items (even featured ones).
 #[test]
 fn test_non_owner_cannot_delete() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;

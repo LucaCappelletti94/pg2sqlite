@@ -26,10 +26,6 @@ use rosetta_uuid::Uuid;
 // Re-use models from test_groups
 pub use test_groups::{Group, User};
 
-// =============================================================================
-// DIESEL SCHEMA (only RLS-specific tables)
-// =============================================================================
-
 diesel::table! {
     use diesel::sql_types::*;
 
@@ -114,18 +110,10 @@ diesel::allow_tables_to_appear_in_same_query!(
     grants,
 );
 
-// =============================================================================
-// ROLE CONSTANTS
-// =============================================================================
-
 /// Viewer role: can view only
 pub const ROLE_VIEWER: i16 = 2;
 /// Editor role: can view and edit
 pub const ROLE_EDITOR: i16 = 3;
-
-// =============================================================================
-// DIESEL MODELS (only RLS-specific)
-// =============================================================================
 
 /// An ownable entity - something that can be owned and shared.
 #[derive(Queryable, Selectable, Debug, PartialEq, Clone, Insertable)]
@@ -352,10 +340,6 @@ impl HasOwnerId for Group {
     }
 }
 
-// =============================================================================
-// DATABASE SETUP
-// =============================================================================
-
 fn translation_options() -> Pg2SqliteOptions {
     use pg2sqlite::traits::TranslationOptions;
 
@@ -393,11 +377,6 @@ fn setup_database(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-// =============================================================================
-// TESTS
-// =============================================================================
-
-/// Test that the schema translates and executes successfully.
 #[test]
 fn test_rls_grants_schema_execution() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -438,7 +417,8 @@ fn test_insert_without_session_user_fails() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Test that creating an ownable auto-inserts the creator as owner.
+/// The translated schema carries a trigger that auto-inserts the creator as
+/// owner.
 #[test]
 fn test_creator_becomes_owner() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -455,7 +435,6 @@ fn test_creator_becomes_owner() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test adding and removing owners.
 #[test]
 fn test_add_remove_owners() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -503,7 +482,6 @@ fn test_last_owner_detection() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test adding and removing administrators.
 #[test]
 fn test_add_remove_admins() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -526,7 +504,6 @@ fn test_add_remove_admins() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test granting viewer and editor access.
 #[test]
 fn test_grant_access() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -558,7 +535,6 @@ fn test_grant_access() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that groups can be owners.
 #[test]
 fn test_group_as_owner() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -592,7 +568,6 @@ fn test_group_as_owner() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that groups can be administrators.
 #[test]
 fn test_group_as_admin() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -611,7 +586,6 @@ fn test_group_as_admin() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that groups can receive grants.
 #[test]
 fn test_group_grant() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -634,7 +608,6 @@ fn test_group_grant() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test complex hierarchy: group with admin and editor subgroups.
 #[test]
 fn test_group_hierarchy_with_roles() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -686,7 +659,6 @@ fn test_group_hierarchy_with_roles() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test cascade delete: deleting an ownable removes owners, admins, and grants.
 #[test]
 fn test_cascade_delete_ownable() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -724,7 +696,6 @@ fn test_cascade_delete_ownable() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that only one grant per grantee per ownable is allowed.
 #[test]
 fn test_unique_grant_per_grantee() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
@@ -746,7 +717,6 @@ fn test_unique_grant_per_grantee() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test translation snapshot for rls_grants.sql.
 #[test]
 fn test_rls_grants_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     // Translate both files together

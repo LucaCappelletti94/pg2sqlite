@@ -27,9 +27,6 @@ fn reverse_ok(pg_ddl: &str, sqlite_sql: &str) -> Vec<String> {
     stmts.iter().map(ToString::to_string).collect()
 }
 
-// ==================== 4a: Missing reverse function mappings
-// ====================
-
 #[test]
 fn reverse_unicode_to_ascii() {
     let pg = reverse(SCHEMA, "SELECT unicode('A') FROM t;");
@@ -51,8 +48,6 @@ fn reverse_json_array_to_json_build_array() {
     assert!(!pg.contains("json_array("), "Should not contain json_array(: {pg}");
 }
 
-// ==================== 4b: Rename within_group translation ====================
-
 #[test]
 fn reverse_rename_within_group_translates_exprs() {
     // json_group_array reverses to json_agg (Rename path).
@@ -62,9 +57,6 @@ fn reverse_rename_within_group_translates_exprs() {
     // The datetime('now') should be reverse-translated to NOW()
     assert!(pg.contains("NOW()"), "Expected ORDER BY expr to be reverse-translated to NOW(): {pg}");
 }
-
-// ==================== 4c: Transaction statement passthrough
-// ====================
 
 #[test]
 fn reverse_commit() {

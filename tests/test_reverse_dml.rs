@@ -32,10 +32,6 @@ const TWO_TABLES: &str = "
     CREATE TABLE posts (id INT PRIMARY KEY, user_id INT, title TEXT);
 ";
 
-// =============================================================================
-// DELETE tests
-// =============================================================================
-
 #[test]
 fn reverse_delete_basic() {
     let pg = reverse(SCHEMA, "DELETE FROM users WHERE id = 1;");
@@ -59,10 +55,6 @@ fn reverse_delete_all_rows() {
     assert!(pg.contains("DELETE FROM users"), "Expected DELETE FROM users: {pg}");
 }
 
-// =============================================================================
-// UPDATE tests
-// =============================================================================
-
 #[test]
 fn reverse_update_basic() {
     let pg = reverse(SCHEMA, "UPDATE users SET name = 'test' WHERE id = 1;");
@@ -83,10 +75,6 @@ fn reverse_update_multiple_columns() {
     assert!(pg.contains("name ="), "Expected name SET: {pg}");
     assert!(pg.contains("age ="), "Expected age SET: {pg}");
 }
-
-// =============================================================================
-// INSERT tests
-// =============================================================================
 
 #[test]
 fn reverse_insert_basic() {
@@ -159,10 +147,6 @@ fn reverse_insert_on_conflict_do_update_with_where() {
     assert!(pg.contains("DO UPDATE SET"), "Expected DO UPDATE SET: {pg}");
 }
 
-// =============================================================================
-// DELETE with derived table in WHERE
-// =============================================================================
-
 #[test]
 fn reverse_delete_with_derived_subquery() {
     let pg = reverse(
@@ -172,10 +156,6 @@ fn reverse_delete_with_derived_subquery() {
     assert!(pg.contains("DELETE"), "Expected DELETE: {pg}");
     assert!(pg.contains("IN"), "Expected IN: {pg}");
 }
-
-// =============================================================================
-// UPDATE with complex expressions
-// =============================================================================
 
 #[test]
 fn reverse_update_with_subquery_in_where() {
@@ -196,10 +176,6 @@ fn reverse_update_with_join() {
     assert!(pg.contains("UPDATE"), "Expected UPDATE: {pg}");
 }
 
-// =============================================================================
-// INSERT with complex source
-// =============================================================================
-
 #[test]
 fn reverse_insert_from_select_with_join() {
     let pg = reverse(
@@ -209,10 +185,6 @@ fn reverse_insert_from_select_with_join() {
     assert!(pg.contains("INSERT"), "Expected INSERT: {pg}");
     assert!(pg.contains("SELECT"), "Expected SELECT: {pg}");
 }
-
-// =============================================================================
-// DELETE with RETURNING
-// =============================================================================
 
 #[test]
 fn reverse_delete_with_returning() {
@@ -247,10 +219,6 @@ fn reverse_delete_order_by_and_limit_translate_expressions() {
     assert!(pg.contains("LIMIT NOW()"), "Expected LIMIT expression reverse translation: {pg}");
 }
 
-// =============================================================================
-// UPDATE with RETURNING
-// =============================================================================
-
 #[test]
 fn reverse_update_with_returning() {
     let pg = reverse(SCHEMA, "UPDATE users SET name = 'test' WHERE id = 1 RETURNING *;");
@@ -274,10 +242,6 @@ fn reverse_update_limit_translate_expression() {
     assert!(pg.contains("LIMIT NOW()"), "Expected LIMIT expression reverse translation: {pg}");
 }
 
-// =============================================================================
-// UPDATE with FROM clause
-// =============================================================================
-
 #[test]
 fn reverse_update_with_from() {
     let pg = reverse(
@@ -287,10 +251,6 @@ fn reverse_update_with_from() {
     assert!(pg.contains("UPDATE"), "Expected UPDATE: {pg}");
     assert!(pg.contains("FROM"), "Expected FROM: {pg}");
 }
-
-// =============================================================================
-// INSERT with RETURNING
-// =============================================================================
 
 #[test]
 fn reverse_insert_with_returning() {
@@ -310,19 +270,11 @@ fn reverse_insert_with_returning_alias() {
     assert!(pg.contains("new_id"), "Expected alias: {pg}");
 }
 
-// =============================================================================
-// DELETE with USING clause (reverse translate)
-// =============================================================================
-
 #[test]
 fn reverse_delete_with_using() {
     let pg = reverse(TWO_TABLES, "DELETE FROM users WHERE id IN (SELECT user_id FROM posts);");
     assert!(pg.contains("DELETE"), "Expected DELETE: {pg}");
 }
-
-// =============================================================================
-// DELETE with join in FROM
-// =============================================================================
 
 #[test]
 fn reverse_delete_with_join_in_where() {
@@ -334,10 +286,6 @@ fn reverse_delete_with_join_in_where() {
     assert!(pg.contains("EXISTS"), "Expected EXISTS: {pg}");
 }
 
-// =============================================================================
-// UPDATE with derived table in FROM
-// =============================================================================
-
 #[test]
 fn reverse_update_with_derived_table() {
     let pg = reverse(
@@ -346,10 +294,6 @@ fn reverse_update_with_derived_table() {
     );
     assert!(pg.contains("UPDATE"), "Expected UPDATE: {pg}");
 }
-
-// =============================================================================
-// INSERT with ON CONFLICT DO NOTHING
-// =============================================================================
 
 #[test]
 fn reverse_insert_on_conflict_do_nothing() {
@@ -360,10 +304,6 @@ fn reverse_insert_on_conflict_do_nothing() {
     assert!(pg.contains("ON CONFLICT"), "Expected ON CONFLICT: {pg}");
     assert!(pg.contains("DO NOTHING"), "Expected DO NOTHING: {pg}");
 }
-
-// =============================================================================
-// INSERT with default values
-// =============================================================================
 
 #[test]
 fn reverse_insert_multiple_rows() {
@@ -376,10 +316,6 @@ fn reverse_insert_multiple_rows() {
     assert!(pg.contains("Bob"), "Expected Bob: {pg}");
 }
 
-// =============================================================================
-// UPDATE with multiple SET and complex WHERE
-// =============================================================================
-
 #[test]
 fn reverse_update_with_complex_where() {
     let pg = reverse(
@@ -389,10 +325,6 @@ fn reverse_update_with_complex_where() {
     assert!(pg.contains("UPDATE"), "Expected UPDATE: {pg}");
     assert!(pg.contains("LIKE"), "Expected LIKE: {pg}");
 }
-
-// =============================================================================
-// UPDATE FROM with JOIN (covers reverse_translate_join in update.rs)
-// =============================================================================
 
 #[test]
 fn reverse_update_from_with_join() {
@@ -406,10 +338,6 @@ fn reverse_update_from_with_join() {
     assert!(pg.contains("FROM"), "Expected FROM: {pg}");
 }
 
-// =============================================================================
-// INSERT with SELECT containing expressions
-// =============================================================================
-
 #[test]
 fn reverse_insert_select_with_expression() {
     let pg = reverse(
@@ -419,10 +347,6 @@ fn reverse_insert_select_with_expression() {
     assert!(pg.contains("INSERT"), "Expected INSERT: {pg}");
     assert!(pg.contains("SELECT"), "Expected SELECT: {pg}");
 }
-
-// =============================================================================
-// DELETE with returning expression
-// =============================================================================
 
 #[test]
 fn reverse_delete_returning_expression() {
@@ -434,10 +358,6 @@ fn reverse_delete_returning_expression() {
     assert!(pg.contains("RETURNING"), "Expected RETURNING: {pg}");
 }
 
-// =============================================================================
-// UPDATE with returning expression
-// =============================================================================
-
 #[test]
 fn reverse_update_returning_expression() {
     let pg = reverse(
@@ -448,10 +368,6 @@ fn reverse_update_returning_expression() {
     assert!(pg.contains("new_age"), "Expected alias: {pg}");
 }
 
-// =============================================================================
-// INSERT with RETURNING expression
-// =============================================================================
-
 #[test]
 fn reverse_insert_returning_expression() {
     let pg = reverse(
@@ -461,11 +377,6 @@ fn reverse_insert_returning_expression() {
     assert!(pg.contains("RETURNING"), "Expected RETURNING: {pg}");
     assert!(pg.contains("inserted_name"), "Expected alias: {pg}");
 }
-
-// =============================================================================
-// Bug 5: INSERT OR REPLACE on PK-only table must not produce empty DO UPDATE
-// SET
-// =============================================================================
 
 #[test]
 fn reverse_insert_or_replace_pk_only_table_falls_back_to_do_nothing() {

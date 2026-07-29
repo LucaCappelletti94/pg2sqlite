@@ -82,14 +82,12 @@ fn assert_reverse_under_budget(label: &str, sqlite_sql: String) {
     );
 }
 
-// --------------------------------------------------------------------
 // Synthetic minimal reproducer for the IF-keyword chain pathology.
 //
 // `if(if(if(...x` exhibits ~2x growth in parse time per added `if(`,
 // while plain `f(f(...))` and `@(@(...))` stay flat. Depth 25 sits at
 // ~10 s in the unfixed parser; depth 20 is ~574 ms. Either depth is
 // well over the 100 ms budget today.
-// --------------------------------------------------------------------
 
 #[test]
 fn forward_if_keyword_chain_depth_25_under_budget() {
@@ -198,12 +196,10 @@ fn reverse_fuzz_artefact_slow_if_case_db47() {
     assert_reverse_under_budget("reverse_slow_if_case_db47", sqlite_sql);
 }
 
-// --------------------------------------------------------------------
 // Forward fuzz artefacts. Both inputs hit the `IF(...)` exponential
 // path through the postgres dialect; `b624` is the smallest specimen
 // the fuzzer found (~29 s today), `c01cb` is a larger variant that
 // libfuzzer flagged as a hard timeout.
-// --------------------------------------------------------------------
 
 #[test]
 fn forward_fuzz_artefact_if_chain_b624() {
@@ -245,12 +241,10 @@ fn forward_fuzz_artefact_oom_bracket_subscript_c1f1() {
     assert_forward_under_budget("forward_oom_c1f1", sql);
 }
 
-// --------------------------------------------------------------------
 // Reverse fuzz artefacts. Both inputs hit the compound-identifier /
 // compound-keyword chain pathology in the SQLite dialect. Empirically
 // validated against the fork's `pathological3` branch (#2349 + #2350
 // applied): both drop from seconds to ~100 us once the patches land.
-// --------------------------------------------------------------------
 
 #[test]
 fn reverse_fuzz_artefact_compound_5e06() {

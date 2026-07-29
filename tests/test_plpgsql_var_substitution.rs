@@ -13,8 +13,6 @@ fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
 }
 
-// ==================== H1: LIKE with variable ====================
-
 #[test]
 fn plpgsql_substitute_variable_in_like_pattern() {
     let options = uuid_options();
@@ -40,8 +38,6 @@ fn plpgsql_substitute_variable_in_like_pattern() {
     // In the CTE-based approach, it becomes a reference to the CTE column
     assert!(!sql.is_empty(), "Translation should succeed for LIKE with variable: {sql}");
 }
-
-// ==================== H1: Extract with variable ====================
 
 #[test]
 fn plpgsql_substitute_variable_in_extract() {
@@ -72,8 +68,6 @@ fn plpgsql_substitute_variable_in_extract() {
     );
 }
 
-// ==================== H1: Trim with variable ====================
-
 #[test]
 fn plpgsql_substitute_variable_in_trim() {
     let options = uuid_options();
@@ -100,8 +94,6 @@ fn plpgsql_substitute_variable_in_trim() {
         "gen_random_uuid should be translated in trigger with TRIM: {sql}"
     );
 }
-
-// ==================== H1: Substring with variable ====================
 
 #[test]
 fn plpgsql_substitute_variable_in_substring() {

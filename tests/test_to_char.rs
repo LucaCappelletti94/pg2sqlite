@@ -13,9 +13,7 @@ fn translate(sql: &str) -> Result<String, String> {
 
 const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);";
 
-// ---------------------------------------------------------------------------
 // Happy path
-// ---------------------------------------------------------------------------
 
 #[test]
 fn to_char_yyyy_mm_dd() {
@@ -117,9 +115,7 @@ fn to_char_now_also_translated() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Error cases
-// ---------------------------------------------------------------------------
 
 #[test]
 fn to_char_number_format_causes_error() {
@@ -153,9 +149,7 @@ fn to_char_dynamic_format_causes_error() {
     assert!(err.to_lowercase().contains("literal"), "Error should mention 'literal', got: {err}");
 }
 
-// ---------------------------------------------------------------------------
 // to_char preserves window OVER clause
-// ---------------------------------------------------------------------------
 
 #[test]
 fn to_char_preserves_window_over() {

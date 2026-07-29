@@ -36,8 +36,6 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .join("\n")
 }
 
-// ==================== IF with ELSIF ====================
-
 #[test]
 fn if_elsif_translates() {
     let sql = include_str!("fixtures/trigger_elsif_else.sql");
@@ -46,8 +44,6 @@ fn if_elsif_translates() {
     // with injected conditions
     assert!(output.contains("INSERT"), "Expected INSERT statements from trigger: {output}");
 }
-
-// ==================== IF with ELSE ====================
 
 #[test]
 fn if_else_translates() {
@@ -73,8 +69,6 @@ fn if_else_translates() {
     let output = translate(sql);
     assert!(output.contains("INSERT"), "Expected INSERT from trigger: {output}");
 }
-
-// ==================== SET statement (variable binding) ====================
 
 #[test]
 fn set_variable_binding_in_trigger() {
@@ -177,8 +171,6 @@ fn select_into_with_comma_expression_produces_valid_sqlite_trigger_sql() {
     );
 }
 
-// ==================== WITH RECURSIVE ... INSERT pattern ====================
-
 #[test]
 fn with_recursive_insert_transforms() {
     // The trigger_issue.sql fixture has patterns that may involve CTE-based inserts
@@ -187,8 +179,6 @@ fn with_recursive_insert_transforms() {
     // Should translate without error and produce valid statements
     assert!(!output.is_empty(), "Expected non-empty output: {output}");
 }
-
-// ==================== Trigger with ON CONFLICT DO NOTHING ====================
 
 #[test]
 fn trigger_with_on_conflict_do_nothing() {
@@ -216,8 +206,6 @@ fn trigger_with_on_conflict_do_nothing() {
         "Expected INSERT (possibly OR IGNORE): {output}"
     );
 }
-
-// ==================== Multiple triggers on same table ====================
 
 #[test]
 fn multiple_triggers_translate() {
@@ -252,9 +240,6 @@ fn multiple_triggers_translate() {
     assert!(output.contains("order_update_trigger"), "Expected update trigger: {output}");
 }
 
-// ==================== IF with UPDATE inside trigger ====================
-// Ensure UPDATE statements survive IF condition injection in trigger bodies.
-
 #[test]
 fn if_with_update_in_trigger() {
     let sql = r#"
@@ -279,8 +264,6 @@ fn if_with_update_in_trigger() {
     assert!(output.contains("counter_trigger"), "Expected trigger to be created: {output}");
 }
 
-// ==================== IF with DELETE inside trigger ====================
-
 #[test]
 fn if_with_delete_in_trigger() {
     let sql = r#"
@@ -304,8 +287,6 @@ fn if_with_delete_in_trigger() {
     assert!(output.contains("DELETE"), "Expected DELETE in trigger body: {output}");
 }
 
-// ==================== Trigger accessing NEW values ====================
-
 #[test]
 fn trigger_new_values_translated() {
     let sql = r#"
@@ -327,8 +308,6 @@ fn trigger_new_values_translated() {
     let output = translate(sql);
     assert!(output.contains("NEW.id"), "Expected NEW.id reference: {output}");
 }
-
-// ==================== Trigger with multiple statements ====================
 
 #[test]
 fn trigger_with_multiple_statements() {
@@ -376,8 +355,6 @@ fn query_statement_runs_standard_translation_pipeline() {
     );
 }
 
-// ==================== UUID function in trigger ====================
-
 #[test]
 fn uuid_function_in_trigger() {
     let sql = include_str!("fixtures/trigger_uuid_insert.sql");
@@ -419,9 +396,6 @@ fn schema_qualified_uuid_function_in_trigger() {
     );
 }
 
-// ==================== IF with INSERT and condition injection
-// ====================
-
 #[test]
 fn if_with_insert_and_condition() {
     let sql = r#"
@@ -458,9 +432,6 @@ fn if_with_insert_and_condition() {
     );
 }
 
-// ==================== Trigger with UNION ALL in INSERT source
-// ====================
-
 #[test]
 fn trigger_with_union_in_insert() {
     let sql = r#"
@@ -488,9 +459,6 @@ fn trigger_with_union_in_insert() {
     );
 }
 
-// ==================== IF with DELETE that has existing WHERE
-// ====================
-
 #[test]
 fn if_with_delete_existing_where() {
     let sql = r#"
@@ -517,9 +485,6 @@ fn if_with_delete_existing_where() {
     );
 }
 
-// ==================== Trigger with bare INSERT (no source query)
-// ====================
-
 #[test]
 fn trigger_with_bare_values_insert() {
     let sql = r#"
@@ -540,9 +505,6 @@ fn trigger_with_bare_values_insert() {
     let output = translate(sql);
     assert!(output.contains("INSERT"), "Expected INSERT: {output}");
 }
-
-// ==================== Trigger with SELECT INTO preprocessed to SET
-// ====================
 
 #[test]
 fn trigger_with_select_into() {
@@ -570,9 +532,6 @@ fn trigger_with_select_into() {
     assert!(output.contains("INSERT"), "Expected INSERT: {output}");
 }
 
-// ==================== Trigger with multiple INSERT + ON CONFLICT
-// ====================
-
 #[test]
 fn trigger_multiple_inserts_on_conflict() {
     let sql = r#"
@@ -598,8 +557,6 @@ fn trigger_multiple_inserts_on_conflict() {
         "Expected INSERT or stats: {output}"
     );
 }
-
-// ==================== RAISE INFO single space is dropped ====================
 
 /// A PL/pgSQL function with `RAISE INFO 'msg'` (one space after INFO) was
 /// previously not detected and passed through as invalid SQLite syntax.

@@ -21,9 +21,6 @@ const EVENTS: &str =
     "CREATE TABLE events (id INT PRIMARY KEY, created_at TIMESTAMP, category TEXT);";
 const VECTORS: &str = "CREATE TABLE embeddings (id INT PRIMARY KEY, vec VECTOR(3));";
 
-// ==================== group_concat -> string_agg (Rename path)
-// ====================
-
 #[test]
 fn reverse_group_concat_to_string_agg() {
     let pg = reverse(SCHEMA, "SELECT group_concat(name, ', ') FROM users;");
@@ -38,16 +35,12 @@ fn reverse_group_concat_with_filter() {
     assert!(pg.contains("FILTER"), "Expected FILTER clause: {pg}");
 }
 
-// ==================== Passthrough with filter ====================
-
 #[test]
 fn reverse_count_with_filter() {
     let pg = reverse(SCHEMA, "SELECT COUNT(*) FILTER (WHERE age > 18) FROM users;");
     assert!(pg.contains("COUNT"), "Expected COUNT: {pg}");
     assert!(pg.contains("FILTER"), "Expected FILTER clause: {pg}");
 }
-
-// ==================== Vector functions ====================
 
 #[test]
 fn reverse_vec_distance_hamming() {
@@ -79,8 +72,6 @@ fn reverse_vec_f32_to_cast() {
     assert!(pg.contains("::vector"), "Expected ::vector cast: {pg}");
     assert!(!pg.contains("vec_f32"), "Should not contain vec_f32: {pg}");
 }
-
-// ==================== strftime -> EXTRACT ====================
 
 #[test]
 fn reverse_strftime_year() {
@@ -142,8 +133,6 @@ fn reverse_strftime_day_of_year() {
     );
 }
 
-// ==================== datetime('now') -> NOW() ====================
-
 #[test]
 fn reverse_datetime_now() {
     let pg = reverse(EVENTS, "SELECT * FROM events WHERE created_at > datetime('now');");
@@ -172,8 +161,6 @@ fn reverse_datetime_fixed_offset_to_at_time_zone() {
     assert!(!pg.contains("datetime("), "Should not contain datetime call: {pg}");
 }
 
-// ==================== INSTR -> POSITION ====================
-
 #[test]
 fn reverse_instr_to_position() {
     let pg = reverse(SCHEMA, "SELECT INSTR(name, 'a') FROM users;");
@@ -181,16 +168,12 @@ fn reverse_instr_to_position() {
     assert!(!pg.contains("INSTR"), "Should not contain INSTR: {pg}");
 }
 
-// ==================== char -> chr ====================
-
 #[test]
 fn reverse_char_to_chr() {
     let pg = reverse(SCHEMA, "SELECT char(65) FROM users;");
     assert!(pg.contains("chr("), "Expected chr: {pg}");
     assert!(!pg.contains("char("), "Should not contain char: {pg}");
 }
-
-// ==================== scalar MIN/MAX -> LEAST/GREATEST ====================
 
 #[test]
 fn reverse_min_two_args_to_least() {
@@ -213,16 +196,11 @@ fn reverse_min_single_arg_stays_min() {
     assert!(!pg.contains("LEAST"), "Single-arg MIN should not become LEAST: {pg}");
 }
 
-// ==================== datetime passthrough (non-'now') ====================
-
 #[test]
 fn reverse_datetime_passthrough() {
     let pg = reverse(EVENTS, "SELECT datetime(created_at, '+1 day') FROM events;");
     assert!(pg.contains("datetime"), "Expected datetime passthrough: {pg}");
 }
-
-// ==================== strftime unsupported format passthrough
-// ====================
 
 #[test]
 fn reverse_strftime_unsupported_format() {
@@ -232,15 +210,11 @@ fn reverse_strftime_unsupported_format() {
     assert!(pg.contains("strftime"), "Expected strftime passthrough: {pg}");
 }
 
-// ==================== vec_distance_hamming with columns ====================
-
 #[test]
 fn reverse_vec_distance_hamming_columns() {
     let pg = reverse(VECTORS, "SELECT vec_distance_hamming(vec, vec) FROM embeddings;");
     assert!(pg.contains("<~>"), "Expected <~> operator: {pg}");
 }
-
-// ==================== json_group_array -> json_agg ====================
 
 #[test]
 fn reverse_json_group_array_to_json_agg() {
@@ -249,18 +223,12 @@ fn reverse_json_group_array_to_json_agg() {
     assert!(!pg.contains("json_group_array"), "Should not contain json_group_array: {pg}");
 }
 
-// ==================== json_group_object -> json_object_agg
-// ====================
-
 #[test]
 fn reverse_json_group_object_to_json_object_agg() {
     let pg = reverse(SCHEMA, "SELECT json_group_object(name, age) FROM users;");
     assert!(pg.contains("json_object_agg"), "Expected json_object_agg: {pg}");
     assert!(!pg.contains("json_group_object"), "Should not contain json_group_object: {pg}");
 }
-
-// ==================== strftime('%f') -> EXTRACT(SECOND) (Bug 4)
-// ====================
 
 #[test]
 fn reverse_strftime_fractional_second() {
@@ -272,9 +240,6 @@ fn reverse_strftime_fractional_second() {
     assert!(!pg.contains("strftime"), "Should not contain strftime after round-trip: {pg}");
 }
 
-// ==================== strftime('%s') -> EXTRACT(EPOCH) (Bug 4)
-// ====================
-
 #[test]
 fn reverse_strftime_epoch() {
     // The forward translator emits strftime('%s', expr) for EXTRACT(EPOCH FROM
@@ -283,8 +248,6 @@ fn reverse_strftime_epoch() {
     assert!(pg.contains("EXTRACT(EPOCH"), "Expected EXTRACT(EPOCH) from %s: {pg}");
     assert!(!pg.contains("strftime"), "Should not contain strftime after round-trip: {pg}");
 }
-
-// ==================== vec_f16 -> halfvec cast (Bug 3) ====================
 
 #[test]
 fn reverse_vec_f16_to_halfvec_cast() {

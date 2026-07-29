@@ -187,7 +187,6 @@ struct Team {
     name: String,
 }
 
-/// A member.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = members)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -372,7 +371,6 @@ FOR EACH ROW EXECUTE FUNCTION log_task_creation();
     Ok(())
 }
 
-/// Test a more complex scenario with multiple IF NOT EXISTS blocks.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_trigger_with_multiple_if_blocks() -> Result<(), Box<dyn std::error::Error>> {

@@ -15,8 +15,6 @@ const FORWARD_REFERENCE: &str = "\
 CREATE TABLE child (id INT PRIMARY KEY, parent_id INT REFERENCES parent(id));
 CREATE TABLE parent (id INT PRIMARY KEY);";
 
-// ==================== Option knob ====================
-
 #[test]
 fn dangling_foreign_keys_disallowed_by_default() {
     assert!(!Pg2SqliteOptions::default().is_dangling_foreign_keys_allowed());
@@ -27,9 +25,6 @@ fn with_dangling_foreign_keys_allowed_sets_flag() {
     let options = Pg2SqliteOptions::default().with_dangling_foreign_keys_allowed();
     assert!(options.is_dangling_foreign_keys_allowed());
 }
-
-// ==================== Default: reject dangling table target
-// ====================
 
 #[test]
 fn dangling_table_fails_translate_to_sql() {
@@ -65,9 +60,6 @@ fn dangling_table_fails_translation_manifest() {
     assert!(msg.contains("child"), "manifest error should name the owning table: {msg}");
 }
 
-// ==================== Default: reject dangling column target
-// ====================
-
 #[test]
 fn dangling_column_fails_translate_to_sql() {
     let err = Pg2Sqlite::default()
@@ -80,8 +72,6 @@ fn dangling_column_fails_translate_to_sql() {
     assert!(msg.contains("child"), "error should name the owning table: {msg}");
 }
 
-// ==================== Default: forward reference passes ====================
-
 #[test]
 fn forward_reference_translates() {
     let statements = Pg2Sqlite::default()
@@ -91,8 +81,6 @@ fn forward_reference_translates() {
         .expect("forward references are order-insensitive and must translate");
     assert!(!statements.is_empty());
 }
-
-// ==================== Opt-out restores tolerant behavior ====================
 
 #[test]
 fn opt_out_translates_dangling_table() {

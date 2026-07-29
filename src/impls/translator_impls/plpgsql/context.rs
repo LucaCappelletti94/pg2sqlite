@@ -46,28 +46,15 @@ pub struct UuidFirstUse {
     pub column_name: String,
 }
 
-/// Context for PL/pgSQL to `SQLite` translation.
-///
-/// This struct tracks all the state needed during translation:
-/// - Variable declarations from DECLARE blocks
-/// - Persistent variable bindings (from SELECT INTO, persist across IF blocks)
-/// - Scoped variable bindings (from assignments in IF blocks, cleared per
-///   scope)
-/// - Nested scope tracking for IF blocks
-/// - UUID variable first-use tracking for `last_insert_rowid()` pattern
+/// Translation context for PL/pgSQL to SQLite. Tracks scoped bindings (cleared
+/// per IF block) separately from persistent ones (SELECT INTO), plus UUID
+/// first-use state for the `last_insert_rowid()` pattern.
 #[derive(Debug, Clone, Default)]
 pub struct PlPgSqlContext {
-    /// Variable declarations from DECLARE block, keyed by name
     declarations: BTreeMap<String, VariableDeclaration>,
-    /// Persistent variable bindings (e.g., from SELECT INTO), persist across IF
-    /// blocks
     persistent_bindings: BTreeMap<String, VariableBinding>,
-    /// Scoped variable bindings (assignments in IF blocks), cleared per scope
     scoped_bindings: BTreeMap<String, VariableBinding>,
-    /// Stack of conditions for nested IF blocks
     condition_stack: Vec<String>,
-    /// Tracks the first INSERT that used each UUID variable (for
-    /// `last_insert_rowid` pattern)
     uuid_first_use: BTreeMap<String, UuidFirstUse>,
 }
 

@@ -6,10 +6,6 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema for tests
-// ============================================================================
-
 mod schema {
     diesel::table! {
         /// Strings table for position/substring tests.
@@ -35,11 +31,6 @@ struct StringData {
     text_val: String,
 }
 
-// ============================================================================
-// POSITION Tests
-// ============================================================================
-
-/// Test that POSITION expressions are translated to INSTR.
 #[test]
 fn test_position_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -72,7 +63,6 @@ fn test_position_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test POSITION semantic execution.
 #[test]
 fn test_position_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -120,11 +110,6 @@ fn test_position_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// SUBSTRING Tests
-// ============================================================================
-
-/// Test that SUBSTRING expressions are translated to SUBSTR.
 #[test]
 fn test_substring_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -153,7 +138,6 @@ fn test_substring_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test SUBSTRING semantic execution.
 #[test]
 fn test_substring_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -193,7 +177,6 @@ fn test_substring_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test SUBSTRING without FOR (length).
 #[test]
 fn test_substring_no_length_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -221,7 +204,6 @@ fn test_substring_no_length_translation() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Test SUBSTRING without FOR (length) semantic execution.
 #[test]
 fn test_substring_no_length_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -260,10 +242,6 @@ fn test_substring_no_length_semantic() -> Result<(), Box<dyn std::error::Error>>
 
     Ok(())
 }
-
-// ============================================================================
-// OVERLAY Tests (from test_expr_overlay_extract.rs)
-// ============================================================================
 
 mod overlay_schema {
     diesel::table! {
@@ -316,7 +294,6 @@ struct OverlayRow {
     out_text: String,
 }
 
-/// Test OVERLAY with FOR (replacement length specified).
 #[test]
 fn test_overlay_with_for_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

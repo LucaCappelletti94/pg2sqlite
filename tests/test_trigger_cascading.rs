@@ -114,7 +114,6 @@ struct InventoryAudit {
     created_at: Option<String>,
 }
 
-/// Test a complex trigger scenario with multiple tables and cascading effects.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_complex_trigger_with_multiple_variables() -> Result<(), Box<dyn std::error::Error>> {

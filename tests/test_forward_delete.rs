@@ -38,8 +38,6 @@ fn parse_order_by_expr(sql: &str) -> sqlparser::ast::OrderByExpr {
     exprs.remove(0)
 }
 
-// ==================== DELETE with USING ====================
-
 #[test]
 fn delete_using_converts_to_exists() {
     let sql = "
@@ -66,8 +64,6 @@ fn delete_using_with_condition() {
     assert!(output.contains("DELETE") || output.contains("EXISTS"), "Expected DELETE: {output}");
 }
 
-// ==================== Basic DELETE ====================
-
 #[test]
 fn delete_basic() {
     let sql = "
@@ -88,8 +84,6 @@ fn delete_all() {
     assert!(output.contains("DELETE"), "Expected DELETE: {output}");
 }
 
-// ==================== DELETE with expression translation ====================
-
 #[test]
 fn delete_where_translates_expressions() {
     let sql = "
@@ -102,9 +96,6 @@ fn delete_where_translates_expressions() {
         "Expected datetime('now') in DELETE WHERE: {output}"
     );
 }
-
-// ==================== DELETE RETURNING expression translation
-// ====================
 
 #[test]
 fn delete_returning_translates_expressions() {

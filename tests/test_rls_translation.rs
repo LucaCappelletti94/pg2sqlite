@@ -39,7 +39,6 @@ use schema::documents;
 
 use crate::helpers::set_session_user_id;
 
-/// Model for querying documents.
 #[derive(Queryable, Insertable, Selectable, Debug)]
 #[diesel(table_name = documents)]
 struct Document {
@@ -53,7 +52,6 @@ struct Document {
     content: String,
 }
 
-/// Test that RLS SELECT policy filters rows correctly.
 #[test]
 fn test_rls_select_policy_filters_rows() -> Result<(), Box<dyn std::error::Error>> {
     let sql = include_str!("fixtures/rls_basic.sql");
@@ -139,7 +137,6 @@ fn test_rls_select_policy_filters_rows() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Test that RLS INSERT policy enforces owner_id check.
 #[test]
 fn test_rls_insert_policy_enforces_owner() -> Result<(), Box<dyn std::error::Error>> {
     let sql = include_str!("fixtures/rls_basic.sql");
@@ -196,7 +193,6 @@ fn test_rls_insert_policy_enforces_owner() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Test that RLS UPDATE policy restricts updates to own rows only.
 #[test]
 fn test_rls_update_policy_restricts_updates() -> Result<(), Box<dyn std::error::Error>> {
     let sql = include_str!("fixtures/rls_basic.sql");
@@ -285,7 +281,6 @@ fn test_rls_update_policy_restricts_updates() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-/// Test that RLS DELETE policy restricts deletes to own rows only.
 #[test]
 fn test_rls_delete_policy_restricts_deletes() -> Result<(), Box<dyn std::error::Error>> {
     let sql = include_str!("fixtures/rls_basic.sql");
@@ -505,7 +500,6 @@ fn test_rls_all_policy_works_like_individual_policies() -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// Test that missing session variable mapping produces an error.
 #[test]
 fn test_missing_session_variable_mapping_error() -> Result<(), Box<dyn std::error::Error>> {
     let sql = include_str!("fixtures/rls_basic.sql");

@@ -45,7 +45,6 @@ fn random_vector(dim: usize) -> Vec<f32> {
     (0..dim).map(|_| rng.random::<f32>()).collect()
 }
 
-/// Test that sqlite-vec is properly loaded and working.
 #[test]
 fn test_sqlite_vec_loaded() -> Result<()> {
     register_sqlite_vec();
@@ -60,7 +59,6 @@ fn test_sqlite_vec_loaded() -> Result<()> {
     Ok(())
 }
 
-/// Test that translated CREATE TABLE with vector column works.
 #[test]
 fn test_translated_vector_table_works() -> Result<()> {
     register_sqlite_vec();
@@ -105,7 +103,6 @@ fn test_translated_vector_table_works() -> Result<()> {
     Ok(())
 }
 
-/// Test that vec0 KNN query returns correct results.
 #[test]
 fn test_vec0_knn_query_correctness() -> Result<()> {
     register_sqlite_vec();
@@ -402,7 +399,6 @@ fn test_vec0_faster_than_naive_at_scale() -> Result<()> {
     Ok(())
 }
 
-/// Test that UPDATE triggers correctly sync to vec0.
 #[test]
 fn test_update_trigger_syncs_to_vec0() -> Result<()> {
     register_sqlite_vec();
@@ -445,7 +441,6 @@ fn test_update_trigger_syncs_to_vec0() -> Result<()> {
     Ok(())
 }
 
-/// Test that DELETE triggers correctly remove from vec0.
 #[test]
 fn test_delete_trigger_removes_from_vec0() -> Result<()> {
     register_sqlite_vec();

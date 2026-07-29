@@ -30,8 +30,6 @@ fn translate_ok(sql: &str) -> String {
     stmts.iter().find(|s| matches!(s, sqlparser::ast::Statement::Query(_))).unwrap().to_string()
 }
 
-// ==================== CONCAT ====================
-
 #[test]
 fn concat_zero_args_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY);
@@ -66,8 +64,6 @@ fn concat_multiple_args_uses_string_concat() {
     assert!(output.contains("||"), "Multi-arg CONCAT should use ||, got: {output}");
 }
 
-// ==================== CONCAT_WS ====================
-
 #[test]
 fn concat_ws_less_than_two_args_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY);
@@ -98,8 +94,6 @@ fn concat_ws_separator_plus_multiple_values() {
     assert!(output.contains("||"), "CONCAT_WS with multiple values should use ||, got: {output}");
 }
 
-// ==================== FILTER clause ====================
-
 #[test]
 fn filter_clause_on_count_star() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, x INT);
@@ -117,8 +111,6 @@ fn filter_clause_on_named_aggregate() {
     assert!(output.contains("CASE WHEN"), "FILTER should become CASE WHEN, got: {output}");
     assert!(!output.contains("FILTER"), "FILTER clause should be removed, got: {output}");
 }
-
-// ==================== Function renames ====================
 
 #[test]
 fn string_agg_becomes_group_concat() {
@@ -153,8 +145,6 @@ fn chr_becomes_char() {
     assert!(!output.contains("chr("), "chr should be renamed to char, got: {output}");
 }
 
-// ==================== Other function translations ====================
-
 #[test]
 fn least_becomes_min() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);
@@ -170,8 +160,6 @@ fn greatest_becomes_max() {
     let output = translate(sql).unwrap();
     assert!(output.contains("MAX"), "GREATEST should become MAX, got: {output}");
 }
-
-// ==================== LEAST still works ====================
 
 #[test]
 fn least_still_translates_correctly() -> Result<(), Box<dyn std::error::Error>> {
@@ -203,9 +191,6 @@ fn least_still_translates_correctly() -> Result<(), Box<dyn std::error::Error>> 
     assert_eq!(rows[0].result, 3, "LEAST(3, 7) should return 3");
     Ok(())
 }
-
-// ==================== FILTER rewrite (from function audit)
-// ====================
 
 #[test]
 fn filter_rewrite_count_with_filter() {
@@ -255,8 +240,6 @@ fn filter_rewrite_semantic() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-// ==================== json aggregate renames ====================
 
 const SIMPLE_TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, val INT, flag BOOLEAN);";
 

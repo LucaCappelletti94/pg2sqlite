@@ -43,7 +43,6 @@ diesel::table! {
 
 diesel::allow_tables_to_appear_in_same_query!(customer_orders, notifications);
 
-/// A customer order record.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = customer_orders)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -56,7 +55,6 @@ struct CustomerOrder {
     total_amount: f64,
 }
 
-/// A notification record.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = notifications)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -77,7 +75,6 @@ struct Notification {
     priority: i32,
 }
 
-/// Test trigger with IF NOT EXISTS for conditional execution.
 #[test]
 fn test_trigger_with_conditional_logic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

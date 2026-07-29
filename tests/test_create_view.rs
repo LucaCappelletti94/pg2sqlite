@@ -16,8 +16,6 @@ fn translate_joined(sql: &str) -> Result<String, String> {
     translate(sql).map(|v| v.join("\n"))
 }
 
-// ==================== Basic view ====================
-
 #[test]
 fn basic_view_translates() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
@@ -42,8 +40,6 @@ fn temporary_view() {
     assert!(output.contains("VIEW"), "Expected VIEW: {output}");
 }
 
-// ==================== MATERIALIZED VIEW error ====================
-
 #[test]
 fn materialized_view_produces_error() {
     let result = translate("CREATE MATERIALIZED VIEW mv AS SELECT 1;");
@@ -51,8 +47,6 @@ fn materialized_view_produces_error() {
     let err = result.unwrap_err();
     assert!(err.contains("MATERIALIZED"), "Expected MATERIALIZED in error: {err}");
 }
-
-// ==================== OR REPLACE → DROP + CREATE ====================
 
 #[test]
 fn or_replace_view_emits_drop_then_create() {
@@ -76,9 +70,6 @@ fn or_replace_view_emits_drop_then_create() {
         "CREATE VIEW should not contain OR REPLACE: {create}"
     );
 }
-
-// ==================== Negative tests from data_type_aliases
-// ====================
 
 #[test]
 fn materialized_view_still_errors() {

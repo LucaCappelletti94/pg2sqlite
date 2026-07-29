@@ -81,7 +81,6 @@ fn test_current_user_translation_snapshot() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Test that a user can see their own profile.
 #[test]
 fn test_user_sees_own_profile() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -103,7 +102,6 @@ fn test_user_sees_own_profile() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that a user can see public profiles.
 #[test]
 fn test_user_sees_public_profiles() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -139,7 +137,6 @@ fn test_user_sees_public_profiles() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that a user cannot see other users' private profiles.
 #[test]
 fn test_user_cannot_see_private_others() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -163,7 +160,6 @@ fn test_user_cannot_see_private_others() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Test that a user can only update their own profile.
 #[test]
 fn test_user_can_update_own_only() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;

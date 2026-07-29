@@ -24,8 +24,6 @@ fn translate_result(sql: &str) -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())
 }
 
-// ==================== Basic index ====================
-
 #[test]
 fn basic_btree_index() {
     let sql = "
@@ -68,8 +66,6 @@ fn multi_column_index() {
     assert!(output.contains("age"), "Expected age column: {output}");
 }
 
-// ==================== GIN index with to_tsvector ====================
-
 #[test]
 fn gin_tsvector_index_to_fts5() {
     let sql = "
@@ -97,8 +93,6 @@ fn gin_tsvector_single_column() {
     );
 }
 
-// ==================== GiST index ====================
-
 #[test]
 fn gist_tsvector_index() {
     let sql = "
@@ -113,9 +107,6 @@ fn gist_tsvector_index() {
     );
 }
 
-// ==================== Hash index (should be skipped or converted)
-// ====================
-
 #[test]
 fn hash_index() {
     let sql = "
@@ -128,8 +119,6 @@ fn hash_index() {
     assert!(output.contains("users"), "Expected table still present: {output}");
 }
 
-// ==================== Expression index ====================
-
 #[test]
 fn expression_index() {
     let sql = "
@@ -139,8 +128,6 @@ fn expression_index() {
     let output = translate(sql);
     assert!(output.contains("users"), "Expected output: {output}");
 }
-
-// ==================== Partial index (WHERE clause) ====================
 
 #[test]
 fn partial_index() {
@@ -154,9 +141,6 @@ fn partial_index() {
         "Expected index or table: {output}"
     );
 }
-
-// ==================== Bug 1: PG-only fields stripped from regular CREATE INDEX
-// ====================
 
 #[test]
 fn concurrently_is_dropped() {
@@ -194,10 +178,6 @@ fn using_btree_is_dropped() {
     assert!(output.contains("idx_name"), "Index name should be preserved: {output}");
 }
 
-// ==================== GIN/GiST non-tsvector errors and tsvector FTS5
-// translation ====================
-
-/// Test that GIN index without to_tsvector causes an error.
 #[test]
 fn gin_index_non_tsvector_causes_error() {
     let sql = "
@@ -210,7 +190,6 @@ fn gin_index_non_tsvector_causes_error() {
     assert!(err.contains("to_tsvector"), "Error should mention to_tsvector: {}", err);
 }
 
-/// Test that GiST index on non-tsvector column causes an error.
 #[test]
 fn gist_index_non_tsvector_causes_error() {
     let sql = "
@@ -223,7 +202,6 @@ fn gist_index_non_tsvector_causes_error() {
     assert!(err.contains("GiST"), "Error should mention GiST index: {}", err);
 }
 
-/// Test that GiST index with to_tsvector translates to FTS5 (same as GIN).
 #[test]
 fn gist_tsvector_translates_to_fts5() {
     let sql = "
@@ -252,7 +230,6 @@ fn gist_tsvector_translates_to_fts5() {
     );
 }
 
-/// Test that GIN index with to_tsvector translates to FTS5.
 #[test]
 fn gin_tsvector_translates_to_fts5() {
     let sql = "

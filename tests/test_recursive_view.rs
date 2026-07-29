@@ -99,7 +99,6 @@ fn test_recursive_view_translation_snapshot() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-/// Test that the recursive view correctly builds the category tree.
 #[test]
 fn test_category_tree_view() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -162,7 +161,6 @@ fn test_category_tree_view() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that the descendant count view works correctly.
 #[test]
 fn test_category_descendant_count_view() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -216,7 +214,6 @@ fn test_category_descendant_count_view() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Test empty table with recursive view.
 #[test]
 fn test_recursive_view_empty_table() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;

@@ -93,10 +93,6 @@ fn date_trunc_unsupported_granularity_produces_helpful_error() {
     );
 }
 
-// ============================================================================
-// date_trunc preserves window OVER clause
-// ============================================================================
-
 #[test]
 fn date_trunc_preserves_window_over() {
     let options = Pg2SqliteOptions::default();

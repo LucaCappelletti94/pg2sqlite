@@ -22,8 +22,6 @@ const TWO_TABLES: &str = "
     CREATE TABLE posts (id INT PRIMARY KEY, user_id INT, title TEXT);
 ";
 
-// ==================== ORDER BY ====================
-
 #[test]
 fn reverse_order_by_asc() {
     let pg = reverse(SCHEMA, "SELECT * FROM users ORDER BY name ASC;");
@@ -42,8 +40,6 @@ fn reverse_order_by_multiple() {
     let pg = reverse(SCHEMA, "SELECT * FROM users ORDER BY name ASC, age DESC;");
     assert!(pg.contains("ORDER BY"), "Expected ORDER BY: {pg}");
 }
-
-// ==================== Set Operations ====================
 
 #[test]
 fn reverse_union() {
@@ -69,23 +65,17 @@ fn reverse_except() {
     assert!(pg.contains("EXCEPT"), "Expected EXCEPT: {pg}");
 }
 
-// ==================== HAVING clause ====================
-
 #[test]
 fn reverse_having() {
     let pg = reverse(SCHEMA, "SELECT age, COUNT(*) FROM users GROUP BY age HAVING COUNT(*) > 1;");
     assert!(pg.contains("HAVING"), "Expected HAVING: {pg}");
 }
 
-// ==================== GROUP BY ====================
-
 #[test]
 fn reverse_group_by() {
     let pg = reverse(SCHEMA, "SELECT age, COUNT(*) FROM users GROUP BY age;");
     assert!(pg.contains("GROUP BY"), "Expected GROUP BY: {pg}");
 }
-
-// ==================== Derived table / subquery in FROM ====================
 
 #[test]
 fn reverse_derived_table() {
@@ -94,15 +84,11 @@ fn reverse_derived_table() {
     assert!(pg.contains("sub"), "Expected alias 'sub': {pg}");
 }
 
-// ==================== ExprWithAlias in projection ====================
-
 #[test]
 fn reverse_expr_with_alias() {
     let pg = reverse(SCHEMA, "SELECT name AS user_name FROM users;");
     assert!(pg.contains("user_name"), "Expected alias 'user_name': {pg}");
 }
-
-// ==================== JOIN types ====================
 
 #[test]
 fn reverse_inner_join() {
@@ -128,8 +114,6 @@ fn reverse_cross_join() {
     assert!(pg.contains("CROSS JOIN"), "Expected CROSS JOIN: {pg}");
 }
 
-// ==================== Right join ====================
-
 #[test]
 fn reverse_right_join() {
     let pg = reverse(
@@ -148,8 +132,6 @@ fn reverse_right_outer_join() {
     assert!(pg.contains("RIGHT OUTER") || pg.contains("RIGHT"), "Expected RIGHT OUTER JOIN: {pg}");
 }
 
-// ==================== Full outer join ====================
-
 #[test]
 fn reverse_full_outer_join() {
     let pg = reverse(
@@ -162,15 +144,11 @@ fn reverse_full_outer_join() {
     );
 }
 
-// ==================== Natural join ====================
-
 #[test]
 fn reverse_natural_join() {
     let pg = reverse(TWO_TABLES, "SELECT * FROM users NATURAL JOIN posts;");
     assert!(pg.contains("NATURAL"), "Expected NATURAL JOIN: {pg}");
 }
-
-// ==================== JOIN with USING ====================
 
 #[test]
 fn reverse_join_using() {
@@ -182,8 +160,6 @@ fn reverse_join_using() {
     assert!(pg.contains("USING"), "Expected USING: {pg}");
 }
 
-// ==================== Nested join ====================
-
 #[test]
 fn reverse_nested_join() {
     let pg = reverse(
@@ -194,8 +170,6 @@ fn reverse_nested_join() {
     );
     assert!(pg.contains("JOIN"), "Expected nested JOIN: {pg}");
 }
-
-// ==================== LIMIT / OFFSET ====================
 
 #[test]
 fn reverse_limit() {
@@ -210,15 +184,11 @@ fn reverse_limit_offset() {
     assert!(pg.contains("OFFSET"), "Expected OFFSET: {pg}");
 }
 
-// ==================== DISTINCT ====================
-
 #[test]
 fn reverse_distinct() {
     let pg = reverse(SCHEMA, "SELECT DISTINCT name FROM users;");
     assert!(pg.contains("DISTINCT"), "Expected DISTINCT: {pg}");
 }
-
-// ==================== VALUES in insert source ====================
 
 #[test]
 fn reverse_insert_values() {
@@ -231,8 +201,6 @@ fn reverse_insert_values() {
     assert!(pg.contains("Bob"), "Expected Bob: {pg}");
 }
 
-// ==================== LEFT OUTER JOIN ====================
-
 #[test]
 fn reverse_left_outer_join_explicit() {
     let pg = reverse(
@@ -243,15 +211,11 @@ fn reverse_left_outer_join_explicit() {
     assert!(pg.contains("JOIN"), "Expected JOIN: {pg}");
 }
 
-// ==================== CROSS JOIN ====================
-
 #[test]
 fn reverse_cross_join_explicit() {
     let pg = reverse(TWO_TABLES, "SELECT * FROM users CROSS JOIN posts;");
     assert!(pg.contains("CROSS JOIN"), "Expected CROSS JOIN: {pg}");
 }
-
-// ==================== Subquery in SELECT ====================
 
 #[test]
 fn reverse_subquery_in_select() {
@@ -263,16 +227,12 @@ fn reverse_subquery_in_select() {
     assert!(pg.contains("COUNT"), "Expected COUNT: {pg}");
 }
 
-// ==================== Multiple aliased expressions ====================
-
 #[test]
 fn reverse_multiple_aliases() {
     let pg = reverse(SCHEMA, "SELECT name AS user_name, age AS user_age FROM users;");
     assert!(pg.contains("user_name"), "Expected alias user_name: {pg}");
     assert!(pg.contains("user_age"), "Expected alias user_age: {pg}");
 }
-
-// ==================== GROUP BY with multiple columns ====================
 
 #[test]
 fn reverse_group_by_multiple() {
@@ -283,8 +243,6 @@ fn reverse_group_by_multiple() {
     assert!(pg.contains("GROUP BY"), "Expected GROUP BY: {pg}");
 }
 
-// ==================== HAVING with aggregate ====================
-
 #[test]
 fn reverse_having_with_sum() {
     let pg =
@@ -292,8 +250,6 @@ fn reverse_having_with_sum() {
     assert!(pg.contains("HAVING"), "Expected HAVING: {pg}");
     assert!(pg.contains("SUM"), "Expected SUM: {pg}");
 }
-
-// ==================== Subquery with alias in FROM ====================
 
 #[test]
 fn reverse_subquery_from_with_filter() {
@@ -305,8 +261,6 @@ fn reverse_subquery_from_with_filter() {
     assert!(pg.contains("LIKE"), "Expected LIKE: {pg}");
 }
 
-// ==================== UNION with ORDER BY ====================
-
 #[test]
 fn reverse_union_with_order_by() {
     let pg = reverse(
@@ -316,8 +270,6 @@ fn reverse_union_with_order_by() {
     assert!(pg.contains("UNION ALL"), "Expected UNION ALL: {pg}");
     assert!(pg.contains("ORDER BY"), "Expected ORDER BY: {pg}");
 }
-
-// ==================== Nested joins (parenthesized) ====================
 
 #[test]
 fn reverse_nested_join_complex() {
@@ -330,15 +282,11 @@ fn reverse_nested_join_complex() {
     assert!(pg.contains("JOIN"), "Expected JOIN: {pg}");
 }
 
-// ==================== SELECT with wildcard ====================
-
 #[test]
 fn reverse_select_wildcard() {
     let pg = reverse(SCHEMA, "SELECT * FROM users;");
     assert!(pg.contains('*'), "Expected wildcard: {pg}");
 }
-
-// ==================== INSERT with select from join ====================
 
 #[test]
 fn reverse_insert_from_join() {

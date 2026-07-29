@@ -7,10 +7,6 @@ use std::time::Instant;
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Diesel Schema Definitions
-// ============================================================================
-
 diesel::table! {
     /// Documents table for full-text search testing.
     documents (id) {
@@ -48,10 +44,6 @@ diesel::table! {
         content -> Text,
     }
 }
-
-// ============================================================================
-// Model Structs
-// ============================================================================
 
 /// A new document to be inserted (without ID, as it's auto-generated).
 #[derive(Insertable)]
@@ -117,7 +109,6 @@ fn test_gin_to_fts5_translation_snapshot() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Test that FTS5 search works correctly.
 #[test]
 fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -193,7 +184,8 @@ fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that FTS5 is faster than LIKE for full-text search on larger datasets.
+/// The point of the FTS5 rewrite: an index scan beats a LIKE table scan once
+/// the corpus is large enough for the difference to show.
 #[test]
 fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -303,7 +295,6 @@ fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Test FTS5 with multiple columns concatenated.
 #[test]
 fn test_fts5_multi_column_search() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -386,7 +377,6 @@ fn test_fts5_multi_column_search() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that FTS5 triggers correctly handle UPDATE and DELETE.
 #[test]
 fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -465,7 +455,6 @@ fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Test that the @@ operator is translated to FTS5 MATCH.
 #[test]
 fn test_at_at_operator_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -501,7 +490,6 @@ fn test_at_at_operator_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that translated @@ query works semantically.
 #[test]
 fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
     // Schema and query must be translated together so the schema context is
@@ -568,7 +556,6 @@ fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that prefix matching syntax is translated correctly (:* -> *).
 #[test]
 fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -605,7 +592,6 @@ fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Test that prefix matching works semantically.
 #[test]
 fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -654,7 +640,6 @@ fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that tsquery operators are translated correctly.
 #[test]
 fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>> {
     // Test AND operator (&)
@@ -713,7 +698,6 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Test that ts_rank function produces a clear error message.
 #[test]
 fn test_ts_rank_error_message() {
     let sql = "
@@ -735,7 +719,6 @@ fn test_ts_rank_error_message() {
     );
 }
 
-/// Test that ts_rank_cd function produces a clear error message.
 #[test]
 fn test_ts_rank_cd_error_message() {
     let sql = "
@@ -757,7 +740,6 @@ fn test_ts_rank_cd_error_message() {
     );
 }
 
-/// Test that FTS5 works with a non-standard primary key name.
 #[test]
 fn test_fts5_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>> {
     // Use doc_id instead of id as primary key
@@ -823,7 +805,6 @@ fn test_fts5_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Test that @@ operator translation uses the correct primary key.
 #[test]
 fn test_at_at_operator_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -852,10 +833,6 @@ fn test_at_at_operator_with_custom_primary_key() -> Result<(), Box<dyn std::erro
 
     Ok(())
 }
-
-// ============================================================================
-// FTS5 with non-INTEGER primary key must cause a clear error
-// ============================================================================
 
 /// FTS5 `content_rowid=` maps to the SQLite rowid, which must be an INTEGER.
 /// A VARCHAR primary key cannot be used as a rowid.

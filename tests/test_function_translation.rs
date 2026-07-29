@@ -103,7 +103,6 @@ struct User {
     name: String,
 }
 
-/// Test that NOW() is translated to datetime('now').
 #[test]
 fn test_now_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -137,7 +136,6 @@ fn test_now_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that NOW() translation works semantically.
 #[test]
 fn test_now_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -185,7 +183,6 @@ fn test_now_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that string_agg() is translated to group_concat().
 #[test]
 fn test_string_agg_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -219,7 +216,6 @@ fn test_string_agg_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test COALESCE works in both PostgreSQL and SQLite (pass-through).
 #[test]
 fn test_coalesce_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -313,7 +309,6 @@ fn test_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that ILIKE translation works semantically (case-insensitive matching).
 #[test]
 fn test_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -371,7 +366,6 @@ fn test_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that string_agg() translation works semantically.
 #[test]
 fn test_string_agg_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

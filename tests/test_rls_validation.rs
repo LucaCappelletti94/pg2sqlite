@@ -46,10 +46,6 @@ CREATE POLICY documents_delete_policy ON documents
     USING (owner_id = current_setting('app.user_id')::uuid);
 "#;
 
-// ============================================================================
-// Phase 1: Configuration Tests (Should Fail Initially)
-// ============================================================================
-
 /// Test 1: RLS requires audit table name to be configured.
 /// This test ensures that if RLS is present but no audit table name is set,
 /// the translation fails with a clear error.
@@ -77,7 +73,6 @@ fn test_rls_requires_audit_table_name() {
     );
 }
 
-/// Test 2: Audit table is generated with user-provided name.
 #[test]
 fn test_audit_table_uses_configured_name() -> Result<(), Box<dyn std::error::Error>> {
     let custom_audit_name = "my_custom_violations";
@@ -104,7 +99,6 @@ fn test_audit_table_uses_configured_name() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Test 3: Monitoring triggers reference the correct audit table name.
 #[test]
 fn test_triggers_use_configured_audit_table() -> Result<(), Box<dyn std::error::Error>> {
     let custom_audit_name = "custom_audit";
@@ -131,10 +125,6 @@ fn test_triggers_use_configured_audit_table() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-// ============================================================================
-// Phase 2: Monitor Mode Tests (Default Behavior)
-// ============================================================================
-
 mod schema {
     diesel::table! {
         documents (id) {
@@ -156,7 +146,6 @@ struct Document {
     content: String,
 }
 
-/// Test 4: Monitor mode logs violations without blocking.
 #[test]
 fn test_monitor_mode_logs_violations() -> Result<(), Box<dyn std::error::Error>> {
     let audit_table_name = "rls_violations";
@@ -227,11 +216,6 @@ fn test_monitor_mode_logs_violations() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-// ============================================================================
-// Phase 3: Strict Mode Tests
-// ============================================================================
-
-/// Test 5: Strict mode blocks violations.
 #[test]
 fn test_strict_mode_blocks_violations() -> Result<(), Box<dyn std::error::Error>> {
     let audit_table_name = "rls_violations_strict";
@@ -298,11 +282,6 @@ fn test_strict_mode_blocks_violations() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-// ============================================================================
-// Phase 4: Validation View Tests
-// ============================================================================
-
-/// Test 6: Validation views are generated and show violations.
 #[test]
 fn test_validation_views_exist() -> Result<(), Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default()
@@ -370,11 +349,6 @@ fn test_validation_views_exist() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// Phase 5: Snapshot Tests
-// ============================================================================
-
-/// Snapshot test for monitor mode SQL generation.
 #[test]
 fn test_monitor_mode_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default()
@@ -394,7 +368,6 @@ fn test_monitor_mode_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Snapshot test for strict mode SQL generation.
 #[test]
 fn test_strict_mode_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default()

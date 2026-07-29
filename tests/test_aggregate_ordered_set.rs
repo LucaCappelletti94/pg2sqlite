@@ -34,10 +34,6 @@ fn translate_ok(sql: &str) -> String {
         .to_string()
 }
 
-// ---------------------------------------------------------------------------
-// WITHIN GROUP ordered-set aggregates
-// ---------------------------------------------------------------------------
-
 /// percentile_cont uses WITHIN GROUP syntax unsupported by SQLite.
 #[test]
 fn percentile_cont_within_group_causes_error() {
@@ -68,10 +64,6 @@ fn mode_within_group_causes_error() {
     let err = translate_err(&format!("{SCHEMA} SELECT mode() WITHIN GROUP (ORDER BY val) FROM t;"));
     assert!(err.to_lowercase().contains("mode"), "Error should mention mode: {err}");
 }
-
-// ---------------------------------------------------------------------------
-// regr_* regression aggregates
-// ---------------------------------------------------------------------------
 
 #[test]
 fn regr_slope_causes_error() {
@@ -109,10 +101,6 @@ fn regr_avgy_causes_error() {
     assert!(err.to_lowercase().contains("regr"), "Error should mention regr: {err}");
 }
 
-// ---------------------------------------------------------------------------
-// xmlagg / range_agg / multirange_agg
-// ---------------------------------------------------------------------------
-
 #[test]
 fn xmlagg_causes_error() {
     let err = translate_err(&format!("{SCHEMA} SELECT xmlagg(label) FROM t;"));
@@ -134,10 +122,6 @@ fn multirange_agg_causes_error() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// string_agg ORDER BY inside aggregate → group_concat carries ORDER BY
-// ---------------------------------------------------------------------------
-
 /// string_agg with ORDER BY clause inside the aggregate — the ORDER BY must
 /// survive the rename to group_concat so SQLite can use it (requires SQLite
 /// 3.44+).
@@ -148,10 +132,6 @@ fn string_agg_with_order_by_preserves_order_clause() {
     assert!(out.contains("group_concat"), "Should rename to group_concat: {out}");
     assert!(out.to_uppercase().contains("ORDER BY"), "ORDER BY must be preserved: {out}");
 }
-
-// ---------------------------------------------------------------------------
-// Recursive arg translation in the Rename path
-// ---------------------------------------------------------------------------
 
 /// string_agg(NOW()::text, ',') — the NOW() inside the aggregate arg must be
 /// translated to datetime('now') in the output, not left as NOW().

@@ -31,8 +31,6 @@ const SCHEMA: &str = "
     CREATE TABLE comments (id INT PRIMARY KEY, post_id INT, body TEXT);
 ";
 
-// ==================== Views with joins ====================
-
 #[test]
 fn view_with_inner_join() {
     let sql = format!(
@@ -107,8 +105,6 @@ fn view_with_natural_join() {
     assert!(output.contains("NATURAL"), "Expected NATURAL JOIN: {output}");
 }
 
-// ==================== Views with subqueries ====================
-
 #[test]
 fn view_with_derived_table() {
     let sql = format!(
@@ -119,8 +115,6 @@ fn view_with_derived_table() {
     let output = translate(&sql);
     assert!(output.contains("adults"), "Expected derived table alias: {output}");
 }
-
-// ==================== Views with set operations ====================
 
 #[test]
 fn view_with_union() {
@@ -134,8 +128,6 @@ fn view_with_union() {
     let output = translate(&sql);
     assert!(output.contains("UNION"), "Expected UNION: {output}");
 }
-
-// ==================== View with GROUP BY / HAVING ====================
 
 #[test]
 fn view_with_group_by_having() {
@@ -152,8 +144,6 @@ fn view_with_group_by_having() {
     assert!(output.contains("HAVING"), "Expected HAVING: {output}");
 }
 
-// ==================== View with ORDER BY / LIMIT ====================
-
 #[test]
 fn view_with_order_by() {
     let sql = format!(
@@ -164,8 +154,6 @@ fn view_with_order_by() {
     let output = translate(&sql);
     assert!(output.contains("ORDER BY"), "Expected ORDER BY: {output}");
 }
-
-// ==================== Multi-join view ====================
 
 #[test]
 fn view_with_multiple_joins() {
@@ -182,8 +170,6 @@ fn view_with_multiple_joins() {
     assert!(output.contains("full_data"), "Expected view name: {output}");
 }
 
-// ==================== Nested join ====================
-
 #[test]
 fn view_with_nested_join() {
     let sql = format!(
@@ -197,8 +183,6 @@ fn view_with_nested_join() {
     assert!(output.contains("JOIN"), "Expected nested JOIN: {output}");
 }
 
-// ==================== Join with USING ====================
-
 #[test]
 fn view_with_using_join() {
     let sql = "
@@ -209,9 +193,6 @@ fn view_with_using_join() {
     let output = translate(sql);
     assert!(output.contains("USING"), "Expected USING: {output}");
 }
-
-// ==================== INSERT...SELECT with JOIN (exercises query.rs join
-// operators) ====================
 
 #[test]
 fn insert_select_with_inner_join() {
@@ -315,8 +296,6 @@ fn insert_select_with_using_join() {
     assert!(output.contains("USING"), "Expected USING join: {output}");
 }
 
-// ==================== View body expression translation ====================
-
 #[test]
 fn view_body_translates_now() {
     let sql = "
@@ -327,9 +306,6 @@ fn view_body_translates_now() {
     let output = translate(sql);
     assert!(output.contains("datetime('now')"), "Expected datetime('now') in view body: {output}");
 }
-
-// ==================== GROUP BY / HAVING expression translation
-// ====================
 
 #[test]
 fn group_by_translates_expressions() {
@@ -351,8 +327,6 @@ fn having_translates_expressions() {
     assert!(output.contains("HAVING datetime('now')"), "Expected translated HAVING: {output}");
 }
 
-// ==================== CTE expression translation ====================
-
 #[test]
 fn cte_body_translates_expressions() {
     let sql = "
@@ -362,8 +336,6 @@ fn cte_body_translates_expressions() {
     let output = translate(sql);
     assert!(output.contains("datetime('now')"), "Expected datetime('now') in CTE body: {output}");
 }
-
-// ==================== DISTINCT ON error ====================
 
 #[test]
 fn distinct_on_returns_error() {
@@ -377,8 +349,6 @@ fn distinct_on_returns_error() {
     assert!(err.contains("DISTINCT ON"), "Expected DISTINCT ON error: {err}");
 }
 
-// ==================== Named window expression translation ====================
-
 #[test]
 fn named_window_translates_expressions() {
     let sql = "
@@ -391,8 +361,6 @@ fn named_window_translates_expressions() {
         "Expected datetime('now') in named window: {output}"
     );
 }
-
-// ==================== ORDER BY WITH FILL rejection ====================
 
 fn empty_schema() -> ParserDB {
     ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
@@ -420,8 +388,6 @@ fn order_by_expr_translation_rejects_with_fill_clause() {
     ));
 }
 
-// ==================== SetExpr DML translation ====================
-
 #[test]
 fn set_expr_insert_translates_expressions() {
     let options = Pg2SqliteOptions::default();
@@ -432,9 +398,6 @@ fn set_expr_insert_translates_expressions() {
     // The key point is it doesn't panic
     let _ = result;
 }
-
-// ==================== Qualified wildcard (table.*) translation
-// ====================
 
 diesel::table! {
     /// Products table for testing qualified wildcards.

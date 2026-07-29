@@ -85,7 +85,6 @@ fn test_self_referential_translation_snapshot() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-/// Test that a user can only see their own record.
 #[test]
 fn test_user_sees_only_self() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -130,7 +129,6 @@ fn test_user_sees_only_self() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that a user cannot see other users.
 #[test]
 fn test_user_cannot_see_others() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -168,7 +166,6 @@ fn test_user_cannot_see_others() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that a user can update their own record.
 #[test]
 fn test_user_can_update_own() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -199,7 +196,6 @@ fn test_user_can_update_own() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that a user cannot update other users' records.
 #[test]
 fn test_user_cannot_update_others() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -286,7 +282,6 @@ fn test_delete_without_explicit_policy() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Test that inserting with wrong id fails.
 #[test]
 fn test_insert_wrong_id_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;

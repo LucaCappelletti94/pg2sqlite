@@ -20,8 +20,6 @@ const SCHEMA: &str = "
     CREATE INDEX idx_articles_fts ON articles USING GIN (to_tsvector('english', title || ' ' || body));
 ";
 
-// ==================== FTS expression translation ====================
-
 #[test]
 fn tsvector_tsquery_match() {
     let sql = format!(
@@ -51,8 +49,6 @@ fn tsvector_tsquery_single_column() {
         "Expected FTS5 translation: {output}"
     );
 }
-
-// ==================== Various expression types in views ====================
 
 #[test]
 fn view_with_case_expression() {

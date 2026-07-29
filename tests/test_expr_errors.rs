@@ -23,8 +23,6 @@ fn translate(sql: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-// ==================== ANY/SOME ====================
-
 #[test]
 fn any_eq_subquery_translates_to_in() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
@@ -106,8 +104,6 @@ fn all_gt_array_literal_translates_to_and_chain() {
     assert!(!output.contains(" ALL"), "ALL keyword should be removed, got: {output}");
 }
 
-// ==================== SIMILAR TO ====================
-
 #[test]
 fn similar_to_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
@@ -117,8 +113,6 @@ fn similar_to_produces_error() {
     let err = result.unwrap_err();
     assert!(err.contains("SIMILAR TO"), "Expected SIMILAR TO error, got: {err}");
 }
-
-// ==================== IS NORMALIZED ====================
 
 #[test]
 fn is_normalized_produces_error() {
@@ -130,8 +124,6 @@ fn is_normalized_produces_error() {
     assert!(err.contains("IS NORMALIZED"), "Expected IS NORMALIZED error, got: {err}");
 }
 
-// ==================== @@ operator (non-FTS) ====================
-
 #[test]
 fn at_at_without_tsvector_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
@@ -141,8 +133,6 @@ fn at_at_without_tsvector_produces_error() {
     let err = result.unwrap_err();
     assert!(err.contains("@@"), "Expected @@ error, got: {err}");
 }
-
-// ==================== Vector distance operators ====================
 
 #[test]
 fn vector_l2_distance_translates() {
@@ -195,8 +185,6 @@ fn vector_jaccard_produces_error() {
     let err = result.unwrap_err();
     assert!(err.contains("<%>"), "Expected <%> error, got: {err}");
 }
-
-// ==================== AT TIME ZONE ====================
 
 #[test]
 fn at_time_zone_named_zone_still_errors() {

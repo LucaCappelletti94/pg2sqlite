@@ -1,16 +1,8 @@
 //! Preprocessor for PL/pgSQL function bodies.
 //!
-//! This module transforms PL/pgSQL-specific syntax into forms that
-//! can be parsed by sqlparser.
-//!
-//! ## Transformations
-//!
-//! 1. **Variable assignments**: `variable := expression;` → `SET variable =
-//!    expression;`
-//! 2. **DECLARE extraction**: Parses DECLARE block separately to extract
-//!    variable info
-//! 3. **SELECT INTO**: `SELECT cols INTO vars FROM ...` → preserved for later
-//!    handling
+//! Transforms variable assignments (`:=`) into SET statements, extracts DECLARE
+//! blocks, and rewrites SELECT INTO as SET subqueries for sqlparser
+//! compatibility.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -31,84 +23,57 @@ pub struct PlPgSqlPreprocessor;
 
 impl PlPgSqlPreprocessor {
     /// Preprocesses a PL/pgSQL function body string.
-    ///
-    /// Returns:
-    /// - The transformed body ready for parsing
-    /// - A context with extracted variable declarations
-    ///
-    /// # Arguments
-    /// * `body` - The raw function body string (including
-    ///   DECLARE...BEGIN...END)
     #[must_use]
     pub fn preprocess(body: &str) -> (String, PlPgSqlContext) {
         let mut context = PlPgSqlContext::new();
 
-        // Extract DECLARE block if present
         let (declare_section, body_section) = Self::split_declare_and_body(body);
 
-        // Parse variable declarations
         if let Some(declare) = declare_section {
             Self::parse_declarations(&declare, &mut context);
         }
 
-        // Transform the body
         let transformed = Self::transform_body(&body_section, &context);
 
         (transformed, context)
     }
 
-    /// Splits the function body into DECLARE section and BEGIN...END section.
     fn split_declare_and_body(body: &str) -> (Option<String>, String) {
         let body_upper = body.to_uppercase();
 
-        // Find DECLARE and BEGIN positions
         let declare_pos = body_upper.find("DECLARE");
         let begin_pos = body_upper.find("BEGIN");
 
         match (declare_pos, begin_pos) {
             (Some(d), Some(b)) if d < b => {
-                // Has DECLARE block before BEGIN
                 let declare_section = body[d + 7..b].trim().to_string();
                 let body_section = body[b..].to_string();
                 (Some(declare_section), body_section)
             }
-            (_, Some(b)) => {
-                // No DECLARE or DECLARE after BEGIN (unusual)
-                (None, body[b..].to_string())
-            }
-            _ => {
-                // No BEGIN found, return as-is
-                (None, body.to_string())
-            }
+            (_, Some(b)) => (None, body[b..].to_string()),
+            _ => (None, body.to_string()),
         }
     }
 
-    /// Parses variable declarations from a DECLARE section.
     fn parse_declarations(declare_section: &str, context: &mut PlPgSqlContext) {
-        // Split by semicolons to get individual declarations
         for decl in declare_section.split(';') {
             let decl = decl.trim();
             if decl.is_empty() {
                 continue;
             }
 
-            // Parse: variable_name TYPE [DEFAULT|:= expr]
             if let Some(var_decl) = Self::parse_single_declaration(decl) {
                 context.add_declaration(var_decl);
             }
         }
     }
 
-    /// Parses a single variable declaration.
     fn parse_single_declaration(decl: &str) -> Option<VariableDeclaration> {
-        // Handle: "v_name UUID" or "v_name UUID := default_value" or "v_name UUID
-        // DEFAULT value"
         let decl = decl.trim();
         if decl.is_empty() {
             return None;
         }
 
-        // Check for DEFAULT or :=
         let (name_type, default_value) = if let Some(pos) = decl.find(":=") {
             (decl[..pos].trim(), Some(decl[pos + 2..].trim().to_string()))
         } else if let Some(pos) = decl.to_uppercase().find(" DEFAULT ") {
@@ -117,7 +82,6 @@ impl PlPgSqlPreprocessor {
             (decl, None)
         };
 
-        // Split name and type
         let parts: Vec<&str> = name_type.split_whitespace().collect();
         if parts.len() >= 2 {
             Some(VariableDeclaration {
@@ -130,38 +94,24 @@ impl PlPgSqlPreprocessor {
         }
     }
 
-    /// Transforms the body section, converting PL/pgSQL syntax to parseable
-    /// SQL.
     fn transform_body(body: &str, context: &PlPgSqlContext) -> String {
         let mut result = body.to_string();
 
         // Transform PostgreSQL ELSIF → ELSEIF (sqlparser uses ELSEIF keyword)
         result = Self::transform_elsif(&result);
 
-        // Transform variable assignments: `variable := expression;` → `SET variable =
-        // expression;` We need to be careful to only transform standalone
-        // assignments, not within expressions
+        // Rewrite := assignments as SET statements (standalone assignments only).
         result = Self::transform_assignments(&result, context);
 
-        // Transform SELECT INTO statements to extract variable bindings
         result = Self::transform_select_into(&result, context);
 
-        // Transform RAISE EXCEPTION/NOTICE/... → SELECT RAISE(ABORT, ...) or drop
         result = Self::transform_raise_statements(&result);
 
         result
     }
 
-    /// Transforms PL/pgSQL `RAISE` statements into SQLite-compatible form.
-    ///
-    /// Scans the body text directly (not statement-by-statement) so that RAISE
-    /// inside IF/THEN blocks is also rewritten.
-    ///
-    /// - `RAISE EXCEPTION 'msg'` → `SELECT RAISE(ABORT, 'msg')`
-    /// - `RAISE EXCEPTION 'fmt %', arg` → `SELECT RAISE(ABORT, 'fmt %')`
-    ///   (format args dropped)
-    /// - `RAISE NOTICE/INFO/WARNING/DEBUG/LOG ...` → removed (no SQLite
-    ///   equivalent)
+    /// Rewrites RAISE statements; scans body text directly so RAISE inside
+    /// IF/THEN blocks is transformed too.
     fn transform_raise_statements(body: &str) -> String {
         let mut result = String::new();
         let mut search_from = 0;

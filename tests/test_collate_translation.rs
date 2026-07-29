@@ -62,7 +62,6 @@ fn nocase_collation_still_works() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test COLLATE expression translation (also added during fuzzing fixes).
 #[test]
 fn test_collate_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -87,7 +86,6 @@ fn test_collate_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test COLLATE semantic execution with diesel SQLite.
 #[test]
 fn test_collate_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

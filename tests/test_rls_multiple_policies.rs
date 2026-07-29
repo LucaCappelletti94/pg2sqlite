@@ -95,7 +95,6 @@ fn test_multiple_policies_translation_snapshot() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Test that owner sees their own documents.
 #[test]
 fn test_owner_sees_own_docs() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -121,7 +120,6 @@ fn test_owner_sees_own_docs() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that anyone sees public documents.
 #[test]
 fn test_anyone_sees_public_docs() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -152,7 +150,6 @@ fn test_anyone_sees_public_docs() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that department member sees department documents.
 #[test]
 fn test_dept_member_sees_dept_docs() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -190,7 +187,6 @@ fn test_dept_member_sees_dept_docs() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that user sees union of all matching policies.
 #[test]
 fn test_user_sees_union_of_all_matching() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -265,7 +261,7 @@ fn test_user_sees_union_of_all_matching() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Test that policies combine with OR (any match grants access).
+/// Multiple PERMISSIVE policies are a union: any single match grants access.
 #[test]
 fn test_policies_combine_with_or() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -297,7 +293,6 @@ fn test_policies_combine_with_or() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that non-matching user sees nothing.
 #[test]
 fn test_non_matching_sees_nothing() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;

@@ -22,10 +22,8 @@ fn translate_ok(sql: &str) -> String {
         .to_string()
 }
 
-// ---------------------------------------------------------------------------
 // Inline OVER (PARTITION BY <pg-expr>) — partition_by expressions must be
 // translated, not left as PG syntax.
-// ---------------------------------------------------------------------------
 
 /// date_trunc inside PARTITION BY of an inline window spec must be translated
 /// to strftime (the SQLite equivalent) — not left as `date_trunc(...)`.
@@ -100,10 +98,8 @@ fn window_partition_and_order_by_date_trunc_both_translated() {
     assert!(!out.to_lowercase().contains("date_trunc"), "No date_trunc should remain: {out}");
 }
 
-// ---------------------------------------------------------------------------
 // Named WINDOW clause — already covered by translate_named_windows, but
 // confirm the same PG expressions inside named windows are translated.
-// ---------------------------------------------------------------------------
 
 /// date_trunc in a named WINDOW clause's PARTITION BY must be translated.
 #[test]
@@ -124,10 +120,8 @@ fn named_window_partition_by_date_trunc_is_translated() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Aggregate function args that contain PG-specific expressions — fixed in
 // the previous round but confirming with a window-function variant.
-// ---------------------------------------------------------------------------
 
 /// date_trunc as the expression argument to a window aggregate must translate.
 #[test]

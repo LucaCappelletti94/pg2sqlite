@@ -17,23 +17,18 @@ use crate::traits::TranslationOptions;
 
 /// Trait to translate between a `PostgreSQL` entry and a `SQLite` entry.
 pub trait Translator {
-    /// The schema type to be used for the translation.
+    /// Schema type for the translation.
     type Schema: Schema;
-    /// The translation options to be used for the translation.
+    /// Translation options type.
     type Options: TranslationOptions;
-    /// The `SQLite` entry type to be used for the translation.
+    /// Produced SQLite entry type.
     type SQLiteEntry;
 
-    /// Translate a `PostgreSQL` entry to a `SQLite` entry.
-    ///
-    /// # Arguments
-    ///
-    /// * `schema` - The schema to be used for the translation.
-    /// * `options` - The translation options to be used for the translation.
+    /// Translates a PostgreSQL entry to its SQLite equivalent.
     ///
     /// # Errors
     ///
-    /// * `crate::errors::Error` - If the translation fails.
+    /// Returns an error if the translation fails.
     fn translate(
         &self,
         schema: &Self::Schema,

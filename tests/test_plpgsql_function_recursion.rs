@@ -6,10 +6,6 @@ mod helpers;
 use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
 
-// ============================================================================
-// M13: Function arm — parameters, filter, over, within_group recursion
-// ============================================================================
-
 #[test]
 fn plpgsql_trigger_translates_function_in_window_partition() {
     // A trigger body containing a function with OVER (PARTITION BY
@@ -43,10 +39,6 @@ fn plpgsql_trigger_translates_function_in_window_partition() {
     );
 }
 
-// ============================================================================
-// M14: Subquery/Exists — with + order_by recursion
-// ============================================================================
-
 #[test]
 fn plpgsql_trigger_translates_subquery_order_by() {
     // A trigger body with an ORDER BY expression containing gen_random_uuid()
@@ -77,10 +69,6 @@ fn plpgsql_trigger_translates_subquery_order_by() {
         "gen_random_uuid in trigger body should be translated to uuid(): {sql}"
     );
 }
-
-// ============================================================================
-// M17: transform_set_expr — SetOperation path
-// ============================================================================
 
 #[test]
 fn plpgsql_trigger_translates_union_all_body() {
@@ -116,10 +104,6 @@ fn plpgsql_trigger_translates_union_all_body() {
         "expected at least 2 uuid() occurrences in UNION ALL body, got {count}: {sql}"
     );
 }
-
-// ============================================================================
-// M18: transform_table_factor — NestedJoin (basic coverage)
-// ============================================================================
 
 #[test]
 fn plpgsql_trigger_handles_nested_join_in_from() {

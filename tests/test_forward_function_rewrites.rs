@@ -11,9 +11,6 @@ fn default_opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
 }
 
-// ==================== localtimestamp → datetime('now', 'localtime')
-// ====================
-
 #[test]
 fn localtimestamp_to_datetime_localtime() {
     let sql = "SELECT localtimestamp";
@@ -25,9 +22,6 @@ fn localtimestamp_to_datetime_localtime() {
     );
 }
 
-// ==================== localtime → time('now', 'localtime')
-// ====================
-
 #[test]
 fn localtime_to_time_localtime() {
     let sql = "SELECT localtime";
@@ -38,8 +32,6 @@ fn localtime_to_time_localtime() {
         "localtime should become time('now', 'localtime'): {result}"
     );
 }
-
-// ==================== to_json / to_jsonb → json() ====================
 
 #[test]
 fn to_json_renames_to_json() {
@@ -63,8 +55,6 @@ fn to_jsonb_renames_to_json() {
     );
 }
 
-// ==================== jsonb_set → json_set ====================
-
 #[test]
 fn jsonb_set_renames_to_json_set() {
     let sql = "SELECT jsonb_set('{\"a\": 1}', '{a}', '2')";
@@ -72,8 +62,6 @@ fn jsonb_set_renames_to_json_set() {
     let lower = result.to_lowercase();
     assert!(lower.contains("json_set("), "jsonb_set should rename to json_set: {result}");
 }
-
-// ==================== jsonb_insert → json_insert ====================
 
 #[test]
 fn jsonb_insert_renames_to_json_insert() {
@@ -83,8 +71,6 @@ fn jsonb_insert_renames_to_json_insert() {
     assert!(lower.contains("json_insert("), "jsonb_insert should rename to json_insert: {result}");
 }
 
-// ==================== jsonb_each → json_each ====================
-
 #[test]
 fn jsonb_each_renames_to_json_each() {
     let sql = "SELECT jsonb_each('{\"a\": 1}')";
@@ -92,9 +78,6 @@ fn jsonb_each_renames_to_json_each() {
     let lower = result.to_lowercase();
     assert!(lower.contains("json_each("), "jsonb_each should rename to json_each: {result}");
 }
-
-// ==================== json_each_text / jsonb_each_text → json_each
-// ====================
 
 #[test]
 fn json_each_text_renames_to_json_each() {
@@ -112,8 +95,6 @@ fn jsonb_each_text_renames_to_json_each() {
     assert!(lower.contains("json_each("), "jsonb_each_text should rename to json_each: {result}");
 }
 
-// ==================== quote_literal → quote ====================
-
 #[test]
 fn quote_literal_renames_to_quote() {
     let sql = "SELECT quote_literal('hello')";
@@ -125,16 +106,12 @@ fn quote_literal_renames_to_quote() {
     );
 }
 
-// ==================== mod(a, b) → (a % b) ====================
-
 #[test]
 fn mod_to_modulo_operator() {
     let sql = "SELECT mod(10, 3)";
     let result = translate_sql(sql, &default_opts()).unwrap();
     assert!(result.contains('%'), "mod(a, b) should become (a % b): {result}");
 }
-
-// ==================== div(a, b) → CAST(a / b AS INTEGER) ====================
 
 #[test]
 fn div_to_integer_division() {
@@ -147,8 +124,6 @@ fn div_to_integer_division() {
     );
 }
 
-// ==================== trunc(x) → CAST(x AS INTEGER) ====================
-
 #[test]
 fn trunc_single_arg_to_cast_integer() {
     let sql = "SELECT trunc(3.7)";
@@ -160,8 +135,6 @@ fn trunc_single_arg_to_cast_integer() {
     );
 }
 
-// ==================== trunc(x, n) → round(x, n) ====================
-
 #[test]
 fn trunc_two_arg_to_round() {
     let sql = "SELECT trunc(3.14159, 2)";
@@ -169,9 +142,6 @@ fn trunc_two_arg_to_round() {
     let lower = result.to_lowercase();
     assert!(lower.contains("round("), "trunc(x, n) should become round(x, n): {result}");
 }
-
-// ==================== make_date → printf('%04d-%02d-%02d', ...)
-// ====================
 
 #[test]
 fn make_date_to_printf() {
@@ -181,9 +151,6 @@ fn make_date_to_printf() {
     assert!(lower.contains("printf("), "make_date should become printf: {result}");
 }
 
-// ==================== make_time → printf('%02d:%02d:%02d', ...)
-// ====================
-
 #[test]
 fn make_time_to_printf() {
     let sql = "SELECT make_time(12, 30, 45)";
@@ -192,8 +159,6 @@ fn make_time_to_printf() {
     assert!(lower.contains("printf("), "make_time should become printf: {result}");
 }
 
-// ==================== make_timestamp → combined printf ====================
-
 #[test]
 fn make_timestamp_to_printf() {
     let sql = "SELECT make_timestamp(2024, 1, 15, 12, 30, 45)";
@@ -201,8 +166,6 @@ fn make_timestamp_to_printf() {
     let lower = result.to_lowercase();
     assert!(lower.contains("printf("), "make_timestamp should become printf: {result}");
 }
-
-// ==================== json_extract_path → json_extract ====================
 
 #[test]
 fn json_extract_path_to_json_extract() {

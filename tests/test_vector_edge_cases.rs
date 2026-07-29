@@ -26,9 +26,6 @@ fn translate_err(sql: &str) -> String {
     }
 }
 
-// ==================== Vector with table-level PK constraint
-// ====================
-
 #[test]
 fn vector_with_table_level_pk() {
     let sql = "
@@ -44,8 +41,6 @@ fn vector_with_table_level_pk() {
     assert!(output.contains("vec0") || output.contains("BLOB"), "Expected vec0 or BLOB: {output}");
 }
 
-// ==================== Vector with column-level PK ====================
-
 #[test]
 fn vector_with_column_level_pk() {
     let sql = "
@@ -57,8 +52,6 @@ fn vector_with_column_level_pk() {
     let output = translate(sql);
     assert!(output.contains("vec0"), "Expected vec0 virtual table: {output}");
 }
-
-// ==================== Multiple vector columns ====================
 
 #[test]
 fn multiple_vector_columns() {
@@ -74,9 +67,6 @@ fn multiple_vector_columns() {
     assert!(output.contains("vec0"), "Expected vec0: {output}");
 }
 
-// ==================== Vector column without explicit dimensions
-// ====================
-
 #[test]
 fn vector_without_dimensions() {
     let sql = "
@@ -89,9 +79,6 @@ fn vector_without_dimensions() {
     // VECTOR without dimensions should still translate
     assert!(output.contains("BLOB") || output.contains("vec0"), "Expected BLOB or vec0: {output}");
 }
-
-// ==================== Vector table without PK (should error)
-// ====================
 
 #[test]
 fn vector_without_pk_produces_error() {
@@ -110,9 +97,6 @@ fn vector_without_pk_produces_error() {
         "Expected PK error: {output}"
     );
 }
-
-// ==================== Vector with composite PK (should error)
-// ====================
 
 #[test]
 fn vector_with_composite_pk() {

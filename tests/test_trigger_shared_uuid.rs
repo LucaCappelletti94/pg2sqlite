@@ -84,7 +84,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     metadata
 );
 
-/// An entity record.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = entities)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -96,7 +95,6 @@ struct Entity {
     name: String,
 }
 
-/// An ownable record.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = ownables)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -108,7 +106,6 @@ struct Ownable {
     owner: String,
 }
 
-/// A parent relation record.
 #[allow(dead_code)]
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = parent_relations)]
@@ -122,7 +119,6 @@ struct ParentRelation {
     parent_name: String,
 }
 
-/// A metadata record.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = metadata)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]

@@ -48,8 +48,6 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .join("\n")
 }
 
-// ==================== EXISTS in policy USING ====================
-
 #[test]
 fn exists_in_policy_using() {
     let sql = r#"
@@ -77,8 +75,6 @@ fn exists_in_policy_using() {
     let output = translate(sql);
     assert!(output.contains("EXISTS"), "Expected EXISTS in view: {output}");
 }
-
-// ==================== InSubquery in policy ====================
 
 #[test]
 fn in_subquery_in_policy() {
@@ -108,8 +104,6 @@ fn in_subquery_in_policy() {
     assert!(output.contains("IN (SELECT"), "Expected IN subquery: {output}");
 }
 
-// ==================== UPDATE with CHECK using COALESCE ====================
-
 #[test]
 fn update_with_check_generates_coalesce() {
     let sql = r#"
@@ -136,9 +130,6 @@ fn update_with_check_generates_coalesce() {
     // The UPDATE trigger should use COALESCE for WITH CHECK
     assert!(output.contains("COALESCE"), "Expected COALESCE in update trigger: {output}");
 }
-
-// ==================== CompoundIdentifier rename in trigger
-// ====================
 
 #[test]
 fn compound_identifier_renamed_in_trigger() {
@@ -170,9 +161,6 @@ fn compound_identifier_renamed_in_trigger() {
     );
 }
 
-// ==================== find_current_setting_call in BinaryOp
-// ====================
-
 #[test]
 fn current_setting_in_binary_op() {
     let sql = r#"
@@ -201,9 +189,6 @@ fn current_setting_in_binary_op() {
         "Expected current_app_user() function: {output}"
     );
 }
-
-// ==================== contains_current_user in nested expr
-// ====================
 
 #[test]
 fn current_user_in_nested_expr() {
@@ -234,8 +219,6 @@ fn current_user_in_nested_expr() {
     let output = translate_with_options(sql, &options);
     assert!(output.contains("current_app_username()"), "Expected current_app_username(): {output}");
 }
-
-// ==================== validate_session_variables error ====================
 
 #[test]
 fn missing_session_variable_mapping_error() {
@@ -300,8 +283,6 @@ fn missing_one_of_multiple_current_setting_mappings_errors() {
     );
 }
 
-// ==================== generate_readonly_rls_statements ====================
-
 #[test]
 fn readonly_rls_table_no_write_triggers() {
     let sql = r#"
@@ -337,8 +318,6 @@ fn readonly_rls_table_no_write_triggers() {
     );
 }
 
-// ==================== Monitoring triggers ====================
-
 #[test]
 fn monitoring_triggers_in_monitor_mode() {
     let sql = r#"
@@ -368,8 +347,6 @@ fn monitoring_triggers_in_monitor_mode() {
     // In monitor mode (default), should have severity 'warning'
     assert!(output.contains("warning"), "Expected 'warning' severity in monitor mode: {output}");
 }
-
-// ==================== Strict mode triggers ====================
 
 #[test]
 fn monitoring_triggers_in_strict_mode() {
@@ -401,8 +378,6 @@ fn monitoring_triggers_in_strict_mode() {
     assert!(output.contains("error"), "Expected 'error' severity in strict mode: {output}");
 }
 
-// ==================== Validation view ====================
-
 #[test]
 fn validation_view_generated() {
     let sql = r#"
@@ -428,8 +403,6 @@ fn validation_view_generated() {
     let output = translate(sql);
     assert!(output.contains("_violations"), "Expected validation view with _violations: {output}");
 }
-
-// ==================== generate_rls_audit_table ====================
 
 #[test]
 fn audit_table_generated() {
@@ -460,8 +433,6 @@ fn audit_table_generated() {
     );
 }
 
-// ==================== IsNull in transform_expr ====================
-
 #[test]
 fn is_null_in_policy() {
     let sql = r#"
@@ -488,8 +459,6 @@ fn is_null_in_policy() {
     let output = translate(sql);
     assert!(output.contains("IS NULL"), "Expected IS NULL in transformed policy: {output}");
 }
-
-// ==================== InList in transform_expr ====================
 
 #[test]
 fn in_list_in_policy() {
@@ -518,8 +487,6 @@ fn in_list_in_policy() {
     assert!(output.contains("IN ("), "Expected IN list in transformed policy: {output}");
 }
 
-// ==================== Between in transform_expr ====================
-
 #[test]
 fn between_in_policy() {
     let sql = r#"
@@ -547,8 +514,6 @@ fn between_in_policy() {
     assert!(output.contains("BETWEEN"), "Expected BETWEEN in transformed policy: {output}");
 }
 
-// ==================== Audit table name required error ====================
-
 #[test]
 fn missing_audit_table_name_error() {
     let sql = r#"
@@ -573,8 +538,6 @@ fn missing_audit_table_name_error() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("audit table name"), "Expected audit table name error: {err}");
 }
-
-// ==================== IsNotNull in transform_expr ====================
 
 #[test]
 fn is_not_null_in_policy() {
@@ -603,8 +566,6 @@ fn is_not_null_in_policy() {
     assert!(output.contains("IS NOT NULL"), "Expected IS NOT NULL in transformed policy: {output}");
 }
 
-// ==================== UnaryOp (NOT) in policy ====================
-
 #[test]
 fn unary_not_in_policy() {
     let sql = r#"
@@ -631,9 +592,6 @@ fn unary_not_in_policy() {
     let output = translate(sql);
     assert!(output.contains("NOT"), "Expected NOT in transformed policy: {output}");
 }
-
-// ==================== Nested expr (parenthesized) in policy
-// ====================
 
 #[test]
 fn nested_parens_in_policy() {
@@ -665,9 +623,6 @@ fn nested_parens_in_policy() {
         "Expected nested conditions in policy: {output}"
     );
 }
-
-// ==================== Complex UPDATE WITH CHECK expressions
-// ====================
 
 #[test]
 fn update_check_with_not_operator() {
@@ -899,9 +854,6 @@ fn update_check_with_compound_identifier() {
     );
 }
 
-// ==================== Outer table ref expressions in subquery
-// ====================
-
 #[test]
 fn outer_table_ref_is_null_in_subquery() {
     let sql = r#"
@@ -1047,8 +999,6 @@ fn outer_table_ref_nested_in_subquery() {
     );
 }
 
-// ==================== FOR ALL policy ====================
-
 #[test]
 fn for_all_policy() {
     let sql = r#"
@@ -1068,8 +1018,6 @@ fn for_all_policy() {
         "Expected RLS view for FOR ALL policy: {output}"
     );
 }
-
-// ==================== UPDATE WITH CHECK with BETWEEN ====================
 
 #[test]
 fn update_check_with_between() {
@@ -1097,8 +1045,6 @@ fn update_check_with_between() {
     let output = translate(sql);
     assert!(output.contains("BETWEEN"), "Expected BETWEEN in update check: {output}");
 }
-
-// ==================== UPDATE WITH CHECK with Subquery ====================
 
 #[test]
 fn update_check_with_subquery() {
@@ -1131,9 +1077,6 @@ fn update_check_with_subquery() {
     assert!(output.contains("COALESCE"), "Expected COALESCE in update with subquery: {output}");
 }
 
-// ==================== Policy with Cast on session variable
-// ====================
-
 #[test]
 fn policy_with_cast_on_session_var() {
     let sql = r#"
@@ -1163,8 +1106,6 @@ fn policy_with_cast_on_session_var() {
     );
 }
 
-// ==================== Readonly RLS table with monitoring ====================
-
 #[test]
 fn readonly_rls_with_monitoring_triggers() {
     let sql = r#"
@@ -1188,8 +1129,6 @@ fn readonly_rls_with_monitoring_triggers() {
     );
     assert!(output.contains("_violations"), "Expected validation view on readonly: {output}");
 }
-
-// ==================== Subquery in policy ====================
 
 #[test]
 fn subquery_in_policy() {
@@ -1223,9 +1162,6 @@ fn subquery_in_policy() {
         "Expected subquery referencing access_groups: {output}"
     );
 }
-
-// ==================== Outer table ref: IsNotNull in subquery
-// ====================
 
 #[test]
 fn outer_table_ref_is_not_null_in_subquery() {
@@ -1273,9 +1209,6 @@ fn outer_table_ref_is_not_null_in_subquery() {
     let output = translate(sql);
     assert!(output.contains("IS NOT NULL"), "Expected IS NOT NULL in subquery: {output}");
 }
-
-// ==================== Outer table ref: BETWEEN in subquery
-// ====================
 
 #[test]
 fn outer_table_ref_between_in_subquery() {
@@ -1326,9 +1259,6 @@ fn outer_table_ref_between_in_subquery() {
     assert!(output.contains("BETWEEN"), "Expected BETWEEN in subquery: {output}");
 }
 
-// ==================== Outer table ref: UnaryOp (NOT) in subquery
-// ====================
-
 #[test]
 fn outer_table_ref_unary_not_in_subquery() {
     let sql = r#"
@@ -1375,8 +1305,6 @@ fn outer_table_ref_unary_not_in_subquery() {
     let output = translate(sql);
     assert!(output.contains("NOT"), "Expected NOT in subquery: {output}");
 }
-
-// ==================== Missing current_user mapping error ====================
 
 #[test]
 fn missing_current_user_mapping_error() {
@@ -1429,8 +1357,6 @@ fn missing_schema_qualified_current_setting_mapping_error() {
         "Expected missing mapping error mentioning current_setting: {err}"
     );
 }
-
-// ==================== RLS table with InSubquery in USING ====================
 
 #[test]
 fn in_subquery_with_outer_table_ref_in_using() {

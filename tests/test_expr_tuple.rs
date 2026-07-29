@@ -5,10 +5,6 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema for tests
-// ============================================================================
-
 mod schema {
     diesel::table! {
         /// Points table for tuple tests.
@@ -38,11 +34,6 @@ struct Point {
     y: i32,
 }
 
-// ============================================================================
-// Tuple Comparison Tests
-// ============================================================================
-
-/// Test that tuple equality expressions are translated correctly.
 #[test]
 fn test_tuple_equality_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -72,7 +63,6 @@ fn test_tuple_equality_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test tuple equality semantic execution.
 #[test]
 fn test_tuple_equality_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -110,7 +100,6 @@ fn test_tuple_equality_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test tuple IN list expressions.
 #[test]
 fn test_tuple_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -136,7 +125,6 @@ fn test_tuple_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test tuple IN list semantic execution.
 #[test]
 fn test_tuple_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

@@ -11,10 +11,6 @@ use pg2sqlite::{
     traits::TranslationOptions,
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn make_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
@@ -29,10 +25,6 @@ fn make_options() -> Pg2SqliteOptions {
         // Username-based identity mapping
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"))
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 /// Snapshot of the translation output for a policy that uses both
 /// `current_setting('app.user_id')` and `current_user`.

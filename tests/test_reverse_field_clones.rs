@@ -10,9 +10,6 @@ mod helpers;
 
 use helpers::reverse_translate_sql;
 
-// ==================== M1: Rename path translates parameters
-// ====================
-
 #[test]
 fn reverse_rename_translates_parameters() {
     // json_group_array → json_agg is a Rename reversal
@@ -25,9 +22,6 @@ fn reverse_rename_translates_parameters() {
     assert!(lower.contains("json_agg"), "json_group_array should reverse to json_agg: {result}");
 }
 
-// ==================== M2: within_group with_fill translated
-// ====================
-
 #[test]
 fn reverse_rename_within_group_translates() {
     // Test that within_group ORDER BY is reverse-translated properly
@@ -39,9 +33,6 @@ fn reverse_rename_within_group_translates() {
 
     assert!(lower.contains("json_agg"), "json_group_array should reverse to json_agg: {result}");
 }
-
-// ==================== M1+M2: Combined test with more complex function
-// ====================
 
 #[test]
 fn reverse_rename_preserves_function_structure() {
@@ -56,8 +47,6 @@ fn reverse_rename_preserves_function_structure() {
     );
 }
 
-// ==================== M4: Insert table passthrough ====================
-
 #[test]
 fn reverse_insert_table_name_preserved() {
     // Simple INSERT should reverse-translate table name correctly
@@ -67,9 +56,6 @@ fn reverse_insert_table_name_preserved() {
 
     assert!(lower.contains("insert into t"), "INSERT table name should be preserved: {result}");
 }
-
-// ==================== Functional: round-trip reverse of forward-translated SQL
-// ====================
 
 #[test]
 fn reverse_datetime_now_to_now() {

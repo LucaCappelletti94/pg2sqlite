@@ -13,10 +13,6 @@ fn parse_sqlite(sql: &str) -> Vec<sqlparser::ast::Statement> {
     Parser::parse_sql(&SQLiteDialect {}, sql).expect("Failed to parse SQLite SQL")
 }
 
-// =============================================================================
-// Roundtrip Tests
-// =============================================================================
-
 mod roundtrip {
     use super::*;
 
@@ -292,10 +288,6 @@ mod roundtrip {
         assert!(pg_sql.contains("users"), "Output should reference 'users': {pg_sql}");
     }
 }
-
-// =============================================================================
-// Error Cases
-// =============================================================================
 
 mod errors {
     use pg2sqlite::errors::Error;
@@ -596,10 +588,6 @@ mod errors {
         }
     }
 }
-
-// =============================================================================
-// Vector Function Roundtrips
-// =============================================================================
 
 mod vector_functions {
     use super::*;

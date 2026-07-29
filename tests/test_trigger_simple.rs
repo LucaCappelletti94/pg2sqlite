@@ -36,7 +36,6 @@ diesel::table! {
     }
 }
 
-/// An order record.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = orders)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -47,7 +46,6 @@ struct Order {
     customer_name: String,
 }
 
-/// Test a simple trigger with a single IF NOT EXISTS block.
 #[test]
 fn test_simple_trigger_if_not_exists() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

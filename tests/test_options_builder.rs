@@ -16,8 +16,6 @@ use pg2sqlite::{
     traits::TranslationOptions,
 };
 
-// ==================== Default values ====================
-
 #[test]
 fn default_values() {
     let options = Pg2SqliteOptions::default();
@@ -31,8 +29,6 @@ fn default_values() {
     assert!(options.get_rls_audit_table_name().is_none());
     assert!(!options.is_strict_rls_validation());
 }
-
-// ==================== Builder chaining ====================
 
 #[test]
 fn all_builder_methods_chain() {
@@ -61,8 +57,6 @@ fn uuid_text_representation() {
     let options = Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Text);
     assert_eq!(options.get_uuid_representation(), Some(UuidRepresentation::Text));
 }
-
-// ==================== Session variable functions ====================
 
 #[test]
 fn find_session_variable_function_current_user() {
@@ -103,8 +97,6 @@ fn find_session_variable_function_empty_options() {
     assert_eq!(result, None);
 }
 
-// ==================== with_session_user convenience ====================
-
 #[test]
 fn with_session_user_creates_both_mappings() {
     let options = Pg2SqliteOptions::default().with_session_user("app.user_id", "current_app_user");
@@ -124,8 +116,6 @@ fn with_session_user_creates_both_mappings() {
         });
     assert_eq!(current_setting_func, Some("current_app_user"));
 }
-
-// ==================== SessionVariableMapping constructors ====================
 
 #[test]
 fn session_variable_mapping_new() {
@@ -151,8 +141,6 @@ fn session_variable_mapping_current_setting() {
     assert_eq!(mapping.sqlite_function, "get_tenant");
 }
 
-// ==================== SessionVariablePattern Display ====================
-
 #[test]
 fn session_variable_pattern_display() {
     let current_user = SessionVariablePattern::CurrentUser;
@@ -162,8 +150,6 @@ fn session_variable_pattern_display() {
         SessionVariablePattern::CurrentSetting { name: "app.user_id".to_string() };
     assert_eq!(current_setting.to_string(), "current_setting('app.user_id')");
 }
-
-// ==================== Multiple session variables ====================
 
 #[test]
 fn multiple_session_variables() {

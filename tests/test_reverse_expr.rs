@@ -27,8 +27,6 @@ fn empty_schema() -> ParserDB {
 
 const SCHEMA: &str = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT, score REAL);";
 
-// ==================== UnaryOp ====================
-
 #[test]
 fn reverse_unary_op_not() {
     let pg = reverse(SCHEMA, "SELECT NOT (age > 5) FROM users;");
@@ -41,15 +39,11 @@ fn reverse_unary_op_minus() {
     assert!(pg.contains('-'), "Expected minus in output: {pg}");
 }
 
-// ==================== Nested ====================
-
 #[test]
 fn reverse_nested_parenthesized() {
     let pg = reverse(SCHEMA, "SELECT (age + 1) FROM users;");
     assert!(pg.contains('('), "Expected parenthesized expression: {pg}");
 }
-
-// ==================== BinaryOp ====================
 
 #[test]
 fn reverse_binary_op_add() {
@@ -63,16 +57,12 @@ fn reverse_binary_op_and() {
     assert!(pg.contains("AND"), "Expected AND: {pg}");
 }
 
-// ==================== Cast ====================
-
 #[test]
 fn reverse_cast() {
     let pg = reverse(SCHEMA, "SELECT CAST(age AS TEXT) FROM users;");
     assert!(pg.contains("CAST"), "Expected CAST in output: {pg}");
     assert!(pg.contains("TEXT"), "Expected TEXT type: {pg}");
 }
-
-// ==================== IsNull / IsNotNull ====================
 
 #[test]
 fn reverse_is_null() {
@@ -85,8 +75,6 @@ fn reverse_is_not_null() {
     let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name IS NOT NULL;");
     assert!(pg.contains("IS NOT NULL"), "Expected IS NOT NULL: {pg}");
 }
-
-// ==================== Boolean checks ====================
 
 #[test]
 fn reverse_is_true() {
@@ -112,8 +100,6 @@ fn reverse_is_not_false() {
     assert!(pg.contains("IS NOT FALSE"), "Expected IS NOT FALSE: {pg}");
 }
 
-// ==================== Exists ====================
-
 #[test]
 fn reverse_exists() {
     let pg =
@@ -130,8 +116,6 @@ fn reverse_not_exists() {
     assert!(pg.contains("NOT EXISTS"), "Expected NOT EXISTS: {pg}");
 }
 
-// ==================== Like / ILike ====================
-
 #[test]
 fn reverse_like() {
     let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name LIKE '%test%';");
@@ -143,8 +127,6 @@ fn reverse_not_like() {
     let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name NOT LIKE '%test%';");
     assert!(pg.contains("NOT LIKE"), "Expected NOT LIKE: {pg}");
 }
-
-// ==================== InList ====================
 
 #[test]
 fn reverse_in_list() {
@@ -158,8 +140,6 @@ fn reverse_not_in_list() {
     assert!(pg.contains("NOT IN"), "Expected NOT IN: {pg}");
 }
 
-// ==================== InSubquery ====================
-
 #[test]
 fn reverse_in_subquery() {
     let pg =
@@ -167,15 +147,11 @@ fn reverse_in_subquery() {
     assert!(pg.contains("IN (SELECT"), "Expected IN subquery: {pg}");
 }
 
-// ==================== Between ====================
-
 #[test]
 fn reverse_between() {
     let pg = reverse(SCHEMA, "SELECT * FROM users WHERE age BETWEEN 10 AND 20;");
     assert!(pg.contains("BETWEEN"), "Expected BETWEEN: {pg}");
 }
-
-// ==================== Case ====================
 
 #[test]
 fn reverse_case_when() {
@@ -194,8 +170,6 @@ fn reverse_case_with_operand() {
     assert!(pg.contains("CASE"), "Expected CASE: {pg}");
 }
 
-// ==================== Subquery ====================
-
 #[test]
 fn reverse_scalar_subquery() {
     let pg = reverse(SCHEMA, "SELECT (SELECT MAX(age) FROM users) AS max_age;");
@@ -203,15 +177,11 @@ fn reverse_scalar_subquery() {
     assert!(pg.contains("MAX"), "Expected MAX: {pg}");
 }
 
-// ==================== Trim ====================
-
 #[test]
 fn reverse_trim() {
     let pg = reverse(SCHEMA, "SELECT TRIM(name) FROM users;");
     assert!(pg.contains("TRIM"), "Expected TRIM: {pg}");
 }
-
-// ==================== Position ====================
 
 #[test]
 fn reverse_position() {
@@ -219,23 +189,17 @@ fn reverse_position() {
     assert!(pg.contains("POSITION"), "Expected POSITION: {pg}");
 }
 
-// ==================== Substring ====================
-
 #[test]
 fn reverse_substring() {
     let pg = reverse(SCHEMA, "SELECT SUBSTRING(name FROM 1 FOR 3) FROM users;");
     assert!(pg.contains("SUBSTRING"), "Expected SUBSTRING: {pg}");
 }
 
-// ==================== Collate ====================
-
 #[test]
 fn reverse_collate() {
     let pg = reverse(SCHEMA, "SELECT name COLLATE NOCASE FROM users;");
     assert!(pg.contains("COLLATE"), "Expected COLLATE: {pg}");
 }
-
-// ==================== Compound expressions ====================
 
 #[test]
 fn reverse_complex_nested_expression() {
@@ -246,8 +210,6 @@ fn reverse_complex_nested_expression() {
     assert!(pg.contains("AND"), "Expected AND: {pg}");
     assert!(pg.contains("OR"), "Expected OR: {pg}");
 }
-
-// ==================== ILike ====================
 
 #[test]
 fn reverse_ilike() {
@@ -261,8 +223,6 @@ fn reverse_not_ilike() {
     assert!(pg.contains("NOT ILIKE"), "Expected NOT ILIKE: {pg}");
 }
 
-// ==================== Extract ====================
-
 #[test]
 fn reverse_extract() {
     let pg = reverse(
@@ -272,23 +232,17 @@ fn reverse_extract() {
     assert!(pg.contains("EXTRACT"), "Expected EXTRACT: {pg}");
 }
 
-// ==================== Tuple ====================
-
 #[test]
 fn reverse_tuple_in_where() {
     let pg = reverse(SCHEMA, "SELECT * FROM users WHERE (id, age) IN ((1, 30), (2, 25));");
     assert!(pg.contains("IN"), "Expected IN: {pg}");
 }
 
-// ==================== Array ====================
-
 #[test]
 fn reverse_array_literal() {
     let pg = reverse(SCHEMA, "SELECT ARRAY[1, 2, 3] FROM users;");
     assert!(pg.contains("ARRAY"), "Expected ARRAY: {pg}");
 }
-
-// ==================== Trim with character spec ====================
 
 #[test]
 fn reverse_trim_leading() {
@@ -302,8 +256,6 @@ fn reverse_trim_both() {
     assert!(pg.contains("TRIM"), "Expected TRIM: {pg}");
 }
 
-// ==================== Ceil / Floor ====================
-
 #[test]
 fn reverse_ceil() {
     let pg = reverse(SCHEMA, "SELECT CEIL(score) FROM users;");
@@ -316,15 +268,11 @@ fn reverse_floor() {
     assert!(pg.contains("FLOOR"), "Expected FLOOR: {pg}");
 }
 
-// ==================== RLike/Regexp ====================
-
 #[test]
 fn reverse_regexp() {
     let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name REGEXP '^[A-Z]';");
     assert!(pg.contains("REGEXP") || pg.contains("RLIKE"), "Expected REGEXP or RLIKE: {pg}");
 }
-
-// ==================== Interval ====================
 
 #[test]
 fn reverse_interval() {
@@ -335,15 +283,11 @@ fn reverse_interval() {
     assert!(pg.contains("INTERVAL"), "Expected INTERVAL: {pg}");
 }
 
-// ==================== Compound field access ====================
-
 #[test]
 fn reverse_compound_identifier() {
     let pg = reverse(SCHEMA, "SELECT users.name FROM users;");
     assert!(pg.contains("users.name") || pg.contains("name"), "Expected compound: {pg}");
 }
-
-// ==================== TypedString ====================
 
 #[test]
 fn reverse_typed_string_date() {
@@ -363,8 +307,6 @@ fn reverse_typed_string_timestamp() {
     assert!(pg.contains("TIMESTAMP") || pg.contains("2024-01-01"), "Expected TIMESTAMP: {pg}");
 }
 
-// ==================== QualifiedWildcard ====================
-
 #[test]
 fn reverse_qualified_wildcard_in_select() {
     let pg = reverse(
@@ -375,15 +317,11 @@ fn reverse_qualified_wildcard_in_select() {
     assert!(pg.contains("users") && pg.contains("title"), "Expected qualified wildcard: {pg}");
 }
 
-// ==================== Substring with FOR ====================
-
 #[test]
 fn reverse_substring_with_for() {
     let pg = reverse(SCHEMA, "SELECT SUBSTRING(name, 1, 3) FROM users;");
     assert!(pg.contains("SUBSTRING") || pg.contains("name"), "Expected SUBSTRING: {pg}");
 }
-
-// ==================== Complex CASE with multiple WHEN ====================
 
 #[test]
 fn reverse_case_multiple_when() {
@@ -396,15 +334,11 @@ fn reverse_case_multiple_when() {
     assert!(pg.contains("senior"), "Expected senior: {pg}");
 }
 
-// ==================== Not Between ====================
-
 #[test]
 fn reverse_not_between() {
     let pg = reverse(SCHEMA, "SELECT * FROM users WHERE age NOT BETWEEN 10 AND 20;");
     assert!(pg.contains("NOT BETWEEN"), "Expected NOT BETWEEN: {pg}");
 }
-
-// ==================== NOT IN subquery ====================
 
 #[test]
 fn reverse_not_in_subquery() {
@@ -414,8 +348,6 @@ fn reverse_not_in_subquery() {
     );
     assert!(pg.contains("NOT IN"), "Expected NOT IN: {pg}");
 }
-
-// ==================== Nested expressions in binary ops ====================
 
 #[test]
 fn reverse_deeply_nested() {

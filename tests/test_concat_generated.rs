@@ -3,10 +3,6 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema for tests
-// ============================================================================
-
 diesel::table! {
     /// Table for testing CONCAT function.
     users (id) {
@@ -144,7 +140,6 @@ struct NewRectangle {
     height: i32,
 }
 
-/// Test that CONCAT(a, b, c) is translated to a || b || c.
 #[test]
 fn test_concat_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -178,7 +173,6 @@ fn test_concat_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test CONCAT with two arguments.
 #[test]
 fn test_concat_two_args() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -200,7 +194,6 @@ fn test_concat_two_args() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test CONCAT with single argument (degenerate case).
 #[test]
 fn test_concat_single_arg() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -279,7 +272,6 @@ fn test_concat_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test CONCAT with multiple (4+) arguments.
 #[test]
 fn test_concat_many_args_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -328,7 +320,6 @@ fn test_concat_many_args_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test generated column translation (GENERATED ALWAYS AS).
 #[test]
 fn test_generated_column_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -406,7 +397,6 @@ fn test_generated_column_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test generated column with expression using multiple columns.
 #[test]
 fn test_generated_column_expression() -> Result<(), Box<dyn std::error::Error>> {
     // PostgreSQL only supports STORED for generated columns (VIRTUAL is

@@ -10,10 +10,6 @@ mod helpers;
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema Definitions
-// ============================================================================
-
 diesel::table! {
     /// Test table for authors (used in JOIN tests).
     authors (id) {
@@ -101,10 +97,6 @@ diesel::table! {
         name -> Text,
     }
 }
-
-// ============================================================================
-// Struct Definitions
-// ============================================================================
 
 /// An author.
 #[derive(Queryable, Selectable, Insertable)]
@@ -202,11 +194,6 @@ struct Customer {
     name: String,
 }
 
-// ============================================================================
-// Translation Tests - Verify SQL is correctly transformed
-// ============================================================================
-
-/// Test that ILIKE in JOIN ON clause is translated to LIKE.
 #[test]
 fn test_join_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -246,7 +233,6 @@ fn test_join_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that NOW() in JOIN ON clause is translated to datetime('now').
 #[test]
 fn test_join_now_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -287,7 +273,6 @@ fn test_join_now_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that LEAST/GREATEST in JOIN ON clause are translated to MIN/MAX.
 #[test]
 fn test_join_least_greatest_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -336,7 +321,6 @@ fn test_join_least_greatest_translation() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Test that string_agg in JOIN ON subquery is translated to group_concat.
 #[test]
 fn test_join_subquery_function_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -380,7 +364,6 @@ fn test_join_subquery_function_translation() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Test multiple JOINs with different conditions all get translated.
 #[test]
 fn test_multiple_joins_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -430,7 +413,6 @@ fn test_multiple_joins_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test LEFT JOIN with translated conditions.
 #[test]
 fn test_left_join_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -470,11 +452,6 @@ fn test_left_join_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// Semantic Tests - Verify translated SQL works correctly in SQLite
-// ============================================================================
-
-/// Test that JOIN with translated ILIKE works semantically.
 #[test]
 fn test_join_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -539,7 +516,6 @@ fn test_join_ilike_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that JOIN with LEAST/GREATEST works semantically.
 #[test]
 fn test_join_least_greatest_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -607,7 +583,6 @@ fn test_join_least_greatest_semantic() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Test LEFT JOIN semantic behavior with translated conditions.
 #[test]
 fn test_left_join_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -682,7 +657,6 @@ fn test_left_join_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test derived table (subquery) in JOIN with function translation.
 #[test]
 fn test_join_derived_table_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

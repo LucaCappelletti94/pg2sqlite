@@ -33,7 +33,6 @@ use crate::{
     traits::TranslationOptions,
 };
 
-/// Check if a table name ends with the RLS suffix.
 fn strip_identifier_quotes(name: &str) -> &str {
     if name.len() >= 2 {
         let first = name.as_bytes()[0] as char;
@@ -51,13 +50,11 @@ fn identifier_has_suffix(name: &str, suffix: &str) -> bool {
     strip_identifier_quotes(name).ends_with(suffix)
 }
 
-/// Check if a table name ends with the RLS suffix.
 fn is_rls_table(name: &ObjectName, options: &Pg2SqliteOptions) -> bool {
     let suffix = options.get_rls_table_suffix();
     last_ident(name).is_some_and(|ident| ident.value.ends_with(suffix))
 }
 
-/// Check a table reference for RLS table access.
 fn check_table_for_rls(name: &ObjectName, options: &Pg2SqliteOptions) -> Result<(), Error> {
     if is_rls_table(name, options) {
         return Err(Error::RlsTableDetected {
@@ -68,7 +65,6 @@ fn check_table_for_rls(name: &ObjectName, options: &Pg2SqliteOptions) -> Result<
     Ok(())
 }
 
-/// Check a TableObject for RLS table access.
 fn check_table_object_for_rls(
     table: &TableObject,
     options: &Pg2SqliteOptions,

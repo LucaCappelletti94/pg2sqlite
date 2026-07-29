@@ -132,7 +132,6 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
     Ok(connection)
 }
 
-/// Snapshot test for views translation.
 #[test]
 fn test_views_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let sql = include_str!("fixtures/views.sql");
@@ -149,7 +148,6 @@ fn test_views_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that simple view works.
 #[test]
 fn test_simple_view_active_users() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -180,7 +178,6 @@ fn test_simple_view_active_users() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test view with join.
 #[test]
 fn test_view_with_join() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -213,7 +210,6 @@ fn test_view_with_join() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test view with aggregation.
 #[test]
 fn test_view_with_aggregation() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -263,7 +259,6 @@ fn test_view_with_aggregation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that materialized views cause an error.
 #[test]
 fn test_materialized_view_error() {
     let sql = "CREATE MATERIALIZED VIEW order_stats AS SELECT status FROM orders;";
@@ -281,7 +276,6 @@ fn test_materialized_view_error() {
     );
 }
 
-/// Test that OR REPLACE VIEW emits DROP VIEW IF EXISTS + CREATE VIEW.
 #[test]
 fn test_or_replace_view_emits_drop_then_create() {
     let sql = "CREATE OR REPLACE VIEW my_view AS SELECT 1;";
@@ -303,7 +297,6 @@ fn test_or_replace_view_emits_drop_then_create() {
     );
 }
 
-/// Test that OR REPLACE VIEW executes cleanly against a real SQLite database.
 #[test]
 fn test_or_replace_view_diesel_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let setup_sql = "

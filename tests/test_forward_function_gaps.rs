@@ -28,10 +28,6 @@ fn translate_err(sql: &str) -> String {
         .to_string()
 }
 
-// ---------------------------------------------------------------------------
-// ascii() -> unicode()
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_ascii_renamed_to_unicode() {
     let sql = &format!("{TABLE} SELECT ascii('A') FROM t;");
@@ -40,20 +36,12 @@ fn test_ascii_renamed_to_unicode() {
     assert!(!output.contains("ascii("), "ascii() should no longer appear in output, got: {output}");
 }
 
-// ---------------------------------------------------------------------------
-// current_database() -> Unsupported
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_current_database_unsupported() {
     let sql = &format!("{TABLE} SELECT current_database() FROM t;");
     let err = translate_err(sql);
     assert!(err.contains("current_database"), "Error should mention current_database, got: {err}");
 }
-
-// ---------------------------------------------------------------------------
-// current_schema() -> Unsupported
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_current_schema_unsupported() {
@@ -62,20 +50,12 @@ fn test_current_schema_unsupported() {
     assert!(err.contains("current_schema"), "Error should mention current_schema, got: {err}");
 }
 
-// ---------------------------------------------------------------------------
-// pg_typeof() -> Unsupported
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_pg_typeof_unsupported() {
     let sql = &format!("{TABLE} SELECT pg_typeof(1) FROM t;");
     let err = translate_err(sql);
     assert!(err.contains("pg_typeof"), "Error should mention pg_typeof, got: {err}");
 }
-
-// ---------------------------------------------------------------------------
-// unnest() -> Unsupported
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_unnest_unsupported() {
@@ -85,10 +65,6 @@ fn test_unnest_unsupported() {
     assert!(err.contains("json_each"), "Error should suggest json_each() alternative, got: {err}");
 }
 
-// ---------------------------------------------------------------------------
-// encode() -> Unsupported
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_encode_unsupported() {
     let sql = &format!("{TABLE} SELECT encode(val, 'hex') FROM t;");
@@ -97,10 +73,6 @@ fn test_encode_unsupported() {
     assert!(err.contains("hex()"), "Error should suggest hex()/unhex() alternative, got: {err}");
 }
 
-// ---------------------------------------------------------------------------
-// decode() -> Unsupported
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_decode_unsupported() {
     let sql = &format!("{TABLE} SELECT decode(val, 'hex') FROM t;");
@@ -108,10 +80,6 @@ fn test_decode_unsupported() {
     assert!(err.contains("decode"), "Error should mention decode, got: {err}");
     assert!(err.contains("unhex()"), "Error should suggest hex()/unhex() alternative, got: {err}");
 }
-
-// ---------------------------------------------------------------------------
-// to_number() -> Unsupported
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_to_number_unsupported() {

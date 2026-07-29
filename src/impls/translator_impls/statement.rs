@@ -93,9 +93,7 @@ fn append_translated_create_trigger_statements(
 
 macro_rules! unsupported_statement_patterns {
     () => {
-        // ALTER TABLE - no direct SQLite equivalent
         Statement::AlterTable(_)
-        // Session/variable/maintenance/cursor statements
         | Statement::ShowVariable { .. }
         | Statement::Raise { .. }
         | Statement::Print { .. }
@@ -144,7 +142,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::CreateDatabase { .. }
         | Statement::AlterSchema(_)
         | Statement::AlterSession { .. }
-        // PostgreSQL-specific types/domains/sequences
         | Statement::CreateSequence { .. }
         | Statement::CreateProcedure { .. }
         | Statement::CreateMacro { .. }
@@ -155,7 +152,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::DropExtension { .. }
         | Statement::DropDomain { .. }
         | Statement::DropProcedure { .. }
-        // PostgreSQL operators
         | Statement::CreateOperator(_)
         | Statement::CreateOperatorClass(_)
         | Statement::CreateOperatorFamily(_)
@@ -165,7 +161,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::DropOperator { .. }
         | Statement::DropOperatorClass { .. }
         | Statement::DropOperatorFamily { .. }
-        // Other database-specific statements
         | Statement::Comment { .. }
         | Statement::Copy { .. }
         | Statement::CopyIntoSnowflake { .. }
@@ -183,10 +178,8 @@ macro_rules! unsupported_statement_patterns {
         | Statement::AlterIndex { .. }
         | Statement::Msck(_)
         | Statement::RenameTable(_)
-        // DuckDB-specific
         | Statement::AttachDuckDBDatabase { .. }
         | Statement::DetachDuckDBDatabase { .. }
-        // Other vendor-specific
         | Statement::CreateConnector(_)
         | Statement::AlterConnector { .. }
         | Statement::DropConnector { .. }
@@ -202,10 +195,8 @@ macro_rules! unsupported_statement_patterns {
         | Statement::OptimizeTable { .. }
         | Statement::Unload { .. }
         | Statement::ExportData(_)
-        // SQLite-specific statements (no PostgreSQL equivalent needed)
         | Statement::AttachDatabase { .. }
         | Statement::CreateVirtualTable { .. }
-        // Case statement (procedural, not supported)
         | Statement::Case(_)
         // PostgreSQL/Snowflake collation DDL (sqlparser 0.62)
         | Statement::CreateCollation(_)

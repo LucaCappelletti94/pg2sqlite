@@ -16,9 +16,6 @@ fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
 }
 
-// ==================== K1: Function clauses (ORDER BY inside function args)
-// ====================
-
 #[test]
 fn plpgsql_function_clauses_transformed() {
     // gen_random_uuid() nested inside a function that has ORDER BY clause
@@ -42,8 +39,6 @@ fn plpgsql_function_clauses_transformed() {
 
     assert!(!lower.contains("gen_random_uuid"), "gen_random_uuid should be translated: {sql}");
 }
-
-// ==================== K2: Window frame bounds ====================
 
 #[test]
 fn plpgsql_window_frame_bounds_transformed() {
@@ -75,8 +70,6 @@ fn plpgsql_window_frame_bounds_transformed() {
     );
 }
 
-// ==================== K3: CompoundFieldAccess Dot ====================
-
 #[test]
 fn plpgsql_compound_field_access_dot_transformed() {
     // CompoundFieldAccess with Dot accessor — inner expressions should be recursed
@@ -101,9 +94,6 @@ fn plpgsql_compound_field_access_dot_transformed() {
 
     assert!(!lower.contains("gen_random_uuid"), "gen_random_uuid should be translated: {sql}");
 }
-
-// ==================== K5: transform_delete — returning/using
-// ====================
 
 #[test]
 fn plpgsql_delete_with_returning_transformed() {
@@ -134,8 +124,6 @@ fn plpgsql_delete_with_returning_transformed() {
     );
 }
 
-// ==================== K6: transform_insert — on conflict ====================
-
 #[test]
 fn plpgsql_insert_on_conflict_transformed() {
     // INSERT ... ON CONFLICT DO UPDATE inside a PL/pgSQL trigger
@@ -164,8 +152,6 @@ fn plpgsql_insert_on_conflict_transformed() {
         "gen_random_uuid should be translated in upsert trigger: {sql}"
     );
 }
-
-// ==================== K7: IF/ELSIF error propagation ====================
 
 #[test]
 fn plpgsql_if_condition_translates_now() {

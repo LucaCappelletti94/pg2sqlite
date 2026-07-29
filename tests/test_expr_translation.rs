@@ -8,10 +8,6 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema Definitions
-// ============================================================================
-
 diesel::table! {
     /// Test table for items with categories (used in IN list tests).
     items (id) {
@@ -90,10 +86,6 @@ diesel::table! {
         timestamp -> Text,
     }
 }
-
-// ============================================================================
-// Struct Definitions
-// ============================================================================
 
 /// An item with a category.
 #[derive(Queryable, Selectable, Insertable)]
@@ -182,11 +174,6 @@ struct Log {
     timestamp: String,
 }
 
-// ============================================================================
-// IN List Tests
-// ============================================================================
-
-/// Test that IN list expressions are translated correctly.
 #[test]
 fn test_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -211,7 +198,6 @@ fn test_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test IN list semantic execution.
 #[test]
 fn test_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -267,11 +253,6 @@ fn test_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// IN Subquery Tests
-// ============================================================================
-
-/// Test that IN subquery expressions are translated correctly.
 #[test]
 fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -303,7 +284,6 @@ fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test IN subquery semantic execution.
 #[test]
 fn test_in_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -367,11 +347,6 @@ fn test_in_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// BETWEEN Tests
-// ============================================================================
-
-/// Test that BETWEEN expressions are translated correctly.
 #[test]
 fn test_between_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -396,7 +371,6 @@ fn test_between_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test BETWEEN semantic execution.
 #[test]
 fn test_between_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -458,11 +432,6 @@ fn test_between_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// CASE Expression Tests
-// ============================================================================
-
-/// Test that CASE expressions are translated correctly.
 #[test]
 fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -494,7 +463,6 @@ fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test searched CASE expression (without operand).
 #[test]
 fn test_case_searched_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -563,11 +531,6 @@ fn test_case_searched_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// Scalar Subquery Tests
-// ============================================================================
-
-/// Test that scalar subqueries are translated correctly.
 #[test]
 fn test_scalar_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -592,7 +555,6 @@ fn test_scalar_subquery_translation() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Test scalar subquery semantic execution.
 #[test]
 fn test_scalar_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -662,11 +624,6 @@ fn test_scalar_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// EXTRACT Tests
-// ============================================================================
-
-/// Test that EXTRACT is translated to strftime.
 #[test]
 fn test_extract_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -699,7 +656,6 @@ fn test_extract_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test EXTRACT with various date fields.
 #[test]
 fn test_extract_fields_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -757,7 +713,6 @@ fn test_extract_fields_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test EXTRACT with time fields.
 #[test]
 fn test_extract_time_fields_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -814,7 +769,6 @@ fn test_extract_time_fields_semantic() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Test EXTRACT in WHERE clause.
 #[test]
 fn test_extract_in_where_clause() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -871,11 +825,6 @@ fn test_extract_in_where_clause() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// Combined Expression Tests
-// ============================================================================
-
-/// Test combining multiple expression types in a single query.
 #[test]
 fn test_combined_expressions() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -977,10 +926,6 @@ fn test_combined_expressions() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-// ============================================================================
-// AT TIME ZONE Tests (from test_expr_overlay_extract.rs)
-// ============================================================================
 
 mod at_time_zone_schema {
     diesel::table! {

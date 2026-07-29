@@ -55,7 +55,6 @@ impl Translator for CreateTable {
             ..self.clone()
         };
 
-        // Translate CREATE TABLE ... AS SELECT subquery
         if let Some(ref q) = self.query {
             created_table.query = Some(Box::new(q.translate(schema, options)?));
         }

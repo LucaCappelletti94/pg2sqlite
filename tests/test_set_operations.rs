@@ -8,10 +8,6 @@
 use diesel::{RunQueryDsl, prelude::*};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ---------------------------------------------------------------------------
-// Translation-correctness tests
-// ---------------------------------------------------------------------------
-
 /// UNION (with implicit deduplication) must survive translation.
 #[test]
 fn test_union_query_translation() {
@@ -77,10 +73,6 @@ fn test_except_translation() {
 
     assert!(output.contains("EXCEPT"), "Output should contain EXCEPT keyword, got:\n{output}");
 }
-
-// ---------------------------------------------------------------------------
-// Integration tests
-// ---------------------------------------------------------------------------
 
 /// UNION ALL translated SQL executes correctly in an in-memory SQLite DB
 /// and preserves duplicate rows.

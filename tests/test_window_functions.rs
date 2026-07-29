@@ -10,10 +10,6 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema Definitions
-// ============================================================================
-
 diesel::table! {
     /// Test table for items (used in ROW_NUMBER and NTILE tests).
     /// Different tests create this table with different columns.
@@ -106,11 +102,6 @@ diesel::table! {
     }
 }
 
-// ============================================================================
-// Struct Definitions
-// ============================================================================
-
-/// An item.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = items)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -123,7 +114,6 @@ struct Item {
     value: Option<i32>,
 }
 
-/// An employee.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = employees)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -136,7 +126,6 @@ struct Employee {
     salary: i32,
 }
 
-/// A score.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = scores)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -147,7 +136,6 @@ struct Score {
     score: i32,
 }
 
-/// A time series value.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = time_series)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -158,7 +146,6 @@ struct TimeSeries {
     value: i32,
 }
 
-/// A reading.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = readings)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -172,7 +159,6 @@ struct Reading {
     value: i32,
 }
 
-/// A ranking.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = rankings)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -183,7 +169,6 @@ struct Ranking {
     value: i32,
 }
 
-/// An order.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = orders)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -198,7 +183,6 @@ struct Order {
     amount: i32,
 }
 
-/// A transaction.
 #[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = transactions)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -209,7 +193,6 @@ struct Transaction {
     amount: i32,
 }
 
-/// Test that ROW_NUMBER() OVER passes through unchanged.
 #[test]
 fn test_row_number() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -245,7 +228,6 @@ fn test_row_number() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test RANK() with PARTITION BY and ORDER BY clauses.
 #[test]
 fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -284,7 +266,6 @@ fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test DENSE_RANK() window function.
 #[test]
 fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -314,7 +295,6 @@ fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test NTILE() window function.
 #[test]
 fn test_ntile() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -342,7 +322,6 @@ fn test_ntile() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test LAG() and LEAD() window functions.
 #[test]
 fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -378,7 +357,6 @@ fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test FIRST_VALUE() and LAST_VALUE() window functions.
 #[test]
 fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -414,7 +392,6 @@ fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test NTH_VALUE() window function.
 #[test]
 fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -445,7 +422,6 @@ fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test aggregate functions used as window functions (SUM, AVG, etc.).
 #[test]
 fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -486,7 +462,6 @@ fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test running total with ROWS BETWEEN frame clause.
 #[test]
 fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -521,7 +496,6 @@ fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test RANGE BETWEEN frame clause.
 #[test]
 fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -551,7 +525,6 @@ fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test FILTER clause is translated to CASE expression.
 #[test]
 fn test_filter_clause_to_case() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -585,7 +558,6 @@ fn test_filter_clause_to_case() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test FILTER clause with aggregate (not window) is translated to CASE.
 #[test]
 fn test_filter_clause_aggregate_to_case() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

@@ -3,10 +3,6 @@
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ---------------------------------------------------------------------------
-// Bug 1: FOR UPDATE / FOR SHARE must be stripped
-// ---------------------------------------------------------------------------
-
 /// `FOR UPDATE` is a PostgreSQL row-locking hint that SQLite does not support.
 /// The translator must strip it rather than emitting invalid SQLite SQL.
 #[test]
@@ -62,10 +58,6 @@ fn for_share_stripped_from_select() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Bug 2: NULLS FIRST / NULLS LAST must be stripped from ORDER BY
-// ---------------------------------------------------------------------------
 
 /// `NULLS FIRST` is not valid syntax in SQLite < 3.30 and should be stripped.
 /// The translated query must still execute and return rows in the correct

@@ -20,8 +20,6 @@ use sqlparser::{
     parser::Parser,
 };
 
-// ==================== RLS table detection ====================
-
 #[test]
 fn rls_table_in_select_produces_error() {
     let translator =
@@ -293,8 +291,6 @@ fn rls_table_in_insert_source_set_operation_produces_error() {
     );
 }
 
-// ==================== RLS table in expression subqueries ====================
-
 #[test]
 fn rls_table_in_where_subquery_produces_error() {
     let translator = Pg2Sqlite::default()
@@ -507,8 +503,6 @@ fn rls_table_in_is_distinct_from_subquery_produces_error() {
     );
 }
 
-// ==================== Custom RLS suffix ====================
-
 #[test]
 fn rls_table_with_custom_suffix_produces_error() {
     let translator =
@@ -601,8 +595,6 @@ fn rls_table_in_table_function_argument_subquery_produces_error() {
     );
 }
 
-// ==================== Multiple statements ====================
-
 #[test]
 fn reverse_sql_translates_multiple_statements() {
     let translator =
@@ -616,8 +608,6 @@ fn reverse_sql_translates_multiple_statements() {
     assert_eq!(result.len(), 2, "Expected 2 translated statements, got: {}", result.len());
 }
 
-// ==================== Parser error ====================
-
 #[test]
 fn reverse_sql_with_invalid_sql_produces_parser_error() {
     let translator =
@@ -630,8 +620,6 @@ fn reverse_sql_with_invalid_sql_produces_parser_error() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("Parser error"), "Expected parser error, got: {err}");
 }
-
-// ==================== Unsupported reverse statement ====================
 
 #[test]
 fn reverse_translate_non_dml_produces_error() {
@@ -649,8 +637,6 @@ fn reverse_translate_non_dml_produces_error() {
         "Expected unsupported reverse statement error, got: {err}"
     );
 }
-
-// ==================== Valid reverse translations ====================
 
 #[test]
 fn reverse_translate_select_succeeds() {

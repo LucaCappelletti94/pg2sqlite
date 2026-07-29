@@ -137,7 +137,6 @@ fn test_data_types_extended_snapshot() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Test JSON type works (stored as TEXT).
 #[test]
 fn test_json_type_stored_as_text() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -157,7 +156,6 @@ fn test_json_type_stored_as_text() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test JSONB default value works.
 #[test]
 fn test_jsonb_default_empty_object() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -175,7 +173,6 @@ fn test_jsonb_default_empty_object() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test negative default value works.
 #[test]
 fn test_negative_default_value() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -190,7 +187,6 @@ fn test_negative_default_value() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test float default value works.
 #[test]
 fn test_float_default_value() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -204,7 +200,6 @@ fn test_float_default_value() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test boolean default value works.
 #[test]
 fn test_boolean_default_value() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -218,7 +213,6 @@ fn test_boolean_default_value() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test text default value works.
 #[test]
 fn test_text_default_value() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -232,7 +226,6 @@ fn test_text_default_value() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test ON CONFLICT DO UPDATE (UPSERT) works semantically.
 #[test]
 fn test_upsert_insert_new_row() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -272,7 +265,6 @@ fn test_upsert_insert_new_row() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test ON CONFLICT DO UPDATE updates existing row.
 #[test]
 fn test_upsert_update_existing_row() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -319,7 +311,6 @@ fn test_upsert_update_existing_row() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that all default types work together.
 #[test]
 fn test_all_defaults_together() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;

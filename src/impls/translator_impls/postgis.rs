@@ -157,8 +157,6 @@ pub fn is_postgis_shaped_name(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("st_")
 }
 
-// ---------------- GiST index classification ----------------
-//
 // Shared between DDL translation (create_index.rs::try_spatial_index_routing,
 // which emits `SELECT CreateSpatialIndex(...)` statements) and the pre-walk in
 // Pg2Sqlite::translate_internal (which populates the spatial-index catalog so
@@ -251,8 +249,6 @@ pub(crate) fn is_spatial_data_type(dt: &str) -> bool {
     lower == "geometry" || lower == "geography"
 }
 
-// ---------------- Spatial predicate rewriting ----------------
-//
 // When the input contains a `SELECT ... WHERE ST_*(col, expr) ...` over a
 // column whose table has a translated spatial index, the rewrite injects a
 // `WHERE <table>.rowid IN (SELECT id FROM <rtree> WHERE bbox-conditions)`

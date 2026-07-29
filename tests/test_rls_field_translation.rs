@@ -26,9 +26,6 @@ fn apply_all(sql: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> 
     Ok(conn)
 }
 
-// ==================== I1b: Window frame bounds transformed
-// ====================
-
 #[test]
 fn rls_window_frame_bound_appears_in_output() -> Result<(), Box<dyn std::error::Error>> {
     // Window function with ROWS BETWEEN in RLS subquery — the bound expressions
@@ -60,9 +57,6 @@ fn rls_window_frame_bound_appears_in_output() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-// ==================== I1c: Function parameters/args transformed
-// ====================
-
 #[test]
 fn rls_function_args_in_policy_transformed() -> Result<(), Box<dyn std::error::Error>> {
     // A function with column ref arg in INSERT policy — must get NEW. prefix
@@ -87,8 +81,6 @@ fn rls_function_args_in_policy_transformed() -> Result<(), Box<dyn std::error::E
     );
     Ok(())
 }
-
-// ==================== I: RLS with diesel functional test ====================
 
 #[test]
 fn rls_function_in_policy_executes_in_sqlite() -> Result<(), Box<dyn std::error::Error>> {

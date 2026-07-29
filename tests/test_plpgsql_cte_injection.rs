@@ -13,8 +13,6 @@ fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
 }
 
-// ==================== G1: Case with CTE subquery ====================
-
 #[test]
 fn plpgsql_cte_injection_inside_case() {
     let options = uuid_options();
@@ -42,8 +40,6 @@ fn plpgsql_cte_injection_inside_case() {
     assert!(sql.contains("counts"), "CTE 'counts' should appear in translated output: {sql}");
 }
 
-// ==================== G1: InList with CTE subquery ====================
-
 #[test]
 fn plpgsql_cte_injection_inside_inlist() {
     let options = uuid_options();
@@ -68,8 +64,6 @@ fn plpgsql_cte_injection_inside_inlist() {
 
     assert!(sql.contains("ids"), "CTE 'ids' should appear in translated output: {sql}");
 }
-
-// ==================== G1: Between with CTE subquery ====================
 
 #[test]
 fn plpgsql_cte_injection_inside_between() {

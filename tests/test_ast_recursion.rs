@@ -45,10 +45,6 @@ fn translate_all(sql: &str) -> String {
         .join("\n")
 }
 
-// ---------------------------------------------------------------------------
-// 1. Window frame PRECEDING/FOLLOWING bound expressions
-// ---------------------------------------------------------------------------
-
 /// An expression inside a window-frame `PRECEDING` bound must be translated.
 /// Here `EXTRACT(EPOCH FROM NOW())` is a PG-specific expression; after
 /// translation `NOW()` becomes `datetime('now')` so the output must not
@@ -84,10 +80,6 @@ fn window_frame_following_expr_is_translated() {
     assert!(out.contains("datetime('now')"), "Expected datetime('now') in FOLLOWING bound: {out}");
 }
 
-// ---------------------------------------------------------------------------
-// 2. FunctionArgumentClause::OrderBy inside aggregate functions
-// ---------------------------------------------------------------------------
-
 /// `date_trunc` inside the `ORDER BY` clause of `string_agg` must be
 /// translated to `strftime`.
 #[test]
@@ -122,10 +114,6 @@ fn string_agg_order_by_clause_translates_now() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 3. LATERAL VIEW expression translation
-// ---------------------------------------------------------------------------
-
 /// The expression inside a `LATERAL VIEW` clause must be translated.
 /// `now()` should become `datetime('now')` even in a LATERAL VIEW position.
 #[test]
@@ -142,10 +130,6 @@ fn lateral_view_expr_is_translated() {
     assert!(!out.contains("now()"), "now() inside LATERAL VIEW must be translated: {out}");
     assert!(out.contains("datetime('now')"), "Expected datetime('now') inside LATERAL VIEW: {out}");
 }
-
-// ---------------------------------------------------------------------------
-// 4. plpgsql IF-condition translated to SQLite form
-// ---------------------------------------------------------------------------
 
 /// When a plpgsql trigger uses `date_trunc` in an `IF` condition, the
 /// condition injected into the WHERE clause must use `strftime`, not
@@ -199,10 +183,6 @@ FOR EACH ROW EXECUTE FUNCTION fn_elsif_cond();
     assert!(out.contains("strftime"), "Expected strftime in translated ELSIF condition: {out}");
 }
 
-// ---------------------------------------------------------------------------
-// 5. plpgsql derived subquery (TableFactor::Derived) translation
-// ---------------------------------------------------------------------------
-
 /// A subquery in the FROM clause of an INSERT inside a trigger body must have
 /// its PG-specific expressions translated.
 #[test]
@@ -231,10 +211,6 @@ FOR EACH ROW EXECUTE FUNCTION fn_derived();
     );
     assert!(out.contains("strftime"), "Expected strftime in translated derived subquery: {out}");
 }
-
-// ---------------------------------------------------------------------------
-// 6. plpgsql GROUP BY and HAVING inside trigger body
-// ---------------------------------------------------------------------------
 
 /// A PG-specific expression in a `GROUP BY` inside a trigger's SELECT must
 /// be translated to SQLite form.

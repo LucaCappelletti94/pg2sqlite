@@ -30,9 +30,6 @@ fn translate_err(sql: &str) -> String {
     }
 }
 
-// ==================== FTS with compound identifier (table.column in tsvector)
-// ====================
-
 #[test]
 fn fts_gin_with_compound_identifier() {
     let sql = "
@@ -46,8 +43,6 @@ fn fts_gin_with_compound_identifier() {
     );
 }
 
-// ==================== FTS with nested expression ====================
-
 #[test]
 fn fts_gin_with_nested_expression() {
     let sql = "
@@ -57,8 +52,6 @@ fn fts_gin_with_nested_expression() {
     let output = translate(sql);
     assert!(output.contains("fts5") || output.contains("docs"), "Expected FTS5 or docs: {output}");
 }
-
-// ==================== FTS with CAST in expression ====================
 
 #[test]
 fn fts_gin_with_cast() {
@@ -73,7 +66,6 @@ fn fts_gin_with_cast() {
     );
 }
 
-// ==================== DROP TABLE ====================
 // Note: DROP TABLE tests use separate translation calls to avoid schema
 // conflicts
 
@@ -101,8 +93,6 @@ fn drop_view_translates() {
     assert!(result.is_ok() || result.is_err(), "Should handle DROP VIEW");
 }
 
-// ==================== VACUUM ====================
-
 #[test]
 fn vacuum_passes_through() {
     let sql = "
@@ -112,8 +102,6 @@ fn vacuum_passes_through() {
     let output = translate(sql);
     assert!(output.contains("VACUUM"), "Expected VACUUM: {output}");
 }
-
-// ==================== Transaction control ====================
 
 #[test]
 fn begin_commit_passes_through() {
@@ -141,8 +129,6 @@ fn savepoint_passes_through() {
     assert!(output.contains("SAVEPOINT"), "Expected SAVEPOINT: {output}");
 }
 
-// ==================== INSERT with SELECT ====================
-
 #[test]
 fn insert_with_select_translates() {
     let sql = "
@@ -154,8 +140,6 @@ fn insert_with_select_translates() {
     assert!(output.contains("INSERT INTO"), "Expected INSERT INTO: {output}");
     assert!(output.contains("SELECT"), "Expected SELECT: {output}");
 }
-
-// ==================== SELECT query (standalone) ====================
 
 #[test]
 fn standalone_select_query() {
@@ -177,8 +161,6 @@ fn standalone_select_with_order_by() {
     assert!(output.contains("ORDER BY"), "Expected ORDER BY: {output}");
 }
 
-// ==================== Table with CHECK constraint ====================
-
 #[test]
 fn table_with_check_constraint() {
     let sql = "
@@ -193,8 +175,6 @@ fn table_with_check_constraint() {
     let output = translate(sql);
     assert!(output.contains("CHECK"), "Expected CHECK constraint: {output}");
 }
-
-// ==================== Table with UNIQUE constraint ====================
 
 #[test]
 fn table_with_unique_constraint() {
@@ -211,8 +191,6 @@ fn table_with_unique_constraint() {
     assert!(output.contains("UNIQUE"), "Expected UNIQUE constraint: {output}");
 }
 
-// ==================== Table with composite PK constraint ====================
-
 #[test]
 fn table_with_composite_pk_constraint() {
     let sql = "
@@ -227,9 +205,6 @@ fn table_with_composite_pk_constraint() {
     assert!(output.contains("PRIMARY KEY"), "Expected PRIMARY KEY: {output}");
 }
 
-// ==================== GIN index with non-tsvector (unsupported)
-// ====================
-
 #[test]
 fn gin_index_non_tsvector_skipped() {
     let sql = "
@@ -241,8 +216,6 @@ fn gin_index_non_tsvector_skipped() {
     // Just verify it doesn't crash
 }
 
-// ==================== Multiple FTS columns ====================
-
 #[test]
 fn fts_gin_with_multiple_columns_concat() {
     let sql = "
@@ -252,8 +225,6 @@ fn fts_gin_with_multiple_columns_concat() {
     let output = translate(sql);
     assert!(output.contains("fts5") || output.contains("posts"), "Expected FTS5: {output}");
 }
-
-// ==================== Expression index on function ====================
 
 #[test]
 fn expression_index_with_function() {
@@ -266,8 +237,6 @@ fn expression_index_with_function() {
     assert!(output.contains("users"), "Expected table reference: {output}");
 }
 
-// ==================== Partial index with complex WHERE ====================
-
 #[test]
 fn partial_index_with_complex_where() {
     let sql = "
@@ -278,8 +247,6 @@ fn partial_index_with_complex_where() {
     assert!(output.contains("orders"), "Expected table reference: {output}");
 }
 
-// ==================== BTREE index (explicit) ====================
-
 #[test]
 fn btree_index_explicit() {
     let sql = "
@@ -289,8 +256,6 @@ fn btree_index_explicit() {
     let output = translate(sql);
     assert!(output.contains("CREATE INDEX"), "Expected CREATE INDEX: {output}");
 }
-
-// ==================== FTS5 tsquery with prefix search ====================
 
 #[test]
 fn fts_tsvector_match_with_prefix() {
@@ -307,9 +272,6 @@ fn fts_tsvector_match_with_prefix() {
     );
 }
 
-// ==================== Forward query with subquery in WHERE
-// ====================
-
 #[test]
 fn query_with_subquery_in_where() {
     let sql = "
@@ -321,8 +283,6 @@ fn query_with_subquery_in_where() {
     assert!(output.contains("IN (SELECT"), "Expected subquery: {output}");
 }
 
-// ==================== GiST index (FTS translation) ====================
-
 #[test]
 fn gist_index_fts_translation() {
     let sql = "
@@ -332,8 +292,6 @@ fn gist_index_fts_translation() {
     let output = translate(sql);
     assert!(output.contains("fts5") || output.contains("docs"), "Expected FTS5 or docs: {output}");
 }
-
-// ==================== Unique index ====================
 
 #[test]
 fn unique_index_translates() {
@@ -345,8 +303,6 @@ fn unique_index_translates() {
     assert!(output.contains("UNIQUE"), "Expected UNIQUE: {output}");
 }
 
-// ==================== Multicolumn index ====================
-
 #[test]
 fn multicolumn_index_translates() {
     let sql = "
@@ -357,8 +313,6 @@ fn multicolumn_index_translates() {
     assert!(output.contains("CREATE INDEX"), "Expected CREATE INDEX: {output}");
 }
 
-// ==================== Forward DELETE simple ====================
-
 #[test]
 fn forward_delete_simple() {
     let sql = "
@@ -368,8 +322,6 @@ fn forward_delete_simple() {
     let output = translate(sql);
     assert!(output.contains("DELETE FROM"), "Expected DELETE FROM: {output}");
 }
-
-// ==================== Forward UPDATE simple ====================
 
 #[test]
 fn forward_update_simple() {
@@ -382,8 +334,6 @@ fn forward_update_simple() {
     assert!(output.contains("WHERE"), "Expected WHERE clause in output: {output}");
 }
 
-// ==================== Forward INSERT with VALUES ====================
-
 #[test]
 fn forward_insert_with_values() {
     let sql = "
@@ -394,9 +344,6 @@ fn forward_insert_with_values() {
     assert!(output.contains("INSERT INTO"), "Expected INSERT: {output}");
     assert!(output.contains("Alice"), "Expected Alice: {output}");
 }
-
-// ==================== Forward INSERT with ON CONFLICT DO NOTHING
-// ====================
 
 #[test]
 fn forward_insert_on_conflict_do_nothing() {
@@ -411,8 +358,6 @@ fn forward_insert_on_conflict_do_nothing() {
     );
 }
 
-// ==================== DropTrigger ====================
-
 #[test]
 fn drop_trigger_translates() {
     let sql = "
@@ -423,8 +368,6 @@ fn drop_trigger_translates() {
     let output = translate(sql);
     assert!(output.contains("DROP TRIGGER"), "Expected DROP TRIGGER: {output}");
 }
-
-// ==================== DROP INDEX ====================
 
 #[test]
 fn drop_index_translates() {
@@ -437,8 +380,6 @@ fn drop_index_translates() {
     assert!(output.contains("DROP INDEX"), "Expected DROP INDEX: {output}");
 }
 
-// ==================== FTS5 with single column (no concat) ====================
-
 #[test]
 fn fts_gin_single_column() {
     let sql = "
@@ -448,8 +389,6 @@ fn fts_gin_single_column() {
     let output = translate(sql);
     assert!(output.contains("fts5") || output.contains("articles"), "Expected FTS5: {output}");
 }
-
-// ==================== Create table with REFERENCES (FK) ====================
 
 #[test]
 fn table_with_foreign_key() {
@@ -464,8 +403,6 @@ fn table_with_foreign_key() {
     assert!(output.contains("REFERENCES"), "Expected REFERENCES: {output}");
 }
 
-// ==================== AlterTable is filtered ====================
-
 #[test]
 fn alter_table_is_filtered() {
     let sql = "
@@ -475,8 +412,6 @@ fn alter_table_is_filtered() {
     let output = translate(sql);
     assert!(!output.contains("ALTER TABLE"), "ALTER TABLE should be filtered: {output}");
 }
-
-// ==================== CreateFunction is filtered ====================
 
 #[test]
 fn create_function_is_filtered() {
@@ -488,8 +423,6 @@ fn create_function_is_filtered() {
     assert!(!output.contains("CREATE FUNCTION"), "CREATE FUNCTION should be filtered: {output}");
 }
 
-// ==================== Grant is filtered ====================
-
 #[test]
 fn grant_is_filtered() {
     let sql = "
@@ -499,8 +432,6 @@ fn grant_is_filtered() {
     let output = translate(sql);
     assert!(!output.contains("GRANT"), "GRANT should be filtered: {output}");
 }
-
-// ==================== CONCAT -> || concatenation ====================
 
 #[test]
 fn concat_to_concatenation() {
@@ -512,8 +443,6 @@ fn concat_to_concatenation() {
     assert!(output.contains("||"), "Expected || concatenation: {output}");
 }
 
-// ==================== CONCAT_WS -> || with separator ====================
-
 #[test]
 fn concat_ws_to_concatenation_with_separator() {
     let sql = "
@@ -523,8 +452,6 @@ fn concat_ws_to_concatenation_with_separator() {
     let output = translate(sql);
     assert!(output.contains("||"), "Expected || concatenation: {output}");
 }
-
-// ==================== Function with FILTER clause ====================
 
 #[test]
 fn aggregate_with_filter_clause() {
@@ -549,8 +476,6 @@ fn sum_with_filter_clause() {
     let output = translate(sql);
     assert!(output.contains("CASE WHEN") || output.contains("SUM"), "Expected CASE WHEN: {output}");
 }
-
-// ==================== Column with DEFAULT expressions ====================
 
 #[test]
 fn column_default_unary_op() {
@@ -601,8 +526,6 @@ fn column_default_cast() {
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
 }
 
-// ==================== Generated column ====================
-
 #[test]
 fn generated_column_stored() {
     let sql = "
@@ -616,8 +539,6 @@ fn generated_column_stored() {
     let output = translate(sql);
     assert!(output.contains("GENERATED ALWAYS AS"), "Expected GENERATED: {output}");
 }
-
-// ==================== Table-level FK to RLS table ====================
 
 #[test]
 fn table_fk_to_rls_table() {
@@ -663,8 +584,6 @@ fn table_fk_to_rls_table() {
     assert!(output.contains("users_rls"), "Expected users_rls reference: {output}");
 }
 
-// ==================== Column FK to RLS table ====================
-
 #[test]
 fn column_fk_to_rls_table() {
     use pg2sqlite::{prelude::SessionVariableMapping, traits::TranslationOptions};
@@ -707,9 +626,6 @@ fn column_fk_to_rls_table() {
     assert!(output.contains("users_rls"), "Expected users_rls FK reference: {output}");
 }
 
-// ==================== CHECK constraint with function (removable)
-// ====================
-
 #[test]
 fn check_constraint_with_function_removed() {
     use pg2sqlite::traits::TranslationOptions;
@@ -734,9 +650,6 @@ fn check_constraint_with_function_removed() {
     assert!(output.contains("items"), "Expected items table: {output}");
 }
 
-// ==================== CREATE OR REPLACE VIEW → DROP + CREATE
-// ====================
-
 #[test]
 fn create_or_replace_view_emits_drop_then_create() {
     let sql = "
@@ -759,8 +672,6 @@ fn create_or_replace_view_emits_drop_then_create() {
     );
 }
 
-// ==================== MATERIALIZED VIEW error ====================
-
 #[test]
 fn materialized_view_error() {
     let sql = "
@@ -770,9 +681,6 @@ fn materialized_view_error() {
     let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
     assert!(result.is_err(), "Expected error for MATERIALIZED VIEW");
 }
-
-// ==================== DELETE with USING and RLS table join
-// ====================
 
 #[test]
 fn delete_using_with_rls_table_join() {
@@ -820,8 +728,6 @@ fn delete_using_with_rls_table_join() {
     assert!(output.contains("users_rls"), "Expected users_rls in DELETE USING: {output}");
 }
 
-// ==================== Forward vector cast ====================
-
 #[test]
 fn vector_type_cast() {
     let sql = "
@@ -834,8 +740,6 @@ fn vector_type_cast() {
     let output = translate(sql);
     assert!(output.contains("vec_f32"), "Expected vec_f32 cast: {output}");
 }
-
-// ==================== Hamming distance operator ====================
 
 #[test]
 fn hamming_distance_operator() {
@@ -850,8 +754,6 @@ fn hamming_distance_operator() {
     assert!(output.contains("vec_distance_hamming"), "Expected vec_distance_hamming: {output}");
 }
 
-// ==================== ANY operator to IN subquery ====================
-
 #[test]
 fn any_eq_to_in_subquery() {
     let sql = "
@@ -863,8 +765,6 @@ fn any_eq_to_in_subquery() {
     assert!(output.contains("IN (SELECT"), "Expected IN (SELECT: {output}");
 }
 
-// ==================== ALL <> operator to NOT IN subquery ====================
-
 #[test]
 fn all_ne_to_not_in_subquery() {
     let sql = "
@@ -875,8 +775,6 @@ fn all_ne_to_not_in_subquery() {
     let output = translate(sql);
     assert!(output.contains("NOT IN (SELECT"), "Expected NOT IN (SELECT: {output}");
 }
-
-// ==================== Column DEFAULT with identifier ====================
 
 #[test]
 fn column_default_identifier() {
@@ -890,8 +788,6 @@ fn column_default_identifier() {
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
     assert!(output.contains("active"), "Expected active: {output}");
 }
-
-// ==================== OR REPLACE trigger ====================
 
 #[test]
 fn or_replace_trigger() {
@@ -916,8 +812,6 @@ fn or_replace_trigger() {
         "Expected trigger handling: {output}"
     );
 }
-
-// ==================== BEFORE trigger on RLS table ====================
 
 #[test]
 fn before_trigger_on_rls_table() {
@@ -966,9 +860,6 @@ fn before_trigger_on_rls_table() {
     assert!(output.contains("items_rls"), "Expected items_rls redirect: {output}");
 }
 
-// ==================== INSERT ON CONFLICT DO UPDATE expression translation
-// ====================
-
 #[test]
 fn insert_on_conflict_do_update_translates_expressions() {
     let sql = "
@@ -982,9 +873,6 @@ fn insert_on_conflict_do_update_translates_expressions() {
         "Expected datetime('now') in ON CONFLICT DO UPDATE: {output}"
     );
 }
-
-// ==================== INSERT RETURNING expression translation
-// ====================
 
 #[test]
 fn insert_returning_translates_expressions() {

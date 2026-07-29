@@ -34,21 +34,10 @@ use crate::{
     traits::TranslationOptions,
 };
 
-/// Pre-walks the input statements for GiST indexes over `geometry`/`geography`
-/// columns and registers each `(table, column)` pair in the options' internal
-/// spatial-index catalog. Used by `Pg2Sqlite::translate_internal` to drive
-/// later query-time predicate rewriting through the rtree shadow.
-///
-/// Classification errors are deliberately swallowed here: the per-statement
-/// translation in the main loop will re-run the same classifier and surface
-/// the error with full context.
-/// Pre-walks the input statements for GIN / GiST indexes whose expressions
-/// are `to_tsvector(...)` calls and registers each `(table, column)` pair
-/// in the options' internal FTS-index catalog. Consumed by
-/// `translate_fts_expression` to gate the `@@ to_tsquery(...)` rewrite on
-/// the column having a declared FTS5 index. Without this catalog the
-/// rewrite produced a SELECT against a `<table>_fts` vtable that the
-/// schema never declared, which runtime-errored with "no such table".
+/// Pre-walks for GIN / GiST FTS indexes and populates the FTS-index catalog so
+/// the `@@ to_tsquery` rewrite can gate on a declared index. Without the
+/// catalog the rewrite referenced an undeclared `<table>_fts` virtual table,
+/// causing a runtime error.
 fn populate_fts_index_catalog(statements: &[Statement], options: &mut Pg2SqliteOptions) {
     for stmt in statements {
         let Statement::CreateIndex(create_index) = stmt else {
@@ -70,6 +59,11 @@ fn populate_fts_index_catalog(statements: &[Statement], options: &mut Pg2SqliteO
     }
 }
 
+/// Pre-walks GiST indexes over `geometry`/`geography` columns to populate the
+/// spatial-index catalog that drives query-time predicate rewriting.
+///
+/// A classification error is dropped on purpose: the per-statement translation
+/// re-runs the same classifier and reports it with full context.
 fn populate_spatial_index_catalog(
     statements: &[Statement],
     schema: &ParserDB,
@@ -94,12 +88,10 @@ fn populate_spatial_index_catalog(
     }
 }
 
-/// Pre-walks the input statements and registers the SQLite-unqualified name of
-/// every declared table, index, trigger, and view in the options' declared-name
-/// catalog. Consumed by the read-only deny-trigger pass to reject a generated
-/// trigger name that would collide with an existing object. The translation
-/// schema omits index and trigger definitions, so the raw statements are the
-/// authoritative name source here.
+/// Registers every declared object name in `statements` so the read-only
+/// deny-trigger pass can reject names that collide with existing objects. Uses
+/// raw statements because the translation schema omits index and trigger
+/// definitions.
 fn populate_declared_object_names(statements: &[Statement], options: &mut Pg2SqliteOptions) {
     for stmt in statements {
         let name = match stmt {
@@ -162,22 +154,11 @@ impl Pg2Sqlite {
         self
     }
 
-    /// Adds a new SQL statement to be parsed and added to the set of
-    /// `PostgreSQL` statements to be translated.
-    ///
-    /// # Arguments
-    ///
-    /// * `sql` - The SQL statement to be parsed and added to the set of
-    ///   `PostgreSQL` statements to be translated.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the updated `Pg2Sqlite` struct or an error if the
-    /// SQL statement could not be parsed.
+    /// Parses `sql` as PostgreSQL and appends the resulting statements.
     ///
     /// # Errors
     ///
-    /// * If the SQL statement could not be parsed.
+    /// Returns an error if parsing fails.
     ///
     /// # Example
     ///
@@ -195,25 +176,13 @@ impl Pg2Sqlite {
         Ok(self)
     }
 
-    /// Adds a new path with an SQL file to be parsed and added to the set of
-    /// `PostgreSQL` statements to be translated.
+    /// Reads and parses a PostgreSQL SQL file, appending the statements.
     ///
     /// Only available with the `std` feature.
     ///
-    /// # Arguments
-    ///
-    /// * `path` - The path to the SQL file to be parsed and added to the set of
-    ///   `PostgreSQL` statements to be translated.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the updated `Pg2Sqlite` struct or an error if the
-    /// SQL file could not be read or parsed.
-    ///
     /// # Errors
     ///
-    /// * If the SQL file could not be read.
-    /// * If the SQL file could not be parsed.
+    /// Returns an error if the file cannot be read or parsed.
     #[cfg(feature = "std")]
     pub fn file<P: AsRef<std::path::Path>>(self, path: P) -> Result<Self, crate::errors::Error> {
         let path = path.as_ref();
@@ -221,52 +190,28 @@ impl Pg2Sqlite {
         self.sql(&content)
     }
 
-    /// Adds all of the `up.sql` migrations found under the given directory to
-    /// the set of `PostgreSQL` statements to be translated.
+    /// Loads all `up.sql` migrations found recursively under `directory`.
     ///
     /// Only available with the `std` feature.
     ///
-    /// # Arguments
-    ///
-    /// * `path` - The path to the directory containing the `up.sql` migrations.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the updated `Pg2Sqlite` struct or an error if the
-    /// SQL files could not be read or parsed.
-    ///
     /// # Errors
     ///
-    /// * If the SQL files could not be read.
-    /// * If the SQL files could not be parsed.
+    /// Returns an error if any migration cannot be read or parsed.
     #[cfg(feature = "std")]
     pub fn ups<P: AsRef<std::path::Path>>(directory: P) -> Result<Self, crate::errors::Error> {
         let up_sql_paths = Self::sorted_up_sql_paths(directory.as_ref())?;
         Self::from_migration_paths(up_sql_paths)
     }
 
-    /// Adds all of the `up.sql` migrations found under the given directory to
-    /// the set of `PostgreSQL` statements to be translated, stopping at (and
-    /// including) the specified migration.
+    /// Loads `up.sql` migrations under `directory`, stopping at and including
+    /// `stop_at`.
     ///
     /// Only available with the `std` feature.
     ///
-    /// # Arguments
-    ///
-    /// * `directory` - The path to the directory containing the `up.sql`
-    ///   migrations.
-    /// * `stop_at` - The path to the migration file where processing should
-    ///   stop (inclusive).
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the updated `Pg2Sqlite` struct or an error if the
-    /// SQL files could not be read or parsed.
-    ///
     /// # Errors
     ///
-    /// * If the SQL files could not be read.
-    /// * If the SQL files could not be parsed.
+    /// Returns an error if any migration cannot be read, parsed, or if
+    /// `stop_at` is not found.
     #[cfg(feature = "std")]
     pub fn ups_until<P: AsRef<std::path::Path>>(
         directory: P,
@@ -345,27 +290,14 @@ impl Pg2Sqlite {
         Ok(())
     }
 
-    /// Adds all of the `up.sql` migrations found in the provided git repository
-    /// to the set of `PostgreSQL` statements to be translated.
+    /// Clones the git repository at `url` and loads its migrations.
     ///
     /// Only available with the `std` feature.
     ///
-    /// # Arguments
-    ///
-    /// * `url` - The URL of the git repository containing the `up.sql`
-    ///   migrations.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the updated `Pg2Sqlite` struct or an error if the
-    /// repository could not be cloned or the SQL files could not be read or
-    /// parsed.
-    ///
     /// # Errors
     ///
-    /// * If the git repository could not be cloned.
-    /// * If the SQL files could not be read.
-    /// * If the SQL files could not be parsed.
+    /// Returns an error if the repository cannot be cloned or migrations cannot
+    /// be read.
     #[cfg(feature = "std")]
     pub fn from_git(url: &str) -> Result<Self, crate::errors::Error> {
         let temp_dir = TempDir::new()?;
@@ -424,20 +356,11 @@ impl Pg2Sqlite {
         Ok(result)
     }
 
-    /// Translates the set of `PostgreSQL` statements to `SQLite` statements.
-    ///
-    /// # Returns
-    ///
-    /// * A Result containing the set of `SQLite` statements or an error if the
-    ///   translation could not be performed.
+    /// Translates loaded PostgreSQL statements to SQLite.
     ///
     /// # Errors
     ///
-    /// * If the translation could not be performed.
-    ///
-    /// # Panics
-    ///
-    /// * If the progress bar could not be created.
+    /// Returns an error if translation fails.
     ///
     /// # Example
     ///
@@ -490,19 +413,12 @@ impl Pg2Sqlite {
         Ok(self.translate(options)?.into_iter().map(|s| s.to_string()).collect())
     }
 
-    /// Builds the schema from the loaded PostgreSQL statements.
-    ///
-    /// This method constructs a [`ParserDB`] schema from the PostgreSQL
-    /// statements that have been added to this translator. The schema can
-    /// be reused for multiple reverse translation operations.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the constructed [`ParserDB`] schema.
+    /// Builds a [`ParserDB`] schema from the loaded PostgreSQL statements,
+    /// reusable for multiple reverse translation operations.
     ///
     /// # Errors
     ///
-    /// * If the schema could not be constructed from the statements.
+    /// Returns an error if schema construction fails.
     ///
     /// # Example
     ///
@@ -518,16 +434,14 @@ impl Pg2Sqlite {
             .map_err(crate::errors::Error::from)
     }
 
-    /// Logical to physical table map this translator produces under `options`,
+    /// Logical-to-physical table map produced under `options`,
     /// one [`TableManifestEntry`](crate::manifest::TableManifestEntry) per
-    /// emitted table. Derived from the same
-    /// classification [`translate`](Self::translate) uses, so it matches the
-    /// objects that call emits. A role-configured `options` omits tables the
-    /// role cannot SELECT.
+    /// emitted table. A role-configured `options` omits tables the role
+    /// cannot SELECT.
     ///
     /// # Errors
     ///
-    /// * If the schema could not be constructed from the statements.
+    /// Returns an error if schema construction fails.
     ///
     /// # Example
     ///
@@ -582,28 +496,13 @@ impl Pg2Sqlite {
         Ok(entries)
     }
 
-    /// Reverse translates a single SQLite statement to PostgreSQL.
-    ///
-    /// This method converts a SQLite DML statement (INSERT, UPDATE, DELETE,
-    /// SELECT) back to its PostgreSQL equivalent, using the schema built
-    /// from the loaded PostgreSQL statements.
-    ///
-    /// # Arguments
-    ///
-    /// * `sqlite_stmt` - The SQLite statement to reverse translate.
-    /// * `schema` - The schema to use for type recovery and validation.
-    /// * `options` - The translation options.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the PostgreSQL statement.
+    /// Reverse translates a single SQLite DML statement to PostgreSQL.
     ///
     /// # Errors
     ///
-    /// * [`crate::errors::Error::UnsupportedReverseStatement`] - If the
-    ///   statement is not a DML statement.
-    /// * [`crate::errors::Error::RlsTableDetected`] - If the statement
-    ///   references an RLS backing table.
+    /// Returns [`crate::errors::Error::UnsupportedReverseStatement`] for
+    /// non-DML statements or [`crate::errors::Error::RlsTableDetected`] for
+    /// RLS backing table references.
     ///
     /// # Example
     ///
@@ -629,10 +528,7 @@ impl Pg2Sqlite {
         sqlite_stmt.reverse_translate(schema, options)
     }
 
-    /// Parses SQLite SQL and reverse translates it to PostgreSQL statements.
-    ///
-    /// This is a convenience method that parses a SQLite SQL string and
-    /// reverse translates all statements to PostgreSQL.
+    /// Parses SQLite SQL and reverse translates all statements to PostgreSQL.
     ///
     /// Identifiers are re-quoted to PostgreSQL double quotes (SQLite also
     /// accepts backtick and bracket quoting). Only the quote style changes: the
@@ -640,24 +536,12 @@ impl Pg2Sqlite {
     /// becomes a case-sensitive PostgreSQL identifier with the same spelling,
     /// which lines up only under a shared schema.
     ///
-    /// # Arguments
-    ///
-    /// * `sqlite_sql` - The SQLite SQL string to parse and reverse translate.
-    /// * `schema` - The schema to use for type recovery and validation.
-    /// * `options` - The translation options.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing a vector of PostgreSQL statements.
-    ///
     /// # Errors
     ///
-    /// * [`crate::errors::Error::ParserError`] - If the SQL could not be
-    ///   parsed.
-    /// * [`crate::errors::Error::UnsupportedReverseStatement`] - If any
-    ///   statement is not a DML statement.
-    /// * [`crate::errors::Error::RlsTableDetected`] - If any statement
-    ///   references an RLS backing table.
+    /// Returns [`crate::errors::Error::ParserError`] if parsing fails,
+    /// [`crate::errors::Error::UnsupportedReverseStatement`] for non-DML
+    /// statements, or [`crate::errors::Error::RlsTableDetected`] for RLS
+    /// backing table references.
     ///
     /// # Example
     ///

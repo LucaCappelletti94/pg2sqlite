@@ -7,10 +7,6 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Schema for tests
-// ============================================================================
-
 mod schema {
     diesel::table! {
         /// Data table for string/math tests.
@@ -40,11 +36,6 @@ struct Data {
     num_val: f32,
 }
 
-// ============================================================================
-// TRIM Tests
-// ============================================================================
-
-/// Test that TRIM expressions are translated correctly.
 #[test]
 fn test_trim_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -70,7 +61,6 @@ fn test_trim_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test TRIM semantic execution.
 #[test]
 fn test_trim_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -109,7 +99,6 @@ fn test_trim_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test TRIM with LEADING/TRAILING/BOTH.
 #[test]
 fn test_trim_variants_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -135,11 +124,6 @@ fn test_trim_variants_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// CEIL Tests
-// ============================================================================
-
-/// Test that CEIL expressions are translated correctly.
 #[test]
 fn test_ceil_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -166,7 +150,6 @@ fn test_ceil_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test CEIL semantic execution.
 #[test]
 fn test_ceil_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -213,11 +196,6 @@ fn test_ceil_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// FLOOR Tests
-// ============================================================================
-
-/// Test that FLOOR expressions are translated correctly.
 #[test]
 fn test_floor_translation() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -246,7 +224,6 @@ fn test_floor_translation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test FLOOR semantic execution.
 #[test]
 fn test_floor_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

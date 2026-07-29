@@ -26,8 +26,6 @@ fn apply_all(sql: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> 
     Ok(conn)
 }
 
-// ==================== C1: CASE WHEN in policy ====================
-
 #[test]
 fn rls_policy_case_when_transforms_column_refs() -> Result<(), Box<dyn std::error::Error>> {
     let sql = r#"
@@ -62,8 +60,6 @@ fn rls_policy_case_when_transforms_column_refs() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-// ==================== C1: LIKE in policy ====================
-
 #[test]
 fn rls_policy_like_transforms_column_refs() -> Result<(), Box<dyn std::error::Error>> {
     let sql = r#"
@@ -91,8 +87,6 @@ fn rls_policy_like_transforms_column_refs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-// ==================== C1: IS TRUE in policy ====================
-
 #[test]
 fn rls_policy_is_true_transforms_column_refs() -> Result<(), Box<dyn std::error::Error>> {
     let sql = r#"
@@ -116,8 +110,6 @@ fn rls_policy_is_true_transforms_column_refs() -> Result<(), Box<dyn std::error:
     diesel::sql_query("INSERT INTO flags (id, active) VALUES (1, 1)").execute(&mut conn)?;
     Ok(())
 }
-
-// ==================== C2: UNION in RLS subquery ====================
 
 #[test]
 fn rls_policy_with_union_transforms_both_sides() -> Result<(), Box<dyn std::error::Error>> {
@@ -153,9 +145,6 @@ fn rls_policy_with_union_transforms_both_sides() -> Result<(), Box<dyn std::erro
     // These should be visible through the RLS view
     Ok(())
 }
-
-// ==================== C3: Function arg with outer table ref
-// ====================
 
 #[test]
 fn rls_outer_table_ref_in_function_arg() -> Result<(), Box<dyn std::error::Error>> {

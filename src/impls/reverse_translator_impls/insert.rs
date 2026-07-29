@@ -81,7 +81,6 @@ fn resolve_insert_table<'a>(
     }
 }
 
-/// Look up primary key columns for a resolved table.
 fn get_primary_key_columns(
     schema: &ParserDB,
     table: &<ParserDB as DatabaseLike>::Table,

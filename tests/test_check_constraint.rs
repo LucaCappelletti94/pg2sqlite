@@ -13,7 +13,8 @@ use pg2sqlite::{
     traits::TranslationOptions,
 };
 
-/// CHECK constraint survives translation and is enforced at runtime.
+/// The constraint must survive translation AND still be enforced at runtime, so
+/// this executes the DDL rather than only inspecting it.
 #[test]
 fn test_check_constraint_is_translated() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE items (id SERIAL PRIMARY KEY, quantity INT CHECK (quantity > 0));";
@@ -205,7 +206,6 @@ fn table_check_semantic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// CHECK constraint with a string expression is translated.
 #[test]
 fn test_check_constraint_string_length() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE products (id SERIAL PRIMARY KEY, code TEXT CHECK (length(code) >= 3));";

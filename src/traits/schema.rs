@@ -30,17 +30,13 @@ use crate::{
 /// Trait to define a schema for the translation between `PostgreSQL` and
 /// `SQLite`.
 pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
-    /// Returns a reference to the body of a function defined in the schema by
-    /// its name, if it exists.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the function to be searched.
+    /// Returns the `BEGIN ... END` body of the named function, if it exists.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownPostgresFeature`] if the function body cannot be
-    /// tokenized, parsed, or does not contain a valid `BEGIN ... END` block.
+    /// Returns [`Error::UnknownPostgresFeature`] if the body cannot be
+    /// tokenized, parsed, or does not contain a valid `BEGIN ... END`
+    /// block.
     fn function_body(&self, name: &str) -> Result<Option<BeginEndStatements>, Error> {
         Ok(self.function_body_with_context(name)?.map(|(body, _context)| body))
     }

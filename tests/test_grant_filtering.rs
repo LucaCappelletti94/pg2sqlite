@@ -74,10 +74,6 @@ use pg2sqlite::{
 };
 use rosetta_uuid::Uuid;
 
-// ============================================================================
-// Schema definitions for test tables
-// ============================================================================
-
 diesel::table! {
     /// Backing table for users with RLS (read-only for app_user).
     users_rls (id) {
@@ -236,11 +232,6 @@ fn setup_database() -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     Ok(conn)
 }
 
-// ============================================================================
-// Schema Translation Tests
-// ============================================================================
-
-/// Test that the translation correctly identifies table grant levels.
 #[test]
 fn test_grant_based_filtering_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let translated = Pg2Sqlite::default().sql(SQL_FIXTURE)?.translate(&translation_options())?;
@@ -252,7 +243,6 @@ fn test_grant_based_filtering_snapshot() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Test that the translated SQL executes correctly in SQLite.
 #[test]
 fn test_grant_based_filtering_execution() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
@@ -297,7 +287,8 @@ fn test_grant_based_filtering_execution() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Verify that read-only tables don't have INSTEAD OF triggers for writes.
+/// A read-only table gets no INSTEAD OF write triggers at all, so a write fails
+/// on the view rather than being silently swallowed.
 #[test]
 fn test_readonly_table_no_write_triggers() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
@@ -336,10 +327,6 @@ fn test_readonly_table_no_write_triggers() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-// ============================================================================
-// Helper Structs for Metadata Queries
-// ============================================================================
-
 #[derive(QueryableByName, Debug)]
 struct TableInfo {
     #[diesel(sql_type = diesel::sql_types::Text)]
@@ -354,11 +341,6 @@ struct TriggerInfo {
     tbl_name: String,
 }
 
-// ============================================================================
-// Read-Only Table Tests (users)
-// ============================================================================
-
-/// Test that SELECT from read-only table (users) works.
 #[test]
 fn test_readonly_select_works() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
@@ -372,7 +354,6 @@ fn test_readonly_select_works() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that INSERT into read-only table (users) fails.
 #[test]
 fn test_readonly_insert_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
@@ -392,7 +373,6 @@ fn test_readonly_insert_fails() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that UPDATE on read-only table (users) fails.
 #[test]
 fn test_readonly_update_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
@@ -410,7 +390,6 @@ fn test_readonly_update_fails() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that DELETE on read-only table (users) fails.
 #[test]
 fn test_readonly_delete_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
@@ -425,10 +404,6 @@ fn test_readonly_delete_fails() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-// ============================================================================
-// Writable Table Tests (posts)
-// ============================================================================
 
 /// Test that INSERT into writable table (posts) succeeds with valid session
 /// user.
