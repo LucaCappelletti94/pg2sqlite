@@ -6,7 +6,8 @@
 
 use dioxus::prelude::*;
 use pg2sqlite::prelude::{
-    Pg2SqliteOptions, SessionVariableMapping, TranslationOptions, UuidRepresentation,
+    ArrayRepresentation, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions,
+    UuidRepresentation,
 };
 
 use crate::{runner::QueryOutcome, samples::SAMPLES};
@@ -50,6 +51,7 @@ pub struct TranslationStats {
 #[derive(Clone, PartialEq)]
 pub struct WebOptions {
     pub uuid_representation: Option<UuidRepresentation>,
+    pub array_representation: Option<ArrayRepresentation>,
     /// Empty means "leave at the crate default" (currently `uuidv7`).
     pub uuid_function_name: String,
     /// Empty means "don't configure", which is fine for non-RLS schemas.
@@ -61,6 +63,7 @@ impl Default for WebOptions {
     fn default() -> Self {
         Self {
             uuid_representation: Some(UuidRepresentation::Blob),
+            array_representation: Some(ArrayRepresentation::Json),
             uuid_function_name: String::new(),
             rls_audit_table_name: String::new(),
             session_variables: Vec::new(),
@@ -73,6 +76,9 @@ impl WebOptions {
         let mut opts = Pg2SqliteOptions::default().with_sqlitegis_enabled();
         if let Some(rep) = self.uuid_representation {
             opts = opts.with_uuid_representation(rep);
+        }
+        if let Some(rep) = self.array_representation {
+            opts = opts.with_array_representation(rep);
         }
         if !self.uuid_function_name.is_empty() {
             opts = opts.with_uuid_function_name(self.uuid_function_name.clone());

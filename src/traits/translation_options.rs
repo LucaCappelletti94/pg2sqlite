@@ -21,6 +21,20 @@ pub enum UuidRepresentation {
     Text,
 }
 
+/// Enum for defining the representation of PostgreSQL arrays in `SQLite`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum ArrayRepresentation {
+    /// Store arrays as JSON array text in a `TEXT` column and translate array
+    /// operations through the SQLite `json1` extension, which is compiled in
+    /// by default since SQLite 3.38.
+    ///
+    /// The stored form is a JSON array (`[1,2,3]`), not PostgreSQL's own array
+    /// output format (`{1,2,3}`), so a pipeline copying rows between the two
+    /// databases has to convert values as well as schema.
+    Json,
+}
+
 /// Enum for defining the version of UUIDs to generate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UuidVersion {
@@ -84,7 +98,7 @@ impl SessionVariableMapping {
     }
 }
 
-/// Trait defining translation options for the  library.
+/// Trait defining translation options for the library.
 pub trait TranslationOptions {
     #[must_use]
     /// Sets the option to drop check constraints containing unsupported
@@ -95,8 +109,7 @@ pub trait TranslationOptions {
     fn should_remove_unsupported_check_constraints(&self) -> bool;
 
     #[must_use]
-    /// Sets the UUID storage representation expected in translated SQLite
-    /// schemas.
+    /// Sets the UUID storage representation for translated SQLite schemas.
     ///
     /// This must be compatible with the runtime return type of the configured
     /// UUID function name (`with_uuid_function_name`).
@@ -106,36 +119,35 @@ pub trait TranslationOptions {
     fn get_uuid_representation(&self) -> Option<UuidRepresentation>;
 
     #[must_use]
-    /// Sets the option to specify the name of the function to use for UUID
-    /// generation.
-    ///
-    /// The translator rewrites PostgreSQL UUID default generators to this
-    /// function name, but cannot inspect SQLite UDF implementations. Ensure the
-    /// runtime return type of this function matches the configured UUID
-    /// representation.
+    /// Sets the UUID generation function name; the runtime return type must
+    /// match the configured UUID representation.
     fn with_uuid_function_name(self, name: impl Into<String>) -> Self;
 
     /// Returns the name of the function to use for UUID generation.
     fn get_uuid_function_name(&self) -> &str;
 
     #[must_use]
-    /// Sets a SQLite UDF name that converts a text UUID literal (e.g.
-    /// `'550e8400-e29b-41d4-a716-446655440000'`) into its 16-byte binary
-    /// representation. Used by the translator under
-    /// [`UuidRepresentation::Blob`] to wrap text-literal values at INSERT
-    /// and UPDATE positions targeting a UUID column, so the BLOB STRICT
-    /// column accepts them.
-    ///
-    /// If unset, the translator emits a pure-SQLite
-    /// `unhex(replace(literal, '-', ''))` expression instead. Pass a
-    /// function name when the application has registered a custom
-    /// converter UDF (e.g. one that also validates the UUID format).
+    /// Sets a UDF name for converting text UUID literals to 16-byte BLOBs at
+    /// INSERT and UPDATE time (for [`UuidRepresentation::Blob`]). If unset,
+    /// the translator emits `unhex(replace(literal, '-', ''))` inline.
     fn with_uuid_text_to_blob_function_name(self, name: impl Into<String>) -> Self;
 
     /// Returns the configured UUID text-to-blob UDF name, if set.
     fn get_uuid_text_to_blob_function_name(&self) -> Option<&str>;
 
-    // ==================== RLS Options ====================
+    #[must_use]
+    /// Sets the array representation; unset by default, which rejects all array
+    /// constructs instead of silently downgrading.
+    ///
+    /// Under [`ArrayRepresentation::Json`] a subscript such as `tags[1]` is
+    /// read as a one-based *array* subscript. PostgreSQL also allows
+    /// zero-based subscripts on `jsonb` values, and the translator cannot tell
+    /// the two apart from the expression alone, so write `payload -> 0`
+    /// instead of `payload[0]` for JSON documents.
+    fn with_array_representation(self, representation: ArrayRepresentation) -> Self;
+
+    /// Returns the representation of PostgreSQL arrays in `SQLite`.
+    fn get_array_representation(&self) -> Option<ArrayRepresentation>;
 
     #[must_use]
     /// Sets the suffix to append to table names when renaming them for RLS
@@ -157,14 +169,8 @@ pub trait TranslationOptions {
     fn get_readonly_deny_trigger_suffix(&self) -> &str;
 
     #[must_use]
-    /// Sets the role name used for role-aware translation. Only policies for
-    /// PUBLIC or this role are translated, and each table is emitted per the
-    /// role's grants: omitted when not selectable, read-only when selectable
-    /// but not writable, writable otherwise.
-    ///
-    /// A read-only table without row-level security gets deny triggers that
-    /// `RAISE(ABORT)` on `INSERT`/`UPDATE`/`DELETE`, failing interactive writes
-    /// synchronously at the statement.
+    /// Filters translation to policies for PUBLIC or the named role, emitting
+    /// each table per the role's grants (omitted, read-only, or writable).
     ///
     /// Apply contract: consumers applying authoritative changesets to a
     /// role-translated replica MUST disable triggers
@@ -199,13 +205,8 @@ pub trait TranslationOptions {
         sqlite_function: impl Into<String>,
     ) -> Self;
 
-    // ==================== RLS Validation Options ====================
-
     #[must_use]
     /// Sets the name of the audit table for RLS validation monitoring.
-    ///
-    /// This table will store all RLS policy violations detected during sync.
-    /// The audit table name must be configured when using RLS policies.
     ///
     /// # Example
     /// ```
@@ -219,32 +220,19 @@ pub trait TranslationOptions {
     /// Returns the configured RLS audit table name, if set.
     fn get_rls_audit_table_name(&self) -> Option<&str>;
 
-    // ==================== Geolite / PostGIS Options ====================
-
     #[must_use]
-    /// Enables translation of PostGIS-equivalent SQL via the geolite SQLite
-    /// extension. With this on, `ST_*` scalar functions whose `(name, arity)`
-    /// match geolite's published catalog pass through untouched. Functions
-    /// outside the catalog still error as unsupported.
-    ///
-    /// The caller is responsible for ensuring geolite's extension is loaded
-    /// on the destination SQLite connection at runtime. pg2sqlite only
-    /// emits SQL.
-    ///
-    /// Default is `false`.
+    /// Enables passthrough of `ST_*` scalar functions via the geolite SQLite
+    /// extension; functions outside geolite's catalog still error as
+    /// unsupported. The caller must load the extension on the destination
+    /// connection at runtime.
     fn with_sqlitegis_enabled(self) -> Self;
 
     /// Returns whether geolite-backed PostGIS translation is enabled.
     fn is_sqlitegis_enabled(&self) -> bool;
 
     #[must_use]
-    /// Enables strict RLS validation mode.
-    ///
-    /// In strict mode, RLS violations will cause transactions to abort
-    /// immediately instead of just logging. This is useful for development
-    /// and testing to catch backend RLS bugs early.
-    ///
-    /// Default is monitor mode (log only, no abort).
+    /// Enables strict RLS validation (abort on violation instead of logging
+    /// only).
     ///
     /// # Example
     /// ```

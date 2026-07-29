@@ -12,6 +12,7 @@ use alloc::{
     vec::Vec,
 };
 
+pub(crate) mod array;
 mod column;
 mod column_option;
 mod condition_injection;

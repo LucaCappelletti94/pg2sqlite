@@ -90,3 +90,41 @@ fn uuid_blob_cast_still_lowers_to_conversion() {
         "uuid cast fell through to generic path: {out}"
     );
 }
+
+/// SQLite has no cast format clause. Cloning `FORMAT` through emitted
+/// `CAST(x AS TEXT FORMAT '...')`, which SQLite rejects at parse time, so the
+/// translator has to refuse the cast instead.
+#[test]
+fn cast_with_a_format_clause_is_rejected() {
+    let err =
+        translate_pg("SELECT CAST(a AS TEXT FORMAT 'YYYY') FROM t", &Pg2SqliteOptions::default())
+            .expect_err("a cast format clause should be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("cast format"), "error should name the clause, got: {msg}");
+}
+
+/// An array target type is not made valid by the `CAST` spelling: it needs the
+/// array representation like any other array construct.
+#[test]
+fn array_cast_target_needs_an_array_representation() {
+    for pg in ["SELECT a::int[] FROM t", "SELECT CAST(a AS INT ARRAY) FROM t"] {
+        let err = translate_pg(pg, &Pg2SqliteOptions::default())
+            .expect_err("an array cast target should be rejected");
+        assert!(
+            err.to_string().contains("with_array_representation"),
+            "error should name the opt-in for {pg}, got: {err}"
+        );
+    }
+}
+
+/// Under the JSON representation an array cast collapses to `CAST(x AS TEXT)`,
+/// matching the column type the array maps to.
+#[test]
+fn array_cast_target_becomes_text_under_json_arrays() {
+    let opts = Pg2SqliteOptions::default()
+        .with_array_representation(pg2sqlite::prelude::ArrayRepresentation::Json);
+    let out = translate_pg("SELECT a::int[] FROM t", &opts)
+        .expect("array cast should translate")
+        .join("\n");
+    assert!(out.contains("CAST(a AS TEXT)"), "{out}");
+}

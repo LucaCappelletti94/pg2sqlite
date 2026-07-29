@@ -33,16 +33,12 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .join("\n")
 }
 
-// ==================== Default with UnaryOp ====================
-
 #[test]
 fn default_unary_op_negative() {
     let output = translate("CREATE TABLE t (id INT PRIMARY KEY, val INT DEFAULT -1);");
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
     assert!(output.contains("-1"), "Expected -1: {output}");
 }
-
-// ==================== Default with Nested ====================
 
 #[test]
 fn default_nested_expression() {
@@ -51,23 +47,17 @@ fn default_nested_expression() {
     assert!(output.contains("42"), "Expected 42: {output}");
 }
 
-// ==================== Default with BinaryOp ====================
-
 #[test]
 fn default_binary_op() {
     let output = translate("CREATE TABLE t (id INT PRIMARY KEY, val INT DEFAULT 1 + 2);");
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
 }
 
-// ==================== Default with Cast ====================
-
 #[test]
 fn default_cast_expression() {
     let output = translate("CREATE TABLE t (id INT PRIMARY KEY, val TEXT DEFAULT 'hello'::text);");
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
 }
-
-// ==================== Default with Value ====================
 
 #[test]
 fn default_literal_value() {
@@ -76,15 +66,11 @@ fn default_literal_value() {
     assert!(output.contains("unnamed"), "Expected 'unnamed': {output}");
 }
 
-// ==================== Default with Identifier ====================
-
 #[test]
 fn default_identifier() {
     let output = translate("CREATE TABLE t (id INT PRIMARY KEY, val BOOLEAN DEFAULT true);");
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
 }
-
-// ==================== Default with UUID function ====================
 
 #[test]
 fn default_uuid_function() {
@@ -116,8 +102,6 @@ fn default_uuid_generate_v4_function() {
     assert!(result.is_ok(), "uuid_generate_v4() default should be supported: {result:?}");
 }
 
-// ==================== Generated column (ALWAYS) ====================
-
 #[test]
 fn generated_column_stored() {
     let output = translate(
@@ -126,15 +110,11 @@ fn generated_column_stored() {
     assert!(output.contains("GENERATED ALWAYS AS"), "Expected GENERATED ALWAYS AS: {output}");
 }
 
-// ==================== Unique constraint ====================
-
 #[test]
 fn unique_constraint() {
     let output = translate("CREATE TABLE t (id INT PRIMARY KEY, email TEXT UNIQUE);");
     assert!(output.contains("UNIQUE"), "Expected UNIQUE: {output}");
 }
-
-// ==================== NOT NULL ====================
 
 #[test]
 fn not_null_constraint() {
@@ -142,17 +122,12 @@ fn not_null_constraint() {
     assert!(output.contains("NOT NULL"), "Expected NOT NULL: {output}");
 }
 
-// ==================== CHECK constraint (now translated)
-// ====================
-
 #[test]
 fn check_constraint_translated() {
     let output = translate("CREATE TABLE t (id INT PRIMARY KEY, age INT CHECK (age >= 0));");
     assert!(output.contains("CHECK"), "CHECK should be translated: {output}");
     assert!(output.contains("age >= 0"), "CHECK condition should be preserved: {output}");
 }
-
-// ==================== FK to RLS table ====================
 
 #[test]
 fn fk_to_rls_table_gets_renamed() {
@@ -191,8 +166,6 @@ fn fk_to_rls_table_gets_renamed() {
     );
 }
 
-// ==================== FK to non-RLS table stays unchanged ====================
-
 #[test]
 fn fk_to_non_rls_table_unchanged() {
     let sql = r#"
@@ -205,8 +178,6 @@ fn fk_to_non_rls_table_unchanged() {
         "FK should reference categories unchanged: {output}"
     );
 }
-
-// ==================== DEFAULT now() → datetime('now') ====================
 
 /// PostgreSQL's `now()` function returns the current timestamp.
 /// SQLite's equivalent is `datetime('now')`.
@@ -241,7 +212,44 @@ fn default_now_translates_to_datetime_now() {
     assert!(rows[0].created_at.is_some(), "DEFAULT datetime('now') should set a timestamp");
 }
 
-// ==================== Constraint characteristics ====================
+/// SQLite's `DEFAULT` clause takes a literal, a signed number, a bare keyword,
+/// or a *parenthesized* expression: `DEFAULT 1 + 2` and
+/// `DEFAULT CAST(x AS TEXT)` are both syntax errors. The older per-shape
+/// translation emitted them bare, so every `DEFAULT` shape is checked here by
+/// executing the emitted DDL rather than by grepping for the keyword.
+///
+/// The DDL is executed as generated text through `rusqlite` because the string
+/// the translator produced is exactly what is under test; a typed diesel schema
+/// would describe a table this test is trying to discover the shape of.
+#[test]
+fn every_default_shape_produces_runnable_ddl() {
+    let ddl = translate(
+        "CREATE TABLE defaults (
+            id INT PRIMARY KEY,
+            literal TEXT DEFAULT 'a',
+            signed INT DEFAULT -1,
+            parenthesized INT DEFAULT (42),
+            arithmetic INT DEFAULT 1 + 2,
+            casted TEXT DEFAULT 'hello'::text,
+            keyword TEXT DEFAULT CURRENT_TIMESTAMP,
+            call TEXT DEFAULT now(),
+            boolean BOOLEAN DEFAULT true
+         );",
+    );
+
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    conn.execute_batch(&format!("{ddl};"))
+        .unwrap_or_else(|e| panic!("emitted DDL is not runnable: {e}\n{ddl}"));
+
+    // A bare literal or signed number must stay bare: wrapping is harmless but
+    // the assertion pins which forms need parentheses and which do not.
+    assert!(ddl.contains("literal TEXT DEFAULT 'a'"), "{ddl}");
+    assert!(ddl.contains("signed INTEGER DEFAULT -1"), "{ddl}");
+    assert!(ddl.contains("arithmetic INTEGER DEFAULT (1 + 2)"), "{ddl}");
+    assert!(ddl.contains("casted TEXT DEFAULT (CAST('hello' AS TEXT))"), "{ddl}");
+    assert!(ddl.contains("keyword TEXT DEFAULT CURRENT_TIMESTAMP"), "{ddl}");
+    assert!(ddl.contains("call TEXT DEFAULT (datetime('now'))"), "{ddl}");
+}
 
 #[test]
 fn constraint_characteristics_translation_is_rejected() {
@@ -291,9 +299,6 @@ fn referential_action_translation_passthrough_covers_all_variants() {
         assert_eq!(translated, action);
     }
 }
-
-// ==================== Column option silently-dropped tests
-// ====================
 
 #[test]
 fn collate_option_silently_dropped() {

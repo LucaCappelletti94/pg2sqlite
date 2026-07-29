@@ -17,11 +17,10 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    Array, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, Interval,
-    ObjectName, ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, TableAlias,
-    TableAliasColumnDef, TableFactor, TableWithJoins, UnaryOperator, Value, ValueWithSpan,
-    helpers::attached_token::AttachedToken,
+    AccessExpr, Array, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, Interval,
+    JsonKeyUniqueness, JsonPredicateType, ObjectName, ObjectNamePart, Query, Subscript, TableAlias,
+    TableAliasColumnDef, TableFactor, Value, ValueWithSpan,
 };
 
 #[cfg(all(test, feature = "std"))]
@@ -31,9 +30,18 @@ use crate::{
         datetime_helpers::{
             DatePartKey, build_strftime_call, datetime_field_key, strftime_mapping_for_key,
         },
+        expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq},
         function_helpers::{integer_literal, simple_function_expr, string_literal},
-        shared_helpers::function_argument_exprs,
+        query_builder::{from_relation, plain_table_factor, single_expr_query},
+        shared_helpers::{function_argument_exprs, translate_expr_recursive},
         timezone::normalize_timezone_modifier_for_sqlite,
+        translator_impls::{
+            array::{
+                Quantifier, translate_array_literal, translate_array_subscript,
+                translate_quantified_over_array,
+            },
+            helpers::Forward,
+        },
     },
     prelude::{Pg2SqliteOptions, Translator},
 };
@@ -117,7 +125,6 @@ fn is_to_tsquery(func: &Function) -> bool {
 /// Translate a full-text search expression (to_tsvector @@ to_tsquery) to FTS5
 /// MATCH. Returns an expression like: pk_col IN (SELECT rowid FROM table_fts
 /// WHERE table_fts MATCH 'query')
-#[allow(clippy::too_many_lines)]
 fn translate_fts_expression(
     tsvector_func: &Function,
     tsquery_func: &Function,
@@ -186,66 +193,20 @@ fn translate_fts_expression(
     // Build: pk_col IN (SELECT rowid FROM table_fts WHERE table_fts MATCH 'query')
     Ok(Expr::InSubquery {
         expr: Box::new(Expr::Identifier(Ident::new(pk_column))),
-        subquery: Box::new(Query {
-            with: None,
-            body: Box::new(SetExpr::Select(Box::new(Select {
-                select_token: AttachedToken::empty(),
-                distinct: None,
-                top: None,
-                top_before_distinct: false,
-                projection: vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("rowid")))],
-                into: None,
-                from: vec![TableWithJoins {
-                    relation: TableFactor::Table {
-                        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-                            fts_table_name.clone(),
-                        ))]),
-                        alias: None,
-                        args: None,
-                        with_hints: Vec::new(),
-                        version: None,
-                        with_ordinality: false,
-                        partitions: Vec::new(),
-                        json_path: None,
-                        sample: None,
-                        index_hints: Vec::new(),
-                    },
-                    joins: Vec::new(),
-                }],
-                lateral_views: Vec::new(),
-                prewhere: None,
-                selection: Some(Expr::BinaryOp {
-                    left: Box::new(Expr::Identifier(Ident::new(fts_table_name))),
-                    op: BinaryOperator::Match,
-                    right: Box::new(Expr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(fts5_query),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    })),
-                }),
-                group_by: sqlparser::ast::GroupByExpr::Expressions(Vec::new(), Vec::new()),
-                cluster_by: Vec::new(),
-                distribute_by: Vec::new(),
-                sort_by: Vec::new(),
-                having: None,
-                named_window: Vec::new(),
-                qualify: None,
-                window_before_qualify: false,
-                value_table_mode: None,
-                connect_by: Vec::new(),
-                flavor: SelectFlavor::Standard,
-                exclude: None,
-                optimizer_hints: Vec::new(),
-                select_modifiers: None,
-            }))),
-            order_by: None,
-            limit_clause: None,
-            fetch: None,
-            locks: Vec::new(),
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: Vec::new(),
-        }),
+        subquery: Box::new(single_expr_query(
+            Expr::Identifier(Ident::new("rowid")),
+            from_relation(plain_table_factor(ObjectName(vec![ObjectNamePart::Identifier(
+                Ident::new(fts_table_name.clone()),
+            )]))),
+            Some(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(Ident::new(fts_table_name))),
+                op: BinaryOperator::Match,
+                right: Box::new(Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(fts5_query),
+                    span: sqlparser::tokenizer::Span::empty(),
+                })),
+            }),
+        )),
         negated: false,
     })
 }
@@ -295,7 +256,6 @@ fn translate_extract(
         data_type: cast_type,
         format: None,
         kind: CastKind::Cast,
-        array: false,
     })
 }
 
@@ -321,7 +281,6 @@ fn translate_floor(
         data_type: DataType::Integer(None),
         format: None,
         kind: CastKind::Cast,
-        array: false,
     };
 
     // Build: CASE WHEN x >= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
@@ -382,7 +341,6 @@ fn translate_ceil(
         data_type: DataType::Integer(None),
         format: None,
         kind: CastKind::Cast,
-        array: false,
     };
 
     // Build: CASE WHEN x <= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
@@ -617,22 +575,7 @@ fn translate_distinct_comparison(
 ) -> Result<Expr, crate::errors::Error> {
     let l = left.translate(schema, options)?;
     let r = right.translate(schema, options)?;
-    // SQLite's `x IS y` is null-safe equality: treats NULL as equal to NULL.
-    let is_expr = Expr::BinaryOp {
-        left: Box::new(l),
-        op: BinaryOperator::Custom("IS".to_string()),
-        right: Box::new(r),
-    };
-    if is_not_distinct {
-        // IS NOT DISTINCT FROM → x IS y
-        Ok(is_expr)
-    } else {
-        // IS DISTINCT FROM → NOT (x IS y)
-        Ok(Expr::UnaryOp {
-            op: UnaryOperator::Not,
-            expr: Box::new(Expr::Nested(Box::new(is_expr))),
-        })
-    }
+    Ok(if is_not_distinct { null_safe_eq(l, r) } else { null_safe_neq(l, r) })
 }
 
 /// Translate PostgreSQL OVERLAY(str PLACING repl FROM pos [FOR len]) to
@@ -829,12 +772,27 @@ fn translate_vector_distance_op(
     }))
 }
 
-/// Translate ANY/ALL right-hand side into an IN/NOT IN target.
+/// The elements of a quantifier operand that compares element-wise: an
+/// `ARRAY[...]` literal or a parenthesized expression list. Both keep
+/// PostgreSQL's three-valued logic exactly when folded, so they never need the
+/// `json_each` path.
+fn quantifier_elements(right: &Expr) -> Option<&[Expr]> {
+    match right {
+        Expr::Array(Array { elem, .. }) => Some(elem),
+        Expr::Tuple(exprs) => Some(exprs),
+        _ => None,
+    }
+}
+
+/// Translate the equality forms `x = ANY(...)` and `x <> ALL(...)` into
+/// `IN` / `NOT IN`.
 ///
-/// Supported forms:
+/// Supported operands:
 /// - subquery: `x = ANY(SELECT ...)` -> `x IN (SELECT ...)`
 /// - array literal: `x = ANY(ARRAY[...])` -> `x IN (...)`
 /// - tuple: `x = ANY((...))` -> `x IN (...)`
+/// - array value: `x = ANY(tags)` -> `EXISTS (SELECT 1 FROM json_each(tags)
+///   ...)`
 fn translate_any_all_to_in(
     left: &Expr,
     right: &Expr,
@@ -844,43 +802,36 @@ fn translate_any_all_to_in(
 ) -> Result<Expr, crate::errors::Error> {
     let translated_left = left.translate(schema, options)?;
 
-    match right {
-        Expr::Subquery(q) => {
-            Ok(Expr::InSubquery {
-                expr: Box::new(translated_left),
-                subquery: Box::new(q.translate(schema, options)?),
-                negated,
-            })
-        }
-        Expr::Array(Array { elem, .. }) => {
-            Ok(Expr::InList {
-                expr: Box::new(translated_left),
-                list: elem
-                    .iter()
-                    .map(|e| e.translate(schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-                negated,
-            })
-        }
-        Expr::Tuple(exprs) => {
-            Ok(Expr::InList {
-                expr: Box::new(translated_left),
-                list: exprs
-                    .iter()
-                    .map(|e| e.translate(schema, options))
-                    .collect::<Result<Vec<_>, _>>()?,
-                negated,
-            })
-        }
-        _ => Err(crate::errors::Error::UnsupportedSQLiteFeature(
-            "ANY/ALL operator with non-subquery/non-array expressions is not supported in SQLite."
-                .to_string(),
-        )),
+    if let Expr::Subquery(q) = right {
+        return Ok(Expr::InSubquery {
+            expr: Box::new(translated_left),
+            subquery: Box::new(q.translate(schema, options)?),
+            negated,
+        });
     }
-}
+    if let Some(elements) = quantifier_elements(right) {
+        return Ok(Expr::InList {
+            expr: Box::new(translated_left),
+            list: elements
+                .iter()
+                .map(|e| e.translate(schema, options))
+                .collect::<Result<Vec<_>, _>>()?,
+            negated,
+        });
+    }
 
-fn negate_predicate(expr: Expr) -> Expr {
-    Expr::UnaryOp { op: UnaryOperator::Not, expr: Box::new(Expr::Nested(Box::new(expr))) }
+    let (compare_op, quantifier) = if negated {
+        (BinaryOperator::NotEq, Quantifier::All)
+    } else {
+        (BinaryOperator::Eq, Quantifier::Any)
+    };
+    translate_quantified_over_array(
+        &translated_left,
+        &compare_op,
+        right.translate(schema, options)?,
+        quantifier,
+        options,
+    )
 }
 
 fn fold_predicates(predicates: Vec<Expr>, op: &BinaryOperator, empty_value: bool) -> Expr {
@@ -893,6 +844,8 @@ fn fold_predicates(predicates: Vec<Expr>, op: &BinaryOperator, empty_value: bool
     })
 }
 
+/// `EXISTS`/`NOT EXISTS` over the quantifier subquery, aliased so the compared
+/// item has a name the predicate can reference.
 fn build_exists_over_subquery(
     translated_left: &Expr,
     compare_op: &BinaryOperator,
@@ -904,172 +857,87 @@ fn build_exists_over_subquery(
     const ITEM_ALIAS: &str = "__pg2sqlite_item";
 
     let derived_alias = Ident::new(DERIVED_ALIAS);
-    let item_alias = Ident::new(ITEM_ALIAS);
-    let item_ref = Expr::CompoundIdentifier(vec![derived_alias.clone(), item_alias.clone()]);
+    let item_ref = Expr::CompoundIdentifier(vec![derived_alias.clone(), Ident::new(ITEM_ALIAS)]);
     let mut comparison = Expr::BinaryOp {
         left: Box::new(translated_left.clone()),
         op: compare_op.clone(),
         right: Box::new(item_ref),
     };
     if negate_comparison {
-        comparison = negate_predicate(comparison);
+        comparison = not_predicate(comparison);
     }
 
     Expr::Exists {
-        subquery: Box::new(Query {
-            with: None,
-            body: Box::new(SetExpr::Select(Box::new(Select {
-                select_token: AttachedToken::empty(),
-                distinct: None,
-                top: None,
-                top_before_distinct: false,
-                projection: vec![SelectItem::UnnamedExpr(integer_literal(1))],
-                into: None,
-                from: vec![TableWithJoins {
-                    relation: TableFactor::Derived {
-                        lateral: false,
-                        subquery: Box::new(translated_subquery),
-                        alias: Some(TableAlias {
-                            explicit: false,
-                            name: derived_alias,
-                            columns: vec![TableAliasColumnDef::from_name(ITEM_ALIAS)],
-                            at: None,
-                        }),
-                        sample: None,
-                    },
-                    joins: Vec::new(),
-                }],
-                lateral_views: Vec::new(),
-                prewhere: None,
-                selection: Some(comparison),
-                group_by: GroupByExpr::Expressions(Vec::new(), Vec::new()),
-                cluster_by: Vec::new(),
-                distribute_by: Vec::new(),
-                sort_by: Vec::new(),
-                having: None,
-                named_window: Vec::new(),
-                qualify: None,
-                window_before_qualify: false,
-                value_table_mode: None,
-                connect_by: Vec::new(),
-                flavor: SelectFlavor::Standard,
-                exclude: None,
-                optimizer_hints: Vec::new(),
-                select_modifiers: None,
-            }))),
-            order_by: None,
-            limit_clause: None,
-            fetch: None,
-            locks: Vec::new(),
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: Vec::new(),
-        }),
+        subquery: Box::new(single_expr_query(
+            integer_literal(1),
+            from_relation(TableFactor::Derived {
+                lateral: false,
+                subquery: Box::new(translated_subquery),
+                alias: Some(TableAlias {
+                    explicit: false,
+                    name: derived_alias,
+                    columns: vec![TableAliasColumnDef::from_name(ITEM_ALIAS)],
+                    at: None,
+                }),
+                sample: None,
+            }),
+            Some(comparison),
+        )),
         negated: negate_exists,
     }
 }
 
-fn translate_any_operation(
+/// Translate a non-equality quantified comparison, `x <op> ANY(...)` or
+/// `x <op> ALL(...)`.
+///
+/// An element-wise operand folds into an `OR` chain for `ANY` and an `AND`
+/// chain for `ALL`, with the empty operand collapsing to the quantifier's
+/// identity. A subquery becomes an `EXISTS`. Anything else is an array value
+/// and goes through `json_each`.
+fn translate_quantified_operation(
     left: &Expr,
     compare_op: &BinaryOperator,
     right: &Expr,
+    quantifier: Quantifier,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
     let translated_left = left.translate(schema, options)?;
-    match right {
-        Expr::Subquery(q) => {
-            Ok(build_exists_over_subquery(
-                &translated_left,
-                compare_op,
-                q.translate(schema, options)?,
-                false,
-                false,
-            ))
-        }
-        Expr::Array(Array { elem, .. }) => {
-            let predicates = elem
-                .iter()
-                .map(|expr| {
-                    Ok(Expr::BinaryOp {
-                        left: Box::new(translated_left.clone()),
-                        op: compare_op.clone(),
-                        right: Box::new(expr.translate(schema, options)?),
-                    })
-                })
-                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
-            Ok(fold_predicates(predicates, &BinaryOperator::Or, false))
-        }
-        Expr::Tuple(exprs) => {
-            let predicates = exprs
-                .iter()
-                .map(|expr| {
-                    Ok(Expr::BinaryOp {
-                        left: Box::new(translated_left.clone()),
-                        op: compare_op.clone(),
-                        right: Box::new(expr.translate(schema, options)?),
-                    })
-                })
-                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
-            Ok(fold_predicates(predicates, &BinaryOperator::Or, false))
-        }
-        _ => Err(crate::errors::Error::UnsupportedSQLiteFeature(
-            "ANY/SOME operator with non-subquery/non-array expressions is not supported in SQLite."
-                .to_string(),
-        )),
-    }
-}
+    let (fold_op, empty_value, negate) = match quantifier {
+        Quantifier::Any => (BinaryOperator::Or, false, false),
+        Quantifier::All => (BinaryOperator::And, true, true),
+    };
 
-fn translate_all_operation(
-    left: &Expr,
-    compare_op: &BinaryOperator,
-    right: &Expr,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Expr, crate::errors::Error> {
-    let translated_left = left.translate(schema, options)?;
-    match right {
-        Expr::Subquery(q) => {
-            Ok(build_exists_over_subquery(
-                &translated_left,
-                compare_op,
-                q.translate(schema, options)?,
-                true,
-                true,
-            ))
-        }
-        Expr::Array(Array { elem, .. }) => {
-            let predicates = elem
-                .iter()
-                .map(|expr| {
-                    Ok(Expr::BinaryOp {
-                        left: Box::new(translated_left.clone()),
-                        op: compare_op.clone(),
-                        right: Box::new(expr.translate(schema, options)?),
-                    })
-                })
-                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
-            Ok(fold_predicates(predicates, &BinaryOperator::And, true))
-        }
-        Expr::Tuple(exprs) => {
-            let predicates = exprs
-                .iter()
-                .map(|expr| {
-                    Ok(Expr::BinaryOp {
-                        left: Box::new(translated_left.clone()),
-                        op: compare_op.clone(),
-                        right: Box::new(expr.translate(schema, options)?),
-                    })
-                })
-                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
-            Ok(fold_predicates(predicates, &BinaryOperator::And, true))
-        }
-        _ => Err(crate::errors::Error::UnsupportedSQLiteFeature(
-            "ANY/ALL operator with non-subquery/non-array expressions is not supported in SQLite."
-                .to_string(),
-        )),
+    if let Expr::Subquery(q) = right {
+        return Ok(build_exists_over_subquery(
+            &translated_left,
+            compare_op,
+            q.translate(schema, options)?,
+            negate,
+            negate,
+        ));
     }
+    if let Some(elements) = quantifier_elements(right) {
+        let predicates = elements
+            .iter()
+            .map(|expr| {
+                Ok(Expr::BinaryOp {
+                    left: Box::new(translated_left.clone()),
+                    op: compare_op.clone(),
+                    right: Box::new(expr.translate(schema, options)?),
+                })
+            })
+            .collect::<Result<Vec<_>, crate::errors::Error>>()?;
+        return Ok(fold_predicates(predicates, &fold_op, empty_value));
+    }
+
+    translate_quantified_over_array(
+        &translated_left,
+        compare_op,
+        right.translate(schema, options)?,
+        quantifier,
+        options,
+    )
 }
 
 /// Translate a binary operation expression.
@@ -1204,19 +1072,12 @@ impl Translator for Expr {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        use super::helpers::Forward;
-        use crate::impls::shared_helpers::translate_expr_recursive;
-
         Ok(match self {
             Expr::Function(func) => func.translate(schema, options)?,
-            // Handle binary operations (FTS, vector distance, JSON path, etc.)
             Expr::BinaryOp { left, op, right } => {
                 translate_binary_op(left, op, right, schema, options)?
             }
-            // Handle type casts (e.g., value::text)
-            Expr::Cast { expr, data_type, format, array, .. } => {
-                // pgvector casts: '[1,2,3]'::vector -> vec_f32('[1,2,3]'),
-                //                 '[1,2,3]'::halfvec -> vec_f16('[1,2,3]')
+            Expr::Cast { expr, data_type, format, .. } => {
                 if is_vector_type(data_type) {
                     return translate_vector_cast(expr, data_type, schema, options);
                 }
@@ -1232,18 +1093,26 @@ impl Translator for Expr {
                         translated, options,
                     ));
                 }
+                // SQLite has no cast format, so a `FORMAT` clause cannot be
+                // honored and cloning it through produced SQL SQLite rejects at
+                // parse time.
+                if let Some(format) = format {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "CAST(... AS {data_type} FORMAT {format}) is not supported in SQLite, \
+                         which has no cast format clause. Format the value with strftime() or \
+                         printf() instead."
+                    )));
+                }
                 // SQLite only accepts the `CAST(x AS type)` spelling, not
                 // PostgreSQL's `x::type` operator nor TRY_CAST / SAFE_CAST, so
                 // force `CastKind::Cast` regardless of how the source wrote it.
                 Expr::Cast {
                     expr: Box::new(expr.translate(schema, options)?),
                     data_type: data_type.translate(schema, options)?,
-                    format: format.clone(),
+                    format: None,
                     kind: CastKind::Cast,
-                    array: *array,
                 }
             }
-            // AT TIME ZONE expression - map to SQLite datetime(..., modifier)
             Expr::AtTimeZone { timestamp, time_zone } => {
                 translate_at_time_zone(timestamp, time_zone, schema, options)?
             }
@@ -1252,14 +1121,12 @@ impl Translator for Expr {
             Expr::IsNotUnknown(inner) => {
                 Expr::IsNotNull(Box::new(inner.translate(schema, options)?))
             }
-            // IS [NOT] DISTINCT FROM maps to SQLite null-safe IS operator.
             Expr::IsDistinctFrom(left, right) => {
                 translate_distinct_comparison(left, right, false, schema, options)?
             }
             Expr::IsNotDistinctFrom(left, right) => {
                 translate_distinct_comparison(left, right, true, schema, options)?
             }
-            // ILIKE → lower(expr) LIKE lower(pattern)
             Expr::ILike { negated, any, expr, pattern, escape_char } => {
                 let translated_expr = expr.translate(schema, options)?;
                 let translated_pattern = pattern.translate(schema, options)?;
@@ -1271,9 +1138,7 @@ impl Translator for Expr {
                     escape_char: escape_char.clone(),
                 }
             }
-            // EXTRACT: translate to SQLite strftime()
             Expr::Extract { field, expr, .. } => translate_extract(field, expr, schema, options)?,
-            // TRIM expression - directional variants map to LTRIM/RTRIM/TRIM
             Expr::Trim { expr, trim_where, trim_what, trim_characters } => {
                 translate_trim(
                     expr,
@@ -1284,13 +1149,9 @@ impl Translator for Expr {
                     options,
                 )?
             }
-            // CEIL expression - translate to SQLite CASE expression
             Expr::Ceil { expr, .. } => translate_ceil(expr, schema, options)?,
-            // FLOOR expression - translate to SQLite CASE expression
             Expr::Floor { expr, .. } => translate_floor(expr, schema, options)?,
-            // POSITION(substr IN str) -> INSTR(str, substr)
             Expr::Position { expr, r#in } => translate_position(expr, r#in, schema, options)?,
-            // SUBSTRING(str FROM pos FOR len) -> SUBSTR(str, pos, len)
             Expr::Substring { expr, substring_from, substring_for, .. } => {
                 translate_substring(
                     expr,
@@ -1300,7 +1161,6 @@ impl Translator for Expr {
                     options,
                 )?
             }
-            // OVERLAY → substr concatenation
             Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
                 translate_overlay(
                     expr,
@@ -1311,19 +1171,15 @@ impl Translator for Expr {
                     options,
                 )?
             }
-            // TypedString (e.g., TEXT 'value') - translate to CAST
             Expr::TypedString(typed_string) => {
                 Expr::Cast {
                     expr: Box::new(Expr::Value(typed_string.value.clone())),
                     data_type: typed_string.data_type.translate(schema, options)?,
                     format: None,
                     kind: sqlparser::ast::CastKind::Cast,
-                    array: false,
                 }
             }
-            // Prefixed string (e.g., N'value', X'value') - drop prefix
             Expr::Prefixed { value, .. } => value.translate(schema, options)?,
-            // COLLATE - validate SQLite-supported collations
             Expr::Collate { expr, collation } => {
                 let collation_name = collation
                     .0
@@ -1344,7 +1200,6 @@ impl Translator for Expr {
                     collation: collation.clone(),
                 }
             }
-            // INTERVAL expressions are not valid SQLite syntax.
             Expr::Interval(interval) => {
                 let field_str =
                     interval.leading_field.as_ref().map_or(String::new(), |f| format!(" {f}"));
@@ -1354,7 +1209,6 @@ impl Translator for Expr {
                      date('now', '-7 days'), datetime('now', '+1 hour'), etc."
                 )));
             }
-            // IS [NOT] NORMALIZED - no SQLite equivalent
             Expr::IsNormalized { .. } => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "IS NORMALIZED (Unicode normalization check) is not supported in SQLite. \
@@ -1362,21 +1216,39 @@ impl Translator for Expr {
                         .to_string(),
                 ));
             }
-            // ANY/SOME operations
             Expr::AnyOp { left, compare_op, right, .. } => {
                 if matches!(compare_op, BinaryOperator::Eq) {
                     return translate_any_all_to_in(left, right, false, schema, options);
                 }
-                translate_any_operation(left, compare_op, right, schema, options)?
+                translate_quantified_operation(
+                    left,
+                    compare_op,
+                    right,
+                    Quantifier::Any,
+                    schema,
+                    options,
+                )?
             }
-            // ALL operations
             Expr::AllOp { left, compare_op, right } => {
                 if matches!(compare_op, BinaryOperator::NotEq) {
                     return translate_any_all_to_in(left, right, true, schema, options);
                 }
-                translate_all_operation(left, compare_op, right, schema, options)?
+                translate_quantified_operation(
+                    left,
+                    compare_op,
+                    right,
+                    Quantifier::All,
+                    schema,
+                    options,
+                )?
             }
-            // SIMILAR TO - not supported
+            Expr::IsJson { expr, kind, unique_keys, negated } => {
+                translate_is_json(expr, *kind, *unique_keys, *negated, schema, options)?
+            }
+            Expr::Array(Array { elem, .. }) => translate_array_literal(elem, schema, options)?,
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                translate_compound_field_access(root, access_chain, schema, options)?
+            }
             Expr::SimilarTo { .. } => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "SIMILAR TO is not supported in SQLite. \
@@ -1384,7 +1256,6 @@ impl Translator for Expr {
                         .to_string(),
                 ));
             }
-            // ROLLUP / CUBE / GROUPING SETS - not supported as expressions
             Expr::Rollup(_) | Expr::Cube(_) | Expr::GroupingSets(_) => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "ROLLUP / CUBE / GROUPING SETS are not supported in SQLite. \
@@ -1392,7 +1263,6 @@ impl Translator for Expr {
                         .to_string(),
                 ));
             }
-            // IN UNNEST - no SQLite equivalent
             Expr::InUnnest { .. } => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "IN UNNEST (array unnesting) is not supported in SQLite. \
@@ -1400,13 +1270,11 @@ impl Translator for Expr {
                         .to_string(),
                 ));
             }
-            // Lambda expressions - not supported
             Expr::Lambda(_) => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "Lambda expressions are not supported in SQLite.".to_string(),
                 ));
             }
-            // MATCH...AGAINST is MySQL syntax
             Expr::MatchAgainst { .. } => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "MATCH...AGAINST is MySQL-specific syntax and is not supported in SQLite. \
@@ -1414,7 +1282,6 @@ impl Translator for Expr {
                         .to_string(),
                 ));
             }
-            // Oracle OUTER JOIN (+) syntax
             Expr::OuterJoin(_) => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "Oracle outer join syntax (+) is not supported in SQLite. \
@@ -1422,7 +1289,6 @@ impl Translator for Expr {
                         .to_string(),
                 ));
             }
-            // Oracle PRIOR expression
             Expr::Prior(_) => {
                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                     "PRIOR (Oracle hierarchical query syntax) is not supported in SQLite. \
@@ -1433,8 +1299,8 @@ impl Translator for Expr {
             // All remaining variants: delegate structural recursion to shared helper.
             // This covers: Identifier, CompoundIdentifier, Value, UnaryOp, Nested,
             // IsNull, IsNotNull, IsTrue/IsFalse/IsNotTrue/IsNotFalse, Exists,
-            // Like, InList, InSubquery, Between, Case, Subquery, Tuple, Array,
-            // RLike, CompoundFieldAccess, JsonAccess, QualifiedWildcard, Struct,
+            // Like, InList, InSubquery, Between, Case, Subquery, Tuple,
+            // RLike, JsonAccess, QualifiedWildcard, Struct,
             // Named, Dictionary, Map, MemberOf, etc.
             _ => translate_expr_recursive::<Forward>(self, schema, options)?,
         })
@@ -1445,6 +1311,112 @@ impl Translator for Expr {
 /// Used to implement ILIKE → `lower(expr) LIKE lower(pattern)`.
 fn wrap_with_lower(expr: Expr) -> Expr {
     simple_function_expr("lower", vec![expr], None)
+}
+
+/// Translate `<expr> IS [NOT] JSON [VALUE|SCALAR|ARRAY|OBJECT]` onto json1.
+///
+/// `json_valid` answers the unqualified and `VALUE` forms directly. The shape
+/// predicates need `json_type`, which raises on malformed input, so the
+/// `json_valid` guard has to be a `CASE` rather than an `AND`: SQLite does not
+/// promise to short-circuit `AND`.
+///
+/// `WITH`/`WITHOUT UNIQUE KEYS` has no json1 equivalent. json1 keeps the last
+/// of a set of duplicate keys with no way to observe that it did, so the
+/// predicate is rejected rather than answered wrongly.
+fn translate_is_json(
+    expr: &Expr,
+    kind: Option<JsonPredicateType>,
+    unique_keys: Option<JsonKeyUniqueness>,
+    negated: bool,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    if let Some(unique_keys) = unique_keys {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "IS JSON ... {unique_keys} is not supported in SQLite. The json1 extension keeps the \
+             last of a set of duplicate object keys and offers no way to detect that it did, so \
+             the uniqueness constraint cannot be checked."
+        )));
+    }
+
+    let translated = expr.translate(schema, options)?;
+    let is_valid = simple_function_expr("json_valid", vec![translated.clone()], None);
+
+    let predicate = match kind {
+        // `IS JSON` and `IS JSON VALUE` both ask whether the text parses.
+        None | Some(JsonPredicateType::Value) => is_valid,
+        Some(shape) => {
+            let type_of = simple_function_expr("json_type", vec![translated], None);
+            let shape_test = match shape {
+                JsonPredicateType::Array | JsonPredicateType::Object => {
+                    let name = if shape == JsonPredicateType::Array { "array" } else { "object" };
+                    Expr::BinaryOp {
+                        left: Box::new(type_of),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(string_literal(name)),
+                    }
+                }
+                // Anything that is neither a container nor absent is a scalar.
+                JsonPredicateType::Scalar => {
+                    Expr::InList {
+                        expr: Box::new(type_of),
+                        list: vec![string_literal("array"), string_literal("object")],
+                        negated: true,
+                    }
+                }
+                JsonPredicateType::Value => unreachable!("handled above"),
+            };
+            case_when(is_valid, shape_test, Some(boolean_literal(false)))
+        }
+    };
+
+    Ok(if negated { not_predicate(predicate) } else { predicate })
+}
+
+/// Translate a compound field access chain.
+///
+/// A single one-based array subscript maps onto a JSON path extraction. Slices
+/// and multi-step chains do not: a slice would have to rebuild an array, and a
+/// nested subscript would have to re-parse the JSON text `json_extract` returns
+/// for a container element.
+fn translate_compound_field_access(
+    root: &Expr,
+    access_chain: &[AccessExpr],
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    match access_chain {
+        [AccessExpr::Subscript(Subscript::Index { index })] => {
+            let translated_root = root.translate(schema, options)?;
+            translate_array_subscript(translated_root, index, schema, options)
+        }
+        [AccessExpr::Subscript(Subscript::Slice { .. })] => {
+            Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                "Array slice subscripting (arr[lo:hi]) is not supported in SQLite. Rebuild the \
+                 slice with json_each() and json_group_array(), or slice in the application."
+                    .to_string(),
+            ))
+        }
+        // Plain `a.b.c` field paths carry no subscript and need no rewriting.
+        _ if !access_chain.iter().any(|a| matches!(a, AccessExpr::Subscript(_))) => {
+            translate_expr_recursive::<Forward>(
+                &Expr::CompoundFieldAccess {
+                    root: Box::new(root.clone()),
+                    access_chain: access_chain.to_vec(),
+                },
+                schema,
+                options,
+            )
+        }
+        _ => {
+            Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                "Chained subscript access is not supported in SQLite. json_extract() returns a \
+                 nested element as JSON text, so a second subscript would index the text rather \
+                 than the element. Extract a single level at a time."
+                    .to_string(),
+            ))
+        }
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -1519,7 +1491,6 @@ mod tests {
                 data_type: sqlparser::ast::DataType::Text,
                 format: None,
                 kind: sqlparser::ast::CastKind::Cast,
-                array: false,
             }),
             vec!["payload".to_string()]
         );
@@ -1682,8 +1653,8 @@ mod tests {
             &schema,
             &options,
         )
-        .expect_err("unsupported ANY right expression should error");
-        assert!(err.to_string().contains("ANY/ALL operator"));
+        .expect_err("ANY over an array value should need an array representation");
+        assert!(err.to_string().contains("with_array_representation"), "got: {err}");
 
         let access = Expr::CompoundFieldAccess {
             root: Box::new(parse_expr("payload")),
@@ -1692,9 +1663,10 @@ mod tests {
                 AccessExpr::Dot(parse_expr("value")),
             ],
         };
-        let translated_access =
-            access.translate(&schema, &options).expect("access should translate");
-        assert!(translated_access.to_string().contains("[1]"));
+        let chained = access
+            .translate(&schema, &options)
+            .expect_err("chained subscript access should be rejected");
+        assert!(chained.to_string().contains("Chained subscript access"), "got: {chained}");
 
         let unsupported = Expr::InUnnest {
             expr: Box::new(parse_expr("id")),

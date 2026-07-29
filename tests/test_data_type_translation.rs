@@ -24,15 +24,12 @@ fn translate(sql: &str, options: &Pg2SqliteOptions) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-// ==================== Error cases ====================
-
 #[test]
-fn array_type_produces_error() {
+fn array_type_without_representation_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, arr INT[]);";
     let result = translate(sql, &Pg2SqliteOptions::default());
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("Array type"), "Expected array error, got: {err}");
+    let err = result.expect_err("array column should be rejected");
+    assert!(err.contains("with_array_representation"), "Expected array error, got: {err}");
 }
 
 #[test]
@@ -59,8 +56,6 @@ fn unknown_custom_type_produces_error() {
     );
 }
 
-// ==================== UUID representations ====================
-
 #[test]
 fn uuid_as_blob() {
     let sql = "CREATE TABLE t (id UUID PRIMARY KEY);";
@@ -76,8 +71,6 @@ fn uuid_as_text() {
     let output = translate(sql, &options).unwrap();
     assert!(output.contains("TEXT"), "UUID should map to TEXT, got: {output}");
 }
-
-// ==================== Custom types ====================
 
 #[test]
 fn geography_to_blob() {
@@ -149,8 +142,6 @@ fn schema_qualified_vector_to_blob() {
     assert!(output.contains("BLOB"), "public.vector should map to BLOB, got: {output}");
 }
 
-// ==================== Standard mappings ====================
-
 #[test]
 fn serial_to_integer() {
     let sql = "CREATE TABLE t (id SERIAL PRIMARY KEY);";
@@ -221,8 +212,6 @@ fn timestamp_with_timezone_to_text() {
     let output = translate(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(output.contains("TEXT"), "TIMESTAMP WITH TIME ZONE should map to TEXT, got: {output}");
 }
-
-// ==================== Passthrough types ====================
 
 #[test]
 fn text_passes_through() {

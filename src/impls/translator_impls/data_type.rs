@@ -55,7 +55,6 @@ impl Translator for DataType {
             // INT64 is a BigQuery-specific alias for 64-bit integer
             | DataType::Int64 => Ok(DataType::Integer(None)),
             DataType::Float(ExactNumberInfo::None)
-            // Float aliases
             | DataType::Double(_)
             | DataType::DoublePrecision
             | DataType::Float8
@@ -72,9 +71,7 @@ impl Translator for DataType {
             | DataType::Enum(_, _)
             | DataType::TsVector
             | DataType::TsQuery
-            // All TIMESTAMP variants (with/without TZ, with/without precision).
             | DataType::Timestamp(_, _)
-            // Other temporal types.
             | DataType::Date
             | DataType::Datetime(_)
             | DataType::Time(_, _)
@@ -83,13 +80,19 @@ impl Translator for DataType {
             DataType::Bit(_) | DataType::BitVarying(_) | DataType::VarBit(_) => {
                 Ok(DataType::Integer(None))
             }
-            // Arrays are not yet supported - they could map to JSON or vector extensions
-            // depending on use case (regular arrays vs embeddings)
-            DataType::Array(inner) => {
-                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                    "Array type {inner:?} is not supported. Arrays could be JSON-serialized or \
-                     use vector extensions depending on use case.",
-                )))
+            // PostgreSQL arrays become JSON array text under
+            // `ArrayRepresentation::Json`; `super::array` carries the matching
+            // expression-level rewrites. pgvector embeddings are a separate
+            // path: they arrive as `DataType::Custom("vector")`, not as an
+            // array type, and map to BLOB below.
+            DataType::Array(_) => {
+                if super::array::is_json_array_representation(options) {
+                    Ok(DataType::Text)
+                } else {
+                    Err(super::array::representation_required(&format!(
+                        "The array type {self}"
+                    )))
+                }
             }
             DataType::Uuid => {
                 match options.get_uuid_representation() {
@@ -124,11 +127,9 @@ impl Translator for DataType {
                         Ok(DataType::Blob(None))
                     }
                     Some("countrycode") => {
-                        // SQLite does not have a country code type, so we use TEXT instead.
                         Ok(DataType::Text)
                     }
                     Some("cas" | "molecularformula" | "mediatype") => {
-                        // SQLite does not have a CAS type, so we use BLOB instead.
                         Ok(DataType::Blob(None))
                     }
                     // pgvector types: vector(N) and halfvec(N) -> BLOB for sqlite-vec
@@ -156,24 +157,47 @@ mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::ast::DataType;
 
-    use crate::prelude::{Pg2SqliteOptions, Translator};
+    use crate::{
+        prelude::{Pg2SqliteOptions, Translator},
+        traits::TranslationOptions,
+    };
 
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
     }
 
     #[test]
-    fn translate_reports_unsupported_for_unhandled_data_type_variants() {
+    fn array_type_needs_a_representation() {
         use sqlparser::ast::ArrayElemTypeDef;
 
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
-
-        // Array types are still unsupported - use one as a representative unsupported
-        // variant
         let err = DataType::Array(ArrayElemTypeDef::None)
-            .translate(&schema, &options)
-            .expect_err("Array type should be rejected");
-        assert!(err.to_string().contains("Array type"));
+            .translate(&schema, &Pg2SqliteOptions::default())
+            .expect_err("array type should be rejected without a representation");
+        assert!(
+            err.to_string().contains("with_array_representation"),
+            "error should name the opt-in, got: {err}"
+        );
+    }
+
+    #[test]
+    fn array_type_maps_to_text_under_json_representation() {
+        use sqlparser::ast::{ArrayElemTypeDef, DataType as Dt};
+
+        use crate::traits::ArrayRepresentation;
+
+        let schema = empty_schema();
+        let options =
+            Pg2SqliteOptions::default().with_array_representation(ArrayRepresentation::Json);
+        for elem in [
+            ArrayElemTypeDef::None,
+            ArrayElemTypeDef::SquareBracket(Box::new(Dt::Int(None)), None),
+            ArrayElemTypeDef::Qualified(Box::new(Dt::Int(None)), Some(4)),
+        ] {
+            assert_eq!(
+                DataType::Array(elem).translate(&schema, &options).expect("array should translate"),
+                DataType::Text
+            );
+        }
     }
 }

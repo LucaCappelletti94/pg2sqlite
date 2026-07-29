@@ -6,10 +6,6 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn translate(sql: &str) -> Result<String, String> {
     Pg2Sqlite::default()
         .sql(sql)
@@ -26,10 +22,6 @@ fn translate_ok(sql: &str) -> String {
 fn translate_err(sql: &str) -> String {
     translate(sql).expect_err("should fail")
 }
-
-// ============================================================================
-// Diesel schema for functional test
-// ============================================================================
 
 mod schema {
     diesel::table! {
@@ -67,10 +59,6 @@ struct Row {
     active: i32,
 }
 
-// ============================================================================
-// Integer alias tests
-// ============================================================================
-
 #[test]
 fn bigint_maps_to_integer() {
     let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col BIGINT);");
@@ -106,10 +94,6 @@ fn tinyint_maps_to_integer() {
     assert!(!out.contains("TINYINT"), "Output should not contain TINYINT, got: {out}");
 }
 
-// ============================================================================
-// Float alias tests
-// ============================================================================
-
 #[test]
 fn double_maps_to_real() {
     let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col DOUBLE);");
@@ -134,10 +118,6 @@ fn float4_maps_to_real() {
     assert!(out.contains("REAL"), "FLOAT4 should map to REAL, got: {out}");
 }
 
-// ============================================================================
-// Numeric/Decimal tests
-// ============================================================================
-
 #[test]
 fn numeric_maps_to_real() {
     let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col NUMERIC(10,2));");
@@ -152,10 +132,6 @@ fn decimal_maps_to_real() {
     assert!(!out.contains("DECIMAL"), "Output should not contain DECIMAL, got: {out}");
 }
 
-// ============================================================================
-// Binary alias tests
-// ============================================================================
-
 #[test]
 fn binary_maps_to_blob() {
     let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col BINARY(50));");
@@ -167,10 +143,6 @@ fn varbinary_maps_to_blob() {
     let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col VARBINARY(50));");
     assert!(out.contains("BLOB"), "VARBINARY should map to BLOB, got: {out}");
 }
-
-// ============================================================================
-// Text alias tests
-// ============================================================================
 
 #[test]
 fn clob_maps_to_text() {
@@ -206,10 +178,6 @@ fn tsquery_maps_to_text() {
     assert!(!out.contains("TSQUERY"), "Output should not contain TSQUERY, got: {out}");
 }
 
-// ============================================================================
-// Bit type tests
-// ============================================================================
-
 #[test]
 fn bit_maps_to_integer() {
     let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col BIT);");
@@ -222,10 +190,6 @@ fn varbit_maps_to_integer() {
     assert!(out.contains("INTEGER"), "VARBIT should map to INTEGER, got: {out}");
     assert!(!out.contains("VARBIT"), "Output should not contain VARBIT, got: {out}");
 }
-
-// ============================================================================
-// Temporal type tests
-// ============================================================================
 
 #[test]
 fn interval_col_maps_to_text() {
@@ -261,10 +225,6 @@ fn timestamptz_tz_variant_maps_to_text() {
     assert!(!out.contains("TIMESTAMPTZ"), "Output should not contain TIMESTAMPTZ, got: {out}");
 }
 
-// ============================================================================
-// Typed string literal tests (DATE/TIME/DATETIME '...')
-// ============================================================================
-
 #[test]
 fn date_typed_string_translates() {
     // DATE '1999-01-01' becomes CAST('1999-01-01' AS TEXT) in SQLite
@@ -284,19 +244,20 @@ fn datetime_typed_string_translates() {
     assert!(!out.is_empty(), "DATETIME typed string should translate, got: {out}");
 }
 
-// ============================================================================
-// Negative tests — correctly-rejected features
-// ============================================================================
-
 #[test]
-fn array_type_still_errors() {
+fn array_type_errors_without_a_representation() {
     let err = translate_err("CREATE TABLE t (id INT PRIMARY KEY, arr INT[]);");
-    assert!(err.contains("Array type"), "Expected Array error, got: {err}");
+    assert!(err.contains("with_array_representation"), "Expected Array error, got: {err}");
 }
 
-// ============================================================================
-// Diesel functional test
-// ============================================================================
+#[test]
+fn standard_array_keyword_type_errors_without_a_representation() {
+    let err = translate_err("CREATE TABLE t (id INT PRIMARY KEY, arr INT ARRAY[4]);");
+    assert!(
+        err.contains("INT ARRAY[4]"),
+        "Error should render the SQL spelling of the array type, got: {err}"
+    );
+}
 
 #[test]
 fn diesel_translated_schema_accepts_insert_and_query() {

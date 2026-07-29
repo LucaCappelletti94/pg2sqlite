@@ -26,12 +26,13 @@ use sqlparser::{
 
 use super::{
     context::{PlPgSqlContext, VariableBinding},
-    cte_builder::{CteBuilder, make_query, make_simple_select},
+    cte_builder::CteBuilder,
 };
 use crate::{
     errors::Error,
     impls::{
         expr_helpers::{any_child_expr, map_expr_children},
+        query_builder::{make_query, make_simple_select},
         translator_impls::condition_injection::inject_condition_into_dml_statement,
     },
     options::Pg2SqliteOptions,
@@ -44,20 +45,8 @@ pub struct PlPgSqlTranslator;
 impl PlPgSqlTranslator {
     /// Translates a PL/pgSQL function body to `SQLite` statements.
     ///
-    /// This is the main entry point for translation. It:
-    /// 1. Preprocesses the body to handle PL/pgSQL-specific syntax
-    /// 2. Builds a context with variable declarations
-    /// 3. Translates each statement with proper CTE injection
-    ///
-    /// # Arguments
-    /// * `body` - The parsed BEGIN...END block from the PL/pgSQL function
-    /// * `schema` - The database schema for resolving references
-    /// * `options` - Translation options
-    ///
-    /// # Returns
-    /// A vector of SQLite-compatible statements
-    ///
     /// # Errors
+    ///
     /// Returns an error if translation fails for any statement.
     pub fn translate(
         body: &BeginEndStatements,
@@ -68,9 +57,6 @@ impl PlPgSqlTranslator {
     }
 
     /// Translates a PL/pgSQL function body using a pre-seeded context.
-    ///
-    /// This is used when DECLARE defaults were parsed before statement parsing
-    /// and need to be available during translation.
     ///
     /// # Errors
     /// Returns an error if translation fails for any statement.
@@ -84,7 +70,6 @@ impl PlPgSqlTranslator {
 
         context.seed_default_bindings();
 
-        // Process each statement in the body
         for stmt in &body.statements {
             let translated = Self::translate_statement(stmt, &mut context, schema, options)?;
             result.extend(translated);
@@ -93,7 +78,6 @@ impl PlPgSqlTranslator {
         Ok(result)
     }
 
-    /// Translates a single statement within the function body.
     fn translate_statement(
         stmt: &Statement,
         context: &mut PlPgSqlContext,
@@ -101,32 +85,25 @@ impl PlPgSqlTranslator {
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, Error> {
         match stmt {
-            // Handle SET statements (variable assignments from preprocessing)
             Statement::Set(set) => {
                 Self::handle_set_statement(set, context);
-                // SET statements don't produce output - they just record the binding
                 Ok(vec![])
             }
 
-            // Handle IF statements
             Statement::If(if_stmt) => {
                 Self::translate_if_statement(if_stmt, context, schema, options)
             }
 
-            // Handle INSERT statements
             Statement::Insert(insert) => {
                 Self::translate_insert_statement(insert, context, schema, options)
             }
 
-            // Handle Query statements (e.g., WITH RECURSIVE ... INSERT/DELETE)
             Statement::Query(query) => {
                 Self::translate_query_statement(query, context, schema, options)
             }
 
-            // Handle UPDATE and DELETE statements - both need condition injection
             Statement::Update(_) | Statement::Delete(_) => {
                 let mut translated = stmt.translate(schema, options)?;
-                // Inject condition if we're in an IF block
                 if let Some(condition) = context.current_condition() {
                     for t_stmt in &mut translated {
                         Self::inject_condition_into_statement(t_stmt, &condition);
@@ -135,12 +112,10 @@ impl PlPgSqlTranslator {
                 Ok(translated)
             }
 
-            // Other statements - translate normally
             other => other.translate(schema, options),
         }
     }
 
-    /// Handles a SET statement (variable assignment).
     fn handle_set_statement(set: &Set, context: &mut PlPgSqlContext) {
         if let Set::SingleAssignment { variable, values, .. } = set
             && values.len() == 1
@@ -159,7 +134,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Translates an IF statement, including ELSIF and ELSE blocks.
     fn translate_if_statement(
         if_stmt: &sqlparser::ast::IfStatement,
         context: &mut PlPgSqlContext,
@@ -168,10 +142,8 @@ impl PlPgSqlTranslator {
     ) -> Result<Vec<Statement>, Error> {
         let mut result = Vec::new();
 
-        // Track negated conditions for ELSIF/ELSE blocks
         let mut negated_conditions: Vec<String> = Vec::new();
 
-        // Get the IF condition (translated to SQLite form)
         let if_condition = if_stmt.if_block.condition.as_ref().map_or_else(
             || "TRUE".to_string(),
             |cond| {
@@ -179,28 +151,21 @@ impl PlPgSqlTranslator {
             },
         );
 
-        // Push IF condition onto stack
         context.push_condition(if_condition.clone());
 
-        // Clear scoped bindings for this IF block (persistent bindings are kept)
         context.clear_scoped_bindings();
 
-        // Clear UUID first-use tracking for this IF block
         context.clear_uuid_first_use();
 
-        // Translate statements within the IF block
         for stmt in if_stmt.if_block.statements() {
             let translated = Self::translate_statement(stmt, context, schema, options)?;
             result.extend(translated);
         }
 
-        // Pop IF condition from stack
         context.pop_condition();
 
-        // Remember negation of IF condition for ELSIF/ELSE
         negated_conditions.push(format!("NOT ({if_condition})"));
 
-        // Handle ELSIF blocks
         for elseif_block in &if_stmt.elseif_blocks {
             let elseif_condition = elseif_block.condition.as_ref().map_or_else(
                 || "TRUE".to_string(),
@@ -210,7 +175,6 @@ impl PlPgSqlTranslator {
                 },
             );
 
-            // Build combined condition: NOT(prev conditions) AND this condition
             debug_assert!(
                 !negated_conditions.is_empty(),
                 "IF condition negation must be seeded before ELSIF translation"
@@ -229,13 +193,10 @@ impl PlPgSqlTranslator {
 
             context.pop_condition();
 
-            // Add this condition's negation for subsequent blocks
             negated_conditions.push(format!("NOT ({elseif_condition})"));
         }
 
-        // Handle ELSE block
         if let Some(else_block) = &if_stmt.else_block {
-            // ELSE condition is negation of all previous conditions
             let else_condition = negated_conditions.join(" AND ");
 
             context.push_condition(else_condition);
@@ -253,19 +214,8 @@ impl PlPgSqlTranslator {
         Ok(result)
     }
 
-    /// Translates a Query statement (e.g., WITH RECURSIVE ... INSERT/DELETE).
-    ///
-    /// SQLite does NOT support `WITH` clauses directly in trigger bodies.
-    /// We must transform:
-    ///   `WITH RECURSIVE cte AS (...) INSERT INTO t SELECT ... FROM cte`
-    /// Into:
-    ///   `INSERT INTO t SELECT ... FROM (WITH RECURSIVE cte AS (...) SELECT *
-    /// FROM cte) AS subq`
-    ///
-    /// For DELETE with IN (SELECT ... FROM cte):
-    ///   `WITH RECURSIVE cte AS (...) DELETE FROM t WHERE col IN (SELECT id
-    /// FROM cte)` Stays as-is because the WITH is inside a subquery in the
-    /// WHERE clause.
+    /// SQLite does not support WITH clauses in trigger bodies; this wraps the
+    /// CTE inside the INSERT's SELECT source or the DELETE's IN subquery.
     fn translate_query_statement(
         query: &Query,
         context: &mut PlPgSqlContext,
@@ -273,7 +223,6 @@ impl PlPgSqlTranslator {
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, Error> {
         let transformed_statements = if let Some(with) = &query.with {
-            // Check if this is a WITH ... INSERT pattern that needs transformation
             if let SetExpr::Insert(Statement::Insert(insert)) = &*query.body {
                 Self::transform_with_insert_to_subquery(with, insert, context, options)?
             } else if let SetExpr::Delete(Statement::Delete(delete)) = &*query.body {
@@ -298,7 +247,6 @@ impl PlPgSqlTranslator {
                 vec![Statement::Query(Box::new(transformed_query))]
             }
         } else {
-            // For non-WITH query statements, transform normally
             let transformed_body = Self::transform_query_body(&query.body, context, options)?;
             let transformed_query =
                 Query { with: None, body: Box::new(transformed_body), ..query.clone() };
@@ -333,9 +281,8 @@ impl PlPgSqlTranslator {
         Ok(finalized)
     }
 
-    /// Transforms `WITH RECURSIVE cte AS (...) INSERT INTO t SELECT ... FROM
-    /// cte` into `INSERT INTO t SELECT * FROM (WITH RECURSIVE cte AS (...)
-    /// SELECT ... FROM cte) AS subq`
+    /// Moves a WITH RECURSIVE CTE inside the INSERT's SELECT source as a
+    /// derived subquery.
     #[allow(clippy::too_many_lines)]
     fn transform_with_insert_to_subquery(
         with: &sqlparser::ast::With,
@@ -343,46 +290,36 @@ impl PlPgSqlTranslator {
         context: &mut PlPgSqlContext,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, Error> {
-        // Get the source SELECT from the INSERT
         let Some(source) = &insert.source else {
             return Err(Error::UnsupportedSQLiteFeature(
                 "WITH ... INSERT without source SELECT not supported".to_string(),
             ));
         };
 
-        // Create a new WITH query that wraps the original SELECT
         let inner_query = Query { with: Some(with.clone()), ..source.as_ref().clone() };
 
-        // Transform NEW/OLD references in the inner query
         let mut transformed_inner = inner_query;
         Self::transform_cte_query(&mut transformed_inner, context, options);
 
-        // Get the column list from the original SELECT to preserve
         let projection: Vec<SelectItem> = match &*source.body {
             SetExpr::Select(select) => select.projection.clone(),
             _ => vec![SelectItem::Wildcard(sqlparser::ast::WildcardAdditionalOptions::default())],
         };
 
-        // Create a new SELECT that just selects * from the subquery
-        // The inner query already has the right columns projected
         let subquery_alias = "recursive_cte_subquery";
 
-        // We need to determine the column names from the inner projection
-        // and select them from the subquery alias
         let outer_projection: Vec<SelectItem> = projection
             .iter()
             .enumerate()
             .map(|(i, item)| {
                 match item {
                     SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
-                        // Column reference - keep it, prepend alias
                         SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
                             Ident::new(subquery_alias.to_string()),
                             ident.clone(),
                         ]))
                     }
                     SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => {
-                        // Compound identifier - just use the last part (column name)
                         parts.last().map_or_else(
                             || {
                                 SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(format!(
@@ -398,21 +335,16 @@ impl PlPgSqlTranslator {
                         )
                     }
                     SelectItem::ExprWithAlias { alias, .. } => {
-                        // Use the alias
                         SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
                             Ident::new(subquery_alias.to_string()),
                             alias.clone(),
                         ]))
                     }
-                    _ => {
-                        // For other cases (expressions, wildcards), use positional
-                        SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(format!("col{i}"))))
-                    }
+                    _ => SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(format!("col{i}")))),
                 }
             })
             .collect();
 
-        // Simpler approach: just use SELECT * FROM (subquery)
         let use_wildcard = outer_projection.iter().any(|item| {
             matches!(item, SelectItem::UnnamedExpr(Expr::Identifier(id)) if id.value.starts_with("col"))
         });
@@ -442,18 +374,14 @@ impl PlPgSqlTranslator {
             None,
         );
 
-        // Build new source query
         let new_source = make_query(None, SetExpr::Select(Box::new(new_select)));
 
-        // Build the new INSERT, handling ON CONFLICT DO NOTHING -> OR IGNORE
         let mut new_insert = insert.clone();
         new_insert.source = Some(Box::new(new_source));
 
-        // Check for ON CONFLICT DO NOTHING and convert to OR IGNORE
         if let Some(sqlparser::ast::OnInsert::OnConflict(conflict)) = &insert.on
             && conflict.action == sqlparser::ast::OnConflictAction::DoNothing
         {
-            // Set INSERT OR IGNORE and remove the ON CONFLICT clause
             new_insert.or = Some(sqlparser::ast::SqliteOnConflict::Ignore);
             new_insert.on = None;
         }
@@ -461,8 +389,6 @@ impl PlPgSqlTranslator {
         Ok(vec![Statement::Insert(new_insert)])
     }
 
-    /// Transforms `WITH RECURSIVE cte AS (...) DELETE FROM t WHERE ... IN
-    /// (SELECT FROM cte)` The CTE needs to be moved inside the IN subquery.
     fn transform_with_delete_to_subquery(
         with: &sqlparser::ast::With,
         delete: &sqlparser::ast::Delete,
@@ -471,7 +397,6 @@ impl PlPgSqlTranslator {
     ) -> Vec<Statement> {
         let mut new_delete = delete.clone();
 
-        // Transform the selection - move WITH into IN subqueries
         if let Some(selection) = &mut new_delete.selection {
             Self::inject_with_into_in_subqueries(selection, with, context, options);
         }
@@ -479,8 +404,6 @@ impl PlPgSqlTranslator {
         vec![Statement::Delete(new_delete)]
     }
 
-    /// Injects a WITH clause into IN subqueries that reference CTEs from that
-    /// WITH.
     fn inject_with_into_in_subqueries(
         expr: &mut Expr,
         with: &sqlparser::ast::With,
@@ -489,7 +412,6 @@ impl PlPgSqlTranslator {
     ) {
         use crate::impls::expr_helpers::mutate_expr_children;
 
-        /// Inject CTE into a subquery if it references any of the CTEs.
         fn maybe_inject_with(
             subquery: &mut Query,
             with: &sqlparser::ast::With,
@@ -535,18 +457,13 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Checks if a query references any of the given CTE names via AST
-    /// traversal.
-    ///
-    /// This walks the FROM clauses and subqueries at the AST level to avoid
-    /// false positives from string-contains matching (e.g., a column name that
-    /// is a substring of a CTE name).
+    /// Uses AST traversal to detect CTE references by name, avoiding false
+    /// positives from substring matches.
     fn query_references_ctes(query: &Query, cte_names: &[String]) -> bool {
         let normalized: Vec<String> = cte_names.iter().map(|n| n.to_lowercase()).collect();
         Self::set_expr_references_ctes(&query.body, &normalized)
     }
 
-    /// Recursively checks if a `SetExpr` references any of the CTE names.
     fn set_expr_references_ctes(body: &SetExpr, cte_names: &[String]) -> bool {
         match body {
             SetExpr::Select(select) => Self::select_references_ctes(select, cte_names),
@@ -558,18 +475,15 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Checks if a `Select` references any CTE by looking at FROM clauses.
     fn select_references_ctes(select: &Select, cte_names: &[String]) -> bool {
         select.from.iter().any(|from| Self::table_with_joins_references_ctes(from, cte_names))
     }
 
-    /// Checks if a `TableWithJoins` references any CTE.
     fn table_with_joins_references_ctes(twj: &TableWithJoins, cte_names: &[String]) -> bool {
         Self::table_factor_references_ctes(&twj.relation, cte_names)
             || twj.joins.iter().any(|j| Self::table_factor_references_ctes(&j.relation, cte_names))
     }
 
-    /// Checks if a `TableFactor` references any CTE.
     fn table_factor_references_ctes(tf: &TableFactor, cte_names: &[String]) -> bool {
         match tf {
             TableFactor::Table { name, .. } => {
@@ -586,7 +500,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transforms the body of a Query (INSERT, DELETE, SELECT, etc.).
     #[allow(clippy::unnecessary_wraps)]
     fn transform_query_body(
         body: &SetExpr,
@@ -610,8 +523,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Applies the standard query-expression rewrites used by both CTE and
-    /// subquery transformation paths.
     fn transform_query_expressions(
         query: &mut Query,
         context: &mut PlPgSqlContext,
@@ -658,7 +569,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transforms a CTE query (used in WITH clauses).
     fn transform_cte_query(
         query: &mut Query,
         context: &mut PlPgSqlContext,
@@ -667,7 +577,6 @@ impl PlPgSqlTranslator {
         Self::transform_query_expressions(query, context, options);
     }
 
-    /// Transforms an INSERT statement for SQLite compatibility.
     fn transform_insert_for_sqlite(
         insert: &sqlparser::ast::Insert,
         context: &mut PlPgSqlContext,
@@ -675,20 +584,17 @@ impl PlPgSqlTranslator {
     ) -> sqlparser::ast::Insert {
         let mut new_insert = insert.clone();
 
-        // Transform source query if present
         if let Some(source) = &mut new_insert.source {
             if let Ok(transformed_body) = Self::transform_query_body(&source.body, context, options)
             {
                 *source.body = transformed_body;
             }
-            // Also transform VALUES - handle NEW/OLD references and UUID functions
             Self::transform_set_expr(&mut source.body, context, options);
         }
 
         new_insert
     }
 
-    /// Transforms a DELETE statement for SQLite compatibility.
     fn transform_delete_for_sqlite(
         delete: &sqlparser::ast::Delete,
         context: &mut PlPgSqlContext,
@@ -696,10 +602,7 @@ impl PlPgSqlTranslator {
     ) -> sqlparser::ast::Delete {
         let mut new_delete = delete.clone();
 
-        // Transform selection (WHERE clause)
         Self::transform_selection(&mut new_delete.selection, context, options);
-
-        // Transform FROM clause (FromTable is an enum wrapping Vec<TableWithJoins>)
         match &mut new_delete.from {
             sqlparser::ast::FromTable::WithFromKeyword(tables)
             | sqlparser::ast::FromTable::WithoutKeyword(tables) => {
@@ -712,7 +615,6 @@ impl PlPgSqlTranslator {
         new_delete
     }
 
-    /// Transforms a SetExpr, handling NEW/OLD references and UUID functions.
     fn transform_set_expr(
         set_expr: &mut SetExpr,
         context: &mut PlPgSqlContext,
@@ -720,7 +622,6 @@ impl PlPgSqlTranslator {
     ) {
         match set_expr {
             SetExpr::Select(select) => {
-                // Transform projection items
                 for item in &mut select.projection {
                     if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } =
                         item
@@ -728,17 +629,13 @@ impl PlPgSqlTranslator {
                         Self::transform_expr(expr, context, options);
                     }
                 }
-                // Transform selection
                 Self::transform_selection(&mut select.selection, context, options);
-                // Transform FROM clauses
                 for from in &mut select.from {
                     Self::transform_table_with_joins(from, context, options);
                 }
-                // Transform HAVING clause
                 if let Some(having) = &mut select.having {
                     Self::transform_expr(having, context, options);
                 }
-                // Transform GROUP BY expressions
                 if let GroupByExpr::Expressions(exprs, _) = &mut select.group_by {
                     for e in exprs {
                         Self::transform_expr(e, context, options);
@@ -763,19 +660,15 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transforms table WITH JOINS in FROM clause.
     fn transform_table_with_joins(
         table_with_joins: &mut TableWithJoins,
         context: &mut PlPgSqlContext,
         options: &Pg2SqliteOptions,
     ) {
-        // Transform the main table
         Self::transform_table_factor(&mut table_with_joins.relation, context, options);
 
-        // Transform joined tables
         for join in &mut table_with_joins.joins {
             Self::transform_table_factor(&mut join.relation, context, options);
-            // Transform join condition
             if let Some(sqlparser::ast::JoinConstraint::On(expr)) =
                 crate::impls::shared_helpers::join_constraint_mut(&mut join.join_operator)
             {
@@ -784,7 +677,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transforms a table factor (table reference).
     fn transform_table_factor(
         factor: &mut TableFactor,
         context: &mut PlPgSqlContext,
@@ -801,7 +693,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transforms an optional selection (WHERE clause).
     fn transform_selection(
         selection: &mut Option<Expr>,
         context: &mut PlPgSqlContext,
@@ -812,8 +703,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transforms an expression, handling NEW/OLD references and UUID
-    /// functions.
     #[allow(clippy::too_many_lines)]
     fn transform_expr(expr: &mut Expr, context: &mut PlPgSqlContext, options: &Pg2SqliteOptions) {
         use crate::impls::expr_helpers::mutate_expr_children;
@@ -827,7 +716,6 @@ impl PlPgSqlTranslator {
                 // Keep as-is, SQLite supports NEW.col and OLD.col in triggers
             }
             Expr::Function(func) => {
-                // Transform UUID function names
                 let func_name = func.name.0.last().and_then(|part| part.as_ident()).map_or_else(
                     || func.name.to_string().to_ascii_lowercase(),
                     |ident| ident.value.to_ascii_lowercase(),
@@ -856,8 +744,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transform function arguments, parameters, filter, over, and
-    /// within_group.
     fn transform_function_parts(
         func: &mut sqlparser::ast::Function,
         context: &mut PlPgSqlContext,
@@ -896,7 +782,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transform a subquery's body and query-level expressions.
     fn transform_subquery(
         subquery: &mut Query,
         context: &mut PlPgSqlContext,
@@ -921,16 +806,13 @@ impl PlPgSqlTranslator {
     ) -> Result<Vec<Statement>, Error> {
         use sqlparser::ast::TableObject;
 
-        // Get bindings and condition
         let bindings: Vec<_> = context.bindings().cloned().collect();
         let condition = context.current_condition();
 
-        // If no bindings and no condition, use standard translation
         if bindings.is_empty() && condition.is_none() {
             return Statement::Insert(insert.clone()).translate(schema, options);
         }
 
-        // Get table name from INSERT
         let table_name = match &insert.table {
             TableObject::TableName(object_name) => {
                 object_name
@@ -951,7 +833,6 @@ impl PlPgSqlTranslator {
             }
         };
 
-        // Get column names from INSERT
         let column_names: Vec<String> = insert
             .columns
             .iter()
@@ -962,8 +843,7 @@ impl PlPgSqlTranslator {
             })
             .collect();
 
-        // Process bindings - check which UUID variables need the last_insert_rowid()
-        // pattern
+        // Check which bindings need the last_insert_rowid() pattern for UUID variables.
         let mut modified_bindings = Vec::new();
         let mut uuid_var_to_column: Vec<(String, String)> = Vec::new();
 
@@ -977,9 +857,7 @@ impl PlPgSqlTranslator {
             };
 
             if is_uuid_gen {
-                // Check if this variable was already used in a previous INSERT
                 if let Some(first_use) = context.get_uuid_first_use(&binding.name) {
-                    // Use last_insert_rowid() to get the value from the previous INSERT
                     let new_expr = format!(
                         "(SELECT {} FROM {} WHERE rowid = last_insert_rowid())",
                         first_use.column_name, first_use.table_name
@@ -987,8 +865,6 @@ impl PlPgSqlTranslator {
                     modified_bindings
                         .push(VariableBinding { name: binding.name.clone(), expression: new_expr });
                 } else {
-                    // First use - find which column this variable is being inserted into
-                    // and record it for future INSERTTs
                     if let Some(source) = &insert.source
                         && let SetExpr::Values(values) = &*source.body
                         && !values.rows.is_empty()
@@ -1019,35 +895,27 @@ impl PlPgSqlTranslator {
 
         let mut new_insert = insert.clone();
 
-        // Collect CTEs for variable bindings
         let mut ctes = Vec::new();
 
         for binding in &modified_bindings {
-            // Translate UUID function names in the expression
             let translated_expr = Self::translate_uuid_function(&binding.expression, options);
-            // Parse the expression
             let expr = Self::parse_expression(&translated_expr)?;
-            // Translate PG-specific constructs in the CTE expression
             let expr = expr.translate(schema, options).unwrap_or(expr);
             let cte = CteBuilder::create_variable_cte(binding, expr);
             ctes.push(cte);
         }
 
-        // Get the current condition (if any)
         let condition = context.current_condition();
 
-        // Transform the INSERT
         if let Some(source) = &insert.source {
             match &*source.body {
                 SetExpr::Values(values) => {
-                    // Transform VALUES into SELECT with variable substitution
                     let new_source = Self::transform_values_to_select(
                         values,
                         &modified_bindings,
                         condition.as_deref(),
                     )?;
 
-                    // Build the new query with CTEs
                     new_insert.source = Some(Box::new(Query {
                         with: CteBuilder::combine_ctes(ctes),
                         body: Box::new(new_source),
@@ -1062,10 +930,8 @@ impl PlPgSqlTranslator {
                     }));
                 }
                 SetExpr::Select(select) => {
-                    // Already a SELECT - add CTEs and condition
                     let mut new_select = select.as_ref().clone();
 
-                    // Add condition if present
                     if let Some(cond) = &condition {
                         let cond_expr = Self::parse_expression(cond)?;
                         new_select.selection = match &new_select.selection {
@@ -1087,13 +953,11 @@ impl PlPgSqlTranslator {
                     }));
                 }
                 _ => {
-                    // Other source types - translate normally
                     return Statement::Insert(insert.clone()).translate(schema, options);
                 }
             }
         }
 
-        // Apply standard translation (e.g., UUID handling)
         Statement::Insert(new_insert).translate(schema, options)
     }
 
@@ -1139,7 +1003,6 @@ impl PlPgSqlTranslator {
         args_have_var || filter_has_var || over_has_var || within_group_has_var
     }
 
-    /// Checks if an expression references a specific variable name.
     fn expr_references_variable(expr: &Expr, var_name: &str) -> bool {
         match expr {
             Expr::Identifier(ident) => ident.value == var_name,
@@ -1156,7 +1019,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Checks whether a query expression references a specific variable.
     fn query_references_variable_expr(query: &Query, var_name: &str) -> bool {
         let body_has_var = Self::set_expr_references_variable_expr(&query.body, var_name);
         let order_by_has_var = query.order_by.as_ref().is_some_and(|order_by| {
@@ -1219,7 +1081,6 @@ impl PlPgSqlTranslator {
         body_has_var || order_by_has_var || limit_has_var || fetch_has_var
     }
 
-    /// Checks whether a `SetExpr` references a specific variable.
     fn set_expr_references_variable_expr(set_expr: &SetExpr, var_name: &str) -> bool {
         match set_expr {
             SetExpr::Select(select) => {
@@ -1270,8 +1131,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Checks whether a table reference with joins references a specific
-    /// variable.
     fn table_with_joins_references_variable(table: &TableWithJoins, var_name: &str) -> bool {
         Self::table_factor_references_variable(&table.relation, var_name)
             || table.joins.iter().any(|join| {
@@ -1291,7 +1150,6 @@ impl PlPgSqlTranslator {
             })
     }
 
-    /// Checks whether a table factor references a specific variable.
     fn table_factor_references_variable(factor: &TableFactor, var_name: &str) -> bool {
         match factor {
             TableFactor::Derived { subquery, .. } => {
@@ -1301,7 +1159,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Transforms VALUES clause into a SELECT with variable substitution.
     #[allow(clippy::too_many_lines)]
     fn transform_values_to_select(
         values: &sqlparser::ast::Values,
@@ -1317,13 +1174,11 @@ impl PlPgSqlTranslator {
         let row = &values.rows[0];
         let mut projections = Vec::new();
 
-        // Transform each value, substituting variable references
         for expr in &row.content {
             let substituted = Self::substitute_variables(expr, bindings);
             projections.push(SelectItem::UnnamedExpr(substituted));
         }
 
-        // Build FROM clause with CTE references
         let mut from_tables = Vec::new();
         for binding in bindings {
             from_tables.push(TableWithJoins {
@@ -1345,7 +1200,6 @@ impl PlPgSqlTranslator {
             });
         }
 
-        // If no CTEs, use a dummy subquery
         if from_tables.is_empty() {
             from_tables.push(TableWithJoins {
                 relation: TableFactor::Derived {
@@ -1373,7 +1227,6 @@ impl PlPgSqlTranslator {
             });
         }
 
-        // Parse condition if present
         let selection =
             if let Some(cond) = condition { Some(Self::parse_expression(cond)?) } else { None };
 
@@ -1420,8 +1273,6 @@ impl PlPgSqlTranslator {
         Expr::Function(rewritten)
     }
 
-    /// Substitutes variable references in an expression with CTE column
-    /// references.
     fn substitute_variables(expr: &Expr, bindings: &[VariableBinding]) -> Expr {
         let recurse = |e: &Expr| Self::substitute_variables(e, bindings);
 
@@ -1455,7 +1306,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Rewrites bound variable references recursively within a query.
     fn substitute_variables_in_query(query: &Query, bindings: &[VariableBinding]) -> Query {
         let mut rewritten = query.clone();
         rewritten.body = Box::new(Self::substitute_variables_in_set_expr(&query.body, bindings));
@@ -1517,7 +1367,6 @@ impl PlPgSqlTranslator {
         rewritten
     }
 
-    /// Rewrites bound variable references recursively within a `SetExpr`.
     fn substitute_variables_in_set_expr(
         set_expr: &SetExpr,
         bindings: &[VariableBinding],
@@ -1572,11 +1421,6 @@ impl PlPgSqlTranslator {
         }
     }
 
-    /// Translates `PostgreSQL` UUID function names to the configured `SQLite`
-    /// function name.
-    ///
-    /// Replaces `gen_random_uuid()`, `uuidv4()`, and `uuidv7()` with the
-    /// configured UUID function name from options.
     fn translate_uuid_function(expr_str: &str, options: &Pg2SqliteOptions) -> String {
         use crate::traits::TranslationOptions;
         if let Ok(mut parsed_expr) = Self::parse_expression(expr_str) {
@@ -1587,7 +1431,6 @@ impl PlPgSqlTranslator {
 
         let target_func = options.get_uuid_function_name();
 
-        // Replace common PostgreSQL UUID function names
         expr_str
             .replace("gen_random_uuid()", &format!("{target_func}()"))
             .replace("GEN_RANDOM_UUID()", &format!("{target_func}()"))
@@ -1599,7 +1442,6 @@ impl PlPgSqlTranslator {
             .replace("UUIDV7()", &format!("{target_func}()"))
     }
 
-    /// Parses an expression string into an Expr AST.
     fn parse_expression(expr_str: &str) -> Result<Expr, Error> {
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let mut parser =
@@ -1612,7 +1454,6 @@ impl PlPgSqlTranslator {
             .map_err(|e| Error::UnknownPostgresFeature(format!("Failed to parse expression: {e}")))
     }
 
-    /// Injects a condition into a statement's WHERE clause.
     fn inject_condition_into_statement(stmt: &mut Statement, condition: &str) {
         let Ok(cond_expr) = Self::parse_expression(condition) else {
             return;

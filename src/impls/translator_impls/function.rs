@@ -19,12 +19,14 @@ use sqlparser::ast::{
 };
 
 use super::{
+    array::{self, ArrayFunction},
     helpers::{Forward, translate_window_type},
     postgis,
 };
 use crate::{
     impls::{
         datetime_helpers::{build_strftime_call, parse_date_part_key, strftime_mapping_for_key},
+        expr_helpers::case_when,
         function_helpers::{
             extract_exactly, number_literal, simple_function_expr, string_literal, unnamed_arg,
         },
@@ -96,6 +98,9 @@ enum FunctionTranslation {
     Corr,
     /// No translation needed
     PassThrough,
+    /// An array function whose body is rewritten over `json_each` /
+    /// `json_group_array`. See [`super::array`].
+    Array(ArrayFunction),
 }
 
 /// Simple name-only renames: `(pg_name, sqlite_name)`.
@@ -150,6 +155,11 @@ fn translate_function(
         return FunctionTranslation::Rename(target.to_string());
     }
 
+    // Array functions needing a rewritten body over `json_each`.
+    if let Some(kind) = ArrayFunction::from_name(original_name.as_str()) {
+        return FunctionTranslation::Array(kind);
+    }
+
     match original_name.as_str() {
         // bool_and / bool_or / every
         "bool_and" | "every" => FunctionTranslation::Unsupported(
@@ -180,11 +190,20 @@ fn translate_function(
         "concat" => FunctionTranslation::ToConcatenation,
         "concat_ws" => FunctionTranslation::ToConcatenationWithSeparator,
         "date_trunc" => FunctionTranslation::DateTrunc,
-        "array_agg" => FunctionTranslation::Unsupported(
-            "array_agg is not supported in SQLite because arrays are not a native type. \
-             Use group_concat() instead: GROUP_CONCAT(column, ',')"
-                .to_string(),
-        ),
+        // `array_agg` and `cardinality` need only a rename: `json_group_array`
+        // accumulates the same way, and `json_array_length` counts the same
+        // way, including reporting zero for an empty array.
+        "array_agg" | "cardinality" => {
+            if array::is_json_array_representation(options) {
+                let target =
+                    if original_name == "array_agg" { "json_group_array" } else { "json_array_length" };
+                FunctionTranslation::Rename(target.to_string())
+            } else {
+                FunctionTranslation::Unsupported(array::representation_required_message(&format!(
+                    "{original_name}()"
+                )))
+            }
+        }
         "bit_and" | "bit_or" => FunctionTranslation::Unsupported(format!(
             "{original_name} is not supported as an aggregate in SQLite. \
              Consider loading a custom extension or rewriting with bitwise expressions."
@@ -362,13 +381,6 @@ fn translate_function(
              For basic pattern matching use LIKE or GLOB."
                 .to_string(),
         ),
-        // array_length / array_to_string: no array type in SQLite
-        "array_length" | "array_to_string" => FunctionTranslation::Unsupported(
-            "array_length/array_to_string are not supported in SQLite, which has no native \
-             array type. Consider using JSON arrays with json_array_length() or \
-             json_group_array()."
-                .to_string(),
-        ),
         // format: PG format specifiers incompatible with SQLite printf
         "format" => FunctionTranslation::Unsupported(
             "format() with PostgreSQL format specifiers (%I, %L, %s) is not supported in SQLite. \
@@ -381,10 +393,11 @@ fn translate_function(
              with no SQLite equivalent."
                 .to_string(),
         ),
-        // unnest: requires array type
+        // unnest: a set-returning function, valid only in a FROM clause, where
+        // `shared_helpers` rewrites it to `json_each`.
         "unnest" => FunctionTranslation::Unsupported(
-            "unnest() requires PostgreSQL's array type, which has no SQLite equivalent. \
-             Consider using json_each() for JSON arrays."
+            "unnest() is only translatable in a FROM clause, where it becomes json_each(). \
+             In a SELECT list it returns a set, which SQLite cannot express as a scalar."
                 .to_string(),
         ),
         // encode/decode: PG bytea encoding functions
@@ -399,7 +412,6 @@ fn translate_function(
              Use CAST(expr AS REAL) or CAST(expr AS INTEGER) for simple conversions."
                 .to_string(),
         ),
-        // --- GROUP P: Bulk unsupported functions ---
 
         // String functions with no SQLite equivalent
         "regexp_split_to_array" | "regexp_split_to_table" | "string_to_array" => {
@@ -450,15 +462,27 @@ fn translate_function(
             ))
         }
 
-        // Array functions (no native array type)
-        "array_append" | "array_cat" | "array_dims" | "array_fill" | "array_lower"
-        | "array_upper" | "array_ndims" | "array_position" | "array_positions"
-        | "array_prepend" | "array_remove" | "array_replace" | "cardinality" => {
-            FunctionTranslation::Unsupported(format!(
-                "{original_name}() is not available in SQLite (no native array type). \
-                 Consider using JSON arrays with json_group_array() and json_each()."
+        // Array functions with no faithful json1 form. `json_each` hands a
+        // nested element back as JSON text, so anything that inspects or
+        // rebuilds dimensions cannot be answered correctly.
+        "array_cat" | "array_prepend" => FunctionTranslation::Unsupported(array::no_json_message(
+            &format!("{original_name}()"),
+            "Concatenating JSON arrays would have to re-encode every element and SQLite has no \
+             json_concat(). Build the combined array in the application, or insert elements one \
+             at a time with json_insert(a, '$[#]', v).",
+        )),
+        "array_dims" | "array_ndims" => {
+            FunctionTranslation::Unsupported(array::no_json_message(
+                &format!("{original_name}()"),
+                "A JSON array carries no dimension metadata; only one-dimensional arrays are \
+                 represented.",
             ))
         }
+        "array_fill" => FunctionTranslation::Unsupported(array::no_json_message(
+            "array_fill()",
+            "Filling an array needs a row generator, and SQLite has no generate_series() in the \
+             core build. Build the array in the application.",
+        )),
 
         // Network functions
         "host" | "abbrev" | "broadcast" | "family" | "hostmask" | "masklen" | "netmask"
@@ -807,17 +831,6 @@ fn build_concatenation(exprs: Vec<Expr>) -> Option<Expr> {
     }))
 }
 
-/// Build a concatenation expression with separator: first || sep || next...
-fn build_case_when(condition: Expr, then_expr: Expr, else_expr: Expr) -> Expr {
-    Expr::Case {
-        case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-        end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-        operand: None,
-        conditions: vec![sqlparser::ast::CaseWhen { condition, result: then_expr }],
-        else_result: Some(Box::new(else_expr)),
-    }
-}
-
 fn any_not_null_condition(exprs: &[Expr]) -> Option<Expr> {
     let mut iter = exprs.iter();
     let first = iter.next()?.clone();
@@ -834,7 +847,7 @@ fn any_not_null_condition(exprs: &[Expr]) -> Option<Expr> {
 
 fn build_concat_ws_piece(value: Expr, separator: &Expr, prior_values: &[Expr]) -> Expr {
     let prefixed_value = if let Some(has_prior_non_null) = any_not_null_condition(prior_values) {
-        let prefix = build_case_when(has_prior_non_null, separator.clone(), string_literal(""));
+        let prefix = case_when(has_prior_non_null, separator.clone(), Some(string_literal("")));
         Expr::BinaryOp {
             left: Box::new(prefix),
             op: BinaryOperator::StringConcat,
@@ -845,7 +858,7 @@ fn build_concat_ws_piece(value: Expr, separator: &Expr, prior_values: &[Expr]) -
     };
 
     // PostgreSQL CONCAT_WS skips NULL values entirely.
-    build_case_when(Expr::IsNull(Box::new(value)), string_literal(""), prefixed_value)
+    case_when(Expr::IsNull(Box::new(value)), string_literal(""), Some(prefixed_value))
 }
 
 fn build_concat_ws_expression(separator: &Expr, values: Vec<Expr>) -> Option<Expr> {
@@ -1141,7 +1154,6 @@ impl Translator for Function {
                     data_type: cast_type,
                     format: None,
                     kind: CastKind::Cast,
-                    array: false,
                 })
             }
             FunctionTranslation::ToChar => {
@@ -1177,7 +1189,6 @@ impl Translator for Function {
                     data_type: DataType::Real,
                     format: None,
                     kind: CastKind::Cast,
-                    array: false,
                 };
                 let shifted = Expr::BinaryOp {
                     left: Box::new(random_as_real),
@@ -1237,7 +1248,6 @@ impl Translator for Function {
                     data_type: DataType::Integer(None),
                     format: None,
                     kind: CastKind::Cast,
-                    array: false,
                 })
             }
             FunctionTranslation::ToTrunc => {
@@ -1251,7 +1261,6 @@ impl Translator for Function {
                             data_type: DataType::Integer(None),
                             format: None,
                             kind: CastKind::Cast,
-                            array: false,
                         })
                     }
                     // trunc(x, n) → round(x, n) (approximate, lossy)
@@ -1333,6 +1342,9 @@ impl Translator for Function {
             FunctionTranslation::Corr => {
                 let (x, y) = two_aggregate_args(&func.args, schema, options, "corr")?;
                 Ok(corr_closed_form(x, y))
+            }
+            FunctionTranslation::Array(kind) => {
+                array::translate_array_function(kind, &func.args, schema, options)
             }
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))

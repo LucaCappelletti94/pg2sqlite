@@ -15,65 +15,12 @@ use alloc::{
 };
 
 use sqlparser::ast::{
-    Cte, Expr, GroupByExpr, Ident, Query, Select, SelectFlavor, SelectItem, SetExpr, TableAlias,
-    TableAliasColumnDef, TableWithJoins, With, helpers::attached_token::AttachedToken,
+    Cte, Expr, Ident, SelectItem, SetExpr, TableAlias, TableAliasColumnDef, With,
+    helpers::attached_token::AttachedToken,
 };
 
 use super::context::VariableBinding;
-
-/// Create a minimal [`Query`] from a WITH clause and body, with all other
-/// fields set to their defaults (no ORDER BY, no LIMIT, no FETCH, etc.).
-#[must_use]
-pub fn make_query(with: Option<With>, body: SetExpr) -> Query {
-    Query {
-        with,
-        body: Box::new(body),
-        order_by: None,
-        limit_clause: None,
-        fetch: None,
-        locks: vec![],
-        for_clause: None,
-        settings: None,
-        format_clause: None,
-        pipe_operators: vec![],
-    }
-}
-
-/// Create a minimal [`Select`] with projection, FROM clause, and optional
-/// WHERE clause. All other fields are set to defaults.
-#[must_use]
-pub fn make_simple_select(
-    projection: Vec<SelectItem>,
-    from: Vec<TableWithJoins>,
-    selection: Option<Expr>,
-) -> Select {
-    Select {
-        select_token: AttachedToken::empty(),
-        distinct: None,
-        top: None,
-        top_before_distinct: false,
-        projection,
-        into: None,
-        from,
-        lateral_views: vec![],
-        selection,
-        group_by: GroupByExpr::Expressions(vec![], vec![]),
-        cluster_by: vec![],
-        distribute_by: vec![],
-        sort_by: vec![],
-        having: None,
-        named_window: vec![],
-        qualify: None,
-        window_before_qualify: false,
-        value_table_mode: None,
-        connect_by: vec![],
-        flavor: SelectFlavor::Standard,
-        exclude: None,
-        optimizer_hints: Vec::new(),
-        prewhere: None,
-        select_modifiers: None,
-    }
-}
+use crate::impls::query_builder::{make_query, make_simple_select};
 
 /// Builder for constructing CTEs from variable bindings.
 pub struct CteBuilder;

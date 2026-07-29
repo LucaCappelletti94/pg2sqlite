@@ -1,8 +1,5 @@
 //! Implementation of the [`crate::traits::ReverseTranslator`] trait for the
 //! `Function` type.
-//!
-//! This module handles the reversal of SQLite functions to their PostgreSQL
-//! equivalents.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -49,7 +46,6 @@ const REVERSE_RENAMES: &[(&str, &str)] = &[
     ("quote", "quote_nullable"),
 ];
 
-/// Represents a function reversal result.
 pub enum FunctionReversal {
     /// Simple name replacement (e.g., MIN -> LEAST)
     Rename(String),
@@ -95,7 +91,6 @@ fn reverse_strftime_to_date_trunc_field(format: &str) -> Option<&'static str> {
     }
 }
 
-/// Determine how to reverse a SQLite function to PostgreSQL.
 #[allow(clippy::too_many_lines)]
 pub fn reverse_function(
     name: &ObjectName,
@@ -265,7 +260,6 @@ fn build_reverse_function(
     }))
 }
 
-/// Reverse translate a SQLite function to PostgreSQL.
 #[allow(clippy::too_many_lines)]
 pub fn reverse_translate_function(
     func: &Function,
@@ -403,7 +397,6 @@ pub fn reverse_translate_function(
                     ),
                     format: None,
                     kind: sqlparser::ast::CastKind::DoubleColon,
-                    array: false,
                 });
             }
             Err(Error::UnsupportedSQLiteFeature("vec_f32 requires exactly 1 argument".to_string()))
@@ -425,7 +418,6 @@ pub fn reverse_translate_function(
                     ),
                     format: None,
                     kind: sqlparser::ast::CastKind::DoubleColon,
-                    array: false,
                 });
             }
             Err(Error::UnsupportedSQLiteFeature("vec_f16 requires exactly 1 argument".to_string()))

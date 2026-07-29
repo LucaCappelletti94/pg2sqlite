@@ -39,10 +39,8 @@ use crate::{
     traits::{SessionVariablePattern, TranslationOptions},
 };
 
-/// Error message used when a row violates RLS policy constraints.
 const RLS_VIOLATION_ERROR: &str = "new row violates row-level security policy";
 
-/// Collects all column names from a table.
 fn collect_column_names<DB: DatabaseLike>(table: &DB::Table, schema: &DB) -> Vec<String>
 where
     DB::Table: TableLike<DB = DB>,
@@ -50,7 +48,6 @@ where
     table.columns(schema).map(|c| c.column_name().to_string()).collect()
 }
 
-/// Collects primary key column names from a table.
 fn collect_pk_column_names<DB: DatabaseLike>(table: &DB::Table, schema: &DB) -> Vec<String>
 where
     DB::Table: TableLike<DB = DB>,
@@ -58,7 +55,7 @@ where
     table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect()
 }
 
-/// Checks if a table has RLS enabled by looking it up in the schema.
+/// Returns true if the table has RLS enabled.
 pub fn table_has_rls<DB: DatabaseLike>(table_name: &str, schema: &DB) -> bool
 where
     DB::Table: TableLike<DB = DB>,
@@ -71,28 +68,6 @@ where
 /// When a table has RLS, it's split into a view and a backing table.
 /// AFTER triggers must be attached to the backing table (e.g., `table_rls`),
 /// not the view, because views don't fire AFTER triggers in SQLite.
-///
-/// # Arguments
-/// * `base_name` - The original table name (e.g., "users")
-/// * `table` - The table object from schema
-/// * `schema` - The database schema
-/// * `options` - Options containing the RLS table suffix
-///
-/// # Returns
-/// The table name to use for trigger attachment:
-/// - `table_rls` if table has RLS
-/// - `table` if table has no RLS
-///
-/// # Example
-/// ```rust,ignore
-/// let trigger_table = resolve_trigger_table_name(
-///     "documents",
-///     &table_obj,
-///     schema,
-///     options,
-/// );
-/// // Returns "documents_rls" if table has RLS, "documents" otherwise
-/// ```
 pub fn resolve_trigger_table_name<DB: DatabaseLike>(
     base_name: &str,
     table: &DB::Table,
@@ -125,8 +100,6 @@ fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> Strin
         .join(" AND ")
 }
 
-/// Filters policies for a table by the specified commands.
-/// Returns policies that match any of the given commands or the All command.
 fn filter_policies<'a, DB: DatabaseLike>(
     table: &'a DB::Table,
     schema: &'a DB,
@@ -146,7 +119,6 @@ where
     policies
 }
 
-/// Context for RLS trigger generation, encapsulating common setup.
 struct RlsTriggerContext<'a> {
     table_name: &'a str,
     inner_table_name: String,
@@ -502,8 +474,6 @@ impl ColumnRefStrategy<'_> {
     }
 }
 
-/// Transforms a [`FunctionArgumentClause`] for RLS, recursing into any
-/// expression payloads (OrderBy, Limit, Having, OnOverflow filler).
 fn transform_function_argument_clause_rls<O: TranslationOptions, DB: DatabaseLike>(
     clause: &FunctionArgumentClause,
     options: &O,
@@ -548,8 +518,6 @@ fn transform_function_argument_clause_rls<O: TranslationOptions, DB: DatabaseLik
     }
 }
 
-/// Transforms a [`sqlparser::ast::WindowFrameBound`] for RLS, recursing into
-/// `Preceding(Some(expr))` and `Following(Some(expr))`.
 fn transform_window_frame_bound_rls<O: TranslationOptions, DB: DatabaseLike>(
     bound: &sqlparser::ast::WindowFrameBound,
     options: &O,
@@ -572,11 +540,6 @@ fn transform_window_frame_bound_rls<O: TranslationOptions, DB: DatabaseLike>(
     }
 }
 
-/// Core expression transformation, generic over column reference strategy.
-///
-/// 1. Replaces session variable patterns with their SQLite function equivalents
-/// 2. Handles column references according to the given `ColumnRefStrategy`
-/// 3. Recursively transforms all sub-expressions
 #[allow(clippy::too_many_lines)]
 fn transform_expr_generic<O: TranslationOptions, DB: DatabaseLike>(
     expr: &Expr,
@@ -592,7 +555,7 @@ where
 
     match expr {
         // Handle current_setting('name')::type -> sqlite_func()
-        Expr::Cast { expr: inner, data_type, format, kind, array } => {
+        Expr::Cast { expr: inner, data_type, format, kind } => {
             if let Expr::Function(func) = inner.as_ref()
                 && let Some(transformed) = try_transform_session_function(func, options)
             {
@@ -604,7 +567,6 @@ where
                 data_type: data_type.clone(),
                 format: format.clone(),
                 kind: kind.clone(),
-                array: *array,
             }
         }
 
@@ -843,12 +805,6 @@ where
     }
 }
 
-/// Transforms an expression AST by:
-/// 1. Replacing session variable patterns with their SQLite function
-///    equivalents
-/// 2. Optionally prefixing column references with NEW. or OLD.
-/// 3. Renaming table references from `table_name` to `inner_table_name` (for
-///    RLS views)
 fn transform_expr<O: TranslationOptions, DB: DatabaseLike>(
     expr: &Expr,
     options: &O,
@@ -892,15 +848,12 @@ where
     )
 }
 
-/// Creates a COALESCE(NEW.column, OLD.column) expression.
 fn make_coalesce_expr(column: &Ident) -> Expr {
     let new_ref = Expr::CompoundIdentifier(vec![Ident::new("NEW"), column.clone()]);
     let old_ref = Expr::CompoundIdentifier(vec![Ident::new("OLD"), column.clone()]);
     simple_function_expr("COALESCE", vec![new_ref, old_ref], None)
 }
 
-/// Transforms a Query (used in subqueries) by recursively transforming table
-/// references and all relevant expressions.
 fn transform_query<O: TranslationOptions, DB: DatabaseLike>(
     query: &sqlparser::ast::Query,
     options: &O,
@@ -1139,9 +1092,6 @@ fn transform_join_operator_for_subquery<O: TranslationOptions, DB: DatabaseLike>
 ///   `NEW.id`
 /// - If prefix is None: `ownables.id` -> `ownables_rls.id` (using
 ///   renamed_table)
-// Transform all expression arguments in a [`FunctionArguments`] using the
-// provided expression transform function. Handles `List` args (including
-// `OrderBy`, `Limit`, `Having` clauses) and clones other argument forms.
 fn transform_function_arg_with(
     args: &FunctionArguments,
     transform_expr_fn: &impl Fn(&Expr) -> Expr,
@@ -1206,8 +1156,6 @@ fn transform_function_arg_with(
     }
 }
 
-/// Transform a single [`FunctionArg`] by applying `transform_fn` to its
-/// expression content.
 fn transform_function_arg_with_rls(
     arg: &FunctionArg,
     transform_fn: &impl Fn(&Expr) -> Expr,
@@ -1282,8 +1230,6 @@ fn transform_outer_table_refs(
     }
 }
 
-/// Tries to transform a function call if it's a session variable pattern.
-/// Returns Some(transformed_expr) if it was a session function, None otherwise.
 fn try_transform_session_function<O: TranslationOptions>(
     func: &Function,
     options: &O,
@@ -1298,7 +1244,6 @@ fn try_transform_session_function<O: TranslationOptions>(
     None
 }
 
-/// Creates a simple function call expression with no arguments: func_name()
 fn make_function_call(func_name: &str) -> Expr {
     simple_function_expr(func_name, vec![], None)
 }
@@ -1307,8 +1252,7 @@ fn make_function_call(func_name: &str) -> Expr {
 ///
 /// # Errors
 ///
-/// This function is infallible but returns a `Result` for API consistency
-/// with other RLS generation functions.
+/// Infallible, but returns a `Result` to match the other RLS generators.
 #[allow(clippy::unnecessary_wraps)]
 pub fn generate_rls_view_sql<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
@@ -1326,22 +1270,18 @@ where
     let table_name_quoted = quote_identifier(table_name);
     let inner_table_name_quoted = quote_identifier(inner_table_name);
 
-    // Collect SELECT policies for this table
     let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select]);
 
-    // Get all column names from the table for the SELECT clause
     let columns = collect_column_names(table, schema);
     let column_list =
         columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
-    // Build the WHERE clause by combining all USING expressions
     let where_clause = if select_policies.is_empty() {
         String::new()
     } else {
         let mut conditions = Vec::new();
         for policy in &select_policies {
             if let Some(using_expr) = policy.using_expression(schema) {
-                // Transform the AST, renaming table refs from table_name to inner_table_name
                 let transformed =
                     transform_expr(using_expr, options, table, schema, None, table_rename);
                 conditions.push(format!("({transformed})"));
@@ -1359,7 +1299,6 @@ where
     ))
 }
 
-/// Generates INSTEAD OF INSERT trigger SQL.
 fn generate_insert_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
     schema: &DB,
@@ -1792,36 +1731,9 @@ where
     renamed
 }
 
-// ============================================================================
-// RLS Validation and Monitoring
-// ============================================================================
-
-/// Error message prefix used in RLS validation triggers.
 const RLS_VALIDATION_ERROR: &str = "RLS validation";
 
 /// Generates the SQL to create the RLS audit table.
-///
-/// This table stores all detected RLS policy violations during sync operations.
-/// The audit table is created once and shared by all RLS-enabled tables.
-///
-/// # Schema
-/// - `id`: Auto-incrementing primary key
-/// - `table_name`: Name of the table where violation occurred
-/// - `violation_type`: Type of violation (always 'rls_policy_violation')
-/// - `row_identifier`: Primary key values of the violating row
-/// - `policy_name`: Name of the policy that was violated
-/// - `detected_at`: Timestamp when violation was detected
-/// - `severity`: Severity level ('warning' in monitor mode, 'error' in strict)
-/// - `details`: Additional contextual information
-/// - `reported_at`: Timestamp when violation was reported to backend (NULL
-///   until reported)
-///
-/// # Arguments
-/// * `audit_table_name` - The name to use for the audit table (user-configured)
-///
-/// # Returns
-/// SQL string to create the audit table with STRICT mode for better type
-/// safety.
 #[must_use]
 pub fn generate_audit_table_sql(audit_table_name: &str) -> String {
     let audit_table_name_quoted = quote_identifier(audit_table_name);
@@ -1840,18 +1752,6 @@ pub fn generate_audit_table_sql(audit_table_name: &str) -> String {
     )
 }
 
-/// Builds an expression that identifies a row using its primary key columns.
-///
-/// For example, if a table has primary key columns `(id, tenant_id)`, this
-/// generates: `'id=' || quote(NEW.id) || ', tenant_id=' ||
-/// quote(NEW.tenant_id)`
-///
-/// # Arguments
-/// * `pk_columns` - List of primary key column names
-/// * `prefix` - Row reference prefix ("NEW" or "OLD")
-///
-/// # Returns
-/// SQLite expression that builds a human-readable identifier string.
 fn build_row_identifier_expr(pk_columns: &[String], prefix: &str) -> String {
     if pk_columns.is_empty() {
         return "'<no PK>'".to_string();
@@ -1870,19 +1770,6 @@ fn build_row_identifier_expr(pk_columns: &[String], prefix: &str) -> String {
         .join(" || ', ' || ")
 }
 
-/// Generates a WHERE clause check that tests if a row is visible through the
-/// RLS view.
-///
-/// This builds an EXISTS subquery that checks if the inserted/updated row would
-/// be visible when querying through the RLS-filtered view.
-///
-/// # Arguments
-/// * `table_name` - Name of the RLS view (e.g., "documents")
-/// * `pk_columns` - Primary key columns for row identification
-/// * `prefix` - Row reference prefix ("NEW" or "OLD")
-///
-/// # Returns
-/// SQL expression: `EXISTS (SELECT 1 FROM view WHERE pk_match)`
 fn generate_row_visibility_check(table_name: &str, pk_columns: &[String], prefix: &str) -> String {
     let table_name_quoted = quote_identifier(table_name);
     let where_clause = if pk_columns.is_empty() {
@@ -1905,26 +1792,6 @@ fn generate_row_visibility_check(table_name: &str, pk_columns: &[String], prefix
     format!("EXISTS (SELECT 1 FROM {table_name_quoted} WHERE {where_clause})")
 }
 
-/// Generates an AFTER INSERT or AFTER UPDATE trigger that monitors for RLS
-/// violations.
-///
-/// This trigger fires after a row is inserted into or updated in the backing
-/// table (e.g., `documents_rls`). It checks if the row is visible through the
-/// RLS view (e.g., `documents`). If not visible, the row violates RLS policy.
-///
-/// In monitor mode: logs violation to audit table
-/// In strict mode: logs violation + aborts transaction
-///
-/// # Arguments
-/// * `table_name` - Name of the RLS view (e.g., "documents")
-/// * `inner_table_name` - Name of the backing table (e.g., "documents_rls")
-/// * `pk_columns` - Primary key column names
-/// * `audit_table_name` - Name of the audit table for logging
-/// * `strict_mode` - If true, add RAISE(ABORT) to block violations
-/// * `operation` - Either "insert" or "update"
-///
-/// # Returns
-/// SQL string for CREATE TRIGGER statement
 fn generate_monitoring_trigger_sql(
     table_name: &str,
     inner_table_name: &str,
@@ -1998,20 +1865,6 @@ END"
     )
 }
 
-/// Generates a view that shows all rows violating RLS policies.
-///
-/// This validation view makes it easy to query for violations without going
-/// through the audit table. It shows all rows in the backing table that are NOT
-/// visible through the RLS view.
-///
-/// # Arguments
-/// * `table_name` - Name of the RLS view (e.g., "documents")
-/// * `inner_table_name` - Name of the backing table (e.g., "documents_rls")
-/// * `columns` - All column names in the table
-/// * `pk_columns` - Primary key columns for matching rows
-///
-/// # Returns
-/// SQL string for CREATE VIEW statement
 fn generate_validation_view_sql(
     table_name: &str,
     inner_table_name: &str,
@@ -2050,24 +1903,9 @@ WHERE NOT EXISTS (
 
 /// Generates the complete set of RLS validation statements for a table.
 ///
-/// This includes:
-/// - AFTER INSERT monitoring trigger
-/// - AFTER UPDATE monitoring trigger
-/// - Validation view showing current violations
-///
-/// Note: The audit table itself is generated separately (once per schema).
-///
-/// # Arguments
-/// * `table` - The table with RLS policies
-/// * `schema` - The database schema
-/// * `options` - Translation options (contains audit table name and strict mode
-///   setting)
-///
-/// # Returns
-/// Vector of SQL statements parsed and ready for execution
-///
 /// # Errors
-/// Returns an error if the generated SQL cannot be parsed
+///
+/// Returns an error if the generated SQL cannot be parsed.
 pub fn generate_rls_validation_statements<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
     schema: &DB,
@@ -2114,19 +1952,11 @@ where
     Ok(statements)
 }
 
-/// Helper function to generate the audit table SQL as a Statement.
-///
-/// This is a convenience wrapper around `generate_audit_table_sql` that parses
-/// the result into a Statement for easier integration.
-///
-/// # Arguments
-/// * `audit_table_name` - The name to use for the audit table
-///
-/// # Returns
-/// Parsed CREATE TABLE statement
+/// Parses the audit table DDL into a Statement.
 ///
 /// # Errors
-/// Returns an error if the generated SQL cannot be parsed
+///
+/// Returns an error if the generated SQL cannot be parsed.
 pub fn generate_rls_audit_table(audit_table_name: &str) -> Result<Statement, Error> {
     let dialect = sqlparser::dialect::SQLiteDialect {};
     let sql = generate_audit_table_sql(audit_table_name);

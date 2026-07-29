@@ -13,7 +13,10 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{ColumnOption, ColumnOptionDef, Expr, ForeignKeyConstraint, GeneratedAs};
+use sqlparser::ast::{
+    ColumnOption, ColumnOptionDef, Expr, ForeignKeyConstraint, FunctionArguments, GeneratedAs,
+    UnaryOperator, Value, ValueWithSpan,
+};
 
 use crate::{
     impls::object_name::{append_suffix, table_has_implicit_public_rls},
@@ -40,124 +43,12 @@ impl Translator for ColumnOptionDef {
                 }))
             }
             ColumnOption::Default(expr) => {
-                match expr {
-                    Expr::Function(func) => {
-                        let function_name = func
-                            .name
-                            .0
-                            .last()
-                            .and_then(|part| part.as_ident())
-                            .map(|ident| ident.value.to_ascii_lowercase());
-
-                        if function_name.as_deref() == Some("current_timestamp") {
-                            return Ok(Some(ColumnOptionDef {
-                                name: self.name.clone(),
-                                option: ColumnOption::Default(Expr::Function(func.clone())),
-                            }));
-                        }
-                        // now() → datetime('now'): delegate to the function translator
-                        // which already has the now() → datetime('now') mapping.
-                        // SQLite requires function-call defaults to be parenthesized:
-                        //   DEFAULT (datetime('now'))  - not  DEFAULT datetime('now').
-                        if function_name.as_deref() == Some("now") {
-                            let translated =
-                                Expr::Function(func.clone()).translate(schema, options)?;
-                            return Ok(Some(ColumnOptionDef {
-                                name: self.name.clone(),
-                                option: ColumnOption::Default(Expr::Nested(Box::new(translated))),
-                            }));
-                        }
-                        // Translate UUID functions to use the configured function name
-                        if matches!(
-                            function_name.as_deref(),
-                            Some("gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7")
-                        ) {
-                            let mut new_func = func.clone();
-                            new_func.name.0 = vec![sqlparser::ast::ObjectNamePart::Identifier(
-                                sqlparser::ast::Ident::new(options.get_uuid_function_name()),
-                            )];
-                            return Ok(Some(ColumnOptionDef {
-                                name: self.name.clone(),
-                                option: ColumnOption::Default(Expr::Nested(Box::new(
-                                    Expr::Function(new_func),
-                                ))),
-                            }));
-                        }
-                        // Generic fallback: translate the function through the
-                        // normal Expr translator and wrap in parentheses.
-                        let translated = Expr::Function(func.clone()).translate(schema, options)?;
-                        Ok(Some(ColumnOptionDef {
-                            name: self.name.clone(),
-                            option: ColumnOption::Default(Expr::Nested(Box::new(translated))),
-                        }))
-                    }
-                    Expr::Value(value) => {
-                        Ok(Some(ColumnOptionDef {
-                            name: self.name.clone(),
-                            option: ColumnOption::Default(Expr::Value(value.clone())),
-                        }))
-                    }
-                    Expr::Identifier(ident) => {
-                        Ok(Some(ColumnOptionDef {
-                            name: self.name.clone(),
-                            option: ColumnOption::Default(Expr::Identifier(ident.clone())),
-                        }))
-                    }
-                    // Handle unary operators (e.g., DEFAULT -1)
-                    Expr::UnaryOp { op, expr } => {
-                        let translated_inner = expr.translate(schema, options)?;
-                        Ok(Some(ColumnOptionDef {
-                            name: self.name.clone(),
-                            option: ColumnOption::Default(Expr::UnaryOp {
-                                op: *op,
-                                expr: Box::new(translated_inner),
-                            }),
-                        }))
-                    }
-                    // Handle nested/parenthesized expressions
-                    Expr::Nested(inner) => {
-                        let translated_inner = inner.translate(schema, options)?;
-                        Ok(Some(ColumnOptionDef {
-                            name: self.name.clone(),
-                            option: ColumnOption::Default(Expr::Nested(Box::new(translated_inner))),
-                        }))
-                    }
-                    // Handle binary operations (e.g., DEFAULT 1 + 2)
-                    Expr::BinaryOp { left, op, right } => {
-                        let translated_left = left.translate(schema, options)?;
-                        let translated_right = right.translate(schema, options)?;
-                        Ok(Some(ColumnOptionDef {
-                            name: self.name.clone(),
-                            option: ColumnOption::Default(Expr::BinaryOp {
-                                left: Box::new(translated_left),
-                                op: op.clone(),
-                                right: Box::new(translated_right),
-                            }),
-                        }))
-                    }
-                    // Handle type casts (e.g., DEFAULT value::type)
-                    Expr::Cast { expr, data_type, format, kind, array } => {
-                        let translated_expr = expr.translate(schema, options)?;
-                        let translated_type = data_type.translate(schema, options)?;
-                        Ok(Some(ColumnOptionDef {
-                            name: self.name.clone(),
-                            option: ColumnOption::Default(Expr::Cast {
-                                expr: Box::new(translated_expr),
-                                data_type: translated_type,
-                                format: format.clone(),
-                                kind: kind.clone(),
-                                array: *array,
-                            }),
-                        }))
-                    }
-                    other => {
-                        let translated = other.translate(schema, options)?;
-                        Ok(Some(ColumnOptionDef {
-                            name: self.name.clone(),
-                            option: ColumnOption::Default(Expr::Nested(Box::new(translated))),
-                        }))
-                    }
-                }
+                Ok(Some(ColumnOptionDef {
+                    name: self.name.clone(),
+                    option: ColumnOption::Default(parenthesize_default(
+                        expr.translate(schema, options)?,
+                    )),
+                }))
             }
             ColumnOption::NotNull | ColumnOption::PrimaryKey(_) => Ok(Some(self.clone())),
             // Translate CHECK constraints to SQLite CHECK syntax.
@@ -192,7 +83,6 @@ impl Translator for ColumnOptionDef {
                 generation_expr_mode,
                 generated_keyword,
             } => {
-                // SQLite only supports ALWAYS or expression-stored, not BY DEFAULT
                 if *generated_as == GeneratedAs::ByDefault {
                     return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                         "SQLite only supports GENERATED ALWAYS, not GENERATED BY DEFAULT"
@@ -200,7 +90,6 @@ impl Translator for ColumnOptionDef {
                     ));
                 }
 
-                // Translate the generation expression
                 let translated_expr =
                     generation_expr.as_ref().map(|e| e.translate(schema, options)).transpose()?;
 
@@ -228,7 +117,6 @@ impl Translator for ColumnOptionDef {
                 on_update,
                 characteristics,
             }) => {
-                // Check if the referenced table has RLS and update the foreign_table reference
                 let updated_foreign_table = {
                     if table_has_implicit_public_rls(schema, foreign_table)? {
                         append_suffix(foreign_table, options.get_rls_table_suffix())
@@ -266,4 +154,28 @@ impl Translator for ColumnOptionDef {
             }
         }
     }
+}
+
+/// Parenthesize a translated `DEFAULT` operand when SQLite would reject it
+/// bare.
+///
+/// SQLite's `DEFAULT` clause takes a literal value, a signed number, a bare
+/// keyword, or a parenthesized expression. A bare function call, cast, or
+/// operator is a syntax error, so `DEFAULT json_array()` and
+/// `DEFAULT CAST(x AS TEXT)` have to become `DEFAULT (json_array())` and
+/// `DEFAULT (CAST(x AS TEXT))`.
+fn parenthesize_default(expr: Expr) -> Expr {
+    let accepted_bare = match &expr {
+        // A literal, an already parenthesized expression, or a bare word.
+        Expr::Value(_) | Expr::Nested(_) | Expr::Identifier(_) => true,
+        // A signed number, but not a signed expression.
+        Expr::UnaryOp { op: UnaryOperator::Plus | UnaryOperator::Minus, expr: inner } => {
+            matches!(inner.as_ref(), Expr::Value(ValueWithSpan { value: Value::Number(..), .. }))
+        }
+        // Keyword functions such as `CURRENT_TIMESTAMP` carry no argument list
+        // and render without parentheses, which SQLite accepts as a bare word.
+        Expr::Function(func) => matches!(func.args, FunctionArguments::None),
+        _ => false,
+    };
+    if accepted_bare { expr } else { Expr::Nested(Box::new(expr)) }
 }

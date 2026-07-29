@@ -12,7 +12,8 @@ use alloc::{
 };
 
 use crate::traits::{
-    SessionVariableMapping, SessionVariablePattern, TranslationOptions, UuidRepresentation,
+    ArrayRepresentation, SessionVariableMapping, SessionVariablePattern, TranslationOptions,
+    UuidRepresentation,
 };
 
 /// Struct to hold options for the translation.
@@ -30,6 +31,9 @@ pub struct Pg2SqliteOptions {
     /// `unhex(replace(literal, '-', ''))` inline" (pure SQLite, no UDF
     /// setup). Set via `with_uuid_text_to_blob_function_name`.
     uuid_text_to_blob_function_name: Option<String>,
+    /// The representation of PostgreSQL arrays in `SQLite`. `None` rejects
+    /// every array construct instead of downgrading it silently.
+    array_representation: Option<ArrayRepresentation>,
     /// The suffix to append to table names when renaming them for RLS views.
     rls_table_suffix: String,
     /// The reserved marker used to name deny triggers for read-only non-RLS
@@ -90,6 +94,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             uuid_representation: Option::<UuidRepresentation>::arbitrary(u)?,
             uuid_function_name: String::arbitrary(u)?,
             uuid_text_to_blob_function_name: Option::<String>::arbitrary(u)?,
+            array_representation: Option::<ArrayRepresentation>::arbitrary(u)?,
             rls_table_suffix: String::arbitrary(u)?,
             readonly_deny_trigger_suffix: String::arbitrary(u)?,
             session_user_role: Option::<String>::arbitrary(u)?,
@@ -112,6 +117,7 @@ impl Default for Pg2SqliteOptions {
             uuid_representation: None,
             uuid_function_name: "uuid".to_string(),
             uuid_text_to_blob_function_name: None,
+            array_representation: None,
             rls_table_suffix: "_rls".to_string(),
             readonly_deny_trigger_suffix: "__readonly".to_string(),
             session_user_role: None,
@@ -230,7 +236,14 @@ impl TranslationOptions for Pg2SqliteOptions {
         self.uuid_text_to_blob_function_name.as_deref()
     }
 
-    // ==================== RLS Options ====================
+    fn with_array_representation(mut self, representation: ArrayRepresentation) -> Self {
+        self.array_representation = Some(representation);
+        self
+    }
+
+    fn get_array_representation(&self) -> Option<ArrayRepresentation> {
+        self.array_representation
+    }
 
     fn with_rls_table_suffix(mut self, suffix: impl Into<String>) -> Self {
         self.rls_table_suffix = suffix.into();
@@ -288,8 +301,6 @@ impl TranslationOptions for Pg2SqliteOptions {
                 func_name,
             ))
     }
-
-    // ==================== RLS Validation Options ====================
 
     fn with_rls_audit_table_name(mut self, name: impl Into<String>) -> Self {
         self.rls_audit_table_name = Some(name.into());

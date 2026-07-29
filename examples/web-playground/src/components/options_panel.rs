@@ -4,7 +4,7 @@
 
 use dioxus::prelude::*;
 use dioxus_free_icons::{Icon, icons::fa_solid_icons::FaSliders};
-use pg2sqlite::prelude::{SessionVariableMapping, UuidRepresentation};
+use pg2sqlite::prelude::{ArrayRepresentation, SessionVariableMapping, UuidRepresentation};
 
 use crate::state::AppState;
 
@@ -23,9 +23,49 @@ pub fn OptionsPanel() -> Element {
             }
             div { class: "options-grid",
                 UuidRepRow {}
+                ArrayRepRow {}
                 UuidFunctionRow {}
                 RlsAuditRow {}
                 SessionVarsRow {}
+            }
+        }
+    }
+}
+
+#[component]
+fn ArrayRepRow() -> Element {
+    let state: AppState = use_context();
+    let current = state.options.read().array_representation;
+
+    let set_rep = move |rep: Option<ArrayRepresentation>| {
+        let mut options = state.options;
+        let mut opts = options.read().clone();
+        opts.array_representation = rep;
+        options.set(opts);
+    };
+
+    rsx! {
+        div { class: "options-row",
+            span { class: "options-label", "Array representation" }
+            div { class: "options-control",
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "array-rep",
+                        checked: current.is_none(),
+                        onchange: move |_| set_rep(None),
+                    }
+                    " (none - errors on array constructs)"
+                }
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "array-rep",
+                        checked: current == Some(ArrayRepresentation::Json),
+                        onchange: move |_| set_rep(Some(ArrayRepresentation::Json)),
+                    }
+                    " JSON (TEXT column, json1 operations)"
+                }
             }
         }
     }

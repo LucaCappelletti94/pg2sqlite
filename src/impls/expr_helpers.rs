@@ -15,22 +15,14 @@ use alloc::{
     vec::Vec,
 };
 
-use sqlparser::ast::{Expr, JsonPathElem};
+use sqlparser::ast::{CaseWhen, Expr, JsonPathElem, helpers::attached_token::AttachedToken};
 
-// ---------------------------------------------------------------------------
-// map_expr_children  -  immutable rebuild
-// ---------------------------------------------------------------------------
-
-/// Apply `f` to every direct child [`Expr`] inside `expr` and rebuild the
-/// parent node with the transformed children.  Non-expression fields (operator
-/// tokens, identifiers, data-types, etc.) are cloned unchanged.
-///
-/// Callers should match their "interesting" variants first and fall through to
-/// this function for the remaining boilerplate variants.
+/// Apply `f` to every direct child [`Expr`], rebuilding the node. Callers
+/// should match their "interesting" variants first and fall through for the
+/// rest.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr {
     match expr {
-        // -- leaf nodes (no child Expr) → clone as-is -----------------------
         Expr::Identifier(_)
         | Expr::CompoundIdentifier(_)
         | Expr::Value(_)
@@ -41,7 +33,6 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
         | Expr::Lambda(_)
         | Expr::MemberOf(_) => expr.clone(),
 
-        // -- single child ---------------------------------------------------
         Expr::IsFalse(e) => Expr::IsFalse(Box::new(f(e))),
         Expr::IsNotFalse(e) => Expr::IsNotFalse(Box::new(f(e))),
         Expr::IsTrue(e) => Expr::IsTrue(Box::new(f(e))),
@@ -62,13 +53,20 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
         Expr::IsNormalized { expr: inner, form, negated } => {
             Expr::IsNormalized { expr: Box::new(f(inner)), form: *form, negated: *negated }
         }
+        Expr::IsJson { expr: inner, kind, unique_keys, negated } => {
+            Expr::IsJson {
+                expr: Box::new(f(inner)),
+                kind: *kind,
+                unique_keys: *unique_keys,
+                negated: *negated,
+            }
+        }
         Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp { op: *op, expr: Box::new(f(inner)) },
-        Expr::Cast { kind, expr: inner, data_type, array, format } => {
+        Expr::Cast { kind, expr: inner, data_type, format } => {
             Expr::Cast {
                 kind: kind.clone(),
                 expr: Box::new(f(inner)),
                 data_type: data_type.clone(),
-                array: *array,
                 format: format.clone(),
             }
         }
@@ -95,7 +93,6 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
             }
         }
 
-        // -- two children ---------------------------------------------------
         Expr::IsDistinctFrom(a, b) => Expr::IsDistinctFrom(Box::new(f(a)), Box::new(f(b))),
         Expr::IsNotDistinctFrom(a, b) => Expr::IsNotDistinctFrom(Box::new(f(a)), Box::new(f(b))),
         Expr::BinaryOp { left, op, right } => {
@@ -160,7 +157,6 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
             Expr::Position { expr: Box::new(f(inner)), r#in: Box::new(f(r#in)) }
         }
 
-        // -- three children -------------------------------------------------
         Expr::Between { expr: inner, negated, low, high } => {
             Expr::Between {
                 expr: Box::new(f(inner)),
@@ -178,7 +174,6 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
             }
         }
 
-        // -- list children --------------------------------------------------
         Expr::InList { expr: inner, list, negated } => {
             Expr::InList {
                 expr: Box::new(f(inner)),
@@ -204,7 +199,6 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
             Expr::Struct { values: values.iter().map(f).collect(), fields: fields.clone() }
         }
 
-        // -- structured with optional children ------------------------------
         Expr::Substring { expr: inner, substring_from, substring_for, special, shorthand } => {
             Expr::Substring {
                 expr: Box::new(f(inner)),
@@ -266,7 +260,6 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
             })
         }
 
-        // -- compound access ------------------------------------------------
         Expr::CompoundFieldAccess { root, access_chain } => {
             Expr::CompoundFieldAccess {
                 root: Box::new(f(root)),
@@ -310,33 +303,17 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
             }
         }
 
-        // -- Function and subquery nodes are NOT walked here. ---------------
-        // Callers typically need custom logic for these (translating args,
-        // injecting CTEs, rewriting names, etc.), so we just clone.
+        // Function and subquery nodes are not walked. Callers must handle them.
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => expr.clone(),
 
-        // -- Remaining variants without child exprs (Dictionary, Map, etc.) -
         _ => expr.clone(),
     }
 }
 
-// ---------------------------------------------------------------------------
-// try_map_expr_children  -  fallible immutable rebuild
-// ---------------------------------------------------------------------------
-
-/// Fallible version of [`map_expr_children`].  Takes two closures:
-///
-/// - `f_expr`: transforms each child [`Expr`], may fail.
-/// - `f_query`: transforms each child [`sqlparser::ast::Query`] (for
-///   `Subquery`, `Exists`, `InSubquery`), may fail.
-///
-/// **Leaf variants** (no child) are cloned as-is.  `Function` is **not**
-/// walked. Callers must handle it separately (function name rewriting, argument
-/// translation, etc.).
-///
-/// Unlike `map_expr_children`, this function also recurses into:
-/// - `Dictionary` / `Map` / `Lambda` / `MemberOf` fields
-/// - `Subquery`, `Exists`, `InSubquery` via `f_query`
+/// Fallible version of [`map_expr_children`]. `Function` is not walked, so
+/// callers must handle it separately (function name rewriting, argument
+/// translation, etc.). Also recurses into `Subquery`, `Exists`, and
+/// `InSubquery` via `f_query`.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(crate) fn try_map_expr_children<E>(
     expr: &Expr,
@@ -344,7 +321,6 @@ pub(crate) fn try_map_expr_children<E>(
     f_query: &impl Fn(&sqlparser::ast::Query) -> Result<sqlparser::ast::Query, E>,
 ) -> Result<Expr, E> {
     Ok(match expr {
-        // -- leaf nodes (no child Expr) → clone as-is -----------------------
         Expr::Identifier(_)
         | Expr::CompoundIdentifier(_)
         | Expr::Value(_)
@@ -353,7 +329,6 @@ pub(crate) fn try_map_expr_children<E>(
         | Expr::QualifiedWildcard(..)
         | Expr::MatchAgainst { .. } => expr.clone(),
 
-        // -- single child ---------------------------------------------------
         Expr::IsFalse(e) => Expr::IsFalse(Box::new(f(e)?)),
         Expr::IsNotFalse(e) => Expr::IsNotFalse(Box::new(f(e)?)),
         Expr::IsTrue(e) => Expr::IsTrue(Box::new(f(e)?)),
@@ -374,13 +349,20 @@ pub(crate) fn try_map_expr_children<E>(
         Expr::IsNormalized { expr: inner, form, negated } => {
             Expr::IsNormalized { expr: Box::new(f(inner)?), form: *form, negated: *negated }
         }
+        Expr::IsJson { expr: inner, kind, unique_keys, negated } => {
+            Expr::IsJson {
+                expr: Box::new(f(inner)?),
+                kind: *kind,
+                unique_keys: *unique_keys,
+                negated: *negated,
+            }
+        }
         Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp { op: *op, expr: Box::new(f(inner)?) },
-        Expr::Cast { kind, expr: inner, data_type, array, format } => {
+        Expr::Cast { kind, expr: inner, data_type, format } => {
             Expr::Cast {
                 kind: kind.clone(),
                 expr: Box::new(f(inner)?),
                 data_type: data_type.clone(),
-                array: *array,
                 format: format.clone(),
             }
         }
@@ -411,7 +393,6 @@ pub(crate) fn try_map_expr_children<E>(
             }
         }
 
-        // -- two children ---------------------------------------------------
         Expr::IsDistinctFrom(a, b) => Expr::IsDistinctFrom(Box::new(f(a)?), Box::new(f(b)?)),
         Expr::IsNotDistinctFrom(a, b) => Expr::IsNotDistinctFrom(Box::new(f(a)?), Box::new(f(b)?)),
         Expr::BinaryOp { left, op, right } => {
@@ -476,7 +457,6 @@ pub(crate) fn try_map_expr_children<E>(
             Expr::Position { expr: Box::new(f(inner)?), r#in: Box::new(f(r#in)?) }
         }
 
-        // -- three children -------------------------------------------------
         Expr::Between { expr: inner, negated, low, high } => {
             Expr::Between {
                 expr: Box::new(f(inner)?),
@@ -494,7 +474,6 @@ pub(crate) fn try_map_expr_children<E>(
             }
         }
 
-        // -- list children --------------------------------------------------
         Expr::InList { expr: inner, list, negated } => {
             Expr::InList {
                 expr: Box::new(f(inner)?),
@@ -537,7 +516,6 @@ pub(crate) fn try_map_expr_children<E>(
             }
         }
 
-        // -- structured with optional children ------------------------------
         Expr::Substring { expr: inner, substring_from, substring_for, special, shorthand } => {
             Expr::Substring {
                 expr: Box::new(f(inner)?),
@@ -592,7 +570,6 @@ pub(crate) fn try_map_expr_children<E>(
             }
         }
 
-        // -- compound access ------------------------------------------------
         Expr::CompoundFieldAccess { root, access_chain } => {
             Expr::CompoundFieldAccess {
                 root: Box::new(f(root)?),
@@ -606,7 +583,7 @@ pub(crate) fn try_map_expr_children<E>(
             Expr::JsonAccess { value: Box::new(f(value)?), path: try_map_json_path(path, f)? }
         }
 
-        // -- subquery nodes (use f_query) -----------------------------------
+        // Subquery and Exists nodes are walked via f_query.
         Expr::Subquery(q) => Expr::Subquery(Box::new(f_query(q)?)),
         Expr::Exists { subquery, negated } => {
             Expr::Exists { subquery: Box::new(f_query(subquery)?), negated: *negated }
@@ -619,7 +596,7 @@ pub(crate) fn try_map_expr_children<E>(
             }
         }
 
-        // -- Dictionary / Map / Lambda / MemberOf (recurse into children) ---
+        // Dictionary, Map, Lambda, and MemberOf recurse into their children.
         Expr::Dictionary(fields) => {
             Expr::Dictionary(
                 fields
@@ -661,7 +638,7 @@ pub(crate) fn try_map_expr_children<E>(
             })
         }
 
-        // -- Function is NOT walked; callers handle separately. -------------
+        // Function is not walked. Callers must handle it separately.
         Expr::Function(_) => expr.clone(),
     })
 }
@@ -719,15 +696,7 @@ fn try_map_json_path<E>(
     })
 }
 
-// ---------------------------------------------------------------------------
-// for_each_child_expr  -  read-only traversal
-// ---------------------------------------------------------------------------
-
-/// Call `f` on every direct child [`Expr`] inside `expr`.
-///
-/// This is the read-only equivalent of [`map_expr_children`]. It does not
-/// rebuild the tree.  Useful for collecting information (e.g. variable
-/// patterns).
+/// Read-only variant of [`map_expr_children`] that does not rebuild the tree.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
     match expr {
@@ -756,7 +725,9 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         | Expr::Prior(e) => f(e),
 
         Expr::Prefixed { value, .. } => f(value),
-        Expr::Named { expr: inner, .. } | Expr::IsNormalized { expr: inner, .. } => f(inner),
+        Expr::Named { expr: inner, .. }
+        | Expr::IsNormalized { expr: inner, .. }
+        | Expr::IsJson { expr: inner, .. } => f(inner),
         Expr::UnaryOp { expr: inner, .. }
         | Expr::Cast { expr: inner, .. }
         | Expr::Extract { expr: inner, .. }
@@ -911,10 +882,6 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// any_child_expr  -  read-only predicate
-// ---------------------------------------------------------------------------
-
 /// Return `true` if `predicate` returns `true` for any direct child [`Expr`]
 /// inside `expr`.
 pub(crate) fn any_child_expr(expr: &Expr, predicate: &impl Fn(&Expr) -> bool) -> bool {
@@ -927,12 +894,7 @@ pub(crate) fn any_child_expr(expr: &Expr, predicate: &impl Fn(&Expr) -> bool) ->
     found
 }
 
-// ---------------------------------------------------------------------------
-// mutate_expr_children  -  in-place mutation
-// ---------------------------------------------------------------------------
-
-/// Call `f` on every direct child `&mut Expr` inside `expr`, allowing in-place
-/// mutation.  Non-expression fields are left untouched.
+/// Calls `f` on every direct child `&mut Expr`, mutating in place.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(crate) fn mutate_expr_children(expr: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     match expr {
@@ -961,7 +923,9 @@ pub(crate) fn mutate_expr_children(expr: &mut Expr, f: &mut impl FnMut(&mut Expr
         | Expr::Prior(e) => f(e),
 
         Expr::Prefixed { value, .. } => f(value),
-        Expr::Named { expr: inner, .. } | Expr::IsNormalized { expr: inner, .. } => f(inner),
+        Expr::Named { expr: inner, .. }
+        | Expr::IsNormalized { expr: inner, .. }
+        | Expr::IsJson { expr: inner, .. } => f(inner),
         Expr::UnaryOp { expr: inner, .. }
         | Expr::Cast { expr: inner, .. }
         | Expr::Extract { expr: inner, .. }
@@ -1116,10 +1080,6 @@ pub(crate) fn mutate_expr_children(expr: &mut Expr, f: &mut impl FnMut(&mut Expr
     }
 }
 
-// ---------------------------------------------------------------------------
-// Subscript helpers
-// ---------------------------------------------------------------------------
-
 fn map_subscript(
     sub: &sqlparser::ast::Subscript,
     f: &impl Fn(&Expr) -> Expr,
@@ -1170,6 +1130,49 @@ fn mutate_subscript_expr(sub: &mut sqlparser::ast::Subscript, f: &mut impl FnMut
             }
         }
     }
+}
+
+/// `CASE WHEN <condition> THEN <then_expr> [ELSE <else_expr>] END`.
+///
+/// Omitting `else_expr` yields NULL when the condition is false or NULL, which
+/// is how the translators express a guarded value.
+#[must_use]
+pub(crate) fn case_when(condition: Expr, then_expr: Expr, else_expr: Option<Expr>) -> Expr {
+    Expr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: None,
+        conditions: vec![CaseWhen { condition, result: then_expr }],
+        else_result: else_expr.map(Box::new),
+    }
+}
+
+/// `<left> IS <right>`, SQLite's null-safe equality. PostgreSQL spells the
+/// same thing `IS NOT DISTINCT FROM`, which SQLite does not accept, and
+/// `BinaryOperator::Custom` is the only way to render the bare `IS`.
+#[must_use]
+pub(crate) fn null_safe_eq(left: Expr, right: Expr) -> Expr {
+    Expr::BinaryOp {
+        left: Box::new(left),
+        op: sqlparser::ast::BinaryOperator::Custom("IS".to_string()),
+        right: Box::new(right),
+    }
+}
+
+/// `NOT (<expr>)`, parenthesized so the negation binds the whole predicate
+/// rather than its leftmost operand.
+#[must_use]
+pub(crate) fn not_predicate(expr: Expr) -> Expr {
+    Expr::UnaryOp {
+        op: sqlparser::ast::UnaryOperator::Not,
+        expr: Box::new(Expr::Nested(Box::new(expr))),
+    }
+}
+
+/// `NOT (<left> IS <right>)`, SQLite's null-safe inequality.
+#[must_use]
+pub(crate) fn null_safe_neq(left: Expr, right: Expr) -> Expr {
+    not_predicate(null_safe_eq(left, right))
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -1285,6 +1288,10 @@ mod tests {
             ("is_unknown", "a IS UNKNOWN"),
             ("is_not_unknown", "a IS NOT UNKNOWN"),
             ("is_normalized", "a IS NORMALIZED"),
+            ("is_json", "a IS JSON"),
+            ("is_not_json", "a IS NOT JSON"),
+            ("is_json_array", "a IS JSON ARRAY"),
+            ("is_json_unique_keys", "a IS JSON OBJECT WITH UNIQUE KEYS"),
             ("nested", "(a + 1)"),
             ("unary_op_not", "NOT a"),
             ("unary_op_minus", "-a"),

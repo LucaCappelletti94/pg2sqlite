@@ -107,13 +107,9 @@ pub(crate) fn debug_variant_name(value: &impl core::fmt::Debug) -> String {
     debug.split(['(', '{', ' ']).next().unwrap_or("Unknown").to_string()
 }
 
-/// Recursively translate an expression using direction `D`, delegating all
-/// structural recursion to
-/// [`crate::impls::expr_helpers::try_map_expr_children`].
-///
-/// This handles the "boring" arms - variants that simply recurse into their
-/// children.  Callers should match direction-specific semantic transforms
-/// **before** falling through to this function.
+/// Translates `expr` using direction `D`, delegating structural recursion to
+/// [`crate::impls::expr_helpers::try_map_expr_children`]. Callers should handle
+/// direction-specific semantic transforms before falling through.
 pub(crate) fn translate_expr_recursive<D: TranslationDirection>(
     expr: &Expr,
     schema: &ParserDB,
@@ -126,9 +122,7 @@ pub(crate) fn translate_expr_recursive<D: TranslationDirection>(
     )
 }
 
-/// Translate the DO UPDATE assignments and selection inside an ON CONFLICT
-/// clause using direction `D`. Returns a translated
-/// [`sqlparser::ast::OnInsert::OnConflict`] variant.
+/// Translates DO UPDATE assignments and WHERE inside an ON CONFLICT clause.
 pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
     on_conflict: &sqlparser::ast::OnConflict,
     do_update: &sqlparser::ast::DoUpdate,
@@ -1044,9 +1038,7 @@ where
     }
 }
 
-/// Shared UPDATE translation used by both forward and reverse paths.
-///
-/// Forward-specific: validates that no joins exist on the target table.
+/// Shared UPDATE translation. Forward rejects joins on the target table.
 pub(crate) fn translate_update<D: TranslationDirection>(
     update: &sqlparser::ast::Update,
     schema: &ParserDB,
@@ -1060,12 +1052,8 @@ pub(crate) fn translate_update<D: TranslationDirection>(
         ));
     }
 
-    // Resolve the target table once so we can identify which assignment
-    // targets land in `vector` / `halfvec` columns (vector wrap) or in
-    // UUID-Blob columns (UUID wrap). The lookup is best-effort: if the
-    // table is not in the schema (e.g. transient CTEs or unknown
-    // targets) we fall back to passthrough. Both wraps are forward-only
-    // since reverse translation receives an already-rewritten input.
+    // Best-effort: falls back to passthrough for unknown tables (CTEs, etc.).
+    // Both wraps are forward-only. Reverse receives an already-rewritten input.
     let (vector_cols, uuid_cols): (Vec<(String, bool)>, Vec<String>) = if D::IS_FORWARD {
         match &update.table.relation {
             TableFactor::Table { name, .. } => {
@@ -1152,10 +1140,8 @@ pub(crate) fn translate_update<D: TranslationDirection>(
         limit,
     };
 
-    // Forward-only spatial predicate rewriting: route `ST_*` WHERE predicates
-    // over indexed columns through the rtree shadow via an IN-subquery, same
-    // shape as the SELECT path. Single-target-table only; UPDATE ... FROM
-    // and joined targets pass through unchanged.
+    // Route ST_* WHERE predicates through the rtree shadow via IN-subquery.
+    // Single-target-table only. UPDATE ... FROM and joined targets pass through.
     if D::IS_FORWARD
         && let Some(rewritten) =
             crate::impls::translator_impls::postgis::try_rewrite_spatial_update(
@@ -1168,10 +1154,8 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     Ok(translated)
 }
 
-/// Shared DISTINCT translation.
-///
-/// Forward: errors on `DISTINCT ON` (not supported in SQLite).
-/// Reverse: translates `DISTINCT ON` expressions.
+/// Shared DISTINCT translation. Forward rejects `DISTINCT ON` because SQLite
+/// does not support it. Reverse translates `DISTINCT ON` expressions.
 pub(crate) fn translate_distinct_shared<D: TranslationDirection>(
     distinct: Option<&sqlparser::ast::Distinct>,
     schema: &ParserDB,
@@ -1200,9 +1184,7 @@ pub(crate) fn translate_distinct_shared<D: TranslationDirection>(
         .transpose()
 }
 
-/// Shared TOP quantity translation.
-///
-/// Forward: clones as-is. Reverse: translates quantity expressions.
+/// Shared TOP translation. Forward clones as-is. Reverse translates quantity.
 pub(crate) fn translate_top_shared<D: TranslationDirection>(
     top: Option<&sqlparser::ast::Top>,
     schema: &ParserDB,
@@ -1313,13 +1295,8 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         select_modifiers: select.select_modifiers.clone(),
     };
 
-    // Forward-only spatial predicate rewriting (Step 6): drive `ST_*`
-    // predicates over indexed columns through the rtree shadow via an
-    // IN-subquery. Hooked here, at the single canonical Select translation
-    // entry point, so DISTINCT ON and GROUPING SETS rewrites (which call
-    // `<Select as Translator>::translate` directly via `query.rs:236/639`)
-    // get the same treatment as the normal `Query` dispatch path. Gated on
-    // `D::IS_FORWARD` to skip on reverse translation.
+    // Hooked here so DISTINCT ON and GROUPING SETS rewrites that call
+    // translate_select_shared directly also receive spatial rewriting.
     if D::IS_FORWARD
         && let Some(rewritten) =
             crate::impls::translator_impls::postgis::try_rewrite_spatial_select(
@@ -1332,9 +1309,7 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
     Ok(translated)
 }
 
-/// Shared `SetExpr` translation used by both forward and reverse paths.
-///
-/// Forward-specific: errors on `Table` and `Merge` variants.
+/// Shared `SetExpr` translation. Forward errors on `Table` and `Merge`.
 pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
     set_expr: &sqlparser::ast::SetExpr,
     schema: &ParserDB,
@@ -1343,9 +1318,6 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
     use sqlparser::ast::SetExpr;
     Ok(match set_expr {
         SetExpr::Select(select) => {
-            // Spatial predicate rewriting lives inside `translate_select_shared`
-            // so DISTINCT ON / GROUPING SETS rewrites that call it directly
-            // also receive the same treatment.
             SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, options)?))
         }
         SetExpr::Query(query) => {
@@ -1379,16 +1351,12 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
             }
             set_expr.clone()
         }
-        // Catch-all for non-matching DML wrappers
         SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) => set_expr.clone(),
     })
 }
 
-/// Shared base `Query` translation used by both forward and reverse paths.
-///
-/// Forward-specific: strips locks and for_clause. Reverse preserves them.
-/// Note: Forward path may call DISTINCT ON / GROUPING SETS rewrites separately
-/// before falling through to this function.
+/// Shared `Query` translation. Forward strips row locks and `for_clause`.
+/// Callers may apply DISTINCT ON and GROUPING SETS rewrites first.
 pub(crate) fn translate_query_shared<D: TranslationDirection>(
     query: &Query,
     schema: &ParserDB,
@@ -1690,7 +1658,6 @@ pub(crate) fn translate_join_constraint<D: TranslationDirection>(
 ) -> Result<JoinConstraint, Error> {
     Ok(match constraint {
         JoinConstraint::On(expr) => JoinConstraint::On(D::translate_expr(expr, schema, options)?),
-        // USING and other constraints don't need expression translation
         JoinConstraint::Using(idents) => JoinConstraint::Using(idents.clone()),
         JoinConstraint::Natural => JoinConstraint::Natural,
         JoinConstraint::None => JoinConstraint::None,
@@ -1716,8 +1683,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             sample,
             index_hints,
         } => {
-            // Detect PostgreSQL table-valued functions called with arguments.
-            // These appear as TableFactor::Table with args: Some(...).
+            // generate_series with args parses as TableFactor::Table (not Function).
             if D::IS_FORWARD && args.is_some() && is_generate_series_object_name(name) {
                 return Err(generate_series_not_supported_error());
             }
@@ -1764,7 +1730,6 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             }
         }
         TableFactor::Function { lateral, name, args, with_ordinality, alias } => {
-            // Detect PostgreSQL table-valued functions that have no SQLite equivalent
             if D::IS_FORWARD && is_generate_series_object_name(name) {
                 return Err(generate_series_not_supported_error());
             }
@@ -1786,6 +1751,18 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             with_offset_alias,
             with_ordinality,
         } => {
+            // SQLite has no UNNEST; forward translation lowers it onto
+            // `json_each`. Reverse translation leaves it alone.
+            if D::IS_FORWARD {
+                return crate::impls::translator_impls::array::translate_unnest_factor(
+                    array_exprs,
+                    alias.as_ref(),
+                    *with_offset,
+                    *with_ordinality,
+                    schema,
+                    options,
+                );
+            }
             TableFactor::UNNEST {
                 alias: alias.clone(),
                 array_exprs: array_exprs
@@ -1963,7 +1940,6 @@ pub(crate) fn translate_select_item<D: TranslationDirection>(
                 alias: alias.clone(),
             }
         }
-        // Wildcards and qualified wildcards don't need translation
         other => other.clone(),
     })
 }
