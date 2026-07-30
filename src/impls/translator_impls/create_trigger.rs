@@ -18,12 +18,13 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         Assignment, AssignmentTarget, BinaryOperator, ConditionalStatements, CreateTrigger,
-        DropTrigger, Expr, Ident, ObjectName, ObjectNamePart, Statement, TableFactor,
-        TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerObject, TriggerObjectKind,
-        TriggerPeriod, Update, helpers::attached_token::AttachedToken,
+        DropTrigger, Expr, GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select,
+        SelectFlavor, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, TriggerEvent,
+        TriggerExecBodyType, TriggerObject, TriggerObjectKind, TriggerPeriod, Update, Value,
+        ValueWithSpan, helpers::attached_token::AttachedToken,
     },
     keywords::Keyword,
-    tokenizer::{Token, TokenWithSpan, Word},
+    tokenizer::{Span, Token, TokenWithSpan, Word},
 };
 
 use crate::{
@@ -106,6 +107,68 @@ fn generate_maintenance_trigger_body(
             keyword: Keyword::END,
         }))),
     })
+}
+
+/// Replaces an empty translated body with `SELECT NULL`, reporting the trigger
+/// whose body vanished.
+///
+/// The report is unconditional because nothing here can tell an intentional
+/// no-op, a plpgsql function whose only statement is `RETURN NEW`, from a body
+/// the plpgsql translator emptied by dropping statements it could not render.
+fn substitute_no_op_body_when_empty(
+    mut body: sqlparser::ast::BeginEndStatements,
+) -> sqlparser::ast::BeginEndStatements {
+    if !body.statements.is_empty() {
+        return body;
+    }
+
+    crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+        construct: "empty trigger body",
+        reason: "the translated trigger body has no statements left, so the trigger does nothing. \
+                 SQLite rejects an empty BEGIN END, so it carries SELECT NULL instead.",
+    });
+
+    body.statements = vec![Statement::Query(Box::new(Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(Select {
+            select_token: AttachedToken::empty(),
+            distinct: None,
+            top: None,
+            top_before_distinct: false,
+            projection: vec![SelectItem::UnnamedExpr(Expr::Value(ValueWithSpan {
+                value: Value::Null,
+                span: Span::empty(),
+            }))],
+            into: None,
+            from: vec![],
+            lateral_views: vec![],
+            selection: None,
+            group_by: GroupByExpr::Expressions(vec![], vec![]),
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+            named_window: vec![],
+            qualify: None,
+            connect_by: vec![],
+            window_before_qualify: false,
+            exclude: None,
+            optimizer_hints: Vec::new(),
+            value_table_mode: None,
+            prewhere: None,
+            flavor: SelectFlavor::Standard,
+            select_modifiers: None,
+        }))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }))];
+    body
 }
 
 fn generate_standard_trigger_body(
@@ -432,6 +495,14 @@ impl Translator for CreateTrigger {
                 exec_body.func_desc.name
             )));
         };
+
+        // SQLite requires at least one statement between BEGIN and END, so an
+        // emptied body is `near "END": syntax error` rather than a trigger that
+        // does nothing. Substituting `SELECT NULL` keeps the trigger object in
+        // place, which skipping the statement would not: a later DROP TRIGGER
+        // would find nothing, and a CREATE OR REPLACE could not emit its DROP
+        // at all, since this returns pairs in which the CREATE is not optional.
+        let function_body = substitute_no_op_body_when_empty(function_body);
 
         let maybe_drop_trigger = or_replace.then(|| {
             DropTrigger {
