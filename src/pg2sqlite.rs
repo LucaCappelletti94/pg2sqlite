@@ -118,10 +118,11 @@ fn statement_contains_like(statement: &Statement) -> bool {
     .is_break()
 }
 
-/// Registers every declared object name in `statements` so the read-only
-/// deny-trigger pass can reject names that collide with existing objects. Uses
-/// raw statements because the translation schema omits index and trigger
-/// definitions.
+/// Registers every declared object name in `statements`, so the read-only
+/// deny-trigger pass can reject names that collide with existing objects, and
+/// every function a trigger executes, so the `CREATE FUNCTION` arm knows which
+/// definitions are realised inside a trigger rather than lost. Both use raw
+/// statements because the translation schema omits trigger definitions.
 fn populate_declared_object_names(statements: &[Statement], options: &mut Pg2SqliteOptions) {
     for stmt in statements {
         let name = match stmt {
@@ -133,6 +134,13 @@ fn populate_declared_object_names(statements: &[Statement], options: &mut Pg2Sql
         };
         if let Some(name) = name {
             options.add_declared_object_name(last_ident_value_or_display(name));
+        }
+
+        if let Statement::CreateTrigger(create_trigger) = stmt
+            && let Some(exec_body) = &create_trigger.exec_body
+        {
+            options
+                .add_trigger_function_name(last_ident_value_or_display(&exec_body.func_desc.name));
         }
     }
 }
@@ -153,13 +161,15 @@ impl Pg2Sqlite {
         statements
             .iter()
             .filter(|statement| {
-                // AlterTable with RenameTable triggers a bug in sql-traits: after the
-                // rename the internal column arcs still reference the old CreateTable,
-                // so a subsequent rls_enabled() call panics on table-not-found. Keep
-                // AlterTable statements that only carry non-rename operations (e.g.
-                // ENABLE ROW LEVEL SECURITY) so they can update the schema correctly.
-                // The rename itself is translated at the statement level without
-                // schema mutation.
+                // Every statement is translated against one schema snapshot, so a
+                // rename applied to it hides the table from the statements written
+                // before the rename, which then fail to resolve their own table.
+                // `ALTER TABLE ... RENAME TO` becomes a SQLite rename from the
+                // statement alone and needs no schema entry, and `RENAME TABLE` is
+                // refused outright, so excluding both keeps their own diagnostics
+                // rather than a schema lookup failure. An `ALTER TABLE` carrying
+                // only non-rename operations is kept, because `ENABLE ROW LEVEL
+                // SECURITY` and friends must reach the schema.
                 if let Statement::AlterTable(alter_table) = statement {
                     return !alter_table
                         .operations
@@ -172,6 +182,7 @@ impl Pg2Sqlite {
                         | Statement::CreateTrigger(_)
                         | Statement::Drop { .. }
                         | Statement::DropTrigger(_)
+                        | Statement::RenameTable(_)
                 )
             })
             .cloned()

@@ -3,8 +3,23 @@
 //!
 //! Translators push warnings through a thread-local collector installed
 //! by `Pg2Sqlite::translate_with_report`. The plain `translate` API
-//! ignores them. The collector is std-only; under no_std features
-//! warnings are silently discarded (no allocator to back the global).
+//! ignores them. The collector is std-only, so under no_std features warnings
+//! are silently discarded, there being no allocator to back the global.
+//!
+//! # When a warning is the right answer
+//!
+//! A warning is permitted ONLY when the drop provably cannot affect a query
+//! result: server administration, publish and subscribe, access control,
+//! planner hints. If the reason cannot be stated in one sentence, the construct
+//! is a hard error instead, which is the default. A construct whose effect the
+//! pipeline realises elsewhere is neither: it emits nothing and warns nothing,
+//! and it belongs to the closed list documented in
+//! `impls::translator_impls::statement`, which also carries the per-statement
+//! classification. `tests/test_no_statement_is_silently_dropped.rs` enforces
+//! the whole policy.
+//!
+//! Do not add a fourth mechanism. There are three outcomes, plus that closed
+//! list.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]

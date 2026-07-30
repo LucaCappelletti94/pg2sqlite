@@ -224,15 +224,21 @@ fn statement_translation_covers_if_injection_conditionless_and_trigger_paths() {
         assert!(sql.contains("TRUE"), "expected injected condition in: {sql}");
     }
 
+    // A conditionless IF used to be dropped whole, taking its branch statements
+    // with it. It is now reported, because those statements are the work the
+    // script asked for.
     let stmt = parse_statement("IF TRUE THEN DELETE FROM users; END IF;");
     let Statement::If(mut if_stmt) = stmt else {
         panic!("expected IF statement");
     };
     if_stmt.if_block.condition = None;
-    let translated = Statement::If(if_stmt)
+    let error = Statement::If(if_stmt)
         .translate(&schema, &options)
-        .expect("conditionless IF should be ignored");
-    assert!(translated.is_empty());
+        .expect_err("a conditionless IF must be reported");
+    assert!(
+        error.to_string().contains("no condition"),
+        "expected the error to say the block carries no condition, got {error}"
+    );
 }
 
 #[test]

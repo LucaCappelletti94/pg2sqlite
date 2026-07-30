@@ -455,18 +455,38 @@ fn test_drop_role_ignored() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// A cascading `DROP SCHEMA` deletes every table in the schema, so it cannot be
+/// dropped quietly. Inverted from `test_drop_schema_ignored`, which pinned the
+/// silent drop.
 #[test]
-fn test_drop_schema_ignored() -> Result<(), Box<dyn std::error::Error>> {
-    let translated = translate_statement("DROP SCHEMA my_schema CASCADE;")?;
-    assert!(translated.is_empty(), "DROP SCHEMA should produce no output");
+fn drop_schema_cascade_is_rejected() {
+    let error = translate_statement("DROP SCHEMA my_schema CASCADE;")
+        .expect_err("a cascading DROP SCHEMA must be reported");
+    assert!(
+        error.to_string().contains("DROP SCHEMA my_schema CASCADE"),
+        "expected the error to name the statement, got {error}"
+    );
+}
+
+/// Without `CASCADE` the schema has to be empty, so there is nothing in the
+/// SQLite output to remove and the statement is dropped.
+#[test]
+fn drop_schema_without_cascade_produces_no_output() -> Result<(), Box<dyn std::error::Error>> {
+    let translated = translate_statement("DROP SCHEMA my_schema;")?;
+    assert!(translated.is_empty(), "an empty schema has nothing to drop in SQLite");
     Ok(())
 }
 
+/// `DROP DATABASE` deletes everything, and a SQLite database is the file
+/// itself. Inverted from `test_drop_database_ignored`.
 #[test]
-fn test_drop_database_ignored() -> Result<(), Box<dyn std::error::Error>> {
-    let translated = translate_statement("DROP DATABASE my_database;")?;
-    assert!(translated.is_empty(), "DROP DATABASE should produce no output");
-    Ok(())
+fn drop_database_is_rejected() {
+    let error = translate_statement("DROP DATABASE my_database;")
+        .expect_err("DROP DATABASE must be reported");
+    assert!(
+        error.to_string().contains("DROP DATABASE my_database"),
+        "expected the error to name the statement, got {error}"
+    );
 }
 
 #[test]

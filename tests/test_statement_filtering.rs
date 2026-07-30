@@ -174,11 +174,22 @@ fn create_schema_filtered() {
     assert_eq!(count, 0, "CREATE SCHEMA should be filtered");
 }
 
+/// `SET search_path` decides which table a bare name means, so dropping it
+/// could change which table a later statement reads. Inverted from
+/// `set_statement_filtered`, which pinned the silent drop.
 #[test]
-fn set_statement_filtered() {
-    let sql = "SET search_path TO myschema;";
-    let count = translate_count(sql).unwrap();
-    assert_eq!(count, 0, "SET should be filtered");
+fn set_search_path_is_rejected() {
+    let error = translate("SET search_path TO myschema;").expect_err("SET must be reported");
+    assert!(error.contains("search_path"), "expected the error to name the setting, got {error}");
+}
+
+/// A setting that only governs how long a statement may run cannot change its
+/// result, so it is dropped rather than refused. This is the pg_dump preamble,
+/// which must keep translating.
+#[test]
+fn set_statement_timeout_is_dropped() {
+    let count = translate_count("SET statement_timeout = 0;").unwrap();
+    assert_eq!(count, 0, "a result-neutral SET emits nothing");
 }
 
 #[test]

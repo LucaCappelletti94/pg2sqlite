@@ -1,5 +1,32 @@
 //! Implementation of the [`Translator`] trait for the
 //! `Statement` type.
+//!
+//! # How an untranslatable construct is reported
+//!
+//! Every statement leaves this module having produced one of four outcomes,
+//! and there is no fifth. A silently empty result is a defect.
+//!
+//! 1. **Emitted.** One or more SQLite statements.
+//! 2. **Hard error.** `Err(Error::UnsupportedSQLiteFeature)`. This is the
+//!    DEFAULT. Use it when the construct carries meaning that cannot be
+//!    preserved, when dropping it could change results, and for anything
+//!    unrecognised.
+//! 3. **Warn and drop.** `drop_with_warning`, permitted ONLY when the drop
+//!    provably cannot affect a query result. If that cannot be stated in one
+//!    sentence, it is not this outcome.
+//! 4. **Consumed by the translation schema.** The statement is realised
+//!    elsewhere in the pipeline, so contributing no SQLite statement is the
+//!    COMPLETE translation rather than a loss. `CREATE POLICY` becoming a row
+//!    level security view and trigger set is the clearest case. This list is
+//!    closed and each member says where its effect is realised.
+//!
+//! Silence is additionally permitted where a caller-set option asks for it,
+//! currently only `RoleTableAccess::Deny`, which is documented at the option
+//! that sets it.
+//!
+//! The match over `Statement` has no wildcard arm on purpose: a new
+//! `sqlparser` variant fails to compile until it is classified here, which is
+//! stronger than discovering it at run time.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -19,8 +46,9 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         AlterTable, AlterTableOperation, BinaryOperator, CascadeOption, ColumnDef, ColumnOption,
-        CopySource, CopyTarget, Delete, DescribeAlias, Expr, FromTable, Merge, ObjectType,
-        Statement, TableFactor, TableWithJoins, Truncate, TruncateIdentityOption, UnaryOperator,
+        CopySource, CopyTarget, CreateFunction, Delete, DescribeAlias, DiscardObject, Expr,
+        FromTable, Merge, ObjectType, RenameTable, RenameTableNameKind, Set, Statement,
+        TableFactor, TableWithJoins, Truncate, TruncateIdentityOption, UnaryOperator,
         helpers::attached_token::AttachedToken,
     },
     dialect::SQLiteDialect,
@@ -31,9 +59,10 @@ use crate::{
     impls::{
         generated_sql::parse_generated_sql,
         object_name::{
-            append_suffix, last_ident, normalize_schema_qualified_object_name_for_sqlite,
-            quote_identifier, sql_string_literal, sqlite_unqualified_object_name,
-            table_has_implicit_public_rls, table_with_implicit_public_lookup,
+            append_suffix, last_ident, last_ident_value_or_display,
+            normalize_schema_qualified_object_name_for_sqlite, quote_identifier,
+            sql_string_literal, sqlite_unqualified_object_name, table_has_implicit_public_rls,
+            table_with_implicit_public_lookup,
         },
         placeholder::rewrite_placeholders_for_sqlite,
         translator_impls::{
@@ -97,121 +126,204 @@ fn append_translated_create_trigger_statements(
     Ok(())
 }
 
-macro_rules! unsupported_statement_patterns {
+/// Statements that move data into or out of the database. SQLite has no
+/// statement form for any of them, and dropping one loses the rows it carries.
+macro_rules! data_movement_patterns {
     () => {
-        | Statement::ShowVariable { .. }
-        | Statement::Raise { .. }
-        | Statement::Print { .. }
-        | Statement::Open { .. }
-        | Statement::Close { .. }
-        | Statement::Fetch { .. }
-        | Statement::Declare { .. }
-        | Statement::Use { .. }
-        | Statement::Throw { .. }
-        | Statement::Load { .. }
-        | Statement::Return { .. }
-        | Statement::Assert { .. }
-        | Statement::While { .. }
-        | Statement::ExplainTable { .. }
-        | Statement::Kill { .. }
-        | Statement::ShowTables { .. }
-        | Statement::CreateFunction(_)
-        | Statement::CreateExtension(_)
-        | Statement::CreatePolicy(_)
-        | Statement::Set(_)
-        | Statement::Call(_)
-        | Statement::Reset(_)
-        | Statement::Directory { .. }
-        | Statement::Discard { .. }
-        | Statement::ShowViews { .. }
-        | Statement::ShowFunctions { .. }
-        | Statement::ShowCollation { .. }
-        | Statement::ShowCreate { .. }
-        | Statement::ShowSchemas { .. }
-        | Statement::ShowCharset { .. }
-        | Statement::ShowColumns { .. }
-        // User/Role/Schema management (no SQLite equivalent). Postgres
-        // `ALTER USER` now parses as `Statement::AlterRole` on apache
-        // main (upstream #2374) and is handled by the ALTER ROLE arm
-        // below; the `AlterUser` variant here covers dialects such as
-        // Snowflake that still emit it.
-        | Statement::AlterUser(_)
-        | Statement::CreateSchema { .. }
-        | Statement::CreateDatabase { .. }
-        | Statement::AlterSchema(_)
-        | Statement::AlterSession { .. }
-        | Statement::CreateSequence { .. }
-        | Statement::CreateProcedure { .. }
-        | Statement::CreateMacro { .. }
-        | Statement::AlterType(_)
-        | Statement::AlterPolicy(_)
-        | Statement::DropPolicy { .. }
-        | Statement::DropFunction { .. }
-        | Statement::DropExtension { .. }
-        | Statement::DropDomain { .. }
-        | Statement::DropProcedure { .. }
-        | Statement::CreateOperator(_)
-        | Statement::CreateOperatorClass(_)
-        | Statement::CreateOperatorFamily(_)
-        | Statement::AlterOperator(_)
-        | Statement::AlterOperatorClass(_)
-        | Statement::AlterOperatorFamily(_)
-        | Statement::DropOperator { .. }
-        | Statement::DropOperatorClass { .. }
-        | Statement::DropOperatorFamily { .. }
-        | Statement::Comment { .. }
-        | Statement::CopyIntoSnowflake { .. }
-        | Statement::LockTables { .. }
-        | Statement::UnlockTables
-        | Statement::Flush { .. }
-        | Statement::ShowStatus { .. }
-        | Statement::ShowVariables { .. }
-        | Statement::ShowDatabases { .. }
-        | Statement::ShowObjects(_)
-        | Statement::RaisError { .. }
-        | Statement::Deny { .. }
-        | Statement::AlterView { .. }
-        | Statement::AlterIndex { .. }
-        | Statement::Msck(_)
-        | Statement::RenameTable(_)
-        | Statement::AttachDuckDBDatabase { .. }
-        | Statement::DetachDuckDBDatabase { .. }
-        | Statement::CreateConnector(_)
-        | Statement::AlterConnector { .. }
-        | Statement::DropConnector { .. }
-        | Statement::CreateSecret { .. }
-        | Statement::DropSecret { .. }
-        | Statement::CreateStage { .. }
-        | Statement::Cache { .. }
-        | Statement::UNCache { .. }
-        | Statement::Install { .. }
-        | Statement::List { .. }
-        | Statement::Remove { .. }
-        | Statement::LoadData { .. }
-        | Statement::OptimizeTable { .. }
-        | Statement::Unload { .. }
-        | Statement::ExportData(_)
-        | Statement::Case(_)
-        // PostgreSQL/Snowflake collation DDL (sqlparser 0.62)
-        | Statement::CreateCollation(_)
-        | Statement::AlterCollation(_)
-        // PostgreSQL ALTER FUNCTION / ALTER AGGREGATE (sqlparser 0.62)
-        | Statement::AlterFunction(_)
-        // Locking and SHOW variants (sqlparser 0.62)
-        | Statement::Lock { .. }
-        | Statement::ShowCatalogs { .. }
-        | Statement::ShowProcessList { .. }
-        // MSSQL WAITFOR (sqlparser 0.62)
-        | Statement::WaitFor { .. }
-        // Snowflake PUT (post-0.62.0 upstream main)
-        | Statement::Put { .. }
-        // Post-0.62.0 upstream main: Postgres text-search DDL plus
-        // Snowflake file-format and warehouse DDL.
-        | Statement::CreateTextSearch(_)
-        | Statement::AlterTextSearch(_)
-        | Statement::CreateFileFormat { .. }
-        | Statement::CreateWarehouse(_)
+        Statement::Directory { .. }
+            | Statement::ExportData(_)
+            | Statement::Unload { .. }
+            | Statement::LoadData { .. }
+            | Statement::CopyIntoSnowflake { .. }
+            | Statement::Put { .. }
+            | Statement::Remove { .. }
+            | Statement::List { .. }
     };
+}
+
+/// Procedural control flow and diagnostics. Each carries the script's own
+/// logic, so dropping one changes what the script does.
+macro_rules! control_flow_patterns {
+    () => {
+        Statement::Case(_)
+            | Statement::While { .. }
+            | Statement::Raise { .. }
+            | Statement::RaisError { .. }
+            | Statement::Throw { .. }
+            | Statement::Print { .. }
+            | Statement::Return { .. }
+            | Statement::Assert { .. }
+    };
+}
+
+/// Cursor statements. A cursor loop reads and often writes rows, so the four
+/// together perform the work the script intended.
+macro_rules! cursor_patterns {
+    () => {
+        Statement::Declare { .. }
+            | Statement::Open { .. }
+            | Statement::Fetch { .. }
+            | Statement::Close { .. }
+    };
+}
+
+/// Stored procedures and macros. Their bodies are statements that would be
+/// lost, and `CALL` performs the work.
+macro_rules! procedural_patterns {
+    () => {
+        Statement::Call(_)
+            | Statement::CreateProcedure { .. }
+            | Statement::DropProcedure { .. }
+            | Statement::CreateMacro { .. }
+    };
+}
+
+/// Session state other than `SET`, which needs per-setting treatment. Each of
+/// these changes how later statements resolve names or behave.
+macro_rules! session_state_patterns {
+    () => {
+        Statement::Reset(_) | Statement::Use { .. } | Statement::AlterSession { .. }
+    };
+}
+
+/// PostgreSQL extensibility objects. This group is a hard error rather than a
+/// warned drop because its absence is NOT reported at the point of use:
+/// `expr.rs` passes an unrecognised `BinaryOperator::Custom` straight through,
+/// so dropping the definition would leave the emitted SQL to fail at run time.
+macro_rules! extensibility_patterns {
+    () => {
+        Statement::CreateOperator(_)
+            | Statement::CreateOperatorClass(_)
+            | Statement::CreateOperatorFamily(_)
+            | Statement::AlterOperator(_)
+            | Statement::AlterOperatorClass(_)
+            | Statement::AlterOperatorFamily(_)
+            | Statement::DropOperator { .. }
+            | Statement::DropOperatorClass { .. }
+            | Statement::DropOperatorFamily { .. }
+            | Statement::CreateTextSearch(_)
+            | Statement::AlterTextSearch(_)
+    };
+}
+
+/// Redefinitions of an existing object. SQLite can only drop and recreate,
+/// which needs the object's current definition, and the translation schema does
+/// not carry index definitions (see R83), so neither can be rewritten here.
+macro_rules! alter_in_place_patterns {
+    () => {
+        Statement::AlterIndex { .. } | Statement::AlterView { .. }
+    };
+}
+
+/// Statements that address a database rather than objects inside one.
+macro_rules! database_level_patterns {
+    () => {
+        Statement::CreateDatabase { .. }
+            | Statement::AttachDuckDBDatabase { .. }
+            | Statement::DetachDuckDBDatabase { .. }
+    };
+}
+
+/// Reason shared by every statement that only reports server state.
+const REASON_INTROSPECTION: &str =
+    "SQLite has no catalog or settings statement, and reporting state cannot affect a result.";
+
+/// Reason shared by role, privilege, and ownership statements.
+const REASON_ACCESS_CONTROL: &str =
+    "SQLite has no role or privilege model, so there is nothing for the statement to act on.";
+
+/// Reason shared by statements that only administer the server.
+const REASON_ADMINISTRATION: &str =
+    "SQLite has no server to administer, and the request cannot affect a result.";
+
+/// Reason shared by planner and locking hints.
+const REASON_HINT: &str = "SQLite plans each statement itself and locks the whole database per transaction, so the hint \
+     has no counterpart and no effect on results.";
+
+/// Reason shared by type-like object definitions the host registers instead.
+const REASON_HOST_REGISTERED: &str = "SQLite has no SQL form for this object. Where one is needed at run time it is registered \
+     through SQLite's C API by the host application, so the definition cannot be emitted.";
+
+/// Drops a statement with a `LossyDrop` warning. Outcome 3 of the reporting
+/// policy in this module's documentation, so `construct` names the statement
+/// and `reason` states why the drop cannot change a result.
+fn drop_with_warning(construct: &'static str, reason: &'static str) -> Vec<Statement> {
+    crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop { construct, reason });
+    Vec::new()
+}
+
+/// Refuses `statement`, outcome 2 of the reporting policy. Renders the
+/// statement so the message names what was refused rather than only its kind.
+fn reject_unsupported_statement(statement: &Statement, reason: &str) -> Error {
+    Error::UnsupportedSQLiteFeature(format!("{statement} has no SQLite equivalent. {reason}"))
+}
+
+/// Reason shared by the publish and subscribe statements.
+const REASON_PUB_SUB: &str = "SQLite has no channel to publish on or listen to.";
+
+/// Reason shared by type and domain definitions: a translated column carries
+/// the underlying SQLite storage class, so the named wrapper has no use.
+const REASON_TYPE_DEFINITION: &str = "SQLite has no composite, enum, or domain types, and a column of one is translated to the \
+     storage class underneath it.";
+
+/// Reason shared by foreign data and credential definitions.
+const REASON_FOREIGN_DATA: &str = "SQLite reads only its own database file, so it has no foreign data layer for the definition \
+     to configure.";
+
+/// Reason a function definition is dropped. A trigger function is not lost: its
+/// body is inlined into every trigger that calls it, which is what
+/// `create_trigger.rs` uses `function_body_with_context` for. Any other
+/// function has to be registered by the host, the same way this crate expects
+/// `current_setting` to be registered for row level security.
+const REASON_FUNCTION: &str = "SQLite has no statement that defines a function. A trigger function's body is inlined into \
+     the triggers that call it, and any other function must be registered by the host through \
+     SQLite's C API.";
+
+/// Reason an extension declaration is dropped: extension functions are
+/// translated by name, independently of any declaration.
+const REASON_EXTENSION: &str = "SQLite has no extension registry, and the functions an extension provides are translated by \
+     name whether or not it is declared.";
+
+/// Reason a sequence definition is dropped. This one is only result-neutral
+/// because every function that reads a sequence (`nextval`, `currval`,
+/// `lastval`, `setval`) is already refused in `function.rs`, so a translation
+/// that uses the sequence cannot succeed quietly.
+const REASON_SEQUENCE: &str = "SQLite has no sequences, and every function that reads one is refused, so nothing can use \
+     this definition without being reported.";
+
+/// Reason a `SET` of a result-neutral setting is dropped.
+const REASON_SET_NEUTRAL: &str = "The setting governs how long a statement may run, how much it reports, or how a literal was \
+     parsed, so SQLite needs no counterpart and the result cannot change.";
+
+/// Reason a wait statement is dropped.
+const REASON_WAIT: &str = "SQLite has no statement that waits, and waiting changes when a result arrives rather than what \
+     it is.";
+
+/// Reason a `DROP` of a PostgreSQL-only object kind is a warned drop: the
+/// object never reached the SQLite output, because the statement that would
+/// have created it is itself dropped or refused, so there is nothing to remove.
+const REASON_DROP_OF_ABSENT_OBJECT: &str = "SQLite has no object of this kind, and the matching CREATE never emitted one, so the drop \
+     removes nothing that exists.";
+
+/// Static label for the warning emitted when a `DROP` names an object kind
+/// SQLite does not have.
+fn drop_label(object_type: ObjectType) -> &'static str {
+    match object_type {
+        ObjectType::Schema => "DROP SCHEMA",
+        ObjectType::Role => "DROP ROLE",
+        ObjectType::User => "DROP USER",
+        ObjectType::Sequence => "DROP SEQUENCE",
+        ObjectType::Type => "DROP TYPE",
+        ObjectType::Collation => "DROP COLLATION",
+        ObjectType::Stage => "DROP STAGE",
+        ObjectType::Stream => "DROP STREAM",
+        ObjectType::Warehouse => "DROP WAREHOUSE",
+        ObjectType::Table
+        | ObjectType::View
+        | ObjectType::Index
+        | ObjectType::MaterializedView
+        | ObjectType::Database => "DROP",
+    }
 }
 
 fn translate_create_table(
@@ -443,6 +555,13 @@ fn translate_alter_table(
 /// correctly contributes no `ALTER TABLE` of its own. Anything with no SQLite
 /// form is an error rather than a silent drop, because dropping it would change
 /// which rows the database accepts or returns.
+///
+/// A rename is checked rather than passed through. PostgreSQL spells it
+/// `RENAME TO <bare name>` and nothing else, so the two spellings `sqlparser`
+/// also accepts are refused: `RENAME AS` is MySQL, and a schema-qualified
+/// target is a syntax error in PostgreSQL. Both are also syntax errors in
+/// SQLite (`near "AS"` and `near "."`), so passing either through would emit
+/// SQL that cannot run.
 fn translate_alter_table_operation(
     operation: &AlterTableOperation,
     alter_table: &AlterTable,
@@ -450,9 +569,13 @@ fn translate_alter_table_operation(
     options: &Pg2SqliteOptions,
 ) -> Result<Option<AlterTableOperation>, Error> {
     match operation {
-        AlterTableOperation::RenameTable { .. }
-        | AlterTableOperation::RenameColumn { .. }
-        | AlterTableOperation::DropColumn { .. } => Ok(Some(operation.clone())),
+        AlterTableOperation::RenameTable { table_name } => {
+            reject_untranslatable_rename_target(table_name, alter_table)?;
+            Ok(Some(operation.clone()))
+        }
+        AlterTableOperation::RenameColumn { .. } | AlterTableOperation::DropColumn { .. } => {
+            Ok(Some(operation.clone()))
+        }
         AlterTableOperation::AddColumn {
             column_keyword,
             if_not_exists,
@@ -510,6 +633,57 @@ fn reject_unsupported_added_column(column_def: &ColumnDef, table_name: &str) -> 
         )));
     }
     Ok(())
+}
+
+/// Refuses the rename spellings PostgreSQL does not have.
+///
+/// PostgreSQL accepts exactly `ALTER TABLE <name> RENAME TO <bare name>`.
+/// `sqlparser`'s PostgreSQL dialect is looser and also produces
+/// `RenameTableNameKind::As` for `RENAME AS`, which is MySQL, and accepts a
+/// schema-qualified target. Both were verified rejected by PostgreSQL 16, so
+/// input containing either is not the PostgreSQL this crate translates, and
+/// both are syntax errors in SQLite as well.
+fn reject_untranslatable_rename_target(
+    table_name: &RenameTableNameKind,
+    alter_table: &AlterTable,
+) -> Result<(), Error> {
+    let RenameTableNameKind::To(target) = table_name else {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "ALTER TABLE {} RENAME AS is MySQL syntax, which PostgreSQL rejects and SQLite rejects \
+             with `near \"AS\": syntax error`. Write RENAME TO instead.",
+            alter_table.name
+        )));
+    };
+
+    if target.0.len() > 1 {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "ALTER TABLE {} RENAME TO {target} cannot name a schema for the new table. PostgreSQL \
+             rejects a qualified target, since a rename never moves a table between schemas, and \
+             SQLite rejects it too. Name the new table alone.",
+            alter_table.name
+        )));
+    }
+
+    Ok(())
+}
+
+/// Refuses `RENAME TABLE`, which is MySQL rather than PostgreSQL.
+///
+/// `sqlparser` parses it under the PostgreSQL dialect, but PostgreSQL 16
+/// rejects it outright, so a file containing it is not the input this crate
+/// accepts. SQLite has no `RENAME` statement either, only the `ALTER TABLE`
+/// clause, so passing it through would emit `near "RENAME": syntax error`.
+fn reject_rename_table(renames: &[RenameTable]) -> Error {
+    let rewritten = renames
+        .iter()
+        .map(|rename| format!("ALTER TABLE {} RENAME TO {}", rename.old_name, rename.new_name))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Error::UnsupportedSQLiteFeature(format!(
+        "RENAME TABLE is MySQL syntax, which PostgreSQL rejects, and SQLite has no RENAME \
+         statement at all. Write it as PostgreSQL would: {rewritten}."
+    ))
 }
 
 /// Translates `TRUNCATE` to one `DELETE FROM` per named table.
@@ -778,6 +952,303 @@ fn translate_explain(
     }])
 }
 
+/// PostgreSQL run-time configuration parameters whose value cannot change what
+/// a translated statement does. A `SET` naming one is dropped with a warning,
+/// every other `SET` is refused.
+///
+/// Built from PostgreSQL's own classification rather than by hand. `SET` can
+/// change 187 parameters (`pg_settings` where `context` is `user` or
+/// `superuser`, measured against PostgreSQL 16.14). Four of the 26 categories
+/// carry query semantics: `Client Connection Defaults / Statement Behavior`,
+/// `Client Connection Defaults / Locale and Formatting`, and both `Version and
+/// Platform Compatibility` categories. The other 136 parameters govern
+/// planning, memory, durability, logging, and statistics, so the rows a query
+/// returns are identical either way, and they are all here.
+///
+/// `gin_fuzzy_search_limit` is the one the categories get wrong, and it is
+/// excluded: it sits in `Other Defaults` yet is documented as a "soft upper
+/// limit of the size of the set returned by GIN index scans", so setting it
+/// drops rows.
+///
+/// Twelve more are included from the semantic categories, because each is
+/// provably neutral and together they are the `pg_dump` preamble, which must
+/// keep translating. The five timeouts bound how long a statement may run.
+/// `client_min_messages` bounds what it says. `check_function_bodies` only
+/// defers validation of a routine body. `client_encoding` names the wire
+/// encoding, and SQLite stores text as UTF-8 regardless.
+/// `default_table_access_method` names a storage engine with no SQLite
+/// counterpart. `escape_string_warning` only emits a warning. `xmloption`
+/// decides `DOCUMENT` against `CONTENT` when casting XML, which this crate has
+/// no mapping for in the first place. `standard_conforming_strings` is the one
+/// that needs its VALUE checked, in [`translate_set`].
+///
+/// Refused, by way of illustration of what those categories otherwise hold:
+/// `search_path` decides which table a bare name means, `row_security` decides
+/// whether policies apply, `session_replication_role` stops triggers and
+/// therefore foreign key checks from firing, `TimeZone` and `DateStyle` decide
+/// how a value reads, `array_nulls` decides whether `NULL` in an array literal
+/// is a null or the string, and `transform_null_equals` rewrites `x = NULL`
+/// into `x IS NULL`.
+///
+/// Sorted for [`is_result_neutral_setting`], which binary searches it, and
+/// asserted sorted by a test. A parameter a later PostgreSQL adds is absent
+/// until someone adds it here and is therefore refused, which is the intended
+/// direction to fail in.
+const RESULT_NEUTRAL_SETTINGS: [&str; 147] = [
+    "allow_in_place_tablespaces",
+    "allow_system_table_mods",
+    "application_name",
+    "backend_flush_after",
+    "backtrace_functions",
+    "check_function_bodies",
+    "client_connection_check_interval",
+    "client_encoding",
+    "client_min_messages",
+    "commit_delay",
+    "commit_siblings",
+    "compute_query_id",
+    "constraint_exclusion",
+    "cpu_index_tuple_cost",
+    "cpu_operator_cost",
+    "cpu_tuple_cost",
+    "cursor_tuple_fraction",
+    "deadlock_timeout",
+    "debug_discard_caches",
+    "debug_logical_replication_streaming",
+    "debug_parallel_query",
+    "debug_pretty_print",
+    "debug_print_parse",
+    "debug_print_plan",
+    "debug_print_rewritten",
+    "default_statistics_target",
+    "default_table_access_method",
+    "dynamic_library_path",
+    "effective_cache_size",
+    "effective_io_concurrency",
+    "enable_async_append",
+    "enable_bitmapscan",
+    "enable_gathermerge",
+    "enable_hashagg",
+    "enable_hashjoin",
+    "enable_incremental_sort",
+    "enable_indexonlyscan",
+    "enable_indexscan",
+    "enable_material",
+    "enable_memoize",
+    "enable_mergejoin",
+    "enable_nestloop",
+    "enable_parallel_append",
+    "enable_parallel_hash",
+    "enable_partition_pruning",
+    "enable_partitionwise_aggregate",
+    "enable_partitionwise_join",
+    "enable_presorted_aggregate",
+    "enable_seqscan",
+    "enable_sort",
+    "enable_tidscan",
+    "escape_string_warning",
+    "exit_on_error",
+    "extension_destdir",
+    "from_collapse_limit",
+    "geqo",
+    "geqo_effort",
+    "geqo_generations",
+    "geqo_pool_size",
+    "geqo_seed",
+    "geqo_selection_bias",
+    "geqo_threshold",
+    "hash_mem_multiplier",
+    "idle_in_transaction_session_timeout",
+    "idle_session_timeout",
+    "ignore_checksum_failure",
+    "jit",
+    "jit_above_cost",
+    "jit_dump_bitcode",
+    "jit_expressions",
+    "jit_inline_above_cost",
+    "jit_optimize_above_cost",
+    "jit_tuple_deforming",
+    "join_collapse_limit",
+    "local_preload_libraries",
+    "lock_timeout",
+    "log_duration",
+    "log_error_verbosity",
+    "log_executor_stats",
+    "log_lock_waits",
+    "log_min_duration_sample",
+    "log_min_duration_statement",
+    "log_min_error_statement",
+    "log_min_messages",
+    "log_parameter_max_length",
+    "log_parameter_max_length_on_error",
+    "log_parser_stats",
+    "log_planner_stats",
+    "log_replication_commands",
+    "log_statement",
+    "log_statement_sample_rate",
+    "log_statement_stats",
+    "log_temp_files",
+    "log_transaction_sample_rate",
+    "logical_decoding_work_mem",
+    "maintenance_io_concurrency",
+    "maintenance_work_mem",
+    "max_parallel_maintenance_workers",
+    "max_parallel_workers",
+    "max_parallel_workers_per_gather",
+    "max_stack_depth",
+    "min_parallel_index_scan_size",
+    "min_parallel_table_scan_size",
+    "parallel_leader_participation",
+    "parallel_setup_cost",
+    "parallel_tuple_cost",
+    "password_encryption",
+    "plan_cache_mode",
+    "random_page_cost",
+    "recursive_worktable_factor",
+    "scram_iterations",
+    "seq_page_cost",
+    "session_preload_libraries",
+    "standard_conforming_strings",
+    "statement_timeout",
+    "stats_fetch_consistency",
+    "synchronous_commit",
+    "tcp_keepalives_count",
+    "tcp_keepalives_idle",
+    "tcp_keepalives_interval",
+    "tcp_user_timeout",
+    "temp_buffers",
+    "temp_file_limit",
+    "trace_notify",
+    "trace_sort",
+    "track_activities",
+    "track_counts",
+    "track_functions",
+    "track_io_timing",
+    "track_wal_io_timing",
+    "transaction_timeout",
+    "update_process_title",
+    "vacuum_buffer_usage_limit",
+    "vacuum_cost_delay",
+    "vacuum_cost_limit",
+    "vacuum_cost_page_dirty",
+    "vacuum_cost_page_hit",
+    "vacuum_cost_page_miss",
+    "wal_compression",
+    "wal_consistency_checking",
+    "wal_init_zero",
+    "wal_recycle",
+    "wal_sender_timeout",
+    "wal_skip_threshold",
+    "work_mem",
+    "xmloption",
+    "zero_damaged_pages",
+];
+
+/// True when `name` is one of [`RESULT_NEUTRAL_SETTINGS`], matched without case
+/// sensitivity because a PostgreSQL parameter name is an identifier.
+fn is_result_neutral_setting(name: &str) -> bool {
+    RESULT_NEUTRAL_SETTINGS
+        .binary_search_by(|neutral| {
+            neutral
+                .bytes()
+                .map(|byte| byte.to_ascii_lowercase())
+                .cmp(name.bytes().map(|byte| byte.to_ascii_lowercase()))
+        })
+        .is_ok()
+}
+
+/// True when `values` say the setting is being turned on. PostgreSQL accepts
+/// `on`, `true`, `yes`, and `1` for a boolean parameter.
+fn is_enabled(values: &[Expr]) -> bool {
+    let [value] = values else { return false };
+    let rendered = value.to_string();
+    let rendered = rendered.trim_matches('\'');
+    ["on", "true", "yes", "1"].iter().any(|enabled| enabled.eq_ignore_ascii_case(rendered))
+}
+
+/// Drops a `SET` of a setting listed in [`RESULT_NEUTRAL_SETTINGS`], refuses
+/// every other form.
+///
+/// `standard_conforming_strings` is neutral only when turned ON, which is what
+/// every `pg_dump` writes. `sqlparser` does not override
+/// `supports_string_literal_backslash_escape`, so it always parses PostgreSQL
+/// string literals by the standard-conforming rule and cannot be told
+/// otherwise. Turning the parameter off therefore means the input was already
+/// parsed under the wrong rule before reaching this translator, and reporting
+/// it is the only thing left that helps.
+fn translate_set(statement: &Statement, set: &Set) -> Result<Vec<Statement>, Error> {
+    if let Set::SingleAssignment { variable, values, .. } = set
+        && let Some(setting) = last_ident(variable)
+    {
+        let name = setting.value.as_str();
+        if name.eq_ignore_ascii_case("standard_conforming_strings") && !is_enabled(values) {
+            return Err(reject_unsupported_statement(
+                statement,
+                "Turning it off makes a backslash an escape inside an ordinary string literal, and \
+                 the parser reading this input always applies the standard-conforming rule, so the \
+                 literals have already been read the other way. Use E'' literals instead.",
+            ));
+        }
+        if is_result_neutral_setting(name) {
+            return Ok(drop_with_warning("SET", REASON_SET_NEUTRAL));
+        }
+    }
+
+    Err(reject_unsupported_statement(
+        statement,
+        "The PostgreSQL parameter carries query semantics, deciding how later statements resolve \
+         names, whether policies and triggers apply, or how a value reads, and SQLite has no \
+         counterpart, so dropping it could change what those statements do.",
+    ))
+}
+
+/// A function definition emits nothing either way, and which outcome that is
+/// depends on whether a trigger calls it.
+///
+/// A trigger function is realised: `create_trigger.rs` inlines its body into
+/// every trigger that executes it, so the definition is consumed by the
+/// pipeline rather than lost, and a warning would be a false report. Any other
+/// function IS lost, and the host has to register a SQLite function of the same
+/// name through the C API, the way this crate expects `current_setting` to be
+/// registered for row level security, so that one is warned about.
+///
+/// The trigger names come from a prewalk of the input recorded in the options
+/// (`populate_declared_object_names`), not from the schema, because
+/// `schema_statements_for_translation` keeps `CREATE TRIGGER` out of the
+/// translation schema.
+fn translate_create_function(
+    create_function: &CreateFunction,
+    options: &Pg2SqliteOptions,
+) -> Vec<Statement> {
+    if options.has_trigger_function_name(&last_ident_value_or_display(&create_function.name)) {
+        return Vec::new();
+    }
+    drop_with_warning("CREATE FUNCTION", REASON_FUNCTION)
+}
+
+/// `DISCARD PLANS` and `DISCARD SEQUENCES` throw away server caches SQLite does
+/// not keep, so dropping them cannot change a result. `DISCARD ALL` and
+/// `DISCARD TEMP` also destroy the session's temporary tables, which a later
+/// statement can read, so those are refused.
+fn translate_discard(
+    statement: &Statement,
+    object_type: DiscardObject,
+) -> Result<Vec<Statement>, Error> {
+    match object_type {
+        DiscardObject::PLANS | DiscardObject::SEQUENCES => {
+            Ok(drop_with_warning("DISCARD", REASON_HINT))
+        }
+        DiscardObject::ALL | DiscardObject::TEMP => {
+            Err(reject_unsupported_statement(
+                statement,
+                "It destroys the session's temporary tables, and SQLite has no statement that does \
+                 so, therefore a later statement reading one would behave differently. Drop the \
+                 temporary tables by name instead.",
+            ))
+        }
+    }
+}
+
 impl Translator for Statement {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -842,7 +1313,13 @@ impl Translator for Statement {
             }
             Self::If(if_stmt) => {
                 let Some(if_condition) = &if_stmt.if_block.condition else {
-                    return Ok(Vec::new());
+                    // Guard-less: every branch's statements would be dropped, and
+                    // those statements are the work the script asked for.
+                    return Err(reject_unsupported_statement(
+                        self,
+                        "The IF block carries no condition, so its branches cannot be turned into \
+                         guarded statements.",
+                    ));
                 };
 
                 let translated_if_condition = if_condition.translate(schema, options)?;
@@ -910,7 +1387,7 @@ impl Translator for Statement {
             | Self::Pragma { .. }
             | Self::AttachDatabase { .. } => vec![self.clone()],
             // DROP TABLE/VIEW/INDEX - translate to SQLite (strip CASCADE/RESTRICT)
-            Self::Drop { object_type, if_exists, names, .. } => {
+            Self::Drop { object_type, if_exists, names, cascade, .. } => {
                 match object_type {
                     // SQLite supports these object types
                     ObjectType::Table | ObjectType::View | ObjectType::Index => {
@@ -931,8 +1408,37 @@ impl Translator for Statement {
                             table: None,
                         }]
                     }
-                    // Other object types are PostgreSQL-specific, ignore them
-                    _ => Vec::new(),
+                    // A schema, role, or type never reached the output, so
+                    // dropping the statement removes nothing that exists. The
+                    // exceptions are the two that would destroy tables: a
+                    // cascading DROP SCHEMA removes every table in the schema,
+                    // and DROP DATABASE removes the lot.
+                    ObjectType::Schema if *cascade => {
+                        return Err(reject_unsupported_statement(
+                            self,
+                            "A cascading DROP SCHEMA deletes every table in the schema, and the \
+                             translated tables carry no schema, so which tables it means cannot be \
+                             determined. Drop the tables by name instead.",
+                        ));
+                    }
+                    ObjectType::Database | ObjectType::MaterializedView => {
+                        return Err(reject_unsupported_statement(
+                            self,
+                            "SQLite has neither, and the matching CREATE is refused, so nothing of \
+                             the kind can exist in the output.",
+                        ));
+                    }
+                    ObjectType::Schema
+                    | ObjectType::Role
+                    | ObjectType::User
+                    | ObjectType::Sequence
+                    | ObjectType::Type
+                    | ObjectType::Collation
+                    | ObjectType::Stage
+                    | ObjectType::Stream
+                    | ObjectType::Warehouse => {
+                        drop_with_warning(drop_label(*object_type), REASON_DROP_OF_ABSENT_OBJECT)
+                    }
                 }
             }
             // DROP TRIGGER - translate to SQLite (strip table name and CASCADE/RESTRICT)
@@ -947,86 +1453,84 @@ impl Translator for Statement {
                     option: None,     // SQLite doesn't support CASCADE/RESTRICT
                 })]
             }
-            Statement::LISTEN { .. } => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "LISTEN",
-                    reason: "SQLite has no pub/sub channel, so the statement was dropped.",
-                });
-                Vec::new()
+            // Outcome 3, warn and drop. Grouped by the reason each drop cannot
+            // change a result.
+            Self::LISTEN { .. } => drop_with_warning("LISTEN", REASON_PUB_SUB),
+            Self::UNLISTEN { .. } => drop_with_warning("UNLISTEN", REASON_PUB_SUB),
+            Self::NOTIFY { .. } => drop_with_warning("NOTIFY", REASON_PUB_SUB),
+            Self::CreateRole(_) => drop_with_warning("CREATE ROLE", REASON_ACCESS_CONTROL),
+            Self::CreateUser(_) => drop_with_warning("CREATE USER", REASON_ACCESS_CONTROL),
+            Self::AlterRole { .. } => drop_with_warning("ALTER ROLE", REASON_ACCESS_CONTROL),
+            Self::AlterUser(_) => drop_with_warning("ALTER USER", REASON_ACCESS_CONTROL),
+            Self::Grant(_) => drop_with_warning("GRANT", REASON_ACCESS_CONTROL),
+            Self::Revoke(_) => drop_with_warning("REVOKE", REASON_ACCESS_CONTROL),
+            Self::Deny { .. } => drop_with_warning("DENY", REASON_ACCESS_CONTROL),
+            Self::CreateType { .. } => drop_with_warning("CREATE TYPE", REASON_TYPE_DEFINITION),
+            Self::AlterType(_) => drop_with_warning("ALTER TYPE", REASON_TYPE_DEFINITION),
+            Self::CreateDomain(_) => drop_with_warning("CREATE DOMAIN", REASON_TYPE_DEFINITION),
+            Self::DropDomain { .. } => drop_with_warning("DROP DOMAIN", REASON_TYPE_DEFINITION),
+            Self::CreateCollation(_) => {
+                drop_with_warning("CREATE COLLATION", REASON_HOST_REGISTERED)
             }
-            Statement::UNLISTEN { .. } => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "UNLISTEN",
-                    reason: "SQLite has no pub/sub channel, so the statement was dropped.",
-                });
-                Vec::new()
+            Self::AlterCollation(_) => drop_with_warning("ALTER COLLATION", REASON_HOST_REGISTERED),
+            Self::CreateFunction(create_function) => {
+                translate_create_function(create_function, options)
             }
-            Statement::NOTIFY { .. } => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "NOTIFY",
-                    reason: "SQLite has no pub/sub channel, so the statement was dropped.",
-                });
-                Vec::new()
+            Self::DropFunction { .. } => drop_with_warning("DROP FUNCTION", REASON_FUNCTION),
+            Self::AlterFunction(_) => drop_with_warning("ALTER FUNCTION", REASON_ACCESS_CONTROL),
+            Self::CreateServer(_) => drop_with_warning("CREATE SERVER", REASON_FOREIGN_DATA),
+            Self::CreateConnector(_) => drop_with_warning("CREATE CONNECTOR", REASON_FOREIGN_DATA),
+            Self::AlterConnector { .. } => {
+                drop_with_warning("ALTER CONNECTOR", REASON_FOREIGN_DATA)
             }
-            Statement::CreateType { .. } => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "CREATE TYPE",
-                    reason: "SQLite has no composite or enum types, so the type definition was dropped.",
-                });
-                Vec::new()
+            Self::DropConnector { .. } => drop_with_warning("DROP CONNECTOR", REASON_FOREIGN_DATA),
+            Self::CreateSecret { .. } => drop_with_warning("CREATE SECRET", REASON_FOREIGN_DATA),
+            Self::DropSecret { .. } => drop_with_warning("DROP SECRET", REASON_FOREIGN_DATA),
+            Self::CreateExtension(_) => drop_with_warning("CREATE EXTENSION", REASON_EXTENSION),
+            Self::DropExtension { .. } => drop_with_warning("DROP EXTENSION", REASON_EXTENSION),
+            Self::CreateSequence { .. } => drop_with_warning("CREATE SEQUENCE", REASON_SEQUENCE),
+            Self::Comment { .. } => drop_with_warning("COMMENT", REASON_INTROSPECTION),
+            Self::ExplainTable { .. } => drop_with_warning("DESCRIBE", REASON_INTROSPECTION),
+            Self::ShowVariable { .. } => drop_with_warning("SHOW", REASON_INTROSPECTION),
+            Self::ShowVariables { .. } => drop_with_warning("SHOW VARIABLES", REASON_INTROSPECTION),
+            Self::ShowStatus { .. } => drop_with_warning("SHOW STATUS", REASON_INTROSPECTION),
+            Self::ShowTables { .. } => drop_with_warning("SHOW TABLES", REASON_INTROSPECTION),
+            Self::ShowViews { .. } => drop_with_warning("SHOW VIEWS", REASON_INTROSPECTION),
+            Self::ShowColumns { .. } => drop_with_warning("SHOW COLUMNS", REASON_INTROSPECTION),
+            Self::ShowCreate { .. } => drop_with_warning("SHOW CREATE", REASON_INTROSPECTION),
+            Self::ShowSchemas { .. } => drop_with_warning("SHOW SCHEMAS", REASON_INTROSPECTION),
+            Self::ShowDatabases { .. } => drop_with_warning("SHOW DATABASES", REASON_INTROSPECTION),
+            Self::ShowCatalogs { .. } => drop_with_warning("SHOW CATALOGS", REASON_INTROSPECTION),
+            Self::ShowCharset { .. } => drop_with_warning("SHOW CHARSET", REASON_INTROSPECTION),
+            Self::ShowCollation { .. } => drop_with_warning("SHOW COLLATION", REASON_INTROSPECTION),
+            Self::ShowFunctions { .. } => drop_with_warning("SHOW FUNCTIONS", REASON_INTROSPECTION),
+            Self::ShowObjects(_) => drop_with_warning("SHOW OBJECTS", REASON_INTROSPECTION),
+            Self::ShowProcessList { .. } => {
+                drop_with_warning("SHOW PROCESSLIST", REASON_INTROSPECTION)
             }
-            Statement::CreateDomain(_) => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "CREATE DOMAIN",
-                    reason: "SQLite has no domain types, so the domain definition was dropped.",
-                });
-                Vec::new()
+            Self::Kill { .. } => drop_with_warning("KILL", REASON_ADMINISTRATION),
+            Self::WaitFor(_) => drop_with_warning("WAITFOR", REASON_WAIT),
+            Self::Msck(_) => drop_with_warning("MSCK", REASON_ADMINISTRATION),
+            Self::Flush { .. } => drop_with_warning("FLUSH", REASON_ADMINISTRATION),
+            Self::Install { .. } => drop_with_warning("INSTALL", REASON_ADMINISTRATION),
+            Self::Load { .. } => drop_with_warning("LOAD", REASON_ADMINISTRATION),
+            Self::CreateWarehouse(_) => {
+                drop_with_warning("CREATE WAREHOUSE", REASON_ADMINISTRATION)
             }
-            Statement::CreateServer(_) => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "CREATE SERVER",
-                    reason: "SQLite has no foreign-data-wrapper layer, so the server definition was dropped.",
-                });
-                Vec::new()
+            Self::CreateStage { .. } => drop_with_warning("CREATE STAGE", REASON_ADMINISTRATION),
+            Self::CreateFileFormat { .. } => {
+                drop_with_warning("CREATE FILE FORMAT", REASON_ADMINISTRATION)
             }
-            Statement::CreateRole(_) => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "CREATE ROLE",
-                    reason: "SQLite has no role or access-control layer, so the role definition was dropped.",
-                });
-                Vec::new()
-            }
-            Statement::CreateUser(_) => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "CREATE USER",
-                    reason: "SQLite has no user or access-control layer, so the user definition was dropped.",
-                });
-                Vec::new()
-            }
-            Statement::AlterRole { .. } => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "ALTER ROLE",
-                    reason: "SQLite has no role or access-control layer, so the role change was dropped.",
-                });
-                Vec::new()
-            }
-            Statement::Grant(_) => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "GRANT",
-                    reason: "SQLite has no privilege model, so the GRANT statement was dropped.",
-                });
-                Vec::new()
-            }
-            Statement::Revoke(_) => {
-                crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                    construct: "REVOKE",
-                    reason: "SQLite has no privilege model, so the REVOKE statement was dropped.",
-                });
-                Vec::new()
-            }
+            Self::Cache { .. } => drop_with_warning("CACHE TABLE", REASON_HINT),
+            Self::UNCache { .. } => drop_with_warning("UNCACHE TABLE", REASON_HINT),
+            Self::OptimizeTable { .. } => drop_with_warning("OPTIMIZE TABLE", REASON_HINT),
+            Self::Lock { .. } => drop_with_warning("LOCK", REASON_HINT),
+            Self::LockTables { .. } => drop_with_warning("LOCK TABLES", REASON_HINT),
+            Self::UnlockTables => drop_with_warning("UNLOCK TABLES", REASON_HINT),
             Statement::AlterTable(alter_table) => {
                 translate_alter_table(alter_table, schema, options)?
             }
+            Statement::RenameTable(renames) => return Err(reject_rename_table(renames)),
             Statement::Truncate(truncate) => translate_truncate(truncate, schema, options)?,
             Statement::Copy { source, to, target, .. } => {
                 return Err(reject_copy(source, *to, target));
@@ -1070,7 +1574,83 @@ impl Translator for Statement {
             Statement::Explain { analyze, statement, .. } => {
                 translate_explain(*analyze, statement, schema, options)?
             }
-            unsupported_statement_patterns!() => Vec::new(),
+            // Outcome 4, consumed by the translation schema. Each of these is
+            // realised elsewhere, so emitting nothing is the complete
+            // translation. A warning here would be false.
+            //
+            // The policy statements drive the row level security view and
+            // trigger set built from the final schema state (`rls.rs`,
+            // `filter_policies`). The schema statements make a qualified name
+            // resolvable (`object_name.rs`, `schema_resolves`) and SQLite has no
+            // schema for the name to keep, so the qualifier is stripped instead.
+            Self::CreatePolicy(_)
+            | Self::AlterPolicy(_)
+            | Self::DropPolicy { .. }
+            | Self::CreateSchema { .. }
+            | Self::AlterSchema(_) => Vec::new(),
+            // Outcome 2, hard error, grouped by reason.
+            data_movement_patterns!() => {
+                return Err(reject_unsupported_statement(
+                    self,
+                    "SQLite has no statement that moves data between the database and a file or \
+                     stage, so the rows the statement carries would be lost.",
+                ));
+            }
+            control_flow_patterns!() => {
+                return Err(reject_unsupported_statement(
+                    self,
+                    "SQLite's SQL has no procedural control flow outside a trigger body, so the \
+                     branch or the diagnostic this statement performs cannot be preserved.",
+                ));
+            }
+            cursor_patterns!() => {
+                return Err(reject_unsupported_statement(
+                    self,
+                    "SQLite has no server-side cursors: iteration happens in the host through \
+                     sqlite3_step, which has no SQL spelling, so the work the cursor performs \
+                     cannot be emitted. Rewrite the loop as a set-based statement.",
+                ));
+            }
+            procedural_patterns!() => {
+                return Err(reject_unsupported_statement(
+                    self,
+                    "SQLite has no stored procedures, so the body would be lost and a call to it \
+                     would perform nothing. Inline the statements at each call site.",
+                ));
+            }
+            session_state_patterns!() => {
+                return Err(reject_unsupported_statement(
+                    self,
+                    "The statement changes session state that decides how later statements resolve \
+                     names or behave, and SQLite has no equivalent, so dropping it could change \
+                     what those statements do.",
+                ));
+            }
+            extensibility_patterns!() => {
+                return Err(reject_unsupported_statement(
+                    self,
+                    "SQLite cannot define an operator, an operator class or family, or a text \
+                     search configuration, and an unrecognised operator is emitted unchanged, so \
+                     dropping this definition would leave the emitted SQL to fail at run time.",
+                ));
+            }
+            alter_in_place_patterns!() => {
+                return Err(reject_unsupported_statement(
+                    self,
+                    "SQLite cannot alter an index or a view in place: it has to be dropped and \
+                     recreated, which needs its current definition. Write the DROP and the CREATE \
+                     out instead.",
+                ));
+            }
+            database_level_patterns!() => {
+                return Err(reject_unsupported_statement(
+                    self,
+                    "A SQLite database is a file rather than an object inside a server, so it is \
+                     created by opening it and joined to a session with ATTACH.",
+                ));
+            }
+            Self::Set(set) => translate_set(self, set)?,
+            Self::Discard { object_type } => translate_discard(self, *object_type)?,
         };
 
         // PostgreSQL numbered parameters (`$N`) become SQLite `?N` placeholders,
@@ -1101,11 +1681,35 @@ mod tests {
         parser::Parser,
     };
 
-    use super::{inject_condition, translate_create_table_for_role};
+    use super::{
+        RESULT_NEUTRAL_SETTINGS, inject_condition, is_result_neutral_setting,
+        translate_create_table_for_role,
+    };
     use crate::{
         prelude::{Pg2SqliteOptions, Translator},
         traits::TranslationOptions,
     };
+
+    /// `is_result_neutral_setting` binary searches the table, so an unsorted or
+    /// duplicated entry would make a lookup miss silently.
+    #[test]
+    fn result_neutral_settings_are_sorted_and_unique() {
+        for pair in RESULT_NEUTRAL_SETTINGS.windows(2) {
+            assert!(pair[0] < pair[1], "{} must sort before {}", pair[0], pair[1]);
+        }
+    }
+
+    /// Both ends of the table and the case-insensitive match, since a parameter
+    /// name is an identifier and `SET WORK_MEM` is the same setting.
+    #[test]
+    fn result_neutral_settings_are_found_at_either_end_and_ignoring_case() {
+        assert!(is_result_neutral_setting("allow_in_place_tablespaces"));
+        assert!(is_result_neutral_setting("zero_damaged_pages"));
+        assert!(is_result_neutral_setting("WORK_MEM"));
+        assert!(!is_result_neutral_setting("search_path"));
+        assert!(!is_result_neutral_setting("gin_fuzzy_search_limit"));
+        assert!(!is_result_neutral_setting("work_me"));
+    }
 
     fn parse_create_table(sql: &str) -> CreateTable {
         let stmt =

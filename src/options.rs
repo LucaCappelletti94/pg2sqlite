@@ -82,6 +82,16 @@ pub struct Pg2SqliteOptions {
     /// Intentionally not exposed in the public builder API: it is derived from
     /// translation context, not user config.
     pub(crate) declared_object_names: Vec<String>,
+    /// Names of the functions that a `CREATE TRIGGER` in the translation unit
+    /// executes, lowercased and unqualified. Prewalked from the input
+    /// statements by `Pg2Sqlite::translate` for the same reason as
+    /// `declared_object_names`: the translation schema omits trigger
+    /// definitions, so nothing else knows which functions a trigger inlines.
+    /// Consumed by the `CREATE FUNCTION` arm, which stays silent for a function
+    /// a trigger realises and warns for one that is genuinely dropped.
+    /// Intentionally not exposed in the public builder API: it is derived from
+    /// translation context, not user config.
+    pub(crate) trigger_function_names: Vec<String>,
     /// Permit foreign keys whose target table or columns do not resolve in the
     /// document. Default `false`, matching Postgres at DDL apply.
     allow_dangling_foreign_keys: bool,
@@ -113,6 +123,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             spatial_indexes: Vec::new(),
             fts_indexes: Vec::new(),
             declared_object_names: Vec::new(),
+            trigger_function_names: Vec::new(),
             allow_dangling_foreign_keys: bool::arbitrary(u)?,
         })
     }
@@ -138,6 +149,7 @@ impl Default for Pg2SqliteOptions {
             spatial_indexes: Vec::new(),
             fts_indexes: Vec::new(),
             declared_object_names: Vec::new(),
+            trigger_function_names: Vec::new(),
             allow_dangling_foreign_keys: false,
         }
     }
@@ -206,6 +218,25 @@ impl Pg2SqliteOptions {
     pub(crate) fn has_declared_object_name(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
         self.declared_object_names.contains(&name)
+    }
+
+    /// Records `name` as a function executed by a trigger in the translation
+    /// unit, lowercased and idempotent to match
+    /// [`Self::has_trigger_function_name`].
+    pub(crate) fn add_trigger_function_name(&mut self, name: impl Into<String>) {
+        let name = name.into().to_ascii_lowercase();
+        if !self.trigger_function_names.contains(&name) {
+            self.trigger_function_names.push(name);
+        }
+    }
+
+    /// Returns whether a trigger in the translation unit executes `name`, in
+    /// which case the function's body reaches the output inlined in that
+    /// trigger and its definition is not lost.
+    #[must_use]
+    pub(crate) fn has_trigger_function_name(&self, name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        self.trigger_function_names.contains(&name)
     }
 }
 
