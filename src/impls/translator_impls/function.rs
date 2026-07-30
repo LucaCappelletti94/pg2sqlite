@@ -18,8 +18,8 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
-    ValueWithSpan, helpers::attached_token::AttachedToken,
+    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, UnaryOperator,
+    Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use super::{
@@ -203,6 +203,77 @@ fn null_ignoring_extremum(
         .collect();
 
     Ok(simple_function_expr(if greatest { "MAX" } else { "MIN" }, rotations, None))
+}
+
+/// Builds PostgreSQL's `trunc(x, n)`, which truncates toward zero, out of
+/// SQLite's parts.
+///
+/// The shape is `CAST(round(x * 10^n, 9) AS INTEGER) / 10^n`, since a CAST to
+/// INTEGER truncates toward zero for both signs.
+///
+/// The inner `round` is what makes it agree with PostgreSQL, which computes in
+/// exact decimal while SQLite has only binary doubles. Without it, `1.15 * 100`
+/// is 114.99999999999999 and `trunc(1.15, 2)` answers 1.14. Measured: the same
+/// goes for 0.29, 2.675, 1.005, and 100.55, four values out of the twelve the
+/// test covers. Nine decimal places is far below what a double distinguishes at
+/// these magnitudes and far above the representation noise being absorbed.
+///
+/// The scale is folded into a literal when it is one, which is the ordinary
+/// case and keeps the expression free of `pow`. A computed scale needs `pow`,
+/// which ships only under `SQLITE_ENABLE_MATH_FUNCTIONS`, so it is refused
+/// unless the caller has declared that build.
+fn truncate_to_scale(
+    x: Expr,
+    scale: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let factor = match literal_integer(scale) {
+        Some(digits) => number_literal(&format!("{:.10}", 10f64.powi(digits))),
+        None if options.are_math_functions_available() => {
+            simple_function_expr(
+                "pow",
+                vec![number_literal("10"), scale.translate(schema, options)?],
+                None,
+            )
+        }
+        None => {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                "trunc(x, n) with a computed scale needs pow(), which is a math function that \
+                 ships only under SQLITE_ENABLE_MATH_FUNCTIONS. Declare that build, or write the \
+                 scale as a literal."
+                    .to_string(),
+            ));
+        }
+    };
+
+    let scaled = Expr::BinaryOp {
+        left: Box::new(x),
+        op: BinaryOperator::Multiply,
+        right: Box::new(factor.clone()),
+    };
+    let truncated = Expr::Cast {
+        expr: Box::new(simple_function_expr("round", vec![scaled, number_literal("9")], None)),
+        data_type: DataType::Integer(None),
+        format: None,
+        kind: CastKind::Cast,
+    };
+
+    Ok(Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(truncated),
+        op: BinaryOperator::Divide,
+        right: Box::new(factor),
+    })))
+}
+
+/// The value of `expr` when it is an integer literal, with an optional sign.
+fn literal_integer(expr: &Expr) -> Option<i32> {
+    match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => digits.parse().ok(),
+        Expr::UnaryOp { op: UnaryOperator::Minus, expr } => literal_integer(expr).map(|n| -n),
+        Expr::Nested(inner) => literal_integer(inner),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1712,11 +1783,9 @@ impl Translator for Function {
                             kind: CastKind::Cast,
                         })
                     }
-                    // trunc(x, n) → round(x, n) (approximate, lossy)
                     2 => {
                         let x = exprs[0].translate(schema, options)?;
-                        let n = exprs[1].translate(schema, options)?;
-                        Ok(simple_function_expr("round", vec![x, n], None))
+                        truncate_to_scale(x, exprs[1], schema, options)
                     }
                     _ => {
                         Err(crate::errors::Error::UnsupportedSQLiteFeature(

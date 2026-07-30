@@ -141,14 +141,6 @@ fn trunc_single_arg_to_cast_integer() {
 }
 
 #[test]
-fn trunc_two_arg_to_round() {
-    let sql = "SELECT trunc(3.14159, 2)";
-    let result = translate_sql(sql, &default_opts()).unwrap();
-    let lower = result.to_lowercase();
-    assert!(lower.contains("round("), "trunc(x, n) should become round(x, n): {result}");
-}
-
-#[test]
 fn make_date_to_printf() {
     let sql = "SELECT make_date(2024, 1, 15)";
     let result = translate_sql(sql, &default_opts()).unwrap();

@@ -183,7 +183,7 @@ pub fn reverse_function(
             }
             FunctionReversal::PassThrough
         }
-        // strftime('%Y-01-01', expr) -> date_trunc('year', expr)
+        // strftime('%Y-01-01 00:00:00', expr) -> date_trunc('year', expr)
         // strftime('%Y', expr) -> EXTRACT(YEAR FROM expr)
         "strftime" => {
             if let FunctionArguments::List(list) = args
