@@ -111,6 +111,12 @@ enum FunctionTranslation {
     /// An array function whose body is rewritten over `json_each` /
     /// `json_group_array`. See [`super::array`].
     Array(ArrayFunction),
+    /// `greatest`/`least`, which ignore NULL arguments where SQLite's scalar
+    /// `MAX`/`MIN` return NULL as soon as one argument is NULL.
+    Extremum {
+        /// `MAX` for `greatest`, `MIN` for `least`.
+        greatest: bool,
+    },
     /// `cbrt(x)` translated to `pow(x, (1.0 / 3.0))` when math functions are
     /// available.
     ToCbrt,
@@ -119,8 +125,8 @@ enum FunctionTranslation {
 /// Simple name-only renames: `(pg_name, sqlite_name)`.
 /// Checked before the main match for a compact fast path.
 const FORWARD_RENAMES: &[(&str, &str)] = &[
-    ("least", "MIN"),
-    ("greatest", "MAX"),
+    // greatest and least are NOT renames: SQLite's scalar MAX and MIN return
+    // NULL when any argument is NULL. See `FunctionTranslation::Extremum`.
     ("string_agg", "group_concat"),
     ("strpos", "INSTR"),
     ("chr", "char"),
@@ -148,6 +154,46 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     ("jsonb_each_text", "json_each"),
     ("ascii", "unicode"),
 ];
+
+/// Builds a NULL-ignoring `MAX`/`MIN` over `arguments`.
+///
+/// Each slot is a `coalesce` starting at one argument and wrapping around, so
+/// a slot is NULL only when every argument is, and slot `i` is `arguments[i]`
+/// itself whenever that is not NULL. The values reaching `MAX` are therefore
+/// exactly the non-NULL arguments, which is PostgreSQL's rule.
+///
+/// The plan proposed `(SELECT max(v) FROM (VALUES (a),(b)))` instead. Measured
+/// on SQLite 3.51.1, that form cannot see the outer query's columns at all
+/// (`no such column`), which is the only interesting case, and it is rejected
+/// outright inside an index expression. This form is an ordinary expression and
+/// works in both places, at the cost of naming each argument once per argument.
+fn null_ignoring_extremum(
+    arguments: &[Expr],
+    greatest: bool,
+    label: &str,
+) -> Result<Expr, crate::errors::Error> {
+    let Some((first, rest)) = arguments.split_first() else {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "{label} needs at least one argument"
+        )));
+    };
+
+    // A single argument is already its own extremum, and SQLite's one-argument
+    // `MAX` is the AGGREGATE, which would collapse the rows instead.
+    if rest.is_empty() {
+        return Ok(first.clone());
+    }
+
+    let rotations = (0..arguments.len())
+        .map(|start| {
+            let rotated =
+                arguments.iter().cycle().skip(start).take(arguments.len()).cloned().collect();
+            simple_function_expr("coalesce", rotated, None)
+        })
+        .collect();
+
+    Ok(simple_function_expr(if greatest { "MAX" } else { "MIN" }, rotations, None))
+}
 
 #[allow(clippy::too_many_lines)]
 fn translate_function(
@@ -332,6 +378,9 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // greatest / least ignore NULLs, MAX / MIN do not.
+        "greatest" => FunctionTranslation::Extremum { greatest: true },
+        "least" => FunctionTranslation::Extremum { greatest: false },
         // to_json / to_jsonb: a conversion, not a reinterpretation.
         "to_json" | "to_jsonb" => FunctionTranslation::ToJson,
         // jsonb_set / jsonb_insert: path and value both need converting.
@@ -1672,6 +1721,18 @@ impl Translator for Function {
             FunctionTranslation::StddevSamp => {
                 let x = single_aggregate_arg(&func.args, schema, options, "stddev_samp")?;
                 Ok(simple_function_expr("sqrt", vec![var_samp_closed_form(x)], None))
+            }
+            FunctionTranslation::Extremum { greatest } => {
+                let exprs = function_argument_exprs(&func.args);
+                let arguments = exprs
+                    .iter()
+                    .map(|expr| expr.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?;
+                null_ignoring_extremum(
+                    &arguments,
+                    greatest,
+                    if greatest { "greatest" } else { "least" },
+                )
             }
             FunctionTranslation::ToCbrt => {
                 // cbrt(x) -> pow(x, (1.0 / 3.0))
