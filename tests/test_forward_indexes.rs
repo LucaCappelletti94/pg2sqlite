@@ -1,9 +1,12 @@
 //! Tests for forward index translation covering FTS and other index types
 //! in `src/impls/translator_impls/create_index.rs`.
 
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use run_translated_helper::run_translated_with;
 use translate_helpers::translate_default as translate;
 
 fn translate_result(sql: &str) -> Result<Vec<String>, String> {
@@ -302,4 +305,71 @@ fn unique_index_nulls_distinct_is_translated() {
         !sql.to_uppercase().contains("NULLS"),
         "the clause has no SQLite form and must not reach the output: {sql}"
     );
+}
+
+/// SQLite rejects a `NULLS` qualifier inside an index definition, at every
+/// version: measured on 3.51.1, `CREATE INDEX i ON t (n DESC NULLS LAST)`
+/// answers `unsupported use of NULLS LAST`. The clause used to be copied
+/// through, so the index could not be created at all.
+#[test]
+fn an_index_column_nulls_qualifier_is_dropped() {
+    // Both NULL and non-NULL rows, so the index is exercised over the values
+    // whose ordering the dropped qualifier was about.
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT);
+         CREATE INDEX i ON t (n DESC NULLS LAST);
+         INSERT INTO t VALUES (1, 5), (2, NULL);
+         SELECT count(*) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("2".to_string())]);
+
+    let sql = translate(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT);
+         CREATE INDEX i ON t (n DESC NULLS LAST);",
+    );
+    assert!(sql.to_uppercase().contains("DESC"), "the direction IS legal and must survive: {sql}");
+}
+
+/// Dropping it is reported, since the index then serves fewer orderings than
+/// the one PostgreSQL would have built.
+#[test]
+fn dropping_an_index_nulls_qualifier_warns() {
+    let warnings = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, n INT);
+              CREATE INDEX i ON t (n DESC NULLS LAST);",
+        )
+        .expect("parse")
+        .translate_with_report(&Pg2SqliteOptions::default())
+        .expect("translate")
+        .warnings;
+
+    assert!(
+        warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                pg2sqlite::warnings::TranslationWarning::LossyDrop { construct, .. }
+                    if *construct == "NULLS FIRST/LAST"
+            )
+        }),
+        "expected a LossyDrop naming the qualifier, got {warnings:?}"
+    );
+}
+
+/// An index without the qualifier loses nothing, so it must not warn. Guards
+/// the warning from firing on every index.
+#[test]
+fn an_ordinary_index_does_not_warn() {
+    let warnings = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, n INT);
+              CREATE INDEX i ON t (n DESC);",
+        )
+        .expect("parse")
+        .translate_with_report(&Pg2SqliteOptions::default())
+        .expect("translate")
+        .warnings;
+
+    assert!(warnings.is_empty(), "an ordinary index has nothing to report: {warnings:?}");
 }
