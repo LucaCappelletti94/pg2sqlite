@@ -13,10 +13,13 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::TableConstraint;
+use sqlparser::ast::{NullsDistinctOption, TableConstraint};
 
 use crate::{
-    impls::object_name::{append_suffix, table_has_implicit_public_rls},
+    impls::{
+        object_name::{append_suffix, table_has_implicit_public_rls},
+        shared_helpers::nulls_not_distinct_not_supported_error,
+    },
     options::Pg2SqliteOptions,
     prelude::{TranslationOptions, Translator},
 };
@@ -79,6 +82,10 @@ impl Translator for TableConstraint {
                 Ok(Some(Self::PrimaryKey(updated_pk)))
             }
             Self::Unique(unique_constraint) => {
+                if matches!(unique_constraint.nulls_distinct, NullsDistinctOption::NotDistinct) {
+                    return Err(nulls_not_distinct_not_supported_error());
+                }
+
                 let mut updated_unique = unique_constraint.clone();
                 updated_unique.columns = unique_constraint
                     .columns
@@ -89,6 +96,10 @@ impl Translator for TableConstraint {
                     .characteristics
                     .map(|c| c.translate(schema, options))
                     .transpose()?;
+                // `NULLS DISTINCT` is the default and is what SQLite does, so
+                // the clause is dropped rather than emitted: SQLite rejects it
+                // with `near "NULLS": syntax error`.
+                updated_unique.nulls_distinct = NullsDistinctOption::None;
                 Ok(Some(Self::Unique(updated_unique)))
             }
             // Outcome 2 of the reporting policy in `statement.rs`. The

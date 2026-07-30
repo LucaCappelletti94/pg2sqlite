@@ -272,3 +272,34 @@ fn gin_tsvector_translates_to_fts5() {
         translated_sql[4]
     );
 }
+
+/// The index path had the mirror image of the table-constraint defect: it
+/// cleared `nulls_distinct` unconditionally, so `NULLS NOT DISTINCT` was
+/// dropped silently rather than emitted. That is worse than the syntax error,
+/// because the emitted index accepts rows PostgreSQL rejects. Verified on both:
+/// PostgreSQL 16 refuses a second NULL, SQLite accepts it.
+#[test]
+fn unique_index_nulls_not_distinct_is_rejected() {
+    let error = translate_result(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         CREATE UNIQUE INDEX i ON t (s) NULLS NOT DISTINCT;",
+    )
+    .expect_err("NULLS NOT DISTINCT changes which rows collide and must be reported");
+    assert!(
+        error.to_uppercase().contains("NULLS NOT DISTINCT"),
+        "expected the error to name the clause, got {error}"
+    );
+}
+
+/// The default spelling matches SQLite, so the index still translates.
+#[test]
+fn unique_index_nulls_distinct_is_translated() {
+    let sql = translate(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         CREATE UNIQUE INDEX i ON t (s) NULLS DISTINCT;",
+    );
+    assert!(
+        !sql.to_uppercase().contains("NULLS"),
+        "the clause has no SQLite form and must not reach the output: {sql}"
+    );
+}

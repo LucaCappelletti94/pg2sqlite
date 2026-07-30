@@ -117,3 +117,36 @@ fn the_translatable_constraints_still_translate() {
         assert!(lower.contains(expected), "{expected} must survive: {sql}");
     }
 }
+
+/// `NULLS NOT DISTINCT` makes two NULL rows collide, which SQLite cannot do:
+/// its unique indexes always treat NULLs as distinct. Verified on both, where
+/// PostgreSQL 16 answers `duplicate key value violates unique constraint` for
+/// the second NULL and SQLite accepts it. Dropping the clause would therefore
+/// change which rows the database accepts, so it is refused rather than
+/// cleared. The clause used to reach the output and fail with `near "NULLS":
+/// syntax error`.
+#[test]
+fn unique_nulls_not_distinct_is_rejected() {
+    let error =
+        reject("CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, UNIQUE NULLS NOT DISTINCT (s));");
+    assert!(
+        error.to_uppercase().contains("NULLS NOT DISTINCT"),
+        "expected the error to name the clause, got {error}"
+    );
+}
+
+/// `NULLS DISTINCT` is PostgreSQL's default and is exactly what SQLite does, so
+/// the clause is dropped rather than refused. Guards the rejection above from
+/// swallowing the harmless spelling.
+#[test]
+fn unique_nulls_distinct_is_translated() {
+    let sql = translate_sql(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, UNIQUE NULLS DISTINCT (s));",
+        &default_options(),
+    )
+    .expect("NULLS DISTINCT matches SQLite and must translate");
+    assert!(
+        !sql.to_uppercase().contains("NULLS"),
+        "the clause has no SQLite form and must not reach the output: {sql}"
+    );
+}

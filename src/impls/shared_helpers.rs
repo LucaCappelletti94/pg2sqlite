@@ -118,6 +118,27 @@ pub(crate) fn with_ordinality_not_supported_error() -> Error {
     )
 }
 
+/// Returns the standardised error for `NULLS NOT DISTINCT`.
+///
+/// PostgreSQL makes two NULL rows collide under it, and SQLite's unique
+/// indexes always treat NULLs as distinct, with no clause to change that.
+/// Verified on both: PostgreSQL 16 answers `duplicate key value violates
+/// unique constraint` for a second NULL, SQLite accepts it. So the clause
+/// cannot be dropped, which would let through rows PostgreSQL refuses, and it
+/// cannot be emitted either, which is `near "NULLS": syntax error`.
+///
+/// `NULLS DISTINCT`, PostgreSQL's default, IS what SQLite does, so that
+/// spelling is dropped rather than refused.
+#[must_use]
+pub(crate) fn nulls_not_distinct_not_supported_error() -> Error {
+    Error::UnsupportedSQLiteFeature(
+        "NULLS NOT DISTINCT is not supported in SQLite, whose unique indexes always treat NULLs as \
+         distinct, so the constraint would accept rows PostgreSQL rejects. Add a CHECK that the \
+         column is NOT NULL, or enforce the rule with a trigger."
+            .to_string(),
+    )
+}
+
 /// True when `expr` is the bare `DEFAULT` keyword.
 ///
 /// `sqlparser` has no `Expr` variant for it: `DEFAULT` is not reserved in

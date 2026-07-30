@@ -30,7 +30,7 @@ use crate::{
             prefixed_quoted_identifier, quote_identifier, quoted_ident, sql_string_literal,
             sqlite_unqualified_object_name, table_with_implicit_public_lookup,
         },
-        shared_helpers::function_argument_exprs,
+        shared_helpers::{function_argument_exprs, nulls_not_distinct_not_supported_error},
         translator_impls::{postgis, rls::resolve_trigger_table_name},
     },
     prelude::{Pg2SqliteOptions, TranslationOptions, Translator},
@@ -385,9 +385,15 @@ impl Translator for CreateIndex {
             };
         }
 
+        if self.nulls_distinct == Some(false) {
+            return Err(nulls_not_distinct_not_supported_error());
+        }
+
         // Regular index - translate normally, explicitly dropping PG-only fields
         // (using, concurrently, include, nulls_distinct, with, index_options,
-        // alter_options) that are not valid in SQLite.
+        // alter_options) that are not valid in SQLite. `nulls_distinct` is only
+        // safe to drop for the DISTINCT spelling, refused above otherwise,
+        // because it decides which rows collide.
         Ok(vec![Statement::CreateIndex(CreateIndex {
             name: self.name.clone(),
             table_name: sqlite_unqualified_object_name(&sqlite_table_name),
