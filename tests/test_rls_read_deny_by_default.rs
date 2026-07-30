@@ -14,6 +14,13 @@
 //! PostgreSQL treats a missing `USING` as permissive-true, so such a policy
 //! grants every row. `policy_without_using_clause_grants_every_row` pins that
 //! distinction so the deny-all fix cannot be over-applied.
+//!
+//! Denying every row also removes the point of the runtime validation monitor
+//! for such a table: its check asks whether a backing row is visible through
+//! the view, which for a deny-all view is always no, so it would fire on every
+//! write and report nothing. That configuration is reported once at translation
+//! time as a `TranslationWarning::RlsDeniesEveryRow` instead, and no monitoring
+//! triggers are emitted.
 
 mod helpers;
 
@@ -21,6 +28,7 @@ use diesel::prelude::*;
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     traits::TranslationOptions,
+    warnings::TranslationWarning,
 };
 
 mod schema {
@@ -205,17 +213,16 @@ fn rls_with_only_a_for_all_policy_filters_normally() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Characterization: the RLS validation monitor tests visibility THROUGH the
-/// view, so a deny-all view makes every backing-table write look like a policy
-/// violation and log an audit row.
+/// A deny-all table gets no runtime monitor at all, so a backing-table write
+/// logs nothing.
 ///
-/// This is a consequence of denying reads, not a deliberate design choice. It
-/// is pinned so the behaviour is visible and cannot change unnoticed. Whether a
-/// deny-all view should be excluded from violation monitoring is an open
-/// question, see the note on R2 in the remediation plan.
+/// The monitor exists to catch a row in the backing table that the policies
+/// would hide, which is a discrepancy between data and policy. With no policy
+/// there is nothing to disagree with: the check would fire on every write and
+/// so carry no information. The condition is reported once at translation time
+/// instead, which `deny_all_table_warns_once_at_translation_time` covers.
 #[test]
-fn deny_all_view_makes_the_monitor_log_every_backing_write()
--> Result<(), Box<dyn std::error::Error>> {
+fn deny_all_view_is_not_monitored_at_runtime() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup(
         "
         CREATE TABLE docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
@@ -224,23 +231,18 @@ fn deny_all_view_makes_the_monitor_log_every_backing_write()
     )?;
 
     let logged: i64 = rls_audit::table.count().get_result(&mut conn)?;
-    assert_eq!(
-        logged, 2,
-        "both seeded rows are invisible through the deny-all view, so both are logged"
-    );
+    assert_eq!(logged, 0, "a monitor that could only ever fire is not emitted");
 
     Ok(())
 }
 
-/// Characterization: with strict RLS validation the monitor RAISEs instead of
-/// only logging, so a zero-policy table rejects every backing-table write.
+/// Strict validation no longer rejects a backing write to a deny-all table.
 ///
-/// Before reads were denied this insert was accepted. The change is arguably
-/// correct, since the row genuinely would not be readable, but "RLS enabled,
-/// policies not written yet" is a plausible mid-migration state that now fails
-/// hard. Pinned deliberately rather than discovered in production.
+/// "RLS enabled, policies arrive in a later migration" is an ordinary
+/// mid-migration state, and failing every write in it blocked a data load for a
+/// configuration problem that translation already reports.
 #[test]
-fn strict_validation_over_a_deny_all_view_rejects_backing_writes()
+fn strict_validation_over_a_deny_all_view_accepts_backing_writes()
 -> Result<(), Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default()
         .with_rls_audit_table_name("rls_audit")
@@ -253,16 +255,69 @@ fn strict_validation_over_a_deny_all_view_rejects_backing_writes()
         &options,
     )?;
 
-    let seeded = seed(&mut conn);
-    assert!(
-        seeded.is_err(),
-        "strict validation aborts a backing write whose row is not visible through the view"
-    );
+    seed(&mut conn)?;
     assert_eq!(
         docs_rls::table.count().get_result::<i64>(&mut conn)?,
-        0,
-        "the aborted write must leave no row behind"
+        2,
+        "both rows must reach the backing table"
     );
+    assert_eq!(
+        docs::table.count().get_result::<i64>(&mut conn)?,
+        0,
+        "they still must not be readable through the deny-all view"
+    );
+
+    Ok(())
+}
+
+/// The deny-all configuration is reported once, at translation time, rather
+/// than once per row at runtime.
+#[test]
+fn deny_all_table_warns_once_at_translation_time() -> Result<(), Box<dyn std::error::Error>> {
+    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+    let report = Pg2Sqlite::default()
+        .sql(
+            "
+        CREATE TABLE docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
+        ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+    ",
+        )?
+        .translate_with_report(&options)?;
+
+    let denials: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning,
+                TranslationWarning::RlsDeniesEveryRow { table } if table == "docs"
+            )
+        })
+        .collect();
+
+    assert_eq!(denials.len(), 1, "exactly one warning per table, got {:?}", report.warnings);
+
+    Ok(())
+}
+
+/// A table with a working policy is still monitored, and still discriminates.
+///
+/// The seed writes `owner_id` 7 and 9, and the policy admits only 7, so exactly
+/// one row is invisible. Asserting one rather than two proves the monitor is
+/// still evaluating the predicate, not merely firing, which is what makes the
+/// deny-all skip a scoped change instead of a way to switch validation off.
+#[test]
+fn a_table_with_a_policy_is_still_monitored() -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = setup(
+        "
+        CREATE TABLE docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
+        ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY p ON docs FOR SELECT USING (owner_id = 7);
+    ",
+    )?;
+
+    let logged: i64 = rls_audit::table.count().get_result(&mut conn)?;
+    assert_eq!(logged, 1, "the row invisible under the policy is still reported");
 
     Ok(())
 }

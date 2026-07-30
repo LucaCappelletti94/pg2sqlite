@@ -8,7 +8,7 @@
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 #[cfg(feature = "std")]
 use std::cell::RefCell;
 
@@ -24,6 +24,19 @@ pub enum TranslationWarning {
         construct: &'static str,
         /// Human-readable reason the construct was dropped.
         reason: &'static str,
+    },
+    /// A table has row level security enabled but no policy grants read access,
+    /// so its translated view denies every row.
+    ///
+    /// PostgreSQL behaves the same way, so the view is correct. This is
+    /// reported because it is usually an unfinished migration, and because
+    /// no runtime validation monitor is emitted for such a table: the
+    /// monitor asks whether a backing row is visible through the view,
+    /// which here is always no, so it would flag every write without
+    /// distinguishing anything.
+    RlsDeniesEveryRow {
+        /// The table whose view denies every row.
+        table: String,
     },
 }
 

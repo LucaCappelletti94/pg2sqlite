@@ -1309,6 +1309,34 @@ fn make_function_call(func_name: &str) -> Expr {
     simple_function_expr(func_name, vec![], None)
 }
 
+/// Computes the predicate the RLS view applies on the read path.
+///
+/// Single source of truth for whether a table's view denies every row, shared
+/// by the view generator and the decision to emit validation triggers, so the
+/// two cannot drift into disagreeing about the same table.
+fn rls_read_predicate<O: TranslationOptions, DB: DatabaseLike>(
+    table: &DB::Table,
+    schema: &DB,
+    options: &O,
+) -> PolicyPredicate
+where
+    DB::Table: TableLike<DB = DB>,
+    DB::Policy: PolicyLike<DB = DB>,
+{
+    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+    let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select]);
+
+    combine_policy_predicates(
+        &select_policies,
+        PolicyClause::Using,
+        None,
+        options,
+        table,
+        schema,
+        Some(ctx.as_rename_tuple()),
+    )
+}
+
 /// Generates the CREATE VIEW SQL statement for a table with RLS.
 ///
 /// # Errors
@@ -1327,25 +1355,14 @@ where
     let ctx = RlsTriggerContext::new::<O, DB>(table, options);
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
-    let table_rename = Some(ctx.as_rename_tuple());
     let table_name_quoted = quote_identifier(table_name);
     let inner_table_name_quoted = quote_identifier(inner_table_name);
-
-    let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select]);
 
     let columns = collect_column_names(table, schema);
     let column_list =
         columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
-    let where_clause = match combine_policy_predicates(
-        &select_policies,
-        PolicyClause::Using,
-        None,
-        options,
-        table,
-        schema,
-        table_rename,
-    ) {
+    let where_clause = match rls_read_predicate(table, schema, options) {
         // No permissive policy grants access, so no row is readable. Covers both
         // an empty policy set and a restrictive-only one.
         PolicyPredicate::DenyAll => " WHERE false".to_owned(),
@@ -1749,10 +1766,19 @@ where
         statements.extend(delete_stmts);
     }
 
-    // Generate RLS validation monitoring triggers and views
-    let validation_stmts =
-        generate_rls_validation_statements(table, schema, options, audit_table_name)?;
-    statements.extend(validation_stmts);
+    // A deny-all view makes the monitor useless rather than strict: its check asks
+    // whether a backing row is visible through the view, which is always no here,
+    // so it would flag every write and distinguish nothing. Report the
+    // configuration once now instead of once per row at runtime.
+    if matches!(rls_read_predicate(table, schema, options), PolicyPredicate::DenyAll) {
+        crate::warnings::emit(crate::warnings::TranslationWarning::RlsDeniesEveryRow {
+            table: table.table_name().to_owned(),
+        });
+    } else {
+        let validation_stmts =
+            generate_rls_validation_statements(table, schema, options, audit_table_name)?;
+        statements.extend(validation_stmts);
+    }
 
     Ok(statements)
 }
