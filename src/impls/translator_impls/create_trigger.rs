@@ -19,8 +19,8 @@ use sqlparser::{
     ast::{
         Assignment, AssignmentTarget, BinaryOperator, ConditionalStatements, CreateTrigger,
         DropTrigger, Expr, Ident, ObjectName, ObjectNamePart, Statement, TableFactor,
-        TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerPeriod, Update,
-        helpers::attached_token::AttachedToken,
+        TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerObject, TriggerObjectKind,
+        TriggerPeriod, Update, helpers::attached_token::AttachedToken,
     },
     keywords::Keyword,
     tokenizer::{Token, TokenWithSpan, Word},
@@ -246,6 +246,43 @@ impl Translator for CreateTrigger {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // SQLite has only row triggers, so a statement trigger has no form to
+        // emit: `FOR EACH STATEMENT` is `near "STATEMENT": syntax error`, and a
+        // row trigger carrying the same body would run once per affected row.
+        //
+        // The omitted clause is the same case. PostgreSQL defaults to
+        // STATEMENT, measured on PostgreSQL 16, while SQLite defaults to ROW,
+        // so passing it through silently reverses how often the body runs.
+        //
+        // Checked before the maintenance-trigger split below, so neither the
+        // split halves nor the recursion can reach the emitter unexamined.
+        match self.trigger_object {
+            Some(
+                TriggerObjectKind::For(TriggerObject::Row)
+                | TriggerObjectKind::ForEach(TriggerObject::Row),
+            ) => {}
+            Some(
+                TriggerObjectKind::For(TriggerObject::Statement)
+                | TriggerObjectKind::ForEach(TriggerObject::Statement),
+            ) => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "a statement trigger has no SQLite equivalent, since SQLite fires a trigger \
+                     once per row rather than once per statement. Rewrite the body so it is \
+                     correct once per row and declare the trigger FOR EACH ROW."
+                        .to_string(),
+                ));
+            }
+            None => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    "a trigger with no FOR EACH clause is a statement trigger in PostgreSQL, \
+                     which has no SQLite equivalent, since SQLite fires a trigger once per row \
+                     rather than once per statement. Write FOR EACH ROW if that is what was \
+                     meant, since SQLite would otherwise silently run the body once per row."
+                        .to_string(),
+                ));
+            }
+        }
+
         let source_table_name = self.table_name.clone();
         validate_schema_qualified_object_name_for_sqlite(schema, &source_table_name)?;
         let normalized_source_table_name =
@@ -537,5 +574,64 @@ mod tests {
             sql.contains("CREATE TRIGGER trigger_upsert_brands_edited_at_pg2sqlite_insert AFTER INSERT ON brands"),
             "missing AFTER INSERT branch: {sql}"
         );
+    }
+    /// SQLite has only row triggers, and `FOR EACH STATEMENT` is `near
+    /// "STATEMENT": syntax error`. A row trigger cannot stand in for one: the
+    /// body would run once per affected row instead of once per statement.
+    #[test]
+    fn statement_triggers_are_rejected() {
+        for spelling in ["FOR EACH STATEMENT", "FOR STATEMENT"] {
+            let trigger = parse_trigger(&format!(
+                "CREATE TRIGGER docs_ai AFTER INSERT ON docs \
+                 {spelling} EXECUTE FUNCTION docs_trigger_fn()"
+            ));
+            let err = trigger
+                .translate(
+                    &schema_with_trigger_function_and_rls_table(),
+                    &Pg2SqliteOptions::default(),
+                )
+                .expect_err("a statement trigger has no SQLite form");
+            assert!(
+                err.to_string().contains("once per statement"),
+                "the error must say what differs, got: {err}"
+            );
+        }
+    }
+
+    /// PostgreSQL defaults to `FOR EACH STATEMENT` when the clause is omitted,
+    /// measured on PostgreSQL 16: a trigger written without it fires once for a
+    /// three row insert and `information_schema.triggers` reports `STATEMENT`.
+    /// SQLite defaults to the opposite, so the omitted spelling must be
+    /// rejected too, or the body silently starts running once per row.
+    #[test]
+    fn a_trigger_without_a_for_each_clause_is_rejected() {
+        let trigger = parse_trigger(
+            "CREATE TRIGGER docs_ai AFTER INSERT ON docs EXECUTE FUNCTION docs_trigger_fn()",
+        );
+        let err = trigger
+            .translate(&schema_with_trigger_function_and_rls_table(), &Pg2SqliteOptions::default())
+            .expect_err("an omitted clause means STATEMENT in PostgreSQL");
+        assert!(
+            err.to_string().contains("once per statement"),
+            "the error must say what differs, got: {err}"
+        );
+    }
+
+    /// Both row spellings still translate. Guards the rejection from widening
+    /// to the case SQLite does support.
+    #[test]
+    fn row_triggers_still_translate() {
+        for spelling in ["FOR EACH ROW", "FOR ROW"] {
+            let trigger = parse_trigger(&format!(
+                "CREATE TRIGGER docs_ai AFTER INSERT ON docs \
+                 {spelling} EXECUTE FUNCTION docs_trigger_fn()"
+            ));
+            trigger
+                .translate(
+                    &schema_with_trigger_function_and_rls_table(),
+                    &Pg2SqliteOptions::default(),
+                )
+                .unwrap_or_else(|error| panic!("{spelling} is what SQLite does: {error}"));
+        }
     }
 }
