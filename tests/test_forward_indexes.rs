@@ -373,3 +373,51 @@ fn an_ordinary_index_does_not_warn() {
 
     assert!(warnings.is_empty(), "an ordinary index has nothing to report: {warnings:?}");
 }
+
+/// SQLite has no operator classes: `CREATE INDEX i ON t (s text_pattern_ops)`
+/// answers `near "text_pattern_ops": syntax error`, so the clause was making
+/// the index unbuildable.
+///
+/// The spelling here is UNIQUE on purpose. That is the only case where an
+/// opclass could decide something other than plan shape, since PostgreSQL's
+/// pattern classes compare bitwise while the default class compares by
+/// collation. The two only disagree under a nondeterministic collation, and
+/// `Expr::Collate` already refuses every collation but SQLite's three, all
+/// deterministic, so no column that reaches SQLite can tell them apart.
+#[test]
+fn an_index_operator_class_is_dropped() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         CREATE UNIQUE INDEX i ON t (s text_pattern_ops);
+         INSERT INTO t VALUES (1, 'a'), (2, 'A');
+         SELECT count(*) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("2".to_string())], "the two spellings must stay distinct");
+}
+
+/// Dropping it is reported, since the index then serves fewer queries than the
+/// PostgreSQL one.
+#[test]
+fn dropping_an_index_operator_class_warns() {
+    let warnings = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+             CREATE INDEX i ON t (s text_pattern_ops);",
+        )
+        .expect("parse")
+        .translate_with_report(&Pg2SqliteOptions::default())
+        .expect("translate")
+        .warnings;
+
+    assert!(
+        warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                pg2sqlite::warnings::TranslationWarning::LossyDrop { construct, .. }
+                    if *construct == "index operator class"
+            )
+        }),
+        "expected a LossyDrop naming the operator class, got {warnings:?}"
+    );
+}
