@@ -22,7 +22,9 @@ use super::helpers::Forward;
 use crate::{
     impls::{
         object_name::{last_ident, last_ident_value_or_display, table_with_implicit_public_lookup},
-        shared_helpers::{translate_on_conflict_do_update, translate_returning},
+        shared_helpers::{
+            is_default_keyword, translate_on_conflict_do_update, translate_returning,
+        },
         translator_impls::{
             rls,
             uuid::{
@@ -44,12 +46,26 @@ impl Translator for Insert {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        let source =
-            self.source.as_ref().map(|q| q.translate(schema, options)).transpose()?.map(Box::new);
+        // Replace DEFAULT with the column's declared default BEFORE translating
+        // the source, for two reasons. The substituted expression is PostgreSQL
+        // SQL and gets translated by the same path as a written-out value
+        // rather than needing its own call. And once no INSERT can carry the
+        // keyword any further, `translate_values_rows` can refuse a DEFAULT
+        // reaching it from anywhere else, which is the only other place the
+        // parser accepts one.
+        let mut prepared = self.clone();
+        substitute_default_values(&mut prepared, schema, options)?;
+
+        let source = prepared
+            .source
+            .as_ref()
+            .map(|q| q.translate(schema, options))
+            .transpose()?
+            .map(Box::new);
 
         let returning = translate_returning::<Forward>(self.returning.as_ref(), schema, options)?;
 
-        let mut insert = Insert { source, returning, ..self.clone() };
+        let mut insert = Insert { source, returning, ..prepared };
 
         // INSERT INTO <RLS view> ... RETURNING ...: rewrite to target
         // the backing table so RETURNING surfaces the row that was
@@ -197,6 +213,172 @@ fn unresolvable_constraint(constraint: &str, table: &str) -> crate::errors::Erro
         "ON CONFLICT ON CONSTRAINT {constraint} cannot be translated because {table} declares no \
          unique constraint of that name, and SQLite's conflict target is a column list. Name the \
          conflicting columns instead, as ON CONFLICT (col, ...)."
+    ))
+}
+
+/// Replaces every `DEFAULT` in a `VALUES` row with the column's declared
+/// default, since SQLite accepts the keyword only in `INSERT INTO t DEFAULT
+/// VALUES` and rejects it inside a row with `near "DEFAULT": syntax error`.
+///
+/// Three outcomes per column, and the middle one is the case worth stating.
+/// A declared default is translated and substituted. A column with no declared
+/// default takes `NULL`, which is what PostgreSQL inserts too, and which for a
+/// generated primary key is exactly right: PostgreSQL takes the next sequence
+/// value while SQLite assigns the rowid, both from the same statement, verified
+/// to yield 1 and 2 for two defaulted rows. A `NOT NULL` column with no
+/// declared default is refused, because the insert could then only ever fail.
+///
+/// Unlike the vector and UUID walkers beside it this one reports rather than
+/// returning quietly, since a `DEFAULT` left in place cannot execute. It
+/// therefore checks for one FIRST: an insert carrying none must not be made to
+/// resolve its target, which for a function-style table object cannot be
+/// resolved at all.
+fn substitute_default_values(
+    insert: &mut Insert,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), crate::errors::Error> {
+    if !carries_default(insert) {
+        return Ok(());
+    }
+
+    let TableObject::TableName(table_name) = &insert.table else {
+        return Err(default_without_a_named_table(&insert.table));
+    };
+    let Some(table) = table_with_implicit_public_lookup(schema, table_name)? else {
+        return Err(unknown_default_table(table_name));
+    };
+
+    let column_names: Vec<String> = if insert.columns.is_empty() {
+        table.columns(schema)?.map(|column| column.column_name().to_owned()).collect()
+    } else {
+        insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
+    };
+
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
+
+    for row in &mut values.rows {
+        for (index, expr) in row.content.iter_mut().enumerate() {
+            if !is_default_keyword(expr) {
+                continue;
+            }
+            let column_name = column_names
+                .get(index)
+                .ok_or_else(|| default_without_a_column(table_name, index))?;
+            *expr = default_expr_for_column(table, column_name, schema, options)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The expression a `DEFAULT` in a `VALUES` row stands for.
+fn default_expr_for_column(
+    table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
+    column_name: &str,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<sqlparser::ast::Expr, crate::errors::Error> {
+    let Some(column) = table.column(column_name, schema)? else {
+        return Err(unknown_default_column(table.table_name(), column_name));
+    };
+
+    // Read the default off the column definition rather than through
+    // `ColumnLike::default_value()`, which renders it back to a String that
+    // would have to be reparsed. Returned untranslated on purpose: the caller
+    // substitutes it before the source is translated, so a PostgreSQL default
+    // such as `now()` goes through the ordinary expression path.
+    for option in &column.attribute().options {
+        if let sqlparser::ast::ColumnOption::Default(expr) = &option.option {
+            return Ok(expr.clone());
+        }
+    }
+
+    if column.is_nullable(schema)? || is_generated_primary_key(table, column_name, schema, options)?
+    {
+        return Ok(sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan {
+            value: sqlparser::ast::Value::Null,
+            span: sqlparser::tokenizer::Span::empty(),
+        }));
+    }
+
+    Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "DEFAULT was written for {}.{column_name}, which declares no default and is NOT NULL, so \
+         there is nothing to insert and the statement could only fail. Give the column a DEFAULT, \
+         or write the value out.",
+        table.table_name()
+    )))
+}
+
+/// True when `column_name` is the whole primary key and holds an integer, which
+/// SQLite translates to a rowid alias. Inserting `NULL` there assigns the next
+/// rowid, so a PostgreSQL `SERIAL PRIMARY KEY` keeps generating values through
+/// the same statement.
+fn is_generated_primary_key(
+    table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
+    column_name: &str,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<bool, crate::errors::Error> {
+    let mut primary_key = table.primary_key_columns(schema)?;
+    let Some(only) = primary_key.next() else { return Ok(false) };
+    if primary_key.next().is_some() || !only.column_name().eq_ignore_ascii_case(column_name) {
+        return Ok(false);
+    }
+
+    // Ask the data type translator rather than enumerating PostgreSQL spellings:
+    // `SERIAL` reaches here as `DataType::Custom("serial")` and only the
+    // translator knows it becomes `INTEGER`, which is what makes the column a
+    // rowid alias.
+    Ok(matches!(
+        only.attribute().data_type.translate(schema, options)?,
+        sqlparser::ast::DataType::Int(_)
+            | sqlparser::ast::DataType::Integer(_)
+            | sqlparser::ast::DataType::BigInt(_)
+            | sqlparser::ast::DataType::SmallInt(_)
+    ))
+}
+
+fn default_without_a_column(
+    table: &sqlparser::ast::ObjectName,
+    index: usize,
+) -> crate::errors::Error {
+    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "DEFAULT appears at position {} of a VALUES row for {table}, which names no column there, \
+         so there is no default to substitute.",
+        index + 1
+    ))
+}
+
+/// True when any `VALUES` row of `insert` carries the bare `DEFAULT` keyword.
+///
+/// Checked before anything else so an insert that never mentions it is not made
+/// to resolve its target, which a function-style table object cannot do.
+fn carries_default(insert: &Insert) -> bool {
+    let Some(source) = insert.source.as_deref() else { return false };
+    let SetExpr::Values(values) = source.body.as_ref() else { return false };
+    values.rows.iter().any(|row| row.content.iter().any(is_default_keyword))
+}
+
+fn default_without_a_named_table(table: &TableObject) -> crate::errors::Error {
+    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "DEFAULT was written in a VALUES row for {table}, which is not a named table, so there are \
+         no column defaults to resolve."
+    ))
+}
+
+fn unknown_default_table(table: &sqlparser::ast::ObjectName) -> crate::errors::Error {
+    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "DEFAULT was written in a VALUES row for {table}, which the translation schema does not \
+         declare, so its column defaults cannot be resolved."
+    ))
+}
+
+fn unknown_default_column(table: &str, column_name: &str) -> crate::errors::Error {
+    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "DEFAULT was written for {table}.{column_name}, which the translation schema does not \
+         declare, so its default cannot be resolved."
     ))
 }
 

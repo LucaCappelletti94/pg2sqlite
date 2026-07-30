@@ -93,16 +93,25 @@ fn insert_null_at_vector_position_left_alone() {
     assert!(insert.contains("NULL"), "NULL must survive verbatim; got: {insert}");
 }
 
+/// `DEFAULT` is replaced by the column's default before the wrapper runs, and
+/// `embedding` declares none and is nullable, so the row carries an unwrapped
+/// `NULL`. Inverted from `insert_default_at_vector_position_left_alone`, which
+/// pinned `DEFAULT` surviving into the output, where SQLite rejects it with
+/// `near "DEFAULT": syntax error`.
 #[test]
-fn insert_default_at_vector_position_left_alone() {
+fn insert_default_at_vector_position_becomes_an_unwrapped_null() {
     let sql = "
         CREATE TABLE items (id INTEGER PRIMARY KEY, embedding vector(3));
         INSERT INTO items (id, embedding) VALUES (1, DEFAULT);
     ";
     let out = translate(sql);
     let insert = find_insert(&out);
-    assert!(!insert.contains("vec_f32(DEFAULT)"), "DEFAULT must not be wrapped; got: {insert}");
-    assert!(insert.to_uppercase().contains("DEFAULT"), "DEFAULT must survive; got: {insert}");
+    assert!(!insert.contains("vec_f32("), "a substituted NULL must not be wrapped, got: {insert}");
+    assert!(
+        !insert.to_uppercase().contains("DEFAULT"),
+        "DEFAULT cannot reach SQLite, got: {insert}"
+    );
+    assert!(insert.contains("NULL"), "the column default is NULL, got: {insert}");
 }
 
 #[test]

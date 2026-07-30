@@ -118,6 +118,38 @@ pub(crate) fn with_ordinality_not_supported_error() -> Error {
     )
 }
 
+/// True when `expr` is the bare `DEFAULT` keyword.
+///
+/// `sqlparser` has no `Expr` variant for it: `DEFAULT` is not reserved in
+/// expression position, so it arrives as a plain identifier, which is why this
+/// is a name comparison rather than a pattern match. A column genuinely called
+/// `default` has to be quoted to be referenced, and a quoted identifier is not
+/// matched here.
+#[must_use]
+pub(crate) fn is_default_keyword(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Identifier(ident)
+            if ident.quote_style.is_none() && ident.value.eq_ignore_ascii_case("default")
+    )
+}
+
+/// Returns the error for a `DEFAULT` outside an `INSERT`.
+///
+/// Inside one it is substituted for the column's declared default, which is
+/// what `insert.rs` does before the source is translated, so anything reaching
+/// here is in a context where PostgreSQL does not allow the keyword either: it
+/// answers "DEFAULT is not allowed in this context".
+#[must_use]
+pub(crate) fn default_outside_an_insert_error() -> Error {
+    Error::UnsupportedSQLiteFeature(
+        "DEFAULT is only meaningful in a VALUES row of an INSERT, where it stands for the \
+         column's declared default. PostgreSQL rejects it anywhere else, and SQLite has no form \
+         of it at all."
+            .to_string(),
+    )
+}
+
 /// Extracts a stable-ish variant name from debug output.
 #[must_use]
 pub(crate) fn debug_variant_name(value: &impl core::fmt::Debug) -> String {
@@ -1001,7 +1033,12 @@ pub(crate) fn translate_values_rows<D: TranslationDirection>(
                 let translated = row
                     .content
                     .iter()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| {
+                        if D::IS_FORWARD && is_default_keyword(expr) {
+                            return Err(default_outside_an_insert_error());
+                        }
+                        D::translate_expr(expr, schema, options)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(sqlparser::ast::Parens {
                     opening_token: row.opening_token.clone(),
