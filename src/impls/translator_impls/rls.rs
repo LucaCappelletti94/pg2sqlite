@@ -1581,17 +1581,27 @@ where
     };
     let forward = format!("UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {row_filter};");
 
-    let denied = update_policies.is_empty()
-        || matches!(using, PolicyPredicate::DenyAll)
-        || matches!(check, PolicyPredicate::DenyAll);
+    // PostgreSQL distinguishes the two ways an UPDATE can be refused, and so must
+    // this. USING selects which rows the statement may target, so when nothing
+    // qualifies there is simply no row to update: PostgreSQL reports zero rows and
+    // succeeds. WITH CHECK judges the new value of a row that WAS targetable, and
+    // failing it is an error. Verified against PostgreSQL 16.
+    let using_denies = update_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll);
 
-    let trigger_body = if denied {
-        // Deny-by-default: PostgreSQL RLS rejects an UPDATE when no permissive
-        // FOR UPDATE (or FOR ALL) policy grants it, whether because none is
-        // declared or because every applicable one is restrictive.
-        format!(
-            "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no UPDATE policy on {table_name}');\nEND"
-        )
+    let trigger_body = if using_denies {
+        if options.is_strict_rls_write_deny() {
+            format!(
+                "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no UPDATE policy on {table_name}');\nEND"
+            )
+        } else {
+            // No row is targetable, so the trigger forwards nothing. SQLite then
+            // reports zero rows changed, matching PostgreSQL exactly.
+            "BEGIN\n    SELECT NULL;\nEND".to_owned()
+        }
+    } else if matches!(check, PolicyPredicate::DenyAll) {
+        // The row is targetable but no WITH CHECK can ever admit its new value,
+        // which PostgreSQL reports as a violation rather than a silent skip.
+        format!("BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}');\nEND")
     } else if let PolicyPredicate::Expr(check_predicate) = check {
         // Raise only for a row that IS updatable but whose new value violates
         // WITH CHECK. Without the USING conjunct, a row merely visible through
@@ -1657,13 +1667,19 @@ where
         table_rename,
     );
 
-    let trigger_body = if delete_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll) {
-        // Deny-by-default: PostgreSQL RLS rejects a DELETE when no permissive
-        // FOR DELETE (or FOR ALL) policy grants it, whether because none is
-        // declared or because every applicable one is restrictive.
-        format!(
-            "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no DELETE policy on {table_name}');\nEND"
-        )
+    let using_denies = delete_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll);
+
+    let trigger_body = if using_denies {
+        // A DELETE is governed only by USING, and it has no WITH CHECK, so an
+        // unqualified row is always a silent no-op in PostgreSQL rather than an
+        // error. Verified against PostgreSQL 16: DELETE reports zero rows.
+        if options.is_strict_rls_write_deny() {
+            format!(
+                "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no DELETE policy on {table_name}');\nEND"
+            )
+        } else {
+            "BEGIN\n    SELECT NULL;\nEND".to_owned()
+        }
     } else {
         let row_filter = match &using {
             PolicyPredicate::AllowAll | PolicyPredicate::DenyAll => pk_where.clone(),

@@ -264,6 +264,37 @@ pub trait TranslationOptions {
     fn is_strict_rls_validation(&self) -> bool;
 
     #[must_use]
+    /// Raises instead of silently affecting zero rows when no policy makes a
+    /// row updatable or deletable.
+    ///
+    /// The default matches PostgreSQL, which evaluates a policy's `USING`
+    /// clause to decide which rows an `UPDATE` or `DELETE` can target and
+    /// reports zero rows affected when none qualify. Verified against
+    /// PostgreSQL 16: with row level security enabled and no applicable
+    /// policy, `UPDATE` and `DELETE` return a zero count and no error.
+    ///
+    /// Enable this to surface a missing policy loudly during development. Note
+    /// it diverges from PostgreSQL, so an application treating a zero-row
+    /// write as ordinary will see an error where PostgreSQL succeeded.
+    ///
+    /// This does not affect `INSERT`, nor an `UPDATE` whose new row fails a
+    /// `WITH CHECK` clause. PostgreSQL raises for both, so the translation
+    /// always does too.
+    ///
+    /// # Example
+    /// ```
+    /// use pg2sqlite::prelude::*;
+    ///
+    /// let options = Pg2SqliteOptions::default().with_strict_rls_write_deny();
+    /// assert!(options.is_strict_rls_write_deny());
+    /// ```
+    fn with_strict_rls_write_deny(self) -> Self;
+
+    /// Returns whether a write denied by a policy's `USING` clause raises
+    /// rather than affecting zero rows.
+    fn is_strict_rls_write_deny(&self) -> bool;
+
+    #[must_use]
     /// Permits foreign keys whose target table or columns do not resolve in the
     /// document. Default is to fail on the first dangling reference, as
     /// Postgres does at DDL apply.

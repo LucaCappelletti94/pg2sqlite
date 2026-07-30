@@ -1,19 +1,27 @@
-//! Red tests: PostgreSQL Row-Level Security is deny-by-default. Once
-//! a table has any policy, an action without a matching policy is
-//! forbidden. pg2sqlite currently emits INSTEAD OF DELETE/UPDATE
-//! triggers on the view that forward to the backing table without
-//! consulting any policy, so DELETE and UPDATE succeed silently when
-//! the schema only declared FOR SELECT / FOR INSERT policies.
+//! Write-path policy enforcement, matching PostgreSQL per operation.
 //!
-//! This is a **security regression** vs PostgreSQL behaviour: an
-//! application that relies on RLS to gate writes will get the writes
-//! through pg2sqlite's translated schema.
+//! PostgreSQL is deny-by-default once a table has any policy, but what "denied"
+//! means differs by operation, and the difference is measured against
+//! PostgreSQL 16 rather than assumed:
 //!
-//! These tests pin the expected deny-by-default behaviour. They are
-//! intentionally RED until pg2sqlite either (a) emits a RAISE(ABORT)
-//! at the top of any INSTEAD OF trigger whose action has no policy,
-//! or (b) skips emitting that INSTEAD OF trigger entirely so SQLite
-//! errors with the standard "cannot modify view" message.
+//! - `INSERT` is checked against `WITH CHECK`. With no applicable policy
+//!   nothing satisfies it, so the statement errors with "new row violates
+//!   row-level security policy".
+//! - `UPDATE` and `DELETE` use `USING` to choose which rows they may target.
+//!   With no applicable policy no row qualifies, so they report zero rows
+//!   affected and succeed.
+//! - An `UPDATE` whose new row fails `WITH CHECK` errors, even though the same
+//!   statement against an invisible row would have been a silent no-op.
+//!
+//! This file originally pinned a raise for all three, which was stricter than
+//! PostgreSQL on the `UPDATE` and `DELETE` paths. That raise is still available
+//! through `with_strict_rls_write_deny` for callers who want a missing policy
+//! to be loud, and `strict_write_deny_raises_for_update_and_delete` covers it.
+//!
+//! These tests drive `rusqlite` rather than diesel because the schema calls
+//! `current_setting('app.user_id')`, which translates to a SQLite function that
+//! has to be registered on the connection with `create_scalar_function`. That
+//! is a driver capability diesel does not expose.
 
 use pg2sqlite::prelude::{
     Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions, UuidRepresentation,
@@ -71,8 +79,15 @@ fn translate(schema: &str, opts: &Pg2SqliteOptions) -> String {
         .join("\n")
 }
 
+/// A `DELETE` with no applicable policy affects zero rows and does not raise.
+///
+/// Verified against PostgreSQL 16: with row level security enabled and no
+/// applicable policy, `DELETE` reports `DELETE 0` and succeeds. PostgreSQL uses
+/// a policy's `USING` clause to decide which rows the statement can target, so
+/// when none qualify there is simply nothing to delete. Raising here diverged
+/// from that, and is now available behind `with_strict_rls_write_deny`.
 #[test]
-fn delete_is_blocked_when_no_delete_policy_is_defined() {
+fn delete_without_a_policy_affects_no_rows_and_does_not_raise() {
     let opts = rls_opts();
     let conn = open_with_session_user();
     conn.execute_batch(&translate(SCHEMA_SELECT_INSERT_ONLY, &opts)).expect("apply schema");
@@ -82,19 +97,19 @@ fn delete_is_blocked_when_no_delete_policy_is_defined() {
     let result = conn.execute("DELETE FROM documents WHERE id = 1", []);
     let after: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
 
-    assert!(
-        result.is_err(),
-        "DELETE on a table with no DELETE policy must raise; got Ok ({result:?})"
-    );
+    assert!(result.is_ok(), "DELETE must succeed as it does in PostgreSQL, got {result:?}");
     assert_eq!(
         after, before,
-        "DELETE must not remove rows when the schema has no DELETE policy; \
-         row count changed {before} -> {after}"
+        "no row may be removed without a DELETE policy; row count changed {before} -> {after}"
     );
 }
 
+/// An `UPDATE` with no applicable policy affects zero rows and does not raise.
+///
+/// Same PostgreSQL 16 measurement as the DELETE case above: `UPDATE 0`, no
+/// error.
 #[test]
-fn update_is_blocked_when_no_update_policy_is_defined() {
+fn update_without_a_policy_changes_nothing_and_does_not_raise() {
     let opts = rls_opts();
     let conn = open_with_session_user();
     conn.execute_batch(&translate(SCHEMA_SELECT_INSERT_ONLY, &opts)).expect("apply schema");
@@ -103,11 +118,28 @@ fn update_is_blocked_when_no_update_policy_is_defined() {
     let title: String =
         conn.query_row("SELECT title FROM documents WHERE id = 1", [], |r| r.get(0)).unwrap();
 
+    assert!(result.is_ok(), "UPDATE must succeed as it does in PostgreSQL, got {result:?}");
+    assert_ne!(title, "Hijacked", "the row must not change without an UPDATE policy");
+}
+
+/// The strict opt-in restores the raise for both operations.
+#[test]
+fn strict_write_deny_raises_for_update_and_delete() {
+    let opts = rls_opts().with_strict_rls_write_deny();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(SCHEMA_SELECT_INSERT_ONLY, &opts)).expect("apply schema");
+
     assert!(
-        result.is_err(),
-        "UPDATE on a table with no UPDATE policy must raise; got Ok ({result:?})"
+        conn.execute("UPDATE documents SET title = 'Hijacked' WHERE id = 1", []).is_err(),
+        "strict write deny must raise on an UPDATE with no policy"
     );
-    assert_ne!(title, "Hijacked", "title must not change when there is no UPDATE policy");
+    assert!(
+        conn.execute("DELETE FROM documents WHERE id = 1", []).is_err(),
+        "strict write deny must raise on a DELETE with no policy"
+    );
+
+    let after: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    assert_eq!(after, 2, "neither statement may change data");
 }
 
 const SCHEMA_FULL_POLICIES: &str = "\
@@ -189,14 +221,22 @@ fn insert_is_blocked_when_no_insert_policy_is_defined() {
     assert_eq!(count, 0, "no row may be written when INSERT is denied");
 }
 
+/// A table whose only policy is `FOR SELECT`: the `INSERT` is rejected while
+/// the `UPDATE` and `DELETE` quietly affect nothing, which is what PostgreSQL
+/// does.
+///
+/// The asymmetry is the point and it is measured, not assumed. PostgreSQL
+/// checks `WITH CHECK` for an inserted row, and with no `FOR INSERT` policy
+/// nothing can satisfy it, so the insert errors. For `UPDATE` and `DELETE` it
+/// instead uses `USING` to choose targetable rows, so no applicable policy
+/// means no candidate rows and a zero count.
+///
+/// A row is seeded straight into the backing table so the INSTEAD OF triggers
+/// really fire: under SQLite's FOR EACH ROW semantics an UPDATE matching no
+/// view row never invokes its trigger, which would make this pass for the wrong
+/// reason.
 #[test]
-fn select_only_table_blocks_all_writes() {
-    // The strongest deny-by-default test: a table whose only policy is FOR
-    // SELECT must block INSERT, UPDATE, and DELETE through the translated
-    // view. We seed one row directly into the backing table so the
-    // INSTEAD OF UPDATE / DELETE triggers actually fire (per SQLite
-    // FOR-EACH-ROW semantics, an UPDATE that matches zero rows does not
-    // invoke the trigger at all).
+fn select_only_table_blocks_inserts_and_silently_ignores_other_writes() {
     let opts = rls_opts();
     let conn = open_with_session_user();
     conn.execute_batch(&translate(SCHEMA_SELECT_ONLY, &opts)).expect("apply schema");
@@ -206,23 +246,24 @@ fn select_only_table_blocks_all_writes() {
     let insert_err = conn
         .execute("INSERT INTO documents (id, owner_id, title) VALUES (2, 42, 't')", [])
         .expect_err("INSERT must be rejected");
-    let update_err = conn
-        .execute("UPDATE documents SET title = 't' WHERE id = 1", [])
-        .expect_err("UPDATE must be rejected");
-    let delete_err = conn
-        .execute("DELETE FROM documents WHERE id = 1", [])
-        .expect_err("DELETE must be rejected");
-
     assert!(
         insert_err.to_string().contains("INSERT") && insert_err.to_string().contains("policy"),
         "INSERT error must reference policy: {insert_err:?}"
     );
+
     assert!(
-        update_err.to_string().contains("UPDATE") && update_err.to_string().contains("policy"),
-        "UPDATE error must reference policy: {update_err:?}"
+        conn.execute("UPDATE documents SET title = 't' WHERE id = 1", []).is_ok(),
+        "UPDATE must succeed, affecting nothing"
     );
     assert!(
-        delete_err.to_string().contains("DELETE") && delete_err.to_string().contains("policy"),
-        "DELETE error must reference policy: {delete_err:?}"
+        conn.execute("DELETE FROM documents WHERE id = 1", []).is_ok(),
+        "DELETE must succeed, affecting nothing"
     );
+
+    let title: String =
+        conn.query_row("SELECT title FROM documents_rls WHERE id = 1", [], |r| r.get(0)).unwrap();
+    assert_eq!(title, "seed", "the backing row must be untouched by either write");
+    let count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM documents_rls", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 1, "no row may be added or removed");
 }

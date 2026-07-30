@@ -47,6 +47,9 @@ pub struct Pg2SqliteOptions {
     rls_audit_table_name: Option<String>,
     /// Whether to enable strict RLS validation (abort on violations).
     strict_rls_validation: bool,
+    /// Whether a write denied by a policy `USING` clause raises instead of
+    /// affecting zero rows as PostgreSQL does.
+    strict_rls_write_deny: bool,
     /// Whether to enable SQLiteGIS-backed PostGIS translation (passthrough of
     /// `ST_*` scalar functions in SQLiteGIS's catalog).
     sqlitegis_enabled: bool,
@@ -104,6 +107,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             session_variables: Vec::<SessionVariableMapping>::arbitrary(u)?,
             rls_audit_table_name: Option::<String>::arbitrary(u)?,
             strict_rls_validation: bool::arbitrary(u)?,
+            strict_rls_write_deny: bool::arbitrary(u)?,
             sqlitegis_enabled: bool::arbitrary(u)?,
             math_functions_available: bool::arbitrary(u)?,
             spatial_indexes: Vec::new(),
@@ -128,6 +132,7 @@ impl Default for Pg2SqliteOptions {
             session_variables: Vec::new(),
             rls_audit_table_name: None,
             strict_rls_validation: false,
+            strict_rls_write_deny: false,
             sqlitegis_enabled: false,
             math_functions_available: false,
             spatial_indexes: Vec::new(),
@@ -323,6 +328,15 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn is_strict_rls_validation(&self) -> bool {
         self.strict_rls_validation
+    }
+
+    fn with_strict_rls_write_deny(mut self) -> Self {
+        self.strict_rls_write_deny = true;
+        self
+    }
+
+    fn is_strict_rls_write_deny(&self) -> bool {
+        self.strict_rls_write_deny
     }
 
     fn with_sqlitegis_enabled(mut self) -> Self {

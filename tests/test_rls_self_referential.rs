@@ -243,10 +243,16 @@ fn test_user_cannot_update_others() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test delete behavior when no explicit DELETE policy exists. Per the
-/// deny-by-default semantics PostgreSQL applies once RLS is enabled, a DELETE
-/// against a table that has no `FOR DELETE` policy must be rejected -
-/// regardless of whether the user could `SELECT` the row.
+/// Delete behaviour when no explicit `FOR DELETE` policy exists.
+///
+/// PostgreSQL decides which rows a `DELETE` may target from a policy's `USING`
+/// clause. With no applicable policy no row qualifies, so the statement removes
+/// nothing and succeeds, which measurement against PostgreSQL 16 confirms
+/// (`DELETE 0`). Being able to `SELECT` the row is irrelevant: read visibility
+/// comes from the SELECT policy and does not make the row deletable.
+///
+/// This previously asserted a raise, which was stricter than PostgreSQL. That
+/// behaviour is still reachable through `with_strict_rls_write_deny`.
 #[test]
 fn test_delete_without_explicit_policy() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
@@ -264,20 +270,16 @@ fn test_delete_without_explicit_policy() -> Result<(), Box<dyn std::error::Error
         })
         .execute(&mut connection)?;
 
-    // Even the row owner cannot DELETE through the view when no FOR DELETE
-    // policy is declared. pg2sqlite emits a RAISE(ABORT) inside the INSTEAD
-    // OF DELETE trigger that mirrors PostgreSQL's "permission denied" deny.
-    let result =
+    let affected =
         diesel::delete(app_users::table.filter(app_users::id.eq(alice_id.as_bytes().to_vec())))
-            .execute(&mut connection);
-    assert!(
-        result.is_err(),
-        "DELETE must be rejected when no FOR DELETE policy is declared, got Ok({result:?})"
-    );
+            .execute(&mut connection)?;
 
-    // Row must still exist.
+    assert_eq!(
+        affected, 0,
+        "the DELETE must report no rows affected, as PostgreSQL does with no FOR DELETE policy"
+    );
     let count = app_users::table.count().get_result::<i64>(&mut connection)?;
-    assert_eq!(count, 1, "row must survive the rejected DELETE");
+    assert_eq!(count, 1, "the row must survive, since no policy makes it deletable");
 
     Ok(())
 }
