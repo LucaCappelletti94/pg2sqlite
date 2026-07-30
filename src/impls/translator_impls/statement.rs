@@ -19,8 +19,8 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         AlterTable, AlterTableOperation, BinaryOperator, CascadeOption, ColumnDef, ColumnOption,
-        CopySource, CopyTarget, Delete, Expr, FromTable, Merge, ObjectType, Statement, TableFactor,
-        TableWithJoins, Truncate, TruncateIdentityOption, UnaryOperator,
+        CopySource, CopyTarget, Delete, DescribeAlias, Expr, FromTable, Merge, ObjectType,
+        Statement, TableFactor, TableWithJoins, Truncate, TruncateIdentityOption, UnaryOperator,
         helpers::attached_token::AttachedToken,
     },
     dialect::SQLiteDialect,
@@ -113,15 +113,12 @@ macro_rules! unsupported_statement_patterns {
         | Statement::Assert { .. }
         | Statement::While { .. }
         | Statement::ExplainTable { .. }
-        | Statement::Explain { .. }
         | Statement::Kill { .. }
         | Statement::ShowTables { .. }
-        | Statement::Analyze { .. }
         | Statement::CreateFunction(_)
         | Statement::CreateExtension(_)
         | Statement::CreatePolicy(_)
         | Statement::Set(_)
-        | Statement::Pragma { .. }
         | Statement::Call(_)
         | Statement::Reset(_)
         | Statement::Directory { .. }
@@ -194,8 +191,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::OptimizeTable { .. }
         | Statement::Unload { .. }
         | Statement::ExportData(_)
-        | Statement::AttachDatabase { .. }
-        | Statement::CreateVirtualTable { .. }
         | Statement::Case(_)
         // PostgreSQL/Snowflake collation DDL (sqlparser 0.62)
         | Statement::CreateCollation(_)
@@ -737,6 +732,52 @@ fn reject_prepared_statement(keyword: &str, name: Option<&str>) -> Error {
     ))
 }
 
+/// Translates PostgreSQL `EXPLAIN` to SQLite `EXPLAIN QUERY PLAN`.
+///
+/// The inner statement is translated too. Without that the plan would be
+/// computed over PostgreSQL SQL that SQLite cannot parse, so the emitted
+/// statement would not run.
+///
+/// `EXPLAIN ANALYZE` is refused: PostgreSQL executes the statement and reports
+/// real timings, whereas `EXPLAIN QUERY PLAN` never executes anything, so an
+/// `EXPLAIN ANALYZE INSERT ...` would quietly stop writing.
+fn translate_explain(
+    analyze: bool,
+    statement: &Statement,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<Statement>, Error> {
+    if analyze {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "EXPLAIN ANALYZE cannot be translated. PostgreSQL runs the statement and reports real \
+             timings, while SQLite's EXPLAIN QUERY PLAN only describes the plan and never executes, \
+             so any write the statement performs would be lost. Run the statement itself, or use a \
+             plain EXPLAIN for the plan."
+                .to_owned(),
+        ));
+    }
+
+    let mut translated = statement.translate(schema, options)?;
+    if translated.len() != 1 {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "EXPLAIN cannot be translated because its statement expands to {} SQLite statements, \
+             and a plan can only describe one. Explain the individual statements instead.",
+            translated.len()
+        )));
+    }
+
+    Ok(vec![Statement::Explain {
+        describe_alias: DescribeAlias::Explain,
+        analyze: false,
+        verbose: false,
+        query_plan: true,
+        estimate: false,
+        statement: Box::new(translated.remove(0)),
+        format: None,
+        options: None,
+    }])
+}
+
 impl Translator for Statement {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -820,7 +861,8 @@ impl Translator for Statement {
                     let Some(elseif_condition) = &elseif_block.condition else {
                         continue;
                     };
-                    let translated_elseif_condition = elseif_condition.translate(schema, options)?;
+                    let translated_elseif_condition =
+                        elseif_condition.translate(schema, options)?;
                     let guard = if let Some(prior_any) = or_chain(&prior_conditions) {
                         Expr::BinaryOp {
                             left: Box::new(negate(prior_any)),
@@ -855,27 +897,28 @@ impl Translator for Statement {
 
                 statements
             }
-            // VACUUM is supported by SQLite - pass through
+            // Statements that are already SQLite's own syntax, passed through
+            // unchanged. A pragma name is a SQLite setting and an attached alias is
+            // a database handle, so neither is a schema-qualified object to
+            // normalise.
             Self::Vacuum { .. }
-            // Transaction control statements - pass through unchanged (SQLite supports these)
             | Self::Commit { .. }
             | Self::Rollback { .. }
             | Self::StartTransaction { .. }
             | Self::Savepoint { .. }
-            | Self::ReleaseSavepoint { .. } => vec![self.clone()],
+            | Self::ReleaseSavepoint { .. }
+            | Self::Pragma { .. }
+            | Self::AttachDatabase { .. } => vec![self.clone()],
             // DROP TABLE/VIEW/INDEX - translate to SQLite (strip CASCADE/RESTRICT)
-            Self::Drop {
-                object_type,
-                if_exists,
-                names,
-                ..
-            } => {
+            Self::Drop { object_type, if_exists, names, .. } => {
                 match object_type {
                     // SQLite supports these object types
                     ObjectType::Table | ObjectType::View | ObjectType::Index => {
                         let normalized_names = names
                             .iter()
-                            .map(|name| normalize_schema_qualified_object_name_for_sqlite(schema, name))
+                            .map(|name| {
+                                normalize_schema_qualified_object_name_for_sqlite(schema, name)
+                            })
                             .collect::<Result<Vec<_>, _>>()?;
                         vec![Statement::Drop {
                             object_type: *object_type,
@@ -1003,6 +1046,29 @@ impl Translator for Statement {
                     "DEALLOCATE",
                     Some(name.to_string().as_str()),
                 ));
+            }
+            // Already SQLite's own syntax, so these pass through. A table name is
+            // normalised the way every other table reference is, since a
+            // schema-qualified PostgreSQL name has no SQLite counterpart.
+            Statement::Analyze(analyze) => {
+                let mut analyze = analyze.clone();
+                if let Some(table_name) = &analyze.table_name {
+                    analyze.table_name = Some(normalize_schema_qualified_object_name_for_sqlite(
+                        schema, table_name,
+                    )?);
+                }
+                vec![Statement::Analyze(analyze)]
+            }
+            Statement::CreateVirtualTable { name, if_not_exists, module_name, module_args } => {
+                vec![Statement::CreateVirtualTable {
+                    name: normalize_schema_qualified_object_name_for_sqlite(schema, name)?,
+                    if_not_exists: *if_not_exists,
+                    module_name: module_name.clone(),
+                    module_args: module_args.clone(),
+                }]
+            }
+            Statement::Explain { analyze, statement, .. } => {
+                translate_explain(*analyze, statement, schema, options)?
             }
             unsupported_statement_patterns!() => Vec::new(),
         };
