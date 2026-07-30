@@ -101,6 +101,23 @@ pub(crate) fn generate_series_not_supported_error() -> Error {
     Error::UnsupportedSQLiteFeature(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
 }
 
+/// Returns the standardised error for `WITH ORDINALITY`, which SQLite has no
+/// clause for.
+///
+/// Refused rather than dropped, because the ordinality column is projected by
+/// the query around it, so losing the clause loses a column the caller selects.
+/// `UNNEST ... WITH ORDINALITY` does NOT come here: forward translation lowers
+/// it onto `json_each`, whose `key` column supplies the ordinality.
+#[must_use]
+pub(crate) fn with_ordinality_not_supported_error() -> Error {
+    Error::UnsupportedSQLiteFeature(
+        "WITH ORDINALITY is not supported in SQLite, which has no clause that numbers the rows of \
+         a FROM item. Number them in the query instead, with ROW_NUMBER() OVER (), or use UNNEST, \
+         which is translated through json_each and does supply an ordinality column."
+            .to_string(),
+    )
+}
+
 /// Extracts a stable-ish variant name from debug output.
 #[must_use]
 pub(crate) fn debug_variant_name(value: &impl core::fmt::Debug) -> String {
@@ -1724,6 +1741,9 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                         .to_string(),
                 ));
             }
+            if D::IS_FORWARD && *with_ordinality {
+                return Err(with_ordinality_not_supported_error());
+            }
             TableFactor::Table {
                 name: D::translate_object_name(name, schema, options)?,
                 alias: alias.clone(),
@@ -1803,6 +1823,9 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
         TableFactor::Function { lateral, name, args, with_ordinality, alias } => {
             if D::IS_FORWARD && is_generate_series_object_name(name) {
                 return Err(generate_series_not_supported_error());
+            }
+            if D::IS_FORWARD && *with_ordinality {
+                return Err(with_ordinality_not_supported_error());
             }
             TableFactor::Function {
                 lateral: *lateral,
