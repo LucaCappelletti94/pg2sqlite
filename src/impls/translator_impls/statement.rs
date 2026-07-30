@@ -117,9 +117,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::Kill { .. }
         | Statement::ShowTables { .. }
         | Statement::Analyze { .. }
-        | Statement::Deallocate { .. }
-        | Statement::Prepare { .. }
-        | Statement::Execute { .. }
         | Statement::CreateFunction(_)
         | Statement::CreateExtension(_)
         | Statement::CreatePolicy(_)
@@ -712,6 +709,34 @@ fn reject_merge(merge: &Merge) -> Error {
     ))
 }
 
+/// Rejects PostgreSQL's server-side prepared statements, which SQLite has no
+/// statement form for.
+///
+/// In SQLite, preparing is a C API operation (`sqlite3_prepare_v2`) with no SQL
+/// spelling and no server-side name to refer to afterwards, so none of these
+/// has anything to emit. `EXECUTE` is the important one: it performs the work,
+/// so dropping it loses whatever the migration intended, silently.
+///
+/// `DEALLOCATE` is refused as well, and it is the case worth justifying, since
+/// its own effect is only to free a named plan and is therefore result-neutral
+/// in isolation. It stays a hard error because a script that deallocates must
+/// have prepared first, that `PREPARE` is an error, and a `DEALLOCATE` naming a
+/// statement that cannot exist in the output is not something to accept
+/// quietly.
+fn reject_prepared_statement(keyword: &str, name: Option<&str>) -> Error {
+    let subject = match name {
+        Some(name) => format!("{keyword} {name}"),
+        None => keyword.to_owned(),
+    };
+
+    Error::UnsupportedSQLiteFeature(format!(
+        "{subject} cannot be translated. SQLite has no server-side prepared statements: preparing \
+         is a C API call rather than a SQL statement, so there is no name to prepare, execute, or \
+         deallocate. Inline the statement body at each use site, and let your SQLite driver \
+         prepare it."
+    ))
+}
+
 impl Translator for Statement {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -964,6 +989,21 @@ impl Translator for Statement {
                 return Err(reject_copy(source, *to, target));
             }
             Statement::Merge(merge) => return Err(reject_merge(merge)),
+            Statement::Prepare { name, .. } => {
+                return Err(reject_prepared_statement("PREPARE", Some(name.to_string().as_str())));
+            }
+            Statement::Execute { name, .. } => {
+                return Err(reject_prepared_statement(
+                    "EXECUTE",
+                    name.as_ref().map(ToString::to_string).as_deref(),
+                ));
+            }
+            Statement::Deallocate { name, prepare: _ } => {
+                return Err(reject_prepared_statement(
+                    "DEALLOCATE",
+                    Some(name.to_string().as_str()),
+                ));
+            }
             unsupported_statement_patterns!() => Vec::new(),
         };
 
