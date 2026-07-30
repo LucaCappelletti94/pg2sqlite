@@ -32,13 +32,15 @@ use crate::{
         expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq},
         function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
         query_builder::{from_relation, plain_table_factor, single_expr_query},
-        shared_helpers::{function_argument_exprs, translate_expr_recursive},
+        shared_helpers::{
+            every_declared_type_matches, function_argument_exprs, translate_expr_recursive,
+        },
         timezone::normalize_timezone_modifier_for_sqlite,
         translator_impls::{
             array::{
-                Quantifier, array_overlap, is_json_array_representation, representation_required,
-                translate_array_literal, translate_array_subscript,
-                translate_quantified_over_array,
+                Quantifier, array_concat, array_overlap, is_json_array_representation,
+                json_array_call, representation_required, translate_array_literal,
+                translate_array_subscript, translate_quantified_over_array,
             },
             helpers::Forward,
         },
@@ -243,6 +245,30 @@ fn translate_extract(
         format: None,
         kind: CastKind::Cast,
     })
+}
+/// True when `expr` is an array: an `ARRAY[...]` literal, or a column declared
+/// with an array type.
+///
+/// Under the JSON array representation an array column is TEXT holding a JSON
+/// array, so nothing about the value distinguishes it from a string and the
+/// declared type is the only evidence there is.
+fn is_array_expression(expr: &Expr, schema: &ParserDB) -> bool {
+    match expr {
+        Expr::Array(_) => true,
+        Expr::Nested(inner) => is_array_expression(inner, schema),
+        _ => {
+            every_declared_type_matches(expr, schema, |data_type| {
+                let lowered = data_type.to_ascii_lowercase();
+                lowered.ends_with("[]") || lowered.starts_with("array")
+            })
+        }
+    }
+}
+
+/// False only for a literal, which is the one thing known not to be NULL
+/// without running the query.
+fn can_be_null(expr: &Expr) -> bool {
+    !matches!(expr, Expr::Value(ValueWithSpan { value, .. }) if !matches!(value, Value::Null))
 }
 
 /// Translate a cast to boolean, which SQLite has no type for.
@@ -1245,6 +1271,47 @@ fn translate_binary_op(
             op: BinaryOperator::Minus,
             right: Box::new(and_expr),
         });
+    }
+
+    // `||` is overloaded. On arrays PostgreSQL concatenates elements, on text
+    // it concatenates characters, and under the JSON array representation an
+    // array is TEXT, so passing it through turned `{1,2} || {3,4}` into the
+    // string `[1,2][3,4]`. The operands decide, not the operator.
+    if *op == BinaryOperator::StringConcat
+        && (is_array_expression(left, schema) || is_array_expression(right, schema))
+    {
+        if !is_json_array_representation(options) {
+            return Err(representation_required("The || (array concatenation) operator"));
+        }
+        // PostgreSQL appends or prepends a lone element, and a one element
+        // array expands to exactly that element, so both spellings reuse the
+        // array shape rather than needing their own.
+        let as_array = |side: &Expr| -> Result<Expr, crate::errors::Error> {
+            let translated = side.translate(schema, options)?;
+            Ok(if is_array_expression(side, schema) {
+                translated
+            } else {
+                json_array_call(vec![translated])
+            })
+        };
+        let concatenated = array_concat(as_array(left)?, as_array(right)?);
+
+        // Two NULL arrays concatenate to NULL in PostgreSQL, where the rewrite
+        // would answer an empty array. One NULL needs no guard: PostgreSQL
+        // reads it as empty, which is what expanding it to no rows already
+        // does.
+        if can_be_null(left) && can_be_null(right) {
+            return Ok(case_when(
+                Expr::BinaryOp {
+                    left: Box::new(Expr::IsNull(Box::new(left.translate(schema, options)?))),
+                    op: BinaryOperator::And,
+                    right: Box::new(Expr::IsNull(Box::new(right.translate(schema, options)?))),
+                },
+                Expr::Value(Value::Null.with_empty_span()),
+                Some(concatenated),
+            ));
+        }
+        return Ok(concatenated);
     }
 
     // Array overlap. Rewritten over `json_each` rather than passed through,

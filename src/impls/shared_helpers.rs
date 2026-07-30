@@ -13,7 +13,10 @@ use alloc::{
 };
 use core::ops::ControlFlow;
 
-use sql_traits::structs::ParserDB;
+use sql_traits::{
+    structs::ParserDB,
+    traits::{ColumnLike, DatabaseLike, TableLike},
+};
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy,
     Fetch, FromTable, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
@@ -137,6 +140,46 @@ pub(crate) fn nulls_not_distinct_not_supported_error() -> Error {
          column is NOT NULL, or enforce the rule with a trigger."
             .to_string(),
     )
+}
+
+/// True when every column named by `expr` is declared with a type `predicate`
+/// accepts, and there is at least one.
+///
+/// A `json`, `jsonb`, or array column all become TEXT in SQLite and are
+/// otherwise indistinguishable from a string column, so the declared type is
+/// the only thing that tells them apart. The qualifier of a compound name is
+/// ignored, since it may be an alias rather than a table, which is why the
+/// answer has to be unanimous across every column of that name in the schema.
+///
+/// The type comes from the parsed DDL rather than through
+/// `ColumnLike::data_type`, which normalises and panics on an array:
+/// `Normalization for SQLParser data type Array(...) is not yet implemented`.
+pub(crate) fn every_declared_type_matches(
+    expr: &Expr,
+    schema: &ParserDB,
+    predicate: impl Fn(&str) -> bool,
+) -> bool {
+    let column_name = match expr {
+        Expr::Identifier(ident) => ident.value.as_str(),
+        Expr::CompoundIdentifier(parts) => {
+            match parts.last() {
+                Some(ident) => ident.value.as_str(),
+                None => return false,
+            }
+        }
+        Expr::Nested(inner) => return every_declared_type_matches(inner, schema, predicate),
+        _ => return false,
+    };
+
+    let declared = schema.tables().filter_map(|table| {
+        table
+            .columns(schema)
+            .ok()?
+            .find(|column| column.column_name().eq_ignore_ascii_case(column_name))
+    });
+    let mut declared = declared.map(|column| column.attribute().data_type.to_string());
+    let Some(first) = declared.next() else { return false };
+    predicate(&first) && declared.all(|data_type| predicate(&data_type))
 }
 
 /// True when `expr` is the bare `DEFAULT` keyword.

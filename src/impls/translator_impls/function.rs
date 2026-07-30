@@ -12,10 +12,7 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::{
-    structs::ParserDB,
-    traits::{ColumnLike, DatabaseLike, TableLike},
-};
+use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, UnaryOperator,
@@ -36,8 +33,8 @@ use crate::{
             unnamed_arg,
         },
         shared_helpers::{
-            GENERATE_SERIES_UNSUPPORTED_MESSAGE, function_argument_exprs,
-            translate_function_arguments,
+            GENERATE_SERIES_UNSUPPORTED_MESSAGE, every_declared_type_matches,
+            function_argument_exprs, translate_function_arguments,
         },
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -919,36 +916,10 @@ fn replace_first_argument(args: &mut FunctionArguments, replacement: Expr) {
 /// accepted only when every column with that name in the schema agrees, since
 /// guessing between the two is wrong half the time in either direction.
 fn carries_json(expr: &Expr, schema: &ParserDB) -> bool {
-    if is_already_json(expr) {
-        return true;
-    }
-
-    let column_name = match expr {
-        Expr::Identifier(ident) => ident.value.as_str(),
-        // The qualifier may be a table or an alias, so only the column name is
-        // matched and the answer still has to be unanimous.
-        Expr::CompoundIdentifier(parts) => {
-            match parts.last() {
-                Some(ident) => ident.value.as_str(),
-                None => return false,
-            }
-        }
-        Expr::Nested(inner) => return carries_json(inner, schema),
-        _ => return false,
-    };
-
-    let mut declared = schema.tables().filter_map(|table| {
-        table
-            .columns(schema)
-            .ok()?
-            .find(|column| column.column_name().eq_ignore_ascii_case(column_name))
-    });
-    let Some(first) = declared.next() else { return false };
-    let is_json =
-        |data_type: &str| matches!(data_type.to_ascii_lowercase().as_str(), "json" | "jsonb");
-
-    let verdict = is_json(first.data_type(schema));
-    verdict && declared.all(|column| is_json(column.data_type(schema)))
+    is_already_json(expr)
+        || every_declared_type_matches(expr, schema, |data_type| {
+            matches!(data_type.to_ascii_lowercase().as_str(), "json" | "jsonb")
+        })
 }
 
 /// The SQLite function that matches PostgreSQL's fourth argument.

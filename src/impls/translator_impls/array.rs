@@ -40,8 +40,8 @@ use core::ops::ControlFlow;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArgumentClause, FunctionArguments, Ident, OrderByExpr,
-    OrderByOptions, SelectItem, SetExpr, TableAlias, TableFactor, UnaryOperator, Value,
-    ValueWithSpan, visit_expressions,
+    OrderByOptions, SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor,
+    UnaryOperator, Value, ValueWithSpan, visit_expressions,
 };
 
 use crate::{
@@ -63,6 +63,15 @@ use crate::{
 const VALUE_COLUMN: &str = "value";
 /// Column of `json_each` holding the zero-based element index.
 const KEY_COLUMN: &str = "key";
+
+/// Which half of a concatenation a row came from, so the two orderings do not
+/// interleave once both `key` sequences restart at zero.
+const SIDE_COLUMN: &str = "pg2sqlite_side";
+
+/// Name for the derived table holding both halves. SQLite needs no alias here,
+/// but sqlparser renders one and a name nobody can collide with is cheaper than
+/// finding out.
+const HALVES_ALIAS: &str = "pg2sqlite_halves";
 
 /// True when the caller opted into the JSON array representation.
 #[must_use]
@@ -155,20 +164,93 @@ pub(crate) fn array_overlap(left: Expr, right: Expr) -> Expr {
     }
 }
 
+/// `a || b` over arrays, as
+/// `(SELECT json_group_array(value ORDER BY side, key) FROM (SELECT 0 AS side,
+/// key, value FROM json_each(a) UNION ALL SELECT 1 AS side, key, value FROM
+/// json_each(b)))`.
+///
+/// `side` is what keeps the two halves in order once their `key` sequences both
+/// restart at zero, and ordering inside the aggregate rather than in the
+/// subquery is what makes that order binding.
+///
+/// The same shape serves all three PostgreSQL spellings, since an operand that
+/// is not an array is wrapped in `json_array` by the caller and `json_each` of
+/// a one element array yields that one element.
+///
+/// A NULL operand expands to no rows, which is PostgreSQL's answer too: it
+/// treats a NULL array as empty here rather than propagating. Two NULLs would
+/// give an empty array where PostgreSQL gives NULL, so the caller guards that.
+pub(crate) fn array_concat(left: Expr, right: Expr) -> Expr {
+    let half = |side: i64, array: Expr| {
+        Box::new(SetExpr::Select(Box::new(make_simple_select(
+            vec![
+                aliased(integer_literal(side), SIDE_COLUMN),
+                SelectItem::UnnamedExpr(json_each_column(KEY_COLUMN)),
+                SelectItem::UnnamedExpr(json_each_column(VALUE_COLUMN)),
+            ],
+            from_relation(json_each_factor(array)),
+            None,
+        ))))
+    };
+
+    let union = make_query(
+        None,
+        SetExpr::SetOperation {
+            op: SetOperator::Union,
+            set_quantifier: SetQuantifier::All,
+            left: half(0, left),
+            right: half(1, right),
+        },
+    );
+
+    Expr::Subquery(Box::new(single_expr_query(
+        ordered_aggregate_by(
+            "json_group_array",
+            vec![json_each_column(VALUE_COLUMN)],
+            vec![SIDE_COLUMN, KEY_COLUMN],
+        ),
+        from_relation(TableFactor::Derived {
+            lateral: false,
+            subquery: Box::new(union),
+            alias: Some(TableAlias {
+                explicit: true,
+                name: Ident::new(HALVES_ALIAS),
+                columns: Vec::new(),
+                at: None,
+            }),
+            sample: None,
+        }),
+        None,
+    )))
+}
+
 /// Attach `ORDER BY key` to an aggregate call so the rebuilt array preserves
 /// element order instead of relying on whatever scan order `json_each` happens
 /// to produce.
 #[must_use]
 fn ordered_aggregate(name: &str, args: Vec<Expr>) -> Expr {
+    ordered_aggregate_by(name, args, vec![KEY_COLUMN])
+}
+
+/// Attach `ORDER BY <columns>` to an aggregate call.
+#[must_use]
+fn ordered_aggregate_by(name: &str, args: Vec<Expr>, columns: Vec<&str>) -> Expr {
     let Expr::Function(mut func) = simple_function_expr(name, args, None) else {
         unreachable!("simple_function_expr always builds Expr::Function")
     };
     if let FunctionArguments::List(list) = &mut func.args {
-        list.clauses.push(FunctionArgumentClause::OrderBy(vec![OrderByExpr {
-            expr: json_each_column(KEY_COLUMN),
-            options: OrderByOptions::default(),
-            with_fill: None,
-        }]));
+        list.clauses.push(FunctionArgumentClause::OrderBy(
+            columns
+                .into_iter()
+                .map(|column| {
+                    OrderByExpr {
+                        expr: json_each_column(column),
+                        options: OrderByOptions::default(),
+                        with_fill: None,
+                    }
+                })
+                .collect(),
+        ));
     }
     Expr::Function(func)
 }
