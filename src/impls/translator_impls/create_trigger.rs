@@ -283,6 +283,22 @@ impl Translator for CreateTrigger {
             }
         }
 
+        // A transition table hands the body every row the statement touched.
+        // SQLite has no such thing, and no way to build one: a row trigger sees
+        // only NEW and OLD, one row at a time, and cannot tell whether the
+        // statement is still running. Measured on PostgreSQL 16, the clause is
+        // meaningful even on a FOR EACH ROW trigger, which fires per row while
+        // the transition table still holds every row, so R27's rejection of
+        // statement triggers does not already cover this.
+        if let Some(referencing) = self.referencing.first() {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "the transition table `{referencing}` has no SQLite equivalent, since a SQLite \
+                 trigger body sees one row at a time through NEW and OLD and never the set of \
+                 rows a statement touched. Collect the rows in a table the body appends to, or \
+                 do the work in the application."
+            )));
+        }
+
         let source_table_name = self.table_name.clone();
         validate_schema_qualified_object_name_for_sqlite(schema, &source_table_name)?;
         let normalized_source_table_name =
@@ -632,6 +648,36 @@ mod tests {
                     &Pg2SqliteOptions::default(),
                 )
                 .unwrap_or_else(|error| panic!("{spelling} is what SQLite does: {error}"));
+        }
+    }
+
+    /// A transition table gives the body every row the statement touched, so a
+    /// SQLite row trigger cannot stand in for it even when the PostgreSQL
+    /// trigger is itself `FOR EACH ROW`. Measured on PostgreSQL 16: an
+    /// `AFTER INSERT ... REFERENCING NEW TABLE AS nt FOR EACH ROW` trigger over
+    /// a three row insert fires three times and sees all three rows each time.
+    ///
+    /// Each spelling is paired with an event PostgreSQL accepts it on, so the
+    /// rejection is the translator's and not a stand-in for an invalid input.
+    #[test]
+    fn transition_tables_are_rejected() {
+        for (event, referencing) in
+            [("INSERT", "REFERENCING NEW TABLE AS nt"), ("DELETE", "REFERENCING OLD TABLE AS ot")]
+        {
+            let trigger = parse_trigger(&format!(
+                "CREATE TRIGGER docs_a AFTER {event} ON docs \
+                 {referencing} FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn()"
+            ));
+            let err = trigger
+                .translate(
+                    &schema_with_trigger_function_and_rls_table(),
+                    &Pg2SqliteOptions::default(),
+                )
+                .expect_err("SQLite has no transition tables");
+            assert!(
+                err.to_string().contains("transition table"),
+                "the error must name the clause, got: {err}"
+            );
         }
     }
 }
