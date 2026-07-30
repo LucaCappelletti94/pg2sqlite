@@ -209,16 +209,6 @@ fn extract_quarter_is_rejected() {
     );
 }
 
-/// EXTRACT(ISOYEAR FROM ...) has no faithful strftime equivalent in SQLite.
-#[test]
-fn extract_isoyear_is_rejected() {
-    let err = translate_err("SELECT EXTRACT(ISOYEAR FROM ts) FROM t");
-    assert!(
-        err.contains("ISOYEAR") || err.contains("not supported") || err.contains("EXTRACT"),
-        "expected rejection for ISOYEAR, got: {err}"
-    );
-}
-
 // ── date_part
 // ─────────────────────────────────────────────────────────────────
 

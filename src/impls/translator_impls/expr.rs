@@ -27,9 +27,7 @@ use sqlparser::ast::{
 use crate::impls::timezone::is_fixed_utc_offset;
 use crate::{
     impls::{
-        datetime_helpers::{
-            DatePartKey, build_strftime_call, datetime_field_key, strftime_mapping_for_key,
-        },
+        datetime_helpers::{build_strftime_call, datetime_field_key, strftime_mapping_for_key},
         expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq},
         function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
         query_builder::{from_relation, plain_table_factor, single_expr_query},
@@ -232,22 +230,6 @@ fn translate_extract(
              YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH."
         ))
     })?;
-    // WEEK uses ISO 8601 week numbering in PostgreSQL (Monday-based, week 1
-    // contains the first Thursday). SQLite's strftime('%W') uses Sunday-based
-    // week numbers and disagrees near year boundaries. No single strftime
-    // format produces ISO week numbers; emit a clear error instead.
-    if key == DatePartKey::Week {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-            "EXTRACT(WEEK) is not supported in SQLite. PostgreSQL uses ISO 8601 \
-             week numbers (Monday-based) while SQLite's strftime('%W') uses \
-             Sunday-based week numbers - they diverge near year boundaries. \
-             To compute ISO week number manually: \
-             CAST((CAST(strftime('%j', date(ts, 'weekday 1', '-6 days')) AS INTEGER) \
-             - 1) / 7 + 1 AS INTEGER)"
-                .to_string(),
-        ));
-    }
-
     let (format_str, cast_type) = strftime_mapping_for_key(key);
 
     // Build: CAST(strftime('format', expr) AS cast_type)
@@ -1831,19 +1813,16 @@ mod tests {
         let schema = empty_schema();
         let options = Pg2SqliteOptions::default();
 
-        // EXTRACT(WEEK) now correctly errors: SQLite's %W is Sunday-based while
-        // PostgreSQL uses ISO 8601 Monday-based week numbers.
-        let week_err = translate_extract(
+        // EXTRACT(WEEK) is the ISO week, which SQLite spells %V. %W is the
+        // Sunday based one and disagrees at every year boundary.
+        let week = translate_extract(
             &DateTimeField::Week(None),
             &parse_expr("created_at"),
             &schema,
             &options,
         )
-        .expect_err("week extract must now return an error (ISO vs Sunday-based mismatch)");
-        assert!(
-            week_err.to_string().to_lowercase().contains("week"),
-            "Error must mention WEEK: {week_err}"
-        );
+        .expect("week extract should translate");
+        assert!(week.to_string().contains("'%V'"), "week must use the ISO format: {week}");
 
         let extracted_day_of_year = translate_extract(
             &DateTimeField::DayOfYear,

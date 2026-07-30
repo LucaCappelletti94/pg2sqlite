@@ -111,8 +111,16 @@ fn reverse_strftime_second() {
 
 #[test]
 fn reverse_strftime_week() {
-    let pg = reverse(EVENTS, "SELECT strftime('%W', created_at) FROM events;");
+    let pg = reverse(EVENTS, "SELECT strftime('%V', created_at) FROM events;");
     assert!(pg.contains("EXTRACT(WEEK"), "Expected EXTRACT(WEEK): {pg}");
+}
+
+/// `%W` is the Sunday based week and has no PostgreSQL field: `EXTRACT(WEEK)`
+/// is the ISO one, so reversing it that way would change the answer.
+#[test]
+fn reverse_strftime_sunday_week_is_not_extract_week() {
+    let pg = reverse(EVENTS, "SELECT strftime('%W', created_at) FROM events;");
+    assert!(!pg.contains("EXTRACT(WEEK"), "a Sunday based week is not the ISO one: {pg}");
 }
 
 #[test]

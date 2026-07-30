@@ -27,7 +27,14 @@ pub(crate) enum DatePartKey {
     DayOfWeek,
     DayOfYear,
     Epoch,
+    /// ISO 8601 week number, Monday based, week 1 holding the first Thursday.
     Week,
+    /// The year that ISO week belongs to, which differs from the calendar year
+    /// at a boundary: 2023-01-01 is week 52 of 2022.
+    IsoYear,
+    /// ISO weekday, Monday as 1 through Sunday as 7, where `DayOfWeek` counts
+    /// Sunday as 0.
+    IsoDayOfWeek,
 }
 
 /// Parse a PostgreSQL `date_part` / `extract` textual field into a canonical
@@ -45,6 +52,8 @@ pub(crate) fn parse_date_part_key(field: &str) -> Option<DatePartKey> {
         "doy" => Some(DatePartKey::DayOfYear),
         "epoch" => Some(DatePartKey::Epoch),
         "week" | "weeks" => Some(DatePartKey::Week),
+        "isoyear" => Some(DatePartKey::IsoYear),
+        "isodow" => Some(DatePartKey::IsoDayOfWeek),
         _ => None,
     }
 }
@@ -64,7 +73,11 @@ pub(crate) fn datetime_field_key(field: &DateTimeField) -> Option<DatePartKey> {
         DateTimeField::Dow | DateTimeField::DayOfWeek => Some(DatePartKey::DayOfWeek),
         DateTimeField::Doy | DateTimeField::DayOfYear => Some(DatePartKey::DayOfYear),
         DateTimeField::Epoch => Some(DatePartKey::Epoch),
-        DateTimeField::Week(_) | DateTimeField::Weeks => Some(DatePartKey::Week),
+        DateTimeField::Week(_) | DateTimeField::Weeks | DateTimeField::IsoWeek => {
+            Some(DatePartKey::Week)
+        }
+        DateTimeField::Isoyear => Some(DatePartKey::IsoYear),
+        DateTimeField::Isodow => Some(DatePartKey::IsoDayOfWeek),
         _ => None,
     }
 }
@@ -82,7 +95,12 @@ pub(crate) fn strftime_mapping_for_key(key: DatePartKey) -> (&'static str, DataT
         DatePartKey::DayOfWeek => ("%w", DataType::Integer(None)),
         DatePartKey::DayOfYear => ("%j", DataType::Integer(None)),
         DatePartKey::Epoch => ("%s", DataType::Real),
-        DatePartKey::Week => ("%W", DataType::Integer(None)),
+        // %V is the ISO week, Monday based, where %W is Sunday based and
+        // disagrees at every year boundary. Same for %G against %Y and %u
+        // against %w.
+        DatePartKey::Week => ("%V", DataType::Integer(None)),
+        DatePartKey::IsoYear => ("%G", DataType::Integer(None)),
+        DatePartKey::IsoDayOfWeek => ("%u", DataType::Integer(None)),
     }
 }
 
@@ -98,7 +116,11 @@ pub(crate) fn datetime_field_from_strftime_format(format: &str) -> Option<DateTi
         // %S is standard strftime; %f is emitted for fractional-second paths.
         "%S" | "%f" => Some(DateTimeField::Second),
         "%s" => Some(DateTimeField::Epoch),
-        "%W" => Some(DateTimeField::Week(None)),
+        // %W, the Sunday based week, has no PostgreSQL field: EXTRACT(WEEK)
+        // is the ISO one, so reversing %W to it would change the answer.
+        "%V" => Some(DateTimeField::Week(None)),
+        "%G" => Some(DateTimeField::Isoyear),
+        "%u" => Some(DateTimeField::Isodow),
         "%w" => Some(DateTimeField::DayOfWeek),
         "%j" => Some(DateTimeField::DayOfYear),
         _ => None,
