@@ -110,23 +110,31 @@ fn reverse_custom_uuid_function_name() {
 
 #[test]
 fn reverse_strftime_year_to_date_trunc() {
-    let pg = reverse(EVENTS, "SELECT strftime('%Y-01-01', created_at) FROM events;");
+    let pg = reverse(EVENTS, "SELECT strftime('%Y-01-01 00:00:00', created_at) FROM events;");
     assert!(pg.contains("date_trunc"), "Expected date_trunc: {pg}");
     assert!(pg.contains("year"), "Expected 'year' field: {pg}");
 }
 
 #[test]
 fn reverse_strftime_month_to_date_trunc() {
-    let pg = reverse(EVENTS, "SELECT strftime('%Y-%m-01', created_at) FROM events;");
+    let pg = reverse(EVENTS, "SELECT strftime('%Y-%m-01 00:00:00', created_at) FROM events;");
     assert!(pg.contains("date_trunc"), "Expected date_trunc: {pg}");
     assert!(pg.contains("month"), "Expected 'month' field: {pg}");
 }
 
 #[test]
 fn reverse_strftime_day_to_date_trunc() {
-    let pg = reverse(EVENTS, "SELECT strftime('%Y-%m-%d', created_at) FROM events;");
+    let pg = reverse(EVENTS, "SELECT strftime('%Y-%m-%d 00:00:00', created_at) FROM events;");
     assert!(pg.contains("date_trunc"), "Expected date_trunc: {pg}");
     assert!(pg.contains("day"), "Expected 'day' field: {pg}");
+}
+
+/// A date-only format is not a `date_trunc`: PostgreSQL's answers a timestamp,
+/// so reversing it that way would change what the query returns.
+#[test]
+fn reverse_strftime_date_only_is_not_date_trunc() {
+    let pg = reverse(EVENTS, "SELECT strftime('%Y-%m-%d', created_at) FROM events;");
+    assert!(!pg.contains("date_trunc"), "a bare date is not a truncated timestamp: {pg}");
 }
 
 #[test]

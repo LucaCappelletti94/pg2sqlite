@@ -306,26 +306,23 @@ fn date_trunc_hour() {
 }
 
 /// PostgreSQL date_trunc('day', '2024-03-05 14:07:09') = '2024-03-05 00:00:00'.
-/// SQLite strftime('%Y-%m-%d', ts) drops the time component, yielding
-/// '2024-03-05'. The semantic value (midnight on that day) is preserved; the
-/// time suffix is absent.
 #[test]
 fn date_trunc_day() {
-    assert_eq!(eval_dt("date_trunc('day', ts)").as_deref(), Some("2024-03-05"));
+    assert_eq!(eval_dt("date_trunc('day', ts)").as_deref(), Some("2024-03-05 00:00:00"));
 }
 
 /// PostgreSQL date_trunc('month', '2024-03-05 14:07:09') = '2024-03-01
-/// 00:00:00'. strftime('%Y-%m-01', ts) = '2024-03-01'.
+/// 00:00:00'.
 #[test]
 fn date_trunc_month() {
-    assert_eq!(eval_dt("date_trunc('month', ts)").as_deref(), Some("2024-03-01"));
+    assert_eq!(eval_dt("date_trunc('month', ts)").as_deref(), Some("2024-03-01 00:00:00"));
 }
 
 /// PostgreSQL date_trunc('year', '2024-03-05 14:07:09') = '2024-01-01
-/// 00:00:00'. strftime('%Y-01-01', ts) = '2024-01-01'.
+/// 00:00:00'.
 #[test]
 fn date_trunc_year() {
-    assert_eq!(eval_dt("date_trunc('year', ts)").as_deref(), Some("2024-01-01"));
+    assert_eq!(eval_dt("date_trunc('year', ts)").as_deref(), Some("2024-01-01 00:00:00"));
 }
 
 /// date_trunc('quarter', ...) has no faithful single strftime expression.

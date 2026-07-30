@@ -1543,15 +1543,19 @@ impl Translator for Function {
                     }
                 };
 
-                // Map PostgreSQL truncation granularities to strftime format strings.
-                // The format string zeros out the sub-granularity components.
+                // Map PostgreSQL truncation granularities to strftime format
+                // strings. The format zeros out the sub-granularity components
+                // rather than dropping them: PostgreSQL's date_trunc always
+                // answers a full timestamp, so a coarse unit that stopped at the
+                // date would never compare equal to a stored one, which this
+                // crate writes as TEXT `YYYY-MM-DD HH:MM:SS`.
                 let format_str = match field_str.as_str() {
                     "second" | "seconds" => "%Y-%m-%d %H:%M:%S",
                     "minute" | "minutes" => "%Y-%m-%d %H:%M:00",
                     "hour" | "hours" => "%Y-%m-%d %H:00:00",
-                    "day" | "days" => "%Y-%m-%d",
-                    "month" | "months" => "%Y-%m-01",
-                    "year" | "years" => "%Y-01-01",
+                    "day" | "days" => "%Y-%m-%d 00:00:00",
+                    "month" | "months" => "%Y-%m-01 00:00:00",
+                    "year" | "years" => "%Y-01-01 00:00:00",
                     other => {
                         return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                             "date_trunc('{other}', ...) is not supported in SQLite. \

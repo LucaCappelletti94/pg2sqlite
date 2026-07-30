@@ -1,10 +1,13 @@
 //! Tests for `date_trunc` translation to SQLite `strftime`.
 
 mod helpers;
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
 
 use diesel::{Connection, RunQueryDsl};
 use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use run_translated_helper::run_translated_with;
 
 fn translate(sql: &str) -> Result<String, String> {
     Pg2Sqlite::default()
@@ -15,59 +18,43 @@ fn translate(sql: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Measured on PostgreSQL 16 over `2024-03-15 10:20:30.456`. Every unit
+/// returns a full timestamp, which is the point of the item: the three coarse
+/// ones used to return a bare date.
 #[test]
-fn date_trunc_day_translates_to_strftime() {
-    let sql = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
-               SELECT date_trunc('day', ts) FROM t;";
-    let output = translate(sql).unwrap();
-    assert!(
-        output.contains("strftime('%Y-%m-%d'"),
-        "date_trunc('day', ...) should use strftime('%Y-%m-%d', ...), got: {output}"
-    );
+fn every_granularity_returns_the_postgres_value() {
+    for (unit, expected) in [
+        ("second", "2024-03-15 10:20:30"),
+        ("minute", "2024-03-15 10:20:00"),
+        ("hour", "2024-03-15 10:00:00"),
+        ("day", "2024-03-15 00:00:00"),
+        ("month", "2024-03-01 00:00:00"),
+        ("year", "2024-01-01 00:00:00"),
+    ] {
+        let rows = run_translated_with(
+            &format!(
+                "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
+                 INSERT INTO t VALUES (1, '2024-03-15 10:20:30');
+                 SELECT date_trunc('{unit}', ts) FROM t;"
+            ),
+            &Pg2SqliteOptions::default(),
+        );
+        assert_eq!(rows, vec![Some(expected.to_string())], "date_trunc('{unit}', ts)");
+    }
 }
 
+/// The consequence the item names: this crate stores a timestamp as TEXT
+/// `YYYY-MM-DD HH:MM:SS`, so a truncated value that drops the time never
+/// matches one, and a comparison or a join on it silently returns nothing.
 #[test]
-fn date_trunc_month_uses_first_day() {
-    let sql = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
-               SELECT date_trunc('month', ts) FROM t;";
-    let output = translate(sql).unwrap();
-    assert!(
-        output.contains("strftime('%Y-%m-01'"),
-        "date_trunc('month', ...) should use strftime('%Y-%m-01', ...), got: {output}"
+fn a_truncated_value_compares_against_a_stored_timestamp() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
+         INSERT INTO t VALUES (1, '2024-03-15 10:20:30');
+         SELECT count(*) FROM t WHERE date_trunc('month', ts) = '2024-03-01 00:00:00';",
+        &Pg2SqliteOptions::default(),
     );
-}
-
-#[test]
-fn date_trunc_year_uses_first_month_day() {
-    let sql = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
-               SELECT date_trunc('year', ts) FROM t;";
-    let output = translate(sql).unwrap();
-    assert!(
-        output.contains("strftime('%Y-01-01'"),
-        "date_trunc('year', ...) should use strftime('%Y-01-01', ...), got: {output}"
-    );
-}
-
-#[test]
-fn date_trunc_hour_zeros_minutes_seconds() {
-    let sql = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
-               SELECT date_trunc('hour', ts) FROM t;";
-    let output = translate(sql).unwrap();
-    assert!(
-        output.contains("strftime('%Y-%m-%d %H:00:00'"),
-        "date_trunc('hour', ...) should use strftime('%Y-%m-%d %H:00:00', ...), got: {output}"
-    );
-}
-
-#[test]
-fn date_trunc_minute_zeros_seconds() {
-    let sql = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
-               SELECT date_trunc('minute', ts) FROM t;";
-    let output = translate(sql).unwrap();
-    assert!(
-        output.contains("strftime('%Y-%m-%d %H:%M:00'"),
-        "date_trunc('minute', ...) should use strftime('%Y-%m-%d %H:%M:00', ...), got: {output}"
-    );
+    assert_eq!(rows, vec![Some("1".to_string())]);
 }
 
 #[test]
@@ -144,12 +131,7 @@ fn date_trunc_without_over_semantic() -> Result<(), Box<dyn std::error::Error>> 
     assert_eq!(results.len(), 2);
     // Both rows for the same day should produce the same truncated date
     assert_eq!(results[0].truncated, results[1].truncated);
-    // Day truncation should produce YYYY-MM-DD 00:00:00
-    assert!(
-        results[0].truncated.contains("2024-03-15"),
-        "expected day-truncated date, got: {}",
-        results[0].truncated
-    );
+    assert_eq!(results[0].truncated, "2024-03-15 00:00:00");
 
     Ok(())
 }

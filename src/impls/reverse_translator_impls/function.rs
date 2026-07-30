@@ -120,11 +120,17 @@ pub enum FunctionReversal {
 /// Reverse a composite strftime format string back to a `date_trunc` field
 /// name. Returns `None` if the format doesn't match a known `date_trunc`
 /// pattern.
+///
+/// The three coarse formats carry ` 00:00:00` because PostgreSQL's
+/// `date_trunc` always answers a full timestamp. A date-only format such as
+/// `%Y-%m-%d` is deliberately absent: it is a valid thing to write in SQLite,
+/// but reversing it to `date_trunc('day', ...)` would hand back PostgreSQL
+/// that answers a timestamp where the SQLite it came from answered a date.
 fn reverse_strftime_to_date_trunc_field(format: &str) -> Option<&'static str> {
     match format {
-        "%Y-01-01" => Some("year"),
-        "%Y-%m-01" => Some("month"),
-        "%Y-%m-%d" => Some("day"),
+        "%Y-01-01 00:00:00" => Some("year"),
+        "%Y-%m-01 00:00:00" => Some("month"),
+        "%Y-%m-%d 00:00:00" => Some("day"),
         "%Y-%m-%d %H:00:00" => Some("hour"),
         "%Y-%m-%d %H:%M:00" => Some("minute"),
         "%Y-%m-%d %H:%M:%S" => Some("second"),
