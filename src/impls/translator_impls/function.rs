@@ -17,9 +17,9 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
+    BinaryOperator, CaseWhen, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
-    ValueWithSpan,
+    ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use super::{
@@ -114,6 +114,9 @@ enum FunctionTranslation {
     /// An array function whose body is rewritten over `json_each` /
     /// `json_group_array`. See [`super::array`].
     Array(ArrayFunction),
+    /// `json_typeof`/`jsonb_typeof`, whose answers are renamed onto SQLite's
+    /// `json_type` vocabulary.
+    JsonTypeof,
     /// `json_agg`/`jsonb_agg`, which nest a JSON element where
     /// `json_group_array` would quote it, and answer NULL over no rows where it
     /// answers an empty array.
@@ -136,6 +139,8 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     // NULL when any argument is NULL. See `FunctionTranslation::Extremum`.
     // json_agg and jsonb_agg are NOT renames: a JSON column is TEXT in SQLite
     // and would be quoted rather than nested. See `FunctionTranslation::JsonAgg`.
+    // json_typeof and jsonb_typeof are NOT renames: json_type answers over a
+    // different vocabulary. See `FunctionTranslation::JsonTypeof`.
     ("string_agg", "group_concat"),
     ("strpos", "INSTR"),
     ("chr", "char"),
@@ -147,8 +152,6 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     ("json_build_object", "json_object"),
     ("btrim", "trim"),
     ("jsonb_array_length", "json_array_length"),
-    ("json_typeof", "json_type"),
-    ("jsonb_typeof", "json_type"),
     ("quote_nullable", "quote"),
     ("quote_literal", "quote"),
     ("version", "sqlite_version"),
@@ -385,6 +388,8 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // json_typeof / jsonb_typeof: json_type names the types differently.
+        "json_typeof" | "jsonb_typeof" => FunctionTranslation::JsonTypeof,
         // json_agg / jsonb_agg: a JSON element needs parsing, not quoting.
         "json_agg" | "jsonb_agg" => FunctionTranslation::JsonAgg,
         // greatest / least ignore NULLs, MAX / MIN do not.
@@ -783,6 +788,44 @@ fn is_already_json(expr: &Expr) -> bool {
         }
         Expr::Nested(inner) => is_already_json(inner),
         _ => false,
+    }
+}
+
+/// Renames SQLite's `json_type` answer onto PostgreSQL's `json_typeof` one.
+///
+/// Both vocabularies were measured rather than read off the documentation:
+/// `text` is `string`, both `integer` and `real` are `number`, both `true` and
+/// `false` are `boolean`, and `null`, `object`, and `array` already agree.
+///
+/// Those eight are the whole of SQLite's domain, so every one is listed and the
+/// `CASE` needs no `ELSE`. A missing `ELSE` yields NULL, which is also the
+/// right answer for a SQL NULL argument, since `json_type(NULL)` is NULL in
+/// SQLite and `json_typeof(NULL)` is NULL in PostgreSQL. Listing the three
+/// agreeing names rather than falling through to an `ELSE` keeps the argument
+/// evaluated once: a `CASE` with an operand cannot name that operand again.
+fn postgres_json_type_name(sqlite_type: Expr) -> Expr {
+    const VOCABULARY: [(&str, &str); 8] = [
+        ("text", "string"),
+        ("integer", "number"),
+        ("real", "number"),
+        ("true", "boolean"),
+        ("false", "boolean"),
+        ("null", "null"),
+        ("object", "object"),
+        ("array", "array"),
+    ];
+
+    Expr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: Some(Box::new(sqlite_type)),
+        conditions: VOCABULARY
+            .iter()
+            .map(|&(sqlite, postgres)| {
+                CaseWhen { condition: string_literal(sqlite), result: string_literal(postgres) }
+            })
+            .collect(),
+        else_result: None,
     }
 }
 
@@ -1795,6 +1838,11 @@ impl Translator for Function {
                     greatest,
                     if greatest { "greatest" } else { "least" },
                 )
+            }
+            FunctionTranslation::JsonTypeof => {
+                let exprs = extract_exactly(&func.args, 1, "json_typeof")?;
+                let document = exprs[0].translate(schema, options)?;
+                Ok(postgres_json_type_name(simple_function_expr("json_type", vec![document], None)))
             }
             FunctionTranslation::JsonAgg => {
                 let exprs = function_argument_exprs(&func.args);
