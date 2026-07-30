@@ -77,6 +77,10 @@ enum FunctionTranslation {
     ToMakePrintf { format: &'static str, arg_count: usize, func_label: &'static str },
     /// Transform json_extract_path(j, keys...) to json_extract(j, '$.k1.k2...')
     ToJsonExtractPath,
+    /// Transform `jsonb_set` and `jsonb_insert` to the `json_set`,
+    /// `json_replace`, or `json_insert` that matches, converting the `text[]`
+    /// path to JSONPath and keeping the value typed as JSON.
+    JsonSet { insert: bool },
     /// Population variance: var_pop(x) becomes avg(x*x) - avg(x)*avg(x).
     VarPop,
     /// Population standard deviation: stddev_pop(x) becomes sqrt(var_pop(x)).
@@ -132,8 +136,8 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     ("version", "sqlite_version"),
     ("to_json", "json"),
     ("to_jsonb", "json"),
-    ("jsonb_set", "json_set"),
-    ("jsonb_insert", "json_insert"),
+    // jsonb_set and jsonb_insert are NOT renames: their path and value
+    // arguments need translating too. See `FunctionTranslation::JsonSet`.
     ("jsonb_each", "json_each"),
     ("json_each_text", "json_each"),
     ("jsonb_each_text", "json_each"),
@@ -323,6 +327,9 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // jsonb_set / jsonb_insert: path and value both need converting.
+        "jsonb_set" => FunctionTranslation::JsonSet { insert: false },
+        "jsonb_insert" => FunctionTranslation::JsonSet { insert: true },
         // json_extract_path* -> json_extract(j, '$.k1.k2...')
         "json_extract_path" | "json_extract_path_text" | "jsonb_extract_path"
         | "jsonb_extract_path_text" => FunctionTranslation::ToJsonExtractPath,
@@ -676,6 +683,119 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
         }
     }
     Ok(result)
+}
+
+/// The SQLite function that matches PostgreSQL's fourth argument.
+///
+/// Measured against both databases rather than assumed. `jsonb_set`'s
+/// `create_if_missing` defaults to true and maps to `json_set`, while `false`
+/// maps to `json_replace`, which leaves a missing path untouched exactly as
+/// PostgreSQL does. `jsonb_insert`'s fourth argument is `insert_after` rather
+/// than `create_if_missing`, and it places the value after an array element,
+/// which SQLite cannot express at all.
+fn json_set_target_function(
+    insert: bool,
+    flag: Option<&Expr>,
+    label: &str,
+) -> Result<&'static str, crate::errors::Error> {
+    let flag = match flag {
+        None => None,
+        Some(Expr::Value(ValueWithSpan { value: Value::Boolean(flag), .. })) => Some(*flag),
+        Some(other) => {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "{label} needs its fourth argument to be a literal true or false to choose the \
+                 matching SQLite function, and {other} is decided at run time."
+            )));
+        }
+    };
+
+    match (insert, flag) {
+        (false, None | Some(true)) => Ok("json_set"),
+        (false, Some(false)) => Ok("json_replace"),
+        (true, None | Some(false)) => Ok("json_insert"),
+        (true, Some(true)) => Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            "jsonb_insert with insert_after cannot be translated: it places the value after an \
+                 array element, and SQLite's json_insert only fills a path that is absent."
+                .to_string(),
+        )),
+    }
+}
+
+/// Converts PostgreSQL's `text[]` path to the JSONPath string SQLite takes,
+/// so `'{a,b}'` and `ARRAY['a','b']` both become `$.a.b`.
+///
+/// A numeric element is refused rather than guessed. PostgreSQL decides at run
+/// time whether it indexes an array or names an object key, verified both ways
+/// against PostgreSQL 16: `'{arr,0}'` set element 0 of an array, and `'{0}'`
+/// set the key `"0"` of an object. JSONPath has to commit to one at translation
+/// time, and picking wrong writes to the wrong place silently.
+fn json_path_from_text_array(path: &Expr, label: &str) -> Result<String, crate::errors::Error> {
+    let elements = match path {
+        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(literal), .. }) => {
+            let trimmed = literal.trim();
+            let inner = trimmed
+                .strip_prefix('{')
+                .and_then(|rest| rest.strip_suffix('}'))
+                .ok_or_else(|| json_path_not_literal(label, path))?;
+            inner.split(',').map(|element| element.trim().to_owned()).collect::<Vec<_>>()
+        }
+        Expr::Array(array) => {
+            array
+                .elem
+                .iter()
+                .map(|element| {
+                    match element {
+                        Expr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(key),
+                            ..
+                        }) => Ok(key.clone()),
+                        other => Err(json_path_not_literal(label, other)),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        other => return Err(json_path_not_literal(label, other)),
+    };
+
+    if elements.iter().any(String::is_empty) {
+        return Err(json_path_not_literal(label, path));
+    }
+
+    let mut json_path = String::from("$");
+    for element in &elements {
+        if element.parse::<i64>().is_ok() {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "{label} cannot translate the path element {element}, because PostgreSQL decides \
+                 at run time whether it indexes an array or names an object key, and JSONPath has \
+                 to choose one. Use json_set with an explicit $.a[0] path against the SQLite \
+                 database instead."
+            )));
+        }
+        if element.contains('"') {
+            return Err(json_path_not_literal(label, path));
+        }
+        // A key that is not a bare identifier has to be quoted in JSONPath.
+        if element.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !element.starts_with(|c: char| c.is_ascii_digit())
+        {
+            json_path.push('.');
+            json_path.push_str(element);
+        } else {
+            json_path.push_str(".\"");
+            json_path.push_str(element);
+            json_path.push('"');
+        }
+    }
+
+    Ok(json_path)
+}
+
+fn json_path_not_literal(label: &str, path: &Expr) -> crate::errors::Error {
+    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "{label} needs a literal text[] path such as '{{a,b}}' or ARRAY['a','b'] so it can be \
+         converted to the JSONPath SQLite takes, and {path} cannot be converted at translation \
+         time."
+    ))
 }
 
 /// Extract and translate the single argument of an aggregate like
@@ -1442,6 +1562,33 @@ impl Translator for Function {
                 Ok(simple_function_expr(
                     "json_extract",
                     vec![json_expr, string_literal(&path)],
+                    None,
+                ))
+            }
+            FunctionTranslation::JsonSet { insert } => {
+                let exprs = function_argument_exprs(&func.args);
+                let label = if insert { "jsonb_insert" } else { "jsonb_set" };
+                let ([target, path, value] | [target, path, value, _]) = exprs.as_slice() else {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "{label} takes a document, a path, a value, and optionally a flag, so {} \
+                         arguments cannot be translated.",
+                        exprs.len()
+                    )));
+                };
+
+                let sqlite_name = json_set_target_function(insert, exprs.get(3).copied(), label)?;
+                // The value is `jsonb` in PostgreSQL, so `'2'` means the number
+                // 2. SQLite reads a bare text argument as a string, which would
+                // store `"2"`, so it is wrapped rather than passed along.
+                let value =
+                    simple_function_expr("json", vec![value.translate(schema, options)?], None);
+                Ok(simple_function_expr(
+                    sqlite_name,
+                    vec![
+                        target.translate(schema, options)?,
+                        string_literal(&json_path_from_text_array(path, label)?),
+                        value,
+                    ],
                     None,
                 ))
             }
