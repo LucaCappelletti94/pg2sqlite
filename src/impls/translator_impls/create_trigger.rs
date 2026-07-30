@@ -246,6 +246,21 @@ impl Translator for CreateTrigger {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // SQLite has no TRUNCATE, so there is no event to fire on. Checked
+        // before the FOR EACH clause below, and not folded into it, because
+        // PostgreSQL allows TRUNCATE triggers only FOR EACH STATEMENT, so that
+        // check would catch every valid one first and then advise rewriting it
+        // FOR EACH ROW, which PostgreSQL 16 answers with `TRUNCATE FOR EACH ROW
+        // triggers are not supported`.
+        if self.events.iter().any(|event| matches!(event, TriggerEvent::Truncate)) {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                "a TRUNCATE trigger has no SQLite equivalent, since SQLite has no TRUNCATE. \
+                 PostgreSQL TRUNCATE is translated to DELETE FROM, which fires DELETE triggers, \
+                 so add the work to a DELETE trigger if it should run on that."
+                    .to_string(),
+            ));
+        }
+
         // SQLite has only row triggers, so a statement trigger has no form to
         // emit: `FOR EACH STATEMENT` is `near "STATEMENT": syntax error`, and a
         // row trigger carrying the same body would run once per affected row.
@@ -677,6 +692,39 @@ mod tests {
             assert!(
                 err.to_string().contains("transition table"),
                 "the error must name the clause, got: {err}"
+            );
+        }
+    }
+
+    /// Every TRUNCATE trigger PostgreSQL accepts is a statement trigger, so R27
+    /// already refuses all of them, but with advice that is wrong here: it says
+    /// to rewrite the trigger `FOR EACH ROW`, which PostgreSQL 16 answers with
+    /// `TRUNCATE FOR EACH ROW triggers are not supported`. The event is
+    /// therefore checked before the `FOR EACH` clause, and the message has to
+    /// name TRUNCATE for any spelling.
+    ///
+    /// The last case is not valid PostgreSQL and is included because sqlparser
+    /// parses it, so it reaches the translator regardless.
+    #[test]
+    fn truncate_triggers_are_rejected() {
+        for spelling in [
+            "AFTER TRUNCATE ON docs FOR EACH STATEMENT",
+            "AFTER TRUNCATE ON docs",
+            "AFTER INSERT OR TRUNCATE ON docs FOR EACH STATEMENT",
+            "AFTER TRUNCATE ON docs FOR EACH ROW",
+        ] {
+            let trigger = parse_trigger(&format!(
+                "CREATE TRIGGER docs_at {spelling} EXECUTE FUNCTION docs_trigger_fn()"
+            ));
+            let err = trigger
+                .translate(
+                    &schema_with_trigger_function_and_rls_table(),
+                    &Pg2SqliteOptions::default(),
+                )
+                .expect_err("SQLite has no TRUNCATE");
+            assert!(
+                err.to_string().contains("TRUNCATE"),
+                "`{spelling}` must be refused for its event, got: {err}"
             );
         }
     }
