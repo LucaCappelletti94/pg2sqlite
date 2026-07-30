@@ -17,10 +17,11 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    AccessExpr, Array, BinaryOperator, CastKind, DataType, DateTimeField, Expr, Function,
+    AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField, Expr, Function,
     FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, Interval,
     JsonKeyUniqueness, JsonPredicateType, ObjectName, ObjectNamePart, Query, Subscript, TableAlias,
     TableAliasColumnDef, TableFactor, UnaryOperator, Value, ValueWithSpan,
+    helpers::attached_token::AttachedToken,
 };
 
 #[cfg(all(test, feature = "std"))]
@@ -242,6 +243,112 @@ fn translate_extract(
         format: None,
         kind: CastKind::Cast,
     })
+}
+
+/// Translate a cast to boolean, which SQLite has no type for.
+///
+/// Mapping the target to INTEGER, which is right for a column declaration, is
+/// wrong for the cast itself: `CAST('true' AS INTEGER)` is 0, because the
+/// string does not begin with a digit, so every spelling PostgreSQL accepts
+/// became false.
+///
+/// The accepted set was measured on PostgreSQL 16. It is every unambiguous
+/// prefix of `true`, `false`, `yes`, `no`, `on`, and `off`, plus `1` and `0`,
+/// case insensitive and whitespace trimmed. `of` is in it and `o` is not, since
+/// `o` could be either `on` or `off`.
+///
+/// A literal is decided here rather than at run time, so an unreadable one is
+/// refused during translation exactly as PostgreSQL refuses it.
+fn translate_boolean_cast(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    const TRUE_SPELLINGS: [&str; 9] = ["t", "tr", "tru", "true", "y", "ye", "yes", "on", "1"];
+    const FALSE_SPELLINGS: [&str; 10] =
+        ["f", "fa", "fal", "fals", "false", "n", "no", "of", "off", "0"];
+
+    if let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), .. }) = expr {
+        let spelling = text.trim().to_ascii_lowercase();
+        if TRUE_SPELLINGS.contains(&spelling.as_str()) {
+            return Ok(number_literal("1"));
+        }
+        if FALSE_SPELLINGS.contains(&spelling.as_str()) {
+            return Ok(number_literal("0"));
+        }
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "invalid input syntax for type boolean: \"{text}\". PostgreSQL accepts true, false, \
+             yes, no, on, off, 1, 0, and any unambiguous prefix of those words."
+        )));
+    }
+
+    let value = expr.translate(schema, options)?;
+    let normalized = simple_function_expr(
+        "lower",
+        vec![simple_function_expr("trim", vec![value.clone()], None)],
+        None,
+    );
+
+    Ok(Expr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: None,
+        conditions: vec![
+            // Without this the NULL falls through every IN, which answers NULL
+            // rather than true, and lands on the error branch.
+            CaseWhen {
+                condition: Expr::IsNull(Box::new(value.clone())),
+                result: Expr::Value(Value::Null.with_empty_span()),
+            },
+            // A number is not read as text: PostgreSQL takes any nonzero
+            // integer as true, where the text set would refuse 5.
+            CaseWhen {
+                condition: string_set_membership(
+                    simple_function_expr("typeof", vec![value.clone()], None),
+                    &["integer", "real"],
+                ),
+                result: Expr::BinaryOp {
+                    left: Box::new(value.clone()),
+                    op: BinaryOperator::NotEq,
+                    right: Box::new(number_literal("0")),
+                },
+            },
+            CaseWhen {
+                condition: string_set_membership(normalized.clone(), &TRUE_SPELLINGS),
+                result: number_literal("1"),
+            },
+            CaseWhen {
+                condition: string_set_membership(normalized, &FALSE_SPELLINGS),
+                result: number_literal("0"),
+            },
+        ],
+        // SQLite has no way to raise from an expression, so this borrows one:
+        // a JSON path that cannot parse. The message it prints carries
+        // PostgreSQL's own wording and the offending value, behind a `bad JSON
+        // path:` prefix. Answering NULL instead would be the silent wrongness
+        // this whole rewrite exists to remove.
+        else_result: Some(Box::new(simple_function_expr(
+            "json_extract",
+            vec![
+                string_literal("{}"),
+                Expr::BinaryOp {
+                    left: Box::new(string_literal("invalid input syntax for type boolean: ")),
+                    op: BinaryOperator::StringConcat,
+                    right: Box::new(value),
+                },
+            ],
+            None,
+        ))),
+    })
+}
+
+/// Builds `expr IN ('a', 'b', ...)`.
+fn string_set_membership(expr: Expr, values: &[&str]) -> Expr {
+    Expr::InList {
+        expr: Box::new(expr),
+        list: values.iter().map(|value| string_literal(value)).collect(),
+        negated: false,
+    }
 }
 
 /// Translate PostgreSQL FLOOR(x) to SQLite-compatible expression.
@@ -1333,6 +1440,12 @@ impl Translator for Expr {
                          which has no cast format clause. Format the value with strftime() or \
                          printf() instead."
                     )));
+                }
+                if matches!(
+                    data_type,
+                    sqlparser::ast::DataType::Boolean | sqlparser::ast::DataType::Bool
+                ) {
+                    return translate_boolean_cast(expr, schema, options);
                 }
                 // SQLite only accepts the `CAST(x AS type)` spelling, not
                 // PostgreSQL's `x::type` operator nor TRY_CAST / SAFE_CAST, so
