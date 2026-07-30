@@ -139,8 +139,9 @@ fn translate_fts_expression(
             if columns.is_empty() {
                 return false;
             }
+            let Ok(table_column_iter) = table.columns(schema) else { return false };
             let table_columns: alloc::collections::BTreeSet<_> =
-                table.columns(schema).map(|c| c.column_name().to_lowercase()).collect();
+                table_column_iter.map(|c| c.column_name().to_lowercase()).collect();
             columns.iter().all(|col| table_columns.contains(&col.to_lowercase()))
         })
         .ok_or_else(|| {
@@ -168,7 +169,7 @@ fn translate_fts_expression(
         )));
     }
 
-    let pk_columns: Vec<_> = table.primary_key_columns(schema).collect();
+    let pk_columns: Vec<_> = table.primary_key_columns(schema)?.collect();
     if pk_columns.len() != 1 {
         return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
             "FTS5 requires a single-column primary key. Table '{table_name}' has {} primary key columns.",

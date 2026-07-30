@@ -35,6 +35,7 @@ use alloc::{
 };
 
 use sql_traits::{
+    errors::LookupError,
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
 };
@@ -144,8 +145,10 @@ fn find_pk_column(create_table: &CreateTable, schema: &ParserDB) -> Option<Strin
         }
     }
 
-    if let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &create_table.name) {
-        let pk_cols: Vec<_> = table.primary_key_columns(schema).collect();
+    if let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &create_table.name)
+        && let Ok(pk_iter) = table.primary_key_columns(schema)
+    {
+        let pk_cols: Vec<_> = pk_iter.collect();
         if pk_cols.len() == 1 {
             return Some(pk_cols[0].column_name().to_string());
         }
@@ -255,7 +258,7 @@ pub fn generate_vec0_statements(
             ))
         })?;
 
-    let trigger_table_name = resolve_trigger_table_name(&table_name, table_obj, schema, options);
+    let trigger_table_name = resolve_trigger_table_name(&table_name, table_obj, schema, options)?;
 
     let dialect = sqlparser::dialect::SQLiteDialect {};
     let mut statements = Vec::new();
@@ -323,9 +326,9 @@ pub(crate) fn maybe_wrap_text_vector_literal(expr: Expr, is_halfvec: bool) -> Ex
 pub(crate) fn vector_columns_of_table(
     table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
     schema: &ParserDB,
-) -> Vec<(String, bool)> {
-    table
-        .columns(schema)
+) -> Result<Vec<(String, bool)>, LookupError> {
+    Ok(table
+        .columns(schema)?
         .filter_map(|col| {
             let dt = &col.attribute().data_type;
             if is_vector_data_type(dt) {
@@ -334,7 +337,7 @@ pub(crate) fn vector_columns_of_table(
                 None
             }
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(all(test, feature = "std"))]

@@ -22,6 +22,7 @@ use alloc::{
 };
 
 use sql_traits::{
+    errors::LookupError,
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
@@ -51,18 +52,17 @@ pub(crate) fn is_blob_uuid_representation(options: &Pg2SqliteOptions) -> bool {
 /// Collect every UUID column name on the resolved schema table,
 /// preserving column ordinal order. Returns an empty `Vec` when the
 /// table has no UUID columns.
-#[must_use]
 pub(crate) fn uuid_columns_of_table(
     table: &<ParserDB as DatabaseLike>::Table,
     schema: &ParserDB,
-) -> Vec<String> {
-    table
-        .columns(schema)
+) -> Result<Vec<String>, LookupError> {
+    Ok(table
+        .columns(schema)?
         .filter_map(|col| {
             let dt = &col.attribute().data_type;
             if is_uuid_data_type(dt) { Some(col.column_name().to_string()) } else { None }
         })
-        .collect()
+        .collect())
 }
 
 /// Build the expression that converts `arg` (a text UUID literal or any

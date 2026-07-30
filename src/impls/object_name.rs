@@ -252,8 +252,10 @@ pub(crate) fn table_has_implicit_public_rls(
     schema: &ParserDB,
     name: &ObjectName,
 ) -> Result<bool, Error> {
-    Ok(table_with_implicit_public_lookup(schema, name)?
-        .is_some_and(|table| table.has_row_level_security(schema)))
+    match table_with_implicit_public_lookup(schema, name)? {
+        Some(table) => Ok(table.has_row_level_security(schema)?),
+        None => Ok(false),
+    }
 }
 
 /// Quotes an SQL identifier with double quotes, escaping interior quotes.

@@ -14,6 +14,7 @@ use alloc::{
 };
 
 use sql_traits::{
+    errors::LookupError,
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
@@ -84,8 +85,8 @@ fn resolve_insert_table<'a>(
 fn get_primary_key_columns(
     schema: &ParserDB,
     table: &<ParserDB as DatabaseLike>::Table,
-) -> Vec<String> {
-    table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect()
+) -> Result<Vec<String>, LookupError> {
+    Ok(table.primary_key_columns(schema)?.map(|c| c.column_name().to_string()).collect())
 }
 
 /// Resolve the INSERT column list.
@@ -97,12 +98,12 @@ fn resolve_insert_columns(
     schema: &ParserDB,
     table: &<ParserDB as DatabaseLike>::Table,
     explicit_columns: &[Ident],
-) -> Vec<Ident> {
+) -> Result<Vec<Ident>, LookupError> {
     if !explicit_columns.is_empty() {
-        return explicit_columns.to_vec();
+        return Ok(explicit_columns.to_vec());
     }
 
-    table.columns(schema).map(|column| Ident::new(column.column_name().to_string())).collect()
+    Ok(table.columns(schema)?.map(|column| Ident::new(column.column_name().to_string())).collect())
 }
 
 /// Build the `ON CONFLICT DO UPDATE SET` clause for an `INSERT OR REPLACE`.
@@ -292,7 +293,7 @@ impl ReverseTranslator for Insert {
                     // clause; DO NOTHING would silently preserve the old values.
                     let resolved_table = resolve_insert_table(schema, &self.table)?;
                     let table_name = resolved_table.table_name().to_string();
-                    let pk_columns = get_primary_key_columns(schema, resolved_table);
+                    let pk_columns = get_primary_key_columns(schema, resolved_table)?;
                     let column_idents: Vec<Ident> = self
                         .columns
                         .iter()
@@ -301,9 +302,9 @@ impl ReverseTranslator for Insert {
                         })
                         .collect();
                     let insert_columns =
-                        resolve_insert_columns(schema, resolved_table, &column_idents);
+                        resolve_insert_columns(schema, resolved_table, &column_idents)?;
                     let all_table_columns: Vec<String> = resolved_table
-                        .columns(schema)
+                        .columns(schema)?
                         .map(|c| c.column_name().to_string())
                         .collect();
                     insert.on = Some(build_upsert_on_conflict(

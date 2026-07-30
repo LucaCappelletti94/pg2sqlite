@@ -240,7 +240,7 @@ fn create_fts5_statements(
         ))
     })?;
 
-    let pk_columns: Vec<_> = table.primary_key_columns(schema).collect();
+    let pk_columns: Vec<_> = table.primary_key_columns(schema)?.collect();
     if pk_columns.len() != 1 {
         return Err(Error::UnsupportedSQLiteFeature(format!(
             "FTS5 requires a single-column primary key. Table '{base_name}' has {} primary key columns.",
@@ -263,7 +263,7 @@ fn create_fts5_statements(
              Use an INTEGER or BIGINT primary key, or add a surrogate INTEGER rowid column."
         )));
     }
-    let trigger_table_name = resolve_trigger_table_name(&base_name, table, schema, options);
+    let trigger_table_name = resolve_trigger_table_name(&base_name, table, schema, options)?;
 
     let fts_name = format!("{base_name}_fts");
     let fts_name_quoted = quote_identifier(&fts_name);

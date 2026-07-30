@@ -223,7 +223,7 @@ fn translate_create_table(
         return Ok(role_filtered);
     }
 
-    if create_table.has_row_level_security(schema) {
+    if create_table.has_row_level_security(schema)? {
         validate_table_policies(create_table, schema, options)?;
         let rls_statements = generate_rls_statements(create_table, schema, options)?;
         return build_create_table_statements(create_table, schema, options, Some(rls_statements));
@@ -244,12 +244,12 @@ fn translate_create_table_for_role(
         return Ok(None);
     };
 
-    if !table.can_select(role, schema) {
+    if !table.can_select(role, schema)? {
         return Ok(Some(Vec::new()));
     }
 
-    let is_readonly = !table.can_write(role, schema);
-    if table.has_row_level_security(schema) {
+    let is_readonly = !table.can_write(role, schema)?;
+    if table.has_row_level_security(schema)? {
         validate_table_policies(table, schema, options)?;
         let rls_statements = if is_readonly {
             generate_readonly_rls_statements(table, schema, options)?
@@ -398,7 +398,7 @@ fn role_access_for_object_name(
         return Err(Error::TableNotFoundInSchema { table_name: table_name.to_string() });
     };
 
-    if table.can_select(role, schema) {
+    if table.can_select(role, schema)? {
         Ok(RoleTableAccess::Allow)
     } else {
         Ok(RoleTableAccess::Deny)

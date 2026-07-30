@@ -353,7 +353,7 @@ impl Pg2Sqlite {
         self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
-        use sql_traits::traits::{DatabaseLike, TableLike};
+        use sql_traits::traits::DatabaseLike;
 
         let normalized_statements = Self::normalize_statements(&self.pg_statements);
         let schema_statements = Self::schema_statements_for_translation(&normalized_statements);
@@ -389,7 +389,7 @@ impl Pg2Sqlite {
 
         // If any table has RLS enabled and audit table name is configured,
         // prepend the audit table creation statement
-        let has_rls_tables = schema.tables().any(|table| table.has_row_level_security(&schema));
+        let has_rls_tables = schema.has_rls_tables()?;
 
         if has_rls_tables && let Some(audit_table_name) = options.get_rls_audit_table_name() {
             let audit_table_stmt = generate_rls_audit_table(audit_table_name)?;
@@ -534,15 +534,21 @@ impl Pg2Sqlite {
 
         let mut entries = Vec::new();
         for table in schema.tables() {
-            if role.is_some_and(|role| !table.can_select(role, &schema)) {
+            if let Some(role) = role
+                && !table.can_select(role, &schema)?
+            {
                 continue;
             }
 
             let logical = table.table_name().to_string();
-            let physical = resolve_trigger_table_name(&logical, table, &schema, options);
-            let wrapper = if table.has_row_level_security(&schema) {
+            let physical = resolve_trigger_table_name(&logical, table, &schema, options)?;
+            let readonly = match role {
+                Some(role) => !table.can_write(role, &schema)?,
+                None => false,
+            };
+            let wrapper = if table.has_row_level_security(&schema)? {
                 WrapperKind::RlsView
-            } else if role.is_some_and(|role| !table.can_write(role, &schema)) {
+            } else if readonly {
                 WrapperKind::ReadOnly
             } else {
                 WrapperKind::Plain

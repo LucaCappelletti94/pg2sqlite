@@ -376,15 +376,20 @@ fn rls_public_helpers_cover_no_pk_and_readonly_paths() {
     );
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
 
-    assert!(table_has_rls("docs", &schema));
-    assert!(!table_has_rls("public_table", &schema));
+    assert!(table_has_rls("docs", &schema).expect("rls lookup should resolve"));
+    assert!(!table_has_rls("public_table", &schema).expect("rls lookup should resolve"));
 
     let docs_table = schema.table(None, "docs").expect("docs table must exist");
     let public_table = schema.table(None, "public_table").expect("public table must exist");
 
-    assert_eq!(resolve_trigger_table_name("docs", docs_table, &schema, &options), "docs_rls");
     assert_eq!(
-        resolve_trigger_table_name("public_table", public_table, &schema, &options),
+        resolve_trigger_table_name("docs", docs_table, &schema, &options)
+            .expect("trigger table name should resolve"),
+        "docs_rls"
+    );
+    assert_eq!(
+        resolve_trigger_table_name("public_table", public_table, &schema, &options)
+            .expect("trigger table name should resolve"),
         "public_table"
     );
 

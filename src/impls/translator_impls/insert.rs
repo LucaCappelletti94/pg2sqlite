@@ -119,7 +119,9 @@ fn wrap_vector_text_literals(insert: &mut Insert, schema: &ParserDB) {
     let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
         return;
     };
-    let vector_cols = vector_columns_of_table(table, schema);
+    // A table absent from the schema has no vector columns to wrap, so this
+    // leaves the insert verbatim exactly as the lookup above does.
+    let Ok(vector_cols) = vector_columns_of_table(table, schema) else { return };
     if vector_cols.is_empty() {
         return;
     }
@@ -128,7 +130,8 @@ fn wrap_vector_text_literals(insert: &mut Insert, schema: &ParserDB) {
     // otherwise the natural table order. Comparison is
     // case-insensitive to match PostgreSQL's default identifier folding.
     let column_names: Vec<String> = if insert.columns.is_empty() {
-        table.columns(schema).map(|c| c.column_name().to_string()).collect()
+        let Ok(columns) = table.columns(schema) else { return };
+        columns.map(|c| c.column_name().to_string()).collect()
     } else {
         insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
     };
@@ -187,9 +190,9 @@ fn rewrite_rls_view_insert(insert: &mut Insert, schema: &ParserDB, options: &Pg2
         return;
     };
     let Some(last) = last_ident(table_name) else { return };
-    if !rls::table_has_rls(&last.value, schema) {
+    let Ok(true) = rls::table_has_rls(&last.value, schema) else {
         return;
-    }
+    };
 
     // Build the backing-table ObjectName: same schema prefix as the
     // original, but the bare table name gets the configured RLS
@@ -214,13 +217,16 @@ fn wrap_uuid_text_literals(insert: &mut Insert, schema: &ParserDB, options: &Pg2
     let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
         return;
     };
-    let uuid_cols = uuid_columns_of_table(table, schema);
+    // A table absent from the schema has no UUID columns to wrap, so this leaves
+    // the insert verbatim exactly as the lookup above does.
+    let Ok(uuid_cols) = uuid_columns_of_table(table, schema) else { return };
     if uuid_cols.is_empty() {
         return;
     }
 
     let column_names: Vec<String> = if insert.columns.is_empty() {
-        table.columns(schema).map(|c| c.column_name().to_string()).collect()
+        let Ok(columns) = table.columns(schema) else { return };
+        columns.map(|c| c.column_name().to_string()).collect()
     } else {
         insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
     };

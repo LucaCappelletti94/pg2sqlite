@@ -1062,9 +1062,9 @@ pub(crate) fn translate_update<D: TranslationDirection>(
                     .ok()
                     .flatten()
                     .map(|table| {
-                        let v = vector_columns_of_table(table, schema);
+                        let v = vector_columns_of_table(table, schema).unwrap_or_default();
                         let u = if is_blob_uuid_representation(options) {
-                            uuid_columns_of_table(table, schema)
+                            uuid_columns_of_table(table, schema).unwrap_or_default()
                         } else {
                             Vec::new()
                         };

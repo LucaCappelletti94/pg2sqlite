@@ -24,6 +24,17 @@ pub enum Error {
     /// Error that may occur during the construction of the schema.
     #[error("Schema error: {0}")]
     SchemaError(#[from] sql_traits::errors::Error),
+    /// Error raised when a schema object cannot be resolved in the database it
+    /// is queried against.
+    ///
+    /// Carried separately from [`Error::SchemaError`] rather than nested inside
+    /// it so that `?` converts a `LookupError` in one hop. The accessors on
+    /// `sql-traits`' `TableLike` and `ColumnLike` return this whenever the
+    /// object is absent, which happens for instance when a statement list
+    /// renames a table away and a caller still holds the original `CREATE
+    /// TABLE` node.
+    #[error("Schema lookup error: {0}")]
+    LookupError(#[from] sql_traits::errors::LookupError),
     /// Error that may occur during the reading of a file.
     ///
     /// Only available with the `std` feature; produced by the

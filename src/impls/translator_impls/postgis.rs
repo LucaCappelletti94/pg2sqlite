@@ -201,7 +201,7 @@ pub(crate) fn classify_gist_spatial_columns(
             non_spatial_columns.push(format!("{}", index_col.column.expr));
             continue;
         };
-        match table.column(&column_name, schema).map(|col| col.data_type(schema)) {
+        match table.column(&column_name, schema)?.map(|col| col.data_type(schema)) {
             Some(dt) if is_spatial_data_type(dt) => spatial_columns.push(column_name),
             _ => non_spatial_columns.push(column_name),
         }

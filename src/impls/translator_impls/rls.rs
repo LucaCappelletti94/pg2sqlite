@@ -17,7 +17,10 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike};
+use sql_traits::{
+    errors::LookupError,
+    traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
+};
 use sqlparser::ast::{
     CreatePolicyCommand, CreatePolicyType, CreateTable, Expr, Function, FunctionArg,
     FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments, HavingBound,
@@ -90,11 +93,23 @@ fn combine_policy_predicates<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
     schema: &DB,
     table_rename: Option<(&str, &str)>,
-) -> PolicyPredicate
+) -> Result<PolicyPredicate, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
+    // Both sets are resolved once here rather than inside the recursive
+    // transformer, which keeps that transformer total and avoids re-querying the
+    // schema at every node it visits.
+    let lowercased_columns: Vec<String> =
+        table.columns(schema)?.map(|c| c.column_name().to_lowercase()).collect();
+    let rls_table_names: Vec<String> =
+        schema.rls_tables()?.map(|t| t.table_name().to_string()).collect();
+    let facts = ResolvedSchemaFacts {
+        lowercased_columns: &lowercased_columns,
+        rls_table_names: &rls_table_names,
+    };
+
     let mut permissive = Vec::new();
     let mut restrictive = Vec::new();
     let mut has_permissive = false;
@@ -119,7 +134,7 @@ where
             }
         };
         let Some(expr) = expr else { continue };
-        let transformed = transform_expr(expr, options, table, schema, prefix, table_rename);
+        let transformed = transform_expr(expr, options, table, schema, prefix, table_rename, facts);
         // A literally-true predicate constrains nothing, so it contributes no
         // conjunct. `USING (true)` is the idiomatic public-access policy, and
         // without this fold it emits dead SQL such as
@@ -137,7 +152,7 @@ where
     }
 
     if !has_permissive {
-        return PolicyPredicate::DenyAll;
+        return Ok(PolicyPredicate::DenyAll);
     }
 
     // Each condition is already parenthesised, so a grouping paren is only
@@ -156,32 +171,46 @@ where
     conjuncts.extend(restrictive);
 
     if conjuncts.is_empty() {
-        PolicyPredicate::AllowAll
+        Ok(PolicyPredicate::AllowAll)
     } else {
-        PolicyPredicate::Expr(conjuncts.join(" AND "))
+        Ok(PolicyPredicate::Expr(conjuncts.join(" AND ")))
     }
 }
 
-fn collect_column_names<DB: DatabaseLike>(table: &DB::Table, schema: &DB) -> Vec<String>
+fn collect_column_names<DB: DatabaseLike>(
+    table: &DB::Table,
+    schema: &DB,
+) -> Result<Vec<String>, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
 {
-    table.columns(schema).map(|c| c.column_name().to_string()).collect()
+    Ok(table.columns(schema)?.map(|c| c.column_name().to_string()).collect())
 }
 
-fn collect_pk_column_names<DB: DatabaseLike>(table: &DB::Table, schema: &DB) -> Vec<String>
+fn collect_pk_column_names<DB: DatabaseLike>(
+    table: &DB::Table,
+    schema: &DB,
+) -> Result<Vec<String>, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
 {
-    table.primary_key_columns(schema).map(|c| c.column_name().to_string()).collect()
+    Ok(table.primary_key_columns(schema)?.map(|c| c.column_name().to_string()).collect())
 }
 
 /// Returns true if the table has RLS enabled.
-pub fn table_has_rls<DB: DatabaseLike>(table_name: &str, schema: &DB) -> bool
+///
+/// # Errors
+///
+/// Returns [`LookupError`] if the table is present but its metadata cannot be
+/// resolved in `schema`.
+pub fn table_has_rls<DB: DatabaseLike>(table_name: &str, schema: &DB) -> Result<bool, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
 {
-    schema.table(None, table_name).is_some_and(|t| t.has_row_level_security(schema))
+    match schema.table(None, table_name) {
+        Some(table) => table.has_row_level_security(schema),
+        None => Ok(false),
+    }
 }
 
 /// Resolves the correct table name for attaching AFTER triggers.
@@ -189,20 +218,25 @@ where
 /// When a table has RLS, it's split into a view and a backing table.
 /// AFTER triggers must be attached to the backing table (e.g., `table_rls`),
 /// not the view, because views don't fire AFTER triggers in SQLite.
+///
+/// # Errors
+///
+/// Returns [`LookupError`] if the table's metadata cannot be resolved in
+/// `schema`.
 pub fn resolve_trigger_table_name<DB: DatabaseLike>(
     base_name: &str,
     table: &DB::Table,
     schema: &DB,
     options: &impl TranslationOptions,
-) -> String
+) -> Result<String, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
 {
-    if table.has_row_level_security(schema) {
+    if table.has_row_level_security(schema)? {
         let suffix = options.get_rls_table_suffix();
-        format!("{base_name}{suffix}")
+        Ok(format!("{base_name}{suffix}"))
     } else {
-        base_name.to_string()
+        Ok(base_name.to_string())
     }
 }
 
@@ -225,19 +259,19 @@ fn filter_policies<'a, DB: DatabaseLike>(
     table: &'a DB::Table,
     schema: &'a DB,
     commands: &[CreatePolicyCommand],
-) -> Vec<&'a DB::Policy>
+) -> Result<Vec<&'a DB::Policy>, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
     let mut policies = Vec::new();
-    for policy in table.policies(schema) {
+    for policy in table.policies(schema)? {
         let command = policy.command();
         if commands.contains(&command) || command == CreatePolicyCommand::All {
             policies.push(policy);
         }
     }
-    policies
+    Ok(policies)
 }
 
 struct RlsTriggerContext<'a> {
@@ -554,7 +588,7 @@ where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
-    for policy in table.policies(schema) {
+    for policy in table.policies(schema)? {
         if let Some(using_expr) = policy.using_expression(schema) {
             validate_session_variables(using_expr, options, table.table_name(), policy.name())?;
         }
@@ -565,24 +599,54 @@ where
     Ok(())
 }
 
+/// Schema facts the expression transformer needs, resolved once by the caller.
+///
+/// Grouped so the transformer entry points take one reference rather than two
+/// parallel slices that must always travel together.
+#[derive(Clone, Copy)]
+struct ResolvedSchemaFacts<'a> {
+    /// The host table's column names, folded to lower case.
+    lowercased_columns: &'a [String],
+    /// Names of every table in the database with row level security enabled.
+    rls_table_names: &'a [String],
+}
+
 /// How column references are rewritten during expression transformation.
 ///
 /// `prefix` qualifies bare column references, typically with `NEW` or `OLD`
 /// depending on which row the surrounding trigger clause constrains. `None`
 /// leaves them bare. `table_rename` rewrites a qualified reference to the
 /// renamed backing table.
+///
+/// `lowercased_columns` holds the table's column names, folded to lower case
+/// once by the caller. Resolving them up front keeps the recursive transformer
+/// infallible and total, and avoids rescanning the table's columns at every
+/// identifier node.
 struct ColumnRefStrategy<'a> {
     prefix: Option<&'a str>,
     table_rename: Option<(&'a str, &'a str)>,
+    lowercased_columns: &'a [String],
+    rls_table_names: &'a [String],
 }
 
-impl ColumnRefStrategy<'_> {
+impl<'a> ColumnRefStrategy<'a> {
     fn table_rename(&self) -> Option<(&str, &str)> {
         self.table_rename
     }
 
     fn subquery_prefix(&self) -> Option<&str> {
         self.prefix
+    }
+
+    fn facts(&self) -> ResolvedSchemaFacts<'a> {
+        ResolvedSchemaFacts {
+            lowercased_columns: self.lowercased_columns,
+            rls_table_names: self.rls_table_names,
+        }
+    }
+
+    fn has_column(&self, lowercased_name: &str) -> bool {
+        self.lowercased_columns.iter().any(|column| column == lowercased_name)
     }
 }
 
@@ -724,6 +788,7 @@ where
                         schema,
                         strategy.subquery_prefix(),
                         strategy.table_rename(),
+                        strategy.facts(),
                     )))
                 }
                 FunctionArguments::None => FunctionArguments::None,
@@ -828,7 +893,7 @@ where
             }
 
             if let Some(pfx) = strategy.prefix
-                && table.columns(schema).any(|c| c.column_name().to_lowercase() == ident_lower)
+                && strategy.has_column(&ident_lower)
             {
                 return Expr::CompoundIdentifier(vec![Ident::new(pfx), ident.clone()]);
             }
@@ -859,6 +924,7 @@ where
                     schema,
                     strategy.subquery_prefix(),
                     strategy.table_rename(),
+                    strategy.facts(),
                 )),
                 negated: *negated,
             }
@@ -872,6 +938,7 @@ where
                 schema,
                 strategy.subquery_prefix(),
                 strategy.table_rename(),
+                strategy.facts(),
             )))
         }
 
@@ -885,6 +952,7 @@ where
                     schema,
                     strategy.subquery_prefix(),
                     strategy.table_rename(),
+                    strategy.facts(),
                 )),
                 negated: *negated,
             }
@@ -902,6 +970,7 @@ fn transform_expr<O: TranslationOptions, DB: DatabaseLike>(
     schema: &DB,
     prefix: Option<&str>,
     table_rename: Option<(&str, &str)>,
+    facts: ResolvedSchemaFacts<'_>,
 ) -> Expr
 where
     DB::Table: TableLike<DB = DB>,
@@ -911,7 +980,12 @@ where
         options,
         table,
         schema,
-        &ColumnRefStrategy { prefix, table_rename },
+        &ColumnRefStrategy {
+            prefix,
+            table_rename,
+            lowercased_columns: facts.lowercased_columns,
+            rls_table_names: facts.rls_table_names,
+        },
     )
 }
 
@@ -922,14 +996,23 @@ fn transform_query<O: TranslationOptions, DB: DatabaseLike>(
     schema: &DB,
     prefix: Option<&str>,
     outer_table: Option<(&str, &str)>,
+    facts: ResolvedSchemaFacts<'_>,
 ) -> sqlparser::ast::Query
 where
     DB::Table: TableLike<DB = DB>,
 {
     let mut transformed = query.clone();
     let rls_suffix = options.get_rls_table_suffix();
-    let context =
-        SubqueryTransformContext { options, table, schema, prefix, outer_table, rls_suffix };
+    let context = SubqueryTransformContext {
+        options,
+        table,
+        schema,
+        prefix,
+        outer_table,
+        rls_suffix,
+        lowercased_columns: facts.lowercased_columns,
+        rls_table_names: facts.rls_table_names,
+    };
 
     if let sqlparser::ast::SetExpr::Select(ref mut select) = *transformed.body {
         let mut subquery_table_renames: Vec<(String, String)> = Vec::new();
@@ -941,17 +1024,8 @@ where
             );
         }
 
-        let rewrite_expr = |expr: &Expr| {
-            transform_subquery_expression(
-                expr,
-                options,
-                table,
-                schema,
-                prefix,
-                outer_table,
-                &subquery_table_renames,
-            )
-        };
+        let rewrite_expr =
+            |expr: &Expr| transform_subquery_expression(expr, &context, &subquery_table_renames);
 
         if let Some(selection) = &mut select.selection {
             *selection = rewrite_expr(selection);
@@ -985,19 +1059,18 @@ where
 
 fn transform_subquery_expression<O: TranslationOptions, DB: DatabaseLike>(
     expr: &Expr,
-    options: &O,
-    table: &DB::Table,
-    schema: &DB,
-    prefix: Option<&str>,
-    outer_table: Option<(&str, &str)>,
+    context: &SubqueryTransformContext<'_, O, DB>,
     subquery_table_renames: &[(String, String)],
 ) -> Expr
 where
     DB::Table: TableLike<DB = DB>,
 {
+    let (options, table, schema, prefix) =
+        (context.options, context.table, context.schema, context.prefix);
+    let facts = context.facts();
     let mut transformed = expr.clone();
 
-    if let Some((outer_table_name, renamed_table_name)) = outer_table {
+    if let Some((outer_table_name, renamed_table_name)) = context.outer_table {
         transformed = transform_outer_table_refs(
             &transformed,
             outer_table_name,
@@ -1014,10 +1087,11 @@ where
             schema,
             prefix,
             Some((old_name.as_str(), new_name.as_str())),
+            facts,
         );
     }
 
-    transform_expr(&transformed, options, table, schema, prefix, None)
+    transform_expr(&transformed, options, table, schema, prefix, None, facts)
 }
 
 struct SubqueryTransformContext<'a, O: TranslationOptions, DB: DatabaseLike>
@@ -1030,6 +1104,27 @@ where
     prefix: Option<&'a str>,
     outer_table: Option<(&'a str, &'a str)>,
     rls_suffix: &'a str,
+    /// The host table's column names, lower-cased once by the caller.
+    lowercased_columns: &'a [String],
+    /// Names of every table in the database with row level security enabled,
+    /// resolved once by the caller so the subquery walk stays total.
+    rls_table_names: &'a [String],
+}
+
+impl<'a, O: TranslationOptions, DB: DatabaseLike> SubqueryTransformContext<'a, O, DB>
+where
+    DB::Table: TableLike<DB = DB>,
+{
+    fn facts(&self) -> ResolvedSchemaFacts<'a> {
+        ResolvedSchemaFacts {
+            lowercased_columns: self.lowercased_columns,
+            rls_table_names: self.rls_table_names,
+        }
+    }
+
+    fn has_rls_table(&self, table_name: &str) -> bool {
+        self.rls_table_names.iter().any(|known| known == table_name)
+    }
 }
 
 fn transform_table_with_joins_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
@@ -1071,12 +1166,12 @@ fn transform_table_factor_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
                 return;
             }
 
-            let (table_schema, table_name) = schema_and_table_for_lookup(name);
-            let has_rls = table_name
-                .and_then(|table_name| {
-                    context.schema.table(table_schema.as_deref(), table_name.as_ref())
-                })
-                .is_some_and(|table| table.has_row_level_security(context.schema));
+            let (_table_schema, table_name) = schema_and_table_for_lookup(name);
+            // Membership in a set resolved once by the caller, so this walk stays
+            // total. Resolving per factor would ask the schema about a table it may
+            // not hold, which is exactly the fallible case.
+            let has_rls =
+                table_name.is_some_and(|table_name| context.has_rls_table(table_name.as_ref()));
             if has_rls {
                 let renamed_name = append_suffix(name, context.rls_suffix);
                 let new_name = last_ident(&renamed_name)
@@ -1095,6 +1190,7 @@ fn transform_table_factor_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
                 context.schema,
                 context.prefix,
                 context.outer_table,
+                context.facts(),
             );
         }
         TableFactor::NestedJoin { table_with_joins, .. } => {
@@ -1117,15 +1213,7 @@ fn transform_join_operator_for_subquery<O: TranslationOptions, DB: DatabaseLike>
 {
     let rewrite_constraint = |constraint: &mut JoinConstraint| {
         if let JoinConstraint::On(expr) = constraint {
-            *expr = transform_subquery_expression(
-                expr,
-                context.options,
-                context.table,
-                context.schema,
-                context.prefix,
-                context.outer_table,
-                subquery_table_renames,
-            );
+            *expr = transform_subquery_expression(expr, context, subquery_table_renames);
         }
     };
 
@@ -1134,15 +1222,8 @@ fn transform_join_operator_for_subquery<O: TranslationOptions, DB: DatabaseLike>
     }
 
     if let JoinOperator::AsOf { match_condition, .. } = join_operator {
-        *match_condition = transform_subquery_expression(
-            match_condition,
-            context.options,
-            context.table,
-            context.schema,
-            context.prefix,
-            context.outer_table,
-            subquery_table_renames,
-        );
+        *match_condition =
+            transform_subquery_expression(match_condition, context, subquery_table_renames);
     }
 }
 
@@ -1318,13 +1399,13 @@ fn rls_read_predicate<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
     schema: &DB,
     options: &O,
-) -> PolicyPredicate
+) -> Result<PolicyPredicate, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
 {
     let ctx = RlsTriggerContext::new::<O, DB>(table, options);
-    let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select]);
+    let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select])?;
 
     combine_policy_predicates(
         &select_policies,
@@ -1358,11 +1439,11 @@ where
     let table_name_quoted = quote_identifier(table_name);
     let inner_table_name_quoted = quote_identifier(inner_table_name);
 
-    let columns = collect_column_names(table, schema);
+    let columns = collect_column_names(table, schema)?;
     let column_list =
         columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
 
-    let where_clause = match rls_read_predicate(table, schema, options) {
+    let where_clause = match rls_read_predicate(table, schema, options)? {
         // No permissive policy grants access, so no row is readable. Covers both
         // an empty policy set and a restrictive-only one.
         PolicyPredicate::DenyAll => " WHERE false".to_owned(),
@@ -1381,7 +1462,7 @@ fn generate_insert_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
     schema: &DB,
     options: &O,
-) -> String
+) -> Result<String, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
@@ -1395,10 +1476,10 @@ where
     let trigger_name = quote_identifier(&format!("{table_name}_insert_trigger"));
 
     // Find INSERT policies
-    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert]);
+    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert])?;
 
     // Get all column names for the INSERT statement
-    let columns = collect_column_names(table, schema);
+    let columns = collect_column_names(table, schema)?;
     let column_list =
         columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
     let value_list = columns
@@ -1415,7 +1496,7 @@ where
         table,
         schema,
         table_rename,
-    );
+    )?;
 
     let forward =
         format!("INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});");
@@ -1443,9 +1524,9 @@ where
         }
     };
 
-    format!(
+    Ok(format!(
         "CREATE TRIGGER {trigger_name} INSTEAD OF INSERT ON {table_name_quoted} FOR EACH ROW {trigger_body}"
-    )
+    ))
 }
 
 /// Generates a BEFORE INSERT trigger on the **backing table** that fires
@@ -1467,7 +1548,7 @@ fn generate_insert_check_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
     schema: &DB,
     options: &O,
-) -> Option<String>
+) -> Result<Option<String>, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
@@ -1480,25 +1561,34 @@ where
     let inner_table_name_quoted = quote_identifier(inner_table_name);
     let trigger_name = quote_identifier(&format!("{inner_table_name}_insert_check"));
 
-    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert]);
+    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert])?;
+    let lowercased_columns: Vec<String> =
+        table.columns(schema)?.map(|c| c.column_name().to_lowercase()).collect();
+    let rls_table_names: Vec<String> =
+        schema.rls_tables()?.map(|t| t.table_name().to_string()).collect();
+    let facts = ResolvedSchemaFacts {
+        lowercased_columns: &lowercased_columns,
+        rls_table_names: &rls_table_names,
+    };
+
     let mut check_conditions = Vec::new();
     for policy in &insert_policies {
         if let Some(expr) = policy.check_expression(schema) {
             let transformed =
-                transform_expr(expr, options, table, schema, Some("NEW"), table_rename);
+                transform_expr(expr, options, table, schema, Some("NEW"), table_rename, facts);
             check_conditions.push(format!("({transformed})"));
         }
     }
     if check_conditions.is_empty() {
-        return None;
+        return Ok(None);
     }
     let check = check_conditions.join(" OR ");
 
-    Some(format!(
+    Ok(Some(format!(
         "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
          WHEN NOT ({check}) \
          BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
-    ))
+    )))
 }
 
 /// Generates INSTEAD OF UPDATE trigger SQL.
@@ -1506,7 +1596,7 @@ fn generate_update_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
     schema: &DB,
     options: &O,
-) -> String
+) -> Result<String, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
@@ -1520,13 +1610,13 @@ where
     let trigger_name = quote_identifier(&format!("{table_name}_update_trigger"));
 
     // Find UPDATE policies
-    let update_policies = filter_policies(table, schema, &[CreatePolicyCommand::Update]);
+    let update_policies = filter_policies(table, schema, &[CreatePolicyCommand::Update])?;
 
     // Get all column names for the SET clause
-    let columns = collect_column_names(table, schema);
+    let columns = collect_column_names(table, schema)?;
 
     // Get primary key columns
-    let pk_columns = collect_pk_column_names(table, schema);
+    let pk_columns = collect_pk_column_names(table, schema)?;
 
     // SQLite populates NEW fully in an INSTEAD OF UPDATE trigger: a column
     // absent from the statement's SET clause already carries its OLD value. So
@@ -1556,7 +1646,7 @@ where
         table,
         schema,
         table_rename,
-    );
+    )?;
     let check = combine_policy_predicates(
         &update_policies,
         PolicyClause::Check,
@@ -1565,7 +1655,7 @@ where
         table,
         schema,
         table_rename,
-    );
+    )?;
 
     // USING selects which existing rows are updatable at all. A row that fails
     // it is skipped, not rejected: PostgreSQL leaves the statement affecting
@@ -1620,9 +1710,9 @@ where
         format!("BEGIN\n    {forward}\nEND")
     };
 
-    format!(
+    Ok(format!(
         "CREATE TRIGGER {trigger_name} INSTEAD OF UPDATE ON {table_name_quoted} FOR EACH ROW {trigger_body}"
-    )
+    ))
 }
 
 /// Generates INSTEAD OF DELETE trigger SQL.
@@ -1630,7 +1720,7 @@ fn generate_delete_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
     table: &DB::Table,
     schema: &DB,
     options: &O,
-) -> String
+) -> Result<String, LookupError>
 where
     DB::Table: TableLike<DB = DB>,
     DB::Policy: PolicyLike<DB = DB>,
@@ -1644,13 +1734,13 @@ where
     let trigger_name = quote_identifier(&format!("{table_name}_delete_trigger"));
 
     // Find DELETE policies
-    let delete_policies = filter_policies(table, schema, &[CreatePolicyCommand::Delete]);
+    let delete_policies = filter_policies(table, schema, &[CreatePolicyCommand::Delete])?;
 
     // Get all column names for the WHERE clause fallback
-    let columns = collect_column_names(table, schema);
+    let columns = collect_column_names(table, schema)?;
 
     // Get primary key columns
-    let pk_columns = collect_pk_column_names(table, schema);
+    let pk_columns = collect_pk_column_names(table, schema)?;
 
     // Build PK WHERE clause
     let pk_where = build_row_identity_clause(&columns, &pk_columns);
@@ -1665,7 +1755,7 @@ where
         table,
         schema,
         table_rename,
-    );
+    )?;
 
     let using_denies = delete_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll);
 
@@ -1688,9 +1778,9 @@ where
         format!("BEGIN\n    DELETE FROM {inner_table_name_quoted} WHERE {row_filter};\nEND")
     };
 
-    format!(
+    Ok(format!(
         "CREATE TRIGGER {trigger_name} INSTEAD OF DELETE ON {table_name_quoted} FOR EACH ROW {trigger_body}"
-    )
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1727,7 +1817,7 @@ where
 
     if mode == RlsStatementMode::ReadWrite {
         // Generate INSERT trigger
-        let insert_sql = generate_insert_trigger_sql(table, schema, options);
+        let insert_sql = generate_insert_trigger_sql(table, schema, options)?;
         let insert_stmts = parse_generated_sql(
             &dialect,
             &insert_sql,
@@ -1753,7 +1843,7 @@ where
         // Skipped when no INSERT policy declares a WITH CHECK
         // expression.
         if options.is_strict_rls_validation()
-            && let Some(check_sql) = generate_insert_check_trigger_sql(table, schema, options)
+            && let Some(check_sql) = generate_insert_check_trigger_sql(table, schema, options)?
         {
             let check_stmts = parse_generated_sql(
                 &dialect,
@@ -1764,7 +1854,7 @@ where
         }
 
         // Generate UPDATE trigger
-        let update_sql = generate_update_trigger_sql(table, schema, options);
+        let update_sql = generate_update_trigger_sql(table, schema, options)?;
         let update_stmts = parse_generated_sql(
             &dialect,
             &update_sql,
@@ -1773,7 +1863,7 @@ where
         statements.extend(update_stmts);
 
         // Generate DELETE trigger
-        let delete_sql = generate_delete_trigger_sql(table, schema, options);
+        let delete_sql = generate_delete_trigger_sql(table, schema, options)?;
         let delete_stmts = parse_generated_sql(
             &dialect,
             &delete_sql,
@@ -1786,7 +1876,7 @@ where
     // whether a backing row is visible through the view, which is always no here,
     // so it would flag every write and distinguish nothing. Report the
     // configuration once now instead of once per row at runtime.
-    if matches!(rls_read_predicate(table, schema, options), PolicyPredicate::DenyAll) {
+    if matches!(rls_read_predicate(table, schema, options)?, PolicyPredicate::DenyAll) {
         crate::warnings::emit(crate::warnings::TranslationWarning::RlsDeniesEveryRow {
             table: table.table_name().to_owned(),
         });
@@ -2046,8 +2136,8 @@ where
 
     let table_name = table.table_name();
     let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
-    let pk_columns = collect_pk_column_names(table, schema);
-    let all_columns = collect_column_names(table, schema);
+    let pk_columns = collect_pk_column_names(table, schema)?;
+    let all_columns = collect_column_names(table, schema)?;
     let strict_mode = options.is_strict_rls_validation();
 
     // Generate INSERT and UPDATE monitoring triggers
@@ -2092,7 +2182,28 @@ pub fn generate_rls_audit_table(audit_table_name: &str) -> Result<Statement, Err
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
-    use sql_traits::{structs::ParserDB, traits::DatabaseLike};
+    use sql_traits::{
+        structs::ParserDB,
+        traits::{ColumnLike, DatabaseLike, TableLike},
+    };
+
+    /// Resolves the two sets the transformer needs, exactly as production
+    /// callers do, so these tests exercise the same shapes.
+    fn resolved_sets(
+        table: &<ParserDB as DatabaseLike>::Table,
+        schema: &ParserDB,
+    ) -> (Vec<String>, Vec<String>) {
+        let columns = TableLike::columns(table, schema)
+            .expect("columns must resolve")
+            .map(|c| c.column_name().to_lowercase())
+            .collect();
+        let rls = schema
+            .rls_tables()
+            .expect("rls tables must resolve")
+            .map(|t| t.table_name().to_string())
+            .collect();
+        (columns, rls)
+    }
     use sqlparser::{
         ast::{
             Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgOperator,
@@ -2104,12 +2215,13 @@ mod tests {
     };
 
     use super::{
-        SubqueryTransformContext, extract_current_setting_name, extract_string_literal,
-        filter_policies, generate_delete_trigger_sql, generate_insert_trigger_sql,
-        generate_readonly_rls_statements, generate_rls_audit_table, generate_rls_statements,
-        generate_rls_validation_statements, generate_update_trigger_sql, rename_table_for_rls,
-        transform_expr, transform_join_operator_for_subquery, transform_query,
-        transform_table_factor_for_subquery, validate_session_variables, validate_table_policies,
+        ResolvedSchemaFacts, SubqueryTransformContext, extract_current_setting_name,
+        extract_string_literal, filter_policies, generate_delete_trigger_sql,
+        generate_insert_trigger_sql, generate_readonly_rls_statements, generate_rls_audit_table,
+        generate_rls_statements, generate_rls_validation_statements, generate_update_trigger_sql,
+        rename_table_for_rls, transform_expr, transform_join_operator_for_subquery,
+        transform_query, transform_table_factor_for_subquery, validate_session_variables,
+        validate_table_policies,
     };
     use crate::{
         prelude::{Pg2SqliteOptions, TranslationOptions},
@@ -2228,6 +2340,11 @@ mod tests {
         let options = Pg2SqliteOptions::default().with_session_variable(
             crate::traits::translation_options::SessionVariableMapping::current_user("sqlite_user"),
         );
+        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts {
+            lowercased_columns: &lowercased_columns,
+            rls_table_names: &rls_table_names,
+        };
 
         let transformed_current_user = transform_expr(
             &Expr::Identifier(Ident::new("current_user")),
@@ -2236,6 +2353,7 @@ mod tests {
             &schema,
             Some("NEW"),
             None,
+            facts,
         );
         assert_eq!(transformed_current_user.to_string(), "sqlite_user()");
 
@@ -2246,6 +2364,7 @@ mod tests {
             &schema,
             Some("NEW"),
             None,
+            facts,
         );
         assert!(transformed_cast.to_string().contains("NEW.owner_id"));
 
@@ -2256,11 +2375,19 @@ mod tests {
             &schema,
             None,
             Some(("docs", "docs_rls")),
+            facts,
         );
         assert_eq!(renamed.to_string(), "docs_rls.owner_id");
 
-        let prefixed_identifier =
-            transform_expr(&parse_expr("owner_id"), &options, table, &schema, Some("NEW"), None);
+        let prefixed_identifier = transform_expr(
+            &parse_expr("owner_id"),
+            &options,
+            table,
+            &schema,
+            Some("NEW"),
+            None,
+            facts,
+        );
         assert_eq!(prefixed_identifier.to_string(), "NEW.owner_id");
     }
 
@@ -2276,6 +2403,11 @@ mod tests {
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
+        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts {
+            lowercased_columns: &lowercased_columns,
+            rls_table_names: &rls_table_names,
+        };
 
         let mut wildcard_query = parse_query("SELECT * FROM docs");
         let SetExpr::Select(select) = wildcard_query.body.as_mut() else {
@@ -2289,6 +2421,7 @@ mod tests {
             &schema,
             Some("NEW"),
             Some(("docs", "docs_rls")),
+            facts,
         );
         assert!(transformed.to_string().contains("QUALIFY"));
 
@@ -2299,6 +2432,8 @@ mod tests {
             prefix: Some("NEW"),
             outer_table: Some(("docs", "docs_rls")),
             rls_suffix: options.get_rls_table_suffix(),
+            lowercased_columns: &lowercased_columns,
+            rls_table_names: &rls_table_names,
         };
 
         let mut rename_pairs = Vec::new();
@@ -2368,6 +2503,7 @@ mod tests {
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
+        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
         let context = SubqueryTransformContext {
             options: &options,
             table,
@@ -2375,6 +2511,8 @@ mod tests {
             prefix: Some("NEW"),
             outer_table: Some(("docs", "docs_rls")),
             rls_suffix: options.get_rls_table_suffix(),
+            lowercased_columns: &lowercased_columns,
+            rls_table_names: &rls_table_names,
         };
 
         let mut rename_pairs = Vec::new();
@@ -2410,10 +2548,22 @@ mod tests {
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
+        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts {
+            lowercased_columns: &lowercased_columns,
+            rls_table_names: &rls_table_names,
+        };
 
         // Bare identifier, prefix applied.
-        let prefixed_ident =
-            transform_expr(&parse_expr("owner_id"), &options, table, &schema, Some("NEW"), None);
+        let prefixed_ident = transform_expr(
+            &parse_expr("owner_id"),
+            &options,
+            table,
+            &schema,
+            Some("NEW"),
+            None,
+            facts,
+        );
         assert_eq!(prefixed_ident.to_string(), "NEW.owner_id");
 
         // Qualified identifier, rename applied with no prefix.
@@ -2424,6 +2574,7 @@ mod tests {
             &schema,
             None,
             Some(("docs", "docs_inner")),
+            facts,
         );
         assert_eq!(renamed_compound.to_string(), "docs_inner.owner_id");
 
@@ -2437,6 +2588,7 @@ mod tests {
             &schema,
             Some("NEW"),
             Some(("docs", "docs_inner")),
+            facts,
         );
         assert_eq!(prefixed_over_rename.to_string(), "NEW.owner_id");
     }
@@ -2448,6 +2600,11 @@ mod tests {
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
+        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts {
+            lowercased_columns: &lowercased_columns,
+            rls_table_names: &rls_table_names,
+        };
 
         let prefixed_identifier = transform_expr(
             &Expr::Identifier(Ident::new("owner_id")),
@@ -2456,6 +2613,7 @@ mod tests {
             &schema,
             Some("OLD"),
             None,
+            facts,
         );
         assert_eq!(prefixed_identifier.to_string(), "OLD.owner_id");
 
@@ -2466,6 +2624,7 @@ mod tests {
             &schema,
             None,
             Some(("docs", "docs_inner")),
+            facts,
         );
         assert_eq!(renamed_compound.to_string(), "docs_inner.owner_id");
 
@@ -2476,6 +2635,7 @@ mod tests {
             &schema,
             Some("OLD"),
             Some(("docs", "docs_inner")),
+            facts,
         );
         assert_eq!(prefixed_compound.to_string(), "OLD.owner_id");
     }
@@ -2535,7 +2695,8 @@ mod tests {
     }
 
     #[test]
-    fn query_and_trigger_generation_helpers_cover_policy_paths() {
+    fn query_and_trigger_generation_helpers_cover_policy_paths() -> Result<(), crate::errors::Error>
+    {
         let schema = schema_from_sql(
             r#"
             CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, body TEXT);
@@ -2551,9 +2712,14 @@ mod tests {
         let options = Pg2SqliteOptions::default()
             .with_rls_audit_table_name("rls_audit")
             .with_strict_rls_validation();
+        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts {
+            lowercased_columns: &lowercased_columns,
+            rls_table_names: &rls_table_names,
+        };
 
         let select_policies =
-            filter_policies(table, &schema, &[sqlparser::ast::CreatePolicyCommand::Select]);
+            filter_policies(table, &schema, &[sqlparser::ast::CreatePolicyCommand::Select])?;
         assert_eq!(select_policies.len(), 1);
 
         let transformed_query = transform_query(
@@ -2570,16 +2736,17 @@ mod tests {
             &schema,
             Some("NEW"),
             Some(("docs", "docs_rls")),
+            facts,
         );
         let transformed_sql = transformed_query.to_string();
         assert!(transformed_sql.contains("NEW.owner_id"));
         assert!(transformed_sql.contains("QUALIFY"));
 
-        let insert_trigger_sql = generate_insert_trigger_sql(table, &schema, &options);
+        let insert_trigger_sql = generate_insert_trigger_sql(table, &schema, &options)?;
         assert!(insert_trigger_sql.contains("docs_insert_trigger"));
         assert!(insert_trigger_sql.contains("RAISE(ABORT"));
 
-        let update_trigger_sql = generate_update_trigger_sql(table, &schema, &options);
+        let update_trigger_sql = generate_update_trigger_sql(table, &schema, &options)?;
         assert!(update_trigger_sql.contains("docs_update_trigger"));
         assert!(update_trigger_sql.contains("owner_id = NEW.owner_id"));
         assert!(
@@ -2587,8 +2754,10 @@ mod tests {
             "the SET clause must assign NEW.col directly, not COALESCE(NEW.col, OLD.col)"
         );
 
-        let delete_trigger_sql = generate_delete_trigger_sql(table, &schema, &options);
+        let delete_trigger_sql = generate_delete_trigger_sql(table, &schema, &options)?;
         assert!(delete_trigger_sql.contains("docs_delete_trigger"));
+
+        Ok(())
     }
 
     #[test]

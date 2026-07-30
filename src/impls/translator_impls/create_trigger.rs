@@ -11,6 +11,7 @@ use alloc::{
 };
 
 use sql_traits::{
+    errors::LookupError,
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, TableLike, TriggerLike},
 };
@@ -40,9 +41,9 @@ fn generate_maintenance_trigger_body(
     target_table_name: &ObjectName,
     row_context: &str,
     schema: &ParserDB,
-) -> sqlparser::ast::BeginEndStatements {
+) -> Result<sqlparser::ast::BeginEndStatements, LookupError> {
     let assignments = trigger
-        .maintenance_assignments(schema)
+        .maintenance_assignments(schema)?
         .map(|(col, expr)| {
             Assignment {
                 target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
@@ -92,7 +93,7 @@ fn generate_maintenance_trigger_body(
         optimizer_hints: Vec::new(),
     });
 
-    sqlparser::ast::BeginEndStatements {
+    Ok(sqlparser::ast::BeginEndStatements {
         begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
             value: "BEGIN".into(),
             quote_style: None,
@@ -104,7 +105,7 @@ fn generate_maintenance_trigger_body(
             quote_style: None,
             keyword: Keyword::END,
         }))),
-    }
+    })
 }
 
 fn generate_standard_trigger_body(
@@ -129,38 +130,38 @@ fn collect_non_maintenance_update_columns(
     trigger: &CreateTrigger,
     schema: &ParserDB,
     maintenance_columns: &BTreeSet<String>,
-) -> Vec<Ident> {
+) -> Result<Vec<Ident>, LookupError> {
     let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &trigger.table_name) else {
-        return vec![];
+        return Ok(vec![]);
     };
 
-    table
-        .columns(schema)
+    Ok(table
+        .columns(schema)?
         .filter_map(|column| {
             let name = column.column_name();
             (!maintenance_columns.contains(&name.to_lowercase())).then(|| Ident::new(name))
         })
-        .collect()
+        .collect())
 }
 
 fn rewrite_maintenance_update_events(
     trigger: &CreateTrigger,
     events: Vec<TriggerEvent>,
     schema: &ParserDB,
-) -> Vec<TriggerEvent> {
+) -> Result<Vec<TriggerEvent>, LookupError> {
     let maintenance_columns = trigger
-        .maintenance_assignments(schema)
+        .maintenance_assignments(schema)?
         .map(|(column, _)| column.column_name().to_lowercase())
         .collect::<BTreeSet<_>>();
 
     if maintenance_columns.is_empty() {
-        return events;
+        return Ok(events);
     }
 
     let non_maintenance_columns =
-        collect_non_maintenance_update_columns(trigger, schema, &maintenance_columns);
+        collect_non_maintenance_update_columns(trigger, schema, &maintenance_columns)?;
 
-    events
+    Ok(events
         .into_iter()
         .map(|event| {
             match event {
@@ -189,7 +190,7 @@ fn rewrite_maintenance_update_events(
                 other => other,
             }
         })
-        .collect()
+        .collect())
 }
 
 fn maintenance_trigger_has_insert_event(events: &[TriggerEvent]) -> bool {
@@ -200,9 +201,9 @@ fn split_before_insert_maintenance_trigger(
     create_trigger: &CreateTrigger,
     schema: &ParserDB,
 ) -> Option<(CreateTrigger, CreateTrigger)> {
-    if !create_trigger.is_maintenance_trigger(schema) {
+    let Ok(true) = create_trigger.is_maintenance_trigger(schema) else {
         return None;
-    }
+    };
 
     if !matches!(create_trigger.period, Some(TriggerPeriod::Before)) {
         return None;
@@ -312,9 +313,9 @@ impl Translator for CreateTrigger {
 
         let mut period = period;
         let is_maintenance_trigger =
-            can_use_trigger_traits && trigger_for_helpers.is_maintenance_trigger(schema);
+            can_use_trigger_traits && trigger_for_helpers.is_maintenance_trigger(schema)?;
         let events = if is_maintenance_trigger {
-            rewrite_maintenance_update_events(&trigger_for_helpers, events, schema)
+            rewrite_maintenance_update_events(&trigger_for_helpers, events, schema)?
         } else {
             events
         };
@@ -353,7 +354,7 @@ impl Translator for CreateTrigger {
                 &redirected_table_name,
                 row_context,
                 schema,
-            )
+            )?
         } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
             body
         } else {
