@@ -71,3 +71,49 @@ fn pk_with_deferrable_characteristics_errors() {
     // Should error because constraint characteristics are unsupported
     assert!(result.is_err(), "PK with DEFERRABLE should error: {result:?}");
 }
+
+/// Translates and returns the error message, or the emitted SQL when the
+/// translation unexpectedly succeeds.
+fn reject(sql: &str) -> String {
+    match translate_sql(sql, &default_options()) {
+        Err(error) => error,
+        Ok(emitted) => panic!("expected a rejection, got: {emitted}"),
+    }
+}
+
+/// PostgreSQL's exclusion constraint has no SQLite form, and used to be copied
+/// into the CREATE TABLE body verbatim, where SQLite answers `near "USING":
+/// syntax error`.
+#[test]
+fn exclude_constraint_is_rejected() {
+    let error = reject(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, room INTEGER, EXCLUDE USING btree (room WITH =));",
+    );
+    assert!(
+        error.to_uppercase().contains("EXCLUDE"),
+        "expected the error to name the constraint, got {error}"
+    );
+}
+
+/// Guards the fix from refusing the constraints that do translate.
+#[test]
+fn the_translatable_constraints_still_translate() {
+    let sql = translate_sql(
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY);
+         CREATE TABLE t (
+            id INTEGER,
+            parent_id INTEGER,
+            s TEXT,
+            PRIMARY KEY (id),
+            UNIQUE (s),
+            FOREIGN KEY (parent_id) REFERENCES parent (id),
+            CHECK (id > 0)
+         );",
+        &default_options(),
+    )
+    .expect("every translatable constraint must survive");
+    let lower = sql.to_lowercase();
+    for expected in ["primary key", "unique", "foreign key", "check"] {
+        assert!(lower.contains(expected), "{expected} must survive: {sql}");
+    }
+}

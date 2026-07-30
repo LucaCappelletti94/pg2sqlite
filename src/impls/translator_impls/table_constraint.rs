@@ -91,7 +91,39 @@ impl Translator for TableConstraint {
                     .transpose()?;
                 Ok(Some(Self::Unique(updated_unique)))
             }
-            other => Ok(Some(other.clone())),
+            // Outcome 2 of the reporting policy in `statement.rs`. The
+            // passthrough that used to stand here emitted every one of these
+            // verbatim, and none has a SQLite form, so each produced SQL that
+            // could not run. There is no wildcard arm on purpose: a new
+            // `sqlparser` variant fails to compile until it is classified.
+            Self::Exclude(exclude) => {
+                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "{exclude} cannot be translated. An exclusion constraint enforces that no two \
+                     rows satisfy a comparison, which SQLite has no constraint for. Express it \
+                     with a trigger that raises, or with a unique index where the comparison is \
+                     equality."
+                )))
+            }
+            Self::Index(index) => {
+                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "{index} cannot be translated. SQLite declares an index with a CREATE INDEX \
+                     statement of its own rather than inside the table body."
+                )))
+            }
+            Self::FulltextOrSpatial(constraint) => {
+                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "{constraint} cannot be translated. SQLite offers full-text search through the \
+                     FTS5 virtual table rather than a key on an ordinary table."
+                )))
+            }
+            Self::PrimaryKeyUsingIndex(constraint) | Self::UniqueUsingIndex(constraint) => {
+                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "USING INDEX {} cannot be translated. It adopts an existing index as the \
+                     constraint, and SQLite has no way to promote an index that way. Declare the \
+                     constraint on the table instead.",
+                    constraint.index_name
+                )))
+            }
         }
     }
 }
