@@ -14,14 +14,14 @@ use alloc::{
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{ColumnLike, TableLike},
+    traits::{ColumnLike, IndexLike, TableLike, UniqueIndexLike},
 };
 use sqlparser::ast::{Insert, SetExpr, TableObject};
 
 use super::helpers::Forward;
 use crate::{
     impls::{
-        object_name::{last_ident, table_with_implicit_public_lookup},
+        object_name::{last_ident, last_ident_value_or_display, table_with_implicit_public_lookup},
         shared_helpers::{translate_on_conflict_do_update, translate_returning},
         translator_impls::{
             rls,
@@ -87,11 +87,19 @@ impl Translator for Insert {
                             insert.on = None;
                         }
                         sqlparser::ast::OnConflictAction::DoUpdate(do_update) => {
+                            // The conflict target has to name columns before it
+                            // reaches the shared translator, which copies it
+                            // through.
+                            let resolved = sqlparser::ast::OnConflict {
+                                conflict_target: resolve_conflict_target(
+                                    on_conflict.conflict_target.as_ref(),
+                                    &insert.table,
+                                    schema,
+                                )?,
+                                action: on_conflict.action.clone(),
+                            };
                             insert.on = Some(translate_on_conflict_do_update::<Forward>(
-                                on_conflict,
-                                do_update,
-                                schema,
-                                options,
+                                &resolved, do_update, schema, options,
                             )?);
                         }
                     }
@@ -105,6 +113,91 @@ impl Translator for Insert {
         }
         Ok(insert)
     }
+}
+
+/// Resolves `ON CONFLICT ON CONSTRAINT <name>` to the column list SQLite needs.
+///
+/// SQLite's conflict target is a column list, so the named form has to be
+/// looked up rather than passed through, which emitted `near "ON": syntax
+/// error`. Dropping the target is not an alternative: it changes which
+/// conflicts the statement catches, and `DO UPDATE` with no target does not
+/// parse in SQLite either.
+///
+/// A constraint that cannot be resolved is an error, because guessing a
+/// different target would silently upsert on the wrong conflict.
+fn resolve_conflict_target(
+    conflict_target: Option<&sqlparser::ast::ConflictTarget>,
+    table: &TableObject,
+    schema: &ParserDB,
+) -> Result<Option<sqlparser::ast::ConflictTarget>, crate::errors::Error> {
+    let Some(sqlparser::ast::ConflictTarget::OnConstraint(constraint)) = conflict_target else {
+        return Ok(conflict_target.cloned());
+    };
+
+    let wanted = last_ident_value_or_display(constraint);
+    let TableObject::TableName(table_name) = table else {
+        return Err(unresolvable_constraint(&wanted, &table.to_string()));
+    };
+    let Some(resolved_table) = table_with_implicit_public_lookup(schema, table_name)? else {
+        return Err(unresolvable_constraint(&wanted, &table_name.to_string()));
+    };
+
+    for unique_index in resolved_table.unique_indices(schema)? {
+        let columns: Vec<String> =
+            unique_index.columns(schema)?.map(|column| column.column_name().to_owned()).collect();
+        if columns.is_empty() {
+            continue;
+        }
+
+        let declared = declared_constraint_name(unique_index.attribute());
+        let generated = postgres_constraint_name(
+            resolved_table.table_name(),
+            &columns,
+            unique_index.is_primary_key(schema)?,
+        );
+
+        if declared.is_some_and(|name| name.eq_ignore_ascii_case(&wanted))
+            || generated.eq_ignore_ascii_case(&wanted)
+        {
+            return Ok(Some(sqlparser::ast::ConflictTarget::Columns(
+                columns.into_iter().map(sqlparser::ast::Ident::new).collect(),
+            )));
+        }
+    }
+
+    Err(unresolvable_constraint(&wanted, &table_name.to_string()))
+}
+
+/// The name a unique constraint was declared with, or `None` when it was
+/// anonymous.
+///
+/// Read off the constraint rather than through `IndexLike::name()`, which
+/// looks like the accessor for this and always returns `None` for a unique
+/// constraint: the declared name is an `Ident` while that accessor returns an
+/// `ObjectName`, so `sql-traits` documents the omission rather than lying about
+/// the shape. PostgreSQL spells the name `CONSTRAINT uq UNIQUE (..)` and MySQL
+/// spells it `UNIQUE KEY uq (..)`, which `sqlparser` keeps in separate fields.
+fn declared_constraint_name(constraint: &sqlparser::ast::UniqueConstraint) -> Option<&str> {
+    constraint.name.as_ref().or(constraint.index_name.as_ref()).map(|name| name.value.as_str())
+}
+
+/// The name PostgreSQL gives an unnamed constraint, verified against
+/// PostgreSQL 16 by reading `pg_constraint`: `<table>_pkey` for a primary key,
+/// and `<table>_<column>_key` for a unique constraint with every column joined
+/// by an underscore.
+fn postgres_constraint_name(table: &str, columns: &[String], is_primary_key: bool) -> String {
+    if is_primary_key {
+        return format!("{table}_pkey");
+    }
+    format!("{table}_{}_key", columns.join("_"))
+}
+
+fn unresolvable_constraint(constraint: &str, table: &str) -> crate::errors::Error {
+    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "ON CONFLICT ON CONSTRAINT {constraint} cannot be translated because {table} declares no \
+         unique constraint of that name, and SQLite's conflict target is a column list. Name the \
+         conflicting columns instead, as ON CONFLICT (col, ...)."
+    ))
 }
 
 /// Rewrite each text-literal value at a vector-column position in a
