@@ -19,7 +19,7 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         AlterTable, AlterTableOperation, BinaryOperator, CascadeOption, ColumnDef, ColumnOption,
-        CopySource, CopyTarget, Delete, Expr, FromTable, ObjectType, Statement, TableFactor,
+        CopySource, CopyTarget, Delete, Expr, FromTable, Merge, ObjectType, Statement, TableFactor,
         TableWithJoins, Truncate, TruncateIdentityOption, UnaryOperator,
         helpers::attached_token::AttachedToken,
     },
@@ -167,7 +167,6 @@ macro_rules! unsupported_statement_patterns {
         | Statement::DropOperatorFamily { .. }
         | Statement::Comment { .. }
         | Statement::CopyIntoSnowflake { .. }
-        | Statement::Merge(_)
         | Statement::LockTables { .. }
         | Statement::UnlockTables
         | Statement::Flush { .. }
@@ -695,6 +694,34 @@ fn reject_copy(source: &CopySource, to: bool, target: &CopyTarget) -> Error {
     Error::UnsupportedSQLiteFeature(format!("{subject} cannot be translated. {advice}"))
 }
 
+/// Rejects `MERGE`, which has no SQLite form.
+///
+/// `INSERT ... ON CONFLICT DO UPDATE` resembles a translation without being
+/// one. A `MERGE` `ON` clause is an ordinary join predicate, whereas an
+/// upsert's conflict target must name a PRIMARY KEY or UNIQUE constraint, so
+/// the common case of merging on a non-unique column has no upsert form at all.
+/// Even when the columns are unique the two disagree on repeated matches: given
+/// two source rows for one target row, PostgreSQL raises "MERGE command cannot
+/// affect row a second time" and changes nothing, while an upsert applies both
+/// and keeps the last, so a translation would silently produce data PostgreSQL
+/// refuses. `WHEN NOT MATCHED BY SOURCE THEN DELETE` has no insert-shaped
+/// equivalent whatsoever.
+///
+/// Recognising the narrow translatable subset would need the target's index
+/// set, which the translation schema filters out, so the check is not even
+/// possible today.
+fn reject_merge(merge: &Merge) -> Error {
+    Error::UnsupportedSQLiteFeature(format!(
+        "MERGE INTO {} cannot be translated. SQLite has no MERGE statement, and \
+         INSERT ... ON CONFLICT DO UPDATE is not equivalent: its conflict target must be a \
+         PRIMARY KEY or UNIQUE constraint rather than an arbitrary join condition, and it applies \
+         repeated matches in sequence where PostgreSQL refuses them. Write the INSERT, UPDATE, and \
+         DELETE statements you mean, using INSERT ... ON CONFLICT DO UPDATE when the merge key is \
+         genuinely unique.",
+        merge.table
+    ))
+}
+
 impl Translator for Statement {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -946,6 +973,7 @@ impl Translator for Statement {
             Statement::Copy { source, to, target, .. } => {
                 return Err(reject_copy(source, *to, target));
             }
+            Statement::Merge(merge) => return Err(reject_merge(merge)),
             unsupported_statement_patterns!() => Vec::new(),
         };
 
