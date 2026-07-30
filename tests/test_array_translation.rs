@@ -6,8 +6,11 @@
 //! statements under test are generated text whose shape is the thing being
 //! verified.
 
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
+
 use pg2sqlite::prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
-use rusqlite::Connection;
+use run_translated_helper::run_translated_with;
 
 /// Options with JSON-backed arrays enabled.
 fn json_arrays() -> Pg2SqliteOptions {
@@ -42,38 +45,10 @@ fn reject_default(pg: &str) -> String {
         .to_string()
 }
 
-/// Translate a whole PostgreSQL script under JSON arrays, run every statement
-/// but the last against a fresh in-memory SQLite, then return the first column
-/// of the last one.
-///
-/// Executing the translator's own output, rather than a hand-written
-/// equivalent, is what makes these assertions proof: a drift between the shape
-/// the translator emits and the shape that runs would fail here.
+/// Translate a whole PostgreSQL script under JSON arrays and return the first
+/// column of its last statement, having applied the rest.
 fn run_translated(pg: &str) -> Vec<Option<String>> {
-    let mut statements =
-        translate_all(pg, &json_arrays()).expect("translation should succeed under JSON arrays");
-    let probe = statements.pop().expect("script should emit at least one statement");
-
-    let conn = Connection::open_in_memory().expect("in-memory SQLite");
-    for statement in &statements {
-        conn.execute_batch(&format!("{statement};"))
-            .unwrap_or_else(|e| panic!("emitted setup failed: {e}\n{statement}"));
-    }
-
-    let mut stmt =
-        conn.prepare(&probe).unwrap_or_else(|e| panic!("emitted probe failed: {e}\n{probe}"));
-    stmt.query_map([], |row| {
-        Ok(match row.get_ref(0)? {
-            rusqlite::types::ValueRef::Null => None,
-            rusqlite::types::ValueRef::Integer(i) => Some(i.to_string()),
-            rusqlite::types::ValueRef::Real(f) => Some(f.to_string()),
-            rusqlite::types::ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
-            rusqlite::types::ValueRef::Blob(b) => Some(format!("{b:?}")),
-        })
-    })
-    .unwrap_or_else(|e| panic!("emitted probe failed to run: {e}\n{probe}"))
-    .collect::<Result<Vec<_>, _>>()
-    .expect("probe rows should decode")
+    run_translated_with(pg, &json_arrays())
 }
 
 /// A table with an array column plus the seed rows every function test shares.

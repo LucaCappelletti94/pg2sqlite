@@ -18,26 +18,22 @@
 //! | `jsonb_insert(t, p, v)` | `json_insert` |
 //! | `jsonb_insert(t, p, v, true)` | no equivalent, since SQLite cannot insert after an array element |
 
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
+
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use rusqlite::Connection;
+use run_translated_helper::run_translated_with;
 
 fn translate(pg: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
     Pg2Sqlite::default().sql(pg)?.translate_to_sql(&Pg2SqliteOptions::default())
 }
 
-/// Runs every emitted statement but the last, then returns the last one's first
-/// column. Executing the translator's own output is what makes these proofs.
+/// The document the last statement returns.
 fn run_translated(pg: &str) -> String {
-    let mut statements = translate(pg).expect("translate");
-    let probe = statements.pop().expect("at least one statement");
-
-    let conn = Connection::open_in_memory().expect("in-memory SQLite");
-    for statement in &statements {
-        conn.execute_batch(&format!("{statement};"))
-            .unwrap_or_else(|e| panic!("emitted setup failed: {e}\n{statement}"));
-    }
-    conn.query_row(&probe, [], |row| row.get::<_, String>(0))
-        .unwrap_or_else(|e| panic!("emitted probe failed: {e}\n{probe}"))
+    run_translated_with(pg, &Pg2SqliteOptions::default())
+        .pop()
+        .expect("the probe should return a row")
+        .expect("the probe should return a document")
 }
 
 fn translate_err(pg: &str) -> String {
