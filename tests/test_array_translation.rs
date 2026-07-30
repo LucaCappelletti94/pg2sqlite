@@ -473,3 +473,52 @@ fn array_schema_and_query_round_trip_through_sqlite() {
     );
     assert_eq!(rows, vec![Some("2".to_string())]);
 }
+
+/// `&&` is true when the two arrays share at least one element.
+#[test]
+fn overlap_matches_rows_sharing_an_element() {
+    let rows = run_translated(&format!("{TAGS_FIXTURE}SELECT id FROM t WHERE tags && ARRAY['a'];"));
+    assert_eq!(rows, vec![Some("1".to_string())]);
+}
+
+/// Disjoint arrays do not overlap, and the empty array in row 2 does not
+/// either, which is the boundary worth pinning: an EXISTS over an empty
+/// `json_each` must be false rather than vacuously true.
+#[test]
+fn overlap_excludes_disjoint_and_empty_arrays() {
+    let rows = run_translated(&format!("{TAGS_FIXTURE}SELECT id FROM t WHERE tags && ARRAY['z'];"));
+    assert!(rows.is_empty(), "nothing overlaps with a disjoint array, got {rows:?}");
+
+    let empty = run_translated("SELECT ARRAY[1, 2] && ARRAY[]::INT[];");
+    assert_eq!(empty, vec![Some("0".to_string())]);
+}
+
+/// Both operands can be columns, which is the shape the review reproduced.
+#[test]
+fn overlap_between_two_array_columns() {
+    let rows = run_translated(
+        "CREATE TABLE t (id INT PRIMARY KEY, a INT[], b INT[]);
+         INSERT INTO t (id, a, b) VALUES (1, ARRAY[1, 2], ARRAY[2, 3]);
+         INSERT INTO t (id, a, b) VALUES (2, ARRAY[1, 2], ARRAY[8, 9]);
+         SELECT id FROM t WHERE a && b;",
+    );
+    assert_eq!(rows, vec![Some("1".to_string())]);
+}
+
+/// Overlap over an array needs the representation opt-in like every other
+/// array operation.
+#[test]
+fn overlap_needs_a_representation() {
+    let err = reject_default("SELECT ARRAY[1, 2] && ARRAY[2, 3];");
+    assert!(err.contains("with_array_representation"), "error should name the opt-in: {err}");
+}
+
+/// Pins the known divergence: PostgreSQL yields NULL when either operand is
+/// NULL, and this yields false. Both exclude the row from a `WHERE` clause,
+/// which is the only place the difference is observable, the same trade the
+/// module header already records for `x <op> ALL(arr)`.
+#[test]
+fn overlap_with_a_null_operand_is_false_rather_than_null() {
+    let rows = run_translated("SELECT NULL::INT[] && ARRAY[1];");
+    assert_eq!(rows, vec![Some("0".to_string())]);
+}

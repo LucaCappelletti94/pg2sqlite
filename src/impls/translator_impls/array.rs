@@ -20,9 +20,10 @@
 //! * `unnest` translates only over a self-contained array. PostgreSQL reads
 //!   `FROM t, unnest(t.col)` as an implicit LATERAL, which SQLite has no
 //!   equivalent for.
-//! * `x <op> ALL(arr)` yields false where PostgreSQL yields NULL for an array
-//!   containing NULL. Both exclude the row from a `WHERE` clause, which is the
-//!   only place the difference is observable.
+//! * `x <op> ALL(arr)` and `a && b` yield false where PostgreSQL yields NULL
+//!   for a NULL operand, or for an array containing NULL in the `ALL` case.
+//!   Both exclude the row from a `WHERE` clause, which is the only place the
+//!   difference is observable.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -120,6 +121,38 @@ fn scalar_subquery_over_json_each(projection: Expr, array: Expr, selection: Opti
         from_relation(json_each_factor(array)),
         selection,
     )))
+}
+
+/// `a && b`, PostgreSQL's array overlap, as
+/// `EXISTS (SELECT 1 FROM json_each(a) WHERE value IN (SELECT value FROM
+/// json_each(b)))`.
+///
+/// The inner `value` resolves to the inner `json_each` and the outer one to the
+/// outer, so the two sides really are compared, verified by executing a
+/// disjoint pair and getting false. An empty array yields no rows, so `EXISTS`
+/// is false, which matches PostgreSQL.
+///
+/// Like `x <op> ALL(arr)` in this module, a NULL operand yields false where
+/// PostgreSQL yields NULL. See the divergence list in the module header.
+pub(crate) fn array_overlap(left: Expr, right: Expr) -> Expr {
+    let shares_an_element = Expr::InSubquery {
+        expr: Box::new(json_each_column(VALUE_COLUMN)),
+        subquery: Box::new(single_expr_query(
+            json_each_column(VALUE_COLUMN),
+            from_relation(json_each_factor(right)),
+            None,
+        )),
+        negated: false,
+    };
+
+    Expr::Exists {
+        subquery: Box::new(single_expr_query(
+            integer_literal(1),
+            from_relation(json_each_factor(left)),
+            Some(shares_an_element),
+        )),
+        negated: false,
+    }
 }
 
 /// Attach `ORDER BY key` to an aggregate call so the rebuilt array preserves

@@ -37,7 +37,8 @@ use crate::{
         timezone::normalize_timezone_modifier_for_sqlite,
         translator_impls::{
             array::{
-                Quantifier, translate_array_literal, translate_array_subscript,
+                Quantifier, array_overlap, is_json_array_representation, representation_required,
+                translate_array_literal, translate_array_subscript,
                 translate_quantified_over_array,
             },
             helpers::Forward,
@@ -1155,6 +1156,19 @@ fn translate_binary_op(
             op: BinaryOperator::Minus,
             right: Box::new(and_expr),
         });
+    }
+
+    // Array overlap. Rewritten over `json_each` rather than passed through,
+    // which emitted `json_array(1, 2) && json_array(2, 3)` and failed at the
+    // `&`. Gated on the array representation like every other array operation.
+    if *op == BinaryOperator::PGOverlap {
+        if !is_json_array_representation(options) {
+            return Err(representation_required("The && (array overlap) operator"));
+        }
+        return Ok(array_overlap(
+            left.translate(schema, options)?,
+            right.translate(schema, options)?,
+        ));
     }
 
     // POSIX regex operators: SQLite's REGEXP needs an application-supplied function
