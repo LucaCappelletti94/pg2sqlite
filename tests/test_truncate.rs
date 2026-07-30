@@ -47,19 +47,39 @@ mod schema {
             body -> Text,
         }
     }
+    diesel::table! {
+        /// Backing table behind the RLS view, which is what a translated
+        /// `TRUNCATE` must empty.
+        docs_rls (id) {
+            id -> Integer,
+            owner_id -> Integer,
+        }
+    }
 }
 
-use schema::{docs, notes};
+use schema::{docs, docs_rls, notes};
 
 const BASE: &str = "
     CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
     CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
 ";
 
-/// Translates `pg` and applies every emitted statement to a fresh database. The
-/// emitted SQL is the artifact under test, so it is applied as generated text.
+/// Translates `pg` with default options and applies every emitted statement.
 fn apply(pg: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let statements = Pg2Sqlite::default().sql(pg)?.translate(&Pg2SqliteOptions::default())?;
+    apply_with(pg, &Pg2SqliteOptions::default())
+}
+
+/// Translates `pg` and applies every emitted statement to a fresh database.
+///
+/// The generated SQL is itself the artifact under test, so it is applied as
+/// text rather than through the query DSL. That is the documented exception: no
+/// typed query can stand in for "execute exactly what the translator emitted".
+/// Every assertion about the resulting data uses the DSL.
+fn apply_with(
+    pg: &str,
+    options: &Pg2SqliteOptions,
+) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
+    let statements = Pg2Sqlite::default().sql(pg)?.translate(options)?;
     let mut conn = SqliteConnection::establish(":memory:")?;
     for statement in &statements {
         sql_query(statement.to_string()).execute(&mut conn)?;
@@ -211,32 +231,44 @@ fn truncate_continue_identity_warns() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// A `TRUNCATE` against an RLS table must be refused rather than quietly
-/// becoming a partial delete.
+/// A `TRUNCATE` against an RLS table empties the backing table, ignoring the
+/// policies exactly as PostgreSQL does.
 ///
-/// This is the one case where translating `TRUNCATE` at all is unsafe. The
-/// emitted `DELETE FROM docs` names the RLS view, and the view's
-/// `INSTEAD OF DELETE` trigger carries the policy predicate, so the statement
-/// would remove only the rows the policy admits and report success. PostgreSQL
-/// ignores policies for `TRUNCATE` and empties the table, so the translated
-/// database would silently disagree about which rows survive.
+/// The discriminating detail is the seed: `owner_id` 1 and 2, with a policy
+/// admitting only 1. Routing the delete through the RLS view would fire its
+/// `INSTEAD OF DELETE` trigger, which carries the policy predicate, and remove
+/// only the first row while reporting success. Asserting zero rows rather than
+/// one is what proves the statement reached the backing table.
+///
+/// This bypasses the RLS wrapper, which is correct for `TRUNCATE` specifically:
+/// PostgreSQL's policies do not apply to it. It is also unobserved by the
+/// validation monitor, which only generates INSERT and UPDATE triggers.
 #[test]
-fn truncate_of_an_rls_table_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+fn truncate_of_an_rls_table_empties_the_backing_table() -> Result<(), Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let sql = "
+    let ddl = "
         CREATE TABLE docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
         CREATE POLICY p ON docs FOR ALL USING (owner_id = 1);
-        TRUNCATE docs;
     ";
+    let mut conn = apply_with(ddl, &options)?;
 
-    let Err(error) = Pg2Sqlite::default().sql(sql)?.translate(&options) else {
-        panic!("TRUNCATE of an RLS table must not become a policy-filtered partial delete");
-    };
-    let error = error.to_string();
-    assert!(
-        error.contains("row level security"),
-        "the error must explain the RLS conflict, got: {error}"
+    diesel::insert_into(docs_rls::table)
+        .values(vec![
+            (docs_rls::id.eq(1), docs_rls::owner_id.eq(1)),
+            (docs_rls::id.eq(2), docs_rls::owner_id.eq(2)),
+        ])
+        .execute(&mut conn)?;
+
+    let statements =
+        Pg2Sqlite::default().sql(&format!("{ddl} TRUNCATE docs;"))?.translate(&options)?;
+    let truncation = statements.last().expect("a statement must be emitted for TRUNCATE");
+    sql_query(truncation.to_string()).execute(&mut conn)?;
+
+    assert_eq!(
+        docs_rls::table.count().get_result::<i64>(&mut conn)?,
+        0,
+        "TRUNCATE must empty the backing table, not filter through the policy"
     );
 
     Ok(())

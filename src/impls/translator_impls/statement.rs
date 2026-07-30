@@ -31,9 +31,9 @@ use crate::{
     impls::{
         generated_sql::parse_generated_sql,
         object_name::{
-            last_ident, normalize_schema_qualified_object_name_for_sqlite, quote_identifier,
-            sql_string_literal, sqlite_unqualified_object_name, table_has_implicit_public_rls,
-            table_with_implicit_public_lookup,
+            append_suffix, last_ident, normalize_schema_qualified_object_name_for_sqlite,
+            quote_identifier, sql_string_literal, sqlite_unqualified_object_name,
+            table_has_implicit_public_rls, table_with_implicit_public_lookup,
         },
         placeholder::rewrite_placeholders_for_sqlite,
         translator_impls::{
@@ -552,7 +552,19 @@ fn translate_truncate(
 
     let mut statements = Vec::with_capacity(truncate.table_names.len());
     for target in &truncate.table_names {
-        reject_truncate_of_rls_table(target, schema)?;
+        // PostgreSQL does not apply policies to TRUNCATE: it needs the TRUNCATE
+        // privilege and then empties the table. An RLS table is translated as a
+        // view over a suffixed backing table, and the view's INSTEAD OF DELETE
+        // trigger carries the policy predicate, so deleting through it would empty
+        // only the admitted rows. Naming the backing table directly reproduces
+        // PostgreSQL. Nothing observes it: only INSERT and UPDATE monitoring
+        // triggers are generated, so a delete raises no validation event.
+        let rls_backed = table_has_implicit_public_rls(schema, &target.name)?;
+        let name = if rls_backed {
+            append_suffix(&target.name, options.get_rls_table_suffix())
+        } else {
+            target.name.clone()
+        };
 
         // ONLY and the trailing asterisk both concern table inheritance, which
         // CREATE TABLE ... INHERITS rejects outright, so no descendants can exist
@@ -561,7 +573,7 @@ fn translate_truncate(
             tables: Vec::new(),
             from: FromTable::WithFromKeyword(vec![TableWithJoins {
                 relation: TableFactor::Table {
-                    name: target.name.clone(),
+                    name,
                     alias: None,
                     args: None,
                     with_hints: vec![],
@@ -584,41 +596,19 @@ fn translate_truncate(
             optimizer_hints: Vec::new(),
         };
 
-        statements.push(delete.translate(schema, options)?);
+        if rls_backed {
+            // The backing name is deliberate and already final. Routing it through
+            // the DELETE translator would resolve it against the logical schema,
+            // which does not know the suffixed table, and could reapply the RLS
+            // rewrite this branch exists to avoid. A TRUNCATE carries no predicate,
+            // so there is nothing else for that pass to translate.
+            statements.push(Statement::Delete(delete));
+        } else {
+            statements.push(delete.translate(schema, options)?);
+        }
     }
 
     Ok(statements)
-}
-
-/// Rejects `TRUNCATE` against a table whose rows are guarded by row level
-/// security.
-///
-/// PostgreSQL's policies do not apply to `TRUNCATE`, which needs the TRUNCATE
-/// privilege and then removes every row. An RLS table is translated as a view
-/// over a renamed backing table, and the view's `INSTEAD OF DELETE` trigger
-/// carries the policy predicate, so deleting through it would remove only the
-/// rows the policy admits and silently leave the rest. Emptying the backing
-/// table instead would match PostgreSQL but bypass the wrapper the caller asked
-/// for, and it is the wrapper that the validation monitor watches.
-///
-/// Neither reading is safe to pick silently, so the statement is refused with
-/// both spelled out.
-fn reject_truncate_of_rls_table(
-    target: &sqlparser::ast::TruncateTableTarget,
-    schema: &ParserDB,
-) -> Result<(), Error> {
-    if !table_has_implicit_public_rls(schema, &target.name)? {
-        return Ok(());
-    }
-
-    Err(Error::UnsupportedSQLiteFeature(format!(
-        "TRUNCATE {} cannot be translated because the table has row level security enabled. \
-         PostgreSQL ignores policies for TRUNCATE and removes every row, but the translated table \
-         is a view whose DELETE trigger applies the policy, so a translated TRUNCATE would delete \
-         only the rows the policy admits and silently leave the rest. Write the DELETE you mean: \
-         against the view to respect the policy, or against the backing table to empty it.",
-        target.name
-    )))
 }
 
 /// Rejects the `TRUNCATE` options with no SQLite form, per the reporting policy
