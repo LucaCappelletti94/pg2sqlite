@@ -15,7 +15,8 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, Value, ValueWithSpan,
+    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
+    ValueWithSpan,
 };
 
 use super::{
@@ -81,6 +82,10 @@ enum FunctionTranslation {
     /// `json_replace`, or `json_insert` that matches, converting the `text[]`
     /// path to JSONPath and keeping the value typed as JSON.
     JsonSet { insert: bool },
+    /// Transform `to_json` and `to_jsonb` to `json_quote`, which CONVERTS a
+    /// value to JSON, keeping SQL NULL and leaving an argument that is already
+    /// JSON alone.
+    ToJson,
     /// Population variance: var_pop(x) becomes avg(x*x) - avg(x)*avg(x).
     VarPop,
     /// Population standard deviation: stddev_pop(x) becomes sqrt(var_pop(x)).
@@ -134,8 +139,8 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     ("quote_nullable", "quote"),
     ("quote_literal", "quote"),
     ("version", "sqlite_version"),
-    ("to_json", "json"),
-    ("to_jsonb", "json"),
+    // to_json and to_jsonb are NOT renames: `json()` reads its argument as JSON
+    // where they convert a value into JSON. See `FunctionTranslation::ToJson`.
     // jsonb_set and jsonb_insert are NOT renames: their path and value
     // arguments need translating too. See `FunctionTranslation::JsonSet`.
     ("jsonb_each", "json_each"),
@@ -327,6 +332,8 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // to_json / to_jsonb: a conversion, not a reinterpretation.
+        "to_json" | "to_jsonb" => FunctionTranslation::ToJson,
         // jsonb_set / jsonb_insert: path and value both need converting.
         "jsonb_set" => FunctionTranslation::JsonSet { insert: false },
         "jsonb_insert" => FunctionTranslation::JsonSet { insert: true },
@@ -683,6 +690,40 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
         }
     }
     Ok(result)
+}
+
+/// True when `expr` already carries JSON, so `to_json` has nothing to convert.
+///
+/// Recognised syntactically, which covers what this translator itself emits and
+/// what a migration writes inline: an array literal, which becomes JSON text
+/// under the JSON array representation, and a call to a function that returns
+/// JSON.
+///
+/// It cannot see through a bare column reference, so an array or `json` COLUMN
+/// takes the `json_quote` path and is quoted into a string, which is wrong and
+/// needs the column's declared type to fix. Tracked as R89.
+fn is_already_json(expr: &Expr) -> bool {
+    const JSON_VALUED: [&str; 8] = [
+        "json",
+        "jsonb",
+        "json_array",
+        "json_object",
+        "json_group_array",
+        "json_group_object",
+        "json_quote",
+        "to_json",
+    ];
+
+    match expr {
+        Expr::Array(_) => true,
+        Expr::Function(func) => {
+            func.name.0.last().and_then(ObjectNamePart::as_ident).is_some_and(|name| {
+                JSON_VALUED.iter().any(|json| name.value.eq_ignore_ascii_case(json))
+            })
+        }
+        Expr::Nested(inner) => is_already_json(inner),
+        _ => false,
+    }
 }
 
 /// The SQLite function that matches PostgreSQL's fourth argument.
@@ -1588,6 +1629,30 @@ impl Translator for Function {
                         target.translate(schema, options)?,
                         string_literal(&json_path_from_text_array(path, label)?),
                         value,
+                    ],
+                    None,
+                ))
+            }
+            FunctionTranslation::ToJson => {
+                let exprs = extract_exactly(&func.args, 1, "to_json")?;
+                let argument = exprs[0];
+                let translated = argument.translate(schema, options)?;
+
+                // An argument that is already JSON needs reading, not
+                // converting: quoting it would turn the document into a string.
+                if is_already_json(argument) {
+                    return Ok(simple_function_expr("json", vec![translated], None));
+                }
+
+                // `json_quote` renders SQL NULL as the JSON text `null` where
+                // PostgreSQL yields SQL NULL, and it produces that bare `null`
+                // for no other input, so NULLIF restores it while evaluating
+                // the argument once.
+                Ok(simple_function_expr(
+                    "NULLIF",
+                    vec![
+                        simple_function_expr("json_quote", vec![translated], None),
+                        string_literal("null"),
                     ],
                     None,
                 ))

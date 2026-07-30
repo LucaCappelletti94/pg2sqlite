@@ -33,25 +33,30 @@ fn localtime_to_time_localtime() {
     );
 }
 
+/// Inverted from `to_json_renames_to_json`. The rename emitted `json('hello')`,
+/// which fails with `malformed JSON` because `json()` reads its argument as
+/// JSON rather than converting it. Behaviour is proven by execution in
+/// `tests/test_to_json.rs`, so this only pins the shape.
 #[test]
-fn to_json_renames_to_json() {
+fn to_json_converts_rather_than_reinterprets() {
     let sql = "SELECT to_json('hello')";
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(
-        lower.contains("json(") && !lower.contains("to_json"),
-        "to_json should rename to json: {result}"
+        lower.contains("json_quote(") && !lower.contains("to_json"),
+        "to_json should convert through json_quote: {result}"
     );
 }
 
+/// Inverted from `to_jsonb_renames_to_json`, for the same reason.
 #[test]
-fn to_jsonb_renames_to_json() {
+fn to_jsonb_converts_rather_than_reinterprets() {
     let sql = "SELECT to_jsonb('hello')";
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(
-        lower.contains("json(") && !lower.contains("to_jsonb"),
-        "to_jsonb should rename to json: {result}"
+        lower.contains("json_quote(") && !lower.contains("to_jsonb"),
+        "to_jsonb should convert through json_quote: {result}"
     );
 }
 
