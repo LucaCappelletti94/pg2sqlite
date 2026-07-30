@@ -12,7 +12,10 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::structs::ParserDB;
+use sql_traits::{
+    structs::ParserDB,
+    traits::{ColumnLike, DatabaseLike, TableLike},
+};
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value,
@@ -111,6 +114,10 @@ enum FunctionTranslation {
     /// An array function whose body is rewritten over `json_each` /
     /// `json_group_array`. See [`super::array`].
     Array(ArrayFunction),
+    /// `json_agg`/`jsonb_agg`, which nest a JSON element where
+    /// `json_group_array` would quote it, and answer NULL over no rows where it
+    /// answers an empty array.
+    JsonAgg,
     /// `greatest`/`least`, which ignore NULL arguments where SQLite's scalar
     /// `MAX`/`MIN` return NULL as soon as one argument is NULL.
     Extremum {
@@ -127,13 +134,13 @@ enum FunctionTranslation {
 const FORWARD_RENAMES: &[(&str, &str)] = &[
     // greatest and least are NOT renames: SQLite's scalar MAX and MIN return
     // NULL when any argument is NULL. See `FunctionTranslation::Extremum`.
+    // json_agg and jsonb_agg are NOT renames: a JSON column is TEXT in SQLite
+    // and would be quoted rather than nested. See `FunctionTranslation::JsonAgg`.
     ("string_agg", "group_concat"),
     ("strpos", "INSTR"),
     ("chr", "char"),
     ("char_length", "length"),
     ("character_length", "length"),
-    ("json_agg", "json_group_array"),
-    ("jsonb_agg", "json_group_array"),
     ("json_object_agg", "json_group_object"),
     ("jsonb_object_agg", "json_group_object"),
     ("json_build_array", "json_array"),
@@ -378,6 +385,8 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // json_agg / jsonb_agg: a JSON element needs parsing, not quoting.
+        "json_agg" | "jsonb_agg" => FunctionTranslation::JsonAgg,
         // greatest / least ignore NULLs, MAX / MIN do not.
         "greatest" => FunctionTranslation::Extremum { greatest: true },
         "least" => FunctionTranslation::Extremum { greatest: false },
@@ -752,7 +761,7 @@ fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::err
 /// takes the `json_quote` path and is quoted into a string, which is wrong and
 /// needs the column's declared type to fix. Tracked as R89.
 fn is_already_json(expr: &Expr) -> bool {
-    const JSON_VALUED: [&str; 8] = [
+    const JSON_VALUED: [&str; 10] = [
         "json",
         "jsonb",
         "json_array",
@@ -761,6 +770,8 @@ fn is_already_json(expr: &Expr) -> bool {
         "json_group_object",
         "json_quote",
         "to_json",
+        "json_agg",
+        "jsonb_agg",
     ];
 
     match expr {
@@ -773,6 +784,57 @@ fn is_already_json(expr: &Expr) -> bool {
         Expr::Nested(inner) => is_already_json(inner),
         _ => false,
     }
+}
+
+/// Swaps the first positional argument of an already translated argument list,
+/// leaving `ORDER BY`, `DISTINCT`, and the rest of the clauses in place.
+fn replace_first_argument(args: &mut FunctionArguments, replacement: Expr) {
+    if let FunctionArguments::List(list) = args
+        && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(first))) = list.args.first_mut()
+    {
+        *first = replacement;
+    }
+}
+
+/// True when `expr` carries a JSON document, either by its shape or by the
+/// declared type of the column it names.
+///
+/// A `json` or `jsonb` column becomes TEXT in SQLite and is otherwise
+/// indistinguishable from a string column, so the declared type is the only
+/// thing that separates a document from its own text. An unqualified name is
+/// accepted only when every column with that name in the schema agrees, since
+/// guessing between the two is wrong half the time in either direction.
+fn carries_json(expr: &Expr, schema: &ParserDB) -> bool {
+    if is_already_json(expr) {
+        return true;
+    }
+
+    let column_name = match expr {
+        Expr::Identifier(ident) => ident.value.as_str(),
+        // The qualifier may be a table or an alias, so only the column name is
+        // matched and the answer still has to be unanimous.
+        Expr::CompoundIdentifier(parts) => {
+            match parts.last() {
+                Some(ident) => ident.value.as_str(),
+                None => return false,
+            }
+        }
+        Expr::Nested(inner) => return carries_json(inner, schema),
+        _ => return false,
+    };
+
+    let mut declared = schema.tables().filter_map(|table| {
+        table
+            .columns(schema)
+            .ok()?
+            .find(|column| column.column_name().eq_ignore_ascii_case(column_name))
+    });
+    let Some(first) = declared.next() else { return false };
+    let is_json =
+        |data_type: &str| matches!(data_type.to_ascii_lowercase().as_str(), "json" | "jsonb");
+
+    let verdict = is_json(first.data_type(schema));
+    verdict && declared.all(|column| is_json(column.data_type(schema)))
 }
 
 /// The SQLite function that matches PostgreSQL's fourth argument.
@@ -1733,6 +1795,45 @@ impl Translator for Function {
                     greatest,
                     if greatest { "greatest" } else { "least" },
                 )
+            }
+            FunctionTranslation::JsonAgg => {
+                let exprs = function_argument_exprs(&func.args);
+                let [argument] = exprs.as_slice() else {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "json_agg takes exactly one argument".to_string(),
+                    ));
+                };
+                let element = argument.translate(schema, options)?;
+                // A JSON column is TEXT here, so json_group_array would quote
+                // the document into a string. Reading it back with json() is
+                // only safe for a column declared JSON: json('hello') is
+                // `malformed JSON`.
+                let element = if carries_json(argument, schema) {
+                    simple_function_expr("json", vec![element], None)
+                } else {
+                    element
+                };
+
+                let mut args =
+                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                replace_first_argument(&mut args, element);
+                let aggregate = Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("json_group_array")]),
+                    parameters: translate_function_arguments::<Forward>(
+                        &func.parameters,
+                        schema,
+                        options,
+                    )?,
+                    args,
+                    over: translate_window_type(func.over.as_ref(), schema, options)?,
+                    filter: None,
+                    ..func
+                });
+
+                // PostgreSQL answers NULL over no rows where json_group_array
+                // answers an empty array. An aggregate over one row or more
+                // always has an element, so `[]` can only mean no rows.
+                Ok(simple_function_expr("NULLIF", vec![aggregate, string_literal("[]")], None))
             }
             FunctionTranslation::ToCbrt => {
                 // cbrt(x) -> pow(x, (1.0 / 3.0))
