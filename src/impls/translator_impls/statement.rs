@@ -45,11 +45,12 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        AlterTable, AlterTableOperation, BinaryOperator, CascadeOption, ColumnDef, ColumnOption,
-        CopySource, CopyTarget, CreateFunction, Delete, DescribeAlias, DiscardObject, Expr,
-        FromTable, Merge, ObjectType, RenameTable, RenameTableNameKind, Set, Statement,
-        TableFactor, TableWithJoins, Truncate, TruncateIdentityOption, UnaryOperator,
-        helpers::attached_token::AttachedToken,
+        AlterTable, AlterTableOperation, BeginTransactionKind, BinaryOperator, CascadeOption,
+        ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction, Delete, DescribeAlias,
+        DiscardObject, ExceptionWhen, Expr, FromTable, Ident, Merge, ObjectType, RenameTable,
+        RenameTableNameKind, Set, Statement, TableFactor, TableWithJoins, TransactionAccessMode,
+        TransactionMode, TransactionModifier, Truncate, TruncateIdentityOption, UnaryOperator,
+        VacuumStatement, helpers::attached_token::AttachedToken,
     },
     dialect::SQLiteDialect,
 };
@@ -295,9 +296,17 @@ const REASON_SEQUENCE: &str = "SQLite has no sequences, and every function that 
 const REASON_SET_NEUTRAL: &str = "The setting governs how long a statement may run, how much it reports, or how a literal was \
      parsed, so SQLite needs no counterpart and the result cannot change.";
 
+/// Reason the PostgreSQL transaction characteristics are dropped.
+const REASON_TRANSACTION_CHARACTERISTICS: &str = "SQLite has one isolation level, and it serialises writers, so it is at least as strict as any \
+     level PostgreSQL can name and the transaction sees the same rows either way.";
+
+/// Reason the `VACUUM` options and table name are dropped.
+const REASON_VACUUM_OPTIONS: &str = "SQLite's VACUUM rebuilds the whole database and takes no options, so the request is carried \
+     out on a larger scope than asked for rather than lost.";
+
 /// Reason a wait statement is dropped.
-const REASON_WAIT: &str = "SQLite has no statement that waits, and waiting changes when a result arrives rather than what \
-     it is.";
+const REASON_WAIT: &str = "SQLite has no statement that waits, and waiting changes when a result arrives rather than \
+     what it is.";
 
 /// Reason a `DROP` of a PostgreSQL-only object kind is a warned drop: the
 /// object never reached the SQLite output, because the statement that would
@@ -952,6 +961,154 @@ fn translate_explain(
     }])
 }
 
+/// Builds SQLite's `BEGIN`, carrying only a locking modifier SQLite has of its
+/// own.
+fn sqlite_begin(modifier: Option<TransactionModifier>) -> Statement {
+    Statement::StartTransaction {
+        modes: Vec::new(),
+        begin: true,
+        transaction: None,
+        modifier,
+        statements: Vec::new(),
+        exception: None,
+        has_end_keyword: false,
+    }
+}
+
+/// Translates `START TRANSACTION` and `BEGIN` to SQLite's `BEGIN`.
+///
+/// `START TRANSACTION` is a syntax error in SQLite whatever follows it, so the
+/// spelling itself has to change, and the PostgreSQL clauses go with it.
+///
+/// An isolation level is dropped with a warning because SQLite is at least as
+/// strict as any level PostgreSQL can name: it serialises writers, so asking
+/// for something weaker and getting something stronger cannot change which rows
+/// a transaction sees. `READ WRITE` is the default and goes the same way.
+///
+/// `READ ONLY` is refused instead. PostgreSQL rejects a write inside such a
+/// transaction, so dropping the clause would turn an error the author relies on
+/// into a write that succeeds.
+///
+/// `DEFERRED`, `IMMEDIATE`, and `EXCLUSIVE` are SQLite's own locking modifiers
+/// and are kept.
+fn translate_start_transaction(
+    statement: &Statement,
+    modes: &[TransactionMode],
+    transaction: Option<&BeginTransactionKind>,
+    modifier: Option<TransactionModifier>,
+    statements: &[Statement],
+    exception: Option<&[ExceptionWhen]>,
+) -> Result<Vec<Statement>, Error> {
+    if !statements.is_empty() || exception.is_some() {
+        return Err(reject_unsupported_statement(
+            statement,
+            "SQLite has no BEGIN block outside a trigger body, so the statements it carries would \
+             be lost.",
+        ));
+    }
+
+    if modes.contains(&TransactionMode::AccessMode(TransactionAccessMode::ReadOnly)) {
+        return Err(reject_unsupported_statement(
+            statement,
+            "SQLite has no read-only transaction, so a write PostgreSQL would reject inside one \
+             would succeed here. Set the connection read-only with PRAGMA query_only = 1 instead.",
+        ));
+    }
+
+    let modifier = match modifier {
+        // MS-SQL block structure rather than a transaction characteristic.
+        Some(TransactionModifier::Try | TransactionModifier::Catch) => {
+            return Err(reject_unsupported_statement(
+                statement,
+                "TRY and CATCH blocks are MS-SQL, and SQLite has no error handling in SQL.",
+            ));
+        }
+        kept => kept,
+    };
+
+    if !modes.is_empty() {
+        drop_with_warning("BEGIN", REASON_TRANSACTION_CHARACTERISTICS);
+    }
+
+    Ok(vec![Statement::StartTransaction {
+        modes: Vec::new(),
+        begin: true,
+        // SQLite accepts `BEGIN TRANSACTION` but neither `WORK` nor `TRAN`.
+        transaction: matches!(transaction, Some(BeginTransactionKind::Transaction))
+            .then_some(BeginTransactionKind::Transaction),
+        modifier,
+        statements: Vec::new(),
+        exception: None,
+        has_end_keyword: false,
+    }])
+}
+
+/// Translates `COMMIT`, turning `AND CHAIN` into the `BEGIN` it means.
+///
+/// `AND CHAIN` commits and immediately opens another transaction with the same
+/// characteristics, so emitting `COMMIT` alone would leave the statements after
+/// it outside any transaction and a later `ROLLBACK` with nothing to undo.
+/// Emitting the `BEGIN` reproduces it, minus characteristics SQLite does not
+/// have anyway.
+fn translate_commit(
+    statement: &Statement,
+    chain: bool,
+    end: bool,
+    modifier: Option<TransactionModifier>,
+) -> Result<Vec<Statement>, Error> {
+    if let Some(TransactionModifier::Try | TransactionModifier::Catch) = modifier {
+        return Err(reject_unsupported_statement(
+            statement,
+            "TRY and CATCH blocks are MS-SQL, and SQLite has no error handling in SQL.",
+        ));
+    }
+
+    // `END` is SQLite's own synonym for `COMMIT`, so the spelling survives.
+    let mut translated = vec![Statement::Commit { chain: false, end, modifier: None }];
+    if chain {
+        translated.push(sqlite_begin(None));
+    }
+    Ok(translated)
+}
+
+/// Translates `ROLLBACK`, turning `AND CHAIN` into the `BEGIN` it means, for
+/// the same reason as [`translate_commit`]. `ROLLBACK TO SAVEPOINT` is SQLite's
+/// own spelling and passes through.
+fn translate_rollback(chain: bool, savepoint: Option<&Ident>) -> Vec<Statement> {
+    let mut translated = vec![Statement::Rollback { chain: false, savepoint: savepoint.cloned() }];
+    if chain {
+        translated.push(sqlite_begin(None));
+    }
+    translated
+}
+
+/// Emits a bare `VACUUM`.
+///
+/// SQLite's `VACUUM` takes an optional SCHEMA name and nothing else, so a
+/// PostgreSQL option list has no counterpart and a table name is actively
+/// harmful: SQLite reads it as a schema and answers `unknown database t`.
+/// Rebuilding one table is not expressible, and vacuuming the whole database
+/// achieves what the statement asked for on a larger scope, so this is a warned
+/// drop rather than an error.
+fn translate_vacuum(vacuum: &VacuumStatement) -> Vec<Statement> {
+    let bare = VacuumStatement {
+        full: false,
+        sort_only: false,
+        delete_only: false,
+        reindex: false,
+        recluster: false,
+        table_name: None,
+        threshold: None,
+        boost: false,
+    };
+
+    if *vacuum != bare {
+        drop_with_warning("VACUUM", REASON_VACUUM_OPTIONS);
+    }
+
+    vec![Statement::Vacuum(bare)]
+}
+
 /// PostgreSQL run-time configuration parameters whose value cannot change what
 /// a translated statement does. A `SET` naming one is dropped with a warning,
 /// every other `SET` is refused.
@@ -1377,15 +1534,29 @@ impl Translator for Statement {
             // Statements that are already SQLite's own syntax, passed through
             // unchanged. A pragma name is a SQLite setting and an attached alias is
             // a database handle, so neither is a schema-qualified object to
-            // normalise.
-            Self::Vacuum { .. }
-            | Self::Commit { .. }
-            | Self::Rollback { .. }
-            | Self::StartTransaction { .. }
-            | Self::Savepoint { .. }
+            // normalise. A savepoint name needs no normalising either, and
+            // `ROLLBACK TO SAVEPOINT` is SQLite's own spelling.
+            Self::Savepoint { .. }
             | Self::ReleaseSavepoint { .. }
             | Self::Pragma { .. }
             | Self::AttachDatabase { .. } => vec![self.clone()],
+            Self::StartTransaction {
+                modes, transaction, modifier, statements, exception, ..
+            } => {
+                translate_start_transaction(
+                    self,
+                    modes,
+                    transaction.as_ref(),
+                    *modifier,
+                    statements,
+                    exception.as_deref(),
+                )?
+            }
+            Self::Commit { chain, end, modifier } => {
+                translate_commit(self, *chain, *end, *modifier)?
+            }
+            Self::Rollback { chain, savepoint } => translate_rollback(*chain, savepoint.as_ref()),
+            Self::Vacuum(vacuum) => translate_vacuum(vacuum),
             // DROP TABLE/VIEW/INDEX - translate to SQLite (strip CASCADE/RESTRICT)
             Self::Drop { object_type, if_exists, names, cascade, .. } => {
                 match object_type {
