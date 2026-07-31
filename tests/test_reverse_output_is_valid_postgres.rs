@@ -187,6 +187,21 @@ fn glob_has_no_postgres_operator() {
     ]);
 }
 
+/// `~` is PostgreSQL's case-sensitive POSIX regex operator. Measured against
+/// both engines with `^[A-Z]`: SQLite `REGEXP` with the usual host-registered
+/// function and PostgreSQL `~` agree on `'A'` and on `'a'`, and the negations
+/// agree too. `RLIKE` is not SQLite at all, `near "RLIKE": syntax error`, so
+/// it cannot have arrived from a SQLite replica.
+#[test]
+fn regexp_becomes_the_posix_operator() {
+    check(&[
+        ("SELECT s FROM t WHERE s REGEXP '^[A-Z]'", Emits("~ '^[A-Z]'")),
+        ("SELECT s FROM t WHERE s NOT REGEXP '^[A-Z]'", Emits("!~ '^[A-Z]'")),
+        ("SELECT s FROM t WHERE s RLIKE '^[A-Z]'", Rejected),
+        ("SELECT s FROM t WHERE s NOT RLIKE '^[A-Z]'", Rejected),
+    ]);
+}
+
 /// `INSERT OR REPLACE` deletes the conflicting row and inserts the new one, so
 /// a column left out of the insert comes back as its default rather than
 /// keeping the old value. Reversing a partial column list to `DO NOTHING`

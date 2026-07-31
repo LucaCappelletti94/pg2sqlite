@@ -195,6 +195,31 @@ impl ReverseTranslator for Expr {
                 translate_glob_to_like(left, right, false, schema, options)
             }
 
+            // SQLite REGEXP and PostgreSQL ~ are both case-sensitive and agree
+            // on common patterns, so this is a rewrite rather than a
+            // rejection. Beyond that the two regex dialects diverge and the
+            // difference is the caller's to resolve.
+            //
+            // sqlparser gives the two spellings different nodes: `c REGEXP 'p'`
+            // is a BinaryOp, `c NOT REGEXP 'p'` is an RLike.
+            Expr::BinaryOp { op: BinaryOperator::Regexp, left, right } => {
+                posix_regex(left, right, false, schema, options)
+            }
+
+            // SQLite's parser rejects RLIKE outright, so it cannot have come
+            // from a SQLite replica.
+            Expr::RLike { negated, expr, pattern, regexp } => {
+                if *regexp {
+                    posix_regex(expr, pattern, *negated, schema, options)
+                } else {
+                    let not = if *negated { "NOT " } else { "" };
+                    Err(Error::UnsupportedSQLiteFeature(format!(
+                        "RLIKE is not SQLite syntax, so {expr} {not}RLIKE {pattern} cannot have \
+                         come from SQLite. Write REGEXP instead."
+                    )))
+                }
+            }
+
             // SQLite's implicit rowid column does not exist in PostgreSQL.
             Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("rowid") => {
                 Err(Error::UnsupportedSQLiteFeature(
@@ -207,4 +232,19 @@ impl ReverseTranslator for Expr {
             _ => translate_expr_recursive::<Reverse>(self, schema, options),
         }
     }
+}
+
+/// Builds PostgreSQL's POSIX regex match, `~` or `!~`.
+fn posix_regex(
+    expr: &Expr,
+    pattern: &Expr,
+    negated: bool,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, Error> {
+    Ok(Expr::BinaryOp {
+        left: Box::new(Expr::reverse_translate(expr, schema, options)?),
+        op: if negated { BinaryOperator::PGRegexNotMatch } else { BinaryOperator::PGRegexMatch },
+        right: Box::new(Expr::reverse_translate(pattern, schema, options)?),
+    })
 }

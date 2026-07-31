@@ -271,7 +271,7 @@ fn reverse_floor() {
 #[test]
 fn reverse_regexp() {
     let pg = reverse(SCHEMA, "SELECT * FROM users WHERE name REGEXP '^[A-Z]';");
-    assert!(pg.contains("REGEXP") || pg.contains("RLIKE"), "Expected REGEXP or RLIKE: {pg}");
+    assert!(pg.contains("name ~ '^[A-Z]'"), "Expected the POSIX operator: {pg}");
 }
 
 #[test]
@@ -405,7 +405,7 @@ fn reverse_manual_expr_variants_cover_prefixed_trim_chars_and_compound_access() 
     };
     let regexp_out =
         regexp_expr.reverse_translate(&schema, &options).expect("regexp should reverse");
-    assert!(regexp_out.to_string().contains("REGEXP"));
+    assert_eq!(regexp_out.to_string(), "name ~ '^[A-Z]'");
 
     let compound_access = Expr::CompoundFieldAccess {
         root: Box::new(Expr::Identifier(Ident::new("payload"))),
