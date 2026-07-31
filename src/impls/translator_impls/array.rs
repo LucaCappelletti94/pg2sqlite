@@ -514,9 +514,13 @@ fn array_append(array: Expr, value: Expr) -> Expr {
 }
 
 /// `array_position(a, v)`:
-/// `(SELECT min(key) + 1 FROM json_each(a) WHERE value = v)`. A miss leaves
+/// `(SELECT min(key) + 1 FROM json_each(a) WHERE value IS v)`. A miss leaves
 /// `min(key)` NULL, which propagates through the addition exactly as
 /// PostgreSQL's NULL result.
+///
+/// The comparison is null safe because PostgreSQL finds a NULL element:
+/// `array_position(ARRAY[1,NULL,3], NULL)` is 2, where `value = NULL` matches
+/// nothing.
 #[must_use]
 fn array_position(array: Expr, value: Expr) -> Expr {
     scalar_subquery_over_json_each(
@@ -526,13 +530,14 @@ fn array_position(array: Expr, value: Expr) -> Expr {
             right: Box::new(integer_literal(1)),
         },
         array,
-        Some(element_equals(value)),
+        Some(null_safe_eq(json_each_column(VALUE_COLUMN), value)),
     )
 }
 
 /// `array_positions(a, v)`:
 /// `(SELECT json_group_array(key + 1 ORDER BY key) FROM json_each(a) WHERE
-/// value = v)`, an empty JSON array when nothing matches.
+/// value IS v)`, an empty JSON array when nothing matches. Null safe for the
+/// same reason as `array_position`.
 #[must_use]
 fn array_positions(array: Expr, value: Expr) -> Expr {
     scalar_subquery_over_json_each(
@@ -545,7 +550,7 @@ fn array_positions(array: Expr, value: Expr) -> Expr {
             }],
         ),
         array,
-        Some(element_equals(value)),
+        Some(null_safe_eq(json_each_column(VALUE_COLUMN), value)),
     )
 }
 
@@ -577,16 +582,6 @@ fn array_replace(array: Expr, from: Expr, to: Expr) -> Expr {
         array,
         None,
     )
-}
-
-/// `value = <expr>` against the current `json_each` row.
-#[must_use]
-fn element_equals(value: Expr) -> Expr {
-    Expr::BinaryOp {
-        left: Box::new(json_each_column(VALUE_COLUMN)),
-        op: BinaryOperator::Eq,
-        right: Box::new(value),
-    }
 }
 
 /// Whether a quantified comparison must hold for every element or just one.

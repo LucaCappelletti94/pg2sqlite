@@ -298,6 +298,24 @@ fn array_remove_is_null_safe() {
     );
 }
 
+/// `array_position(a, NULL)` and `array_positions(a, NULL)` find the NULL
+/// elements in PostgreSQL, measured on PostgreSQL 16 as 2 and `{2,4}`, so their
+/// predicate has to be null safe exactly as `array_remove`'s already was.
+#[test]
+fn array_position_is_null_safe() {
+    const NULLS: &str = "CREATE TABLE t (id INT PRIMARY KEY, tags TEXT[]);
+         INSERT INTO t (id, tags) VALUES (1, ARRAY['a', NULL, 'b', NULL]);";
+
+    assert_eq!(
+        run_translated(&format!("{NULLS} SELECT array_position(tags, NULL) FROM t;")),
+        vec![Some("2".to_string())]
+    );
+    assert_eq!(
+        run_translated(&format!("{NULLS} SELECT array_positions(tags, NULL) FROM t;")),
+        vec![Some("[2,4]".to_string())]
+    );
+}
+
 #[test]
 fn array_remove_drops_matching_elements() {
     assert_eq!(
