@@ -118,17 +118,20 @@ fn float4_maps_to_real() {
     assert!(out.contains("REAL"), "FLOAT4 should map to REAL, got: {out}");
 }
 
+/// NUMERIC and DECIMAL are emitted as an INTEGER holding minor units rather
+/// than a REAL, which is what keeps decimal arithmetic exact. See decision D1
+/// and `tests/test_numeric_scaled_integer.rs` for the values.
 #[test]
-fn numeric_maps_to_real() {
+fn numeric_maps_to_a_scaled_integer() {
     let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col NUMERIC(10,2));");
-    assert!(out.contains("REAL"), "NUMERIC should map to REAL, got: {out}");
+    assert!(out.contains("col INTEGER"), "NUMERIC should map to INTEGER, got: {out}");
     assert!(!out.contains("NUMERIC"), "Output should not contain NUMERIC, got: {out}");
 }
 
 #[test]
-fn decimal_maps_to_real() {
+fn decimal_maps_to_a_scaled_integer() {
     let out = translate_ok("CREATE TABLE t (id INT PRIMARY KEY, col DECIMAL(5,2));");
-    assert!(out.contains("REAL"), "DECIMAL should map to REAL, got: {out}");
+    assert!(out.contains("col INTEGER"), "DECIMAL should map to INTEGER, got: {out}");
     assert!(!out.contains("DECIMAL"), "Output should not contain DECIMAL, got: {out}");
 }
 

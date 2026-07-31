@@ -18,14 +18,15 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, ConnectByKind, Expr, ExprWithAlias, ExprWithAliasAndOrderBy,
-    Fetch, FromTable, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
-    FunctionArguments, GroupByExpr, HavingBound, Join, JoinConstraint, JoinOperator, LateralView,
-    LimitClause, ListAggOnOverflow, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName,
-    ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query,
-    SelectItem, SetExpr, Setting, Statement, SymbolDefinition, TableFactor, TableFunctionArgs,
-    TableSample, TableSampleBucket, TableSampleKind, TableSampleQuantity, TableVersion,
-    TableWithJoins, UpdateTableFromKind, Values, WindowFrame, WindowFrameBound, WindowSpec,
+    Assignment, AssignmentTarget, ConnectByKind, DataType, Expr, ExprWithAlias,
+    ExprWithAliasAndOrderBy, Fetch, FromTable, FunctionArg, FunctionArgExpr,
+    FunctionArgumentClause, FunctionArgumentList, FunctionArguments, GroupByExpr, HavingBound,
+    Join, JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow, Measure,
+    NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr,
+    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, SetExpr, Setting, Statement,
+    SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
+    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, UnaryOperator,
+    UpdateTableFromKind, Value, ValueWithSpan, Values, WindowFrame, WindowFrameBound, WindowSpec,
     WindowType, With, WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause,
     XmlTableColumn, XmlTableColumnOption, visit_expressions,
 };
@@ -180,6 +181,100 @@ pub(crate) fn every_declared_type_matches(
     let mut declared = declared.map(|column| column.attribute().data_type.to_string());
     let Some(first) = declared.next() else { return false };
     predicate(&first) && declared.all(|data_type| predicate(&data_type))
+}
+
+/// The scale of `expr` when it is a `NUMERIC` value held as minor units, or
+/// `None` when it is not one.
+///
+/// Every arithmetic rule in D1 needs this: an addition has to bring both sides
+/// to one scale, a comparison against a literal has to scale the literal, and a
+/// cast has to know how far to move the point. A column carries its scale in
+/// the declared type, and nothing else in SQLite does, since the emitted column
+/// is an ordinary INTEGER.
+pub(crate) fn numeric_scale(expr: &Expr, schema: &ParserDB) -> Option<u32> {
+    match expr {
+        Expr::Nested(inner) => numeric_scale(inner, schema),
+        Expr::Cast { data_type: DataType::Numeric(info) | DataType::Decimal(info), .. } => {
+            crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)
+                .ok()
+                .map(|(_, scale)| scale)
+        }
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
+            let column_name = match expr {
+                Expr::Identifier(ident) => ident.value.as_str(),
+                Expr::CompoundIdentifier(parts) => parts.last()?.value.as_str(),
+                _ => return None,
+            };
+            let mut scales = schema.tables().filter_map(|table| {
+                let column = table
+                    .columns(schema)
+                    .ok()?
+                    .find(|column| column.column_name().eq_ignore_ascii_case(column_name))?;
+                match &column.attribute().data_type {
+                    DataType::Numeric(info) | DataType::Decimal(info) => {
+                        crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)
+                            .ok()
+                            .map(|(_, scale)| scale)
+                    }
+                    _ => None,
+                }
+            });
+            // Two columns of one name at different scales cannot both be right,
+            // so the answer has to be unanimous, as it does for every other
+            // declared-type question here.
+            let first = scales.next()?;
+            scales.all(|scale| scale == first).then_some(first)
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite a decimal literal as the integer count of minor units at `scale`.
+///
+/// Exact by construction: the digits are moved, never multiplied as a float, so
+/// `19.99` at scale 2 becomes 1999 rather than 1998.9999999999998. A literal
+/// finer than the column can hold is refused rather than rounded, since
+/// PostgreSQL would round it and an author who wrote more decimals than the
+/// column has almost certainly meant a different scale.
+pub(crate) fn scale_decimal_literal(expr: &Expr, scale: u32) -> Result<Option<Expr>, Error> {
+    let (negated, digits) = match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => (false, digits),
+        Expr::UnaryOp { op: UnaryOperator::Minus, expr } => {
+            match expr.as_ref() {
+                Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
+                    (true, digits)
+                }
+                _ => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+
+    if digits.contains(['e', 'E']) {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "the literal {digits} is in exponent notation, which this translator does not scale \
+             onto a NUMERIC column. Write it in full."
+        )));
+    }
+
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits.as_str(), ""));
+    let fraction_digits = u32::try_from(fraction.len()).unwrap_or(u32::MAX);
+    if fraction_digits > scale {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "the literal {digits} has {fraction_digits} decimal places and the column holds \
+             {scale}. PostgreSQL would round it, which silently changes the value, so write it \
+             at the column's scale instead."
+        )));
+    }
+
+    // Provably in range: `fraction_digits <= scale` was just checked, and a
+    // scale is at most MAX_NUMERIC_PRECISION.
+    let padding = "0".repeat(usize::try_from(scale - fraction_digits).unwrap_or(0));
+    let minor_units = format!("{}{whole}{fraction}{padding}", if negated { "-" } else { "" });
+    Ok(Some(Expr::Value(ValueWithSpan {
+        value: Value::Number(minor_units, false),
+        span: sqlparser::tokenizer::Span::empty(),
+    })))
 }
 
 /// True when `expr` is the bare `DEFAULT` keyword.

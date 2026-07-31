@@ -16,16 +16,18 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, IndexLike, TableLike, UniqueIndexLike},
 };
-use sqlparser::ast::{Insert, SetExpr, TableObject};
+use sqlparser::ast::{DataType, Insert, SetExpr, TableObject};
 
 use super::helpers::Forward;
 use crate::{
     impls::{
         object_name::{last_ident, last_ident_value_or_display, table_with_implicit_public_lookup},
         shared_helpers::{
-            is_default_keyword, translate_on_conflict_do_update, translate_returning,
+            is_default_keyword, scale_decimal_literal, translate_on_conflict_do_update,
+            translate_returning,
         },
         translator_impls::{
+            data_type::numeric_precision_and_scale,
             rls,
             uuid::{
                 is_blob_uuid_representation, maybe_wrap_text_uuid_literal, uuid_columns_of_table,
@@ -92,6 +94,10 @@ impl Translator for Insert {
         if is_blob_uuid_representation(options) {
             wrap_uuid_text_literals(&mut insert, schema, options)?;
         }
+
+        // A NUMERIC column is an INTEGER of minor units, so a decimal literal
+        // has to be moved onto that scale before it reaches a STRICT table.
+        scale_numeric_literals(&mut insert, schema)?;
 
         if let Some(on_insert) = &self.on {
             match on_insert {
@@ -428,6 +434,66 @@ fn wrap_vector_text_literals(insert: &mut Insert, schema: &ParserDB) {
             }
         }
     }
+}
+
+/// Rewrite every decimal literal targeting a `NUMERIC` column as the integer
+/// count of minor units the column now holds.
+///
+/// Without this the emitted INSERT puts a REAL into an INTEGER column and
+/// STRICT refuses it, which is loud, but the same literal in a WHERE clause
+/// would be silent, so both sites scale through
+/// `shared_helpers::scale_decimal_literal`.
+///
+/// Bails out on the same unresolvable shapes as its vector and UUID siblings,
+/// leaving the insert verbatim.
+fn scale_numeric_literals(
+    insert: &mut Insert,
+    schema: &ParserDB,
+) -> Result<(), crate::errors::Error> {
+    let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
+    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
+        return Ok(());
+    };
+    let Ok(columns) = table.columns(schema) else { return Ok(()) };
+    let scales: Vec<(String, u32)> = columns
+        .filter_map(|column| {
+            match &column.attribute().data_type {
+                DataType::Numeric(info) | DataType::Decimal(info) => {
+                    let (_, scale) = numeric_precision_and_scale(info).ok()?;
+                    (scale > 0).then(|| (column.column_name().to_string(), scale))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    if scales.is_empty() {
+        return Ok(());
+    }
+
+    let column_names: Vec<String> = if insert.columns.is_empty() {
+        let Ok(columns) = table.columns(schema) else { return Ok(()) };
+        columns.map(|c| c.column_name().to_string()).collect()
+    } else {
+        insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
+    };
+
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
+
+    for row in &mut values.rows {
+        for (idx, expr) in row.content.iter_mut().enumerate() {
+            let Some(col_name) = column_names.get(idx) else { break };
+            let Some((_, scale)) =
+                scales.iter().find(|(name, _)| name.eq_ignore_ascii_case(col_name))
+            else {
+                continue;
+            };
+            if let Some(scaled) = scale_decimal_literal(expr, *scale)? {
+                *expr = scaled;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Redirect `INSERT INTO <view> ... RETURNING ...` to the backing table

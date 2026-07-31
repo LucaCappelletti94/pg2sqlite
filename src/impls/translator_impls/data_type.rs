@@ -13,12 +13,100 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{DataType, ExactNumberInfo};
+use sqlparser::{
+    ast::{DataType, ExactNumberInfo, Expr, Ident, Value, ValueWithSpan},
+    tokenizer::Span,
+};
 
 use crate::{
     prelude::{Pg2SqliteOptions, Translator},
     traits::{TranslationOptions, UuidRepresentation},
 };
+
+/// The largest precision a scaled integer can hold.
+///
+/// The biggest minor-unit value for `NUMERIC(p,s)` is `10^p - 1`, and i64 stops
+/// at 9223372036854775807, so 18 digits fit and 19 do not. `NUMERIC(18,2)`
+/// still reaches about 10^16, well past any money.
+pub(crate) const MAX_NUMERIC_PRECISION: u64 = 18;
+
+/// [`MAX_NUMERIC_PRECISION`] as an exponent, for the one conversion that needs
+/// a fallback the debug assertion above it rules out.
+pub(crate) const MAX_NUMERIC_PRECISION_EXPONENT: u32 = 18;
+
+/// The precision and scale of a `NUMERIC` or `DECIMAL` declaration, refusing
+/// the two shapes that cannot be a scaled integer.
+///
+/// Bare `NUMERIC` has arbitrary unconstrained scale, so there is no `10^s` to
+/// scale by, and picking one would corrupt data. `NUMERIC(p)` is scale 0 in
+/// PostgreSQL, which is already a plain integer.
+pub(crate) fn numeric_precision_and_scale(
+    info: &ExactNumberInfo,
+) -> Result<(u64, u32), crate::errors::Error> {
+    let (precision, scale) = match info {
+        ExactNumberInfo::None => {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                "NUMERIC and DECIMAL without a precision and scale have no SQLite form: the \
+                 column is emitted as an INTEGER holding minor units, which needs a fixed scale \
+                 to multiply by. Declare one, as NUMERIC(10,2)."
+                    .to_string(),
+            ));
+        }
+        ExactNumberInfo::Precision(precision) => (*precision, 0),
+        ExactNumberInfo::PrecisionAndScale(precision, scale) => {
+            let Ok(scale) = u32::try_from(*scale) else {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "NUMERIC({precision},{scale}) has a negative scale, which cannot be a count \
+                     of minor units."
+                )));
+            };
+            (*precision, scale)
+        }
+    };
+
+    if precision > MAX_NUMERIC_PRECISION {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "NUMERIC({precision},{scale}) needs {precision} digits, and a SQLite INTEGER holds \
+             at most {MAX_NUMERIC_PRECISION}. The column would silently become a float, which is \
+             what the scaled integer exists to avoid. Reduce the precision, or store the value \
+             as TEXT and compare it in the application."
+        )));
+    }
+    if u64::from(scale) > precision {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "NUMERIC({precision},{scale}) has a scale larger than its precision."
+        )));
+    }
+    Ok((precision, scale))
+}
+
+/// `<col> BETWEEN -(10^p - 1) AND (10^p - 1)`, with the bound expanded to a
+/// literal so SQLite has no arithmetic to do per row.
+///
+/// `precision` has already passed [`numeric_precision_and_scale`], so it is at
+/// most [`MAX_NUMERIC_PRECISION`] and the exponent conversion cannot lose
+/// anything.
+#[must_use]
+pub(crate) fn numeric_precision_bound_expr(column_name: &Ident, precision: u64) -> Expr {
+    debug_assert!(
+        precision <= MAX_NUMERIC_PRECISION,
+        "the bound is only meaningful for a precision a scaled integer can hold"
+    );
+    let exponent = u32::try_from(precision).unwrap_or(MAX_NUMERIC_PRECISION_EXPONENT);
+    let magnitude = 10_i128.pow(exponent) - 1;
+    let literal = |value: i128| {
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(value.to_string(), false),
+            span: Span::empty(),
+        })
+    };
+    Expr::Between {
+        expr: Box::new(Expr::Identifier(column_name.clone())),
+        negated: false,
+        low: Box::new(literal(-magnitude)),
+        high: Box::new(literal(magnitude)),
+    }
+}
 
 impl Translator for DataType {
     type Schema = ParserDB;
@@ -58,10 +146,16 @@ impl Translator for DataType {
             | DataType::Double(_)
             | DataType::DoublePrecision
             | DataType::Float8
-            | DataType::Float4
-            // Numeric/Decimal: mapping is intentionally lossy - SQLite has no fixed-precision type
-            | DataType::Numeric(_)
-            | DataType::Decimal(_) => Ok(DataType::Real),
+            | DataType::Float4 => Ok(DataType::Real),
+            // NUMERIC and DECIMAL become an INTEGER holding minor units, scaled
+            // by 10^s, which is the only representation SQLite has that keeps
+            // decimal arithmetic exact. REAL does not: measured, `sum` over
+            // 0.10 and 0.20 answers 0.30000000000000004 and `0.1 + 0.2 = 0.3`
+            // is FALSE. See decision D1.
+            DataType::Numeric(info) | DataType::Decimal(info) => {
+                numeric_precision_and_scale(info)?;
+                Ok(DataType::Integer(None))
+            }
             // JSON/JSONB, text aliases, and temporal types are stored as TEXT in SQLite.
             DataType::Varchar(_)
             | DataType::JSON

@@ -175,8 +175,8 @@ const CONSTRAINTS_SQL: &str = "\
 CREATE TABLE orders (
     id SERIAL PRIMARY KEY,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
-    unit_price NUMERIC NOT NULL CHECK (unit_price >= 0),
-    total NUMERIC GENERATED ALWAYS AS (quantity * unit_price) STORED,
+    unit_price NUMERIC(10,2) NOT NULL CHECK (unit_price >= 0),
+    total NUMERIC(12,2) GENERATED ALWAYS AS (quantity * unit_price) STORED,
     placed_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 

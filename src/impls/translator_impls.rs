@@ -21,7 +21,7 @@ pub(crate) mod create_index;
 mod create_table;
 mod create_trigger;
 mod create_view;
-mod data_type;
+pub(crate) mod data_type;
 mod delete;
 pub(crate) mod expr;
 mod function;

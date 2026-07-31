@@ -38,11 +38,16 @@ fn double_colon_int_literal_cast_uses_cast_syntax() {
     assert!(!out.contains("::"), "cast operator leaked into output: {out}");
 }
 
+/// A NUMERIC column is emitted as an INTEGER of minor units, so a cast to
+/// NUMERIC has to move the point rather than change a storage class. `val` here
+/// belongs to no declared table, so its scale is unknown and shifting it either
+/// way would be a guess. The value cases live in
+/// `tests/test_numeric_scaled_integer.rs`, where the columns have types.
 #[test]
-fn double_colon_numeric_cast_maps_to_real() {
-    let out = tr("SELECT val::numeric(10, 2) FROM t");
-    assert!(out.contains("CAST(val AS REAL)"), "{out}");
-    assert!(!out.contains("::"), "cast operator leaked into output: {out}");
+fn double_colon_numeric_cast_needs_a_resolvable_scale() {
+    let error = translate_pg("SELECT val::numeric(10, 2) FROM t", &Pg2SqliteOptions::default())
+        .expect_err("the operand's scale cannot be resolved");
+    assert!(error.to_string().contains("scale"), "got: {error}");
 }
 
 #[test]

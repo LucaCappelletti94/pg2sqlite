@@ -17,11 +17,11 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField, Expr, Function,
-    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, Interval,
-    JsonKeyUniqueness, JsonPredicateType, ObjectName, ObjectNamePart, Query, Subscript, TableAlias,
-    TableAliasColumnDef, TableFactor, TimezoneInfo, UnaryOperator, Value, ValueWithSpan,
-    helpers::attached_token::AttachedToken,
+    AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
+    ExactNumberInfo, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+    FunctionArguments, Ident, Interval, JsonKeyUniqueness, JsonPredicateType, ObjectName,
+    ObjectNamePart, Query, Subscript, TableAlias, TableAliasColumnDef, TableFactor, TimezoneInfo,
+    UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::{
@@ -31,7 +31,8 @@ use crate::{
         function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
         query_builder::{from_relation, plain_table_factor, single_expr_query},
         shared_helpers::{
-            every_declared_type_matches, function_argument_exprs, translate_expr_recursive,
+            every_declared_type_matches, function_argument_exprs, numeric_scale,
+            scale_decimal_literal, translate_expr_recursive,
         },
         timezone::{is_fixed_utc_offset, normalize_timezone_modifier_for_sqlite},
         translator_impls::{
@@ -40,6 +41,7 @@ use crate::{
                 json_array_call, representation_required, translate_array_literal,
                 translate_array_subscript, translate_quantified_over_array,
             },
+            data_type::numeric_precision_and_scale,
             helpers::Forward,
         },
     },
@@ -924,6 +926,96 @@ fn negated_offset(modifier: &str) -> Option<String> {
     })
 }
 
+/// Move a value held as minor units from `from` scale to `to` scale.
+///
+/// Growing the scale multiplies, which is exact. Shrinking it divides, and
+/// PostgreSQL rounds half away from zero there while SQLite's integer division
+/// truncates toward it, so the emitted form adds half a unit of the target
+/// scale before dividing and takes the sign from the value. Measured on
+/// PostgreSQL 16: `1.005::numeric(10,2)` is 1.01 and `(-1.005)::numeric(10,2)`
+/// is -1.01, so the rounding is away from zero on both sides.
+fn rescale_minor_units(value: Expr, from: u32, to: u32) -> Expr {
+    if from == to {
+        return value;
+    }
+    if to > from {
+        return Expr::Nested(Box::new(Expr::BinaryOp {
+            left: Box::new(value),
+            op: BinaryOperator::Multiply,
+            right: Box::new(number_literal(&10_i128.pow(to - from).to_string())),
+        }));
+    }
+
+    let divisor = 10_i128.pow(from - to);
+    let half = divisor / 2;
+    // `value + half * sign(value)` before the truncating division turns
+    // truncation toward zero into rounding away from it.
+    let biased = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(value.clone()),
+        op: BinaryOperator::Plus,
+        right: Box::new(Expr::BinaryOp {
+            left: Box::new(number_literal(&half.to_string())),
+            op: BinaryOperator::Multiply,
+            right: Box::new(simple_function_expr("sign", vec![value], None)),
+        }),
+    }));
+    Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(biased),
+        op: BinaryOperator::Divide,
+        right: Box::new(number_literal(&divisor.to_string())),
+    }))
+}
+
+/// `CAST(x AS NUMERIC(p,s))`, which moves `x` onto the scaled-integer
+/// representation rather than truncating it into a bare INTEGER.
+fn translate_numeric_cast(
+    expr: &Expr,
+    info: &ExactNumberInfo,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let (_, target_scale) = numeric_precision_and_scale(info)?;
+    let translated = expr.translate(schema, options)?;
+
+    if let Some(source_scale) = numeric_scale(expr, schema) {
+        return Ok(rescale_minor_units(translated, source_scale, target_scale));
+    }
+
+    // An operand that is not already minor units, an integer column or a
+    // literal, is at scale 0 by definition, so it only needs multiplying up.
+    // Anything whose scale cannot be resolved would be shifted by a guess.
+    if is_integral_expression(expr, schema) {
+        return Ok(rescale_minor_units(translated, 0, target_scale));
+    }
+    Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "CAST({expr} AS NUMERIC) needs the operand's scale, since a NUMERIC column is emitted as \
+         an INTEGER of minor units and the cast has to know how far to move the point. The type \
+         of `{expr}` cannot be resolved here. Cast it to a declared NUMERIC first."
+    )))
+}
+
+/// True when `expr` is a whole number by construction, so its scale is 0.
+fn is_integral_expression(expr: &Expr, schema: &ParserDB) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_integral_expression(inner, schema),
+        Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
+            is_integral_expression(expr, schema)
+        }
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
+            !digits.contains('.') && !digits.contains(['e', 'E'])
+        }
+        Expr::Cast { data_type, .. } => matches!(data_type, DataType::Integer(_)),
+        _ => {
+            every_declared_type_matches(expr, schema, |declared| {
+                let lowered = declared.to_ascii_lowercase();
+                ["int", "smallint", "bigint", "serial"]
+                    .iter()
+                    .any(|integral| lowered.starts_with(integral))
+            })
+        }
+    }
+}
+
 /// A single-quoted string as an expression.
 fn string_literal_value(value: &str) -> Expr {
     Expr::Value(ValueWithSpan {
@@ -1255,6 +1347,20 @@ fn translate_quantified_operation(
     )
 }
 
+/// The literal `candidate` rewritten in the minor units of `partner`, when
+/// `partner` is a NUMERIC value and `candidate` is a decimal literal.
+fn scale_literal_against(
+    candidate: &Expr,
+    partner: &Expr,
+    schema: &ParserDB,
+) -> Result<Option<Expr>, crate::errors::Error> {
+    let Some(scale) = numeric_scale(partner, schema) else { return Ok(None) };
+    if scale == 0 {
+        return Ok(None);
+    }
+    scale_decimal_literal(candidate, scale)
+}
+
 /// Translate a binary operation expression.
 #[allow(clippy::too_many_lines)]
 fn translate_binary_op(
@@ -1264,6 +1370,24 @@ fn translate_binary_op(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
+    // A NUMERIC column holds minor units, so a decimal literal beside one has
+    // to be moved onto the same scale. Missing this is silent: `price = 19.99`
+    // compares 1999 against 19.99 and returns nothing.
+    if let Some(scaled) = scale_literal_against(right, left, schema)? {
+        return Ok(Expr::BinaryOp {
+            left: Box::new(left.translate(schema, options)?),
+            op: op.clone(),
+            right: Box::new(scaled),
+        });
+    }
+    if let Some(scaled) = scale_literal_against(left, right, schema)? {
+        return Ok(Expr::BinaryOp {
+            left: Box::new(scaled),
+            op: op.clone(),
+            right: Box::new(right.translate(schema, options)?),
+        });
+    }
+
     // Check for full-text search: to_tsvector(...) @@ to_tsquery(...)
     if *op == BinaryOperator::AtAt {
         if let (Expr::Function(tsvector_func), Expr::Function(tsquery_func)) = (left, right)
@@ -1630,6 +1754,9 @@ impl Translator for Expr {
                     sqlparser::ast::DataType::Boolean | sqlparser::ast::DataType::Bool
                 ) {
                     return translate_boolean_cast(expr, schema, options);
+                }
+                if let DataType::Numeric(info) | DataType::Decimal(info) = data_type {
+                    return translate_numeric_cast(expr, info, schema, options);
                 }
                 // SQLite only accepts the `CAST(x AS type)` spelling, not
                 // PostgreSQL's `x::type` operator nor TRY_CAST / SAFE_CAST, so
