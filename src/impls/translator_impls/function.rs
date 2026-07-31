@@ -192,11 +192,8 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
 /// itself whenever that is not NULL. The values reaching `MAX` are therefore
 /// exactly the non-NULL arguments, which is PostgreSQL's rule.
 ///
-/// The plan proposed `(SELECT max(v) FROM (VALUES (a),(b)))` instead. Measured
-/// on SQLite 3.51.1, that form cannot see the outer query's columns at all
-/// (`no such column`), which is the only interesting case, and it is rejected
-/// outright inside an index expression. This form is an ordinary expression and
-/// works in both places, at the cost of naming each argument once per argument.
+/// A `VALUES` subquery would be shorter but cannot see the outer query's
+/// columns and is rejected inside an index expression, where this form works.
 fn null_ignoring_extremum(
     arguments: &[Expr],
     greatest: bool,
@@ -231,17 +228,12 @@ fn null_ignoring_extremum(
 /// The shape is `CAST(round(x * 10^n, 9) AS INTEGER) / 10^n`, since a CAST to
 /// INTEGER truncates toward zero for both signs.
 ///
-/// The inner `round` is what makes it agree with PostgreSQL, which computes in
-/// exact decimal while SQLite has only binary doubles. Without it, `1.15 * 100`
-/// is 114.99999999999999 and `trunc(1.15, 2)` answers 1.14. Measured: the same
-/// goes for 0.29, 2.675, 1.005, and 100.55, four values out of the twelve the
-/// test covers. Nine decimal places is far below what a double distinguishes at
-/// these magnitudes and far above the representation noise being absorbed.
+/// The inner `round` absorbs binary representation noise: without it
+/// `1.15 * 100` is 114.99999999999999 and `trunc(1.15, 2)` answers 1.14.
 ///
-/// The scale is folded into a literal when it is one, which is the ordinary
-/// case and keeps the expression free of `pow`. A computed scale needs `pow`,
-/// which ships only under `SQLITE_ENABLE_MATH_FUNCTIONS`, so it is refused
-/// unless the caller has declared that build.
+/// A literal scale is folded into a literal factor, keeping `pow` out of the
+/// emitted SQL. A computed scale needs `pow`, which ships only under
+/// `SQLITE_ENABLE_MATH_FUNCTIONS`, and is refused without it.
 fn truncate_to_scale(
     x: Expr,
     scale: &Expr,
@@ -895,16 +887,11 @@ fn is_already_json(expr: &Expr) -> bool {
 
 /// Renames SQLite's `json_type` answer onto PostgreSQL's `json_typeof` one.
 ///
-/// Both vocabularies were measured rather than read off the documentation:
-/// `text` is `string`, both `integer` and `real` are `number`, both `true` and
-/// `false` are `boolean`, and `null`, `object`, and `array` already agree.
-///
-/// Those eight are the whole of SQLite's domain, so every one is listed and the
-/// `CASE` needs no `ELSE`. A missing `ELSE` yields NULL, which is also the
-/// right answer for a SQL NULL argument, since `json_type(NULL)` is NULL in
-/// SQLite and `json_typeof(NULL)` is NULL in PostgreSQL. Listing the three
-/// agreeing names rather than falling through to an `ELSE` keeps the argument
-/// evaluated once: a `CASE` with an operand cannot name that operand again.
+/// Those eight names are the whole of SQLite's domain, so all are listed and
+/// the `CASE` needs no `ELSE`. The missing `ELSE` yields NULL, which is also
+/// the right answer for a NULL argument. Falling through to an `ELSE` instead
+/// would have to name the argument twice, since a `CASE` with an operand
+/// cannot refer to it again.
 fn postgres_json_type_name(sqlite_type: Expr) -> Expr {
     const VOCABULARY: [(&str, &str); 8] = [
         ("text", "string"),

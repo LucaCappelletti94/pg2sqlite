@@ -100,11 +100,8 @@ impl Translator for ColumnDef {
             });
         }
 
-        // The bound is load-bearing, not decorative. SQLite promotes an
-        // overflowing integer to REAL with no error, measured as
-        // `9223372036854775807 + 1` answering 9.223372036854776e+18, so
-        // without this a value past the declared precision silently becomes
-        // the float this mapping exists to avoid.
+        // SQLite promotes an overflowing integer to REAL with no error, so
+        // without this bound an out-of-range value becomes a float.
         if let DataType::Numeric(info) | DataType::Decimal(info) = &self.data_type {
             let (precision, _) = numeric_precision_and_scale(info)?;
             translated_options.push(ColumnOptionDef {

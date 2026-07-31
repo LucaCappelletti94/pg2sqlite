@@ -68,9 +68,7 @@ const KEY_COLUMN: &str = "key";
 /// interleave once both `key` sequences restart at zero.
 const SIDE_COLUMN: &str = "pg2sqlite_side";
 
-/// Name for the derived table holding both halves. SQLite needs no alias here,
-/// but sqlparser renders one and a name nobody can collide with is cheaper than
-/// finding out.
+/// Alias for the derived table holding both halves.
 const HALVES_ALIAS: &str = "pg2sqlite_halves";
 
 /// True when the caller opted into the JSON array representation.
@@ -169,17 +167,12 @@ pub(crate) fn array_overlap(left: Expr, right: Expr) -> Expr {
 /// key, value FROM json_each(a) UNION ALL SELECT 1 AS side, key, value FROM
 /// json_each(b)))`.
 ///
-/// `side` is what keeps the two halves in order once their `key` sequences both
-/// restart at zero, and ordering inside the aggregate rather than in the
-/// subquery is what makes that order binding.
+/// `side` keeps the halves in order once both `key` sequences restart at zero,
+/// and ordering inside the aggregate rather than the subquery is what binds it.
 ///
-/// The same shape serves all three PostgreSQL spellings, since an operand that
-/// is not an array is wrapped in `json_array` by the caller and `json_each` of
-/// a one element array yields that one element.
-///
-/// A NULL operand expands to no rows, which is PostgreSQL's answer too: it
-/// treats a NULL array as empty here rather than propagating. Two NULLs would
-/// give an empty array where PostgreSQL gives NULL, so the caller guards that.
+/// A NULL operand expands to no rows, which is PostgreSQL's answer as well. Two
+/// NULLs give an empty array where PostgreSQL gives NULL, so the caller guards
+/// that case.
 pub(crate) fn array_concat(left: Expr, right: Expr) -> Expr {
     let half = |side: i64, array: Expr| {
         Box::new(SetExpr::Select(Box::new(make_simple_select(

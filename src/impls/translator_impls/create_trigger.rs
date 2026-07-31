@@ -309,12 +309,9 @@ impl Translator for CreateTrigger {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        // SQLite has no TRUNCATE, so there is no event to fire on. Checked
-        // before the FOR EACH clause below, and not folded into it, because
-        // PostgreSQL allows TRUNCATE triggers only FOR EACH STATEMENT, so that
-        // check would catch every valid one first and then advise rewriting it
-        // FOR EACH ROW, which PostgreSQL 16 answers with `TRUNCATE FOR EACH ROW
-        // triggers are not supported`.
+        // Checked before the FOR EACH clause because PostgreSQL allows
+        // TRUNCATE triggers only FOR EACH STATEMENT, so that check would catch
+        // every valid one first and advise a rewrite PostgreSQL rejects.
         if self.events.iter().any(|event| matches!(event, TriggerEvent::Truncate)) {
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                 "a TRUNCATE trigger has no SQLite equivalent, since SQLite has no TRUNCATE. \
@@ -324,16 +321,10 @@ impl Translator for CreateTrigger {
             ));
         }
 
-        // SQLite has only row triggers, so a statement trigger has no form to
-        // emit: `FOR EACH STATEMENT` is `near "STATEMENT": syntax error`, and a
-        // row trigger carrying the same body would run once per affected row.
-        //
-        // The omitted clause is the same case. PostgreSQL defaults to
-        // STATEMENT, measured on PostgreSQL 16, while SQLite defaults to ROW,
-        // so passing it through silently reverses how often the body runs.
-        //
-        // Checked before the maintenance-trigger split below, so neither the
-        // split halves nor the recursion can reach the emitter unexamined.
+        // SQLite has only row triggers. The omitted clause is the same case:
+        // PostgreSQL defaults to STATEMENT and SQLite to ROW, so passing it
+        // through reverses how often the body runs. Checked before the
+        // maintenance-trigger split, which recurses through here.
         match self.trigger_object {
             Some(
                 TriggerObjectKind::For(TriggerObject::Row)
@@ -361,13 +352,9 @@ impl Translator for CreateTrigger {
             }
         }
 
-        // A transition table hands the body every row the statement touched.
-        // SQLite has no such thing, and no way to build one: a row trigger sees
-        // only NEW and OLD, one row at a time, and cannot tell whether the
-        // statement is still running. Measured on PostgreSQL 16, the clause is
-        // meaningful even on a FOR EACH ROW trigger, which fires per row while
-        // the transition table still holds every row, so R27's rejection of
-        // statement triggers does not already cover this.
+        // A transition table hands the body every row the statement touched,
+        // which a SQLite row trigger cannot see. PostgreSQL allows the clause
+        // on a FOR EACH ROW trigger too, so R27's rejection does not cover it.
         if let Some(referencing) = self.referencing.first() {
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                 "the transition table `{referencing}` has no SQLite equivalent, since a SQLite \
@@ -767,12 +754,10 @@ mod tests {
         }
     }
 
-    /// Every TRUNCATE trigger PostgreSQL accepts is a statement trigger, so R27
-    /// already refuses all of them, but with advice that is wrong here: it says
-    /// to rewrite the trigger `FOR EACH ROW`, which PostgreSQL 16 answers with
-    /// `TRUNCATE FOR EACH ROW triggers are not supported`. The event is
-    /// therefore checked before the `FOR EACH` clause, and the message has to
-    /// name TRUNCATE for any spelling.
+    /// Every TRUNCATE trigger PostgreSQL accepts is a statement trigger, which
+    /// R27 already refuses, but with advice that is wrong here: rewriting it
+    /// `FOR EACH ROW` is itself refused by PostgreSQL. So the message has to
+    /// name TRUNCATE for every spelling.
     ///
     /// The last case is not valid PostgreSQL and is included because sqlparser
     /// parses it, so it reaches the translator regardless.

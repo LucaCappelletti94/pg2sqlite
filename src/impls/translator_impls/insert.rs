@@ -439,11 +439,6 @@ fn wrap_vector_text_literals(insert: &mut Insert, schema: &ParserDB) {
 /// Rewrite every decimal literal targeting a `NUMERIC` column as the integer
 /// count of minor units the column now holds.
 ///
-/// Without this the emitted INSERT puts a REAL into an INTEGER column and
-/// STRICT refuses it, which is loud, but the same literal in a WHERE clause
-/// would be silent, so both sites scale through
-/// `shared_helpers::scale_decimal_literal`.
-///
 /// Bails out on the same unresolvable shapes as its vector and UUID siblings,
 /// leaving the insert verbatim.
 fn scale_numeric_literals(

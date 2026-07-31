@@ -273,18 +273,12 @@ fn can_be_null(expr: &Expr) -> bool {
 
 /// Translate a cast to boolean, which SQLite has no type for.
 ///
-/// Mapping the target to INTEGER, which is right for a column declaration, is
-/// wrong for the cast itself: `CAST('true' AS INTEGER)` is 0, because the
-/// string does not begin with a digit, so every spelling PostgreSQL accepts
-/// became false.
+/// `CAST('true' AS INTEGER)` is 0, so mapping the target to INTEGER, right for
+/// a column declaration, turns every spelling PostgreSQL accepts into false.
 ///
-/// The accepted set was measured on PostgreSQL 16. It is every unambiguous
-/// prefix of `true`, `false`, `yes`, `no`, `on`, and `off`, plus `1` and `0`,
-/// case insensitive and whitespace trimmed. `of` is in it and `o` is not, since
-/// `o` could be either `on` or `off`.
-///
-/// A literal is decided here rather than at run time, so an unreadable one is
-/// refused during translation exactly as PostgreSQL refuses it.
+/// The accepted set is every unambiguous prefix of `true`, `false`, `yes`,
+/// `no`, `on`, and `off`, plus `1` and `0`, case insensitive and trimmed. `of`
+/// is in it, `o` is not, since it could be either `on` or `off`.
 fn translate_boolean_cast(
     expr: &Expr,
     schema: &ParserDB,
@@ -986,16 +980,13 @@ fn string_literal_value(value: &str) -> Expr {
 
 /// Translate PostgreSQL `expr AT TIME ZONE '...'` to a SQLite `datetime` call.
 ///
-/// The two PostgreSQL operations share this syntax and shift opposite ways. A
-/// naive timestamp is read as local to the zone and moves toward UTC, an aware
-/// one is already an instant and moves away from it. Measured on PostgreSQL 16
-/// over `2023-01-15 12:00:00`: the naive form with `'+05:30'` answers 17:30 and
-/// the aware form answers 06:30.
+/// The two PostgreSQL operations share this syntax and shift opposite ways: a
+/// naive timestamp moves toward UTC, an aware one away from it. Over
+/// `2023-01-15 12:00:00` with `'+05:30'` PostgreSQL answers 17:30 and 06:30.
 ///
-/// The plus on the naive side is not a slip. PostgreSQL reads a bare `'+05:30'`
-/// STRING as a POSIX zone specification, whose sign is the opposite of the ISO
-/// one, so that zone is UTC-5:30. `AT TIME ZONE INTERVAL '05:30'` and a named
-/// zone both go the other way, and neither spelling is accepted here.
+/// The naive side ADDS because PostgreSQL reads a bare `'+05:30'` string as a
+/// POSIX zone, whose sign is the opposite of the ISO one. `AT TIME ZONE
+/// INTERVAL '05:30'` goes the other way and is not accepted here.
 fn translate_at_time_zone(
     timestamp: &Expr,
     time_zone: &Expr,
@@ -1312,28 +1303,20 @@ fn translate_quantified_operation(
 ///
 /// Addition and subtraction need one scale, so the lesser side is multiplied
 /// up. Multiplication needs none: the integer product is already at the sum of
-/// the scales, which is exactly what PostgreSQL answers, measured as
-/// `1.50 * 2.2500 = 3.375000`. It can still overflow, so the result precision
-/// is checked here, where both operand types are known.
+/// the scales, matching `1.50 * 2.2500 = 3.375000`. It can still overflow, so
+/// the result precision is checked where both operand types are known.
 ///
-/// Division is refused. PostgreSQL picks a result scale by a rule that depends
-/// on both operand precisions, `NUMERIC(10,2) / integer` answering at scale 20,
-/// and SQLite's integer division truncates toward zero on top of that, so any
-/// scale chosen here would disagree with PostgreSQL by a different amount for
-/// every pair of operands.
+/// Division is refused: PostgreSQL picks a result scale from both operand
+/// precisions, answering `NUMERIC(10,2) / integer` at scale 20, so any scale
+/// chosen here would disagree by a different amount for every operand pair.
 fn translate_numeric_arithmetic(
     left: &Expr,
     op: &BinaryOperator,
     right: &Expr,
+    (left_scale, right_scale): (u32, u32),
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<Expr>, crate::errors::Error> {
-    let (Some(left_scale), Some(right_scale)) =
-        (numeric_scale(left, schema), numeric_scale(right, schema))
-    else {
-        return Ok(None);
-    };
-
     let translated = |side: &Expr| side.translate(schema, options);
     let combined = match op {
         BinaryOperator::Plus | BinaryOperator::Minus => {
@@ -1390,18 +1373,35 @@ fn numeric_precision(expr: &Expr, schema: &ParserDB) -> Option<u64> {
     }
 }
 
-/// The literal `candidate` rewritten in the minor units of `partner`, when
-/// `partner` is a NUMERIC value and `candidate` is a decimal literal.
-fn scale_literal_against(
-    candidate: &Expr,
-    partner: &Expr,
-    schema: &ParserDB,
-) -> Result<Option<Expr>, crate::errors::Error> {
-    let Some(scale) = numeric_scale(partner, schema) else { return Ok(None) };
-    if scale == 0 {
-        return Ok(None);
+/// Whether the NUMERIC scale rules could bear on this operation at all.
+///
+/// The rules only reach arithmetic and comparison, and only when a side could
+/// name a column or be a decimal literal. Checking that first keeps a schema
+/// lookup out of every `AND` in every predicate, which is most of the binary
+/// operators in a real query.
+fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bool {
+    if !matches!(
+        op,
+        BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide
+            | BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+    ) {
+        return false;
     }
-    scale_decimal_literal(candidate, scale)
+    let addressable = |expr: &Expr| {
+        matches!(
+            expr,
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Nested(_) | Expr::Cast { .. }
+        )
+    };
+    addressable(left) || addressable(right)
 }
 
 /// Translate a binary operation expression.
@@ -1413,25 +1413,41 @@ fn translate_binary_op(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
-    // A NUMERIC column holds minor units, so a decimal literal beside one has
-    // to be moved onto the same scale. Missing this is silent: `price = 19.99`
-    // compares 1999 against 19.99 and returns nothing.
-    if let Some(scaled) = scale_literal_against(right, left, schema)? {
-        return Ok(Expr::BinaryOp {
-            left: Box::new(left.translate(schema, options)?),
-            op: op.clone(),
-            right: Box::new(scaled),
-        });
-    }
-    if let Some(scaled) = scale_literal_against(left, right, schema)? {
-        return Ok(Expr::BinaryOp {
-            left: Box::new(scaled),
-            op: op.clone(),
-            right: Box::new(right.translate(schema, options)?),
-        });
-    }
-    if let Some(combined) = translate_numeric_arithmetic(left, op, right, schema, options)? {
-        return Ok(combined);
+    if numeric_rules_may_apply(op, left, right) {
+        let scales = (numeric_scale(left, schema), numeric_scale(right, schema));
+        // A NUMERIC column holds minor units, so a decimal literal beside one
+        // has to be moved onto the same scale. Missing this is silent:
+        // `price = 19.99` compares 1999 against 19.99 and returns nothing.
+        if let Some(scale) = scales.0.filter(|scale| *scale > 0)
+            && let Some(scaled) = scale_decimal_literal(right, scale)?
+        {
+            return Ok(Expr::BinaryOp {
+                left: Box::new(left.translate(schema, options)?),
+                op: op.clone(),
+                right: Box::new(scaled),
+            });
+        }
+        if let Some(scale) = scales.1.filter(|scale| *scale > 0)
+            && let Some(scaled) = scale_decimal_literal(left, scale)?
+        {
+            return Ok(Expr::BinaryOp {
+                left: Box::new(scaled),
+                op: op.clone(),
+                right: Box::new(right.translate(schema, options)?),
+            });
+        }
+        if let (Some(left_scale), Some(right_scale)) = scales
+            && let Some(combined) = translate_numeric_arithmetic(
+                left,
+                op,
+                right,
+                (left_scale, right_scale),
+                schema,
+                options,
+            )?
+        {
+            return Ok(combined);
+        }
     }
 
     // Check for full-text search: to_tsvector(...) @@ to_tsquery(...)

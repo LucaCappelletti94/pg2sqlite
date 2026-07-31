@@ -68,14 +68,10 @@ pub(crate) fn uuid_columns_of_table(
 /// The 32 hex digits of a PostgreSQL UUID literal, or `None` when the text is
 /// not one.
 ///
-/// PostgreSQL's grammar, measured on PostgreSQL 16 rather than read off the
-/// documentation: optional balanced braces around the whole thing, upper or
-/// lower case digits, and hyphens allowed only after a group of four digits,
-/// any number of them or none at all. So
-/// `550e-8400-e29b-41d4-a716-4466-5544-0000` is accepted and
-/// `550-e8400e29b41d4a716446655440000` is not, since its first hyphen falls
-/// after three digits. `urn:uuid:...` is refused too, which is worth saying
-/// because it is a common UUID spelling everywhere else.
+/// PostgreSQL's grammar: optional balanced braces, either case, and hyphens
+/// only after a group of four digits. `550e-8400-e29b-41d4-a716-4466-5544-0000`
+/// is accepted, `550-e8400e29b41d4a716446655440000` and `urn:uuid:...` are
+/// not.
 #[must_use]
 fn canonical_uuid_hex(text: &str) -> Option<String> {
     let inner = match (text.strip_prefix('{'), text.strip_suffix('}')) {

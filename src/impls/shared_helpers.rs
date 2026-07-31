@@ -143,127 +143,91 @@ pub(crate) fn nulls_not_distinct_not_supported_error() -> Error {
     )
 }
 
-/// True when every column named by `expr` is declared with a type `predicate`
-/// accepts, and there is at least one.
+/// The name of the column `expr` refers to.
 ///
-/// A `json`, `jsonb`, or array column all become TEXT in SQLite and are
-/// otherwise indistinguishable from a string column, so the declared type is
-/// the only thing that tells them apart. The qualifier of a compound name is
-/// ignored, since it may be an alias rather than a table, which is why the
-/// answer has to be unanimous across every column of that name in the schema.
+/// The qualifier of a compound name is dropped, since it may be an alias rather
+/// than a table.
+fn referenced_column_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.as_str()),
+        Expr::CompoundIdentifier(parts) => Some(parts.last()?.value.as_str()),
+        Expr::Nested(inner) => referenced_column_name(inner),
+        _ => None,
+    }
+}
+
+/// Fold over every column in the schema named by `expr`, stopping as soon as
+/// `read` returns `None`.
+///
+/// The answer has to be unanimous, since the qualifier is dropped, and the
+/// early stop is what keeps this off the hot path: a first column that already
+/// settles the question ends the walk instead of visiting every table.
 ///
 /// The type comes from the parsed DDL rather than through
-/// `ColumnLike::data_type`, which normalises and panics on an array:
+/// `ColumnLike::data_type`, which normalises and panics on an array with
 /// `Normalization for SQLParser data type Array(...) is not yet implemented`.
+fn unanimous_declared<T: PartialEq>(
+    expr: &Expr,
+    schema: &ParserDB,
+    read: impl Fn(&DataType) -> Option<T>,
+) -> Option<T> {
+    let column_name = referenced_column_name(expr)?;
+    let mut answer: Option<T> = None;
+    for table in schema.tables() {
+        let Ok(mut columns) = table.columns(schema) else { continue };
+        let Some(column) = columns.find(|c| c.column_name().eq_ignore_ascii_case(column_name))
+        else {
+            continue;
+        };
+        let read = read(&column.attribute().data_type)?;
+        match &answer {
+            Some(previous) if *previous != read => return None,
+            Some(_) => {}
+            None => answer = Some(read),
+        }
+    }
+    answer
+}
+
+/// True when the column `expr` names is declared with a type `predicate`
+/// accepts.
 pub(crate) fn every_declared_type_matches(
     expr: &Expr,
     schema: &ParserDB,
     predicate: impl Fn(&str) -> bool,
 ) -> bool {
-    let column_name = match expr {
-        Expr::Identifier(ident) => ident.value.as_str(),
-        Expr::CompoundIdentifier(parts) => {
-            match parts.last() {
-                Some(ident) => ident.value.as_str(),
-                None => return false,
-            }
-        }
-        Expr::Nested(inner) => return every_declared_type_matches(inner, schema, predicate),
-        _ => return false,
-    };
-
-    let declared = schema.tables().filter_map(|table| {
-        table
-            .columns(schema)
-            .ok()?
-            .find(|column| column.column_name().eq_ignore_ascii_case(column_name))
-    });
-    let mut declared = declared.map(|column| column.attribute().data_type.to_string());
-    let Some(first) = declared.next() else { return false };
-    predicate(&first) && declared.all(|data_type| predicate(&data_type))
+    unanimous_declared(expr, schema, |data_type| predicate(&data_type.to_string()).then_some(()))
+        .is_some()
 }
 
-/// The scale of `expr` when it is a `NUMERIC` value held as minor units, or
-/// `None` when it is not one.
-///
-/// Every arithmetic rule in D1 needs this: an addition has to bring both sides
-/// to one scale, a comparison against a literal has to scale the literal, and a
-/// cast has to know how far to move the point. A column carries its scale in
-/// the declared type, and nothing else in SQLite does, since the emitted column
-/// is an ordinary INTEGER.
+/// The scale of `expr` when it is a `NUMERIC` value held as minor units.
 pub(crate) fn numeric_scale(expr: &Expr, schema: &ParserDB) -> Option<u32> {
-    match expr {
-        Expr::Nested(inner) => numeric_scale(inner, schema),
-        Expr::Cast { data_type: DataType::Numeric(info) | DataType::Decimal(info), .. } => {
-            crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)
-                .ok()
-                .map(|(_, scale)| scale)
-        }
-        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
-            let column_name = match expr {
-                Expr::Identifier(ident) => ident.value.as_str(),
-                Expr::CompoundIdentifier(parts) => parts.last()?.value.as_str(),
-                _ => return None,
-            };
-            let mut scales = schema.tables().filter_map(|table| {
-                let column = table
-                    .columns(schema)
-                    .ok()?
-                    .find(|column| column.column_name().eq_ignore_ascii_case(column_name))?;
-                match &column.attribute().data_type {
-                    DataType::Numeric(info) | DataType::Decimal(info) => {
-                        crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)
-                            .ok()
-                            .map(|(_, scale)| scale)
-                    }
-                    _ => None,
-                }
-            });
-            // Two columns of one name at different scales cannot both be right,
-            // so the answer has to be unanimous, as it does for every other
-            // declared-type question here.
-            let first = scales.next()?;
-            scales.all(|scale| scale == first).then_some(first)
-        }
-        _ => None,
-    }
+    numeric_precision_and_scale_of(expr, schema).map(|(_, scale)| scale)
 }
 
-/// The declared precision of a NUMERIC column named by `expr`, the companion of
-/// [`numeric_scale`] that D1's multiplication rule needs.
+/// The declared precision of `expr`, which D1's multiplication rule needs.
 pub(crate) fn declared_numeric_precision(expr: &Expr, schema: &ParserDB) -> Option<u64> {
-    let column_name = match expr {
-        Expr::Identifier(ident) => ident.value.as_str(),
-        Expr::CompoundIdentifier(parts) => parts.last()?.value.as_str(),
-        Expr::Nested(inner) => return declared_numeric_precision(inner, schema),
-        _ => return None,
+    numeric_precision_and_scale_of(expr, schema).map(|(precision, _)| precision)
+}
+
+fn numeric_precision_and_scale_of(expr: &Expr, schema: &ParserDB) -> Option<(u64, u32)> {
+    let read = |data_type: &DataType| {
+        let (DataType::Numeric(info) | DataType::Decimal(info)) = data_type else { return None };
+        crate::impls::translator_impls::data_type::numeric_precision_and_scale(info).ok()
     };
-    let mut precisions = schema.tables().filter_map(|table| {
-        let column = table
-            .columns(schema)
-            .ok()?
-            .find(|column| column.column_name().eq_ignore_ascii_case(column_name))?;
-        match &column.attribute().data_type {
-            DataType::Numeric(info) | DataType::Decimal(info) => {
-                crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)
-                    .ok()
-                    .map(|(precision, _)| precision)
-            }
-            _ => None,
-        }
-    });
-    let first = precisions.next()?;
-    precisions.all(|precision| precision == first).then_some(first)
+    match expr {
+        Expr::Nested(inner) => numeric_precision_and_scale_of(inner, schema),
+        Expr::Cast { data_type, .. } => read(data_type),
+        _ => unanimous_declared(expr, schema, read),
+    }
 }
 
 /// Move a value held as minor units from `from` scale to `to` scale.
 ///
-/// Growing the scale multiplies, which is exact. Shrinking it divides, and
-/// PostgreSQL rounds half away from zero there while SQLite's integer division
-/// truncates toward it, so the emitted form adds half a unit of the target
-/// scale before dividing and takes the sign from the value. Measured on
-/// PostgreSQL 16: `1.005::numeric(10,2)` is 1.01 and `(-1.005)::numeric(10,2)`
-/// is -1.01, so the rounding is away from zero on both sides.
+/// Growing the scale multiplies. Shrinking it divides, and PostgreSQL rounds
+/// half away from zero where SQLite's integer division truncates toward it, so
+/// half a unit is added with the value's sign first. `1.005::numeric(10,2)` is
+/// 1.01 and `(-1.005)::numeric(10,2)` is -1.01.
 pub(crate) fn rescale_minor_units(value: Expr, from: u32, to: u32) -> Expr {
     if from == to {
         return value;
@@ -304,11 +268,9 @@ pub(crate) fn rescale_minor_units(value: Expr, from: u32, to: u32) -> Expr {
 
 /// Rewrite a decimal literal as the integer count of minor units at `scale`.
 ///
-/// Exact by construction: the digits are moved, never multiplied as a float, so
-/// `19.99` at scale 2 becomes 1999 rather than 1998.9999999999998. A literal
-/// finer than the column can hold is refused rather than rounded, since
-/// PostgreSQL would round it and an author who wrote more decimals than the
-/// column has almost certainly meant a different scale.
+/// The digits are moved rather than multiplied as a float, so `19.99` at scale
+/// 2 is 1999 and not 1998.9999999999998. A literal finer than the column is
+/// refused rather than rounded.
 pub(crate) fn scale_decimal_literal(expr: &Expr, scale: u32) -> Result<Option<Expr>, Error> {
     let (negated, digits) = match expr {
         Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => (false, digits),
