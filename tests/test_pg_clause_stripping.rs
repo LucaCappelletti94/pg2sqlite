@@ -59,69 +59,40 @@ fn for_share_stripped_from_select() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `NULLS FIRST` is not valid syntax in SQLite < 3.30 and should be stripped.
-/// The translated query must still execute and return rows in the correct
-/// order.
+/// `NULLS FIRST` and `NULLS LAST` are emitted rather than stripped: the two
+/// databases default oppositely, so dropping the clause inverts the order. The
+/// values are asserted in `tests/test_null_ordering.rs`, which covers the
+/// implicit defaults as well.
 #[test]
-fn nulls_first_stripped_from_order_by() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = "
-        CREATE TABLE nulls_test (id INTEGER PRIMARY KEY, val INTEGER);
-        SELECT val FROM nulls_test ORDER BY val ASC NULLS FIRST;
-    ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+fn an_explicit_null_ordering_reaches_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+    for (ordering, expected_first) in
+        [("val ASC NULLS FIRST", None), ("val DESC NULLS LAST", Some(10))]
+    {
+        let sql = format!(
+            "CREATE TABLE nulls_test (id INTEGER PRIMARY KEY, val INTEGER);
+             SELECT val FROM nulls_test ORDER BY {ordering};"
+        );
+        let translated = Pg2Sqlite::default().sql(&sql)?.translate(&Pg2SqliteOptions::default())?;
+        let select_sql = translated
+            .iter()
+            .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
+            .unwrap()
+            .to_string();
 
-    let select_sql = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .unwrap()
-        .to_string();
+        let mut conn = SqliteConnection::establish(":memory:")?;
+        for stmt in &translated {
+            diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
+        }
+        diesel::sql_query("INSERT INTO nulls_test VALUES (1, 10), (2, 5), (3, NULL)")
+            .execute(&mut conn)?;
 
-    let upper = select_sql.to_uppercase();
-    assert!(
-        !upper.contains("NULLS FIRST") && !upper.contains("NULLS LAST"),
-        "NULLS FIRST must be stripped from ORDER BY, got: {select_sql}"
-    );
-
-    let mut conn = SqliteConnection::establish(":memory:")?;
-    for stmt in &translated {
-        diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
-    }
-    diesel::sql_query("INSERT INTO nulls_test VALUES (1, 10), (2, 5)").execute(&mut conn)?;
-
-    #[derive(diesel::QueryableByName)]
-    struct Row {
-        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
-        val: Option<i32>,
-    }
-    let rows = diesel::sql_query(select_sql).load::<Row>(&mut conn)?;
-    assert_eq!(rows[0].val, Some(5), "Expected ascending sort; first row should be 5");
-    Ok(())
-}
-
-/// `NULLS LAST` must also be stripped.
-#[test]
-fn nulls_last_stripped_from_order_by() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = "
-        CREATE TABLE nulls_test2 (id INTEGER PRIMARY KEY, val INTEGER);
-        SELECT val FROM nulls_test2 ORDER BY val DESC NULLS LAST;
-    ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
-
-    let select_sql = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .unwrap()
-        .to_string();
-
-    let upper = select_sql.to_uppercase();
-    assert!(
-        !upper.contains("NULLS FIRST") && !upper.contains("NULLS LAST"),
-        "NULLS LAST must be stripped from ORDER BY, got: {select_sql}"
-    );
-
-    let mut conn = SqliteConnection::establish(":memory:")?;
-    for stmt in &translated {
-        diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
+        #[derive(diesel::QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
+            val: Option<i32>,
+        }
+        let rows = diesel::sql_query(&select_sql).load::<Row>(&mut conn)?;
+        assert_eq!(rows[0].val, expected_first, "{ordering} gave: {select_sql}");
     }
     Ok(())
 }

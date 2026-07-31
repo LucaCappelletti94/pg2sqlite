@@ -4,4 +4,4 @@ assertion_line: 406
 expression: translated_sql
 ---
 CREATE TABLE items (id INTEGER PRIMARY KEY NOT NULL, embedding BLOB) STRICT
-SELECT * FROM items WHERE vec_distance_cosine(embedding, vec_f32('[1,2,3]')) < 0.5 ORDER BY vec_distance_L2(embedding, vec_f32('[1,2,3]')) LIMIT 5
+SELECT * FROM items WHERE vec_distance_cosine(embedding, vec_f32('[1,2,3]')) < 0.5 ORDER BY vec_distance_L2(embedding, vec_f32('[1,2,3]')) NULLS LAST LIMIT 5

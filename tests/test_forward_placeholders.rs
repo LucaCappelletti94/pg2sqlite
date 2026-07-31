@@ -101,8 +101,8 @@ fn update_and_delete_and_insert_parameters() {
 
 #[test]
 fn statement_without_parameters_is_unchanged() {
-    let out = forward("SELECT a FROM t WHERE a > 1 ORDER BY a");
-    assert_eq!(out, "SELECT a FROM t WHERE a > 1 ORDER BY a");
+    let out = forward("SELECT a FROM t WHERE a > 1 ORDER BY a NULLS LAST");
+    assert_eq!(out, "SELECT a FROM t WHERE a > 1 ORDER BY a NULLS LAST");
     reparse_sqlite(&out);
 }
 

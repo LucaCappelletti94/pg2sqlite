@@ -676,15 +676,23 @@ pub(crate) fn translate_order_by_expr<D: TranslationDirection>(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<OrderByExpr, Error> {
+    let options_out = if D::IS_FORWARD {
+        // The two databases default oppositely, PostgreSQL ASC NULLS LAST and
+        // DESC NULLS FIRST against SQLite's reverse, so an absent clause is
+        // filled in rather than left out. An absent direction is ASC.
+        let descending =
+            matches!(order_by_expr.options.sort, Some(sqlparser::ast::OrderBySort::Desc));
+        sqlparser::ast::OrderByOptions {
+            sort: order_by_expr.options.sort.clone(),
+            nulls_first: Some(order_by_expr.options.nulls_first.unwrap_or(descending)),
+        }
+    } else {
+        order_by_expr.options.clone()
+    };
+
     Ok(OrderByExpr {
         expr: D::translate_expr(&order_by_expr.expr, schema, options)?,
-        options: sqlparser::ast::OrderByOptions {
-            sort: order_by_expr.options.sort.clone(),
-            // Strip NULLS FIRST/LAST in forward direction: SQLite < 3.30 rejects
-            // this syntax and the semantics differ from PostgreSQL defaults anyway.
-            // Preserve it in reverse translation to maintain PostgreSQL round-trip.
-            nulls_first: if D::IS_FORWARD { None } else { order_by_expr.options.nulls_first },
-        },
+        options: options_out,
         with_fill: order_by_expr
             .with_fill
             .as_ref()
