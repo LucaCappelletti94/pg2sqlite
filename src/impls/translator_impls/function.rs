@@ -111,6 +111,13 @@ enum FunctionTranslation {
     /// An array function whose body is rewritten over `json_each` /
     /// `json_group_array`. See [`super::array`].
     Array(ArrayFunction),
+    /// `char_length`/`character_length`, which PostgreSQL defines over text
+    /// alone where SQLite's `length` also accepts a blob and counts bytes.
+    CharLength {
+        /// The spelling as written, so the error names the function the query
+        /// used.
+        label: &'static str,
+    },
     /// `quote_literal`/`quote_nullable`, which agree on everything but NULL.
     Quote {
         /// True for `quote_nullable`, which answers the four characters `NULL`
@@ -147,11 +154,12 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     // quote_literal and quote_nullable are NOT renames: they differ on NULL,
     // and both quote a number where SQLite's quote does not. See
     // `FunctionTranslation::Quote`.
+    // char_length and character_length are NOT renames: PostgreSQL defines them
+    // over text alone, while SQLite's length accepts a blob and counts its
+    // bytes. See `FunctionTranslation::CharLength`.
     ("string_agg", "group_concat"),
     ("strpos", "INSTR"),
     ("chr", "char"),
-    ("char_length", "length"),
-    ("character_length", "length"),
     ("json_object_agg", "json_group_object"),
     ("jsonb_object_agg", "json_group_object"),
     ("json_build_array", "json_array"),
@@ -463,6 +471,9 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // char_length / character_length: text only in PostgreSQL.
+        "char_length" => FunctionTranslation::CharLength { label: "char_length" },
+        "character_length" => FunctionTranslation::CharLength { label: "character_length" },
         // quote_literal / quote_nullable: they differ only on NULL.
         "quote_literal" => FunctionTranslation::Quote { nullable: false },
         "quote_nullable" => FunctionTranslation::Quote { nullable: true },
@@ -915,6 +926,21 @@ fn replace_first_argument(args: &mut FunctionArguments, replacement: Expr) {
     {
         *first = replacement;
     }
+}
+
+/// True when `expr` names a column whose declared type is not a text type.
+///
+/// False for anything with no declared type to consult, a literal or a computed
+/// expression, since those are not the case this guards and refusing them would
+/// refuse valid PostgreSQL.
+fn resolves_to_non_textual_column(expr: &Expr, schema: &ParserDB) -> bool {
+    const TEXTUAL: [&str; 7] =
+        ["text", "varchar", "character varying", "char", "bpchar", "citext", "name"];
+
+    every_declared_type_matches(expr, schema, |declared| {
+        let lowered = declared.to_ascii_lowercase();
+        !TEXTUAL.iter().any(|textual| lowered.starts_with(textual))
+    })
 }
 
 /// True when `expr` carries a JSON document, either by its shape or by the
@@ -1910,6 +1936,28 @@ impl Translator for Function {
                     greatest,
                     if greatest { "greatest" } else { "least" },
                 )
+            }
+            FunctionTranslation::CharLength { label } => {
+                let exprs = extract_exactly(&func.args, 1, label)?;
+                let argument = exprs[0];
+                // PostgreSQL has no char_length over anything but text:
+                // `char_length(u)` on a uuid column answers `function
+                // char_length(uuid) does not exist`. SQLite's length takes the
+                // column anyway and counts a blob's bytes, so a UUID stored as
+                // one answered 16 for a query PostgreSQL never runs.
+                if resolves_to_non_textual_column(argument, schema) {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "{label}({argument}) has no PostgreSQL meaning: {label} is defined over \
+                         text, and this column is not. PostgreSQL answers `function {label}(...) \
+                         does not exist`. Use length() for a binary column, or cast the operand \
+                         to text."
+                    )));
+                }
+                Ok(simple_function_expr(
+                    "length",
+                    vec![argument.translate(schema, options)?],
+                    translate_window_type(func.over.as_ref(), schema, options)?,
+                ))
             }
             FunctionTranslation::Quote { nullable } => {
                 let label = if nullable { "quote_nullable" } else { "quote_literal" };
