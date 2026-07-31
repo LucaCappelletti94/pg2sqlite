@@ -953,12 +953,16 @@ struct ShiftedTimeRow {
     shifted: String,
 }
 
+/// `ts` is declared TIMESTAMP rather than TEXT because the two `AT TIME ZONE`
+/// directions are chosen by the operand's declared type, and a bare TEXT column
+/// says nothing. The expected values are the naive direction: PostgreSQL reads
+/// the string `'+02:00'` as a POSIX zone, so a naive operand gains the offset.
 #[test]
 fn test_at_time_zone_fixed_offset_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
         CREATE TABLE time_samples (
             id INTEGER PRIMARY KEY,
-            ts TEXT NOT NULL
+            ts TIMESTAMP NOT NULL
         );
         SELECT id, ts AT TIME ZONE '+02:00' AS shifted
         FROM time_samples

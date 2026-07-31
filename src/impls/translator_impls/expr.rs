@@ -20,12 +20,10 @@ use sqlparser::ast::{
     AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField, Expr, Function,
     FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, Interval,
     JsonKeyUniqueness, JsonPredicateType, ObjectName, ObjectNamePart, Query, Subscript, TableAlias,
-    TableAliasColumnDef, TableFactor, UnaryOperator, Value, ValueWithSpan,
+    TableAliasColumnDef, TableFactor, TimezoneInfo, UnaryOperator, Value, ValueWithSpan,
     helpers::attached_token::AttachedToken,
 };
 
-#[cfg(all(test, feature = "std"))]
-use crate::impls::timezone::is_fixed_utc_offset;
 use crate::{
     impls::{
         datetime_helpers::{build_strftime_call, datetime_field_key, strftime_mapping_for_key},
@@ -35,7 +33,7 @@ use crate::{
         shared_helpers::{
             every_declared_type_matches, function_argument_exprs, translate_expr_recursive,
         },
-        timezone::normalize_timezone_modifier_for_sqlite,
+        timezone::{is_fixed_utc_offset, normalize_timezone_modifier_for_sqlite},
         translator_impls::{
             array::{
                 Quantifier, array_concat, array_overlap, is_json_array_representation,
@@ -857,8 +855,95 @@ fn normalize_at_time_zone_modifier(value: &str) -> Option<String> {
     normalize_timezone_modifier_for_sqlite(value)
 }
 
-/// Translate PostgreSQL `expr AT TIME ZONE '...'` to SQLite
-/// `datetime(expr, modifier)`.
+/// Whether a timestamp expression carries a zone, which decides which way
+/// `AT TIME ZONE` shifts it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimestampAwareness {
+    /// A bare `timestamp`, read as local to the named zone.
+    Naive,
+    /// A `timestamptz`, already an instant, converted into the named zone.
+    Aware,
+}
+
+/// Resolve whether `expr` is a `timestamptz`, from its own spelling or from the
+/// declared type of the column it names.
+fn timestamp_awareness(expr: &Expr, schema: &ParserDB) -> Option<TimestampAwareness> {
+    fn from_data_type(data_type: &DataType) -> Option<TimestampAwareness> {
+        match data_type {
+            DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone) => {
+                Some(TimestampAwareness::Aware)
+            }
+            DataType::Timestamp(_, _) | DataType::Date => Some(TimestampAwareness::Naive),
+            _ => None,
+        }
+    }
+
+    match expr {
+        Expr::Nested(inner) => timestamp_awareness(inner, schema),
+        Expr::TypedString(typed) => from_data_type(&typed.data_type),
+        Expr::Cast { data_type, .. } => from_data_type(data_type),
+        // PostgreSQL's now() and its aliases return timestamptz, and
+        // localtimestamp returns a bare timestamp.
+        Expr::Function(function) => {
+            let name =
+                crate::impls::object_name::last_ident(&function.name)?.value.to_ascii_lowercase();
+            match name.as_str() {
+                "now"
+                | "current_timestamp"
+                | "transaction_timestamp"
+                | "statement_timestamp"
+                | "clock_timestamp" => Some(TimestampAwareness::Aware),
+                "localtimestamp" => Some(TimestampAwareness::Naive),
+                _ => None,
+            }
+        }
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
+            let declared_contains = |needle: &'static str| {
+                every_declared_type_matches(expr, schema, |declared| {
+                    declared.to_ascii_lowercase().contains(needle)
+                })
+            };
+            if declared_contains("with time zone") || declared_contains("timestamptz") {
+                Some(TimestampAwareness::Aware)
+            } else if declared_contains("timestamp") || declared_contains("date") {
+                Some(TimestampAwareness::Naive)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A `+HH:MM` / `-HH:MM` offset with its sign flipped, or `None` when the
+/// modifier is not a fixed offset.
+fn negated_offset(modifier: &str) -> Option<String> {
+    is_fixed_utc_offset(modifier).then(|| {
+        let flipped = if modifier.starts_with('-') { '+' } else { '-' };
+        format!("{flipped}{}", &modifier[1..])
+    })
+}
+
+/// A single-quoted string as an expression.
+fn string_literal_value(value: &str) -> Expr {
+    Expr::Value(ValueWithSpan {
+        value: Value::SingleQuotedString(value.to_string()),
+        span: sqlparser::tokenizer::Span::empty(),
+    })
+}
+
+/// Translate PostgreSQL `expr AT TIME ZONE '...'` to a SQLite `datetime` call.
+///
+/// The two PostgreSQL operations share this syntax and shift opposite ways. A
+/// naive timestamp is read as local to the zone and moves toward UTC, an aware
+/// one is already an instant and moves away from it. Measured on PostgreSQL 16
+/// over `2023-01-15 12:00:00`: the naive form with `'+05:30'` answers 17:30 and
+/// the aware form answers 06:30.
+///
+/// The plus on the naive side is not a slip. PostgreSQL reads a bare `'+05:30'`
+/// STRING as a POSIX zone specification, whose sign is the opposite of the ISO
+/// one, so that zone is UTC-5:30. `AT TIME ZONE INTERVAL '05:30'` and a named
+/// zone both go the other way, and neither spelling is accepted here.
 fn translate_at_time_zone(
     timestamp: &Expr,
     time_zone: &Expr,
@@ -880,16 +965,36 @@ fn translate_at_time_zone(
         )
     })?;
 
-    Ok(function_call(
-        "datetime",
-        vec![
-            translated_timestamp,
-            Expr::Value(ValueWithSpan {
-                value: Value::SingleQuotedString(modifier),
-                span: sqlparser::tokenizer::Span::empty(),
-            }),
-        ],
-    ))
+    // UTC shifts nothing in PostgreSQL whichever side the operand is on, so its
+    // type need not be resolved. SQLite's own `utc` modifier is NOT that: it
+    // reads the value as local time, so emitting it made the answer depend on
+    // the offset of whatever machine ran the query.
+    if modifier == "utc" || modifier == "+00:00" || modifier == "-00:00" {
+        return Ok(function_call("datetime", vec![translated_timestamp]));
+    }
+
+    let Some(negated) = negated_offset(&modifier) else {
+        // `localtime`, where both databases mean the machine's own zone and
+        // neither agrees on which machine.
+        return Ok(function_call(
+            "datetime",
+            vec![translated_timestamp, string_literal_value(&modifier)],
+        ));
+    };
+
+    let awareness = timestamp_awareness(timestamp, schema).ok_or_else(|| {
+        crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "AT TIME ZONE shifts a bare timestamp and a timestamptz in opposite directions, and \
+             the type of `{timestamp}` cannot be resolved here, so either choice would be wrong \
+             half the time. Cast the operand, as `{timestamp}::timestamptz`, to say which it is."
+        ))
+    })?;
+
+    let applied = match awareness {
+        TimestampAwareness::Naive => modifier,
+        TimestampAwareness::Aware => negated,
+    };
+    Ok(function_call("datetime", vec![translated_timestamp, string_literal_value(&applied)]))
 }
 
 /// Check if a data type is a pgvector type (vector or halfvec).

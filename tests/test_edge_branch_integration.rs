@@ -642,7 +642,10 @@ fn forward_expr_translation_covers_remaining_fts_extract_and_timezone_paths() {
         "EXTRACT(EPOCH) should use strftime('%s', ...), got: {translated_epoch}"
     );
 
-    let at_tz_prefixed = parse_expr("created_at AT TIME ZONE 'utc+02:30'");
+    // `created_at` is declared TEXT here, so the cast is what says which of the
+    // two AT TIME ZONE directions applies. This exercises the `utc±HH:MM`
+    // prefix path, where a naive operand keeps the offset's sign.
+    let at_tz_prefixed = parse_expr("created_at::timestamp AT TIME ZONE 'utc+02:30'");
     let translated =
         at_tz_prefixed.translate(&schema, &options).expect("timezone should translate");
     assert!(translated.to_string().contains("'+02:30'"));
