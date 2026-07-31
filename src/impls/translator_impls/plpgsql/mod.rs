@@ -19,6 +19,7 @@ use alloc::{
 mod context;
 mod cte_builder;
 mod preprocessor;
+mod scanner;
 mod translator;
 
 pub use context::PlPgSqlContext;

@@ -16,10 +16,35 @@ use alloc::{
 };
 use core::fmt::Write;
 
-use super::context::{PlPgSqlContext, VariableBinding, VariableDeclaration};
+use super::{
+    context::{PlPgSqlContext, VariableBinding, VariableDeclaration},
+    scanner::Scanner,
+};
 
 /// Preprocessor for PL/pgSQL function bodies.
 pub struct PlPgSqlPreprocessor;
+
+/// Rewrite a dollar-quoted default as a single-quoted one, which is the only
+/// string literal SQLite has.
+///
+/// Anything else is returned unchanged, so a value that is already a literal or
+/// an expression passes through.
+fn single_quoted_default(default: &str) -> String {
+    let Some(body) = dollar_quoted_body(default) else { return default.to_string() };
+    format!("'{}'", body.replace('\'', "''"))
+}
+
+/// The text between a dollar-quoted string's delimiters, when `text` is exactly
+/// one such string.
+fn dollar_quoted_body(text: &str) -> Option<&str> {
+    let tag_end = text.strip_prefix('$')?.find('$')? + 1;
+    let delimiter = &text[..=tag_end];
+    if !delimiter[1..tag_end].chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let body = text.get(delimiter.len()..)?.strip_suffix(delimiter)?;
+    Some(body)
+}
 
 impl PlPgSqlPreprocessor {
     /// Preprocesses a PL/pgSQL function body string.
@@ -39,16 +64,13 @@ impl PlPgSqlPreprocessor {
     }
 
     fn split_declare_and_body(body: &str) -> (Option<String>, String) {
-        let body_upper = body.to_uppercase();
-
-        let declare_pos = body_upper.find("DECLARE");
-        let begin_pos = body_upper.find("BEGIN");
+        let scanner = Scanner::new(body);
+        let declare_pos = scanner.find_keyword("DECLARE", 0);
+        let begin_pos = scanner.find_keyword("BEGIN", 0);
 
         match (declare_pos, begin_pos) {
             (Some(d), Some(b)) if d < b => {
-                let declare_section = body[d + 7..b].trim().to_string();
-                let body_section = body[b..].to_string();
-                (Some(declare_section), body_section)
+                (Some(body[d + "DECLARE".len()..b].trim().to_string()), body[b..].to_string())
             }
             (_, Some(b)) => (None, body[b..].to_string()),
             _ => (None, body.to_string()),
@@ -56,7 +78,7 @@ impl PlPgSqlPreprocessor {
     }
 
     fn parse_declarations(declare_section: &str, context: &mut PlPgSqlContext) {
-        for decl in declare_section.split(';') {
+        for decl in Scanner::new(declare_section).split_in_code(b';') {
             let decl = decl.trim();
             if decl.is_empty() {
                 continue;
@@ -75,12 +97,13 @@ impl PlPgSqlPreprocessor {
         }
 
         let (name_type, default_value) = if let Some(pos) = decl.find(":=") {
-            (decl[..pos].trim(), Some(decl[pos + 2..].trim().to_string()))
-        } else if let Some(pos) = decl.to_uppercase().find(" DEFAULT ") {
-            (decl[..pos].trim(), Some(decl[pos + 9..].trim().to_string()))
+            (decl[..pos].trim(), Some(decl[pos + 2..].trim()))
+        } else if let Some(pos) = Scanner::new(decl).find_keyword("DEFAULT", 0) {
+            (decl[..pos].trim(), Some(decl[pos + "DEFAULT".len()..].trim()))
         } else {
             (decl, None)
         };
+        let default_value = default_value.map(single_quoted_default);
 
         let parts: Vec<&str> = name_type.split_whitespace().collect();
         if parts.len() >= 2 {
@@ -116,13 +139,13 @@ impl PlPgSqlPreprocessor {
         let mut result = String::new();
         let mut search_from = 0;
         let upper_body = body.to_uppercase();
+        let scanner = Scanner::new(body);
 
-        while let Some(raise_rel) = upper_body[search_from..].find("RAISE ") {
-            let raise_pos = search_from + raise_rel;
-
-            // Append everything up to and including the RAISE keyword
-            // (we'll decide below whether to keep or replace it)
-            let after_raise_start = raise_pos + 6; // byte offset after "RAISE "
+        while let Some(raise_pos) = scanner.find_keyword("RAISE", search_from) {
+            let after_raise_start = raise_pos + "RAISE ".len();
+            if after_raise_start > body.len() {
+                break;
+            }
 
             let rest_upper = &upper_body[after_raise_start..];
 
@@ -175,21 +198,7 @@ impl PlPgSqlPreprocessor {
 
     /// Returns the byte offset of the first unquoted semicolon in `s`.
     fn find_unquoted_semicolon(s: &str) -> Option<usize> {
-        let mut in_string = false;
-        let mut string_char = ' ';
-        for (i, c) in s.char_indices() {
-            if in_string {
-                if c == string_char {
-                    in_string = false;
-                }
-            } else if c == '\'' || c == '"' {
-                in_string = true;
-                string_char = c;
-            } else if c == ';' {
-                return Some(i);
-            }
-        }
-        None
+        Scanner::new(s).find_in_code(b';')
     }
 
     /// Extracts the first string literal from a comma-separated argument list.
