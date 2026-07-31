@@ -14,9 +14,9 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, CaseWhen, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, UnaryOperator,
-    Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    BinaryOperator, CaseWhen, CastKind, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
+    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart,
+    UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use super::{
@@ -111,6 +111,9 @@ enum FunctionTranslation {
     /// An array function whose body is rewritten over `json_each` /
     /// `json_group_array`. See [`super::array`].
     Array(ArrayFunction),
+    /// `string_agg`, whose separator argument SQLite's `group_concat` refuses
+    /// to take alongside DISTINCT.
+    StringAgg,
     /// `char_length`/`character_length`, which PostgreSQL defines over text
     /// alone where SQLite's `length` also accepts a blob and counts bytes.
     CharLength {
@@ -157,7 +160,8 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     // char_length and character_length are NOT renames: PostgreSQL defines them
     // over text alone, while SQLite's length accepts a blob and counts its
     // bytes. See `FunctionTranslation::CharLength`.
-    ("string_agg", "group_concat"),
+    // string_agg is NOT a rename: SQLite takes no separator argument beside
+    // DISTINCT. See `FunctionTranslation::StringAgg`.
     ("strpos", "INSTR"),
     ("chr", "char"),
     ("json_object_agg", "json_group_object"),
@@ -471,6 +475,8 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // string_agg: SQLite takes no separator argument beside DISTINCT.
+        "string_agg" => FunctionTranslation::StringAgg,
         // char_length / character_length: text only in PostgreSQL.
         "char_length" => FunctionTranslation::CharLength { label: "char_length" },
         "character_length" => FunctionTranslation::CharLength { label: "character_length" },
@@ -1936,6 +1942,50 @@ impl Translator for Function {
                     greatest,
                     if greatest { "greatest" } else { "least" },
                 )
+            }
+            FunctionTranslation::StringAgg => {
+                let mut args =
+                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                if let FunctionArguments::List(list) = &mut args
+                    && list.duplicate_treatment == Some(DuplicateTreatment::Distinct)
+                    && list.args.len() == 2
+                {
+                    // SQLite answers `DISTINCT aggregates must have exactly one
+                    // argument`, in every version, so the separator has to go.
+                    // The one group_concat then uses is a comma, which is the
+                    // separator nearly every caller passes, and any other has
+                    // no faithful form: replacing commas in the joined result
+                    // would corrupt any value that contains one.
+                    let comma_separated = matches!(
+                        list.args.last(),
+                        Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                            ValueWithSpan { value: Value::SingleQuotedString(separator), .. },
+                        )))) if separator == ","
+                    );
+                    if !comma_separated {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                            "string_agg(DISTINCT x, sep) has no SQLite form unless the separator \
+                             is a comma: group_concat takes no separator argument beside \
+                             DISTINCT, and it joins with a comma. Drop the DISTINCT and \
+                             de-duplicate in a subquery, or use a comma."
+                                .to_string(),
+                        ));
+                    }
+                    list.args.truncate(1);
+                }
+
+                Ok(Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("group_concat")]),
+                    parameters: translate_function_arguments::<Forward>(
+                        &func.parameters,
+                        schema,
+                        options,
+                    )?,
+                    args,
+                    over: translate_window_type(func.over.as_ref(), schema, options)?,
+                    filter: None,
+                    ..func
+                }))
             }
             FunctionTranslation::CharLength { label } => {
                 let exprs = extract_exactly(&func.args, 1, label)?;
