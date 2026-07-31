@@ -111,6 +111,12 @@ enum FunctionTranslation {
     /// An array function whose body is rewritten over `json_each` /
     /// `json_group_array`. See [`super::array`].
     Array(ArrayFunction),
+    /// `quote_literal`/`quote_nullable`, which agree on everything but NULL.
+    Quote {
+        /// True for `quote_nullable`, which answers the four characters `NULL`
+        /// where `quote_literal` answers SQL NULL.
+        nullable: bool,
+    },
     /// `json_typeof`/`jsonb_typeof`, whose answers are renamed onto SQLite's
     /// `json_type` vocabulary.
     JsonTypeof,
@@ -138,6 +144,9 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     // and would be quoted rather than nested. See `FunctionTranslation::JsonAgg`.
     // json_typeof and jsonb_typeof are NOT renames: json_type answers over a
     // different vocabulary. See `FunctionTranslation::JsonTypeof`.
+    // quote_literal and quote_nullable are NOT renames: they differ on NULL,
+    // and both quote a number where SQLite's quote does not. See
+    // `FunctionTranslation::Quote`.
     ("string_agg", "group_concat"),
     ("strpos", "INSTR"),
     ("chr", "char"),
@@ -149,8 +158,6 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     ("json_build_object", "json_object"),
     ("btrim", "trim"),
     ("jsonb_array_length", "json_array_length"),
-    ("quote_nullable", "quote"),
-    ("quote_literal", "quote"),
     ("version", "sqlite_version"),
     // to_json and to_jsonb are NOT renames: `json()` reads its argument as JSON
     // where they convert a value into JSON. See `FunctionTranslation::ToJson`.
@@ -456,6 +463,9 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // quote_literal / quote_nullable: they differ only on NULL.
+        "quote_literal" => FunctionTranslation::Quote { nullable: false },
+        "quote_nullable" => FunctionTranslation::Quote { nullable: true },
         // json_typeof / jsonb_typeof: json_type names the types differently.
         "json_typeof" | "jsonb_typeof" => FunctionTranslation::JsonTypeof,
         // json_agg / jsonb_agg: a JSON element needs parsing, not quoting.
@@ -1900,6 +1910,33 @@ impl Translator for Function {
                     greatest,
                     if greatest { "greatest" } else { "least" },
                 )
+            }
+            FunctionTranslation::Quote { nullable } => {
+                let label = if nullable { "quote_nullable" } else { "quote_literal" };
+                let exprs = extract_exactly(&func.args, 1, label)?;
+                // PostgreSQL casts to text before quoting, so `quote_literal(42)`
+                // is the four characters `'42'`. SQLite's `quote` renders a
+                // number as a bare numeric literal instead, which is different
+                // SQL from a function whose whole purpose is building SQL.
+                let quoted = simple_function_expr(
+                    "quote",
+                    vec![Expr::Cast {
+                        expr: Box::new(exprs[0].translate(schema, options)?),
+                        data_type: DataType::Text,
+                        format: None,
+                        kind: CastKind::Cast,
+                    }],
+                    None,
+                );
+                if nullable {
+                    return Ok(quoted);
+                }
+                // `quote` answers the bare word NULL for a NULL argument, which
+                // is what quote_nullable wants and quote_literal does not. Any
+                // other argument comes back wrapped in apostrophes, so the
+                // string `NULL` quotes to a six character `'NULL'` and this
+                // comparison cannot mistake it for the absent value.
+                Ok(simple_function_expr("NULLIF", vec![quoted, string_literal("NULL")], None))
             }
             FunctionTranslation::JsonTypeof => {
                 let exprs = extract_exactly(&func.args, 1, "json_typeof")?;
