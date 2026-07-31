@@ -138,11 +138,17 @@ mod tests {
             translate_limit_clause::<Reverse>(Some(&limit_offset), &schema, &options).unwrap();
         assert!(matches!(translated, Some(LimitClause::LimitOffset { .. })));
 
+        // The comma form has no PostgreSQL spelling, so it becomes LIMIT
+        // OFFSET with the operands kept in place: offset 1, limit 10.
         let offset_comma =
             LimitClause::OffsetCommaLimit { offset: parse_expr("1"), limit: parse_expr("10") };
         let translated =
             translate_limit_clause::<Reverse>(Some(&offset_comma), &schema, &options).unwrap();
-        assert!(matches!(translated, Some(LimitClause::OffsetCommaLimit { .. })));
+        let Some(LimitClause::LimitOffset { limit, offset, .. }) = translated else {
+            panic!("expected the explicit form, got: {translated:?}");
+        };
+        assert_eq!(limit.map(|e| e.to_string()), Some("10".to_string()));
+        assert_eq!(offset.map(|o| o.value.to_string()), Some("1".to_string()));
     }
 
     #[test]

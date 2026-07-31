@@ -1017,6 +1017,18 @@ pub(crate) fn translate_limit_clause<D: TranslationDirection>(
                             .collect::<Result<Vec<_>, _>>()?,
                     }
                 }
+                // PostgreSQL has no comma form. The spelling puts the offset
+                // first, so `LIMIT 5, 10` is offset 5 and limit 10.
+                LimitClause::OffsetCommaLimit { offset, limit } if !D::IS_FORWARD => {
+                    LimitClause::LimitOffset {
+                        limit: Some(D::translate_expr(limit, schema, options)?),
+                        offset: Some(sqlparser::ast::Offset {
+                            value: D::translate_expr(offset, schema, options)?,
+                            rows: sqlparser::ast::OffsetRows::None,
+                        }),
+                        limit_by: Vec::new(),
+                    }
+                }
                 LimitClause::OffsetCommaLimit { offset, limit } => {
                     LimitClause::OffsetCommaLimit {
                         offset: D::translate_expr(offset, schema, options)?,
