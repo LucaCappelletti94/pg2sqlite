@@ -15,6 +15,20 @@ use sqlparser::ast::{BinaryOperator, Expr, Statement};
 
 use crate::errors::Error;
 
+/// Combine an existing WHERE clause with an injected guard.
+///
+/// The existing clause is parenthesised because AND binds tighter than OR, so a
+/// bare `a = 1 OR b = 2 AND guard` reassociates to `a = 1 OR (b = 2 AND guard)`
+/// and the guard never reaches the first disjunct.
+fn guarded(existing: Option<Expr>, condition: Expr) -> Expr {
+    let Some(existing) = existing else { return condition };
+    Expr::BinaryOp {
+        left: Box::new(Expr::Nested(Box::new(existing))),
+        op: BinaryOperator::And,
+        right: Box::new(condition),
+    }
+}
+
 /// Injects an `AND <condition>` predicate into mutable DML statements.
 ///
 /// Supports:
@@ -30,56 +44,23 @@ pub(crate) fn inject_condition_into_dml_statement(
 ) -> Result<(), Error> {
     match stmt {
         Statement::Insert(insert) => {
-            if let Some(source) = &mut insert.source {
-                match &mut *source.body {
-                    sqlparser::ast::SetExpr::Select(select) => {
-                        let new_selection = if let Some(existing) = &select.selection {
-                            Expr::BinaryOp {
-                                left: Box::new(existing.clone()),
-                                op: BinaryOperator::And,
-                                right: Box::new(condition),
-                            }
-                        } else {
-                            condition
-                        };
-                        select.selection = Some(new_selection);
-                    }
-                    _ => {
-                        return Err(Error::UnsupportedSQLiteFeature(
-                            "Cannot inject IF condition into INSERT with non-SELECT source"
-                                .to_string(),
-                        ));
-                    }
-                }
-            } else {
+            let Some(source) = &mut insert.source else {
                 return Err(Error::UnsupportedSQLiteFeature(
                     "Cannot inject IF condition into INSERT without source".to_string(),
                 ));
-            }
+            };
+            let sqlparser::ast::SetExpr::Select(select) = &mut *source.body else {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "Cannot inject IF condition into INSERT with non-SELECT source".to_string(),
+                ));
+            };
+            select.selection = Some(guarded(select.selection.take(), condition));
         }
         Statement::Update(update) => {
-            let new_selection = if let Some(existing) = &update.selection {
-                Expr::BinaryOp {
-                    left: Box::new(existing.clone()),
-                    op: BinaryOperator::And,
-                    right: Box::new(condition),
-                }
-            } else {
-                condition
-            };
-            update.selection = Some(new_selection);
+            update.selection = Some(guarded(update.selection.take(), condition));
         }
         Statement::Delete(delete) => {
-            let new_selection = if let Some(existing) = &delete.selection {
-                Expr::BinaryOp {
-                    left: Box::new(existing.clone()),
-                    op: BinaryOperator::And,
-                    right: Box::new(condition),
-                }
-            } else {
-                condition
-            };
-            delete.selection = Some(new_selection);
+            delete.selection = Some(guarded(delete.selection.take(), condition));
         }
         _ => {
             return Err(Error::UnsupportedSQLiteFeature(

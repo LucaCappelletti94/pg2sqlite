@@ -1905,6 +1905,9 @@ mod tests {
         assert!(result.is_err(), "Expected unsupported statement to return an error");
     }
 
+    /// Each base condition has a top level OR, so a guard appended without
+    /// parentheses would bind to the last disjunct alone. `tests/
+    /// test_condition_injection.rs` covers the same case by row count.
     #[test]
     fn inject_condition_updates_insert_update_and_delete_statements() {
         let condition = Expr::Value(ValueWithSpan {
@@ -1912,33 +1915,22 @@ mod tests {
             span: sqlparser::tokenizer::Span::empty(),
         });
 
-        let mut insert = Parser::parse_sql(
-            &PostgreSqlDialect {},
-            "INSERT INTO logs(id) SELECT id FROM users WHERE active = 1",
-        )
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-        inject_condition(&mut insert, condition.clone()).unwrap();
-        assert!(insert.to_string().to_uppercase().contains("AND TRUE"), "unexpected SQL: {insert}");
-
-        let mut update =
-            Parser::parse_sql(&PostgreSqlDialect {}, "UPDATE users SET active = 0 WHERE id = 1")
-                .unwrap()
-                .into_iter()
-                .next()
-                .unwrap();
-        inject_condition(&mut update, condition.clone()).unwrap();
-        assert!(update.to_string().to_uppercase().contains("AND TRUE"), "unexpected SQL: {update}");
-
-        let mut delete = Parser::parse_sql(&PostgreSqlDialect {}, "DELETE FROM users WHERE id = 1")
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-        inject_condition(&mut delete, condition).unwrap();
-        assert!(delete.to_string().to_uppercase().contains("AND TRUE"), "unexpected SQL: {delete}");
+        for sql in [
+            "INSERT INTO logs(id) SELECT id FROM users WHERE active = 1 OR admin = 1",
+            "UPDATE users SET active = 0 WHERE id = 1 OR id = 2",
+            "DELETE FROM users WHERE id = 1 OR id = 2",
+        ] {
+            let mut statement =
+                Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().into_iter().next().unwrap();
+            inject_condition(&mut statement, condition.clone()).unwrap();
+            let injected = statement.to_string().to_uppercase();
+            assert!(injected.contains("AND TRUE"), "unexpected SQL: {statement}");
+            assert!(
+                injected.contains("OR ID = 2) AND TRUE")
+                    || injected.contains("ADMIN = 1) AND TRUE"),
+                "the guard must bind to the whole condition: {statement}"
+            );
+        }
     }
 
     #[test]
