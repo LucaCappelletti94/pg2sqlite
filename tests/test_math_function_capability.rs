@@ -118,17 +118,21 @@ fn off_variance_still_works() {
     assert!(sql.contains("sum(v * v)"), "{sql}");
 }
 
+/// Both covariances are closed forms over `sum`, `avg`, and `count`, so they
+/// translate with the math functions off. The assertion is the absence of
+/// `sqrt`, not the shape of the arithmetic, which R41 changed when it made the
+/// marginals ignore rows whose partner is NULL.
 #[test]
 fn off_covar_pop_still_works() {
     let sql = translate_off("SELECT covar_pop(a, b) FROM t;").expect("covar_pop should translate");
-    assert!(sql.contains("avg(a * b)"), "{sql}");
+    assert!(!sql.contains("sqrt"), "covar_pop must need no math function: {sql}");
 }
 
 #[test]
 fn off_covar_samp_still_works() {
     let sql =
         translate_off("SELECT covar_samp(a, b) FROM t;").expect("covar_samp should translate");
-    assert!(sql.contains("sum(a * b)"), "{sql}");
+    assert!(!sql.contains("sqrt"), "covar_samp must need no math function: {sql}");
 }
 
 // ---------- option ON: scalar math functions pass through ----------

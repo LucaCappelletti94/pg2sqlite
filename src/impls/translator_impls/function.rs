@@ -1139,7 +1139,8 @@ fn two_aggregate_args(
 
 /// Build the population-covariance closed form
 /// `avg(x*y) - avg(x) * avg(y)`.
-fn covar_pop_closed_form(x: Expr, y: Expr) -> Expr {
+fn covar_pop_closed_form(x: &Expr, y: &Expr) -> Expr {
+    let (x, y) = (paired_with(x, y), paired_with(y, x));
     let xy = Expr::BinaryOp {
         left: Box::new(x.clone()),
         op: BinaryOperator::Multiply,
@@ -1160,22 +1161,34 @@ fn covar_pop_closed_form(x: Expr, y: Expr) -> Expr {
     }
 }
 
+/// `CASE WHEN <partner> IS NOT NULL THEN <value> END`, so an aggregate over the
+/// result sees only the rows where both inputs are present.
+///
+/// PostgreSQL's bivariate aggregates are defined over the complete pairs, so
+/// every marginal inside one has to be taken over the same row set as the joint
+/// term. Taking `avg(x)` over its own non-NULL rows and `avg(x*y)` over the
+/// pairs breaks the identity these closed forms rest on.
+fn paired_with(value: &Expr, partner: &Expr) -> Expr {
+    case_when(Expr::IsNotNull(Box::new(partner.clone())), value.clone(), None)
+}
+
 /// Build the sample-covariance closed form
-/// `(sum(x*y) - sum(x) * sum(y) / count(*)) / (count(*) - 1)`.
-fn covar_samp_closed_form(x: Expr, y: Expr) -> Expr {
+/// `(sum(x*y) - sum(x) * sum(y) / count(x*y)) / (count(x*y) - 1)`.
+///
+/// The pair count is `count(x*y)` rather than `count(*)`: the product is NULL
+/// whenever either input is, so counting it counts exactly the rows
+/// PostgreSQL averages over, where `count(*)` counted every row in the group.
+fn covar_samp_closed_form(x: &Expr, y: &Expr) -> Expr {
+    let (x, y) = (paired_with(x, y), paired_with(y, x));
     let xy = Expr::BinaryOp {
         left: Box::new(x.clone()),
         op: BinaryOperator::Multiply,
         right: Box::new(y.clone()),
     };
-    let sum_xy = simple_function_expr("sum", vec![xy], None);
+    let sum_xy = simple_function_expr("sum", vec![xy.clone()], None);
     let total_x = simple_function_expr("sum", vec![x], None);
     let total_y = simple_function_expr("sum", vec![y], None);
-    let count_star = simple_function_expr(
-        "count",
-        vec![Expr::Wildcard(sqlparser::ast::helpers::attached_token::AttachedToken::empty())],
-        None,
-    );
+    let count_star = simple_function_expr("count", vec![xy], None);
 
     let sum_x_times_sum_y = Expr::BinaryOp {
         left: Box::new(total_x),
@@ -1206,10 +1219,15 @@ fn covar_samp_closed_form(x: Expr, y: Expr) -> Expr {
 
 /// Build the Pearson correlation closed form
 /// `covar_pop(x, y) / (sqrt(var_pop(x)) * sqrt(var_pop(y)))`.
-fn corr_closed_form(x: Expr, y: Expr) -> Expr {
-    let numerator = covar_pop_closed_form(x.clone(), y.clone());
-    let stddev_x = simple_function_expr("sqrt", vec![var_pop_closed_form(x)], None);
-    let stddev_y = simple_function_expr("sqrt", vec![var_pop_closed_form(y)], None);
+///
+/// The two deviations are paired here as well, which is not automatic: the
+/// numerator pairs itself inside `covar_pop_closed_form`, but `var_pop` of a
+/// bare column would still spread over rows whose partner is NULL, and the
+/// ratio of terms taken over different row sets is not a correlation.
+fn corr_closed_form(x: &Expr, y: &Expr) -> Expr {
+    let numerator = covar_pop_closed_form(x, y);
+    let stddev_x = simple_function_expr("sqrt", vec![var_pop_closed_form(paired_with(x, y))], None);
+    let stddev_y = simple_function_expr("sqrt", vec![var_pop_closed_form(paired_with(y, x))], None);
     let denominator = Expr::Nested(Box::new(Expr::BinaryOp {
         left: Box::new(stddev_x),
         op: BinaryOperator::Multiply,
@@ -1940,15 +1958,15 @@ impl Translator for Function {
             }
             FunctionTranslation::CovarPop => {
                 let (x, y) = two_aggregate_args(&func.args, schema, options, "covar_pop")?;
-                Ok(covar_pop_closed_form(x, y))
+                Ok(covar_pop_closed_form(&x, &y))
             }
             FunctionTranslation::CovarSamp => {
                 let (x, y) = two_aggregate_args(&func.args, schema, options, "covar_samp")?;
-                Ok(covar_samp_closed_form(x, y))
+                Ok(covar_samp_closed_form(&x, &y))
             }
             FunctionTranslation::Corr => {
                 let (x, y) = two_aggregate_args(&func.args, schema, options, "corr")?;
-                Ok(corr_closed_form(x, y))
+                Ok(corr_closed_form(&x, &y))
             }
             FunctionTranslation::Array(kind) => {
                 array::translate_array_function(kind, &func.args, schema, options)

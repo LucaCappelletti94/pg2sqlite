@@ -76,22 +76,14 @@ fn open_with_sqrt() -> SqliteConnection {
 
 // Phase 3: closed-form rewrites
 
+/// `corr` is the only one of the three that needs a math function, which is
+/// what decides whether it can be emitted at all. The other two are proved over
+/// a known dataset by the `p3_apply_*` tests below.
 #[test]
-fn p3_covar_pop_to_avg_form() {
-    let out = translate("SELECT covar_pop(x, y) FROM m;");
-    assert!(out.contains("avg(x * y)") && out.contains("avg(x) * avg(y)"), "{out}");
-}
-
-#[test]
-fn p3_covar_samp_to_sum_count_form() {
-    let out = translate("SELECT covar_samp(x, y) FROM m;");
-    assert!(out.contains("sum(x * y)") && out.contains("count(*) - 1"), "{out}");
-}
-
-#[test]
-fn p3_corr_combines_covar_and_sqrt_of_variances() {
-    let out = translate("SELECT corr(x, y) FROM m;");
-    assert!(out.contains("avg(x * y)") && out.contains("sqrt("), "{out}");
+fn p3_corr_needs_sqrt_and_the_covariances_do_not() {
+    assert!(translate("SELECT corr(x, y) FROM m;").contains("sqrt("));
+    assert!(!translate("SELECT covar_pop(x, y) FROM m;").contains("sqrt("));
+    assert!(!translate("SELECT covar_samp(x, y) FROM m;").contains("sqrt("));
 }
 
 #[test]
