@@ -106,7 +106,7 @@ impl PlPgSqlTranslator {
                 let mut translated = stmt.translate(schema, options)?;
                 if let Some(condition) = context.current_condition() {
                     for t_stmt in &mut translated {
-                        Self::inject_condition_into_statement(t_stmt, &condition);
+                        Self::inject_condition_into_statement(t_stmt, &condition)?;
                     }
                 }
                 Ok(translated)
@@ -271,7 +271,7 @@ impl PlPgSqlTranslator {
 
             if let Some(condition) = &condition {
                 for translated in &mut translated_statements {
-                    Self::inject_condition_into_statement(translated, condition);
+                    Self::inject_condition_into_statement(translated, condition)?;
                 }
             }
 
@@ -1454,12 +1454,12 @@ impl PlPgSqlTranslator {
             .map_err(|e| Error::UnknownPostgresFeature(format!("Failed to parse expression: {e}")))
     }
 
-    fn inject_condition_into_statement(stmt: &mut Statement, condition: &str) {
-        let Ok(cond_expr) = Self::parse_expression(condition) else {
-            return;
-        };
-
-        let _ = inject_condition_into_dml_statement(stmt, cond_expr);
+    /// Attach an `IF` condition to a statement's WHERE clause.
+    ///
+    /// A failure is propagated rather than dropped: a guard that does not
+    /// attach leaves the statement running for every row.
+    fn inject_condition_into_statement(stmt: &mut Statement, condition: &str) -> Result<(), Error> {
+        inject_condition_into_dml_statement(stmt, Self::parse_expression(condition)?)
     }
 }
 
@@ -1587,39 +1587,28 @@ mod tests {
         assert!(!PlPgSqlTranslator::expr_references_variable(&parse_expr("other_id + 1"), "id"));
     }
 
+    /// The two shapes that cannot take a guard now report it rather than
+    /// leaving the statement to run unguarded.
     #[test]
-    fn inject_condition_into_statement_updates_where_and_ignores_invalid_conditions() {
-        let mut update = parse_statement("UPDATE users SET active = TRUE");
-        PlPgSqlTranslator::inject_condition_into_statement(&mut update, "NEW.kind = 'x'");
-        assert!(update.to_string().contains("WHERE NEW.kind = 'x'"));
+    fn inject_condition_into_statement_updates_where_or_reports_why_not() {
+        for sql in [
+            "UPDATE users SET active = TRUE",
+            "DELETE FROM users",
+            "INSERT INTO users(id) SELECT id FROM users",
+        ] {
+            let mut statement = parse_statement(sql);
+            PlPgSqlTranslator::inject_condition_into_statement(&mut statement, "NEW.kind = 'x'")
+                .expect("this shape has a WHERE clause");
+            assert!(statement.to_string().contains("WHERE NEW.kind = 'x'"), "{statement}");
+        }
 
-        let mut delete = parse_statement("DELETE FROM users");
-        PlPgSqlTranslator::inject_condition_into_statement(&mut delete, "NEW.kind = 'x'");
-        assert!(delete.to_string().contains("WHERE NEW.kind = 'x'"));
-
-        let mut unchanged = parse_statement("DELETE FROM users");
-        let before = unchanged.to_string();
-        PlPgSqlTranslator::inject_condition_into_statement(&mut unchanged, "NOT (");
-        assert_eq!(unchanged.to_string(), before);
-    }
-
-    #[test]
-    fn inject_condition_into_statement_injects_insert_select_and_skips_insert_values() {
-        let mut insert_select = parse_statement("INSERT INTO users(id) SELECT id FROM users");
-        PlPgSqlTranslator::inject_condition_into_statement(&mut insert_select, "NEW.kind = 'x'");
-        assert!(
-            insert_select.to_string().contains("WHERE NEW.kind = 'x'"),
-            "INSERT ... SELECT should receive IF condition injection"
-        );
+        let mut unparsable = parse_statement("DELETE FROM users");
+        PlPgSqlTranslator::inject_condition_into_statement(&mut unparsable, "NOT (")
+            .expect_err("a condition that does not parse cannot be attached");
 
         let mut insert_values = parse_statement("INSERT INTO users(id) VALUES (1)");
-        let before = insert_values.to_string();
-        PlPgSqlTranslator::inject_condition_into_statement(&mut insert_values, "NEW.kind = 'x'");
-        assert_eq!(
-            insert_values.to_string(),
-            before,
-            "INSERT ... VALUES should remain unchanged when condition injection is unsupported"
-        );
+        PlPgSqlTranslator::inject_condition_into_statement(&mut insert_values, "NEW.kind = 'x'")
+            .expect_err("VALUES has no WHERE clause to guard");
     }
 
     #[test]
@@ -2005,7 +1994,8 @@ mod tests {
 
         let mut insert = parse_statement("INSERT INTO users(id) VALUES (1)");
         let before = insert.to_string();
-        PlPgSqlTranslator::inject_condition_into_statement(&mut insert, "id > 0");
+        PlPgSqlTranslator::inject_condition_into_statement(&mut insert, "id > 0")
+            .expect_err("VALUES has no WHERE clause to guard");
         assert_eq!(insert.to_string(), before);
     }
 

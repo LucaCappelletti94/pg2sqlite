@@ -62,6 +62,16 @@ pub(crate) fn inject_condition_into_dml_statement(
         Statement::Delete(delete) => {
             delete.selection = Some(guarded(delete.selection.take(), condition));
         }
+        // A `RAISE EXCEPTION` becomes `SELECT RAISE(ABORT, ...)`, so the guard
+        // has to reach its WHERE clause or the abort fires for every row.
+        Statement::Query(query) => {
+            let sqlparser::ast::SetExpr::Select(select) = &mut *query.body else {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "Cannot inject IF condition into a non-SELECT query".to_string(),
+                ));
+            };
+            select.selection = Some(guarded(select.selection.take(), condition));
+        }
         _ => {
             return Err(Error::UnsupportedSQLiteFeature(
                 "Cannot inject IF condition into this statement variant".to_string(),
