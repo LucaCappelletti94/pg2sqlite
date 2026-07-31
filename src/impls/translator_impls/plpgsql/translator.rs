@@ -18,8 +18,9 @@ use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
         BeginEndStatements, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-        GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select, SelectItem, Set, SetExpr,
-        Statement, TableAlias, TableFactor, TableWithJoins, Value, ValueWithSpan,
+        GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, ReturnStatementValue, Select,
+        SelectItem, Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
+        ValueWithSpan,
     },
     tokenizer::Span,
 };
@@ -32,7 +33,8 @@ use crate::{
     errors::Error,
     impls::{
         expr_helpers::{any_child_expr, map_expr_children},
-        query_builder::{make_query, make_simple_select},
+        function_helpers::simple_function_expr,
+        query_builder::{make_query, make_simple_select, single_expr_query},
         translator_impls::condition_injection::inject_condition_into_dml_statement,
     },
     options::Pg2SqliteOptions,
@@ -41,6 +43,16 @@ use crate::{
 
 /// Main translator for PL/pgSQL function bodies.
 pub struct PlPgSqlTranslator;
+
+/// `SELECT RAISE(IGNORE)`, SQLite's way for a BEFORE trigger to cancel the
+/// write it was fired for.
+fn raise_ignore_statement() -> Statement {
+    Statement::Query(Box::new(single_expr_query(
+        simple_function_expr("RAISE", vec![Expr::Identifier(Ident::new("IGNORE"))], None),
+        Vec::new(),
+        None,
+    )))
+}
 
 impl PlPgSqlTranslator {
     /// Translates a PL/pgSQL function body to `SQLite` statements.
@@ -112,7 +124,50 @@ impl PlPgSqlTranslator {
                 Ok(translated)
             }
 
+            Statement::Return(ret) => {
+                Self::translate_return_statement(ret.value.as_ref(), context, schema, options)
+            }
+
             other => other.translate(schema, options),
+        }
+    }
+
+    /// Translate a `RETURN` in a trigger body.
+    ///
+    /// `RETURN NULL` in a BEFORE row trigger cancels the write, which SQLite
+    /// spells `SELECT RAISE(IGNORE)`. Measured on both over inserts of 5, -1,
+    /// and 7 with a trigger vetoing negatives: the same two rows survive.
+    ///
+    /// `RETURN NEW` proceeds with the row unchanged, which is what SQLite does
+    /// anyway, so it carries no statement. Every other form is refused.
+    fn translate_return_statement(
+        value: Option<&ReturnStatementValue>,
+        context: &PlPgSqlContext,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<Statement>, Error> {
+        let Some(ReturnStatementValue::Expr(expr)) = value else {
+            return Ok(Vec::new());
+        };
+
+        match expr {
+            Expr::Value(ValueWithSpan { value: Value::Null, .. }) => {
+                // A Query, so the enclosing IF's condition reaches its WHERE
+                // clause and the veto applies to the matching rows alone.
+                Self::finalize_query_statements(
+                    vec![raise_ignore_statement()],
+                    context,
+                    schema,
+                    options,
+                )
+            }
+            Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("new") => Ok(Vec::new()),
+            other => {
+                Err(Error::UnsupportedSQLiteFeature(format!(
+                    "RETURN {other} has no SQLite equivalent in a trigger body. A trigger can only \
+                 proceed, which is RETURN NEW, or cancel the write, which is RETURN NULL."
+                )))
+            }
         }
     }
 
