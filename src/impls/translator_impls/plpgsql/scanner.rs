@@ -83,6 +83,18 @@ impl<'a> Scanner<'a> {
             .position(|(byte, region)| byte == needle && region == Region::Code)
     }
 
+    /// The offset of the first occurrence of `needle` that is live code.
+    pub(crate) fn find_str_in_code(&self, needle: &str) -> Option<usize> {
+        let regions = self.regions();
+        let haystack = self.text.as_bytes();
+        if needle.is_empty() || needle.len() > haystack.len() {
+            return None;
+        }
+        (0..=haystack.len() - needle.len()).find(|&start| {
+            regions[start] == Region::Code && haystack[start..].starts_with(needle.as_bytes())
+        })
+    }
+
     /// The offset of `keyword` as a whole word in live code, searched from
     /// `from`, comparing case-insensitively.
     ///
@@ -245,6 +257,12 @@ mod tests {
         let scanner = Scanner::new("EXCEPTION -- note\n  WHEN x");
         assert_eq!(scanner.next_word_in_code(9), Some("WHEN"));
         assert_eq!(Scanner::new("EXCEPTION").next_word_in_code(9), None);
+    }
+
+    #[test]
+    fn a_substring_inside_a_literal_is_not_found() {
+        assert_eq!(Scanner::new("a := 1").find_str_in_code(":="), Some(2));
+        assert_eq!(Scanner::new("'x := y'").find_str_in_code(":="), None);
     }
 
     #[test]

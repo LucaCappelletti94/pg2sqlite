@@ -486,26 +486,46 @@ impl PlPgSqlPreprocessor {
     }
 
     /// Transforms variable assignments from := to SET syntax.
+    ///
+    /// Split on unquoted semicolons rather than newlines, since the right-hand
+    /// side of an assignment can span lines and a statement ends at a
+    /// semicolon.
     fn transform_assignments(body: &str, context: &PlPgSqlContext) -> String {
         let mut result = String::new();
-        let lines: Vec<&str> = body.lines().collect();
+        let mut start = 0;
 
-        for line in lines {
-            let trimmed = line.trim();
-
-            // Check if this line is a simple variable assignment
-            if let Some(assignment) = Self::parse_assignment_line(trimmed, context) {
-                // Replace with SET syntax
-                let indent = &line[..line.len() - line.trim_start().len()];
-                result.push_str(indent);
-                let _ = write!(result, "SET {} = {};", assignment.name, assignment.expression);
-            } else {
-                result.push_str(line);
-            }
-            result.push('\n');
+        while let Some(offset) = Scanner::new(&body[start..]).find_in_code(b';') {
+            let end = start + offset;
+            result.push_str(&Self::rewrite_assignment(&body[start..end], context));
+            result.push(';');
+            start = end + 1;
         }
-
+        result.push_str(&Self::rewrite_assignment(&body[start..], context));
         result
+    }
+    /// One statement, rewritten to `SET name = expr` when it is an assignment
+    /// and returned unchanged when it is not.
+    ///
+    /// A chunk can carry text before the assignment, `BEGIN` on the first one
+    /// and `END IF` after a branch, so the variable is the identifier
+    /// immediately before `:=` and everything ahead of it passes through.
+    fn rewrite_assignment(statement: &str, context: &PlPgSqlContext) -> String {
+        let Some(operator) = Scanner::new(statement).find_str_in_code(":=") else {
+            return statement.to_string();
+        };
+        let before = statement[..operator].trim_end();
+        let name_start = before
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(0, |boundary| boundary + 1);
+        let (prefix, name) = before.split_at(name_start);
+
+        let candidate = format!("{} := {}", name.trim(), statement[operator + 2..].trim());
+        match Self::parse_assignment_line(&candidate, context) {
+            Some(assignment) => {
+                format!("{prefix}SET {} = {}", assignment.name, assignment.expression)
+            }
+            None => statement.to_string(),
+        }
     }
 
     /// Parses a line to see if it's a variable assignment.
@@ -535,6 +555,14 @@ impl PlPgSqlPreprocessor {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assignments_are_split_on_statements_not_lines() {
+        let context = PlPgSqlContext::new();
+        let body = "BEGIN\n    v_label :=\n        'a; b';\n    RETURN NEW;\nEND";
+        let out = PlPgSqlPreprocessor::transform_assignments(body, &context);
+        assert!(out.contains("SET v_label = 'a; b'"), "got: {out}");
+    }
 
     #[test]
     fn test_split_declare_and_body() {
