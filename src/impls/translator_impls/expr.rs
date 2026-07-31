@@ -31,8 +31,8 @@ use crate::{
         function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
         query_builder::{from_relation, plain_table_factor, single_expr_query},
         shared_helpers::{
-            every_declared_type_matches, function_argument_exprs, numeric_scale,
-            scale_decimal_literal, translate_expr_recursive,
+            declared_numeric_precision, every_declared_type_matches, function_argument_exprs,
+            numeric_scale, rescale_minor_units, scale_decimal_literal, translate_expr_recursive,
         },
         timezone::{is_fixed_utc_offset, normalize_timezone_modifier_for_sqlite},
         translator_impls::{
@@ -41,7 +41,7 @@ use crate::{
                 json_array_call, representation_required, translate_array_literal,
                 translate_array_subscript, translate_quantified_over_array,
             },
-            data_type::numeric_precision_and_scale,
+            data_type::{MAX_NUMERIC_PRECISION, numeric_precision_and_scale},
             helpers::Forward,
         },
     },
@@ -926,46 +926,6 @@ fn negated_offset(modifier: &str) -> Option<String> {
     })
 }
 
-/// Move a value held as minor units from `from` scale to `to` scale.
-///
-/// Growing the scale multiplies, which is exact. Shrinking it divides, and
-/// PostgreSQL rounds half away from zero there while SQLite's integer division
-/// truncates toward it, so the emitted form adds half a unit of the target
-/// scale before dividing and takes the sign from the value. Measured on
-/// PostgreSQL 16: `1.005::numeric(10,2)` is 1.01 and `(-1.005)::numeric(10,2)`
-/// is -1.01, so the rounding is away from zero on both sides.
-fn rescale_minor_units(value: Expr, from: u32, to: u32) -> Expr {
-    if from == to {
-        return value;
-    }
-    if to > from {
-        return Expr::Nested(Box::new(Expr::BinaryOp {
-            left: Box::new(value),
-            op: BinaryOperator::Multiply,
-            right: Box::new(number_literal(&10_i128.pow(to - from).to_string())),
-        }));
-    }
-
-    let divisor = 10_i128.pow(from - to);
-    let half = divisor / 2;
-    // `value + half * sign(value)` before the truncating division turns
-    // truncation toward zero into rounding away from it.
-    let biased = Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(value.clone()),
-        op: BinaryOperator::Plus,
-        right: Box::new(Expr::BinaryOp {
-            left: Box::new(number_literal(&half.to_string())),
-            op: BinaryOperator::Multiply,
-            right: Box::new(simple_function_expr("sign", vec![value], None)),
-        }),
-    }));
-    Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(biased),
-        op: BinaryOperator::Divide,
-        right: Box::new(number_literal(&divisor.to_string())),
-    }))
-}
-
 /// `CAST(x AS NUMERIC(p,s))`, which moves `x` onto the scaled-integer
 /// representation rather than truncating it into a bare INTEGER.
 fn translate_numeric_cast(
@@ -1347,6 +1307,89 @@ fn translate_quantified_operation(
     )
 }
 
+/// Apply D1's arithmetic rules to an operation whose operands are held as
+/// minor units.
+///
+/// Addition and subtraction need one scale, so the lesser side is multiplied
+/// up. Multiplication needs none: the integer product is already at the sum of
+/// the scales, which is exactly what PostgreSQL answers, measured as
+/// `1.50 * 2.2500 = 3.375000`. It can still overflow, so the result precision
+/// is checked here, where both operand types are known.
+///
+/// Division is refused. PostgreSQL picks a result scale by a rule that depends
+/// on both operand precisions, `NUMERIC(10,2) / integer` answering at scale 20,
+/// and SQLite's integer division truncates toward zero on top of that, so any
+/// scale chosen here would disagree with PostgreSQL by a different amount for
+/// every pair of operands.
+fn translate_numeric_arithmetic(
+    left: &Expr,
+    op: &BinaryOperator,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<Expr>, crate::errors::Error> {
+    let (Some(left_scale), Some(right_scale)) =
+        (numeric_scale(left, schema), numeric_scale(right, schema))
+    else {
+        return Ok(None);
+    };
+
+    let translated = |side: &Expr| side.translate(schema, options);
+    let combined = match op {
+        BinaryOperator::Plus | BinaryOperator::Minus => {
+            let common = left_scale.max(right_scale);
+            Expr::BinaryOp {
+                left: Box::new(rescale_minor_units(translated(left)?, left_scale, common)),
+                op: op.clone(),
+                right: Box::new(rescale_minor_units(translated(right)?, right_scale, common)),
+            }
+        }
+        BinaryOperator::Multiply => {
+            let (left_precision, right_precision) =
+                (numeric_precision(left, schema), numeric_precision(right, schema));
+            if let (Some(left_precision), Some(right_precision)) = (left_precision, right_precision)
+                && left_precision + right_precision > MAX_NUMERIC_PRECISION
+            {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "NUMERIC({left_precision},{left_scale}) * \
+                     NUMERIC({right_precision},{right_scale}) needs \
+                     {} digits, and a SQLite INTEGER holds at most {MAX_NUMERIC_PRECISION}. \
+                     PostgreSQL gives a product the sum of the operand precisions, so the \
+                     result would silently become a float. Narrow one of the operands.",
+                    left_precision + right_precision
+                )));
+            }
+            Expr::BinaryOp {
+                left: Box::new(translated(left)?),
+                op: op.clone(),
+                right: Box::new(translated(right)?),
+            }
+        }
+        BinaryOperator::Divide => {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "dividing NUMERIC values has no faithful SQLite form: PostgreSQL chooses the \
+                 result scale from both operand precisions, answering `{left} / {right}` at a \
+                 scale neither operand has, and SQLite's integer division truncates toward zero \
+                 on top of that. Write the scale you want, as CAST({left} AS NUMERIC(18,6)) / \
+                 ..., or do the division in the application."
+            )));
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(combined))
+}
+
+/// The declared precision of a NUMERIC expression, when it has one.
+fn numeric_precision(expr: &Expr, schema: &ParserDB) -> Option<u64> {
+    match expr {
+        Expr::Nested(inner) => numeric_precision(inner, schema),
+        Expr::Cast { data_type: DataType::Numeric(info) | DataType::Decimal(info), .. } => {
+            numeric_precision_and_scale(info).ok().map(|(precision, _)| precision)
+        }
+        _ => declared_numeric_precision(expr, schema),
+    }
+}
+
 /// The literal `candidate` rewritten in the minor units of `partner`, when
 /// `partner` is a NUMERIC value and `candidate` is a decimal literal.
 fn scale_literal_against(
@@ -1386,6 +1429,9 @@ fn translate_binary_op(
             op: op.clone(),
             right: Box::new(right.translate(schema, options)?),
         });
+    }
+    if let Some(combined) = translate_numeric_arithmetic(left, op, right, schema, options)? {
+        return Ok(combined);
     }
 
     // Check for full-text search: to_tsvector(...) @@ to_tsquery(...)

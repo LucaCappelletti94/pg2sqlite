@@ -190,3 +190,132 @@ fn a_literal_finer_than_the_column_is_refused() {
         .to_string();
     assert!(error.contains("19.999"), "the error must name the literal, got: {error}");
 }
+
+/// Addition needs both sides at one scale. Measured on PostgreSQL 16 with
+/// `a NUMERIC(10,2) = 1.50` and `b NUMERIC(10,4) = 2.2500`: `a + b` is 3.7500
+/// and `a - b` is -0.7500, both at the greater of the two scales.
+#[test]
+fn addition_brings_both_sides_to_one_scale() {
+    const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, a NUMERIC(10,2), b NUMERIC(10,4));
+         INSERT INTO t VALUES (1, 1.50, 2.2500);";
+    let sum =
+        run_translated_with(&format!("{TABLE} SELECT a + b FROM t;"), &Pg2SqliteOptions::default());
+    assert_eq!(sum, vec![Some("37500".to_string())], "3.7500 at scale 4");
+    let difference =
+        run_translated_with(&format!("{TABLE} SELECT a - b FROM t;"), &Pg2SqliteOptions::default());
+    assert_eq!(difference, vec![Some("-7500".to_string())], "-0.7500 at scale 4");
+}
+
+/// Multiplication lands at the sum of the scales with no rescaling, which is
+/// what makes minor units elegant here: PostgreSQL answers 3.375000 for
+/// `1.50 * 2.2500`, scale 6, and the integer product is already that.
+#[test]
+fn multiplication_lands_at_the_sum_of_the_scales() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, a NUMERIC(5,2), b NUMERIC(5,4));
+         INSERT INTO t VALUES (1, 1.50, 2.2500);
+         SELECT a * b FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("3375000".to_string())], "3.375000 at scale 6");
+}
+
+/// A product needing more than 18 digits cannot be held, and rescaling it
+/// silently would change the value, so it is refused with both operand types
+/// named.
+#[test]
+fn a_product_past_the_precision_ceiling_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, a NUMERIC(10,2), b NUMERIC(10,2));
+              SELECT a * b FROM t;",
+        )
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("20 digits do not fit")
+        .to_string();
+    assert!(error.contains("NUMERIC(10,2)"), "the error must name the operands, got: {error}");
+}
+
+/// PostgreSQL picks a division result scale from both operand precisions,
+/// measured as `NUMERIC(10,2) / integer` answering at scale 20, and SQLite's
+/// integer division truncates toward zero on top of that. Any scale chosen here
+/// would disagree by a different amount for every pair of operands, so the
+/// operation is refused rather than approximated.
+#[test]
+fn dividing_two_numerics_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, a NUMERIC(10,2), b NUMERIC(10,2));
+              SELECT a / b FROM t;",
+        )
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("division has no faithful form")
+        .to_string();
+    assert!(error.contains("scale"), "the error must explain why, got: {error}");
+}
+
+/// `sum`, `min`, and `max` keep the operand's scale, so they need nothing
+/// beyond the representation itself.
+#[test]
+fn scale_preserving_aggregates_stay_exact() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 0.10), (2, 0.20), (3, 19.99);
+         SELECT sum(price) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("2029".to_string())], "20.29 at scale 2, exactly");
+}
+
+/// Ordering is native integer ordering, which is the same order as the decimal
+/// values, unlike a TEXT representation.
+#[test]
+fn ordering_is_numeric() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 9.90), (2, 10.10), (3, 2.00);
+         SELECT group_concat(price) FROM (SELECT price FROM t ORDER BY price);",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("200,990,1010".to_string())], "2.00, 9.90, 10.10");
+}
+
+/// `round(numeric, n)` becomes integer arithmetic, which is where R35's `trunc`
+/// fix has to agree: both round away from zero on a negative operand, measured
+/// on PostgreSQL 16 as `round(-2.5, 0) = -3` and `round(1.005, 2) = 1.01`.
+#[test]
+fn round_matches_postgres_on_both_signs() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, v NUMERIC(10,3));
+         INSERT INTO t VALUES (1, 2.500), (2, -2.500), (3, 1.005);
+         SELECT round(v, 0) FROM t ORDER BY id;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("3000".to_string()), Some("-3000".to_string()), Some("1000".to_string())],
+        "3, -3, and 1, still at the column's scale of 3"
+    );
+}
+
+/// A consumer reading `price` gets 1999 where PostgreSQL gave 19.99, so the
+/// representation has to be discoverable rather than guessed. The manifest
+/// already describes the logical-to-physical mapping, so it carries the scale.
+#[test]
+fn the_manifest_publishes_the_scale() {
+    let manifest = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2), note TEXT);")
+        .expect("parse")
+        .translation_manifest(&Pg2SqliteOptions::default())
+        .expect("manifest");
+
+    let table = manifest.iter().find(|entry| entry.logical == "t").expect("the table");
+    let scaled: Vec<_> = table
+        .columns
+        .iter()
+        .filter_map(|column| column.minor_unit_scale.map(|scale| (column.name.as_str(), scale)))
+        .collect();
+    assert_eq!(scaled, vec![("price", 2)], "only the NUMERIC column carries a scale");
+}

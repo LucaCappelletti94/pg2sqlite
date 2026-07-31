@@ -34,7 +34,8 @@ use crate::{
         },
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, every_declared_type_matches,
-            function_argument_exprs, translate_function_arguments,
+            function_argument_exprs, numeric_scale, rescale_minor_units,
+            translate_function_arguments,
         },
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -111,6 +112,9 @@ enum FunctionTranslation {
     /// An array function whose body is rewritten over `json_each` /
     /// `json_group_array`. See [`super::array`].
     Array(ArrayFunction),
+    /// `round(x, n)` over a value held as minor units, which has to move to
+    /// scale `n` and back rather than round the integer count.
+    NumericRound,
     /// `string_agg`, whose separator argument SQLite's `group_concat` refuses
     /// to take alongside DISTINCT.
     StringAgg,
@@ -475,6 +479,9 @@ fn translate_function(
             arg_count: 6,
             func_label: "make_timestamp",
         },
+        // round over a NUMERIC needs the column's scale, so it is decided at
+        // emission where the schema is in hand.
+        "round" => FunctionTranslation::NumericRound,
         // string_agg: SQLite takes no separator argument beside DISTINCT.
         "string_agg" => FunctionTranslation::StringAgg,
         // char_length / character_length: text only in PostgreSQL.
@@ -1942,6 +1949,40 @@ impl Translator for Function {
                     greatest,
                     if greatest { "greatest" } else { "least" },
                 )
+            }
+            FunctionTranslation::NumericRound => {
+                let exprs = function_argument_exprs(&func.args);
+                // `round(x)` and `round(x, n)` over anything that is not minor
+                // units are SQLite's own round, which already agrees with
+                // PostgreSQL on a float.
+                let [value, places] = exprs.as_slice() else {
+                    return Ok(simple_function_expr(
+                        "round",
+                        exprs
+                            .iter()
+                            .map(|arg| arg.translate(schema, options))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        translate_window_type(func.over.as_ref(), schema, options)?,
+                    ));
+                };
+                let Some(scale) = numeric_scale(value, schema) else {
+                    return Ok(simple_function_expr(
+                        "round",
+                        vec![value.translate(schema, options)?, places.translate(schema, options)?],
+                        translate_window_type(func.over.as_ref(), schema, options)?,
+                    ));
+                };
+                let Some(target) = literal_integer(places).and_then(|n| u32::try_from(n).ok())
+                else {
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "round({value}, {places}) over a NUMERIC needs the number of places as a                          literal, since the value is held as minor units and the rounding is                          integer arithmetic decided at translation time."
+                    )));
+                };
+                // Down to the requested places and back, so the result keeps
+                // the column's scale exactly as PostgreSQL keeps the numeric's.
+                let translated = value.translate(schema, options)?;
+                let rounded = rescale_minor_units(translated, scale, target.min(scale));
+                Ok(rescale_minor_units(rounded, target.min(scale), scale))
             }
             FunctionTranslation::StringAgg => {
                 let mut args =

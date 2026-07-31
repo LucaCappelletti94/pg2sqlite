@@ -33,6 +33,26 @@ pub struct TableManifestEntry {
     pub physical: String,
     /// The wrapper generated around the physical table.
     pub wrapper: WrapperKind,
+    /// How each column is represented, for the columns whose representation a
+    /// consumer cannot infer from the emitted type alone.
+    pub columns: Vec<ColumnManifestEntry>,
+}
+
+/// How one column is physically represented.
+///
+/// A `NUMERIC(p,s)` column is emitted as an INTEGER holding minor units, so
+/// reading it back gives 1999 where PostgreSQL gave 19.99. Dividing by `10^s`
+/// in the projection would put the value back into a float and undo the point
+/// of the representation, so the scale is published here and the consumer
+/// applies it deliberately.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnManifestEntry {
+    /// The column name, as declared in the source schema.
+    pub name: String,
+    /// The power of ten the stored integer is scaled by, for a `NUMERIC` or
+    /// `DECIMAL` column, and `None` for every other type.
+    pub minor_unit_scale: Option<u32>,
 }
 
 #[cfg(all(test, feature = "std"))]

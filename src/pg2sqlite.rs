@@ -528,11 +528,11 @@ impl Pg2Sqlite {
         &self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<crate::manifest::TableManifestEntry>, crate::errors::Error> {
-        use sql_traits::traits::{DatabaseLike, TableLike};
+        use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
         use crate::{
             impls::translator_impls::rls::resolve_trigger_table_name,
-            manifest::{TableManifestEntry, WrapperKind},
+            manifest::{ColumnManifestEntry, TableManifestEntry, WrapperKind},
         };
 
         let schema = self.build_schema()?;
@@ -565,7 +565,28 @@ impl Pg2Sqlite {
                 WrapperKind::Plain
             };
 
-            entries.push(TableManifestEntry { logical, physical, wrapper });
+            // Only NUMERIC carries a representation a consumer cannot read off
+            // the emitted type, so every other column reports None rather than
+            // being omitted, which keeps the list a faithful column order.
+            let columns = table
+                .columns(&schema)?
+                .map(|column| {
+                    let minor_unit_scale = match &column.attribute().data_type {
+                        sqlparser::ast::DataType::Numeric(info)
+                        | sqlparser::ast::DataType::Decimal(info) => {
+                            crate::impls::translator_impls::data_type::numeric_precision_and_scale(
+                                info,
+                            )
+                            .ok()
+                            .map(|(_, scale)| scale)
+                        }
+                        _ => None,
+                    };
+                    ColumnManifestEntry { name: column.column_name().to_string(), minor_unit_scale }
+                })
+                .collect();
+
+            entries.push(TableManifestEntry { logical, physical, wrapper, columns });
         }
 
         Ok(entries)

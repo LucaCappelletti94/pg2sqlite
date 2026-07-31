@@ -18,7 +18,7 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, ConnectByKind, DataType, Expr, ExprWithAlias,
+    Assignment, AssignmentTarget, BinaryOperator, ConnectByKind, DataType, Expr, ExprWithAlias,
     ExprWithAliasAndOrderBy, Fetch, FromTable, FunctionArg, FunctionArgExpr,
     FunctionArgumentClause, FunctionArgumentList, FunctionArguments, GroupByExpr, HavingBound,
     Join, JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow, Measure,
@@ -227,6 +227,79 @@ pub(crate) fn numeric_scale(expr: &Expr, schema: &ParserDB) -> Option<u32> {
         }
         _ => None,
     }
+}
+
+/// The declared precision of a NUMERIC column named by `expr`, the companion of
+/// [`numeric_scale`] that D1's multiplication rule needs.
+pub(crate) fn declared_numeric_precision(expr: &Expr, schema: &ParserDB) -> Option<u64> {
+    let column_name = match expr {
+        Expr::Identifier(ident) => ident.value.as_str(),
+        Expr::CompoundIdentifier(parts) => parts.last()?.value.as_str(),
+        Expr::Nested(inner) => return declared_numeric_precision(inner, schema),
+        _ => return None,
+    };
+    let mut precisions = schema.tables().filter_map(|table| {
+        let column = table
+            .columns(schema)
+            .ok()?
+            .find(|column| column.column_name().eq_ignore_ascii_case(column_name))?;
+        match &column.attribute().data_type {
+            DataType::Numeric(info) | DataType::Decimal(info) => {
+                crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)
+                    .ok()
+                    .map(|(precision, _)| precision)
+            }
+            _ => None,
+        }
+    });
+    let first = precisions.next()?;
+    precisions.all(|precision| precision == first).then_some(first)
+}
+
+/// Move a value held as minor units from `from` scale to `to` scale.
+///
+/// Growing the scale multiplies, which is exact. Shrinking it divides, and
+/// PostgreSQL rounds half away from zero there while SQLite's integer division
+/// truncates toward it, so the emitted form adds half a unit of the target
+/// scale before dividing and takes the sign from the value. Measured on
+/// PostgreSQL 16: `1.005::numeric(10,2)` is 1.01 and `(-1.005)::numeric(10,2)`
+/// is -1.01, so the rounding is away from zero on both sides.
+pub(crate) fn rescale_minor_units(value: Expr, from: u32, to: u32) -> Expr {
+    if from == to {
+        return value;
+    }
+    if to > from {
+        return Expr::Nested(Box::new(Expr::BinaryOp {
+            left: Box::new(value),
+            op: BinaryOperator::Multiply,
+            right: Box::new(crate::impls::function_helpers::number_literal(
+                &10_i128.pow(to - from).to_string(),
+            )),
+        }));
+    }
+
+    let divisor = 10_i128.pow(from - to);
+    let half = divisor / 2;
+    // `value + half * sign(value)` before the truncating division turns
+    // truncation toward zero into rounding away from it.
+    let biased = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(value.clone()),
+        op: BinaryOperator::Plus,
+        right: Box::new(Expr::BinaryOp {
+            left: Box::new(crate::impls::function_helpers::number_literal(&half.to_string())),
+            op: BinaryOperator::Multiply,
+            right: Box::new(crate::impls::function_helpers::simple_function_expr(
+                "sign",
+                vec![value],
+                None,
+            )),
+        }),
+    }));
+    Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(biased),
+        op: BinaryOperator::Divide,
+        right: Box::new(crate::impls::function_helpers::number_literal(&divisor.to_string())),
+    }))
 }
 
 /// Rewrite a decimal literal as the integer count of minor units at `scale`.
