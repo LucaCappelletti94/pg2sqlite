@@ -104,6 +104,19 @@ impl<'a> Scanner<'a> {
         })
     }
 
+    /// The next word of live code at or after `from`, skipping whitespace and
+    /// anything quoted or commented.
+    pub(crate) fn next_word_in_code(&self, from: usize) -> Option<&'a str> {
+        let regions = self.regions();
+        let bytes = self.text.as_bytes();
+        let start = (from..bytes.len())
+            .find(|&index| regions[index] == Region::Code && !bytes[index].is_ascii_whitespace())?;
+        let end = (start..bytes.len())
+            .find(|&index| regions[index] != Region::Code || !is_word_byte(Some(bytes[index])))
+            .unwrap_or(bytes.len());
+        (end > start).then(|| &self.text[start..end])
+    }
+
     /// Split on every `separator` byte that is live code.
     pub(crate) fn split_in_code(&self, separator: u8) -> Vec<&'a str> {
         let regions = self.regions();
@@ -227,6 +240,13 @@ mod tests {
 
     /// A haystack shorter than the keyword has no match and must not index
     /// past its end.
+    #[test]
+    fn the_next_word_skips_whitespace_and_comments() {
+        let scanner = Scanner::new("EXCEPTION -- note\n  WHEN x");
+        assert_eq!(scanner.next_word_in_code(9), Some("WHEN"));
+        assert_eq!(Scanner::new("EXCEPTION").next_word_in_code(9), None);
+    }
+
     #[test]
     fn a_short_text_has_no_keyword() {
         assert_eq!(Scanner::new("x, y").find_keyword("DEFAULT", 0), None);

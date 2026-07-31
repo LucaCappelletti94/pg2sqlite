@@ -61,6 +61,17 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
         // We strip spaces and semicolons from the body.
         let maybe_body = function_body.trim().trim_end_matches(';').trim();
 
+        // Reported here rather than left to the SQL parser, which names the
+        // statement after the keyword instead of the handler itself.
+        if PlPgSqlPreprocessor::has_exception_handler(maybe_body) {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "trigger function '{name}' uses exception handling, which SQLite has no \
+                 equivalent for: a trigger body can abort the statement with RAISE(ABORT) but \
+                 cannot catch anything. Move the handling into the application, or drop the \
+                 handler and let the error surface."
+            )));
+        }
+
         // Preprocess the PL/pgSQL body to handle syntax like `variable := expr`
         let (preprocessed_body, context) = PlPgSqlPreprocessor::preprocess(maybe_body);
 

@@ -47,6 +47,28 @@ fn dollar_quoted_body(text: &str) -> Option<&str> {
 }
 
 impl PlPgSqlPreprocessor {
+    /// True when `body` opens an exception handler.
+    ///
+    /// A handler is `EXCEPTION WHEN`, which is what separates it from the
+    /// `RAISE EXCEPTION` statement that shares the keyword. Read through the
+    /// scanner, so neither one inside a literal or a comment counts.
+    #[must_use]
+    pub fn has_exception_handler(body: &str) -> bool {
+        let scanner = Scanner::new(body);
+        let mut from = 0;
+        while let Some(position) = scanner.find_keyword("EXCEPTION", from) {
+            let after = position + "EXCEPTION".len();
+            if scanner
+                .next_word_in_code(after)
+                .is_some_and(|word| word.eq_ignore_ascii_case("when"))
+            {
+                return true;
+            }
+            from = after;
+        }
+        false
+    }
+
     /// Preprocesses a PL/pgSQL function body string.
     #[must_use]
     pub fn preprocess(body: &str) -> (String, PlPgSqlContext) {
