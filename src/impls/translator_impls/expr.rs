@@ -1494,9 +1494,21 @@ impl Translator for Expr {
                     && crate::impls::translator_impls::uuid::is_blob_uuid_representation(options)
                 {
                     let translated = expr.translate(schema, options)?;
-                    return Ok(crate::impls::translator_impls::uuid::make_uuid_conversion_call(
-                        translated, options,
-                    ));
+                    // The literal wrapper validates and canonicalises, and
+                    // passes anything else through, so the cast and the
+                    // INSERT path accept and refuse exactly the same set.
+                    let wrapped =
+                        crate::impls::translator_impls::uuid::maybe_wrap_text_uuid_literal(
+                            translated.clone(),
+                            options,
+                        )?;
+                    return Ok(if wrapped == translated {
+                        crate::impls::translator_impls::uuid::make_uuid_conversion_call(
+                            translated, options,
+                        )
+                    } else {
+                        wrapped
+                    });
                 }
                 // SQLite has no cast format, so a `FORMAT` clause cannot be
                 // honored and cloning it through produced SQL SQLite rejects at

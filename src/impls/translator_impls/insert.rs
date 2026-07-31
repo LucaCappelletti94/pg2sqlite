@@ -90,7 +90,7 @@ impl Translator for Insert {
         // STRICT column does not. Wrap with the configured text-to-blob
         // expression (default `unhex(replace(literal, '-', ''))`).
         if is_blob_uuid_representation(options) {
-            wrap_uuid_text_literals(&mut insert, schema, options);
+            wrap_uuid_text_literals(&mut insert, schema, options)?;
         }
 
         if let Some(on_insert) = &self.on {
@@ -487,27 +487,31 @@ fn rewrite_rls_view_insert(insert: &mut Insert, schema: &ParserDB, options: &Pg2
 /// posture as `wrap_vector_text_literals`: silently skip on any lookup
 /// failure (table not in schema, table function source,
 /// INSERT INTO ... SELECT).
-fn wrap_uuid_text_literals(insert: &mut Insert, schema: &ParserDB, options: &Pg2SqliteOptions) {
-    let TableObject::TableName(table_name) = &insert.table else { return };
+fn wrap_uuid_text_literals(
+    insert: &mut Insert,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), crate::errors::Error> {
+    let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
     let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
-        return;
+        return Ok(());
     };
     // A table absent from the schema has no UUID columns to wrap, so this leaves
     // the insert verbatim exactly as the lookup above does.
-    let Ok(uuid_cols) = uuid_columns_of_table(table, schema) else { return };
+    let Ok(uuid_cols) = uuid_columns_of_table(table, schema) else { return Ok(()) };
     if uuid_cols.is_empty() {
-        return;
+        return Ok(());
     }
 
     let column_names: Vec<String> = if insert.columns.is_empty() {
-        let Ok(columns) = table.columns(schema) else { return };
+        let Ok(columns) = table.columns(schema) else { return Ok(()) };
         columns.map(|c| c.column_name().to_string()).collect()
     } else {
         insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
     };
 
-    let Some(source) = insert.source.as_deref_mut() else { return };
-    let SetExpr::Values(values) = source.body.as_mut() else { return };
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
 
     for row in &mut values.rows {
         for (idx, expr) in row.content.iter_mut().enumerate() {
@@ -517,10 +521,11 @@ fn wrap_uuid_text_literals(insert: &mut Insert, schema: &ParserDB, options: &Pg2
                     expr,
                     sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("__placeholder")),
                 );
-                *expr = maybe_wrap_text_uuid_literal(taken, options);
+                *expr = maybe_wrap_text_uuid_literal(taken, options)?;
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "std"))]

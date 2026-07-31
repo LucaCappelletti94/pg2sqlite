@@ -65,34 +65,88 @@ pub(crate) fn uuid_columns_of_table(
         .collect())
 }
 
+/// The 32 hex digits of a PostgreSQL UUID literal, or `None` when the text is
+/// not one.
+///
+/// PostgreSQL's grammar, measured on PostgreSQL 16 rather than read off the
+/// documentation: optional balanced braces around the whole thing, upper or
+/// lower case digits, and hyphens allowed only after a group of four digits,
+/// any number of them or none at all. So
+/// `550e-8400-e29b-41d4-a716-4466-5544-0000` is accepted and
+/// `550-e8400e29b41d4a716446655440000` is not, since its first hyphen falls
+/// after three digits. `urn:uuid:...` is refused too, which is worth saying
+/// because it is a common UUID spelling everywhere else.
+#[must_use]
+fn canonical_uuid_hex(text: &str) -> Option<String> {
+    let inner = match (text.strip_prefix('{'), text.strip_suffix('}')) {
+        (Some(_), Some(_)) => &text[1..text.len() - 1],
+        (None, None) => text,
+        // One brace without the other.
+        _ => return None,
+    };
+
+    let mut hex = String::with_capacity(32);
+    for character in inner.chars() {
+        if character == '-' {
+            if !hex.len().is_multiple_of(4) {
+                return None;
+            }
+            continue;
+        }
+        if !character.is_ascii_hexdigit() {
+            return None;
+        }
+        hex.push(character);
+    }
+
+    (hex.len() == 32).then_some(hex)
+}
+
 /// Build the expression that converts `arg` (a text UUID literal or any
 /// other expression producing a textual UUID) into a 16-byte BLOB. When
 /// the caller configured a UDF name, emits `<udf_name>(arg)`. Otherwise
-/// emits the pure-SQLite shape `unhex(replace(arg, '-', ''))`.
+/// emits the pure-SQLite shape `unhex(replace(arg, '-', ''))`, with the braces
+/// stripped too, since `unhex` answers NULL rather than failing on anything it
+/// cannot read.
 #[must_use]
 pub(crate) fn make_uuid_conversion_call(arg: Expr, options: &Pg2SqliteOptions) -> Expr {
     if let Some(udf) = options.get_uuid_text_to_blob_function_name() {
         return single_arg_function(udf, arg);
     }
-    let dash_literal = string_literal_expr("-");
-    let empty_literal = string_literal_expr("");
-    let replace_call = three_arg_function("replace", arg, dash_literal, empty_literal);
-    single_arg_function("unhex", replace_call)
+    let empty = || string_literal_expr("");
+    let stripped = ["-", "{", "}"].into_iter().fold(arg, |inner, removed| {
+        three_arg_function("replace", inner, string_literal_expr(removed), empty())
+    });
+    single_arg_function("unhex", stripped)
 }
 
-/// If `expr` is a single-quoted string literal, wrap it with the
-/// configured UUID text-to-blob conversion. Other shapes pass through
-/// untouched. NULL, DEFAULT, identifiers, casts, and existing function
-/// calls (including a pre-wrapped `unhex(replace(...))`) are left
-/// alone, so this helper is idempotent within a single translation
-/// pass.
-#[must_use]
-pub(crate) fn maybe_wrap_text_uuid_literal(expr: Expr, options: &Pg2SqliteOptions) -> Expr {
-    if matches!(&expr, Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(_), .. })) {
-        make_uuid_conversion_call(expr, options)
-    } else {
-        expr
+/// If `expr` is a single-quoted string literal, convert it to a 16-byte BLOB.
+/// Other shapes pass through untouched. NULL, DEFAULT, identifiers, casts, and
+/// existing function calls (including a pre-wrapped `unhex(replace(...))`) are
+/// left alone, so this helper is idempotent within a single translation pass.
+///
+/// A literal is validated here rather than at run time, because `unhex` answers
+/// NULL for anything it cannot read and the column's `CHECK (length(id) = 16)`
+/// passes on NULL, so a misspelled UUID used to be stored as nothing at all.
+pub(crate) fn maybe_wrap_text_uuid_literal(
+    expr: Expr,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), .. }) = &expr else {
+        return Ok(expr);
+    };
+    let Some(hex) = canonical_uuid_hex(text) else {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "invalid input syntax for type uuid: \"{text}\""
+        )));
+    };
+
+    // A configured UDF gets the literal as written, since it does its own
+    // parsing and may expect the canonical hyphenated spelling.
+    if options.get_uuid_text_to_blob_function_name().is_some() {
+        return Ok(make_uuid_conversion_call(expr, options));
     }
+    Ok(single_arg_function("unhex", string_literal_expr(&hex)))
 }
 
 /// Build a column-level `CHECK (length(<col>) = 16)` ColumnOption. The

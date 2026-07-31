@@ -188,3 +188,81 @@ fn text_representation_must_not_wrap() {
         conn.query_row("SELECT id FROM u WHERE name = 'alice'", [], |r| r.get(0)).unwrap();
     assert_eq!(row, UUID_HEX_STR, "Text-represented UUID must be stored as the 36-char string");
 }
+
+/// PostgreSQL accepts more than the canonical spelling. Measured on
+/// PostgreSQL 16, all of these are the same UUID: upper case digits, the whole
+/// thing in braces, every hyphen omitted, and a hyphen after any group of four
+/// digits. `unhex` answers NULL for any of them but the first two, and a
+/// `CHECK (length(id) = 16)` passes on NULL, so the row went in holding
+/// nothing.
+#[test]
+fn every_postgres_uuid_spelling_stores_the_same_blob() {
+    for spelling in [
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550E8400-E29B-41D4-A716-446655440000",
+        "{550e8400-e29b-41d4-a716-446655440000}",
+        "550e8400e29b41d4a716446655440000",
+        "{550e8400e29b41d4a716446655440000}",
+        "550e-8400-e29b-41d4-a716-4466-5544-0000",
+    ] {
+        let schema = format!(
+            "CREATE TABLE u (id UUID PRIMARY KEY, name TEXT NOT NULL);\n\
+             INSERT INTO u (id, name) VALUES ('{spelling}', 'alice');"
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&translate(&schema, &blob_opts()))
+            .unwrap_or_else(|error| panic!("`{spelling}` must apply: {error}"));
+        let row: Vec<u8> =
+            conn.query_row("SELECT id FROM u WHERE name = 'alice'", [], |r| r.get(0)).unwrap();
+        assert_eq!(row, UUID_BYTES, "`{spelling}` must store the same 16 bytes");
+    }
+}
+
+/// PostgreSQL 16 rejects each of these with `invalid input syntax for type
+/// uuid`, so they are not PostgreSQL input and must not translate. The URN
+/// form is included because it is a common UUID spelling elsewhere and
+/// PostgreSQL still refuses it.
+#[test]
+fn a_malformed_uuid_literal_is_refused() {
+    for spelling in [
+        "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-44665544000",
+        "550-e8400e29b41d4a716446655440000",
+        "{550e8400-e29b-41d4-a716-446655440000",
+        "not-a-uuid",
+        "550e8400-e29b-41d4-a716-44665544zzzz",
+    ] {
+        let schema = format!(
+            "CREATE TABLE u (id UUID PRIMARY KEY, name TEXT NOT NULL);\n\
+             INSERT INTO u (id, name) VALUES ('{spelling}', 'alice');"
+        );
+        let error = Pg2Sqlite::default()
+            .sql(&schema)
+            .expect("parse")
+            .translate(&blob_opts())
+            .expect_err(&format!("`{spelling}` is not a PostgreSQL UUID"));
+        assert!(error.to_string().contains("uuid"), "the error must name the type, got: {error}");
+    }
+}
+
+/// The `::uuid` cast reaches a different code path than a bare literal.
+#[test]
+fn the_cast_spelling_accepts_and_refuses_the_same_set() {
+    let braced = format!(
+        "CREATE TABLE u (id UUID PRIMARY KEY, name TEXT NOT NULL);\n\
+         INSERT INTO u (id, name) VALUES ('{{{UUID_HEX_STR}}}'::uuid, 'alice');"
+    );
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(&translate(&braced, &blob_opts())).expect("a braced cast must apply");
+    let row: Vec<u8> =
+        conn.query_row("SELECT id FROM u WHERE name = 'alice'", [], |r| r.get(0)).unwrap();
+    assert_eq!(row, UUID_BYTES);
+
+    let bad = "CREATE TABLE u (id UUID PRIMARY KEY, name TEXT NOT NULL);\n\
+               INSERT INTO u (id, name) VALUES ('not-a-uuid'::uuid, 'alice');";
+    Pg2Sqlite::default()
+        .sql(bad)
+        .expect("parse")
+        .translate(&blob_opts())
+        .expect_err("a malformed cast operand is not a PostgreSQL UUID");
+}

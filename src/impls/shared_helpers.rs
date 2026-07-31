@@ -1214,7 +1214,7 @@ pub(crate) fn translate_update<D: TranslationDirection>(
                     {
                         maybe_wrap_text_vector_literal(translated_value, is_halfvec)
                     } else if uuid_cols.iter().any(|col| col.eq_ignore_ascii_case(name)) {
-                        maybe_wrap_text_uuid_literal(translated_value, options)
+                        maybe_wrap_text_uuid_literal(translated_value, options)?
                     } else {
                         translated_value
                     }
