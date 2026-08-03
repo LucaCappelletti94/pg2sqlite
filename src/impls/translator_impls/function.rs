@@ -33,7 +33,6 @@ use crate::{
         expr_helpers::case_when,
         function_helpers::{
             extract_exactly, integer_literal, number_literal, simple_function_expr, string_literal,
-            unnamed_arg,
         },
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, every_declared_type_matches,
@@ -51,7 +50,7 @@ enum FunctionTranslation {
     /// Simple name replacement (e.g., LEAST -> MIN)
     Rename(String),
     /// Function with modified arguments (e.g., NOW() -> datetime('now'))
-    WithArgs { name: String, args: Vec<FunctionArg> },
+    WithArgs { name: String, args: Vec<Expr> },
     /// Transform to concatenation operator (CONCAT -> ||)
     ToConcatenation,
     /// Transform to concatenation with separator (CONCAT_WS)
@@ -334,7 +333,7 @@ fn translate_function(
         // NOW() -> datetime('now')
         "now" => FunctionTranslation::WithArgs {
             name: "datetime".to_string(),
-            args: vec![unnamed_arg(string_literal("now"))],
+            args: vec![string_literal("now")],
         },
         "ts_rank" | "ts_rank_cd" => FunctionTranslation::Unsupported(
             "ts_rank/ts_rank_cd are not directly translatable to SQLite. \
@@ -450,12 +449,12 @@ fn translate_function(
         // localtimestamp -> datetime('now', 'localtime')
         "localtimestamp" => FunctionTranslation::WithArgs {
             name: "datetime".to_string(),
-            args: vec![unnamed_arg(string_literal("now")), unnamed_arg(string_literal("localtime"))],
+            args: vec![string_literal("now"), string_literal("localtime")],
         },
         // localtime -> time('now', 'localtime')
         "localtime" => FunctionTranslation::WithArgs {
             name: "time".to_string(),
-            args: vec![unnamed_arg(string_literal("now")), unnamed_arg(string_literal("localtime"))],
+            args: vec![string_literal("now"), string_literal("localtime")],
         },
         "mod" => FunctionTranslation::ToModulo,
         "div" => FunctionTranslation::ToIntegerDiv,
@@ -551,7 +550,7 @@ fn translate_function(
         "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
             FunctionTranslation::WithArgs {
                 name: "datetime".to_string(),
-                args: vec![unnamed_arg(string_literal("now"))],
+                args: vec![string_literal("now")],
             }
         }
         // Sequence functions: no SQLite equivalent
@@ -1599,20 +1598,7 @@ impl Translator for Function {
             }
             FunctionTranslation::WithArgs { name, args } => {
                 let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
-                Ok(Expr::Function(Function {
-                    name: ObjectName::from(vec![Ident::new(name)]),
-                    uses_odbc_syntax: false,
-                    parameters: FunctionArguments::None,
-                    args: FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: None,
-                        args,
-                        clauses: vec![],
-                    }),
-                    filter: None,
-                    null_treatment: None,
-                    over: translated_over,
-                    within_group: vec![],
-                }))
+                Ok(simple_function_expr(&name, args, translated_over))
             }
             FunctionTranslation::ToConcatenation => {
                 // CONCAT(a, b, c) -> COALESCE(a, '') || COALESCE(b, '') || COALESCE(c, '')

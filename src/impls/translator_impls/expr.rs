@@ -18,10 +18,9 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
-    ExactNumberInfo, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, Ident, Interval, JsonKeyUniqueness, JsonPredicateType, ObjectName,
-    ObjectNamePart, Query, Subscript, TableAlias, TableAliasColumnDef, TableFactor, TimezoneInfo,
-    UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    ExactNumberInfo, Expr, Function, Ident, Interval, JsonKeyUniqueness, JsonPredicateType,
+    ObjectName, ObjectNamePart, Query, Subscript, TableAlias, TableAliasColumnDef, TableFactor,
+    TimezoneInfo, UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::{
@@ -506,23 +505,7 @@ fn translate_position(
     let translated_in = in_expr.translate(schema, options)?;
 
     // Build: INSTR(str, substr) - note the reversed argument order
-    Ok(Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("INSTR"))]),
-        uses_odbc_syntax: false,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_in)),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_substr)),
-            ],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-    }))
+    Ok(simple_function_expr("INSTR", vec![translated_in, translated_substr], None))
 }
 
 /// Translate a TRIM expression to SQLite.
@@ -569,28 +552,12 @@ fn translate_trim(
         };
 
         let args = if let Some(char_expr) = char_arg {
-            vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_expr)),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(char_expr)),
-            ]
+            vec![translated_expr, char_expr]
         } else {
-            vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_expr))]
+            vec![translated_expr]
         };
 
-        return Ok(Expr::Function(Function {
-            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
-            uses_odbc_syntax: false,
-            args: FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: None,
-                args,
-                clauses: vec![],
-            }),
-            filter: None,
-            null_treatment: None,
-            over: None,
-            within_group: vec![],
-            parameters: FunctionArguments::None,
-        }));
+        return Ok(simple_function_expr(name, args, None));
     }
 
     // Plain TRIM(str) or TRIM(str, chars) - pass through with translated parts.
@@ -666,12 +633,6 @@ fn boolean_literal(value: bool) -> Expr {
         value: Value::Boolean(value),
         span: sqlparser::tokenizer::Span::empty(),
     })
-}
-
-/// Build a function call expression with unnamed positional arguments (no
-/// window specification).
-fn function_call(name: &str, args: Vec<Expr>) -> Expr {
-    simple_function_expr(name, args, None)
 }
 
 /// Convert a PostgreSQL text-array path literal `{a,b}` to a SQLite JSON path
@@ -799,10 +760,10 @@ fn translate_overlay(
     let replacement_len = if let Some(overlay_for) = overlay_for {
         overlay_for.translate(schema, options)?
     } else {
-        function_call("length", vec![translated_overlay_what.clone()])
+        simple_function_expr("length", vec![translated_overlay_what.clone()], None)
     };
 
-    let prefix = function_call(
+    let prefix = simple_function_expr(
         "substr",
         vec![
             translated_expr.clone(),
@@ -813,9 +774,10 @@ fn translate_overlay(
                 right: Box::new(integer_literal(1)),
             },
         ],
+        None,
     );
 
-    let suffix = function_call(
+    let suffix = simple_function_expr(
         "substr",
         vec![
             translated_expr,
@@ -825,6 +787,7 @@ fn translate_overlay(
                 right: Box::new(replacement_len),
             },
         ],
+        None,
     );
 
     Ok(Expr::BinaryOp {
@@ -1013,15 +976,16 @@ fn translate_at_time_zone(
     // reads the value as local time, so emitting it made the answer depend on
     // the offset of whatever machine ran the query.
     if modifier == "utc" || modifier == "+00:00" || modifier == "-00:00" {
-        return Ok(function_call("datetime", vec![translated_timestamp]));
+        return Ok(simple_function_expr("datetime", vec![translated_timestamp], None));
     }
 
     let Some(negated) = negated_offset(&modifier) else {
         // `localtime`, where both databases mean the machine's own zone and
         // neither agrees on which machine.
-        return Ok(function_call(
+        return Ok(simple_function_expr(
             "datetime",
             vec![translated_timestamp, string_literal_value(&modifier)],
+            None,
         ));
     };
 
@@ -1037,7 +1001,11 @@ fn translate_at_time_zone(
         TimestampAwareness::Naive => modifier,
         TimestampAwareness::Aware => negated,
     };
-    Ok(function_call("datetime", vec![translated_timestamp, string_literal_value(&applied)]))
+    Ok(simple_function_expr(
+        "datetime",
+        vec![translated_timestamp, string_literal_value(&applied)],
+        None,
+    ))
 }
 
 /// Check if a data type is a pgvector type (vector or halfvec).
@@ -1074,20 +1042,7 @@ fn translate_vector_cast(
     let translated_expr = expr.translate(schema, options)?;
     let func_name = if is_halfvec_type(data_type) { "vec_f16" } else { "vec_f32" };
 
-    Ok(Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(func_name))]),
-        uses_odbc_syntax: false,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_expr))],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-    }))
+    Ok(simple_function_expr(func_name, vec![translated_expr], None))
 }
 
 /// Translate a pgvector distance operator to a sqlite-vec function call.
@@ -1111,23 +1066,7 @@ fn translate_vector_distance_op(
     let translated_left = left.translate(schema, options)?;
     let translated_right = right.translate(schema, options)?;
 
-    Ok(Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(function_name))]),
-        uses_odbc_syntax: false,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_left)),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(translated_right)),
-            ],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-    }))
+    Ok(simple_function_expr(function_name, vec![translated_left, translated_right], None))
 }
 
 /// The elements of a quantifier operand that compares element-wise: an
@@ -1539,7 +1478,7 @@ fn translate_binary_op(
         }
         let l = left.translate(schema, options)?;
         let r = right.translate(schema, options)?;
-        return Ok(function_call("pow", vec![l, r]));
+        return Ok(simple_function_expr("pow", vec![l, r], None));
     }
 
     // # is PostgreSQL bitwise XOR; SQLite has no # token.
@@ -1667,7 +1606,11 @@ fn translate_binary_op(
                 }
             };
             let path = format!("$.\"{}\"", key);
-            let call = function_call("json_type", vec![translated_doc, string_literal(&path)]);
+            let call = simple_function_expr(
+                "json_type",
+                vec![translated_doc, string_literal(&path)],
+                None,
+            );
             return Ok(Expr::IsNotNull(Box::new(call)));
         }
         // doc ?| ARRAY[...] -> OR chain of json_type IS NOT NULL
@@ -1686,9 +1629,10 @@ fn translate_binary_op(
                 .iter()
                 .map(|k| {
                     let path = format!("$.\"{}\"", k);
-                    let call = function_call(
+                    let call = simple_function_expr(
                         "json_type",
                         vec![translated_doc.clone(), string_literal(&path)],
+                        None,
                     );
                     Expr::IsNotNull(Box::new(call))
                 })
@@ -1716,7 +1660,11 @@ fn translate_binary_op(
                     ));
                 }
             };
-            return Ok(function_call("json_remove", vec![translated_doc, string_literal(&path)]));
+            return Ok(simple_function_expr(
+                "json_remove",
+                vec![translated_doc, string_literal(&path)],
+                None,
+            ));
         }
         _ => {}
     }
@@ -1745,7 +1693,7 @@ fn translate_binary_op(
                 for m in modifiers {
                     args.push(string_literal(&m));
                 }
-                return Ok(function_call("datetime", args));
+                return Ok(simple_function_expr("datetime", args, None));
             }
         }
     }
@@ -2012,7 +1960,7 @@ impl Translator for Expr {
                                     .to_string(),
                             ));
                         }
-                        function_call("sqrt", vec![expr.translate(schema, options)?])
+                        simple_function_expr("sqrt", vec![expr.translate(schema, options)?], None)
                     }
                     UnaryOperator::PGCubeRoot => {
                         if !options.are_math_functions_available() {
@@ -2028,10 +1976,10 @@ impl Translator for Expr {
                             op: BinaryOperator::Divide,
                             right: Box::new(number_literal("3.0")),
                         }));
-                        function_call("pow", vec![x, exponent])
+                        simple_function_expr("pow", vec![x, exponent], None)
                     }
                     UnaryOperator::PGAbs => {
-                        function_call("abs", vec![expr.translate(schema, options)?])
+                        simple_function_expr("abs", vec![expr.translate(schema, options)?], None)
                     }
                     _ => translate_expr_recursive::<Forward>(self, schema, options)?,
                 }

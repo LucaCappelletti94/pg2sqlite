@@ -26,12 +26,10 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
-use sqlparser::ast::{
-    BinaryOperator, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
-};
+use sqlparser::ast::{BinaryOperator, DataType, Expr, Ident, Value, ValueWithSpan};
 
 use crate::{
+    impls::function_helpers::{simple_function_expr, string_literal},
     prelude::Pg2SqliteOptions,
     traits::{TranslationOptions, UuidRepresentation},
 };
@@ -107,13 +105,13 @@ fn canonical_uuid_hex(text: &str) -> Option<String> {
 #[must_use]
 pub(crate) fn make_uuid_conversion_call(arg: Expr, options: &Pg2SqliteOptions) -> Expr {
     if let Some(udf) = options.get_uuid_text_to_blob_function_name() {
-        return single_arg_function(udf, arg);
+        return simple_function_expr(udf, vec![arg], None);
     }
-    let empty = || string_literal_expr("");
+    let empty = || string_literal("");
     let stripped = ["-", "{", "}"].into_iter().fold(arg, |inner, removed| {
-        three_arg_function("replace", inner, string_literal_expr(removed), empty())
+        simple_function_expr("replace", vec![inner, string_literal(removed), empty()], None)
     });
-    single_arg_function("unhex", stripped)
+    simple_function_expr("unhex", vec![stripped], None)
 }
 
 /// If `expr` is a single-quoted string literal, convert it to a 16-byte BLOB.
@@ -142,7 +140,7 @@ pub(crate) fn maybe_wrap_text_uuid_literal(
     if options.get_uuid_text_to_blob_function_name().is_some() {
         return Ok(make_uuid_conversion_call(expr, options));
     }
-    Ok(single_arg_function("unhex", string_literal_expr(&hex)))
+    Ok(simple_function_expr("unhex", vec![string_literal(&hex)], None))
 }
 
 /// Build a column-level `CHECK (length(<col>) = 16)` ColumnOption. The
@@ -152,7 +150,8 @@ pub(crate) fn maybe_wrap_text_uuid_literal(
 /// instead of silently storing a non-UUID BLOB.
 #[must_use]
 pub(crate) fn uuid_blob_length_check_expr(column_name: &Ident) -> Expr {
-    let length_call = single_arg_function("length", Expr::Identifier(column_name.clone()));
+    let length_call =
+        simple_function_expr("length", vec![Expr::Identifier(column_name.clone())], None);
     Expr::BinaryOp {
         left: Box::new(length_call),
         op: BinaryOperator::Eq,
@@ -161,49 +160,4 @@ pub(crate) fn uuid_blob_length_check_expr(column_name: &Ident) -> Expr {
             span: sqlparser::tokenizer::Span::empty(),
         })),
     }
-}
-
-fn single_arg_function(name: &str, arg: Expr) -> Expr {
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
-        uses_odbc_syntax: false,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-    })
-}
-
-fn three_arg_function(name: &str, a: Expr, b: Expr, c: Expr) -> Expr {
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
-        uses_odbc_syntax: false,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(a)),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(b)),
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(c)),
-            ],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-    })
-}
-
-fn string_literal_expr(s: &str) -> Expr {
-    Expr::Value(ValueWithSpan {
-        value: Value::SingleQuotedString(s.to_string()),
-        span: sqlparser::tokenizer::Span::empty(),
-    })
 }

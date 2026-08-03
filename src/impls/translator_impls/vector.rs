@@ -40,13 +40,13 @@ use sql_traits::{
     traits::{ColumnLike, TableLike},
 };
 use sqlparser::ast::{
-    CreateTable, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, Ident, ObjectName, ObjectNamePart, Statement, Value, ValueWithSpan,
+    CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Statement, Value, ValueWithSpan,
 };
 
 use crate::{
     errors::Error,
     impls::{
+        function_helpers::simple_function_expr,
         generated_sql::parse_generated_sql,
         object_name::{
             last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
@@ -290,20 +290,7 @@ pub fn generate_vec0_statements(
 /// Build a `vec_f32(expr)` or `vec_f16(expr)` function call.
 fn make_vec_conversion_call(arg: Expr, is_halfvec: bool) -> Expr {
     let func_name = if is_halfvec { "vec_f16" } else { "vec_f32" };
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(func_name))]),
-        uses_odbc_syntax: false,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: None,
-        within_group: vec![],
-        parameters: FunctionArguments::None,
-    })
+    simple_function_expr(func_name, vec![arg], None)
 }
 
 /// If `expr` is a single-quoted string literal, wrap it with the matching

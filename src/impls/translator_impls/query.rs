@@ -14,11 +14,11 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, Distinct, Expr, Fetch, Function, FunctionArgumentList, FunctionArguments,
-    GroupByExpr, GroupByWithModifier, Ident, LimitClause, ObjectName, ObjectNamePart, Offset,
-    OffsetRows, OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query, Select, SelectItem,
-    SetExpr, SetOperator, SetQuantifier, Setting, TableAlias, TableFactor, TableWithJoins, Value,
-    ValueWithSpan, WindowSpec, WindowType, helpers::attached_token::AttachedToken,
+    BinaryOperator, Distinct, Expr, Fetch, Function, GroupByExpr, GroupByWithModifier, Ident,
+    LimitClause, Offset, OffsetRows, OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query,
+    Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Setting, TableAlias, TableFactor,
+    TableWithJoins, Value, ValueWithSpan, WindowSpec, WindowType,
+    helpers::attached_token::AttachedToken,
 };
 
 use super::helpers::{
@@ -26,7 +26,10 @@ use super::helpers::{
     translate_with_clause,
 };
 use crate::{
-    impls::{function_helpers::integer_literal, shared_helpers::TranslationDirection},
+    impls::{
+        function_helpers::{integer_literal, simple_function_expr},
+        shared_helpers::TranslationDirection,
+    },
     prelude::{Pg2SqliteOptions, Translator},
 };
 
@@ -305,25 +308,16 @@ fn projection_aliases(projection: &[SelectItem]) -> Result<Vec<Ident>, crate::er
 }
 
 fn row_number_expr(partition_by: Vec<Expr>, order_by: Vec<OrderByExpr>) -> Expr {
-    Expr::Function(Function {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("ROW_NUMBER"))]),
-        uses_odbc_syntax: false,
-        parameters: FunctionArguments::None,
-        args: FunctionArguments::List(FunctionArgumentList {
-            duplicate_treatment: None,
-            args: vec![],
-            clauses: vec![],
-        }),
-        filter: None,
-        null_treatment: None,
-        over: Some(WindowType::WindowSpec(WindowSpec {
+    simple_function_expr(
+        "ROW_NUMBER",
+        vec![],
+        Some(WindowType::WindowSpec(WindowSpec {
             window_name: None,
             partition_by,
             order_by,
             window_frame: None,
         })),
-        within_group: vec![],
-    })
+    )
 }
 
 /// Wraps `inner` in the derived-table row number filter that stands in for
