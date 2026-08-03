@@ -315,27 +315,29 @@ fn date_trunc_year() {
     assert_eq!(eval_dt("date_trunc('year', ts)").as_deref(), Some("2024-01-01 00:00:00"));
 }
 
-/// date_trunc('quarter', ...) has no faithful single strftime expression.
-/// The translation rejects this granularity rather than emitting a wrong date.
+/// PostgreSQL date_trunc('quarter', '2024-03-05 14:07:09') = '2024-01-01
+/// 00:00:00'. The first day of the quarter, not a week number, so this is
+/// month arithmetic rather than a format string.
 #[test]
-fn date_trunc_quarter_is_rejected() {
-    let err = translate_err("SELECT date_trunc('quarter', ts) FROM t");
-    assert!(
-        err.contains("quarter") || err.contains("not supported"),
-        "expected rejection for quarter, got: {err}"
-    );
+fn date_trunc_quarter() {
+    assert_eq!(eval_dt("date_trunc('quarter', ts)").as_deref(), Some("2024-01-01 00:00:00"));
 }
 
-/// date_trunc('week', ...) disagrees between PostgreSQL (ISO Monday-based
-/// weeks) and SQLite strftime('%W') (Sunday-based). The translation rejects
-/// this granularity to avoid silently wrong results near week boundaries.
+/// PostgreSQL date_trunc('week', '2024-03-05 14:07:09') = '2024-03-04
+/// 00:00:00', the Monday of the ISO week. The old rejection reasoned about
+/// `strftime('%W')`, which answers a Sunday based week NUMBER and was never
+/// the right shape for a truncation.
 #[test]
-fn date_trunc_week_is_rejected() {
-    let err = translate_err("SELECT date_trunc('week', ts) FROM t");
-    assert!(
-        err.contains("week") || err.contains("not supported"),
-        "expected rejection for week, got: {err}"
-    );
+fn date_trunc_week() {
+    assert_eq!(eval_dt("date_trunc('week', ts)").as_deref(), Some("2024-03-04 00:00:00"));
+}
+
+/// PostgreSQL date_trunc('decade', '2024-03-05 14:07:09') = '2020-01-01
+/// 00:00:00'. A decade floors the year, unlike a century, which counts from
+/// year 1.
+#[test]
+fn date_trunc_decade() {
+    assert_eq!(eval_dt("date_trunc('decade', ts)").as_deref(), Some("2020-01-01 00:00:00"));
 }
 
 // ── to_char

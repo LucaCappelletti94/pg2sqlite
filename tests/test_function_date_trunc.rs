@@ -57,27 +57,84 @@ fn a_truncated_value_compares_against_a_stored_timestamp() {
     assert_eq!(rows, vec![Some("1".to_string())]);
 }
 
+/// Measured on PostgreSQL 16. These are the units where the calendar rule is
+/// not a format string. `week` truncates to the Monday of the ISO week, so a
+/// Sunday belongs to the previous one and a Monday stays put. `decade` floors
+/// the year, while `century` and `millennium` count from year 1, so 2000 sits
+/// in the century starting 1901 and the millennium starting 1001.
 #[test]
-fn date_trunc_quarter_produces_error() {
-    let sql = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
-               SELECT date_trunc('quarter', ts) FROM t;";
-    let result = translate(sql);
-    assert!(result.is_err(), "date_trunc('quarter', ...) should produce an error");
-    let err = result.unwrap_err();
-    assert!(err.contains("quarter"), "Error should mention 'quarter', got: {err}");
+fn every_coarse_granularity_returns_the_postgres_value() {
+    for (stamp, unit, expected) in [
+        ("2024-03-15 13:45:30", "week", "2024-03-11 00:00:00"),
+        ("2023-01-01 13:45:30", "week", "2022-12-26 00:00:00"),
+        ("2024-12-30 13:45:30", "week", "2024-12-30 00:00:00"),
+        ("2021-01-01 13:45:30", "week", "2020-12-28 00:00:00"),
+        ("2024-03-15 13:45:30", "quarter", "2024-01-01 00:00:00"),
+        ("2024-12-30 13:45:30", "quarter", "2024-10-01 00:00:00"),
+        ("2000-06-15 13:45:30", "quarter", "2000-04-01 00:00:00"),
+        ("2024-03-15 13:45:30", "decade", "2020-01-01 00:00:00"),
+        ("1999-06-15 13:45:30", "decade", "1990-01-01 00:00:00"),
+        ("2000-06-15 13:45:30", "decade", "2000-01-01 00:00:00"),
+        ("2024-03-15 13:45:30", "century", "2001-01-01 00:00:00"),
+        ("2000-06-15 13:45:30", "century", "1901-01-01 00:00:00"),
+        ("2001-01-01 00:00:00", "century", "2001-01-01 00:00:00"),
+        ("2024-03-15 13:45:30", "millennium", "2001-01-01 00:00:00"),
+        ("2000-06-15 13:45:30", "millennium", "1001-01-01 00:00:00"),
+    ] {
+        let rows = run_translated_with(
+            &format!(
+                "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
+                 INSERT INTO t VALUES (1, '{stamp}');
+                 SELECT date_trunc('{unit}', ts) FROM t;"
+            ),
+            &Pg2SqliteOptions::default(),
+        );
+        assert_eq!(rows, vec![Some(expected.to_string())], "date_trunc('{unit}', '{stamp}')");
+    }
 }
 
+/// The coarse units take the same plural spellings as the rest.
+#[test]
+fn a_coarse_granularity_accepts_its_plural() {
+    for unit in ["weeks", "quarters", "decades", "centuries", "millennia"] {
+        let rows = run_translated_with(
+            &format!(
+                "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
+                 INSERT INTO t VALUES (1, '2024-03-15 13:45:30');
+                 SELECT date_trunc('{unit}', ts) FROM t;"
+            ),
+            &Pg2SqliteOptions::default(),
+        );
+        assert_eq!(rows.len(), 1, "date_trunc('{unit}', ts) should return a row");
+    }
+}
+
+/// The granularity is matched case insensitively, which the coarse units have
+/// to honour as well as the rest.
+#[test]
+fn date_trunc_ignores_the_case_of_the_granularity() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
+         INSERT INTO t VALUES (1, '2024-12-30 13:45:30');
+         SELECT date_trunc('QUARTER', ts) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("2024-10-01 00:00:00".to_string())]);
+}
+
+/// A granularity PostgreSQL does not have is still refused, and the message
+/// lists what it accepts. It used to claim the coarse units have no strftime
+/// equivalent, which was never true.
 #[test]
 fn date_trunc_unsupported_granularity_produces_helpful_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
-               SELECT date_trunc('century', ts) FROM t;";
+               SELECT date_trunc('fortnight', ts) FROM t;";
     let result = translate(sql);
-    assert!(result.is_err(), "date_trunc('century', ...) should produce an error");
+    assert!(result.is_err(), "date_trunc('fortnight', ...) should produce an error");
     let err = result.unwrap_err();
-    assert!(
-        err.to_lowercase().contains("not supported"),
-        "Error should mention 'not supported', got: {err}"
-    );
+    for granularity in ["second", "week", "quarter", "century", "millennium"] {
+        assert!(err.contains(granularity), "error should list {granularity}, got: {err}");
+    }
 }
 
 #[test]

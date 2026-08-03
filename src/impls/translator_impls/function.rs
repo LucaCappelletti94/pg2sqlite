@@ -1,6 +1,5 @@
 //! Implementation of the [`Translator`] trait for the
 //! `Function` type.
-
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::{
@@ -26,7 +25,11 @@ use super::{
 };
 use crate::{
     impls::{
-        datetime_helpers::{build_strftime_call, parse_date_part_key, strftime_mapping_for_key},
+        datetime_helpers::{
+            build_date_trunc_quarter_call, build_date_trunc_week_call,
+            build_date_trunc_year_span_call, build_strftime_call, parse_date_part_key,
+            strftime_mapping_for_key,
+        },
         expr_helpers::case_when,
         function_helpers::{
             extract_exactly, integer_literal, number_literal, simple_function_expr, string_literal,
@@ -1639,12 +1642,15 @@ impl Translator for Function {
                     }
                 };
 
-                // Map PostgreSQL truncation granularities to strftime format
-                // strings. The format zeros out the sub-granularity components
-                // rather than dropping them: PostgreSQL's date_trunc always
-                // answers a full timestamp, so a coarse unit that stopped at the
-                // date would never compare equal to a stored one, which this
-                // crate writes as TEXT `YYYY-MM-DD HH:MM:SS`.
+                let translated_ts = ts_expr.translate(schema, options)?;
+                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+
+                // The finer units are a format string that zeros the
+                // sub-granularity components rather than dropping them:
+                // PostgreSQL's date_trunc always answers a full timestamp, so a
+                // coarse unit that stopped at the date would never compare
+                // equal to a stored one, which this crate writes as TEXT
+                // `YYYY-MM-DD HH:MM:SS`.
                 let format_str = match field_str.as_str() {
                     "second" | "seconds" => "%Y-%m-%d %H:%M:%S",
                     "minute" | "minutes" => "%Y-%m-%d %H:%M:00",
@@ -1652,18 +1658,46 @@ impl Translator for Function {
                     "day" | "days" => "%Y-%m-%d 00:00:00",
                     "month" | "months" => "%Y-%m-01 00:00:00",
                     "year" | "years" => "%Y-01-01 00:00:00",
+                    // The rest are calendar arithmetic, not a format.
+                    "week" | "weeks" => {
+                        return Ok(build_date_trunc_week_call(translated_ts, translated_over));
+                    }
+                    "quarter" | "quarters" => {
+                        return Ok(build_date_trunc_quarter_call(translated_ts, translated_over));
+                    }
+                    "decade" | "decades" => {
+                        return Ok(build_date_trunc_year_span_call(
+                            translated_ts,
+                            10,
+                            0,
+                            translated_over,
+                        ));
+                    }
+                    "century" | "centuries" => {
+                        return Ok(build_date_trunc_year_span_call(
+                            translated_ts,
+                            100,
+                            1,
+                            translated_over,
+                        ));
+                    }
+                    "millennium" | "millennia" => {
+                        return Ok(build_date_trunc_year_span_call(
+                            translated_ts,
+                            1000,
+                            1,
+                            translated_over,
+                        ));
+                    }
                     other => {
                         return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                            "date_trunc('{other}', ...) is not supported in SQLite. \
-                             Supported granularities: second, minute, hour, day, month, year. \
-                             Unsupported granularities (quarter, decade, century, millennium) \
-                             have no strftime equivalent."
+                            "date_trunc('{other}', ...) is not a PostgreSQL granularity. \
+                             Supported: second, minute, hour, day, week, month, quarter, year, \
+                             decade, century, millennium, and their plurals."
                         )));
                     }
                 };
 
-                let translated_ts = ts_expr.translate(schema, options)?;
-                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
                 Ok(build_strftime_call(format_str, translated_ts, translated_over))
             }
             FunctionTranslation::DatePart => {
