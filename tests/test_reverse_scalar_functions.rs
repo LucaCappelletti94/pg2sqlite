@@ -245,3 +245,49 @@ fn reverse_dialect_keeps_every_sqlite_parsing_behaviour() {
         );
     }
 }
+
+/// Pins the upstream precedence defect that keeps `glob_dialect.rs` alive.
+///
+/// `SQLiteDialect` gained a `GLOB` arm in apache/datafusion-sqlparser-rs
+/// PR #2362, but it parses the right operand with `Parser::parse_expr`, which
+/// is `parse_subexpr(0)`, so a following `AND` is swallowed into the pattern.
+/// `LIKE` is the control: it takes the caller's precedence and binds correctly,
+/// which is what the pattern operators should do.
+///
+/// The two parses render identically, because sqlparser's `Display` adds no
+/// parentheses, so this asserts on the tree.
+#[test]
+fn sqlparser_still_misparses_sqlite_pattern_operator_precedence() {
+    fn top_level_operator(dialect: &dyn sqlparser::dialect::Dialect, sql: &str) -> String {
+        let statements =
+            sqlparser::parser::Parser::parse_sql(dialect, sql).expect("the fixture must parse");
+        let sqlparser::ast::Statement::Query(query) = &statements[0] else {
+            panic!("expected a query");
+        };
+        let sqlparser::ast::SetExpr::Select(select) = &*query.body else {
+            panic!("expected a select");
+        };
+        match select.selection.as_ref().expect("the fixture has a WHERE") {
+            sqlparser::ast::Expr::BinaryOp { op, .. } => op.to_string(),
+            other => panic!("expected a binary operator at the top, got {other:?}"),
+        }
+    }
+
+    let sqlite = sqlparser::dialect::SQLiteDialect {};
+    assert_eq!(
+        top_level_operator(&sqlite, "SELECT s FROM t WHERE s LIKE 'p' AND n = 1"),
+        "AND",
+        "LIKE is the control: upstream already binds it correctly"
+    );
+
+    for operator in ["GLOB", "REGEXP", "MATCH"] {
+        let sql = format!("SELECT s FROM t WHERE s {operator} 'p' AND n = 1");
+        assert_eq!(
+            top_level_operator(&sqlite, &sql),
+            operator,
+            "upstream still swallows the AND into the {operator} pattern. If this now reports \
+             AND, the precedence fix has landed: delete src/impls/reverse_translator_impls/\
+             glob_dialect.rs and close plan item R81"
+        );
+    }
+}
