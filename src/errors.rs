@@ -46,6 +46,29 @@ pub enum Error {
     /// Error that may occur during git operations.
     #[error("Git error: {0}")]
     GitError(String),
+    /// SQL this crate generated could not be read back.
+    ///
+    /// Not a defect in the input. The statement was synthesised by the
+    /// translator, so reaching this means the generator emitted something it
+    /// cannot itself parse, and the translation that depends on it cannot be
+    /// trusted. Reported rather than panicked because a library must not abort
+    /// its caller's process over its own bug.
+    #[error(
+        "Internal pg2sqlite fault while {context}: {reason}. \
+         This is a bug in pg2sqlite rather than in the input. Generated SQL: {sql}"
+    )]
+    InternalGeneratedSql {
+        /// What the translator was generating, such as `RLS view`.
+        context: String,
+        /// Why the generated SQL could not be read back.
+        reason: String,
+        /// The SQL the translator produced.
+        sql: String,
+        /// The parser's own error, when the failure was a parse failure. A
+        /// statement-count mismatch has no underlying error, so it is `None`.
+        #[source]
+        source: Option<ParserError>,
+    },
     /// Error when a feature is not supported in `PostgreSQL`.
     #[error("Unknown PostgreSQL feature: {0}")]
     UnknownPostgresFeature(String),
