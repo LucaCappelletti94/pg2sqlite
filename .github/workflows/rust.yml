@@ -123,6 +123,21 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  sqlite-floor:
+    name: Minimum Supported SQLite Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SQLite amalgamations
+        uses: actions/cache@v4
+        with:
+          path: target/sqlite-floor
+          key: sqlite-floor-${{ hashFiles('scripts/check_sqlite_floor.sh') }}
+
+      - name: Check emitted SQL against the declared floor
+        run: scripts/check_sqlite_floor.sh
+
   msrv:
     name: Minimum Supported Rust Version
     runs-on: ubuntu-latest
