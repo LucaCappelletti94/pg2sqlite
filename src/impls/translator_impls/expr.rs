@@ -1898,23 +1898,9 @@ impl Translator for Expr {
             }
             Expr::Prefixed { value, .. } => value.translate(schema, options)?,
             Expr::Collate { expr, collation } => {
-                let collation_name = collation
-                    .0
-                    .last()
-                    .and_then(|p| p.as_ident())
-                    .map(|i| i.value.to_ascii_uppercase())
-                    .unwrap_or_default();
-                if !matches!(collation_name.as_str(), "BINARY" | "NOCASE" | "RTRIM") {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                        "COLLATE {collation_name} is not a valid SQLite collation. \
-                         SQLite only supports BINARY (default), NOCASE, and RTRIM. \
-                         PostgreSQL collation names must be dropped or replaced before \
-                         translation."
-                    )));
-                }
                 Expr::Collate {
                     expr: Box::new(expr.translate(schema, options)?),
-                    collation: collation.clone(),
+                    collation: sqlite_collation(collation)?,
                 }
             }
             Expr::Interval(interval) => {
@@ -2067,6 +2053,36 @@ impl Translator for Expr {
 /// direction rebuilds this call to recognise its own output.
 pub(crate) fn wrap_with_lower(expr: Expr) -> Expr {
     simple_function_expr("lower", vec![expr], None)
+}
+
+/// Maps a PostgreSQL collation name onto the SQLite collation that orders the
+/// same way, and reports the names that have none.
+///
+/// `C` and `POSIX` are byte order collations with no locale behind them.
+/// Measured on PostgreSQL 16, both sort `A,B,Zz,_z,a,b`, which is what SQLite
+/// `BINARY` gives, and `pg_collation` reports both as deterministic. Every
+/// other PostgreSQL name is locale dependent, so it has no SQLite counterpart
+/// and no ordering this can promise.
+fn sqlite_collation(collation: &ObjectName) -> Result<ObjectName, crate::errors::Error> {
+    let name = collation
+        .0
+        .last()
+        .and_then(ObjectNamePart::as_ident)
+        .map(|ident| ident.value.to_ascii_uppercase())
+        .unwrap_or_default();
+
+    match name.as_str() {
+        "BINARY" | "NOCASE" | "RTRIM" => Ok(collation.clone()),
+        "C" | "POSIX" => Ok(ObjectName(vec![ObjectNamePart::Identifier(Ident::new("BINARY"))])),
+        _ => {
+            Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "COLLATE {name} is not a valid SQLite collation. SQLite only supports BINARY \
+                 (default), NOCASE, and RTRIM, and PostgreSQL C and POSIX map onto BINARY. \
+                 Any other PostgreSQL collation name must be dropped or replaced before \
+                 translation."
+            )))
+        }
+    }
 }
 
 /// Translate `<expr> IS [NOT] JSON [VALUE|SCALAR|ARRAY|OBJECT]` onto json1.
