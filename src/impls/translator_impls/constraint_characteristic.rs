@@ -22,7 +22,7 @@ use crate::prelude::{Pg2SqliteOptions, Translator};
 /// SQLite honours deferred foreign keys, so `DEFERRABLE` and `INITIALLY` pass
 /// through. It has no `ENFORCED` clause, and it carries deferrability nowhere
 /// but a foreign key clause, so the `PRIMARY KEY` and `UNIQUE` call sites
-/// refuse before reaching here. See [`deferrability_outside_a_foreign_key`].
+/// refuse before reaching here, through `deferrability_outside_a_foreign_key`.
 impl Translator for ConstraintCharacteristics {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
