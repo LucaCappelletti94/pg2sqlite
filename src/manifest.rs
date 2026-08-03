@@ -7,7 +7,7 @@
 //! [`Pg2Sqlite::translation_manifest`](crate::pg2sqlite::Pg2Sqlite::translation_manifest).
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 /// How the translation wrapped one table.
 #[non_exhaustive]
