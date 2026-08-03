@@ -76,13 +76,20 @@ sqlitegis = [
 # the fuzz harnesses; not used by production code.
 arbitrary = ["dep:arbitrary"]
 
-# sqlparser 0.62.0 on crates.io predates several merged upstream fixes we rely
-# on: the no_std-compatible `visitor` feature, the speculative-prefix parse-time
-# fixes, and `ALTER USER` parsing as a synonym for `ALTER ROLE`. Track apache
-# main until a release ships them. Patching at the workspace root unifies every
-# dependent (sql-traits, sql_docs) onto a single sqlparser so dialect types stay
-# compatible across crate boundaries. `sqlparser_derive` follows automatically
-# as a path dependency of the git sqlparser, so it needs no separate patch.
+# Every crate in this graph targets unreleased sqlparser AST, so this patch is
+# not droppable. Against released 0.62.0 the build dies inside `sql-traits`
+# first, on `TableConstraint::Exclude` and `UniqueConstraint::include`, and this
+# crate's own source then fails on `Statement::CreateTextSearch`,
+# `AlterTextSearch`, `CreateFileFormat`, `CreateWarehouse`, `Put`,
+# `Expr::IsJson`, `JsonPredicateType`, `JsonKeyUniqueness`, and the `unlogged`
+# field. Dropping the patch therefore waits on a sqlparser release carrying that
+# AST and a `sql-traits` revision built against it, which is also what blocks
+# publishing this crate to crates.io.
+#
+# Patching at the workspace root unifies every dependent (sql-traits, sql_docs)
+# onto a single sqlparser so dialect types stay compatible across crate
+# boundaries. `sqlparser_derive` follows automatically as a path dependency of
+# the git sqlparser, so it needs no separate patch.
 [patch.crates-io]
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 
