@@ -1459,64 +1459,33 @@ fn build_concat_ws_expression(separator: &Expr, values: Vec<Expr>) -> Option<Exp
 fn wrap_arg_with_case_filter(arg: &FunctionArg, filter: &Expr) -> FunctionArg {
     match arg {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Case {
-                case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                operand: None,
-                conditions: vec![sqlparser::ast::CaseWhen {
-                    condition: filter.clone(),
-                    result: expr.clone(),
-                }],
-                else_result: None,
-            }))
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(case_when(
+                filter.clone(),
+                expr.clone(),
+                None,
+            )))
         }
         FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
             // COUNT(*) FILTER (WHERE cond) -> SUM(CASE WHEN cond THEN 1 END)
             // But we can't change the function name here, so we wrap it differently
             // COUNT(*) FILTER -> COUNT(CASE WHEN cond THEN 1 END)
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Case {
-                case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                operand: None,
-                conditions: vec![sqlparser::ast::CaseWhen {
-                    condition: filter.clone(),
-                    result: Expr::Value(ValueWithSpan {
-                        value: Value::Number("1".to_string(), false),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    }),
-                }],
-                else_result: None,
-            }))
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(case_when(
+                filter.clone(),
+                integer_literal(1),
+                None,
+            )))
         }
         FunctionArg::Named { name, arg: FunctionArgExpr::Expr(expr), operator } => {
             FunctionArg::Named {
                 name: name.clone(),
-                arg: FunctionArgExpr::Expr(Expr::Case {
-                    case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                    end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                    operand: None,
-                    conditions: vec![sqlparser::ast::CaseWhen {
-                        condition: filter.clone(),
-                        result: expr.clone(),
-                    }],
-                    else_result: None,
-                }),
+                arg: FunctionArgExpr::Expr(case_when(filter.clone(), expr.clone(), None)),
                 operator: operator.clone(),
             }
         }
         FunctionArg::ExprNamed { name, arg: FunctionArgExpr::Expr(expr), operator } => {
             FunctionArg::ExprNamed {
                 name: name.clone(),
-                arg: FunctionArgExpr::Expr(Expr::Case {
-                    case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                    end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                    operand: None,
-                    conditions: vec![sqlparser::ast::CaseWhen {
-                        condition: filter.clone(),
-                        result: expr.clone(),
-                    }],
-                    else_result: None,
-                }),
+                arg: FunctionArgExpr::Expr(case_when(filter.clone(), expr.clone(), None)),
                 operator: operator.clone(),
             }
         }

@@ -370,83 +370,42 @@ fn string_set_membership(expr: Expr, values: &[&str]) -> Expr {
     }
 }
 
-/// Translate PostgreSQL FLOOR(x) to SQLite-compatible expression.
-///
-/// SQLite doesn't have a native FLOOR function. We translate it to:
-/// `CASE WHEN x >= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
-///       ELSE CAST(x AS INTEGER) - 1 END`
-///
-/// This handles both positive and negative numbers correctly:
-/// - FLOOR(3.7) = 3 (truncate)
-/// - FLOOR(-3.7) = -4 (round toward negative infinity)
-fn translate_floor(
-    expr: &Expr,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Expr, crate::errors::Error> {
-    let translated_expr = expr.translate(schema, options)?;
-
-    // Build CAST(x AS INTEGER)
-    let cast_to_int = Expr::Cast {
-        expr: Box::new(translated_expr.clone()),
-        data_type: DataType::Integer(None),
-        format: None,
-        kind: CastKind::Cast,
-    };
-
-    // Build: CASE WHEN x >= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
-    //        ELSE CAST(x AS INTEGER) - 1 END
-    Ok(Expr::Case {
-        case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-        end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-        operand: None,
-        conditions: vec![sqlparser::ast::CaseWhen {
-            condition: Expr::BinaryOp {
-                left: Box::new(Expr::BinaryOp {
-                    left: Box::new(translated_expr.clone()),
-                    op: BinaryOperator::GtEq,
-                    right: Box::new(Expr::Value(ValueWithSpan {
-                        value: Value::Number("0".to_string(), false),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    })),
-                }),
-                op: BinaryOperator::Or,
-                right: Box::new(Expr::BinaryOp {
-                    left: Box::new(translated_expr),
-                    op: BinaryOperator::Eq,
-                    right: Box::new(cast_to_int.clone()),
-                }),
-            },
-            result: cast_to_int.clone(),
-        }],
-        else_result: Some(Box::new(Expr::BinaryOp {
-            left: Box::new(cast_to_int),
-            op: BinaryOperator::Minus,
-            right: Box::new(Expr::Value(ValueWithSpan {
-                value: Value::Number("1".to_string(), false),
-                span: sqlparser::tokenizer::Span::empty(),
-            })),
-        })),
-    })
+/// Which way [`translate_integral_rounding`] moves a value that truncation
+/// does not already answer correctly.
+#[derive(Clone, Copy)]
+enum RoundingDirection {
+    /// `FLOOR`, toward negative infinity.
+    Down,
+    /// `CEIL`, toward positive infinity.
+    Up,
 }
 
-/// Translate PostgreSQL CEIL(x) to SQLite-compatible expression.
+/// Translate PostgreSQL `FLOOR(x)` or `CEIL(x)`, neither of which SQLite has.
 ///
-/// SQLite doesn't have a native CEIL function. We translate it to:
-/// `CASE WHEN x <= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
-///       ELSE CAST(x AS INTEGER) + 1 END`
+/// `CAST(x AS INTEGER)` truncates toward zero, so it is already the answer on
+/// one side of zero and one off on the other. Which side depends on the
+/// direction, and a value that is already integral needs no adjustment either
+/// way:
 ///
-/// This handles both positive and negative numbers correctly:
-/// - CEIL(3.2) = 4 (round up)
-/// - CEIL(-3.2) = -3 (truncate toward zero)
-fn translate_ceil(
+/// ```text
+/// FLOOR: CASE WHEN x >= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER) ELSE CAST(x AS INTEGER) - 1 END
+/// CEIL:  CASE WHEN x <= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER) ELSE CAST(x AS INTEGER) + 1 END
+/// ```
+///
+/// So `FLOOR(3.7)` is 3 and `FLOOR(-3.7)` is -4, `CEIL(3.2)` is 4 and
+/// `CEIL(-3.2)` is -3.
+fn translate_integral_rounding(
     expr: &Expr,
+    direction: RoundingDirection,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_expr = expr.translate(schema, options)?;
+    let (truncation_is_exact, adjustment) = match direction {
+        RoundingDirection::Down => (BinaryOperator::GtEq, BinaryOperator::Minus),
+        RoundingDirection::Up => (BinaryOperator::LtEq, BinaryOperator::Plus),
+    };
 
-    // Build CAST(x AS INTEGER)
+    let translated_expr = expr.translate(schema, options)?;
     let cast_to_int = Expr::Cast {
         expr: Box::new(translated_expr.clone()),
         data_type: DataType::Integer(None),
@@ -454,40 +413,27 @@ fn translate_ceil(
         kind: CastKind::Cast,
     };
 
-    // Build: CASE WHEN x <= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER)
-    //        ELSE CAST(x AS INTEGER) + 1 END
-    Ok(Expr::Case {
-        case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-        end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-        operand: None,
-        conditions: vec![sqlparser::ast::CaseWhen {
-            condition: Expr::BinaryOp {
-                left: Box::new(Expr::BinaryOp {
-                    left: Box::new(translated_expr.clone()),
-                    op: BinaryOperator::LtEq,
-                    right: Box::new(Expr::Value(ValueWithSpan {
-                        value: Value::Number("0".to_string(), false),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    })),
-                }),
-                op: BinaryOperator::Or,
-                right: Box::new(Expr::BinaryOp {
-                    left: Box::new(translated_expr),
-                    op: BinaryOperator::Eq,
-                    right: Box::new(cast_to_int.clone()),
-                }),
-            },
-            result: cast_to_int.clone(),
-        }],
-        else_result: Some(Box::new(Expr::BinaryOp {
-            left: Box::new(cast_to_int),
-            op: BinaryOperator::Plus,
-            right: Box::new(Expr::Value(ValueWithSpan {
-                value: Value::Number("1".to_string(), false),
-                span: sqlparser::tokenizer::Span::empty(),
-            })),
-        })),
-    })
+    let already_correct = Expr::BinaryOp {
+        left: Box::new(Expr::BinaryOp {
+            left: Box::new(translated_expr.clone()),
+            op: truncation_is_exact,
+            right: Box::new(integer_literal(0)),
+        }),
+        op: BinaryOperator::Or,
+        right: Box::new(Expr::BinaryOp {
+            left: Box::new(translated_expr),
+            op: BinaryOperator::Eq,
+            right: Box::new(cast_to_int.clone()),
+        }),
+    };
+
+    let adjusted = Expr::BinaryOp {
+        left: Box::new(cast_to_int.clone()),
+        op: adjustment,
+        right: Box::new(integer_literal(1)),
+    };
+
+    Ok(case_when(already_correct, cast_to_int, Some(adjusted)))
 }
 
 /// Translate PostgreSQL POSITION(substr IN str) to SQLite INSTR(str, substr).
@@ -1814,8 +1760,12 @@ impl Translator for Expr {
                     options,
                 )?
             }
-            Expr::Ceil { expr, .. } => translate_ceil(expr, schema, options)?,
-            Expr::Floor { expr, .. } => translate_floor(expr, schema, options)?,
+            Expr::Ceil { expr, .. } => {
+                translate_integral_rounding(expr, RoundingDirection::Up, schema, options)?
+            }
+            Expr::Floor { expr, .. } => {
+                translate_integral_rounding(expr, RoundingDirection::Down, schema, options)?
+            }
             Expr::Position { expr, r#in } => translate_position(expr, r#in, schema, options)?,
             Expr::Substring { expr, substring_from, substring_for, .. } => {
                 translate_substring(
