@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use git2::Repository;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    AlterTableOperation, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement, Value,
-    ValueWithSpan, visit_expressions,
+    AlterTableOperation, CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart,
+    Statement, Value, ValueWithSpan, visit_expressions,
 };
 #[cfg(feature = "std")]
 use tempfile::TempDir;
@@ -38,57 +38,74 @@ use crate::{
     traits::TranslationOptions,
 };
 
-/// Pre-walks for GIN / GiST FTS indexes and populates the FTS-index catalog so
-/// the `@@ to_tsquery` rewrite can gate on a declared index. Without the
-/// catalog the rewrite referenced an undeclared `<table>_fts` virtual table,
-/// causing a runtime error.
-fn populate_fts_index_catalog(statements: &[Statement], options: &mut Pg2SqliteOptions) {
-    for stmt in statements {
-        let Statement::CreateIndex(create_index) = stmt else {
-            continue;
-        };
-        if !matches!(
-            create_index.using,
-            Some(sqlparser::ast::IndexType::GIN | sqlparser::ast::IndexType::GiST)
-        ) {
-            continue;
-        }
-        let FtsTranslation::Fts5 { columns, .. } = analyze_fts_index(create_index) else {
-            continue;
-        };
-        let table_name = last_ident_value_or_display(&create_index.table_name);
-        for col in columns {
-            options.add_fts_index(&table_name, &col);
-        }
+/// Registers a GIN / GiST FTS index so the `@@ to_tsquery` rewrite can gate on
+/// a declared index. Without the catalog the rewrite referenced an undeclared
+/// `<table>_fts` virtual table, causing a runtime error.
+fn register_fts_index(create_index: &CreateIndex, options: &mut Pg2SqliteOptions) {
+    if !matches!(
+        create_index.using,
+        Some(sqlparser::ast::IndexType::GIN | sqlparser::ast::IndexType::GiST)
+    ) {
+        return;
+    }
+    let FtsTranslation::Fts5 { columns, .. } = analyze_fts_index(create_index) else {
+        return;
+    };
+    let table_name = last_ident_value_or_display(&create_index.table_name);
+    for col in columns {
+        options.add_fts_index(&table_name, &col);
     }
 }
 
-/// Pre-walks GiST indexes over `geometry`/`geography` columns to populate the
+/// Registers a GiST index over `geometry`/`geography` columns in the
 /// spatial-index catalog that drives query-time predicate rewriting.
 ///
 /// A classification error is dropped on purpose: the per-statement translation
 /// re-runs the same classifier and reports it with full context.
-fn populate_spatial_index_catalog(
+fn register_spatial_index(
+    create_index: &CreateIndex,
+    schema: &ParserDB,
+    options: &mut Pg2SqliteOptions,
+) {
+    if !matches!(create_index.using, Some(IndexType::GiST)) {
+        return;
+    }
+    let Ok(Some(spatial_columns)) = postgis::classify_gist_spatial_columns(create_index, schema)
+    else {
+        return;
+    };
+    let table_name = last_ident_value_or_display(&create_index.table_name);
+    for col in spatial_columns {
+        options.add_spatial_index(&table_name, &col);
+    }
+}
+
+/// Populates every catalog that a statement's translation reads but that only
+/// another statement in the same unit can declare, so a `SELECT` can be
+/// rewritten against an index written after it.
+///
+/// One traversal serves all three: they only read `statements`, and none
+/// observes what the others record.
+///
+/// Spatial registration is gated because the rewrite it feeds targets an
+/// extension that may not be loaded. The FTS catalog has no such toggle, since
+/// its rewrite depends on the declared indexes alone.
+fn populate_prewalk_catalogs(
     statements: &[Statement],
     schema: &ParserDB,
     options: &mut Pg2SqliteOptions,
 ) {
-    for stmt in statements {
-        let Statement::CreateIndex(create_index) = stmt else {
+    let spatial_enabled = options.is_sqlitegis_enabled();
+    for statement in statements {
+        register_declared_object_name(statement, options);
+
+        let Statement::CreateIndex(create_index) = statement else {
             continue;
         };
-        if !matches!(create_index.using, Some(IndexType::GiST)) {
-            continue;
+        if spatial_enabled {
+            register_spatial_index(create_index, schema, options);
         }
-        let Ok(Some(spatial_columns)) =
-            postgis::classify_gist_spatial_columns(create_index, schema)
-        else {
-            continue;
-        };
-        let table_name = last_ident_value_or_display(&create_index.table_name);
-        for col in spatial_columns {
-            options.add_spatial_index(&table_name, &col);
-        }
+        register_fts_index(create_index, options);
     }
 }
 
@@ -118,30 +135,28 @@ fn statement_contains_like(statement: &Statement) -> bool {
     .is_break()
 }
 
-/// Registers every declared object name in `statements`, so the read-only
-/// deny-trigger pass can reject names that collide with existing objects, and
-/// every function a trigger executes, so the `CREATE FUNCTION` arm knows which
-/// definitions are realised inside a trigger rather than lost. Both use raw
-/// statements because the translation schema omits trigger definitions.
-fn populate_declared_object_names(statements: &[Statement], options: &mut Pg2SqliteOptions) {
-    for stmt in statements {
-        let name = match stmt {
-            Statement::CreateTable(create_table) => Some(&create_table.name),
-            Statement::CreateView(create_view) => Some(&create_view.name),
-            Statement::CreateTrigger(create_trigger) => Some(&create_trigger.name),
-            Statement::CreateIndex(create_index) => create_index.name.as_ref(),
-            _ => None,
-        };
-        if let Some(name) = name {
-            options.add_declared_object_name(last_ident_value_or_display(name));
-        }
+/// Registers `statement`'s declared object name, so the read-only deny-trigger
+/// pass can reject names that collide with existing objects, and the function a
+/// trigger executes, so the `CREATE FUNCTION` arm knows which definitions are
+/// realised inside a trigger rather than lost. Both read the raw statement
+/// because [`Pg2Sqlite::schema_statements_for_translation`] keeps triggers out
+/// of the translation schema.
+fn register_declared_object_name(statement: &Statement, options: &mut Pg2SqliteOptions) {
+    let name = match statement {
+        Statement::CreateTable(create_table) => Some(&create_table.name),
+        Statement::CreateView(create_view) => Some(&create_view.name),
+        Statement::CreateTrigger(create_trigger) => Some(&create_trigger.name),
+        Statement::CreateIndex(create_index) => create_index.name.as_ref(),
+        _ => None,
+    };
+    if let Some(name) = name {
+        options.add_declared_object_name(last_ident_value_or_display(name));
+    }
 
-        if let Statement::CreateTrigger(create_trigger) = stmt
-            && let Some(exec_body) = &create_trigger.exec_body
-        {
-            options
-                .add_trigger_function_name(last_ident_value_or_display(&exec_body.func_desc.name));
-        }
+    if let Statement::CreateTrigger(create_trigger) = statement
+        && let Some(exec_body) = &create_trigger.exec_body
+    {
+        options.add_trigger_function_name(last_ident_value_or_display(&exec_body.func_desc.name));
     }
 }
 
@@ -374,20 +389,8 @@ impl Pg2Sqlite {
             schema.validate_foreign_key_targets()?;
         }
 
-        // Pre-walk for spatial-index DDL so that the same translation unit's
-        // SELECTs can rewrite `ST_*` predicates over indexed columns through
-        // the rtree shadow. Only fires when SQLiteGIS translation is enabled;
-        // skips errors (an unsupported GiST will surface its own error when
-        // the statement itself is translated below).
         let mut options = options.clone();
-        if options.is_sqlitegis_enabled() {
-            populate_spatial_index_catalog(&normalized_statements, &schema, &mut options);
-        }
-        // Always-on: FTS5 rewrite gating doesn't depend on a runtime
-        // extension toggle, only on the schema's declared GIN/GiST
-        // indexes. Populates `options.fts_indexes`.
-        populate_fts_index_catalog(&normalized_statements, &mut options);
-        populate_declared_object_names(&normalized_statements, &mut options);
+        populate_prewalk_catalogs(&normalized_statements, &schema, &mut options);
         let options = options;
 
         let mut result: Vec<Statement> = normalized_statements
@@ -418,6 +421,12 @@ impl Pg2Sqlite {
         // evaluated later than the script (inside a CHECK constraint, a trigger
         // body, or a view) still depends on the pragma being set on whichever
         // connection runs the write.
+        //
+        // This scans the translated statements while the catalog pre-walk above
+        // scans the input. The two differ only for ILIKE, which arrives without
+        // a LIKE and leaves as one, and which the pragma cannot affect either
+        // way, so scanning here emits a pragma an input scan would skip rather
+        // than catching one it would miss.
         if result.iter().any(statement_contains_like) {
             result.insert(0, case_sensitive_like_pragma());
         }
