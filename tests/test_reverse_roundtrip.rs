@@ -564,3 +564,88 @@ fn a_marker_shape_that_breaks_the_order_by_rule_stays_a_window_filter() {
         "DISTINCT ON (sensor) under ORDER BY ts would not run in PostgreSQL: {pg_sql}"
     );
 }
+
+/// The `WHERE` expression of `pg_sql`, read from the parsed tree rather than
+/// from its text, which also proves the reverse output parses.
+fn where_clause(pg_sql: &str) -> sqlparser::ast::Expr {
+    let statements = Parser::parse_sql(&PostgreSqlDialect {}, pg_sql)
+        .unwrap_or_else(|error| panic!("not valid PostgreSQL: {error}\n{pg_sql}"));
+    let Some(sqlparser::ast::Statement::Query(query)) = statements.first() else {
+        panic!("expected a single query, got {pg_sql}");
+    };
+    let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
+        panic!("expected a SELECT, got {pg_sql}");
+    };
+    select.selection.clone().unwrap_or_else(|| panic!("expected a WHERE clause, got {pg_sql}"))
+}
+
+#[test]
+fn ilike_round_trips_through_the_lower_rewrite() {
+    let (sqlite_sql, mut connection) = forward_and_seed(
+        "SELECT sensor, ts, value FROM readings WHERE sensor ILIKE 'A' ORDER BY ts;",
+    );
+    assert_eq!(
+        run_select::<Reading>(&sqlite_sql, &mut connection),
+        vec![reading("a", 10, 100), reading("a", 30, 300)],
+        "ILIKE 'A' should match the lower case sensor: {sqlite_sql}"
+    );
+
+    let pg_sql = reverse(READINGS, &format!("{sqlite_sql};"));
+    assert!(
+        matches!(where_clause(&pg_sql), sqlparser::ast::Expr::ILike { negated: false, .. }),
+        "reversing the lower rewrite should restore ILIKE: {pg_sql}"
+    );
+
+    let (round_tripped, _) = forward_and_seed(&format!("{pg_sql};"));
+    assert_eq!(
+        round_tripped, sqlite_sql,
+        "the restored query should translate back to the same SQLite"
+    );
+}
+
+#[test]
+fn not_ilike_round_trips_through_the_lower_rewrite() {
+    let (sqlite_sql, mut connection) = forward_and_seed(
+        "SELECT sensor, ts, value FROM readings WHERE sensor NOT ILIKE 'A' ORDER BY ts;",
+    );
+    assert_eq!(
+        run_select::<Reading>(&sqlite_sql, &mut connection),
+        vec![reading("b", 5, 50), reading("b", 20, 200)],
+        "NOT ILIKE 'A' should keep only the other sensor: {sqlite_sql}"
+    );
+
+    let pg_sql = reverse(READINGS, &format!("{sqlite_sql};"));
+    assert!(
+        matches!(where_clause(&pg_sql), sqlparser::ast::Expr::ILike { negated: true, .. }),
+        "reversing the negated lower rewrite should restore NOT ILIKE: {pg_sql}"
+    );
+
+    let (round_tripped, _) = forward_and_seed(&format!("{pg_sql};"));
+    assert_eq!(round_tripped, sqlite_sql);
+}
+
+/// Guards the restoration against a shape that only half matches. The rewrite
+/// lowers both sides, so one bare side means this is not its output.
+#[test]
+fn one_lowered_side_is_not_restored_to_ilike() {
+    let pg_sql = reverse(READINGS, "SELECT sensor FROM readings WHERE lower(sensor) LIKE 'a';");
+    assert!(
+        matches!(where_clause(&pg_sql), sqlparser::ast::Expr::Like { .. }),
+        "a single lowered side must stay a LIKE: {pg_sql}"
+    );
+}
+
+/// Guards the restoration against an `ESCAPE` clause. `lower()` folds a letter
+/// escape character, so in PostgreSQL the two readings answer differently and
+/// restoring `ILIKE` would change the result.
+#[test]
+fn a_lowered_like_with_an_escape_is_not_restored_to_ilike() {
+    let pg_sql = reverse(
+        READINGS,
+        "SELECT sensor FROM readings WHERE lower(sensor) LIKE lower('aXb_') ESCAPE 'X';",
+    );
+    assert!(
+        matches!(where_clause(&pg_sql), sqlparser::ast::Expr::Like { .. }),
+        "an escape character must keep the query a LIKE: {pg_sql}"
+    );
+}

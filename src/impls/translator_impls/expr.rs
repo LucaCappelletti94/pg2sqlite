@@ -2062,8 +2062,10 @@ impl Translator for Expr {
 }
 
 /// Wraps `expr` in a SQLite `lower()` call: `lower(expr)`.
-/// Used to implement ILIKE → `lower(expr) LIKE lower(pattern)`.
-fn wrap_with_lower(expr: Expr) -> Expr {
+///
+/// Used to implement ILIKE -> `lower(expr) LIKE lower(pattern)`. The reverse
+/// direction rebuilds this call to recognise its own output.
+pub(crate) fn wrap_with_lower(expr: Expr) -> Expr {
     simple_function_expr("lower", vec![expr], None)
 }
 

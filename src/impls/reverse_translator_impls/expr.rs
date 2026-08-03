@@ -14,16 +14,41 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::{
-    ast::{BinaryOperator, CastKind, DataType, Expr, FunctionArguments, Value, ValueWithSpan},
+    ast::{
+        BinaryOperator, CastKind, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+        Value, ValueWithSpan,
+    },
     tokenizer::Span,
 };
 
 use super::{function::reverse_translate_function, helpers::Reverse};
 use crate::{
     errors::Error,
-    impls::{function_helpers::simple_function_expr, shared_helpers::translate_expr_recursive},
+    impls::{
+        function_helpers::simple_function_expr, shared_helpers::translate_expr_recursive,
+        translator_impls::expr::wrap_with_lower,
+    },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
+
+/// The argument of the `lower()` call the forward direction wraps each side of
+/// an `ILIKE` in, or `None` for anything else.
+///
+/// Rebuilding the call through the emitter and comparing is what keeps the two
+/// directions in step: a `lower` carrying a window, a filter, a modifier, or a
+/// different spelling is not what the rewrite emits, so it is not restored.
+fn forward_lower_argument(expr: &Expr) -> Option<&Expr> {
+    let Expr::Function(function) = expr else {
+        return None;
+    };
+    let FunctionArguments::List(list) = &function.args else {
+        return None;
+    };
+    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))] = list.args.as_slice() else {
+        return None;
+    };
+    (wrap_with_lower(argument.clone()) == *expr).then_some(argument)
+}
 
 /// Convert a SQLite GLOB pattern to a PostgreSQL LIKE pattern.
 ///
@@ -227,6 +252,29 @@ impl ReverseTranslator for Expr {
                      use an explicit INTEGER PRIMARY KEY column instead"
                         .to_string(),
                 ))
+            }
+
+            // The forward direction lowers both sides of ILIKE, so
+            // `lower(x) LIKE lower(y)` restores to `x ILIKE y`. Measured on
+            // PostgreSQL 16, the two readings agree, including on non-ASCII
+            // case and on patterns holding wildcards.
+            //
+            // Only without ESCAPE. `lower()` folds a letter escape character,
+            // and the two readings then disagree: with ESCAPE 'X',
+            // `'aXbc' ILIKE 'aXb_'` is false while the lowered form is true.
+            Expr::Like { negated, any, expr, pattern, escape_char: None } => {
+                match (forward_lower_argument(expr), forward_lower_argument(pattern)) {
+                    (Some(subject), Some(target)) => {
+                        Ok(Expr::ILike {
+                            negated: *negated,
+                            any: *any,
+                            expr: Box::new(subject.reverse_translate(schema, options)?),
+                            pattern: Box::new(target.reverse_translate(schema, options)?),
+                            escape_char: None,
+                        })
+                    }
+                    _ => translate_expr_recursive::<Reverse>(self, schema, options),
+                }
             }
 
             _ => translate_expr_recursive::<Reverse>(self, schema, options),
