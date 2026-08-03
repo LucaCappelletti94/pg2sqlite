@@ -163,9 +163,8 @@ fn referenced_column_name(expr: &Expr) -> Option<&str> {
 /// early stop is what keeps this off the hot path: a first column that already
 /// settles the question ends the walk instead of visiting every table.
 ///
-/// The type comes from the parsed DDL rather than through
-/// `ColumnLike::data_type`, which normalises and panics on an array with
-/// `Normalization for SQLParser data type Array(...) is not yet implemented`.
+/// `read` needs the structured type, so the parsed DDL is read directly rather
+/// than through `ColumnLike::data_type`, which answers a normalised token.
 fn unanimous_declared<T: PartialEq>(
     expr: &Expr,
     schema: &ParserDB,

@@ -515,3 +515,24 @@ fn overlap_with_a_null_operand_is_false_rather_than_null() {
     let rows = run_translated("SELECT NULL::INT[] && ARRAY[1];");
     assert_eq!(rows, vec![Some("0".to_string())]);
 }
+
+/// Asking an array column its declared type used to abort the process inside
+/// `sql-traits`, which forced every lookup in this crate to read the parsed
+/// DDL instead. The prohibition is lifted and this pins it, since a regression
+/// would be a process abort rather than a test failure anywhere else.
+#[test]
+fn an_array_column_answers_its_declared_type() {
+    use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
+
+    for (ddl, want) in [
+        ("CREATE TABLE t (c TEXT[]);", "TEXT[]"),
+        ("CREATE TABLE t (c INTEGER[]);", "INT[]"),
+        ("CREATE TABLE t (c TEXT[3]);", "TEXT[]"),
+        ("CREATE TABLE t (c INT[][]);", "INT[][]"),
+    ] {
+        let schema = Pg2Sqlite::default().sql(ddl).expect("parses").build_schema().expect("builds");
+        let table = schema.tables().next().expect("one table");
+        let column = table.columns(&schema).expect("columns").next().expect("one column");
+        assert_eq!(column.data_type(&schema), want, "for {ddl}");
+    }
+}
