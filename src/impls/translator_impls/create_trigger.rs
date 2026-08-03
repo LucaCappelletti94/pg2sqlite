@@ -18,20 +18,22 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         Assignment, AssignmentTarget, BinaryOperator, ConditionalStatements, CreateTrigger,
-        DropTrigger, Expr, GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select,
-        SelectFlavor, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, TriggerEvent,
-        TriggerExecBodyType, TriggerObject, TriggerObjectKind, TriggerPeriod, Update, Value,
-        ValueWithSpan, helpers::attached_token::AttachedToken,
+        DropTrigger, Expr, Ident, ObjectName, ObjectNamePart, Statement, TableFactor,
+        TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerObject, TriggerObjectKind,
+        TriggerPeriod, Update, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
     },
     keywords::Keyword,
     tokenizer::{Span, Token, TokenWithSpan, Word},
 };
 
 use crate::{
-    impls::object_name::{
-        append_suffix, normalize_schema_qualified_object_name_for_sqlite,
-        table_has_implicit_public_rls, table_with_implicit_public_lookup,
-        validate_schema_qualified_object_name_for_sqlite,
+    impls::{
+        object_name::{
+            append_suffix, normalize_schema_qualified_object_name_for_sqlite,
+            table_has_implicit_public_rls, table_with_implicit_public_lookup,
+            validate_schema_qualified_object_name_for_sqlite,
+        },
+        query_builder::single_expr_query,
     },
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
@@ -129,46 +131,12 @@ fn substitute_no_op_body_when_empty(
             .to_string(),
     });
 
-    body.statements = vec![Statement::Query(Box::new(Query {
-        with: None,
-        body: Box::new(SetExpr::Select(Box::new(Select {
-            select_token: AttachedToken::empty(),
-            distinct: None,
-            top: None,
-            top_before_distinct: false,
-            projection: vec![SelectItem::UnnamedExpr(Expr::Value(ValueWithSpan {
-                value: Value::Null,
-                span: Span::empty(),
-            }))],
-            into: None,
-            from: vec![],
-            lateral_views: vec![],
-            selection: None,
-            group_by: GroupByExpr::Expressions(vec![], vec![]),
-            cluster_by: vec![],
-            distribute_by: vec![],
-            sort_by: vec![],
-            having: None,
-            named_window: vec![],
-            qualify: None,
-            connect_by: vec![],
-            window_before_qualify: false,
-            exclude: None,
-            optimizer_hints: Vec::new(),
-            value_table_mode: None,
-            prewhere: None,
-            flavor: SelectFlavor::Standard,
-            select_modifiers: None,
-        }))),
-        order_by: None,
-        limit_clause: None,
-        fetch: None,
-        locks: vec![],
-        for_clause: None,
-        settings: None,
-        format_clause: None,
-        pipe_operators: vec![],
-    }))];
+    // SQLite rejects an empty BEGIN END, so the body carries `SELECT NULL`.
+    body.statements = vec![Statement::Query(Box::new(single_expr_query(
+        Expr::Value(ValueWithSpan { value: Value::Null, span: Span::empty() }),
+        vec![],
+        None,
+    )))];
     body
 }
 

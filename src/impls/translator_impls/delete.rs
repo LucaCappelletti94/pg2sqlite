@@ -10,18 +10,14 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::{
-    ast::{
-        Delete, Expr, GroupByExpr, Query, Select, SelectFlavor, SelectItem, SetExpr, Statement,
-        TableFactor, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
-    },
-    tokenizer::Span,
-};
+use sqlparser::ast::{Delete, Expr, SetExpr, Statement, TableFactor};
 
 use super::helpers::{Forward, translate_table_with_joins};
 use crate::{
     impls::{
+        function_helpers::integer_literal,
         object_name::{append_suffix, table_has_implicit_public_rls},
+        query_builder::single_expr_query,
         shared_helpers::translate_delete_core,
         translator_impls::postgis,
     },
@@ -55,46 +51,10 @@ impl Translator for Delete {
 
             let original_selection = delete.selection;
 
-            let mut subquery = Query {
-                with: None,
-                body: Box::new(SetExpr::Select(Box::new(Select {
-                    select_token: AttachedToken::empty(),
-                    distinct: None,
-                    top: None,
-                    top_before_distinct: false,
-                    projection: vec![SelectItem::UnnamedExpr(Expr::Value(ValueWithSpan {
-                        value: Value::Number("1".to_string(), false),
-                        span: Span::empty(),
-                    }))],
-                    into: None,
-                    from: translated_using, // The translated USING tables go here
-                    lateral_views: vec![],
-                    selection: original_selection, // The translated WHERE clause moves here
-                    group_by: GroupByExpr::Expressions(vec![], vec![]),
-                    cluster_by: vec![],
-                    distribute_by: vec![],
-                    sort_by: vec![],
-                    having: None,
-                    named_window: vec![],
-                    qualify: None,
-                    connect_by: vec![],
-                    window_before_qualify: false,
-                    exclude: None,
-                    optimizer_hints: Vec::new(),
-                    value_table_mode: None,
-                    prewhere: None,
-                    flavor: SelectFlavor::Standard,
-                    select_modifiers: None,
-                }))),
-                order_by: None,
-                limit_clause: None,
-                fetch: None,
-                locks: vec![],
-                for_clause: None,
-                settings: None,
-                format_clause: None,
-                pipe_operators: vec![],
-            };
+            // `SELECT 1 FROM <using> WHERE <original predicate>`, the EXISTS body
+            // that replaces the USING clause SQLite has no syntax for.
+            let mut subquery =
+                single_expr_query(integer_literal(1), translated_using, original_selection);
 
             // Walk the FROM clause and update table names for RLS tables
             // Tables with RLS are renamed to table_rls (backing table), and we need

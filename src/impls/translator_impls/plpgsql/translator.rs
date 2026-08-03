@@ -971,18 +971,8 @@ impl PlPgSqlTranslator {
                         condition.as_deref(),
                     )?;
 
-                    new_insert.source = Some(Box::new(Query {
-                        with: CteBuilder::combine_ctes(ctes),
-                        body: Box::new(new_source),
-                        order_by: None,
-                        limit_clause: None,
-                        fetch: None,
-                        locks: vec![],
-                        for_clause: None,
-                        settings: None,
-                        format_clause: None,
-                        pipe_operators: vec![],
-                    }));
+                    new_insert.source =
+                        Some(Box::new(make_query(CteBuilder::combine_ctes(ctes), new_source)));
                 }
                 SetExpr::Select(select) => {
                     let mut new_select = select.as_ref().clone();

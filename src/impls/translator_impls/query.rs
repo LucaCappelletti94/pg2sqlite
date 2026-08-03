@@ -28,6 +28,7 @@ use super::helpers::{
 use crate::{
     impls::{
         function_helpers::{integer_literal, simple_function_expr},
+        query_builder::make_query,
         shared_helpers::TranslationDirection,
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -337,18 +338,7 @@ pub(crate) fn distinct_on_window_select(
         alias: Ident::new(DISTINCT_ON_ROWNUM_ALIAS),
     });
 
-    let inner_query = Query {
-        with: None,
-        body: Box::new(SetExpr::Select(Box::new(inner))),
-        order_by: None,
-        limit_clause: None,
-        fetch: None,
-        locks: Vec::new(),
-        for_clause: None,
-        settings: None,
-        format_clause: None,
-        pipe_operators: Vec::new(),
-    };
+    let inner_query = make_query(None, SetExpr::Select(Box::new(inner)));
 
     let derived_alias = Ident::new(DISTINCT_ON_DERIVED_ALIAS);
     Select {
