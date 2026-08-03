@@ -75,16 +75,6 @@ pub enum Error {
         /// The PostgreSQL pattern that was encountered.
         pattern: String,
     },
-    /// Error when a policy pattern is not supported for translation.
-    #[error("Unsupported policy pattern in table '{table}', policy '{policy}': {description}")]
-    UnsupportedPolicyPattern {
-        /// The table the policy is defined on.
-        table: String,
-        /// The name of the policy.
-        policy: String,
-        /// Description of why the pattern is not supported.
-        description: String,
-    },
     /// Error when attempting to access an RLS backing table directly.
     #[error(
         "Direct access to RLS backing table '{table_name}' is not allowed. \
@@ -163,19 +153,6 @@ pub enum Error {
          Example: .with_rls_audit_table_name(\"rls_violations\".to_string())"
     )]
     RlsAuditTableNameRequired,
-    /// Error when a row violates RLS policy during strict validation.
-    #[error(
-        "RLS validation: row violates row-level security policy for table '{table}'. \
-         Policy: {policy}. Row: {row_identifier}"
-    )]
-    RlsValidationViolation {
-        /// The table where the violation occurred.
-        table: String,
-        /// The policy that was violated.
-        policy: String,
-        /// Identifier for the row that violated the policy.
-        row_identifier: String,
-    },
     /// Error when a migration file is not found among discovered migrations.
     #[error("stop_at path '{path}' was not found among discovered up.sql migrations")]
     MigrationNotFound {

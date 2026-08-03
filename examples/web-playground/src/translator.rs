@@ -76,7 +76,6 @@ fn classify_error(err: PgError) -> TranslationError {
         | PgError::UnknownPostgresFeature(_)
         | PgError::UnsupportedReverseStatement { .. }
         | PgError::UnsupportedRlsExpressionVariant { .. }
-        | PgError::UnsupportedPolicyPattern { .. }
         | PgError::UnsupportedSchemaQualification { .. } => ErrorCategory::Unsupported,
         PgError::SessionVariableMappingNotFound { .. }
         | PgError::RlsAuditTableNameRequired
