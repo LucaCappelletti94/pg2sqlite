@@ -17,7 +17,10 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, CreateTable, TableConstraint};
 
 use crate::{
-    impls::object_name::normalize_schema_qualified_object_name_for_sqlite,
+    impls::{
+        object_name::normalize_schema_qualified_object_name_for_sqlite,
+        translator_impls::column::translate_column_def,
+    },
     prelude::{Pg2SqliteOptions, Translator},
     warnings::{TranslationWarning, emit as emit_warning},
 };
@@ -65,9 +68,10 @@ impl Translator for CreateTable {
         // UNLOGGED is a durability hint with no SQLite equivalent. Drop it and warn.
         if self.unlogged {
             emit_warning(TranslationWarning::LossyDrop {
-                construct: "UNLOGGED",
+                construct: "UNLOGGED".to_string(),
                 reason: "SQLite has no UNLOGGED durability setting so the modifier was dropped \
-                         and the table is created as a regular table.",
+                         and the table is created as a regular table."
+                    .to_string(),
             });
         }
 
@@ -80,7 +84,7 @@ impl Translator for CreateTable {
             columns: self
                 .columns
                 .iter()
-                .map(|c| c.translate(schema, options))
+                .map(|c| translate_column_def(c, &self.name, schema, options))
                 .collect::<Result<Vec<_>, _>>()?,
             constraints: self
                 .constraints

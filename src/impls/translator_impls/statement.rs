@@ -68,6 +68,7 @@ use crate::{
         },
         placeholder::rewrite_placeholders_for_sqlite,
         translator_impls::{
+            column::translate_column_def,
             condition_injection::inject_condition_into_dml_statement,
             rls::{
                 generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
@@ -254,7 +255,10 @@ const REASON_HOST_REGISTERED: &str = "SQLite has no SQL form for this object. Wh
 /// policy in this module's documentation, so `construct` names the statement
 /// and `reason` states why the drop cannot change a result.
 fn drop_with_warning(construct: &'static str, reason: &'static str) -> Vec<Statement> {
-    crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop { construct, reason });
+    crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+        construct: construct.to_string(),
+        reason: reason.to_string(),
+    });
     Vec::new()
 }
 
@@ -669,7 +673,7 @@ fn translate_alter_table_operation(
                 // Route through the same translator the CREATE TABLE path uses so
                 // type mapping, STRICT-legal types, and the parenthesisation
                 // SQLite requires of a non-literal DEFAULT all apply.
-                column_def: column_def.translate(schema, options)?,
+                column_def: translate_column_def(column_def, &alter_table.name, schema, options)?,
                 column_position: column_position.clone(),
             }))
         }
@@ -790,9 +794,10 @@ fn translate_truncate(
 
     if matches!(truncate.identity, Some(TruncateIdentityOption::Continue)) {
         crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-            construct: "TRUNCATE ... CONTINUE IDENTITY",
+            construct: "TRUNCATE ... CONTINUE IDENTITY".to_string(),
             reason: "SQLite keeps no sequence counter for a rowid alias, so the identifiers \
-                     restart rather than continuing. The rows are still deleted.",
+                     restart rather than continuing. The rows are still deleted."
+                .to_string(),
         });
     }
 

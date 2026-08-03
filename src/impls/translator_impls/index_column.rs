@@ -35,12 +35,16 @@ impl Translator for IndexColumn {
         // bitwise while the default compares by collation, and those disagree
         // only under a nondeterministic collation, which `Expr::Collate`
         // already refuses.
-        if self.operator_class.is_some() {
-            crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                construct: "index operator class",
+        if let Some(operator_class) = &self.operator_class {
+            crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+                construct: "index operator class".to_string(),
+                from: format!("{} {operator_class}", self.column),
+                to: self.column.to_string(),
+                location: self.column.to_string(),
                 reason: "SQLite has no operator classes, so the index serves fewer queries than \
                          the PostgreSQL one, notably the pattern matches a text pattern class \
-                         exists for.",
+                         exists for."
+                    .to_string(),
             });
         }
 

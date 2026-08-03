@@ -140,10 +140,11 @@ fn blank_padding_loss_is_reported_for_every_padded_spelling() {
             reported.iter().any(|warning| {
                 matches!(
                     warning,
-                    TranslationWarning::LossyDowngrade { location, .. } if location == "padded"
+                    TranslationWarning::LossyDowngrade { location, .. }
+                    if location == "names.padded"
                 )
             }),
-            "{spelling} should report the padding loss on the column, got {reported:?}"
+            "{spelling} should report the padding loss on the qualified column, got {reported:?}"
         );
     }
 }

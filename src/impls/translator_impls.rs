@@ -13,7 +13,7 @@ use alloc::{
 };
 
 pub(crate) mod array;
-mod column;
+pub(crate) mod column;
 mod column_option;
 mod condition_injection;
 mod constraint_characteristic;

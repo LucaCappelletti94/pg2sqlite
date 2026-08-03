@@ -47,10 +47,11 @@ impl Translator for OrderByExpr {
         let mut index_options = self.options.clone();
         if index_options.nulls_first.take().is_some() {
             crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-                construct: "NULLS FIRST/LAST",
+                construct: "NULLS FIRST/LAST".to_string(),
                 reason: "SQLite has no null ordering inside an index, so the index serves fewer \
                          orderings than the PostgreSQL one and a matching ORDER BY is sorted \
-                         instead.",
+                         instead."
+                    .to_string(),
             });
         }
 

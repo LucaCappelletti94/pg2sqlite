@@ -34,11 +34,15 @@ use sqlparser::ast::Statement;
 #[non_exhaustive]
 pub enum TranslationWarning {
     /// A PostgreSQL construct has no SQLite equivalent and was dropped.
+    ///
+    /// Fields are owned so a warning can name the object it concerns. A
+    /// `&'static str` could only ever name the construct kind, which left the
+    /// reader to find the affected table, column, or index themselves.
     LossyDrop {
         /// Short identifier for the construct (e.g. `"LISTEN"`).
-        construct: &'static str,
+        construct: String,
         /// Human-readable reason the construct was dropped.
-        reason: &'static str,
+        reason: String,
     },
     /// A table has row level security enabled but no policy grants read access,
     /// so its translated view denies every row.

@@ -123,9 +123,10 @@ fn substitute_no_op_body_when_empty(
     }
 
     crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
-        construct: "empty trigger body",
+        construct: "empty trigger body".to_string(),
         reason: "the translated trigger body has no statements left, so the trigger does nothing. \
-                 SQLite rejects an empty BEGIN END, so it carries SELECT NULL instead.",
+                 SQLite rejects an empty BEGIN END, so it carries SELECT NULL instead."
+            .to_string(),
     });
 
     body.statements = vec![Statement::Query(Box::new(Query {
