@@ -15,9 +15,12 @@ fn translate(sql: &str) -> Result<String, String> {
 }
 
 #[test]
-fn fk_deferrable_initially_deferred_errors_consistently() {
-    // Table-level FK with DEFERRABLE INITIALLY DEFERRED should error,
-    // matching column-level FK behavior (column_option.rs:252-254)
+fn fk_deferrable_initially_deferred_translates_consistently() {
+    // Table-level FK deferrability translates, matching the column-level FK
+    // path. Both go through `ConstraintCharacteristics::translate`. Deferral is
+    // exercised against a running database in
+    // `tests/test_deferrable_constraints.rs`, so this only pins the two paths
+    // agreeing.
     let sql = r#"
         CREATE TABLE parent (id INTEGER PRIMARY KEY);
         CREATE TABLE child (
@@ -27,11 +30,25 @@ fn fk_deferrable_initially_deferred_errors_consistently() {
         );
     "#;
 
-    let result = translate(sql);
+    let table_level = translate(sql).expect("table-level FK deferrability should translate");
+    let column_level = translate(
+        r#"
+        CREATE TABLE parent (id INTEGER PRIMARY KEY);
+        CREATE TABLE child (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+        );
+    "#,
+    )
+    .expect("column-level FK deferrability should translate");
+
     assert!(
-        result.is_err(),
-        "Table-level FK with DEFERRABLE should error (matching column-level), got:\n{}",
-        result.unwrap()
+        table_level.contains("DEFERRABLE INITIALLY DEFERRED"),
+        "table-level FK should keep the deferral: {table_level}"
+    );
+    assert!(
+        column_level.contains("DEFERRABLE INITIALLY DEFERRED"),
+        "column-level FK should keep the deferral: {column_level}"
     );
 }
 

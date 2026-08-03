@@ -243,7 +243,7 @@ fn every_default_shape_produces_runnable_ddl() {
 }
 
 #[test]
-fn constraint_characteristics_translation_is_rejected() {
+fn constraint_characteristics_keep_deferrability_and_refuse_enforced() {
     use pg2sqlite::{errors::Error, options::Pg2SqliteOptions as Opts, prelude::Translator};
     use sql_traits::structs::ParserDB;
     use sqlparser::ast::{ConstraintCharacteristics, DeferrableInitial};
@@ -251,20 +251,37 @@ fn constraint_characteristics_translation_is_rejected() {
     let schema =
         ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build");
     let options = Opts::default();
-    let characteristics = ConstraintCharacteristics {
+
+    let error = ConstraintCharacteristics {
         deferrable: Some(true),
         initially: Some(DeferrableInitial::Deferred),
         enforced: Some(false),
-    };
-
-    let error = characteristics
-        .translate(&schema, &options)
-        .expect_err("constraint characteristics are unsupported in SQLite translation");
+    }
+    .translate(&schema, &options)
+    .expect_err("SQLite has no ENFORCED clause");
     assert!(matches!(
         error,
-        Error::UnsupportedSQLiteFeature(message)
-            if message.contains("Unsupported constraint characteristic")
+        Error::UnsupportedSQLiteFeature(message) if message.contains("ENFORCED")
     ));
+
+    let deferred = ConstraintCharacteristics {
+        deferrable: Some(true),
+        initially: Some(DeferrableInitial::Deferred),
+        enforced: None,
+    };
+    assert_eq!(deferred.translate(&schema, &options).expect("deferrability translates"), deferred);
+
+    // PostgreSQL reads a bare INITIALLY as DEFERRABLE and SQLite needs the
+    // keyword, so the translation writes it.
+    let bare_initially = ConstraintCharacteristics {
+        deferrable: None,
+        initially: Some(DeferrableInitial::Deferred),
+        enforced: None,
+    };
+    assert_eq!(
+        bare_initially.translate(&schema, &options).expect("a bare INITIALLY translates"),
+        deferred
+    );
 }
 
 #[test]

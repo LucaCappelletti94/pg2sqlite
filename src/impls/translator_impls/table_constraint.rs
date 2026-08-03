@@ -19,6 +19,7 @@ use crate::{
     impls::{
         object_name::{append_suffix, table_has_implicit_public_rls},
         shared_helpers::nulls_not_distinct_not_supported_error,
+        translator_impls::constraint_characteristic::deferrability_outside_a_foreign_key,
     },
     options::Pg2SqliteOptions,
     prelude::{TranslationOptions, Translator},
@@ -75,10 +76,12 @@ impl Translator for TableConstraint {
                     .iter()
                     .map(|col| col.translate(schema, options))
                     .collect::<Result<Vec<_>, _>>()?;
-                updated_pk.characteristics = pk_constraint
-                    .characteristics
-                    .map(|c| c.translate(schema, options))
-                    .transpose()?;
+                if let Some(characteristics) = pk_constraint.characteristics {
+                    return Err(deferrability_outside_a_foreign_key(
+                        "PRIMARY KEY",
+                        characteristics,
+                    ));
+                }
                 Ok(Some(Self::PrimaryKey(updated_pk)))
             }
             Self::Unique(unique_constraint) => {
@@ -92,10 +95,9 @@ impl Translator for TableConstraint {
                     .iter()
                     .map(|col| col.translate(schema, options))
                     .collect::<Result<Vec<_>, _>>()?;
-                updated_unique.characteristics = unique_constraint
-                    .characteristics
-                    .map(|c| c.translate(schema, options))
-                    .transpose()?;
+                if let Some(characteristics) = unique_constraint.characteristics {
+                    return Err(deferrability_outside_a_foreign_key("UNIQUE", characteristics));
+                }
                 // `NULLS DISTINCT` is the default and is what SQLite does, so
                 // the clause is dropped rather than emitted: SQLite rejects it
                 // with `near "NULLS": syntax error`.
