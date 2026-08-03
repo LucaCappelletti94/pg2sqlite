@@ -323,6 +323,13 @@ fn function_constructs() {
             "SELECT var_pop(r), var_samp(r), variance(r) FROM t;",
             "SELECT stddev(r), stddev_pop(r), stddev_samp(r) FROM t;",
             "SELECT covar_pop(r, r), covar_samp(r, r), corr(r, r) FROM t;",
+            // Names the translator does not recognise. The sweep counts
+            // `no such` as a translator fault, so these would have caught the
+            // passthrough that emitted them verbatim, had the corpus ever
+            // carried one. A rejection is the valid outcome.
+            "SELECT pg_sleep(1);",
+            "SELECT definitely_not_a_function(n) FROM t;",
+            "SELECT ST_Point(0, 0);",
         ],
     )]);
 }
