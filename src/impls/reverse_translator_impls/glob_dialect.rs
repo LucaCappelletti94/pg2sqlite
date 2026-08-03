@@ -1,14 +1,19 @@
 //! SQLite dialect extended so `GLOB` parses as an operator.
 //!
-//! `GLOB` is a recognised `Keyword` with `Like`-level precedence, but
-//! `SQLiteDialect` has no `parse_infix` arm for it, so the parser reaches
-//! `GLOB` and fails. The reverse translator needs the node in order to convert
-//! it to `LIKE ... ESCAPE`, so this wrapper adds the missing arm.
+//! `GLOB` is a recognised `Keyword` with `Like`-level precedence. This wrapper
+//! originally existed because `SQLiteDialect` had no `parse_infix` arm for it.
+//! Upstream added one in apache/datafusion-sqlparser-rs PR #2362, so that
+//! reason is gone.
 //!
-//! Interim. The optimal fix is upstream in
-//! apache/datafusion-sqlparser-rs, where `SQLiteDialect::parse_infix` should
-//! handle `GLOB` alongside `MATCH` and `REGEXP`, at which point this file goes
-//! away.
+//! TODO: delete this file once the upstream precedence fix merges. It is
+//! BLOCKED as of 2026-08-03. The upstream arm parses its right operand with
+//! `Parser::parse_expr`, which is `parse_subexpr(0)`, so `a GLOB 'p' AND b = 1`
+//! parses as `a GLOB ('p' AND b = 1)`. `parse_infix` below passes the caller's
+//! `precedence` instead and is therefore correct where upstream is not, so
+//! deleting this file today would regress `GLOB`. A PR against
+//! apache/datafusion-sqlparser-rs is open and unmerged. Written up in
+//! `docs/sqlparser_sqlite_pattern_operator_precedence.md`. `REGEXP` and `MATCH`
+//! are affected upstream too and are not covered by this wrapper.
 //!
 //! Every other method delegates to an inner [`SQLiteDialect`] rather than
 //! copying its body. A copy silently drifts: the first version of this file
