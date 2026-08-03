@@ -275,9 +275,11 @@ const CASES: &[Case] = &[
     rejected("RENAME TABLE t TO t2"),
     rejected("ALTER TABLE t RENAME AS t2"),
     rejected("ALTER TABLE t RENAME TO public.t2"),
-    // Rejected: redefinitions SQLite cannot apply in place.
+    // Rejected: renames SQLite cannot apply in place.
     rejected("ALTER INDEX i RENAME TO j"),
-    rejected("ALTER VIEW v AS SELECT 1"),
+    // Emitted: a view redefinition, which is CREATE OR REPLACE VIEW spelled
+    // differently and takes the same drop-then-create path.
+    emitted("ALTER VIEW v AS SELECT 1"),
     // Rejected: database-level statements.
     rejected("CREATE DATABASE d"),
     rejected("DROP DATABASE d"),

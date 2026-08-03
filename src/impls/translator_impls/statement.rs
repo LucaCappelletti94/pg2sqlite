@@ -46,11 +46,12 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         AlterTable, AlterTableOperation, BeginTransactionKind, BinaryOperator, CascadeOption,
-        ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction, Delete, DescribeAlias,
-        DiscardObject, ExceptionWhen, Expr, FromTable, Ident, Merge, ObjectType, RenameTable,
-        RenameTableNameKind, Set, Statement, TableFactor, TableWithJoins, TransactionAccessMode,
-        TransactionMode, TransactionModifier, Truncate, TruncateIdentityOption, UnaryOperator,
-        VacuumStatement, helpers::attached_token::AttachedToken,
+        ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction, CreateTableOptions,
+        CreateView, Delete, DescribeAlias, DiscardObject, ExceptionWhen, Expr, FromTable, Ident,
+        Merge, ObjectName, ObjectType, Query, RenameTable, RenameTableNameKind, Set, SqlOption,
+        Statement, TableFactor, TableWithJoins, TransactionAccessMode, TransactionMode,
+        TransactionModifier, Truncate, TruncateIdentityOption, UnaryOperator, VacuumStatement,
+        ViewColumnDef, helpers::attached_token::AttachedToken,
     },
     dialect::SQLiteDialect,
 };
@@ -207,12 +208,16 @@ macro_rules! extensibility_patterns {
     };
 }
 
-/// Redefinitions of an existing object. SQLite can only drop and recreate,
-/// which needs the object's current definition, and the translation schema does
-/// not carry index definitions (see R83), so neither can be rewritten here.
+/// Renames of an existing object. SQLite can only drop and recreate, which
+/// needs the object's current definition, and the translation schema does not
+/// carry index definitions, so this cannot be rewritten here.
+///
+/// `ALTER VIEW ... AS` is deliberately not one of these. It is not a rename:
+/// it carries the new definition with it, so nothing has to be looked up, and
+/// it takes the same drop-then-create path as `CREATE OR REPLACE VIEW`.
 macro_rules! alter_in_place_patterns {
     () => {
-        Statement::AlterIndex { .. } | Statement::AlterView { .. }
+        Statement::AlterIndex { .. }
     };
 }
 
@@ -257,6 +262,72 @@ fn drop_with_warning(construct: &'static str, reason: &'static str) -> Vec<State
 /// statement so the message names what was refused rather than only its kind.
 fn reject_unsupported_statement(statement: &Statement, reason: &str) -> Error {
     Error::UnsupportedSQLiteFeature(format!("{statement} has no SQLite equivalent. {reason}"))
+}
+
+/// Emits a view definition, preceded by `DROP VIEW IF EXISTS` when it replaces
+/// one, since SQLite has no `CREATE OR REPLACE VIEW`.
+///
+/// Shared with the `ALTER VIEW ... AS` arm, which is the same redefinition
+/// under another spelling.
+fn translate_view_definition(
+    create_view: &CreateView,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<Statement>, Error> {
+    let mut statements: Vec<Statement> = Vec::new();
+    if create_view.or_replace {
+        statements.push(Statement::Drop {
+            object_type: ObjectType::View,
+            if_exists: true,
+            names: vec![sqlite_unqualified_object_name(&create_view.name)],
+            cascade: false,
+            restrict: false,
+            purge: false,
+            temporary: false,
+            table: None,
+        });
+    }
+    statements.push(create_view.translate(schema, options)?.into());
+    Ok(statements)
+}
+
+/// Reads `ALTER VIEW ... AS` as the replacement it is.
+///
+/// `with_options` travels rather than being dropped, so the `CREATE VIEW`
+/// translator refuses an option it cannot express instead of this arm quietly
+/// losing it.
+fn alter_view_as_create_view(
+    name: &ObjectName,
+    columns: &[Ident],
+    query: &Query,
+    with_options: &[SqlOption],
+) -> CreateView {
+    CreateView {
+        or_alter: false,
+        or_replace: true,
+        materialized: false,
+        secure: false,
+        copy_grants: false,
+        name: name.clone(),
+        name_before_not_exists: false,
+        columns: columns
+            .iter()
+            .map(|name| ViewColumnDef { name: name.clone(), data_type: None, options: None })
+            .collect(),
+        query: Box::new(query.clone()),
+        options: if with_options.is_empty() {
+            CreateTableOptions::None
+        } else {
+            CreateTableOptions::With(with_options.to_vec())
+        },
+        cluster_by: Vec::new(),
+        comment: None,
+        if_not_exists: false,
+        temporary: false,
+        to: None,
+        params: None,
+        with_no_schema_binding: false,
+    }
 }
 
 /// Reason shared by the publish and subscribe statements.
@@ -1446,22 +1517,19 @@ impl Translator for Statement {
             }
             Self::Insert(insert) => vec![insert.translate(schema, options)?.into()],
             Self::CreateView(create_view) => {
-                let mut stmts: Vec<Statement> = Vec::new();
-                if create_view.or_replace {
-                    // SQLite has no CREATE OR REPLACE VIEW, so emit DROP VIEW IF EXISTS first
-                    stmts.push(Statement::Drop {
-                        object_type: ObjectType::View,
-                        if_exists: true,
-                        names: vec![sqlite_unqualified_object_name(&create_view.name)],
-                        cascade: false,
-                        restrict: false,
-                        purge: false,
-                        temporary: false,
-                        table: None,
-                    });
-                }
-                stmts.push(create_view.translate(schema, options)?.into());
-                stmts
+                translate_view_definition(create_view, schema, options)?
+            }
+            // `ALTER VIEW v AS ...` redefines a view, which is what
+            // `CREATE OR REPLACE VIEW` does, so it takes the same path. Every
+            // other `ALTER VIEW` spelling PostgreSQL has, `OWNER TO`,
+            // `SET SCHEMA`, and `RENAME TO`, fails in the parser before
+            // reaching here, so there is no other shape to classify.
+            Self::AlterView { name, columns, query, with_options } => {
+                translate_view_definition(
+                    &alter_view_as_create_view(name, columns, query, with_options),
+                    schema,
+                    options,
+                )?
             }
             Self::Update(update) => vec![Statement::Update(update.translate(schema, options)?)],
             Self::Delete(delete) => vec![delete.translate(schema, options)?],
@@ -1808,9 +1876,9 @@ impl Translator for Statement {
             alter_in_place_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
-                    "SQLite cannot alter an index or a view in place: it has to be dropped and \
-                     recreated, which needs its current definition. Write the DROP and the CREATE \
-                     out instead.",
+                    "SQLite cannot rename an index in place: it has to be dropped and recreated, \
+                     which needs its current definition. Write the DROP and the CREATE out \
+                     instead.",
                 ));
             }
             database_level_patterns!() => {
