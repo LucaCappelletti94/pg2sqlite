@@ -30,8 +30,8 @@ use crate::{
     prelude::{Pg2SqliteOptions, Translator},
 };
 
-const DISTINCT_ON_DERIVED_ALIAS: &str = "__pg2sqlite_distinct_on";
-const DISTINCT_ON_ROWNUM_ALIAS: &str = "__pg2sqlite_rn";
+pub(crate) const DISTINCT_ON_DERIVED_ALIAS: &str = "__pg2sqlite_distinct_on";
+pub(crate) const DISTINCT_ON_ROWNUM_ALIAS: &str = "__pg2sqlite_rn";
 
 impl Translator for Query {
     type Schema = ParserDB;
@@ -326,6 +326,93 @@ fn row_number_expr(partition_by: Vec<Expr>, order_by: Vec<OrderByExpr>) -> Expr 
     })
 }
 
+/// Wraps `inner` in the derived-table row number filter that stands in for
+/// `DISTINCT ON`. `inner` must project exactly `aliases`, in that order.
+///
+/// The reverse direction rebuilds this shape from a parsed query and compares
+/// the result with what it parsed, so the two directions cannot drift apart.
+pub(crate) fn distinct_on_window_select(
+    mut inner: Select,
+    aliases: &[Ident],
+    partition_by: Vec<Expr>,
+    window_order: Vec<OrderByExpr>,
+) -> Select {
+    let flavor = inner.flavor;
+    inner.projection.push(SelectItem::ExprWithAlias {
+        expr: row_number_expr(partition_by, window_order),
+        alias: Ident::new(DISTINCT_ON_ROWNUM_ALIAS),
+    });
+
+    let inner_query = Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(inner))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: Vec::new(),
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: Vec::new(),
+    };
+
+    let derived_alias = Ident::new(DISTINCT_ON_DERIVED_ALIAS);
+    Select {
+        select_token: AttachedToken::empty(),
+        distinct: None,
+        top: None,
+        top_before_distinct: false,
+        projection: aliases
+            .iter()
+            .map(|alias| {
+                SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
+                    derived_alias.clone(),
+                    alias.clone(),
+                ]))
+            })
+            .collect(),
+        into: None,
+        from: vec![TableWithJoins {
+            relation: TableFactor::Derived {
+                lateral: false,
+                subquery: Box::new(inner_query),
+                alias: Some(TableAlias {
+                    explicit: false,
+                    name: derived_alias.clone(),
+                    columns: vec![],
+                    at: None,
+                }),
+                sample: None,
+            },
+            joins: Vec::new(),
+        }],
+        lateral_views: Vec::new(),
+        prewhere: None,
+        selection: Some(Expr::BinaryOp {
+            left: Box::new(Expr::CompoundIdentifier(vec![
+                derived_alias,
+                Ident::new(DISTINCT_ON_ROWNUM_ALIAS),
+            ])),
+            op: BinaryOperator::Eq,
+            right: Box::new(integer_literal(1)),
+        }),
+        group_by: GroupByExpr::Expressions(Vec::new(), Vec::new()),
+        cluster_by: Vec::new(),
+        distribute_by: Vec::new(),
+        sort_by: Vec::new(),
+        having: None,
+        named_window: Vec::new(),
+        qualify: None,
+        window_before_qualify: false,
+        value_table_mode: None,
+        connect_by: Vec::new(),
+        flavor,
+        exclude: None,
+        optimizer_hints: Vec::new(),
+        select_modifiers: None,
+    }
+}
+
 fn null_literal() -> Expr {
     Expr::Value(ValueWithSpan { value: Value::Null, span: sqlparser::tokenizer::Span::empty() })
 }
@@ -382,83 +469,12 @@ fn try_translate_distinct_on_query(
         None => Vec::new(),
     };
 
-    translated_inner.projection.push(SelectItem::ExprWithAlias {
-        expr: row_number_expr(partition_by, window_order),
-        alias: Ident::new(DISTINCT_ON_ROWNUM_ALIAS),
-    });
-
-    let inner_query = Query {
-        with: None,
-        body: Box::new(SetExpr::Select(Box::new(translated_inner))),
-        order_by: None,
-        limit_clause: None,
-        fetch: None,
-        locks: Vec::new(),
-        for_clause: None,
-        settings: None,
-        format_clause: None,
-        pipe_operators: Vec::new(),
-    };
-
-    let derived_alias = Ident::new(DISTINCT_ON_DERIVED_ALIAS);
-    let from = vec![TableWithJoins {
-        relation: TableFactor::Derived {
-            lateral: false,
-            subquery: Box::new(inner_query),
-            alias: Some(TableAlias {
-                explicit: false,
-                name: derived_alias.clone(),
-                columns: vec![],
-                at: None,
-            }),
-            sample: None,
-        },
-        joins: Vec::new(),
-    }];
-
-    let outer_projection = projection_aliases
-        .iter()
-        .map(|alias| {
-            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
-                derived_alias.clone(),
-                alias.clone(),
-            ]))
-        })
-        .collect::<Vec<_>>();
-
-    let outer_select = Select {
-        select_token: AttachedToken::empty(),
-        distinct: None,
-        top: None,
-        top_before_distinct: false,
-        projection: outer_projection,
-        into: None,
-        from,
-        lateral_views: Vec::new(),
-        prewhere: None,
-        selection: Some(Expr::BinaryOp {
-            left: Box::new(Expr::CompoundIdentifier(vec![
-                derived_alias,
-                Ident::new(DISTINCT_ON_ROWNUM_ALIAS),
-            ])),
-            op: BinaryOperator::Eq,
-            right: Box::new(integer_literal(1)),
-        }),
-        group_by: GroupByExpr::Expressions(Vec::new(), Vec::new()),
-        cluster_by: Vec::new(),
-        distribute_by: Vec::new(),
-        sort_by: Vec::new(),
-        having: None,
-        named_window: Vec::new(),
-        qualify: None,
-        window_before_qualify: false,
-        value_table_mode: None,
-        connect_by: Vec::new(),
-        flavor: select.flavor,
-        exclude: None,
-        optimizer_hints: Vec::new(),
-        select_modifiers: None,
-    };
+    let outer_select = distinct_on_window_select(
+        translated_inner,
+        &projection_aliases,
+        partition_by,
+        window_order,
+    );
 
     Ok(Some(build_query_envelope(
         SetExpr::Select(Box::new(outer_select)),

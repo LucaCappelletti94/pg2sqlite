@@ -13,16 +13,135 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Query, Select, SetExpr};
+use sqlparser::ast::{
+    Distinct, Expr, OrderBy, OrderByExpr, OrderByKind, Query, Select, SelectItem, SetExpr,
+    TableFactor, TableWithJoins, WindowType,
+};
 
 use super::helpers::Reverse;
 use crate::{
     errors::Error,
-    impls::shared_helpers::{
-        translate_query_shared, translate_select_shared, translate_set_expr_shared,
+    impls::{
+        shared_helpers::{
+            translate_query_shared, translate_select_shared, translate_set_expr_shared,
+        },
+        translator_impls::query::{DISTINCT_ON_ROWNUM_ALIAS, distinct_on_window_select},
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
+
+/// The inner select, its projected aliases, and the window partition and order
+/// of a `ROW_NUMBER()` filter carrying the forward direction's row number
+/// marker. The inner select is returned without the row number column.
+fn distinct_on_window_parts(outer: &Select) -> Option<(Select, Vec<Expr>, Vec<OrderByExpr>)> {
+    let [TableWithJoins { relation: TableFactor::Derived { subquery, .. }, .. }] =
+        outer.from.as_slice()
+    else {
+        return None;
+    };
+    let SetExpr::Select(inner) = subquery.body.as_ref() else {
+        return None;
+    };
+    if inner.distinct.is_some() {
+        return None;
+    }
+
+    let (row_number, projected) = inner.projection.split_last()?;
+    let SelectItem::ExprWithAlias { expr: Expr::Function(row_number), alias } = row_number else {
+        return None;
+    };
+    if alias.value != DISTINCT_ON_ROWNUM_ALIAS {
+        return None;
+    }
+    let Some(WindowType::WindowSpec(window)) = row_number.over.as_ref() else {
+        return None;
+    };
+
+    let aliases = projected
+        .iter()
+        .map(|item| {
+            match item {
+                SelectItem::ExprWithAlias { alias, .. } => Some(alias.clone()),
+                _ => None,
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut stripped = inner.as_ref().clone();
+    stripped.projection = projected.to_vec();
+
+    // Rebuilding through the emitter and comparing is what proves nothing else
+    // rides on the outer select, so nothing can be dropped here unnoticed.
+    let rebuilt = distinct_on_window_select(
+        stripped.clone(),
+        &aliases,
+        window.partition_by.clone(),
+        window.order_by.clone(),
+    );
+    if rebuilt != *outer {
+        return None;
+    }
+
+    Some((stripped, window.partition_by.clone(), window.order_by.clone()))
+}
+
+/// The `ORDER BY` expressions of `query`, or `None` when it carries an ordering
+/// the forward `DISTINCT ON` rewrite never produces.
+fn plain_order_by(query: &Query) -> Option<&[OrderByExpr]> {
+    match query.order_by.as_ref() {
+        None => Some(&[]),
+        Some(OrderBy { kind: OrderByKind::Expressions(exprs), interpolate: None }) => Some(exprs),
+        Some(_) => None,
+    }
+}
+
+/// Drops an alias that only repeats the name of the column it labels. The
+/// forward rewrite adds those to name every projected column.
+fn strip_redundant_alias(item: SelectItem) -> SelectItem {
+    match item {
+        SelectItem::ExprWithAlias { expr: Expr::Identifier(ident), alias } if ident == alias => {
+            SelectItem::UnnamedExpr(Expr::Identifier(ident))
+        }
+        SelectItem::ExprWithAlias { expr: Expr::CompoundIdentifier(parts), alias }
+            if parts.last() == Some(&alias) =>
+        {
+            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts))
+        }
+        other => other,
+    }
+}
+
+/// Rebuilds the `DISTINCT ON` query that the forward direction rewrote into a
+/// `ROW_NUMBER()` filter over a derived table.
+///
+/// Two conditions beyond the marker shape itself. The window ordering must
+/// equal the query ordering, since the rewrite puts one list in both places and
+/// a query where they differ selects a different row. And PostgreSQL rejects a
+/// `DISTINCT ON` whose expressions are not the initial `ORDER BY` expressions,
+/// so a shape that would breach that rule is left as it stands.
+fn restore_distinct_on(query: &Query) -> Option<Query> {
+    let SetExpr::Select(outer) = query.body.as_ref() else {
+        return None;
+    };
+    let (inner, partition_by, window_order) = distinct_on_window_parts(outer)?;
+
+    let query_order = plain_order_by(query)?;
+    if window_order != query_order {
+        return None;
+    }
+    if !query_order.is_empty()
+        && (query_order.len() < partition_by.len()
+            || !partition_by.iter().zip(query_order).all(|(on, order)| *on == order.expr))
+    {
+        return None;
+    }
+
+    let mut select = inner;
+    select.projection = select.projection.into_iter().map(strip_redundant_alias).collect();
+    select.distinct = Some(Distinct::On(partition_by));
+
+    Some(Query { body: Box::new(SetExpr::Select(Box::new(select))), ..query.clone() })
+}
 
 impl ReverseTranslator for Query {
     type Schema = ParserDB;
@@ -34,7 +153,8 @@ impl ReverseTranslator for Query {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        translate_query_shared::<Reverse>(self, schema, options)
+        let restored = restore_distinct_on(self);
+        translate_query_shared::<Reverse>(restored.as_ref().unwrap_or(self), schema, options)
     }
 }
 
