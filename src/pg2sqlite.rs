@@ -140,7 +140,8 @@ fn statement_contains_like(statement: &Statement) -> bool {
 /// trigger executes, so the `CREATE FUNCTION` arm knows which definitions are
 /// realised inside a trigger rather than lost. Both read the raw statement
 /// because [`Pg2Sqlite::schema_statements_for_translation`] keeps triggers out
-/// of the translation schema.
+/// of the translation schema, and that exclusion is load-bearing, so this
+/// catalog cannot be replaced by reading names back off the schema.
 fn register_declared_object_name(statement: &Statement, options: &mut Pg2SqliteOptions) {
     let name = match statement {
         Statement::CreateTable(create_table) => Some(&create_table.name),
@@ -172,19 +173,28 @@ impl Pg2Sqlite {
         statements.to_vec()
     }
 
+    /// The statements that build the one schema snapshot every statement is
+    /// translated against.
+    ///
+    /// A statement is excluded when it needs no schema entry to translate and
+    /// including it would replace its own diagnostic with a schema-build
+    /// failure. Indexes and triggers translate from the statement alone, and
+    /// the shapes this crate refuses, a non-`public` schema qualifier or a
+    /// three-part name, are refused with a message naming the construct that a
+    /// schema lookup failure would pre-empt.
+    ///
+    /// Drops and renames are the same case with one addition: a single snapshot
+    /// serves every statement, so applying a drop or a rename to it hides the
+    /// object from the statements written before it, which then fail to resolve
+    /// their own target. `ALTER TABLE ... RENAME TO` becomes a SQLite rename
+    /// from the statement alone, and `RENAME TABLE` is refused outright.
+    ///
+    /// An `ALTER TABLE` carrying only non-rename operations is kept, because
+    /// `ENABLE ROW LEVEL SECURITY` and friends must reach the schema.
     fn schema_statements_for_translation(statements: &[Statement]) -> Vec<Statement> {
         statements
             .iter()
             .filter(|statement| {
-                // Every statement is translated against one schema snapshot, so a
-                // rename applied to it hides the table from the statements written
-                // before the rename, which then fail to resolve their own table.
-                // `ALTER TABLE ... RENAME TO` becomes a SQLite rename from the
-                // statement alone and needs no schema entry, and `RENAME TABLE` is
-                // refused outright, so excluding both keeps their own diagnostics
-                // rather than a schema lookup failure. An `ALTER TABLE` carrying
-                // only non-rename operations is kept, because `ENABLE ROW LEVEL
-                // SECURITY` and friends must reach the schema.
                 if let Statement::AlterTable(alter_table) = statement {
                     return !alter_table
                         .operations
