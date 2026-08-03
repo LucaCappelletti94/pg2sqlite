@@ -14,11 +14,15 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::{
-    ast::{DataType, ExactNumberInfo, Expr, Ident, Value, ValueWithSpan},
+    ast::{
+        BinaryOperator, CharLengthUnits, CharacterLength, DataType, ExactNumberInfo, Expr, Ident,
+        Value, ValueWithSpan,
+    },
     tokenizer::Span,
 };
 
 use crate::{
+    impls::function_helpers::simple_function_expr,
     prelude::{Pg2SqliteOptions, Translator},
     traits::{TranslationOptions, UuidRepresentation},
 };
@@ -33,6 +37,55 @@ pub(crate) const MAX_NUMERIC_PRECISION: u64 = 18;
 /// [`MAX_NUMERIC_PRECISION`] as an exponent, for the one conversion that needs
 /// a fallback the debug assertion above it rules out.
 pub(crate) const MAX_NUMERIC_PRECISION_EXPONENT: u32 = 18;
+
+/// The declared length of a character type, or `None` when it carries none.
+///
+/// `VARCHAR(MAX)` is T-SQL and bounds nothing. A length in octets is refused:
+/// SQLite's `length()` counts characters, so it would enforce the wrong thing,
+/// and PostgreSQL answers `syntax error at or near "OCTETS"` anyway.
+pub(crate) fn character_length(data_type: &DataType) -> Result<Option<u64>, crate::errors::Error> {
+    let (DataType::Char(declared)
+    | DataType::Character(declared)
+    | DataType::Varchar(declared)
+    | DataType::CharacterVarying(declared)) = data_type
+    else {
+        return Ok(None);
+    };
+
+    match declared {
+        None | Some(CharacterLength::Max) => Ok(None),
+        Some(CharacterLength::IntegerLength { length, unit }) => {
+            match unit {
+                None | Some(CharLengthUnits::Characters) => Ok(Some(*length)),
+                Some(other) => {
+                    Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "{data_type} declares its length in {other}, and SQLite's length() counts \
+                         characters, so the bound would measure the wrong thing. Declare the \
+                         length in characters."
+                    )))
+                }
+            }
+        }
+    }
+}
+
+/// `length(<col>) <= n`, the bound PostgreSQL enforces on a declared character
+/// length, refusing a longer value rather than truncating it.
+#[must_use]
+pub(crate) fn character_length_bound_expr(column_name: &Ident, length: u64) -> Expr {
+    Expr::BinaryOp {
+        left: Box::new(simple_function_expr(
+            "length",
+            vec![Expr::Identifier(column_name.clone())],
+            None,
+        )),
+        op: BinaryOperator::LtEq,
+        right: Box::new(Expr::Value(ValueWithSpan {
+            value: Value::Number(length.to_string(), false),
+            span: Span::empty(),
+        })),
+    }
+}
 
 /// The precision and scale of a `NUMERIC` or `DECIMAL` declaration, refusing
 /// the two shapes that cannot be a scaled integer.
@@ -159,9 +212,19 @@ impl Translator for DataType {
                 numeric_precision_and_scale(info)?;
                 Ok(DataType::Integer(None))
             }
+            // A declared length becomes a column CHECK rather than vanishing,
+            // and the blank padding CHAR carries is reported. Both live in
+            // `column.rs`, which is where a column constraint can be attached,
+            // so all this arm does is refuse a length it could not enforce.
+            DataType::Char(_)
+            | DataType::Character(_)
+            | DataType::Varchar(_)
+            | DataType::CharacterVarying(_) => {
+                character_length(self)?;
+                Ok(DataType::Text)
+            }
             // JSON/JSONB, text aliases, and temporal types are stored as TEXT in SQLite.
-            DataType::Varchar(_)
-            | DataType::JSON
+            DataType::JSON
             | DataType::JSONB
             | DataType::Clob(_)
             | DataType::Nvarchar(_)
@@ -203,48 +266,49 @@ impl Translator for DataType {
                     }
                 }
             }
-            DataType::Custom(name, ..) => {
-                let custom_type_name = name
-                    .0
-                    .last()
-                    .and_then(|part| part.as_ident())
-                    .map(|ident| ident.value.to_ascii_lowercase());
-
-                match custom_type_name.as_deref() {
-                    Some("serial" | "smallserial" | "bigserial" | "largeserial") => {
-                        Ok(DataType::Integer(None))
-                    }
-                    Some("geometry" | "geography") => {
-                        // PostGIS `geometry` and `geography` translate to BLOB so that
-                        // EWKB-encoded values produced by the `SQLiteGIS` SQLite extension
-                        // (https://github.com/LucaCappelletti94/sqlitegis) round-trip
-                        // through the column. The blob is opaque to SQLite without the
-                        // extension loaded; see `Pg2SqliteOptions::with_sqlitegis_enabled`
-                        // for runtime `ST_*` function passthrough.
-                        Ok(DataType::Blob(None))
-                    }
-                    Some("countrycode") => {
-                        Ok(DataType::Text)
-                    }
-                    Some("cas" | "molecularformula" | "mediatype") => {
-                        Ok(DataType::Blob(None))
-                    }
-                    // pgvector types: vector(N) and halfvec(N) -> BLOB for sqlite-vec
-                    // The vector data is stored as BLOB in the main table, with a companion
-                    // vec0 virtual table for indexed KNN search.
-                    Some("vector" | "halfvec") => Ok(DataType::Blob(None)),
-                    unknown => {
-                        Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                            "Unknown PostgreSQL custom type {unknown:?}"
-                        )))
-                    }
-                }
-            }
+            DataType::Custom(name, ..) => translate_custom_type(name),
             unsupported => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                     "The data type {unsupported:?} is not supported"
                 )))
             }
+        }
+    }
+}
+
+/// Maps the PostgreSQL and extension types that reach the parser as a custom
+/// name rather than as a `DataType` variant of their own.
+fn translate_custom_type(
+    name: &sqlparser::ast::ObjectName,
+) -> Result<DataType, crate::errors::Error> {
+    let custom_type_name = name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .map(|ident| ident.value.to_ascii_lowercase());
+
+    match custom_type_name.as_deref() {
+        Some("serial" | "smallserial" | "bigserial" | "largeserial") => Ok(DataType::Integer(None)),
+        Some("countrycode") => Ok(DataType::Text),
+        // Three groups that all become BLOB.
+        //
+        // PostGIS `geometry` and `geography` carry EWKB produced by the
+        // SQLiteGIS extension (https://github.com/LucaCappelletti94/sqlitegis),
+        // which round-trips through the column. The blob is opaque to SQLite
+        // without the extension loaded, see
+        // `Pg2SqliteOptions::with_sqlitegis_enabled` for runtime `ST_*`
+        // function passthrough.
+        //
+        // pgvector `vector(N)` and `halfvec(N)` are stored as BLOB in the main
+        // table, with a companion vec0 virtual table for indexed KNN search.
+        Some(
+            "geometry" | "geography" | "cas" | "molecularformula" | "mediatype" | "vector"
+            | "halfvec",
+        ) => Ok(DataType::Blob(None)),
+        unknown => {
+            Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "Unknown PostgreSQL custom type {unknown:?}"
+            )))
         }
     }
 }

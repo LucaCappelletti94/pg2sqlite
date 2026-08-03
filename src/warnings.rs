@@ -53,6 +53,27 @@ pub enum TranslationWarning {
         /// The table whose view denies every row.
         table: String,
     },
+    /// A construct translated to something that keeps less than it did.
+    ///
+    /// Distinct from [`TranslationWarning::LossyDrop`], where the construct
+    /// disappears. Here it is emitted, and only part of what it meant survives:
+    /// `CHAR(3)` becomes `TEXT`, which stores what it is given rather than
+    /// padding it to three characters.
+    ///
+    /// Fields are owned rather than `&'static str` because the location and
+    /// the two type names are read from the input.
+    LossyDowngrade {
+        /// Short identifier for the construct, such as `"CHAR"`.
+        construct: String,
+        /// What the source declared, such as `"CHAR(3)"`.
+        from: String,
+        /// What was emitted in its place, such as `"TEXT"`.
+        to: String,
+        /// Where it was declared. Currently the column name.
+        location: String,
+        /// What the emitted form no longer does.
+        reason: String,
+    },
 }
 
 /// Combined output of [`Pg2Sqlite::translate_with_report`]: the translated

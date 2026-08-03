@@ -18,7 +18,10 @@ use sqlparser::ast::{CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, 
 use crate::{
     errors::Error,
     impls::translator_impls::{
-        data_type::{numeric_precision_and_scale, numeric_precision_bound_expr},
+        data_type::{
+            character_length, character_length_bound_expr, numeric_precision_and_scale,
+            numeric_precision_bound_expr,
+        },
         uuid::{is_blob_uuid_representation, is_uuid_data_type, uuid_blob_length_check_expr},
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -111,6 +114,33 @@ impl Translator for ColumnDef {
                     expr: Box::new(numeric_precision_bound_expr(&self.name, precision)),
                     enforced: None,
                 }),
+            });
+        }
+
+        // PostgreSQL refuses a value longer than a declared character length,
+        // so the bound travels as a CHECK rather than disappearing into TEXT.
+        if let Some(length) = character_length(&self.data_type)? {
+            translated_options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Check(CheckConstraint {
+                    name: None,
+                    expr: Box::new(character_length_bound_expr(&self.name, length)),
+                    enforced: None,
+                }),
+            });
+        }
+
+        // CHAR pads to its declared width and TEXT stores what it is given.
+        // Nothing in SQLite reproduces that, so it is reported.
+        if matches!(self.data_type, DataType::Char(_) | DataType::Character(_)) {
+            crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+                construct: "CHAR".to_string(),
+                from: self.data_type.to_string(),
+                to: "TEXT".to_string(),
+                location: self.name.value.clone(),
+                reason: "SQLite stores the value as given, so it is no longer blank padded to \
+                         the declared width."
+                    .to_string(),
             });
         }
 
