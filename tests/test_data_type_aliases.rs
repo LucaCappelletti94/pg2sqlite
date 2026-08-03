@@ -283,3 +283,57 @@ fn diesel_translated_schema_accepts_insert_and_query() {
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].label, "hello");
 }
+
+/// PostgreSQL resolves `FLOAT(p)` to `real` up to p of 24 and to `double
+/// precision` above it, verified on PostgreSQL 16 through
+/// `information_schema`, and refuses p of 54 or more. SQLite has one floating
+/// type, so every width lands on `REAL` and nothing is lost.
+///
+/// Asserted through `pragma_table_info` rather than the emitted text, and the
+/// emitted table is STRICT, so a width that failed to map would be refused at
+/// CREATE time.
+#[test]
+fn float_with_a_precision_maps_to_real() {
+    let statements = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE widths (
+                 id INT PRIMARY KEY,
+                 narrow FLOAT(1),
+                 single FLOAT(24),
+                 wide FLOAT(25),
+                 widest FLOAT(53),
+                 bare FLOAT
+             );",
+        )
+        .expect("script should parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .unwrap_or_else(|error| panic!("every FLOAT width should translate: {error}"));
+
+    let mut connection = SqliteConnection::establish(":memory:").expect("in-memory SQLite");
+    for statement in &statements {
+        // Emitted DDL is the artifact under test, so it runs as text.
+        diesel::sql_query(statement)
+            .execute(&mut connection)
+            .unwrap_or_else(|error| panic!("emitted DDL failed: {error}\n{statement}"));
+    }
+
+    #[derive(QueryableByName)]
+    struct ColumnInfo {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        declared: String,
+    }
+
+    // A pragma has no diesel DSL form, so the column types are read as text.
+    let columns = diesel::sql_query(
+        "SELECT name, type AS declared FROM pragma_table_info('widths') WHERE name <> 'id'",
+    )
+    .load::<ColumnInfo>(&mut connection)
+    .expect("pragma should read");
+
+    assert_eq!(columns.len(), 5, "every declared width should reach the table");
+    for column in columns {
+        assert_eq!(column.declared, "REAL", "{} should be stored as REAL", column.name);
+    }
+}

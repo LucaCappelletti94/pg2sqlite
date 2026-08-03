@@ -142,7 +142,10 @@ impl Translator for DataType {
             | DataType::TinyInt(_)
             // INT64 is a BigQuery-specific alias for 64-bit integer
             | DataType::Int64 => Ok(DataType::Integer(None)),
-            DataType::Float(ExactNumberInfo::None)
+            // PostgreSQL resolves FLOAT(p) to real up to p of 24 and to double
+            // precision above it, and refuses p of 54 or more. SQLite has one
+            // floating type, so the width carries nothing across.
+            DataType::Float(_)
             | DataType::Double(_)
             | DataType::DoublePrecision
             | DataType::Float8
