@@ -31,6 +31,11 @@ pub struct Pg2SqliteOptions {
     /// `unhex(replace(literal, '-', ''))` inline" (pure SQLite, no UDF
     /// setup). Set via `with_uuid_text_to_blob_function_name`.
     uuid_text_to_blob_function_name: Option<String>,
+    /// Names of host-registered functions the destination SQLite provides,
+    /// stored lower-cased because SQLite resolves function names without
+    /// regard to case. A name here passes through instead of being refused as
+    /// unrecognised. Set via `with_user_defined_functions`.
+    user_defined_functions: Vec<String>,
     /// The representation of PostgreSQL arrays in `SQLite`. `None` rejects
     /// every array construct instead of downgrading it silently.
     array_representation: Option<ArrayRepresentation>,
@@ -124,6 +129,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             fts_indexes: Vec::new(),
             declared_object_names: Vec::new(),
             trigger_function_names: Vec::new(),
+            user_defined_functions: Vec::<String>::arbitrary(u)?,
             allow_dangling_foreign_keys: bool::arbitrary(u)?,
         })
     }
@@ -150,6 +156,7 @@ impl Default for Pg2SqliteOptions {
             fts_indexes: Vec::new(),
             declared_object_names: Vec::new(),
             trigger_function_names: Vec::new(),
+            user_defined_functions: Vec::new(),
             allow_dangling_foreign_keys: false,
         }
     }
@@ -386,6 +393,20 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn are_math_functions_available(&self) -> bool {
         self.math_functions_available
+    }
+
+    fn with_user_defined_functions<S: Into<String>>(
+        mut self,
+        names: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.user_defined_functions
+            .extend(names.into_iter().map(|name| name.into().to_ascii_lowercase()));
+        self
+    }
+
+    fn declares_user_defined_function(&self, name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        self.user_defined_functions.contains(&name)
     }
 
     fn with_dangling_foreign_keys_allowed(mut self) -> Self {

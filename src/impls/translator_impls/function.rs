@@ -40,6 +40,7 @@ use crate::{
             function_argument_exprs, numeric_scale, rescale_minor_units,
             translate_function_arguments,
         },
+        sqlite_functions::is_sqlite_builtin,
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
@@ -747,43 +748,69 @@ fn translate_function(
             "{original_name}() is a PostgreSQL size function not available in SQLite."
         )),
 
-        _ => maybe_sqlitegis_passthrough(&original_name, args, options),
+        _ => classify_unrecognised_function(&original_name, args, options),
     }
 }
 
-/// When SQLiteGIS translation is enabled, validate `ST_*`-shaped calls against
-/// the catalog mirrored from the extension (`super::postgis`). Names in the
-/// catalog with a matching arity pass through, everything else errors. With
-/// SQLiteGIS off this is a no-op and unknown functions keep their pre-existing
-/// passthrough behavior.
-fn maybe_sqlitegis_passthrough(
+/// Classifies a name no earlier arm recognised.
+///
+/// The default is a hard error. Emitting an unrecognised name produces SQL
+/// that fails at run time with `no such function`, long after translation
+/// reported success, so the three ways a name earns a passthrough are all
+/// evidence the destination has it: SQLite provides it, the SQLiteGIS catalog
+/// lists it and the caller enabled SQLiteGIS, or the caller declared it.
+///
+/// When SQLiteGIS is on, an `ST_`-shaped name is additionally checked for
+/// arity, since the catalog records which arities the extension implements.
+fn classify_unrecognised_function(
     name: &str,
     args: &FunctionArguments,
     options: &Pg2SqliteOptions,
 ) -> FunctionTranslation {
-    if !options.is_sqlitegis_enabled() {
+    if is_sqlite_builtin(name)
+        || options.declares_user_defined_function(name)
+        || declares_function_by_option(name, options)
+    {
         return FunctionTranslation::PassThrough;
     }
-    let Some(arity) = function_arg_count(args) else {
-        return FunctionTranslation::PassThrough;
-    };
-    if postgis::is_sqlitegis_function(name, arity) {
-        return FunctionTranslation::PassThrough;
+
+    if options.is_sqlitegis_enabled() {
+        if let Some(arity) = function_arg_count(args) {
+            if postgis::is_sqlitegis_function(name, arity) {
+                return FunctionTranslation::PassThrough;
+            }
+            let known_arities = postgis::sqlitegis_function_arities(name);
+            if !known_arities.is_empty() {
+                return FunctionTranslation::Unsupported(format!(
+                    "{name}/{arity} is not in the SQLiteGIS catalog; SQLiteGIS implements arities \
+                     {known_arities:?} for this name."
+                ));
+            }
+        }
+        if postgis::is_postgis_shaped_name(name) {
+            return FunctionTranslation::Unsupported(format!(
+                "{name}() looks like a PostGIS function but is not implemented by the SQLiteGIS \
+                 extension, see https://github.com/LucaCappelletti94/sqlitegis for the supported \
+                 list."
+            ));
+        }
     }
-    let known_arities = postgis::sqlitegis_function_arities(name);
-    if !known_arities.is_empty() {
-        return FunctionTranslation::Unsupported(format!(
-            "{name}/{arity} is not in the SQLiteGIS catalog; SQLiteGIS implements arities \
-             {known_arities:?} for this name."
-        ));
-    }
-    if postgis::is_postgis_shaped_name(name) {
-        return FunctionTranslation::Unsupported(format!(
-            "{name}() looks like a PostGIS function but is not implemented by the SQLiteGIS \
-             extension, see https://github.com/LucaCappelletti94/sqlitegis for the supported list."
-        ));
-    }
-    FunctionTranslation::PassThrough
+
+    FunctionTranslation::Unsupported(format!(
+        "{name}() is not a SQLite function and has no translation. Emitting it would produce SQL \
+         that fails with `no such function`. If the destination registers it, declare it with \
+         with_user_defined_functions([\"{name}\"])."
+    ))
+}
+
+/// Whether an option that names a function names this one.
+///
+/// The UUID options exist precisely to point at a host-registered function, so
+/// setting one is a declaration that the destination has it.
+fn declares_function_by_option(name: &str, options: &Pg2SqliteOptions) -> bool {
+    let matches = |declared: &str| declared.to_ascii_lowercase() == name;
+    matches(options.get_uuid_function_name())
+        || options.get_uuid_text_to_blob_function_name().is_some_and(matches)
 }
 
 /// Returns the positional arg count when it can be determined from the

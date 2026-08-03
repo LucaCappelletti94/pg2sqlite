@@ -13,14 +13,14 @@ use pg2sqlite::{
 mod helpers;
 
 #[test]
-fn st_point_passthrough_when_sqlitegis_disabled() {
-    // Backward compat: without `sqlitegis_enabled`, any ST_* call falls into the
-    // existing PassThrough fallback so legacy users aren't broken.
-    let translated =
-        helpers::translate_pg("SELECT ST_Point(0, 0) AS p;", &Pg2SqliteOptions::default())
-            .expect("should pass through ST_Point untouched when SQLiteGIS is disabled");
-    let joined = translated.join("\n").to_ascii_uppercase();
-    assert!(joined.contains("ST_POINT"), "expected verbatim ST_Point passthrough, got: {joined}");
+fn st_point_is_refused_when_sqlitegis_disabled() {
+    // Without the extension SQLite has no `ST_Point`, so passing it through
+    // emitted SQL that failed at run time with `no such function`. The
+    // refusal names the option that would make it available.
+    let error = helpers::translate_pg("SELECT ST_Point(0, 0) AS p;", &Pg2SqliteOptions::default())
+        .expect_err("ST_Point has no SQLite form without SQLiteGIS")
+        .to_string();
+    assert!(error.contains("st_point"), "the error should name the function: {error}");
 }
 
 #[test]

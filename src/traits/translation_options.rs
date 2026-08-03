@@ -247,6 +247,31 @@ pub trait TranslationOptions {
     fn are_math_functions_available(&self) -> bool;
 
     #[must_use]
+    /// Declares host-registered functions the destination SQLite provides.
+    ///
+    /// The translator refuses a function name it does not recognise, because
+    /// emitting one produces SQL that fails at run time with `no such
+    /// function`. A name declared here passes through instead. SQLite resolves
+    /// function names without regard to case, so the declaration does too.
+    ///
+    /// # Example
+    /// ```
+    /// use pg2sqlite::prelude::*;
+    ///
+    /// let options = Pg2SqliteOptions::default().with_user_defined_functions(["levenshtein"]);
+    /// assert!(options.declares_user_defined_function("LEVENSHTEIN"));
+    /// assert!(!options.declares_user_defined_function("soundex"));
+    /// ```
+    fn with_user_defined_functions<S: Into<String>>(
+        self,
+        names: impl IntoIterator<Item = S>,
+    ) -> Self;
+
+    /// Returns whether `name` was declared through
+    /// [`with_user_defined_functions`](TranslationOptions::with_user_defined_functions).
+    fn declares_user_defined_function(&self, name: &str) -> bool;
+
+    #[must_use]
     /// Enables strict RLS validation (abort on violation instead of logging
     /// only).
     ///

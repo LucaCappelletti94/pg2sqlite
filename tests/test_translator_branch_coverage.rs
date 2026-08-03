@@ -158,14 +158,15 @@ fn column_option_translation_covers_unhandled_default_and_option_branches() {
         .expect("column option should not be filtered");
     assert!(matches!(translated.option, ColumnOption::Default(Expr::Identifier(_))));
 
-    // Unknown functions now pass through via generic fallback (wrapped in parens).
-    let passthrough_function_default =
+    // An unrecognised function is refused rather than emitted verbatim, which
+    // is what a DEFAULT carrying one used to do.
+    let unknown_function_default =
         ColumnOptionDef { name: None, option: ColumnOption::Default(simple_function("pg_sleep")) };
-    let translated = passthrough_function_default
+    let error = unknown_function_default
         .translate(&schema, &options)
-        .expect("unknown function default should translate via generic fallback")
-        .expect("column option should not be filtered");
-    assert!(matches!(translated.option, ColumnOption::Default(Expr::Nested(_))));
+        .expect_err("an unknown function default has no SQLite form")
+        .to_string();
+    assert!(error.contains("pg_sleep"), "the error should name the function: {error}");
 
     // Subquery defaults now translate via generic fallback.
     let subquery_default_expr = ColumnOptionDef {
