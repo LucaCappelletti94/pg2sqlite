@@ -61,7 +61,7 @@ fn build_schema_rejects_index_on_unknown_schema_qualified_table() {
 #[test]
 fn build_schema_allows_non_public_schema_qualified_create_table() {
     let translator = Pg2Sqlite::default()
-        .sql("CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);")
+        .sql("CREATE SCHEMA my_custom_app; CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);")
         .expect("sql should parse");
 
     let schema = translator.build_schema();

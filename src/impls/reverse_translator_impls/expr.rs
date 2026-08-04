@@ -214,9 +214,7 @@ impl ReverseTranslator for Expr {
 
             // GLOB is case-sensitive globbing. Convert literal patterns to LIKE.
             // A character class (e.g. [abc]) or a non-literal pattern is rejected.
-            Expr::BinaryOp { op: BinaryOperator::Custom(op_name), left, right }
-                if op_name == "GLOB" =>
-            {
+            Expr::BinaryOp { op: BinaryOperator::Glob, left, right } => {
                 translate_glob_to_like(left, right, false, schema, options)
             }
 

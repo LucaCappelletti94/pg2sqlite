@@ -426,20 +426,13 @@ fn dropping_an_index_operator_class_warns() {
     );
 }
 
-/// Pins the upstream defect that forecloses reading declared index names off
-/// the translation schema, written up in
-/// `docs/sql_traits_index_ordering_breaks_ingestion.md`.
+/// An index carrying an ordering qualifier is ingested by the schema builder.
 ///
-/// `create_index_expression` renders each column back to a string including its
-/// ordering qualifier and hands the result to `parse_expr`, which cannot parse
-/// `(n DESC)`, so the index is reported as having no columns. A bare column
-/// list is the control.
-///
-/// This is not what keeps `CreateIndex` out of the translation schema. That
-/// exclusion preserves this crate's own diagnostics and survives an upstream
-/// fix, so a green run here does not on its own reopen plan item R83.
+/// `sql-traits` used to reject every one of these as having no columns, because
+/// it rendered each column back to a string including the `DESC` and handed the
+/// result to `parse_expr`. Fixed upstream; this holds the fix.
 #[test]
-fn sql_traits_still_rejects_an_index_with_an_ordering_qualifier() {
+fn an_index_with_an_ordering_qualifier_is_ingested() {
     fn build(index: &str) -> Result<(), String> {
         let sql = format!("CREATE TABLE t (id INT PRIMARY KEY, n INT, m INT);\n{index}");
         let statements =
@@ -450,22 +443,14 @@ fn sql_traits_still_rejects_an_index_with_an_ordering_qualifier() {
             .map_err(|e| e.to_string())
     }
 
-    build("CREATE INDEX i ON t (n);").expect("a bare column list is the control and must ingest");
-
     for index in [
+        "CREATE INDEX i ON t (n);",
         "CREATE INDEX i ON t (n DESC);",
         "CREATE INDEX i ON t (n ASC);",
         "CREATE INDEX i ON t (n NULLS FIRST);",
         "CREATE INDEX i ON t (n, m DESC);",
         "CREATE UNIQUE INDEX i ON t (n DESC);",
     ] {
-        let error = build(index).expect_err(
-            "upstream still rejects an ordering qualifier. If this now ingests, sql-traits has \
-             been fixed: revisit docs/sql_traits_index_ordering_breaks_ingestion.md",
-        );
-        assert!(
-            error.contains("index has no columns"),
-            "expected the miscounted-columns rejection for {index}, got: {error}"
-        );
+        build(index).unwrap_or_else(|e| panic!("{index} must ingest, got: {e}"));
     }
 }

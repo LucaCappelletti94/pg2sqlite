@@ -16,7 +16,6 @@ use alloc::{
 mod delete;
 mod expr;
 mod function;
-pub(crate) mod glob_dialect;
 mod helpers;
 mod ident_quoting;
 mod insert;

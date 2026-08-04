@@ -16,10 +16,10 @@ use std::path::PathBuf;
 
 #[cfg(feature = "std")]
 use git2::Repository;
-use sql_traits::structs::ParserDB;
+use sql_traits::structs::{AccessResolution, ParseOptions, ParserDB};
 use sqlparser::ast::{
     AlterTableOperation, CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart,
-    Statement, Value, ValueWithSpan, visit_expressions,
+    RenameTableNameKind, Statement, Value, ValueWithSpan, visit_expressions,
 };
 #[cfg(feature = "std")]
 use tempfile::TempDir;
@@ -171,6 +171,87 @@ pub struct Pg2Sqlite {
 impl Pg2Sqlite {
     fn normalize_statements(statements: &[Statement]) -> Vec<Statement> {
         statements.to_vec()
+    }
+
+    /// Refuses a table that is both renamed and placed under row level
+    /// security.
+    ///
+    /// Row level security is realised as a backing table, two views, and five
+    /// triggers all named after the table, so a rename would have to move the
+    /// whole set together. Neither order works today. With the rename above,
+    /// the security statements name a table the schema does not carry,
+    /// because [`Pg2Sqlite::schema_statements_for_translation`] keeps renames
+    /// out. With the rename below, the security setting is applied and the
+    /// emitted rename then lands on the view, which SQLite answers with
+    /// `view <name> may not be altered`.
+    ///
+    /// Refusing is the whole answer rather than a stopgap: resolving a table by
+    /// a name it has since lost is ambiguous once a file swaps two names, so
+    /// the schema cannot be asked which table a pre-rename statement meant.
+    fn reject_rename_of_secured_table(
+        statements: &[Statement],
+    ) -> Result<(), crate::errors::Error> {
+        let mut renamed: Vec<(String, String)> = Vec::new();
+        let mut secured: Vec<String> = Vec::new();
+
+        for statement in statements {
+            match statement {
+                Statement::AlterTable(alter_table) => {
+                    let subject = last_ident_value_or_display(&alter_table.name);
+                    for operation in &alter_table.operations {
+                        match operation {
+                            AlterTableOperation::RenameTable { table_name } => {
+                                let (RenameTableNameKind::As(name) | RenameTableNameKind::To(name)) =
+                                    table_name;
+                                renamed.push((subject.clone(), last_ident_value_or_display(name)));
+                            }
+                            AlterTableOperation::EnableRowLevelSecurity
+                            | AlterTableOperation::ForceRowLevelSecurity => {
+                                secured.push(subject.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Statement::CreatePolicy(policy) => {
+                    secured.push(last_ident_value_or_display(&policy.table_name));
+                }
+                _ => {}
+            }
+        }
+
+        for (old_name, new_name) in renamed {
+            let Some(name) =
+                secured.iter().find(|secured| **secured == old_name || **secured == new_name)
+            else {
+                continue;
+            };
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "table `{name}` is both renamed (`{old_name}` to `{new_name}`) and placed under \
+                 row level security in the same translation unit. Row level security is realised \
+                 as a backing table, two views, and five triggers named after the table, and a \
+                 rename cannot move them together. Rename the table in an earlier translation \
+                 unit than the one that enables row level security on it, or create it under its \
+                 final name."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Builds the schema every statement is translated against.
+    ///
+    /// Access resolution is open because a policy or grant naming a role the
+    /// input never creates is the normal shape: roles are cluster objects that
+    /// `pg_dump` does not emit, and a platform role such as `authenticated`
+    /// exists before any migration runs. Closed resolution, which is upstream's
+    /// default, refuses those outright.
+    fn build_translation_schema(
+        statements: Vec<Statement>,
+    ) -> Result<ParserDB, crate::errors::Error> {
+        ParseOptions::default()
+            .with_access_resolution(AccessResolution::OpenWorld)
+            .from_statements(statements, "translation_db".to_owned())
+            .map_err(Into::into)
     }
 
     /// The statements that build the one schema snapshot every statement is
@@ -392,8 +473,10 @@ impl Pg2Sqlite {
         use sql_traits::traits::DatabaseLike;
 
         let normalized_statements = Self::normalize_statements(&self.pg_statements);
+        Self::reject_rename_of_secured_table(&normalized_statements)?;
+
         let schema_statements = Self::schema_statements_for_translation(&normalized_statements);
-        let schema = ParserDB::from_statements(schema_statements, "translation_db".to_owned())?;
+        let schema = Self::build_translation_schema(schema_statements)?;
 
         if !options.is_dangling_foreign_keys_allowed() {
             schema.validate_foreign_key_targets()?;
@@ -518,8 +601,7 @@ impl Pg2Sqlite {
     /// ```
     pub fn build_schema(&self) -> Result<ParserDB, crate::errors::Error> {
         let normalized_statements = Self::normalize_statements(&self.pg_statements);
-        ParserDB::from_statements(normalized_statements, "translation_db".to_owned())
-            .map_err(crate::errors::Error::from)
+        Self::build_translation_schema(normalized_statements)
     }
 
     /// Logical-to-physical table map produced under `options`,
@@ -683,11 +765,9 @@ impl Pg2Sqlite {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
-        let stmts = sqlparser::parser::Parser::parse_sql(
-            &crate::impls::reverse_translator_impls::glob_dialect::SqliteGlobDialect::default(),
-            sqlite_sql,
-        )
-        .map_err(|e| crate::errors::Error::ParserError(sqlite_sql.to_owned(), e))?;
+        let stmts =
+            sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, sqlite_sql)
+                .map_err(|e| crate::errors::Error::ParserError(sqlite_sql.to_owned(), e))?;
 
         stmts.iter().map(|stmt| self.reverse_translate(stmt, schema, options)).collect()
     }

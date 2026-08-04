@@ -141,6 +141,7 @@ fn non_public_schema_qualified_index_target_is_rejected() {
 fn non_public_schema_qualified_index_target_is_unqualified_when_schema_resolves() {
     let output = translated_sql(
         "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
         CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
         CREATE INDEX idx_users_name ON my_custom_app.users(name);
         ",
@@ -159,6 +160,7 @@ fn non_public_schema_qualified_index_target_is_unqualified_when_schema_resolves(
 fn non_public_schema_qualified_create_table_is_unqualified_when_schema_resolves() {
     let output = translated_sql(
         "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
         CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
         ",
     );
@@ -205,6 +207,7 @@ fn non_public_schema_qualified_trigger_target_is_rejected() {
 fn non_public_schema_qualified_trigger_target_is_unqualified_when_schema_resolves() {
     let output = translated_sql(
         "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
         CREATE TABLE my_custom_app.docs (id INT PRIMARY KEY, name TEXT);
         CREATE FUNCTION docs_trigger_fn() RETURNS trigger AS $$
         BEGIN
@@ -252,6 +255,7 @@ fn non_public_schema_qualified_delete_target_is_rejected() {
 fn non_public_schema_qualified_delete_target_is_unqualified_when_schema_resolves() {
     let output = translated_sql(
         "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
         CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
         DELETE FROM my_custom_app.users WHERE id = 1;
         ",
@@ -291,6 +295,7 @@ fn non_public_schema_qualified_select_from_target_is_rejected() {
 fn non_public_schema_qualified_join_target_is_unqualified_when_schema_resolves() {
     let output = translated_sql(
         "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
         CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
         CREATE TABLE teams (id INT PRIMARY KEY, owner_id INT);
         CREATE VIEW team_owners AS
@@ -393,6 +398,7 @@ fn drop_non_public_schema_qualified_object_names_error_when_schema_unresolved() 
 fn drop_non_public_schema_qualified_object_names_are_unqualified_when_schema_resolves() {
     let output = translated_sql(
         "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
         CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
         DROP TABLE IF EXISTS my_custom_app.users;
         ",
@@ -411,6 +417,7 @@ fn drop_non_public_schema_qualified_object_names_are_unqualified_when_schema_res
 fn create_view_non_public_schema_name_is_unqualified_when_schema_resolves() {
     let output = translated_sql(
         "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
         CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
         CREATE VIEW my_custom_app.active_users AS SELECT id FROM my_custom_app.users;
         ",

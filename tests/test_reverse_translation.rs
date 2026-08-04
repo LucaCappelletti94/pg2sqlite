@@ -433,7 +433,7 @@ mod errors {
 
     #[test]
     fn test_insert_or_replace_with_non_public_schema_in_ddl_builds_and_reverses() {
-        let pg_ddl = "CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT, email TEXT);";
+        let pg_ddl = "CREATE SCHEMA app; CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT, email TEXT);";
         let translator = setup_translator(pg_ddl);
         let schema = translator.build_schema().expect("schema build should allow app.users");
         let options = Pg2SqliteOptions::default();
@@ -450,6 +450,8 @@ mod errors {
     #[test]
     fn test_insert_or_replace_with_multiple_non_public_schema_tables_errors_on_ambiguous_lookup() {
         let pg_ddl = "
+            CREATE SCHEMA app;
+            CREATE SCHEMA auth;
             CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT);
             CREATE TABLE auth.users (id UUID PRIMARY KEY, name TEXT);
         ";

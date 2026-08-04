@@ -176,73 +176,71 @@ fn row_level_security_without_a_rename_builds_its_object_set() {
     );
 }
 
-/// Pins a live defect: a rename above `ENABLE ROW LEVEL SECURITY` discards the
-/// security setting silently.
+/// Renaming a table that is also placed under row level security is refused,
+/// with the rename written above the security statements.
 ///
-/// The rename is filtered out of the schema, so `t2` is unknown to it. The
-/// `ENABLE ROW LEVEL SECURITY` still reaches the schema builder, whose arm
-/// skips an unresolvable table, and the statement itself emits nothing because
-/// RLS is realised from the schema rather than from an `ALTER TABLE`. The
-/// caller gets an unprotected table and no diagnostic.
-///
-/// Translating against a schema rebuilt from a growing prefix does not fix
-/// this. It was measured: RLS is realised while the `CREATE TABLE` is
-/// translated, from an `ENABLE ROW LEVEL SECURITY` written below it, so a
-/// prefix that stops at the `CREATE TABLE` cannot know. That attempt failed
-/// 165 tests.
+/// This used to discard the security setting silently and ship an unprotected
+/// table. The refusal is permanent: resolving a table by a name it has since
+/// lost is ambiguous as soon as a file swaps two names, so the schema cannot be
+/// asked which table a statement above the rename meant.
 #[test]
-fn rename_above_row_level_security_still_discards_it() {
-    let emitted = rls_translation(
-        "CREATE TABLE t (id INT PRIMARY KEY, owner TEXT);
-         ALTER TABLE t RENAME TO t2;
-         ALTER TABLE t2 ENABLE ROW LEVEL SECURITY;
-         CREATE POLICY p ON t2 USING (owner = current_setting('app.user'));",
-    )
-    .join("\n");
+fn rename_above_row_level_security_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, owner TEXT);
+             ALTER TABLE t RENAME TO t2;
+             ALTER TABLE t2 ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY p ON t2 USING (owner = current_setting('app.user'));",
+        )
+        .expect("parse")
+        .translate(&rls_options())
+        .expect_err("the combination must be refused");
 
+    let message = error.to_string();
+    assert!(message.contains("t2"), "the error must name the table, got: {message}");
     assert!(
-        !emitted.contains("CREATE VIEW"),
-        "the RLS object set is now emitted, so the silent discard is fixed. Unpin this and \
-         assert the protection instead:\n{emitted}"
+        message.contains("row level security"),
+        "the error must say what the conflict is, got: {message}"
     );
 }
 
-/// Pins the other half of the same hole: with the rename below the policy the
-/// setting survives, and the emitted script is then invalid.
-///
-/// RLS turns the table into a backing table plus a view carrying the original
-/// name, so the rename lands on the view and SQLite refuses it. Supporting the
-/// combination means renaming the backing table, both views, and every trigger
-/// together, which is a feature rather than a schema-plumbing fix.
+/// The same refusal with the rename written below the security statements,
+/// which used to emit a script SQLite rejected with `view t may not be
+/// altered`, because the rename landed on the view row level security creates.
 #[test]
-fn renaming_a_table_that_has_row_level_security_emits_unrunnable_sql() {
-    let emitted = rls_translation(
-        "CREATE TABLE t (id INT PRIMARY KEY, owner TEXT);
-         ALTER TABLE t ENABLE ROW LEVEL SECURITY;
-         CREATE POLICY p ON t USING (owner = current_setting('app.user'));
-         ALTER TABLE t RENAME TO t2;",
-    );
-
-    let connection = rusqlite::Connection::open_in_memory().expect("open");
-    connection
-        .create_scalar_function(
-            "app_user",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-            |_| Ok("alice".to_string()),
+fn rename_below_row_level_security_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, owner TEXT);
+             ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY p ON t USING (owner = current_setting('app.user'));
+             ALTER TABLE t RENAME TO t2;",
         )
-        .expect("register the session user function");
+        .expect("parse")
+        .translate(&rls_options())
+        .expect_err("the combination must be refused");
 
-    let failure = emitted
-        .iter()
-        .find_map(|statement| connection.execute_batch(statement).err().map(|e| e.to_string()));
-
-    let failure = failure.expect(
-        "every statement now applies, so renaming an RLS table is supported. Unpin this and \
-         assert the renamed object set instead",
-    );
     assert!(
-        failure.contains("may not be altered"),
-        "expected SQLite to refuse the rename of the RLS view, got: {failure}"
+        error.to_string().contains("row level security"),
+        "the error must say what the conflict is, got: {error}"
+    );
+}
+
+/// A rename with no row level security anywhere is untouched by the refusal.
+#[test]
+fn a_rename_without_row_level_security_still_translates() {
+    let emitted = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id INT PRIMARY KEY, a TEXT); ALTER TABLE t RENAME TO t2;")
+        .expect("parse")
+        .translate(&rls_options())
+        .expect("a plain rename must still translate")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        emitted.contains("ALTER TABLE t RENAME TO t2"),
+        "the rename must still be emitted, got:\n{emitted}"
     );
 }
