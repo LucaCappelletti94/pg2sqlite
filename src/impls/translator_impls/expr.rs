@@ -20,7 +20,7 @@ use sqlparser::ast::{
     AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
     ExactNumberInfo, Expr, Function, Ident, Interval, JsonKeyUniqueness, JsonPredicateType,
     ObjectName, ObjectNamePart, Query, Subscript, TableAlias, TableAliasColumnDef, TableFactor,
-    TimezoneInfo, UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::{
@@ -33,7 +33,10 @@ use crate::{
             declared_numeric_precision, every_declared_type_matches, function_argument_exprs,
             numeric_scale, rescale_minor_units, scale_decimal_literal, translate_expr_recursive,
         },
-        timezone::{is_fixed_utc_offset, normalize_timezone_modifier_for_sqlite},
+        timezone::{
+            TimestampAwareness, flipped_shifting_offset, normalize_timezone_modifier_for_sqlite,
+            timestamp_awareness,
+        },
         translator_impls::{
             array::{
                 Quantifier, array_concat, array_overlap, is_json_array_representation,
@@ -751,82 +754,13 @@ fn translate_overlay(
 /// `-HH:MM`).
 #[cfg(all(test, feature = "std"))]
 fn is_sqlite_fixed_offset(value: &str) -> bool {
-    is_fixed_utc_offset(value)
+    crate::impls::timezone::is_fixed_utc_offset(value)
 }
 
 /// Normalize PostgreSQL AT TIME ZONE literal names to SQLite datetime
 /// modifiers.
 fn normalize_at_time_zone_modifier(value: &str) -> Option<String> {
     normalize_timezone_modifier_for_sqlite(value)
-}
-
-/// Whether a timestamp expression carries a zone, which decides which way
-/// `AT TIME ZONE` shifts it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TimestampAwareness {
-    /// A bare `timestamp`, read as local to the named zone.
-    Naive,
-    /// A `timestamptz`, already an instant, converted into the named zone.
-    Aware,
-}
-
-/// Resolve whether `expr` is a `timestamptz`, from its own spelling or from the
-/// declared type of the column it names.
-fn timestamp_awareness(expr: &Expr, schema: &ParserDB) -> Option<TimestampAwareness> {
-    fn from_data_type(data_type: &DataType) -> Option<TimestampAwareness> {
-        match data_type {
-            DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone) => {
-                Some(TimestampAwareness::Aware)
-            }
-            DataType::Timestamp(_, _) | DataType::Date => Some(TimestampAwareness::Naive),
-            _ => None,
-        }
-    }
-
-    match expr {
-        Expr::Nested(inner) => timestamp_awareness(inner, schema),
-        Expr::TypedString(typed) => from_data_type(&typed.data_type),
-        Expr::Cast { data_type, .. } => from_data_type(data_type),
-        // PostgreSQL's now() and its aliases return timestamptz, and
-        // localtimestamp returns a bare timestamp.
-        Expr::Function(function) => {
-            let name =
-                crate::impls::object_name::last_ident(&function.name)?.value.to_ascii_lowercase();
-            match name.as_str() {
-                "now"
-                | "current_timestamp"
-                | "transaction_timestamp"
-                | "statement_timestamp"
-                | "clock_timestamp" => Some(TimestampAwareness::Aware),
-                "localtimestamp" => Some(TimestampAwareness::Naive),
-                _ => None,
-            }
-        }
-        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
-            let declared_contains = |needle: &'static str| {
-                every_declared_type_matches(expr, schema, |declared| {
-                    declared.to_ascii_lowercase().contains(needle)
-                })
-            };
-            if declared_contains("with time zone") || declared_contains("timestamptz") {
-                Some(TimestampAwareness::Aware)
-            } else if declared_contains("timestamp") || declared_contains("date") {
-                Some(TimestampAwareness::Naive)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-/// A `+HH:MM` / `-HH:MM` offset with its sign flipped, or `None` when the
-/// modifier is not a fixed offset.
-fn negated_offset(modifier: &str) -> Option<String> {
-    is_fixed_utc_offset(modifier).then(|| {
-        let flipped = if modifier.starts_with('-') { '+' } else { '-' };
-        format!("{flipped}{}", &modifier[1..])
-    })
 }
 
 /// `CAST(x AS NUMERIC(p,s))`, which moves `x` onto the scaled-integer
@@ -925,7 +859,7 @@ fn translate_at_time_zone(
         return Ok(simple_function_expr("datetime", vec![translated_timestamp], None));
     }
 
-    let Some(negated) = negated_offset(&modifier) else {
+    let Some(negated) = flipped_shifting_offset(&modifier) else {
         // `localtime`, where both databases mean the machine's own zone and
         // neither agrees on which machine.
         return Ok(simple_function_expr(
@@ -938,8 +872,8 @@ fn translate_at_time_zone(
     let awareness = timestamp_awareness(timestamp, schema).ok_or_else(|| {
         crate::errors::Error::UnsupportedSQLiteFeature(format!(
             "AT TIME ZONE shifts a bare timestamp and a timestamptz in opposite directions, and \
-             the type of `{timestamp}` cannot be resolved here, so either choice would be wrong \
-             half the time. Cast the operand, as `{timestamp}::timestamptz`, to say which it is."
+             `{timestamp}` is not known to be either, so either choice would be wrong half the \
+             time. Cast the operand, as `{timestamp}::timestamptz`, to say which it is."
         ))
     })?;
 

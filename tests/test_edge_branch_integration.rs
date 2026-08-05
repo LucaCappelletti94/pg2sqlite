@@ -561,8 +561,12 @@ fn reverse_translation_covers_uncommon_function_variants() {
             ))),
         ],
     );
+    // The zone's sign depends on whether the operand carries one, so the
+    // operand needs a declared type, which is what this case always modelled.
+    let dated =
+        schema_from_sql("CREATE TABLE events(id INTEGER PRIMARY KEY, created_at TIMESTAMP);");
     let translated = datetime_prefixed_offset
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&dated, &options)
         .expect("datetime timezone should reverse");
     assert!(translated.to_string().contains("AT TIME ZONE"));
 }

@@ -31,7 +31,10 @@ use crate::{
         shared_helpers::{
             function_argument_exprs, translate_function_arguments, translate_order_by_expr,
         },
-        timezone::normalize_timezone_modifier_for_postgres,
+        timezone::{
+            TimestampAwareness, flipped_shifting_offset, normalize_timezone_modifier_for_postgres,
+            timestamp_awareness,
+        },
         translator_impls::expr::sqlite_json_path_to_pg_text_path,
     },
     prelude::Pg2SqliteOptions,
@@ -138,6 +141,55 @@ fn reverse_strftime_to_date_trunc_field(format: &str) -> Option<&'static str> {
     }
 }
 
+/// The PostgreSQL zone for a SQLite `datetime` timezone modifier.
+///
+/// The forward direction flips an aware operand's offset, because a bare
+/// timestamp and a timestamptz shift opposite ways, so this has to flip it
+/// back. Over `2023-01-15 12:00:00` PostgreSQL answers 17:30 for the naive
+/// operand and 06:30 for the aware one, both measured on 16, and handing the
+/// stored sign straight back turns the second into the first.
+///
+/// An operand not known to be a timestamp is refused, for either of two
+/// reasons, and the message says which. A shifting offset cannot pick its sign
+/// without the type. Every other spelling can, but PostgreSQL applies `AT TIME
+/// ZONE` only to a timestamp, so emitting one over a text column answered
+/// `function pg_catalog.timezone(unknown, text) does not exist`.
+///
+/// The forward direction deliberately does NOT require the type for the second
+/// reason, and the asymmetry is the two type systems rather than an oversight:
+/// SQLite is dynamically typed, so `datetime(txt, '+05:30')` over a text column
+/// answers 17:30 rather than complaining. Both measured.
+fn at_time_zone_for_modifier(
+    modifier: String,
+    timestamp: &Expr,
+    schema: &ParserDB,
+) -> Result<String, Error> {
+    let flipped = flipped_shifting_offset(&modifier);
+
+    let Some(awareness) = timestamp_awareness(timestamp, schema) else {
+        return Err(Error::UnsupportedSQLiteFeature(if flipped.is_some() {
+            format!(
+                "a datetime offset modifier of '{modifier}' shifts a bare timestamp and a \
+                 timestamptz in opposite directions, and `{timestamp}` is not known to be \
+                 either, so either sign would be wrong half the time. Cast the operand, as \
+                 `{timestamp}::timestamptz`, to say which it is."
+            )
+        } else {
+            format!(
+                "PostgreSQL applies AT TIME ZONE only to a timestamp, and `{timestamp}` is not \
+                 known to be a timestamp here, so reversing the datetime modifier '{modifier}' \
+                 onto it would emit SQL PostgreSQL refuses. Cast the operand, as \
+                 `{timestamp}::timestamp`, to say what it holds."
+            )
+        }));
+    };
+
+    match (flipped, awareness) {
+        (Some(flipped), TimestampAwareness::Aware) => Ok(flipped),
+        _ => Ok(modifier),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn reverse_function(
     name: &ObjectName,
@@ -157,16 +209,22 @@ pub fn reverse_function(
     }
 
     match func_name.as_str() {
-        // datetime('now') -> NOW()
+        // datetime('now') -> NOW(), datetime(x) -> x AT TIME ZONE 'UTC'
         "datetime" => {
             if let FunctionArguments::List(list) = args
                 && list.args.len() == 1
-                && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+            {
+                if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
                     ValueWithSpan { value: Value::SingleQuotedString(s), .. },
                 )))) = list.args.first()
-                && s == "now"
-            {
-                return FunctionReversal::ToNow;
+                    && s == "now"
+                {
+                    return FunctionReversal::ToNow;
+                }
+                // The one-argument form is what `AT TIME ZONE 'UTC'` becomes on
+                // the way out, since SQLite's own `utc` modifier shifts by the
+                // machine's offset and PostgreSQL's UTC shifts nothing.
+                return FunctionReversal::ToAtTimeZone("UTC".to_string());
             }
             if let FunctionArguments::List(list) = args
                 && list.args.len() == 2
@@ -420,10 +478,10 @@ pub fn reverse_translate_function(
                     "internal invariant violation in datetime AT TIME ZONE reverse translation"
                 );
             };
-            debug_assert_eq!(
-                list.args.len(),
-                2,
-                "reverse_function classified datetime as ToAtTimeZone without exactly 2 args"
+            debug_assert!(
+                (1..=2).contains(&list.args.len()),
+                "reverse_function classified datetime as ToAtTimeZone with {} args",
+                list.args.len()
             );
             let timestamp_expr = function_arg_expr_or_err(
                 list.args
@@ -436,10 +494,11 @@ pub fn reverse_translate_function(
                 options,
             )?;
 
+            let zone = at_time_zone_for_modifier(time_zone, &reversed_timestamp, schema)?;
             Ok(Expr::AtTimeZone {
                 timestamp: Box::new(reversed_timestamp),
                 time_zone: Box::new(Expr::Value(ValueWithSpan {
-                    value: Value::SingleQuotedString(time_zone),
+                    value: Value::SingleQuotedString(zone),
                     span: sqlparser::tokenizer::Span::empty(),
                 })),
             })
