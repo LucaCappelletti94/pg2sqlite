@@ -148,7 +148,7 @@ pub(crate) fn nulls_not_distinct_not_supported_error() -> Error {
 ///
 /// The qualifier of a compound name is dropped, since it may be an alias rather
 /// than a table.
-fn referenced_column_name(expr: &Expr) -> Option<&str> {
+pub(crate) fn referenced_column_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Identifier(ident) => Some(ident.value.as_str()),
         Expr::CompoundIdentifier(parts) => Some(parts.last()?.value.as_str()),
@@ -166,7 +166,7 @@ fn referenced_column_name(expr: &Expr) -> Option<&str> {
 ///
 /// `read` needs the structured type, so the parsed DDL is read directly rather
 /// than through `ColumnLike::data_type`, which answers a normalised token.
-fn unanimous_declared<T: PartialEq>(
+pub(crate) fn unanimous_declared<T: PartialEq>(
     expr: &Expr,
     schema: &ParserDB,
     read: impl Fn(&DataType) -> Option<T>,

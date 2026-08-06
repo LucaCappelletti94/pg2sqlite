@@ -66,3 +66,19 @@ fn aggregating_no_rows_is_null() {
 fn a_qualified_json_column_nests_too() {
     assert_eq!(probe("json_agg(t.payload)"), vec![Some(r#"[{"a":1},[2,3]]"#.to_string())]);
 }
+
+/// The document predicate is shared with `to_json` (R89), so an array column
+/// under the JSON representation nests as an array of arrays rather than an
+/// array of strings.
+#[test]
+fn aggregating_an_array_column_nests_the_arrays() {
+    use pg2sqlite::prelude::{ArrayRepresentation, TranslationOptions};
+
+    let rows = run_translated_with(
+        "CREATE TABLE arr (id INT PRIMARY KEY, tags INT[]);
+         INSERT INTO arr (id, tags) VALUES (1, ARRAY[1, 2]);
+         SELECT json_agg(tags) FROM arr;",
+        &Pg2SqliteOptions::default().with_array_representation(ArrayRepresentation::Json),
+    );
+    assert_eq!(rows, vec![Some("[[1,2]]".to_string())]);
+}

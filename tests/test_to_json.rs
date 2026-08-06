@@ -88,3 +88,39 @@ fn to_json_with_the_wrong_arity_is_rejected() {
     let error = translate_err("SELECT to_json('a', 'b');");
     assert!(!error.is_empty(), "expected a rejection");
 }
+
+// ---------------------------------------------------------------------------
+// Declared documents and unresolvable columns (R89)
+// ---------------------------------------------------------------------------
+
+/// A `json` column is a document, not a string of its own text, so `to_json`
+/// reads it rather than quoting it.
+#[test]
+fn to_json_over_a_json_column_reads_the_document() {
+    let rows = run("CREATE TABLE t (id INT PRIMARY KEY, doc JSONB);
+         INSERT INTO t (id, doc) VALUES (1, '{\"a\":1}');
+         SELECT to_json(doc) FROM t;");
+    assert_eq!(rows, vec![Some("{\"a\":1}".to_string())]);
+}
+
+/// An array column under the JSON representation holds a document too.
+#[test]
+fn to_json_over_an_array_column_returns_the_array() {
+    let rows = run_with_json_arrays(
+        "CREATE TABLE t (id INT PRIMARY KEY, tags INT[]);
+         INSERT INTO t (id, tags) VALUES (1, ARRAY[1, 2]);
+         SELECT to_json(tags) FROM t;",
+    );
+    assert_eq!(rows, vec![Some("[1,2]".to_string())]);
+}
+
+/// A column the schema cannot resolve is refused rather than guessed, since
+/// reading and quoting are each wrong for the other's type.
+#[test]
+fn to_json_over_an_unresolvable_column_is_refused() {
+    let error = translate_err(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         SELECT to_json(ghost) FROM t;",
+    );
+    assert!(error.contains("ghost"), "the refusal must name the column: {error}");
+}

@@ -36,8 +36,8 @@ use crate::{
         },
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, every_declared_type_matches,
-            function_argument_exprs, numeric_scale, rescale_minor_units,
-            translate_function_arguments,
+            function_argument_exprs, numeric_scale, referenced_column_name, rescale_minor_units,
+            translate_function_arguments, unanimous_declared,
         },
         sqlite_functions::is_sqlite_builtin,
     },
@@ -975,16 +975,26 @@ fn resolves_to_non_textual_column(expr: &Expr, schema: &ParserDB) -> bool {
 /// True when `expr` carries a JSON document, either by its shape or by the
 /// declared type of the column it names.
 ///
-/// A `json` or `jsonb` column becomes TEXT in SQLite and is otherwise
-/// indistinguishable from a string column, so the declared type is the only
+/// A `json` or `jsonb` column becomes TEXT in SQLite, and an array column
+/// under the JSON representation does too, so the declared type is the only
 /// thing that separates a document from its own text. An unqualified name is
 /// accepted only when every column with that name in the schema agrees, since
 /// guessing between the two is wrong half the time in either direction.
-fn carries_json(expr: &Expr, schema: &ParserDB) -> bool {
+fn carries_json(expr: &Expr, schema: &ParserDB, options: &Pg2SqliteOptions) -> bool {
     is_already_json(expr)
-        || every_declared_type_matches(expr, schema, |data_type| {
-            matches!(data_type.to_ascii_lowercase().as_str(), "json" | "jsonb")
+        || unanimous_declared(expr, schema, |data_type| {
+            is_json_document_type(data_type, options).then_some(())
         })
+        .is_some()
+}
+
+/// Whether a declared type holds a JSON document once translated.
+fn is_json_document_type(data_type: &sqlparser::ast::DataType, options: &Pg2SqliteOptions) -> bool {
+    match data_type {
+        sqlparser::ast::DataType::JSON | sqlparser::ast::DataType::JSONB => true,
+        sqlparser::ast::DataType::Array(_) => array::is_json_array_representation(options),
+        _ => false,
+    }
 }
 
 /// The SQLite function that matches PostgreSQL's fourth argument.
@@ -1907,9 +1917,32 @@ impl Translator for Function {
                 let translated = argument.translate(schema, options)?;
 
                 // An argument that is already JSON needs reading, not
-                // converting: quoting it would turn the document into a string.
+                // converting: quoting it would turn the document into a
+                // string. For a bare column the declared type is the only
+                // thing separating a document from its own text, so a column
+                // the schema cannot settle is refused rather than guessed,
+                // since either guess is wrong for the other's type.
                 if is_already_json(argument) {
                     return Ok(simple_function_expr("json", vec![translated], None));
+                }
+                if referenced_column_name(argument).is_some() {
+                    match unanimous_declared(argument, schema, |data_type| {
+                        Some(is_json_document_type(data_type, options))
+                    }) {
+                        Some(true) => {
+                            return Ok(simple_function_expr("json", vec![translated], None));
+                        }
+                        Some(false) => {}
+                        None => {
+                            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                                "to_json({argument}) names a column the translation schema cannot \
+                                 resolve to one declared type, and a json, jsonb, or array column \
+                                 must be read as a document where any other is quoted into a \
+                                 string. Include the column's table in the translation batch, or \
+                                 qualify the reference so the type is unambiguous."
+                            )));
+                        }
+                    }
                 }
 
                 // `json_quote` renders SQL NULL as the JSON text `null` where
@@ -2097,7 +2130,7 @@ impl Translator for Function {
                 // the document into a string. Reading it back with json() is
                 // only safe for a column declared JSON: json('hello') is
                 // `malformed JSON`.
-                let element = if carries_json(argument, schema) {
+                let element = if carries_json(argument, schema, options) {
                     simple_function_expr("json", vec![element], None)
                 } else {
                     element
