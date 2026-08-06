@@ -438,3 +438,87 @@ fn a_plain_integer_column_is_not_scaled_on_update() {
     );
     assert_eq!(rows, vec![Some("3".to_string())], "a plain INTEGER column stores 3");
 }
+
+/// The declared `DEFAULT` writes into the same scaled column every statement
+/// does, so it has to land in minor units. Unscaled it either dies on the
+/// first omitting insert, `cannot store REAL value in INTEGER column`, or
+/// stores a hundredth of the PostgreSQL value.
+#[test]
+fn a_declared_default_is_scaled() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (
+             id INT PRIMARY KEY,
+             a NUMERIC(10,2) DEFAULT 1.50,
+             b NUMERIC(10,2) DEFAULT 5,
+             c NUMERIC(10,2) DEFAULT -1.50
+         );
+         INSERT INTO t (id) VALUES (1);
+         SELECT a || '|' || b || '|' || c FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("150|500|-150".to_string())], "1.50, 5.00 and -1.50 in minor units");
+}
+
+/// PostgreSQL coerces a quoted default, `DEFAULT '1.50'` reads back 1.50, and
+/// a parenthesised literal is the same literal, so both spellings scale.
+/// Measured on PostgreSQL 16.
+#[test]
+fn a_quoted_or_parenthesised_default_is_scaled() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (
+             id INT PRIMARY KEY,
+             a NUMERIC(10,2) DEFAULT '1.50',
+             b NUMERIC(10,2) DEFAULT (2.50)
+         );
+         INSERT INTO t (id) VALUES (1);
+         SELECT a || '|' || b FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("150|250".to_string())], "both spellings are the literal");
+}
+
+/// Guards the fix. `DEFAULT NULL` is result-neutral and must survive, and a
+/// scale-zero NUMERIC and a plain INTEGER take no scaling at all.
+#[test]
+fn null_and_unscaled_defaults_are_untouched() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (
+             id INT PRIMARY KEY,
+             a NUMERIC(10,2) DEFAULT NULL,
+             b NUMERIC(10,0) DEFAULT 5,
+             c INT DEFAULT 7
+         );
+         INSERT INTO t (id) VALUES (1);
+         SELECT coalesce(a, -1) || '|' || b || '|' || c FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("-1|5|7".to_string())], "NULL, 5 and 7 exactly as declared");
+}
+
+/// A default the translator cannot land as one number at the column's scale is
+/// refused rather than guessed, the same rule as an over-precise literal.
+/// PostgreSQL evaluates `(1.0 + 0.5)` to 1.50 at insert time, which minor
+/// units cannot reproduce without evaluating arithmetic at translate time.
+#[test]
+fn a_computed_default_on_a_scaled_column_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2) DEFAULT (1.0 + 0.5));")
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("a computed default cannot be scaled at translate time")
+        .to_string();
+    assert!(error.contains("price"), "the refusal must name the column, got: {error}");
+}
+
+/// The malformed quoted spelling PostgreSQL itself rejects at CREATE TABLE,
+/// measured on PostgreSQL 16: invalid input syntax for type numeric.
+#[test]
+fn a_malformed_quoted_default_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2) DEFAULT 'abc');")
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("PostgreSQL rejects this declaration too")
+        .to_string();
+    assert!(error.contains("price"), "the refusal must name the column, got: {error}");
+}

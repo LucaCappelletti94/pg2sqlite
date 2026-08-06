@@ -14,13 +14,15 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, DataType, ObjectName, TimezoneInfo,
+    CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, ObjectName,
+    TimezoneInfo, Value, ValueWithSpan,
 };
 
 use crate::{
     errors::Error,
     impls::{
         object_name::last_ident_value_or_display,
+        shared_helpers::{minor_unit_scale, scale_decimal_literal},
         translator_impls::{
             data_type::{
                 character_length, character_length_bound_expr, numeric_precision_and_scale,
@@ -31,6 +33,60 @@ use crate::{
     },
     prelude::{Pg2SqliteOptions, Translator},
 };
+
+/// Rewrites a scaled `NUMERIC` column's declared `DEFAULT` as minor units, or
+/// answers `None` for a default that cannot land as one number at the
+/// column's scale.
+///
+/// PostgreSQL coerces the default to the column's type when the table is
+/// created, so a bare number, a quoted number, and a parenthesised number are
+/// all the same literal, measured on PostgreSQL 16 where `DEFAULT '1.50'`
+/// reads back 1.50. `NULL` survives untouched, since an absent value has no
+/// scale. Anything else, arithmetic or a function call, would need evaluating
+/// at translate time, and PostgreSQL itself rejects a malformed string here
+/// with `invalid input syntax for type numeric`.
+fn scaled_numeric_default(expr: &Expr, scale: u32) -> Result<Option<Expr>, Error> {
+    let mut peeled = expr;
+    while let Expr::Nested(inner) = peeled {
+        peeled = inner;
+    }
+
+    if let Some(scaled) = scale_decimal_literal(peeled, scale)? {
+        return Ok(Some(scaled));
+    }
+
+    match peeled {
+        Expr::Value(ValueWithSpan { value: Value::Null, .. }) => Ok(Some(peeled.clone())),
+        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), .. }) => {
+            match quoted_decimal_as_number(text) {
+                Some(number) => scale_decimal_literal(&number, scale),
+                None => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Reads a quoted decimal, `'1.50'` or `' -2.5 '`, back as the number literal
+/// it coerces to, or `None` when the text is not one number.
+fn quoted_decimal_as_number(text: &str) -> Option<Expr> {
+    let trimmed = text.trim();
+    let unsigned = trimmed.strip_prefix(['-', '+']).unwrap_or(trimmed);
+    let shape_holds = !unsigned.is_empty()
+        && unsigned.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && unsigned.chars().filter(|c| *c == '.').count() <= 1
+        && unsigned.chars().any(|c| c.is_ascii_digit());
+    if !shape_holds {
+        return None;
+    }
+
+    let digits =
+        if trimmed.starts_with('-') { format!("-{unsigned}") } else { unsigned.to_string() };
+    Some(Expr::Value(ValueWithSpan {
+        value: Value::Number(digits, false),
+        span: sqlparser::tokenizer::Span::empty(),
+    }))
+}
 
 /// Translates a column definition, reporting what its declared type loses.
 ///
@@ -89,10 +145,29 @@ pub(crate) fn translate_column_def(
         )));
     }
 
+    // D1 makes a scaled NUMERIC column an INTEGER of minor units, and the
+    // declared DEFAULT writes into it like any other statement, so it scales
+    // here, before translation, while the raw literal is still recognisable.
+    let scale = minor_unit_scale(&column.data_type);
     let mut translated_options: Vec<ColumnOptionDef> = column
         .options
         .iter()
-        .map(|o| o.translate(schema, options))
+        .map(|o| {
+            let (Some(scale), ColumnOption::Default(expr)) = (scale, &o.option) else {
+                return o.translate(schema, options);
+            };
+            let Some(scaled) = scaled_numeric_default(expr, scale)? else {
+                return Err(Error::UnsupportedSQLiteFeature(format!(
+                    "the DEFAULT on column '{}' does not land as one number at the column's \
+                     scale. The column is a NUMERIC held as an INTEGER of minor units, so the \
+                     default has to be a plain literal, which PostgreSQL coerces the same way. \
+                     Write it as a number at the column's scale, or drop it.",
+                    column.name
+                )));
+            };
+            ColumnOptionDef { name: o.name.clone(), option: ColumnOption::Default(scaled) }
+                .translate(schema, options)
+        })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
