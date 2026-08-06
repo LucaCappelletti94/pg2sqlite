@@ -680,13 +680,15 @@ fn translate_alter_table(
 /// all three are named anyway so a parser change cannot reopen the hole
 /// quietly.
 ///
-/// `IF EXISTS` is the one that changes behaviour. PostgreSQL skips a missing
-/// table where SQLite raises, so the clause may only be dropped once the table
-/// is known to exist. When it is not declared the statement is refused rather
-/// than skipped: emitting nothing would reproduce PostgreSQL exactly, but the
-/// schema is built from the input rather than from a live database, so an
-/// absent table almost always means the `CREATE TABLE` was left out of the
-/// batch, and that is indistinguishable from a deliberate guard.
+/// The existence check runs for every operation, guarded or not. A rename is
+/// the one operation that needs nothing from the schema, so it was the one
+/// that could reach SQLite naming a table the batch never declared, failing
+/// on apply as `no such table`. The refusal is one message for both forms:
+/// for the guarded form emitting nothing would reproduce PostgreSQL, which
+/// skips a missing table where SQLite raises, but the schema is built from
+/// the input rather than from a live database, so an absent table almost
+/// always means the CREATE TABLE was left out of the batch, and that is
+/// indistinguishable from a deliberate guard.
 fn reject_untranslatable_alter_table_clauses(
     alter_table: &AlterTable,
     schema: &ParserDB,
@@ -713,14 +715,12 @@ fn reject_untranslatable_alter_table_clauses(
         )));
     }
 
-    if alter_table.if_exists
-        && table_with_implicit_public_lookup(schema, &alter_table.name)?.is_none()
-    {
+    if table_with_implicit_public_lookup(schema, &alter_table.name)?.is_none() {
         return Err(Error::UnsupportedSQLiteFeature(format!(
-            "ALTER TABLE IF EXISTS {} names a table the translation schema does not declare. \
-             PostgreSQL skips the statement where SQLite would raise, and emitting nothing here \
-             would silently discard the change for an input that merely omitted the CREATE TABLE. \
-             Include the table's definition in the same translation batch, or drop the IF EXISTS.",
+            "ALTER TABLE {} names a table the translation schema does not declare. The schema \
+             is built from the statements in the batch rather than from a live database, so an \
+             absent table almost always means its CREATE TABLE was left out. Include the \
+             table's definition in the same translation batch.",
             alter_table.name
         )));
     }

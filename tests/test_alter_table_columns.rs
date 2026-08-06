@@ -356,7 +356,10 @@ fn if_exists_over_an_undeclared_table_is_refused() -> Result<(), Box<dyn std::er
         .to_string();
 
     assert!(error.contains("absent_table"), "the error must name the table, got: {error}");
-    assert!(error.contains("IF EXISTS"), "the error must name the clause, got: {error}");
+    assert!(
+        error.contains("translation batch"),
+        "the error must point at the batch model, got: {error}"
+    );
 
     Ok(())
 }

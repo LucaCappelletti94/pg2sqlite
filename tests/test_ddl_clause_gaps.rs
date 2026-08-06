@@ -330,3 +330,66 @@ fn temporary_and_if_not_exists_still_pass() {
     );
     sqlite_accepts(&stmts).expect("the emitted DDL must run");
 }
+
+// ---------------------------------------------------------------------------
+// ALTER TABLE existence check (R104)
+// ---------------------------------------------------------------------------
+
+/// Before the fix the unguarded rename of an undeclared table emitted SQL
+/// that SQLite refuses with `no such table`. It must be refused at
+/// translation time like the other two operations.
+#[test]
+fn unguarded_rename_of_undeclared_table_is_refused() {
+    let error = translate(
+        "CREATE TABLE t (id INT PRIMARY KEY);\nALTER TABLE absent_table RENAME TO other;",
+    )
+    .expect_err("a rename of an undeclared table must not translate")
+    .to_string();
+    assert!(error.contains("absent_table"), "the refusal must name the table: {error}");
+}
+
+/// With or without `IF EXISTS`, the refusal is one message, not two dialects
+/// of it.
+#[test]
+fn guarded_and_unguarded_rename_refusals_share_a_message() {
+    let unguarded = translate(
+        "CREATE TABLE t (id INT PRIMARY KEY);\nALTER TABLE absent_table RENAME TO other;",
+    )
+    .expect_err("unguarded rename of an undeclared table")
+    .to_string();
+    let guarded = translate(
+        "CREATE TABLE t (id INT PRIMARY KEY);\nALTER TABLE IF EXISTS absent_table RENAME TO other;",
+    )
+    .expect_err("guarded rename of an undeclared table")
+    .to_string();
+    assert_eq!(unguarded, guarded);
+}
+
+/// All three SQLite-supported operations agree on refusing an undeclared
+/// table. `ADD COLUMN` and `DROP COLUMN` already refuse from the schema
+/// build, so this pins the agreement and that every refusal names the table.
+#[test]
+fn all_alter_operations_refuse_an_undeclared_table() {
+    for operation in ["ADD COLUMN s TEXT", "DROP COLUMN s", "RENAME TO other"] {
+        let error = translate(&format!(
+            "CREATE TABLE t (id INT PRIMARY KEY);\nALTER TABLE absent_table {operation};"
+        ))
+        .expect_err(operation)
+        .to_string();
+        assert!(
+            error.contains("absent_table"),
+            "the refusal for {operation} must name the table: {error}"
+        );
+    }
+}
+
+/// Guards the fix. The snapshot keeps a renamed table under its declared
+/// name, so a guarded rename of a table the batch declares must keep
+/// translating, with the guard cleared for SQLite.
+#[test]
+fn guarded_rename_of_declared_table_still_translates() {
+    let stmts =
+        translate("CREATE TABLE t (id INT PRIMARY KEY);\nALTER TABLE IF EXISTS t RENAME TO t2;")
+            .expect("a guarded rename of a declared table is valid in both databases");
+    sqlite_accepts(&stmts).expect("the emitted DDL must run");
+}
