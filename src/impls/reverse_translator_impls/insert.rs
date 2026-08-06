@@ -334,6 +334,9 @@ impl ReverseTranslator for Insert {
                 do_update,
                 schema,
                 options,
+                // Reverse never unscales a NUMERIC, so there is nothing to
+                // move here either.
+                &[],
             )?);
         }
 

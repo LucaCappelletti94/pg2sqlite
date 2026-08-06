@@ -311,6 +311,139 @@ pub(crate) fn scale_decimal_literal(expr: &Expr, scale: u32) -> Result<Option<Ex
     })))
 }
 
+/// The minor-unit scale of a declared type, or `None` when it is not a
+/// `NUMERIC` that carries one.
+pub(crate) fn minor_unit_scale(data_type: &DataType) -> Option<u32> {
+    match data_type {
+        DataType::Numeric(info) | DataType::Decimal(info) => {
+            let (_, scale) =
+                crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)
+                    .ok()?;
+            (scale > 0).then_some(scale)
+        }
+        _ => None,
+    }
+}
+
+/// The minor-unit scale of every scaled column `table` declares.
+///
+/// Table-based like its siblings `vector_columns_of_table` and
+/// `uuid_columns_of_table`, so a caller that already resolved the table does
+/// not resolve it again.
+pub(crate) fn numeric_minor_unit_scales_of_table(
+    table: &<ParserDB as DatabaseLike>::Table,
+    schema: &ParserDB,
+) -> Vec<(String, u32)> {
+    let Ok(columns) = table.columns(schema) else { return Vec::new() };
+    columns
+        .filter_map(|column| {
+            minor_unit_scale(&column.attribute().data_type)
+                .map(|scale| (column.column_name().to_string(), scale))
+        })
+        .collect()
+}
+
+/// The minor-unit scale of every scaled column the named table declares.
+///
+/// Empty when the table cannot be resolved, which leaves the caller emitting
+/// what it was handed rather than scaling against a guess.
+pub(crate) fn numeric_minor_unit_scales(
+    schema: &ParserDB,
+    table_name: &ObjectName,
+) -> Vec<(String, u32)> {
+    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
+        return Vec::new();
+    };
+    numeric_minor_unit_scales_of_table(table, schema)
+}
+
+/// Rewrites a literal written into `column` as minor units, in place.
+///
+/// Anything that is not a literal is left alone, which is what stops an
+/// expression the translator already scaled from being scaled a second time.
+pub(crate) fn scale_literal_for_column(
+    value: &mut Expr,
+    column: &str,
+    scales: &[(String, u32)],
+) -> Result<(), Error> {
+    let Some((_, scale)) = scales.iter().find(|(name, _)| name.eq_ignore_ascii_case(column)) else {
+        return Ok(());
+    };
+    if let Some(scaled) = scale_decimal_literal(value, *scale)? {
+        *value = scaled;
+    }
+    Ok(())
+}
+
+/// Rewrites every literal an assignment writes into a scaled column.
+///
+/// The tuple spelling, `SET (a, b) = (1, 2)`, is zipped name by name. SQLite
+/// accepts that shape, so leaving it out would store the wrong number rather
+/// than fail.
+pub(crate) fn scale_assignment_literals(
+    target: &AssignmentTarget,
+    value: &mut Expr,
+    scales: &[(String, u32)],
+) -> Result<(), Error> {
+    if scales.is_empty() {
+        return Ok(());
+    }
+    match target {
+        AssignmentTarget::ColumnName(name) => {
+            if let Some(column) = last_ident(name) {
+                scale_literal_for_column(value, &column.value, scales)?;
+            }
+        }
+        AssignmentTarget::Tuple(names) => {
+            let Expr::Tuple(items) = value else { return Ok(()) };
+            if items.len() != names.len() {
+                return Ok(());
+            }
+            for (name, item) in names.iter().zip(items.iter_mut()) {
+                if let Some(column) = last_ident(name) {
+                    scale_literal_for_column(item, &column.value, scales)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Translates DO UPDATE assignments and WHERE inside an ON CONFLICT clause.
+///
+/// `scales` carries the target table's scaled columns, since a DO UPDATE writes
+/// into the same columns the insert does and has to move a literal onto the
+/// same scale. Empty for the reverse direction, which never unscales.
+pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
+    on_conflict: &sqlparser::ast::OnConflict,
+    do_update: &sqlparser::ast::DoUpdate,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+    scales: &[(String, u32)],
+) -> Result<sqlparser::ast::OnInsert, Error> {
+    let assignments = do_update
+        .assignments
+        .iter()
+        .map(|a| {
+            let mut value = D::translate_expr(&a.value, schema, options)?;
+            scale_assignment_literals(&a.target, &mut value, scales)?;
+            Ok(Assignment { target: a.target.clone(), value })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let selection = do_update
+        .selection
+        .as_ref()
+        .map(|expr| D::translate_expr(expr, schema, options))
+        .transpose()?;
+    Ok(sqlparser::ast::OnInsert::OnConflict(sqlparser::ast::OnConflict {
+        conflict_target: on_conflict.conflict_target.clone(),
+        action: sqlparser::ast::OnConflictAction::DoUpdate(sqlparser::ast::DoUpdate {
+            assignments,
+            selection,
+        }),
+    }))
+}
+
 /// True when `expr` is the bare `DEFAULT` keyword.
 ///
 /// `sqlparser` has no `Expr` variant for it: `DEFAULT` is not reserved in
@@ -363,37 +496,6 @@ pub(crate) fn translate_expr_recursive<D: TranslationDirection>(
         &|e| D::translate_expr(e, schema, options),
         &|q| D::translate_query(q, schema, options),
     )
-}
-
-/// Translates DO UPDATE assignments and WHERE inside an ON CONFLICT clause.
-pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
-    on_conflict: &sqlparser::ast::OnConflict,
-    do_update: &sqlparser::ast::DoUpdate,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<sqlparser::ast::OnInsert, Error> {
-    let assignments = do_update
-        .assignments
-        .iter()
-        .map(|a| {
-            Ok(Assignment {
-                target: a.target.clone(),
-                value: D::translate_expr(&a.value, schema, options)?,
-            })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    let selection = do_update
-        .selection
-        .as_ref()
-        .map(|expr| D::translate_expr(expr, schema, options))
-        .transpose()?;
-    Ok(sqlparser::ast::OnInsert::OnConflict(sqlparser::ast::OnConflict {
-        conflict_target: on_conflict.conflict_target.clone(),
-        action: sqlparser::ast::OnConflictAction::DoUpdate(sqlparser::ast::DoUpdate {
-            assignments,
-            selection,
-        }),
-    }))
 }
 
 /// Translate the core fields shared by forward and reverse `Delete`
@@ -1321,8 +1423,10 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     }
 
     // Best-effort: falls back to passthrough for unknown tables (CTEs, etc.).
-    // Both wraps are forward-only. Reverse receives an already-rewritten input.
-    let (vector_cols, uuid_cols): (Vec<(String, bool)>, Vec<String>) = if D::IS_FORWARD {
+    // All three wraps are forward-only. Reverse receives an already-rewritten
+    // input, and it never unscales a NUMERIC either, so scaling here would put
+    // the two directions out of step rather than into it.
+    let (vector_cols, uuid_cols, numeric_scales) = if D::IS_FORWARD {
         match &update.table.relation {
             TableFactor::Table { name, .. } => {
                 table_with_implicit_public_lookup(schema, name)
@@ -1335,14 +1439,14 @@ pub(crate) fn translate_update<D: TranslationDirection>(
                         } else {
                             Vec::new()
                         };
-                        (v, u)
+                        (v, u, numeric_minor_unit_scales_of_table(table, schema))
                     })
                     .unwrap_or_default()
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => (Vec::new(), Vec::new(), Vec::new()),
         }
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
 
     let assignments = update
@@ -1354,7 +1458,7 @@ pub(crate) fn translate_update<D: TranslationDirection>(
                 AssignmentTarget::ColumnName(name) => last_ident(name).map(|i| i.value.clone()),
                 AssignmentTarget::Tuple(_) => None,
             };
-            let final_value = match column_name.as_deref() {
+            let mut final_value = match column_name.as_deref() {
                 Some(name) => {
                     if let Some(is_halfvec) = vector_cols
                         .iter()
@@ -1370,6 +1474,7 @@ pub(crate) fn translate_update<D: TranslationDirection>(
                 }
                 None => translated_value,
             };
+            scale_assignment_literals(&a.target, &mut final_value, &numeric_scales)?;
             Ok(Assignment { target: a.target.clone(), value: final_value })
         })
         .collect::<Result<Vec<_>, Error>>()?;

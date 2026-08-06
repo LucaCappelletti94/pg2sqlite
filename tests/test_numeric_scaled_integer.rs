@@ -319,3 +319,122 @@ fn the_manifest_publishes_the_scale() {
         .collect();
     assert_eq!(scaled, vec![("price", 2)], "only the NUMERIC column carries a scale");
 }
+
+/// An `UPDATE` writes into the same scaled column an `INSERT` does, so the same
+/// literal has to mean the same thing. Measured on PostgreSQL 16: after
+/// `UPDATE ... SET price = 1.50` the column reads 1.50, and after
+/// `SET price = 3` it reads 3.00.
+#[test]
+fn a_literal_is_scaled_on_update() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 2.00), (2, 2.00), (3, 2.00);
+         UPDATE t SET price = 1.50 WHERE id = 1;
+         UPDATE t SET price = 3 WHERE id = 2;
+         UPDATE t SET price = -1.50 WHERE id = 3;
+         SELECT price FROM t ORDER BY id;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("150".to_string()), Some("300".to_string()), Some("-150".to_string())],
+        "1.50, 3.00 and -1.50 in minor units"
+    );
+}
+
+/// The tuple spelling of the same assignment. SQLite accepts
+/// `SET (a, b) = (1, 2)`, measured on 3.51.1, so the only thing that can go
+/// wrong with it is the scaling.
+#[test]
+fn a_literal_is_scaled_in_a_tuple_assignment() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 0, 2.00);
+         UPDATE t SET (n, price) = (7, 1.50) WHERE id = 1;
+         SELECT n || ':' || price FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("7:150".to_string())],
+        "the plain column is untouched, the scaled one moves"
+    );
+}
+
+/// The upsert's assignment list is the same write through a different door.
+#[test]
+fn a_literal_is_scaled_in_an_upsert_assignment() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 2.00);
+         INSERT INTO t VALUES (1, 9.99) ON CONFLICT (id) DO UPDATE SET price = 1.50;
+         SELECT price FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("150".to_string())], "the DO UPDATE literal is scaled too");
+}
+
+/// A maintenance trigger body is an `UPDATE` this crate builds itself, so it
+/// needs the same treatment rather than its own.
+#[test]
+fn a_literal_is_scaled_in_a_trigger_row_assignment() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT, price NUMERIC(10,2));
+         CREATE FUNCTION f() RETURNS TRIGGER AS $$
+         BEGIN
+             NEW.price := 1.50;
+             RETURN NEW;
+         END;
+         $$ LANGUAGE plpgsql;
+         CREATE TRIGGER tr BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION f();
+         INSERT INTO t VALUES (1, 0, 2.00);
+         UPDATE t SET n = 1 WHERE id = 1;
+         SELECT price FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("150".to_string())], "the trigger's literal is scaled");
+}
+
+/// The same refusal the insert path gives, so the two doors answer alike.
+#[test]
+fn a_literal_finer_than_the_column_is_refused_on_update() {
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+             UPDATE t SET price = 19.999 WHERE id = 1;",
+        )
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("19.999 does not fit a scale of 2")
+        .to_string();
+    assert!(error.contains("19.999"), "the error must name the literal, got: {error}");
+}
+
+/// Guards the fix rather than testing it. Arithmetic is scaled by the
+/// expression translator, which already brings a literal operand onto the
+/// column's scale, so the new assignment-level scaling must leave it alone
+/// rather than multiply it a second time.
+#[test]
+fn an_arithmetic_assignment_is_not_scaled_twice() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 2.00);
+         UPDATE t SET price = price + 1 WHERE id = 1;
+         SELECT price FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("300".to_string())], "2.00 plus 1 is 3.00, which is 300");
+}
+
+/// Guards the fix. A column with no scale must keep its literal untouched.
+#[test]
+fn a_plain_integer_column_is_not_scaled_on_update() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT);
+         INSERT INTO t VALUES (1, 0);
+         UPDATE t SET n = 3 WHERE id = 1;
+         SELECT n FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("3".to_string())], "a plain INTEGER column stores 3");
+}

@@ -34,6 +34,7 @@ use crate::{
             validate_schema_qualified_object_name_for_sqlite,
         },
         query_builder::single_expr_query,
+        shared_helpers::{minor_unit_scale, scale_decimal_literal},
     },
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
@@ -57,11 +58,19 @@ fn generate_maintenance_trigger_body(
     let assignments = trigger
         .maintenance_assignments(schema)?
         .map(|(col, expr)| {
+            let value = expr.translate(schema, options)?;
+            // The column is in hand, so the scale is read off it rather than
+            // looked up by name. D1 makes a NUMERIC column an INTEGER of minor
+            // units, and this UPDATE writes into it like any other.
+            let scaled = match minor_unit_scale(&col.attribute().data_type) {
+                Some(scale) => scale_decimal_literal(&value, scale)?.unwrap_or(value),
+                None => value,
+            };
             Ok(Assignment {
                 target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
                     Ident::new(col.column_name()),
                 )])),
-                value: expr.translate(schema, options)?,
+                value: scaled,
             })
         })
         .collect::<Result<Vec<_>, crate::errors::Error>>()?;

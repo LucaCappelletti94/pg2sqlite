@@ -16,18 +16,17 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, IndexLike, TableLike, UniqueIndexLike},
 };
-use sqlparser::ast::{DataType, Insert, SetExpr, TableObject};
+use sqlparser::ast::{Insert, SetExpr, TableObject};
 
 use super::helpers::Forward;
 use crate::{
     impls::{
         object_name::{last_ident, last_ident_value_or_display, table_with_implicit_public_lookup},
         shared_helpers::{
-            is_default_keyword, scale_decimal_literal, translate_on_conflict_do_update,
-            translate_returning,
+            is_default_keyword, numeric_minor_unit_scales, scale_literal_for_column,
+            translate_on_conflict_do_update, translate_returning,
         },
         translator_impls::{
-            data_type::numeric_precision_and_scale,
             rls,
             uuid::{
                 is_blob_uuid_representation, maybe_wrap_text_uuid_literal, uuid_columns_of_table,
@@ -97,7 +96,13 @@ impl Translator for Insert {
 
         // A NUMERIC column is an INTEGER of minor units, so a decimal literal
         // has to be moved onto that scale before it reaches a STRICT table.
-        scale_numeric_literals(&mut insert, schema)?;
+        // The same scales serve the DO UPDATE list below, which writes into the
+        // same columns.
+        let numeric_scales = match &insert.table {
+            TableObject::TableName(name) => numeric_minor_unit_scales(schema, name),
+            TableObject::TableFunction(_) | TableObject::TableQuery(_) => Vec::new(),
+        };
+        scale_numeric_literals(&mut insert, schema, &numeric_scales)?;
 
         if let Some(on_insert) = &self.on {
             match on_insert {
@@ -121,7 +126,11 @@ impl Translator for Insert {
                                 action: on_conflict.action.clone(),
                             };
                             insert.on = Some(translate_on_conflict_do_update::<Forward>(
-                                &resolved, do_update, schema, options,
+                                &resolved,
+                                do_update,
+                                schema,
+                                options,
+                                &numeric_scales,
                             )?);
                         }
                     }
@@ -440,30 +449,20 @@ fn wrap_vector_text_literals(insert: &mut Insert, schema: &ParserDB) {
 /// count of minor units the column now holds.
 ///
 /// Bails out on the same unresolvable shapes as its vector and UUID siblings,
-/// leaving the insert verbatim.
+/// leaving the insert verbatim. Only the `VALUES` form is handled: a `SELECT`
+/// source needs projection position mapped to column, which is R112.
 fn scale_numeric_literals(
     insert: &mut Insert,
     schema: &ParserDB,
+    scales: &[(String, u32)],
 ) -> Result<(), crate::errors::Error> {
+    if scales.is_empty() {
+        return Ok(());
+    }
     let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
     let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
         return Ok(());
     };
-    let Ok(columns) = table.columns(schema) else { return Ok(()) };
-    let scales: Vec<(String, u32)> = columns
-        .filter_map(|column| {
-            match &column.attribute().data_type {
-                DataType::Numeric(info) | DataType::Decimal(info) => {
-                    let (_, scale) = numeric_precision_and_scale(info).ok()?;
-                    (scale > 0).then(|| (column.column_name().to_string(), scale))
-                }
-                _ => None,
-            }
-        })
-        .collect();
-    if scales.is_empty() {
-        return Ok(());
-    }
 
     let column_names: Vec<String> = if insert.columns.is_empty() {
         let Ok(columns) = table.columns(schema) else { return Ok(()) };
@@ -476,16 +475,9 @@ fn scale_numeric_literals(
     let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
 
     for row in &mut values.rows {
-        for (idx, expr) in row.content.iter_mut().enumerate() {
-            let Some(col_name) = column_names.get(idx) else { break };
-            let Some((_, scale)) =
-                scales.iter().find(|(name, _)| name.eq_ignore_ascii_case(col_name))
-            else {
-                continue;
-            };
-            if let Some(scaled) = scale_decimal_literal(expr, *scale)? {
-                *expr = scaled;
-            }
+        for (index, expr) in row.content.iter_mut().enumerate() {
+            let Some(column) = column_names.get(index) else { break };
+            scale_literal_for_column(expr, column, scales)?;
         }
     }
     Ok(())
