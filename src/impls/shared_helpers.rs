@@ -1994,6 +1994,21 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             if D::IS_FORWARD && *with_ordinality {
                 return Err(with_ordinality_not_supported_error());
             }
+            // A function used where a table goes parses as `Table` carrying
+            // args, not as `Function`, which is why the generate_series guard
+            // above is duplicated in both arms. Anything with arguments here is
+            // therefore a set-returning function rather than a relation.
+            if D::IS_FORWARD
+                && let Some(args) = args.as_ref()
+            {
+                return crate::impls::translator_impls::array::translate_set_returning_factor(
+                    name,
+                    &args.args,
+                    alias.as_ref(),
+                    schema,
+                    options,
+                );
+            }
             TableFactor::Table {
                 name: D::translate_object_name(name, schema, options)?,
                 alias: alias.clone(),
@@ -2076,6 +2091,15 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             }
             if D::IS_FORWARD && *with_ordinality {
                 return Err(with_ordinality_not_supported_error());
+            }
+            if D::IS_FORWARD {
+                return crate::impls::translator_impls::array::translate_set_returning_factor(
+                    name,
+                    args,
+                    alias.as_ref(),
+                    schema,
+                    options,
+                );
             }
             TableFactor::Function {
                 lateral: *lateral,

@@ -39,9 +39,9 @@ use core::ops::ControlFlow;
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArgumentClause, FunctionArguments, Ident, OrderByExpr,
-    OrderByOptions, SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor,
-    UnaryOperator, Value, ValueWithSpan, visit_expressions,
+    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArguments,
+    Ident, ObjectName, OrderByExpr, OrderByOptions, SelectItem, SetExpr, SetOperator,
+    SetQuantifier, TableAlias, TableFactor, UnaryOperator, Value, ValueWithSpan, visit_expressions,
 };
 
 use crate::{
@@ -713,6 +713,178 @@ pub(crate) fn translate_unnest_factor(
         }),
         sample: None,
     })
+}
+
+/// Which columns a set-returning JSON function exposes.
+///
+/// Stated here rather than derived from the name, so the table below is the
+/// only place that decides a shape. An earlier version carried a boolean and
+/// then dispatched `object_keys` on a name suffix, which shadowed the boolean
+/// and made the table lie about that row.
+#[derive(Clone, Copy)]
+enum JsonSetShape {
+    /// One column, the element value. `json_array_elements` and its twins.
+    Value,
+    /// Two columns, the pair. `json_each` and its twins.
+    KeyValue,
+    /// One column, the key. `json_object_keys` and its twin.
+    Key,
+}
+
+/// PostgreSQL's set-returning JSON functions, as (name, shape, requote).
+///
+/// Every one is a projection over SQLite's `json_each`. `requote` distinguishes
+/// the variants returning `json` from the `_text` ones, and it is the half a
+/// single shared projection gets wrong: measured over `'["a",1]'`, PostgreSQL's
+/// `json_array_elements` answers `"a"` and `1` while
+/// `json_array_elements_text` answers `a` and `1`, and SQLite's `value` column
+/// is the unquoted form. `json_quote` supplies the quoted one and is a no-op on
+/// an object or array element, because `json_each` carries the JSON subtype, so
+/// `'[{"a":1}]'` answers `{"a":1}` in both rather than a doubly quoted string.
+/// It is irrelevant to [`JsonSetShape::Key`], which projects no value.
+const JSON_SET_RETURNING: &[(&str, JsonSetShape, bool)] = &[
+    ("json_array_elements", JsonSetShape::Value, true),
+    ("jsonb_array_elements", JsonSetShape::Value, true),
+    ("json_array_elements_text", JsonSetShape::Value, false),
+    ("jsonb_array_elements_text", JsonSetShape::Value, false),
+    ("json_each", JsonSetShape::KeyValue, true),
+    ("jsonb_each", JsonSetShape::KeyValue, true),
+    ("json_each_text", JsonSetShape::KeyValue, false),
+    ("jsonb_each_text", JsonSetShape::KeyValue, false),
+    ("json_object_keys", JsonSetShape::Key, false),
+    ("jsonb_object_keys", JsonSetShape::Key, false),
+];
+
+/// Translate `FROM <set returning function>(<json>)` into a derived table over
+/// `json_each`, or refuse the function.
+///
+/// SQLite has no table-valued form for any of these, so the alternative to a
+/// projection is emitting the call verbatim, which produces `no such table`
+/// when the script is applied. A name that is neither mapped here nor declared
+/// through [`TranslationOptions::with_user_defined_functions`] is refused,
+/// naming the function, which is the same policy scalar functions follow.
+///
+/// The projection is what supplies PostgreSQL's column names.
+/// `json_object_keys` exposes one column, the others one or two, and SQLite's
+/// `json_each` exposes eight, so passing even `json_each` through would
+/// silently widen the row.
+pub(crate) fn translate_set_returning_factor(
+    name: &ObjectName,
+    args: &[FunctionArg],
+    alias: Option<&TableAlias>,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<TableFactor, Error> {
+    let lowered = crate::impls::object_name::last_ident(name)
+        .map(|ident| ident.value.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let Some(&(_, shape, requote)) =
+        JSON_SET_RETURNING.iter().find(|(candidate, _, _)| *candidate == lowered)
+    else {
+        if options.declares_user_defined_function(&lowered) {
+            return Ok(TableFactor::Function {
+                lateral: false,
+                name: name.clone(),
+                args: args.to_vec(),
+                with_ordinality: false,
+                alias: alias.cloned(),
+            });
+        }
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "{name}() is used where a table goes, and SQLite has no table-valued function of that \
+             name, so emitting it would produce `no such table: {lowered}` when the script runs. \
+             SQLite provides only json_each and json_tree. If the destination registers this one, \
+             declare it with with_user_defined_functions([\"{lowered}\"])."
+        )));
+    };
+
+    let arguments = function_argument_exprs_of(args);
+    let [document] = arguments.as_slice() else {
+        return Err(no_json_equivalent(
+            &format!("{name}() with {} arguments", arguments.len()),
+            "Every mapped form takes exactly one JSON document, so this call is not the \
+             PostgreSQL function it names.",
+        ));
+    };
+
+    // PostgreSQL reads a column argument as an implicit LATERAL, and the derived
+    // table that names the output columns cannot see a sibling FROM item.
+    // Verified on SQLite: the correlated form runs as a bare passthrough and
+    // answers `no such column` inside a derived table.
+    if references_a_column(document) {
+        return Err(no_json_equivalent(
+            &format!("{name}() over a column reference"),
+            "PostgreSQL reads it as an implicit LATERAL, which SQLite has no equivalent for, and \
+             SQLite accepts no column list on a table alias, so the output columns cannot keep \
+             their PostgreSQL names. Write `FROM t, json_each(t.col) AS e` and read `e.value`.",
+        ));
+    }
+
+    let table_name = alias.map_or(lowered.as_str(), |a| a.name.value.as_str());
+    let declared: Vec<&str> = alias
+        .map(|a| a.columns.iter().map(|c| c.name.value.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut projection = Vec::with_capacity(2);
+    let value_column = if requote {
+        simple_function_expr("json_quote", vec![json_each_column(VALUE_COLUMN)], None)
+    } else {
+        json_each_column(VALUE_COLUMN)
+    };
+
+    match shape {
+        // PostgreSQL names this column after the function itself.
+        JsonSetShape::Key => {
+            projection.push(aliased(
+                json_each_column(KEY_COLUMN),
+                declared.first().copied().unwrap_or(&lowered),
+            ));
+        }
+        JsonSetShape::KeyValue => {
+            projection.push(aliased(
+                json_each_column(KEY_COLUMN),
+                declared.first().copied().unwrap_or("key"),
+            ));
+            projection.push(aliased(value_column, declared.get(1).copied().unwrap_or("value")));
+        }
+        JsonSetShape::Value => {
+            projection.push(aliased(value_column, declared.first().copied().unwrap_or("value")));
+        }
+    }
+
+    let translated_document = document.translate(schema, options)?;
+    Ok(TableFactor::Derived {
+        lateral: false,
+        subquery: Box::new(make_query(
+            None,
+            SetExpr::Select(Box::new(make_simple_select(
+                projection,
+                from_relation(json_each_factor(translated_document)),
+                None,
+            ))),
+        )),
+        alias: Some(TableAlias {
+            explicit: true,
+            name: Ident::new(table_name),
+            columns: Vec::new(),
+            at: None,
+        }),
+        sample: None,
+    })
+}
+
+/// The expressions of a `FROM` function's argument list.
+fn function_argument_exprs_of(args: &[FunctionArg]) -> Vec<Expr> {
+    args.iter()
+        .filter_map(|arg| {
+            match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. } => Some(expr.clone()),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// `<expr> AS <name>` as a projection item.
