@@ -439,10 +439,32 @@ fn try_translate_distinct_on_query(
         .map(|expr| expr.translate(schema, options))
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Two separate corrections, because the two ORDER BY positions see different
+    // scopes and each was wrong in its own way.
+    //
+    // The window sits INSIDE the derived table, where the source table's columns
+    // are in scope, so it keeps every operand. What it cannot carry is an output
+    // alias: a column alias is invisible inside `OVER`, and SQLite answers `no
+    // such column`. So each operand is resolved back to the expression the
+    // projection aliased.
+    //
+    // The outer ORDER BY sees only what the derived table projects. PostgreSQL
+    // requires the DISTINCT ON expressions to be the leftmost ORDER BY operands,
+    // verified on 16, which rejects `DISTINCT ON (sensor) ... ORDER BY value`. So
+    // once one row per partition survives, those leading operands already order
+    // the result totally and every operand after them is unobservable. Dropping
+    // them is therefore exact rather than a compromise, and it avoids projecting
+    // helper columns, which would break the reverse direction: it rebuilds this
+    // shape and compares it with what it parsed.
     let window_order = match &order_by {
         Some(ob) => {
             match &ob.kind {
-                OrderByKind::Expressions(exprs) => exprs.clone(),
+                OrderByKind::Expressions(exprs) => {
+                    exprs
+                        .iter()
+                        .map(|item| resolve_alias_in_order_by(item, &translated_inner.projection))
+                        .collect::<Vec<_>>()
+                }
                 OrderByKind::All(_) => {
                     return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                         "DISTINCT ON rewrite does not support ORDER BY ALL".to_string(),
@@ -452,6 +474,8 @@ fn try_translate_distinct_on_query(
         }
         None => Vec::new(),
     };
+
+    let outer_order_by = truncate_order_by_to_partition(order_by, distinct_on_exprs.len());
 
     let outer_select = distinct_on_window_select(
         translated_inner,
@@ -463,13 +487,52 @@ fn try_translate_distinct_on_query(
     Ok(Some(build_query_envelope(
         SetExpr::Select(Box::new(outer_select)),
         with,
-        order_by,
+        outer_order_by,
         limit_clause,
         fetch,
         settings,
         query.format_clause.clone(),
         pipe_operators,
     )))
+}
+
+/// An `ORDER BY` operand with any output alias replaced by the expression the
+/// projection aliased, so it can be used inside `OVER`, where aliases do not
+/// resolve. Anything else is returned unchanged.
+fn resolve_alias_in_order_by(item: &OrderByExpr, projection: &[SelectItem]) -> OrderByExpr {
+    let Expr::Identifier(name) = &item.expr else {
+        return item.clone();
+    };
+    let underlying = projection.iter().find_map(|projected| {
+        match projected {
+            SelectItem::ExprWithAlias { expr, alias }
+                if alias.value.eq_ignore_ascii_case(&name.value) =>
+            {
+                Some(expr.clone())
+            }
+            _ => None,
+        }
+    });
+    match underlying {
+        Some(expr) => OrderByExpr { expr, ..item.clone() },
+        None => item.clone(),
+    }
+}
+
+/// The outer `ORDER BY` reduced to its leading `partition_len` operands, which
+/// are the `DISTINCT ON` expressions PostgreSQL requires there.
+fn truncate_order_by_to_partition(
+    order_by: Option<OrderBy>,
+    partition_len: usize,
+) -> Option<OrderBy> {
+    let mut order_by = order_by?;
+    if let OrderByKind::Expressions(exprs) = &mut order_by.kind {
+        if exprs.len() <= partition_len {
+            return Some(order_by);
+        }
+        exprs.truncate(partition_len);
+    }
+    Some(order_by)
 }
 
 #[derive(Clone, Copy)]

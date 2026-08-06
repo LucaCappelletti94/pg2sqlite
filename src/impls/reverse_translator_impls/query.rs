@@ -114,11 +114,20 @@ fn strip_redundant_alias(item: SelectItem) -> SelectItem {
 /// Rebuilds the `DISTINCT ON` query that the forward direction rewrote into a
 /// `ROW_NUMBER()` filter over a derived table.
 ///
-/// Two conditions beyond the marker shape itself. The window ordering must
-/// equal the query ordering, since the rewrite puts one list in both places and
-/// a query where they differ selects a different row. And PostgreSQL rejects a
-/// `DISTINCT ON` whose expressions are not the initial `ORDER BY` expressions,
-/// so a shape that would breach that rule is left as it stands.
+/// The two orderings are NOT the same list, and reading them as one is what let
+/// the forward direction emit SQL that would not prepare. The window keeps
+/// every operand, because it decides which row per partition survives, and it
+/// sits inside the derived table where the source columns are in scope. The
+/// outer `ORDER BY` keeps only the leading `DISTINCT ON` operands, because that
+/// is all the derived table exposes and because those already order the
+/// deduplicated result totally, so the tail is unobservable there.
+///
+/// So the outer ordering must be the window ordering's prefix of exactly the
+/// partition length, and the restored PostgreSQL takes the FULL window
+/// ordering, which is the list PostgreSQL needs to pick the same row.
+/// PostgreSQL also rejects a `DISTINCT ON` whose expressions are not the
+/// initial `ORDER BY` expressions, so a shape breaching that is left as it
+/// stands.
 fn restore_distinct_on(query: &Query) -> Option<Query> {
     let SetExpr::Select(outer) = query.body.as_ref() else {
         return None;
@@ -126,12 +135,13 @@ fn restore_distinct_on(query: &Query) -> Option<Query> {
     let (inner, partition_by, window_order) = distinct_on_window_parts(outer)?;
 
     let query_order = plain_order_by(query)?;
-    if window_order != query_order {
+    let expected_outer = &window_order[..window_order.len().min(partition_by.len())];
+    if query_order != expected_outer {
         return None;
     }
-    if !query_order.is_empty()
-        && (query_order.len() < partition_by.len()
-            || !partition_by.iter().zip(query_order).all(|(on, order)| *on == order.expr))
+    if !window_order.is_empty()
+        && (window_order.len() < partition_by.len()
+            || !partition_by.iter().zip(&window_order).all(|(on, order)| *on == order.expr))
     {
         return None;
     }
@@ -140,7 +150,13 @@ fn restore_distinct_on(query: &Query) -> Option<Query> {
     select.projection = select.projection.into_iter().map(strip_redundant_alias).collect();
     select.distinct = Some(Distinct::On(partition_by));
 
-    Some(Query { body: Box::new(SetExpr::Select(Box::new(select))), ..query.clone() })
+    let restored_order = (!window_order.is_empty())
+        .then_some(OrderBy { kind: OrderByKind::Expressions(window_order), interpolate: None });
+    Some(Query {
+        body: Box::new(SetExpr::Select(Box::new(select))),
+        order_by: restored_order,
+        ..query.clone()
+    })
 }
 
 impl ReverseTranslator for Query {

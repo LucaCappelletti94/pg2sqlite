@@ -121,3 +121,99 @@ fn distinct_on_wildcard_stays_unsupported() {
         "Expected explicit DISTINCT ON projection error, got: {err}"
     );
 }
+
+/// One reading per sensor, so the rewrite has something to discriminate.
+const READINGS: &str = "
+    CREATE TABLE readings (sensor TEXT NOT NULL, value INTEGER NOT NULL, ts TIMESTAMP NOT NULL);
+    INSERT INTO readings VALUES
+        ('a', 100, '2024-01-01'), ('a', 300, '2024-01-03'),
+        ('b', 200, '2024-01-02'), ('b',  50, '2024-01-01');
+";
+
+#[derive(Debug, QueryableByName, PartialEq, Eq)]
+struct Latest {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    sensor: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    reading: i32,
+}
+
+/// Translates `query` against `READINGS`, applies everything but the query, and
+/// returns its rows. The emitted SQL is the artifact under test, so it is
+/// applied as generated text.
+fn latest_per_sensor(query: &str) -> Result<Vec<Latest>, Box<dyn std::error::Error>> {
+    let translated = translate(&format!("{READINGS} {query};"))?;
+    let mut conn = SqliteConnection::establish(":memory:")?;
+    execute_ddl(&translated, &mut conn)?;
+    Ok(diesel::sql_query(query_sql(&translated)).load(&mut conn)?)
+}
+
+fn expected() -> Vec<Latest> {
+    vec![
+        Latest { sensor: "a".to_owned(), reading: 300 },
+        Latest { sensor: "b".to_owned(), reading: 200 },
+    ]
+}
+
+/// The rewrite projects only the output columns, so an `ORDER BY` naming
+/// anything else cannot resolve on the outside and the emitted SQL will not
+/// even prepare. SQLite answered `no such column: ts`.
+///
+/// The window itself was always fine: it sits inside the derived table where
+/// the real table's columns are in scope. Only the outer reference is broken,
+/// so the operand has to be carried into the derived table.
+#[test]
+fn order_by_an_unprojected_column_still_runs() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        latest_per_sensor(
+            "SELECT DISTINCT ON (sensor) sensor, value AS reading FROM readings \
+             ORDER BY sensor, ts DESC"
+        )?,
+        expected()
+    );
+    Ok(())
+}
+
+/// The same shape where the operand IS projected but under its output name, so
+/// the inner name is dead on the outside. SQLite answered `no such column:
+/// value`.
+#[test]
+fn order_by_a_renamed_column_still_runs() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        latest_per_sensor(
+            "SELECT DISTINCT ON (sensor) sensor, value AS reading FROM readings \
+             ORDER BY sensor, value DESC"
+        )?,
+        expected()
+    );
+    Ok(())
+}
+
+/// The reverse trap. PostgreSQL resolves an outer `ORDER BY` against output
+/// names, so ordering by the alias is legal there. Copying that alias into the
+/// window is not: a column alias is invisible inside `OVER`, and SQLite was
+/// right to answer `no such column: reading`. The window has to be built from
+/// the underlying expression instead.
+#[test]
+fn order_by_an_output_alias_still_runs() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        latest_per_sensor(
+            "SELECT DISTINCT ON (sensor) sensor, value AS reading FROM readings \
+             ORDER BY sensor, reading DESC"
+        )?,
+        expected()
+    );
+    Ok(())
+}
+
+/// The shape that already worked, kept as a guard: an `ORDER BY` naming a bare
+/// projected column that keeps its name. This passing is what hid the other
+/// three, since it is what anyone writes in a quick test.
+#[test]
+fn order_by_a_plain_projected_column_keeps_working() -> Result<(), Box<dyn std::error::Error>> {
+    let rows = latest_per_sensor(
+        "SELECT DISTINCT ON (sensor) sensor, value AS reading FROM readings ORDER BY sensor",
+    )?;
+    assert_eq!(rows.len(), 2, "one row per sensor: {rows:?}");
+    Ok(())
+}
