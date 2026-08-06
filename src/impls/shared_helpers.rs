@@ -212,7 +212,7 @@ pub(crate) fn declared_numeric_precision(expr: &Expr, schema: &ParserDB) -> Opti
 
 fn numeric_precision_and_scale_of(expr: &Expr, schema: &ParserDB) -> Option<(u64, u32)> {
     let read = |data_type: &DataType| {
-        let (DataType::Numeric(info) | DataType::Decimal(info)) = data_type else { return None };
+        let info = crate::impls::translator_impls::data_type::exact_numeric_info(data_type)?;
         crate::impls::translator_impls::data_type::numeric_precision_and_scale(info).ok()
     };
     match expr {
@@ -315,15 +315,10 @@ pub(crate) fn scale_decimal_literal(expr: &Expr, scale: u32) -> Result<Option<Ex
 /// The minor-unit scale of a declared type, or `None` when it is not a
 /// `NUMERIC` that carries one.
 pub(crate) fn minor_unit_scale(data_type: &DataType) -> Option<u32> {
-    match data_type {
-        DataType::Numeric(info) | DataType::Decimal(info) => {
-            let (_, scale) =
-                crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)
-                    .ok()?;
-            (scale > 0).then_some(scale)
-        }
-        _ => None,
-    }
+    let info = crate::impls::translator_impls::data_type::exact_numeric_info(data_type)?;
+    let (_, scale) =
+        crate::impls::translator_impls::data_type::numeric_precision_and_scale(info).ok()?;
+    (scale > 0).then_some(scale)
 }
 
 /// The minor-unit scale of every scaled column `table` declares.

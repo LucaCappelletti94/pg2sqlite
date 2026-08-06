@@ -87,6 +87,20 @@ pub(crate) fn character_length_bound_expr(column_name: &Ident, length: u64) -> E
     }
 }
 
+/// The precision carrier shared by `NUMERIC`, `DECIMAL`, and `DEC`, one type
+/// under three standard spellings in PostgreSQL.
+///
+/// Every expression-position site that treats a declared type as a scaled
+/// integer resolves the spelling through this, so an alias added upstream is
+/// added once here. The dispatch arm in the `DataType` translation below
+/// spells the same three variants in its pattern and must stay in step.
+pub(crate) fn exact_numeric_info(data_type: &DataType) -> Option<&ExactNumberInfo> {
+    match data_type {
+        DataType::Numeric(info) | DataType::Decimal(info) | DataType::Dec(info) => Some(info),
+        _ => None,
+    }
+}
+
 /// The precision and scale of a `NUMERIC` or `DECIMAL` declaration, refusing
 /// the two shapes that cannot be a scaled integer.
 ///
@@ -203,12 +217,12 @@ impl Translator for DataType {
             | DataType::DoublePrecision
             | DataType::Float8
             | DataType::Float4 => Ok(DataType::Real),
-            // NUMERIC and DECIMAL become an INTEGER holding minor units, scaled
+            // NUMERIC, DECIMAL, and DEC become an INTEGER holding minor units, scaled
             // by 10^s, which is the only representation SQLite has that keeps
             // decimal arithmetic exact. REAL does not: measured, `sum` over
             // 0.10 and 0.20 answers 0.30000000000000004 and `0.1 + 0.2 = 0.3`
             // is FALSE. See decision D1.
-            DataType::Numeric(info) | DataType::Decimal(info) => {
+            DataType::Numeric(info) | DataType::Decimal(info) | DataType::Dec(info) => {
                 numeric_precision_and_scale(info)?;
                 Ok(DataType::Integer(None))
             }

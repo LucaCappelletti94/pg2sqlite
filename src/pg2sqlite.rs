@@ -672,17 +672,17 @@ impl Pg2Sqlite {
             let columns = table
                 .columns(&schema)?
                 .map(|column| {
-                    let minor_unit_scale = match &column.attribute().data_type {
-                        sqlparser::ast::DataType::Numeric(info)
-                        | sqlparser::ast::DataType::Decimal(info) => {
+                    let minor_unit_scale =
+                        crate::impls::translator_impls::data_type::exact_numeric_info(
+                            &column.attribute().data_type,
+                        )
+                        .and_then(|info| {
                             crate::impls::translator_impls::data_type::numeric_precision_and_scale(
                                 info,
                             )
                             .ok()
                             .map(|(_, scale)| scale)
-                        }
-                        _ => None,
-                    };
+                        });
                     ColumnManifestEntry { name: column.column_name().to_string(), minor_unit_scale }
                 })
                 .collect();

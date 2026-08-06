@@ -43,7 +43,7 @@ use crate::{
                 json_array_call, representation_required, translate_array_literal,
                 translate_array_subscript, translate_quantified_over_array,
             },
-            data_type::{MAX_NUMERIC_PRECISION, numeric_precision_and_scale},
+            data_type::{MAX_NUMERIC_PRECISION, exact_numeric_info, numeric_precision_and_scale},
             helpers::Forward,
         },
     },
@@ -1173,8 +1173,13 @@ fn translate_numeric_arithmetic(
 fn numeric_precision(expr: &Expr, schema: &ParserDB) -> Option<u64> {
     match expr {
         Expr::Nested(inner) => numeric_precision(inner, schema),
-        Expr::Cast { data_type: DataType::Numeric(info) | DataType::Decimal(info), .. } => {
-            numeric_precision_and_scale(info).ok().map(|(precision, _)| precision)
+        Expr::Cast { data_type, .. } => {
+            match exact_numeric_info(data_type) {
+                Some(info) => {
+                    numeric_precision_and_scale(info).ok().map(|(precision, _)| precision)
+                }
+                None => declared_numeric_precision(expr, schema),
+            }
         }
         _ => declared_numeric_precision(expr, schema),
     }
@@ -1633,7 +1638,7 @@ impl Translator for Expr {
                 ) {
                     return translate_boolean_cast(expr, schema, options);
                 }
-                if let DataType::Numeric(info) | DataType::Decimal(info) = data_type {
+                if let Some(info) = exact_numeric_info(data_type) {
                     return translate_numeric_cast(expr, info, schema, options);
                 }
                 // SQLite only accepts the `CAST(x AS type)` spelling, not

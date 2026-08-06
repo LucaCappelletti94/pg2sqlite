@@ -25,8 +25,8 @@ use crate::{
         shared_helpers::{minor_unit_scale, scale_decimal_literal},
         translator_impls::{
             data_type::{
-                character_length, character_length_bound_expr, numeric_precision_and_scale,
-                numeric_precision_bound_expr,
+                character_length, character_length_bound_expr, exact_numeric_info,
+                numeric_precision_and_scale, numeric_precision_bound_expr,
             },
             uuid::{is_blob_uuid_representation, is_uuid_data_type, uuid_blob_length_check_expr},
         },
@@ -190,7 +190,7 @@ pub(crate) fn translate_column_def(
 
     // SQLite promotes an overflowing integer to REAL with no error, so
     // without this bound an out-of-range value becomes a float.
-    if let DataType::Numeric(info) | DataType::Decimal(info) = &column.data_type {
+    if let Some(info) = exact_numeric_info(&column.data_type) {
         let (precision, _) = numeric_precision_and_scale(info)?;
         translated_options.push(ColumnOptionDef {
             name: None,

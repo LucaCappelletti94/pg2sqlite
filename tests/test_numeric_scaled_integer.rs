@@ -81,7 +81,7 @@ fn a_precision_past_eighteen_is_refused() {
 /// scale by and choosing one would corrupt data.
 #[test]
 fn a_bare_numeric_or_decimal_is_refused() {
-    for declaration in ["NUMERIC", "DECIMAL"] {
+    for declaration in ["NUMERIC", "DECIMAL", "DEC"] {
         let error = refuse(&format!("CREATE TABLE t (id INT PRIMARY KEY, price {declaration});"));
         assert!(
             error.to_lowercase().contains("scale"),
@@ -590,4 +590,70 @@ fn a_select_from_another_table_is_unchanged() {
         &Pg2SqliteOptions::default(),
     );
     assert_eq!(rows, vec![Some("150".to_string()), Some("150".to_string())]);
+}
+
+// ---------------------------------------------------------------------------
+// DEC, the standard alias for DECIMAL (R114)
+// ---------------------------------------------------------------------------
+
+/// `DEC` is standard SQL and valid PostgreSQL, one type under three
+/// spellings, so the three must translate byte for byte across DDL, insert,
+/// and update. Before the fix `DEC(10,2)` fell to the catch-all refusal.
+#[test]
+fn dec_is_decimal_under_another_name() {
+    let spell = |ty: &str| {
+        translate(&format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, price {ty});
+             INSERT INTO t VALUES (1, 19.99);
+             UPDATE t SET price = 5.50 WHERE price = 19.99;"
+        ))
+    };
+    let dec = spell("DEC(10,2)");
+    assert_eq!(dec, spell("DECIMAL(10,2)"), "byte for byte across DDL, insert, and update");
+    assert_eq!(dec, spell("NUMERIC(10,2)"));
+}
+
+/// The same literal scaling the other spellings get, asserted by execution:
+/// the stored value is minor units and a comparison literal scales too.
+#[test]
+fn a_dec_column_scales_across_the_pipeline() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price DEC(10,2));
+         INSERT INTO t VALUES (1, 19.99);
+         SELECT price FROM t WHERE price = 19.99;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("1999".to_string())]);
+}
+
+/// The cast path dispatches on the same destructure, so a cast to `DEC`
+/// rescales and rounds away from zero exactly as a cast to `NUMERIC` does.
+#[test]
+fn a_cast_to_dec_rescales_like_decimal() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, fine NUMERIC(10,3));
+         INSERT INTO t VALUES (1, 1.005), (2, -1.005);
+         SELECT CAST(fine AS DEC(10,2)) FROM t ORDER BY id;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("101".to_string()), Some("-101".to_string())]);
+}
+
+/// The manifest reads the declared type through its own match, so a `DEC`
+/// column must publish its scale like its synonyms.
+#[test]
+fn the_manifest_publishes_a_dec_scale() {
+    let manifest = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id INT PRIMARY KEY, price DEC(10,2), note TEXT);")
+        .expect("parse")
+        .translation_manifest(&Pg2SqliteOptions::default())
+        .expect("manifest");
+
+    let table = manifest.iter().find(|entry| entry.logical == "t").expect("the table");
+    let scaled: Vec<_> = table
+        .columns
+        .iter()
+        .filter_map(|column| column.minor_unit_scale.map(|scale| (column.name.as_str(), scale)))
+        .collect();
+    assert_eq!(scaled, vec![("price", 2)], "only the DEC column carries a scale");
 }
