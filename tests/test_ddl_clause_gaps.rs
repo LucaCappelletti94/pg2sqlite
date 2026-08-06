@@ -231,3 +231,102 @@ fn partition_of_is_rejected() {
         "error must mention PARTITION OF: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CREATE TABLE modifier leaks (R103)
+// ---------------------------------------------------------------------------
+
+/// `GLOBAL` and `LOCAL` are SQL-standard noise words PostgreSQL accepts and
+/// ignores before `TEMPORARY`, measured on 16. Cleared with a warning, like
+/// `UNLOGGED`, and the table stays temporary.
+#[test]
+fn global_and_local_temporary_are_cleared_with_a_warning() {
+    for spelling in ["GLOBAL", "LOCAL"] {
+        let (stmts, warnings) = translate_with_warnings(&format!(
+            "CREATE {spelling} TEMPORARY TABLE t (id INT PRIMARY KEY);"
+        ))
+        .expect("a noise word must not fail the translation");
+        assert!(
+            stmts[0].contains("TEMPORARY") && !stmts[0].contains(spelling),
+            "{spelling} must be cleared and TEMPORARY kept: {}",
+            stmts[0]
+        );
+        assert!(!warnings.is_empty(), "clearing {spelling} must be reported");
+        sqlite_accepts(&stmts).expect("the emitted DDL must run");
+    }
+}
+
+/// The four foreign prefixes are refused naming the modifier, per the R13
+/// rule, and so is a bare `GLOBAL` without `TEMPORARY`, which PostgreSQL
+/// rejects too, measured on 16.
+#[test]
+fn foreign_create_table_modifiers_are_refused() {
+    for (sql, modifier) in [
+        ("CREATE OR REPLACE TABLE t (id INT PRIMARY KEY);", "OR REPLACE"),
+        ("CREATE TRANSIENT TABLE t (id INT PRIMARY KEY);", "TRANSIENT"),
+        ("CREATE VOLATILE TABLE t (id INT PRIMARY KEY);", "VOLATILE"),
+        ("CREATE EXTERNAL TABLE t (id INT PRIMARY KEY);", "EXTERNAL"),
+        ("CREATE GLOBAL TABLE t (id INT PRIMARY KEY);", "GLOBAL"),
+    ] {
+        let error = translate(sql).expect_err(modifier).to_string();
+        assert!(error.contains(modifier), "the refusal must name the modifier {modifier}: {error}");
+    }
+}
+
+/// `ON COMMIT PRESERVE ROWS` is PostgreSQL's own default for a temporary
+/// table, and SQLite temporary tables already keep rows across transactions,
+/// so clearing it is result-neutral and warned.
+#[test]
+fn on_commit_preserve_rows_is_cleared_with_a_warning() {
+    let (stmts, warnings) = translate_with_warnings(
+        "CREATE TEMPORARY TABLE t (id INT PRIMARY KEY) ON COMMIT PRESERVE ROWS;",
+    )
+    .expect("the default disposition must not fail the translation");
+    assert!(!stmts[0].contains("ON COMMIT"), "the clause must be cleared: {}", stmts[0]);
+    assert!(!warnings.is_empty(), "clearing ON COMMIT must be reported");
+    sqlite_accepts(&stmts).expect("the emitted DDL must run");
+}
+
+/// `ON COMMIT DELETE ROWS` and `ON COMMIT DROP` change what a transaction
+/// leaves behind, which SQLite cannot express, so both are refused.
+#[test]
+fn on_commit_that_changes_behaviour_is_refused() {
+    for disposition in ["DELETE ROWS", "DROP"] {
+        let error = translate(&format!(
+            "CREATE TEMPORARY TABLE t (id INT PRIMARY KEY) ON COMMIT {disposition};"
+        ))
+        .expect_err(disposition)
+        .to_string();
+        assert!(
+            error.contains("ON COMMIT"),
+            "the refusal must name the clause for {disposition}: {error}"
+        );
+    }
+}
+
+/// PostgreSQL storage parameters, `WITH (fillfactor = 70)`, are performance
+/// hints with no bearing on results, so they are cleared with a warning
+/// rather than carried into SQLite, which answers `near "(": syntax error`.
+#[test]
+fn storage_parameters_are_cleared_with_a_warning() {
+    let (stmts, warnings) =
+        translate_with_warnings("CREATE TABLE t (id INT PRIMARY KEY) WITH (fillfactor = 70);")
+            .expect("a storage parameter must not fail the translation");
+    assert!(!stmts[0].contains("fillfactor"), "the parameter must be cleared: {}", stmts[0]);
+    assert!(!warnings.is_empty(), "clearing a storage parameter must be reported");
+    sqlite_accepts(&stmts).expect("the emitted DDL must run");
+}
+
+/// Guards the fix. Plain `TEMPORARY` and `IF NOT EXISTS` are legal in both
+/// databases and must keep passing through untouched.
+#[test]
+fn temporary_and_if_not_exists_still_pass() {
+    let stmts = translate("CREATE TEMPORARY TABLE IF NOT EXISTS t (id INT PRIMARY KEY);")
+        .expect("both clauses are legal in both databases");
+    assert!(
+        stmts[0].contains("TEMPORARY") && stmts[0].contains("IF NOT EXISTS"),
+        "both clauses must survive: {}",
+        stmts[0]
+    );
+    sqlite_accepts(&stmts).expect("the emitted DDL must run");
+}
