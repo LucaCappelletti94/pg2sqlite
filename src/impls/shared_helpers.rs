@@ -21,20 +21,21 @@ use sqlparser::ast::{
     Assignment, AssignmentTarget, BinaryOperator, ConnectByKind, DataType, Expr, ExprWithAlias,
     ExprWithAliasAndOrderBy, Fetch, FromTable, FunctionArg, FunctionArgExpr,
     FunctionArgumentClause, FunctionArgumentList, FunctionArguments, GroupByExpr, HavingBound,
-    Join, JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow, Measure,
-    NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr,
-    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, SetExpr, Setting, Statement,
-    SymbolDefinition, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
-    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, UnaryOperator,
-    UpdateTableFromKind, Value, ValueWithSpan, Values, WindowFrame, WindowFrameBound, WindowSpec,
-    WindowType, With, WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause,
-    XmlTableColumn, XmlTableColumnOption, visit_expressions,
+    Ident, Join, JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow,
+    Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy,
+    OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, SetExpr, Setting,
+    Statement, SymbolDefinition, TableAlias, TableFactor, TableFunctionArgs, TableSample,
+    TableSampleBucket, TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins,
+    UnaryOperator, UpdateTableFromKind, Value, ValueWithSpan, Values, WindowFrame,
+    WindowFrameBound, WindowSpec, WindowType, With, WithFill, XmlNamespaceDefinition,
+    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption, visit_expressions,
 };
 
 use crate::{
     errors::Error,
     impls::{
         object_name::{last_ident, table_with_implicit_public_lookup},
+        query_builder::{from_relation, make_query, make_simple_select},
         translator_impls::{
             uuid::{
                 is_blob_uuid_representation, maybe_wrap_text_uuid_literal, uuid_columns_of_table,
@@ -2247,6 +2248,16 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                     options,
                 );
             }
+
+            // SQLite accepts no column list on a table alias, the same
+            // limitation that forces the derived shape in
+            // translate_unnest_factor, so the rename happens in a projection
+            // over the relation (R105).
+            if D::IS_FORWARD
+                && let Some(alias) = alias.as_ref().filter(|alias| !alias.columns.is_empty())
+            {
+                return renamed_relation_factor::<D>(name, alias, schema, options);
+            }
             TableFactor::Table {
                 name: D::translate_object_name(name, schema, options)?,
                 alias: alias.clone(),
@@ -2528,6 +2539,110 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 alias: alias.clone(),
             }
         }
+    })
+}
+
+/// Rewrites `FROM t AS x (a, b)` into `(SELECT id AS a, s AS b FROM t) AS x`.
+///
+/// PostgreSQL renames the table's leading columns positionally and keeps the
+/// rest under their declared names, and it refuses a list longer than the
+/// table or one carrying data types, which belong to a function returning
+/// `record`. SQLite accepts no column list on a table alias, so the rename
+/// happens in a projection, the shape `translate_unnest_factor` and the
+/// `Derived` arm already use for the same reason. The declared idents are
+/// rebuilt with their quoting so a quoted column name stays quoted in the
+/// projection.
+fn renamed_relation_factor<D: TranslationDirection>(
+    name: &ObjectName,
+    alias: &TableAlias,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<TableFactor, Error> {
+    if let Some(typed) = alias.columns.iter().find(|column| column.data_type.is_some()) {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "FROM {name} AS {} ({} ...) carries a data type in the column alias list. \
+             PostgreSQL only accepts one on a function returning record, so a file carrying \
+             it on a table is not the input this crate translates. Name the columns alone.",
+            alias.name, typed.name
+        )));
+    }
+
+    let Some(table) = table_with_implicit_public_lookup(schema, name)? else {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "FROM {name} AS {} (...) renames the columns of a relation the translation schema \
+             does not declare, so the declared column list the rewrite needs is unknown. \
+             Include the relation's definition in the same translation batch.",
+            alias.name
+        )));
+    };
+
+    let declared: Vec<Ident> = table
+        .columns(schema)?
+        .map(|column| {
+            if column.column_name_is_quoted() {
+                Ident::with_quote('"', column.column_name())
+            } else {
+                Ident::new(column.column_name())
+            }
+        })
+        .collect();
+
+    if alias.columns.len() > declared.len() {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "FROM {name} AS {} (...) names {} columns for a table that declares only {}. \
+             PostgreSQL refuses the longer list too. Name at most the table's column count.",
+            alias.name,
+            alias.columns.len(),
+            declared.len()
+        )));
+    }
+
+    let projection = declared
+        .into_iter()
+        .enumerate()
+        .map(|(position, column)| {
+            match alias.columns.get(position) {
+                Some(renamed) => {
+                    SelectItem::ExprWithAlias {
+                        expr: Expr::Identifier(column),
+                        alias: renamed.name.clone(),
+                    }
+                }
+                None => SelectItem::UnnamedExpr(Expr::Identifier(column)),
+            }
+        })
+        .collect();
+
+    let relation = TableFactor::Table {
+        name: D::translate_object_name(name, schema, options)?,
+        alias: None,
+        args: None,
+        with_hints: Vec::new(),
+        version: None,
+        with_ordinality: false,
+        partitions: Vec::new(),
+        json_path: None,
+        sample: None,
+        index_hints: Vec::new(),
+    };
+
+    Ok(TableFactor::Derived {
+        lateral: false,
+        subquery: Box::new(make_query(
+            None,
+            SetExpr::Select(Box::new(make_simple_select(
+                projection,
+                from_relation(relation),
+                None,
+            ))),
+        )),
+        alias: Some(TableAlias {
+            explicit: true,
+            name: alias.name.clone(),
+            columns: Vec::new(),
+            at: None,
+        }),
+        sample: None,
     })
 }
 
