@@ -39,23 +39,32 @@ use crate::{
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
 };
 
+/// Builds the `UPDATE` that stands in for a plpgsql body assigning to
+/// `NEW.<column>`, which SQLite has no way to express directly.
+///
+/// The assigned value is PostgreSQL and goes through `Expr::translate` like any
+/// other expression. Skipping that step emitted `AT TIME ZONE`, `::` casts, and
+/// `greatest` verbatim, the first two rejected when the trigger is created and
+/// the third only on the first write, since SQLite resolves function names
+/// lazily.
 fn generate_maintenance_trigger_body(
     trigger: &CreateTrigger,
     target_table_name: &ObjectName,
     row_context: &str,
     schema: &ParserDB,
-) -> Result<sqlparser::ast::BeginEndStatements, LookupError> {
+    options: &Pg2SqliteOptions,
+) -> Result<sqlparser::ast::BeginEndStatements, crate::errors::Error> {
     let assignments = trigger
         .maintenance_assignments(schema)?
         .map(|(col, expr)| {
-            Assignment {
+            Ok(Assignment {
                 target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
                     Ident::new(col.column_name()),
                 )])),
-                value: expr,
-            }
+                value: expr.translate(schema, options)?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, crate::errors::Error>>()?;
 
     let update_stmt = Statement::Update(Update {
         update_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
@@ -441,6 +450,7 @@ impl Translator for CreateTrigger {
                 &redirected_table_name,
                 row_context,
                 schema,
+                options,
             )?
         } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
             body

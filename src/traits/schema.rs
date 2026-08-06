@@ -73,7 +73,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
         }
 
         // Preprocess the PL/pgSQL body to handle syntax like `variable := expr`
-        let (preprocessed_body, context) = PlPgSqlPreprocessor::preprocess(maybe_body);
+        let (preprocessed_body, context) = PlPgSqlPreprocessor::preprocess(maybe_body)?;
 
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let tokens = Tokenizer::new(&dialect, &preprocessed_body).tokenize().map_err(|e| {

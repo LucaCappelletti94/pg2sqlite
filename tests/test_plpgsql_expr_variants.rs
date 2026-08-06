@@ -12,10 +12,10 @@ fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
 }
 
-// (sqlparser limitation). Note: AT TIME ZONE time_zone field is always a
-// literal, making the F2 recursion fix a defensive code change not easily
-// tested end-to-end. Instead, test that gen_random_uuid is translated alongside
-// a combined expression.
+// (sqlparser limitation). Note: the AT TIME ZONE zone operand is always a
+// literal, so the F2 recursion into that one field is a defensive change with
+// nothing observable to assert. The operator itself is observable, and
+// `plpgsql_at_time_zone_is_transformed` checks it.
 
 #[test]
 fn plpgsql_combined_expr_types_transformed() {
@@ -94,9 +94,12 @@ fn plpgsql_ceil_floor_expr_transformed() {
     );
 }
 
+/// Renamed from `plpgsql_at_time_zone_time_zone_field_transformed`, which
+/// asserted only that `gen_random_uuid` was translated. The zone operand is
+/// always a literal, so recursing into it changes nothing observable, but the
+/// operator itself is observable and is what this now checks.
 #[test]
-fn plpgsql_at_time_zone_time_zone_field_transformed() {
-    // The time_zone field of AtTimeZone should also be recursed
+fn plpgsql_at_time_zone_is_transformed() {
     let options = uuid_options();
     let sql = translate_sql(
         r#"
@@ -117,6 +120,14 @@ fn plpgsql_at_time_zone_time_zone_field_transformed() {
     .unwrap();
     let lower = sql.to_lowercase();
 
+    assert!(
+        !lower.contains("at time zone"),
+        "AT TIME ZONE has no SQLite equivalent and must not survive: {sql}"
+    );
+    assert!(
+        lower.contains("datetime(datetime('now'))"),
+        "NOW() AT TIME ZONE 'UTC' should become datetime(datetime('now')): {sql}"
+    );
     assert!(
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated in trigger with AT TIME ZONE: {sql}"

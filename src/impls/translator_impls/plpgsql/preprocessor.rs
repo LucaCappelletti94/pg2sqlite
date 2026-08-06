@@ -20,6 +20,7 @@ use super::{
     context::{PlPgSqlContext, VariableBinding, VariableDeclaration},
     scanner::Scanner,
 };
+use crate::errors::Error;
 
 /// Preprocessor for PL/pgSQL function bodies.
 pub struct PlPgSqlPreprocessor;
@@ -46,6 +47,217 @@ fn dollar_quoted_body(text: &str) -> Option<&str> {
     Some(body)
 }
 
+/// Refuses a statement that assigns to a qualified target.
+///
+/// `NEW.col := expr` means the trigger changes the row being written. That is
+/// emulated with an `UPDATE` over the written row, but only for the shape
+/// `sql-traits` recognises, a run of such assignments to declared columns
+/// closed by `RETURN NEW`. Anywhere else the rewrite below splits the name at
+/// the `.` and produces `NEW.SET col = expr`, which is not SQL.
+///
+/// # Errors
+///
+/// Returns [`Error::UnsupportedSQLiteFeature`] naming the target.
+fn reject_qualified_assignment(statement: &str) -> Result<(), Error> {
+    let Some((qualifier, name)) = qualified_assignment_target(statement) else {
+        return Ok(());
+    };
+
+    // `OLD` is not in this branch. PostgreSQL accepts an assignment to it and
+    // runs the write anyway, measured on PostgreSQL 16, because a BEFORE
+    // trigger writes what `RETURN NEW` hands back. So `OLD` is a plpgsql record
+    // like any other and belongs in the message below.
+    if qualifier.eq_ignore_ascii_case("new") {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "assigning to `{qualifier}.{name}` has no SQLite equivalent here, since a SQLite \
+             trigger cannot change the row it fired for. It is emulated with an UPDATE over the \
+             written row, which needs the whole trigger function body to be a run of assignments \
+             to columns the table declares, closed by RETURN NEW."
+        )));
+    }
+
+    Err(Error::UnsupportedSQLiteFeature(format!(
+        "assigning to `{qualifier}.{name}` has no SQLite equivalent, since a SQLite trigger body \
+         has no plpgsql record variable to hold the change. Compute the value in the statement \
+         that reads it."
+    )))
+}
+
+/// The `(qualifier, name)` a statement assigns to, when its target is
+/// qualified.
+///
+/// Two rules, because the two spellings carry different evidence. `:=` only
+/// ever assigns in plpgsql, so a qualified name in front of one is conclusive
+/// wherever it sits. A lone `=` also compares, so it counts only where a
+/// statement can start, and no SQL statement opens with a qualified identifier.
+fn qualified_assignment_target(statement: &str) -> Option<(String, String)> {
+    qualified_walrus_target(statement).or_else(|| qualified_equals_target(statement))
+}
+
+/// The qualified target of a `:=` assignment anywhere in `statement`.
+///
+/// The name is read the same way the rewrite below reads it, back from the
+/// operator over identifier characters, so the two agree on what the target is.
+/// A named function argument also spells `:=`, but its name is never qualified,
+/// so it cannot land here.
+fn qualified_walrus_target(statement: &str) -> Option<(String, String)> {
+    let mut from = 0;
+    while let Some(offset) = Scanner::new(&statement[from..]).find_str_in_code(":=") {
+        let operator = from + offset;
+        if let Some(target) = qualified_name_before(statement, operator) {
+            return Some(target);
+        }
+        from = operator + 2;
+    }
+    None
+}
+
+/// The qualified target of a bare `=` assignment at a statement start.
+///
+/// A statement starts at the front of the chunk or just past `BEGIN`, `THEN`,
+/// `ELSE`, or `LOOP`, since the caller has already split on live semicolons. A
+/// `THEN` or `ELSE` inside an open `CASE` belongs to the expression rather than
+/// to a branch, and skipping those is what keeps
+/// `CASE WHEN c THEN t.n = 1 ELSE FALSE END` a comparison.
+fn qualified_equals_target(statement: &str) -> Option<(String, String)> {
+    statement_starts(statement)
+        .into_iter()
+        .find_map(|start| qualified_name_at_with_equals(statement, start))
+}
+
+/// What a keyword occurrence does to the scan for statement starts.
+#[derive(Clone, Copy)]
+enum Mark {
+    /// `CASE`, whose arms are expression parts rather than statements.
+    OpensCase,
+    /// `END`, which closes the innermost `CASE`.
+    ClosesCase,
+    /// A keyword a statement can follow.
+    OpensStatement,
+}
+
+/// Offsets in `statement` where a plpgsql statement can begin.
+fn statement_starts(statement: &str) -> Vec<usize> {
+    const KEYWORDS: [(&str, Mark); 6] = [
+        ("CASE", Mark::OpensCase),
+        ("END", Mark::ClosesCase),
+        ("BEGIN", Mark::OpensStatement),
+        ("THEN", Mark::OpensStatement),
+        ("ELSE", Mark::OpensStatement),
+        ("LOOP", Mark::OpensStatement),
+    ];
+
+    let scanner = Scanner::new(statement);
+    let mut marks = Vec::new();
+    for (keyword, mark) in KEYWORDS {
+        let mut from = 0;
+        while let Some(position) = scanner.find_keyword(keyword, from) {
+            from = position + keyword.len();
+            marks.push((position, mark, from));
+        }
+    }
+    marks.sort_unstable_by_key(|&(position, ..)| position);
+
+    let mut starts = vec![0];
+    let mut case_depth = 0_usize;
+    for (_, mark, after) in marks {
+        match mark {
+            Mark::OpensCase => case_depth += 1,
+            // Saturating because a chunk can carry a closing `END IF` with no
+            // `CASE` of its own, the caller having split at the semicolon
+            // before it.
+            Mark::ClosesCase => case_depth = case_depth.saturating_sub(1),
+            Mark::OpensStatement if case_depth == 0 => starts.push(after),
+            Mark::OpensStatement => {}
+        }
+    }
+    starts
+}
+
+/// True for a character an unquoted identifier can carry.
+///
+/// One definition rather than one per reader, since a byte test and a character
+/// test would disagree the moment a name is not ASCII.
+fn is_identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+/// Where the identifier that ends `text` begins, or `text.len()` when `text`
+/// does not end in one.
+///
+/// Walks back over characters rather than searching for the last character that
+/// is not an identifier one, because that search returns the offset of a
+/// character and adding one to it lands inside a multi-byte character. Slicing
+/// there panics, which is what a body carrying a non-ASCII name would have hit.
+fn trailing_identifier_start(text: &str) -> usize {
+    text.char_indices()
+        .rev()
+        .take_while(|&(_, character)| is_identifier_char(character))
+        .last()
+        .map_or(text.len(), |(index, _)| index)
+}
+
+/// Where the identifier starting at `from` ends, which is `from` when none
+/// starts there.
+fn identifier_end(text: &str, from: usize) -> usize {
+    text[from..]
+        .find(|character: char| !is_identifier_char(character))
+        .map_or(text.len(), |offset| from + offset)
+}
+
+/// The first offset at or after `from` that is not ASCII whitespace.
+///
+/// ASCII rather than Unicode whitespace, since SQL does not treat a
+/// non-breaking space as a separator and neither should this.
+fn skip_ascii_whitespace(text: &str, from: usize) -> usize {
+    text[from..]
+        .find(|character: char| !character.is_ascii_whitespace())
+        .map_or(text.len(), |offset| from + offset)
+}
+
+/// Reads `<qualifier>.<name>` followed by a lone `=` at `from`.
+///
+/// The `=` must stand alone, so `==` and the `=>` that spells a named function
+/// argument are both rejected. A leading `<`, `>`, or `!` would already have
+/// ended the name, so only what follows the `=` needs checking.
+fn qualified_name_at_with_equals(statement: &str, from: usize) -> Option<(String, String)> {
+    let qualifier_start = skip_ascii_whitespace(statement, from);
+    let qualifier_end = identifier_end(statement, qualifier_start);
+    if qualifier_end == qualifier_start || !statement[qualifier_end..].starts_with('.') {
+        return None;
+    }
+
+    let name_start = qualifier_end + '.'.len_utf8();
+    let name_end = identifier_end(statement, name_start);
+    if name_end == name_start {
+        return None;
+    }
+
+    let operator = &statement[skip_ascii_whitespace(statement, name_end)..];
+    if !operator.starts_with('=') || operator.starts_with("==") || operator.starts_with("=>") {
+        return None;
+    }
+
+    Some((
+        statement[qualifier_start..qualifier_end].to_string(),
+        statement[name_start..name_end].to_string(),
+    ))
+}
+
+/// Reads `<qualifier>.<name>` backwards from `operator`.
+fn qualified_name_before(statement: &str, operator: usize) -> Option<(String, String)> {
+    let before = statement[..operator].trim_end();
+    let (prefix, name) = before.split_at(trailing_identifier_start(before));
+    if name.is_empty() {
+        return None;
+    }
+
+    let qualifier_text = prefix.strip_suffix('.')?;
+    let qualifier = &qualifier_text[trailing_identifier_start(qualifier_text)..];
+
+    (!qualifier.is_empty()).then(|| (qualifier.to_string(), name.to_string()))
+}
+
 impl PlPgSqlPreprocessor {
     /// True when `body` opens an exception handler.
     ///
@@ -70,8 +282,13 @@ impl PlPgSqlPreprocessor {
     }
 
     /// Preprocesses a PL/pgSQL function body string.
-    #[must_use]
-    pub fn preprocess(body: &str) -> (String, PlPgSqlContext) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedSQLiteFeature`] when a statement assigns to
+    /// a qualified target, such as `NEW.col`, outside the one shape that is
+    /// translatable.
+    pub fn preprocess(body: &str) -> Result<(String, PlPgSqlContext), Error> {
         let mut context = PlPgSqlContext::new();
 
         let (declare_section, body_section) = Self::split_declare_and_body(body);
@@ -80,9 +297,9 @@ impl PlPgSqlPreprocessor {
             Self::parse_declarations(&declare, &mut context);
         }
 
-        let transformed = Self::transform_body(&body_section, &context);
+        let transformed = Self::transform_body(&body_section, &context)?;
 
-        (transformed, context)
+        Ok((transformed, context))
     }
 
     fn split_declare_and_body(body: &str) -> (Option<String>, String) {
@@ -139,20 +356,18 @@ impl PlPgSqlPreprocessor {
         }
     }
 
-    fn transform_body(body: &str, context: &PlPgSqlContext) -> String {
+    fn transform_body(body: &str, context: &PlPgSqlContext) -> Result<String, Error> {
         let mut result = body.to_string();
 
         // Transform PostgreSQL ELSIF → ELSEIF (sqlparser uses ELSEIF keyword)
         result = Self::transform_elsif(&result);
 
         // Rewrite := assignments as SET statements (standalone assignments only).
-        result = Self::transform_assignments(&result, context);
+        result = Self::transform_assignments(&result, context)?;
 
         result = Self::transform_select_into(&result, context);
 
-        result = Self::transform_raise_statements(&result);
-
-        result
+        Ok(Self::transform_raise_statements(&result))
     }
 
     /// Rewrites RAISE statements; scans body text directly so RAISE inside
@@ -490,18 +705,25 @@ impl PlPgSqlPreprocessor {
     /// Split on unquoted semicolons rather than newlines, since the right-hand
     /// side of an assignment can span lines and a statement ends at a
     /// semicolon.
-    fn transform_assignments(body: &str, context: &PlPgSqlContext) -> String {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedSQLiteFeature`] when a statement assigns to
+    /// a qualified target.
+    fn transform_assignments(body: &str, context: &PlPgSqlContext) -> Result<String, Error> {
         let mut result = String::new();
         let mut start = 0;
 
         while let Some(offset) = Scanner::new(&body[start..]).find_in_code(b';') {
             let end = start + offset;
+            reject_qualified_assignment(&body[start..end])?;
             result.push_str(&Self::rewrite_assignment(&body[start..end], context));
             result.push(';');
             start = end + 1;
         }
+        reject_qualified_assignment(&body[start..])?;
         result.push_str(&Self::rewrite_assignment(&body[start..], context));
-        result
+        Ok(result)
     }
     /// One statement, rewritten to `SET name = expr` when it is an assignment
     /// and returned unchanged when it is not.
@@ -514,10 +736,7 @@ impl PlPgSqlPreprocessor {
             return statement.to_string();
         };
         let before = statement[..operator].trim_end();
-        let name_start = before
-            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map_or(0, |boundary| boundary + 1);
-        let (prefix, name) = before.split_at(name_start);
+        let (prefix, name) = before.split_at(trailing_identifier_start(before));
 
         let candidate = format!("{} := {}", name.trim(), statement[operator + 2..].trim());
         match Self::parse_assignment_line(&candidate, context) {
@@ -560,7 +779,7 @@ mod tests {
     fn assignments_are_split_on_statements_not_lines() {
         let context = PlPgSqlContext::new();
         let body = "BEGIN\n    v_label :=\n        'a; b';\n    RETURN NEW;\nEND";
-        let out = PlPgSqlPreprocessor::transform_assignments(body, &context);
+        let out = PlPgSqlPreprocessor::transform_assignments(body, &context).expect("no target");
         assert!(out.contains("SET v_label = 'a; b'"), "got: {out}");
     }
 
@@ -612,7 +831,7 @@ END
     WHERE o.id = NEW.id;
 END";
 
-        let (transformed, _context) = PlPgSqlPreprocessor::preprocess(body);
+        let (transformed, _context) = PlPgSqlPreprocessor::preprocess(body).expect("preprocess");
         println!("Transformed:\n{transformed}");
 
         // Should have SET statements instead of SELECT INTO
@@ -634,7 +853,7 @@ BEGIN
     WHERE o.id = NEW.id;
 END";
 
-        let (transformed, _context) = PlPgSqlPreprocessor::preprocess(body);
+        let (transformed, _context) = PlPgSqlPreprocessor::preprocess(body).expect("preprocess");
         println!("Transformed with DECLARE:\n{transformed}");
 
         // Should have SET statements instead of SELECT INTO
@@ -652,7 +871,7 @@ END";
     LIMIT 1;
 END";
 
-        let (transformed, _context) = PlPgSqlPreprocessor::preprocess(body);
+        let (transformed, _context) = PlPgSqlPreprocessor::preprocess(body).expect("preprocess");
 
         assert!(transformed.contains("SET v_value ="), "Should transform INTO target");
         assert!(
@@ -694,7 +913,7 @@ END";
     #[test]
     fn test_transform_raise_exception_simple() {
         let body = "BEGIN\n  RAISE EXCEPTION 'val must be non-negative';\n  RETURN NEW;\nEND";
-        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body);
+        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body).expect("preprocess");
         assert!(
             transformed.contains("SELECT RAISE(ABORT, 'val must be non-negative')"),
             "RAISE EXCEPTION should become SELECT RAISE(ABORT, ...), got: {transformed}"
@@ -705,7 +924,7 @@ END";
     #[test]
     fn test_transform_raise_exception_with_format_args() {
         let body = "BEGIN\n  RAISE EXCEPTION 'bad value: %', NEW.val;\n  RETURN NEW;\nEND";
-        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body);
+        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body).expect("preprocess");
         assert!(
             transformed.contains("SELECT RAISE(ABORT, 'bad value: %')"),
             "Format args should be dropped, got: {transformed}"
@@ -715,7 +934,7 @@ END";
     #[test]
     fn test_transform_raise_notice_dropped() {
         let body = "BEGIN\n  RAISE NOTICE 'debug info';\n  RETURN NEW;\nEND";
-        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body);
+        let (transformed, _) = PlPgSqlPreprocessor::preprocess(body).expect("preprocess");
         assert!(
             !transformed.contains("RAISE NOTICE"),
             "RAISE NOTICE should be dropped, got: {transformed}"
