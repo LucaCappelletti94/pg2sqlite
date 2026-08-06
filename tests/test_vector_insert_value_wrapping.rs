@@ -221,3 +221,38 @@ fn update_already_wrapped_vector_literal_not_double_wrapped() {
     let count = update.matches("vec_f32(").count();
     assert_eq!(count, 1, "must not double-wrap; got: {update}");
 }
+
+/// The upsert's assignment list writes into the same BLOB column the plain
+/// UPDATE does, so the same text literal has to take the same wrap. Emission
+/// is asserted rather than execution because `vec_f32` lives in the sqlite-vec
+/// extension, which the bundled SQLite does not carry.
+#[test]
+fn do_update_on_vector_column_wraps_text_literal_with_vec_f32() {
+    let sql = "
+        CREATE TABLE items (id INTEGER PRIMARY KEY, embedding vector(2));
+        INSERT INTO items VALUES (1, '[3,4]') ON CONFLICT (id) DO UPDATE SET embedding = '[5,6]';
+    ";
+    let out = translate(sql);
+    let insert = find_insert(&out);
+    assert!(
+        insert.contains("vec_f32('[5,6]')"),
+        "expected vec_f32 wrap around the DO UPDATE literal; got: {insert}"
+    );
+}
+
+/// The tuple spelling of the same assignment skipped the wrap even on the
+/// plain UPDATE path, since the wrap resolved one column name and a tuple has
+/// several.
+#[test]
+fn tuple_update_on_vector_column_wraps_text_literal_with_vec_f32() {
+    let sql = "
+        CREATE TABLE items (id INTEGER PRIMARY KEY, n INTEGER, embedding vector(2));
+        UPDATE items SET (n, embedding) = (7, '[5,6]') WHERE id = 1;
+    ";
+    let out = translate(sql);
+    let update = find_update(&out);
+    assert!(
+        update.contains("vec_f32('[5,6]')"),
+        "expected vec_f32 wrap inside the tuple assignment; got: {update}"
+    );
+}

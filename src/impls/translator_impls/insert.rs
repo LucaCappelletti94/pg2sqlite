@@ -23,7 +23,7 @@ use crate::{
     impls::{
         object_name::{last_ident, last_ident_value_or_display, table_with_implicit_public_lookup},
         shared_helpers::{
-            is_default_keyword, numeric_minor_unit_scales, scale_literal_for_column,
+            ColumnRewrites, is_default_keyword, scale_literal_for_column,
             translate_on_conflict_do_update, translate_returning,
         },
         translator_impls::{
@@ -96,13 +96,13 @@ impl Translator for Insert {
 
         // A NUMERIC column is an INTEGER of minor units, so a decimal literal
         // has to be moved onto that scale before it reaches a STRICT table.
-        // The same scales serve the DO UPDATE list below, which writes into the
-        // same columns.
-        let numeric_scales = match &insert.table {
-            TableObject::TableName(name) => numeric_minor_unit_scales(schema, name),
-            TableObject::TableFunction(_) | TableObject::TableQuery(_) => Vec::new(),
+        // The full rewrite set serves the DO UPDATE list below, which writes
+        // into the same columns the insert does.
+        let rewrites = match &insert.table {
+            TableObject::TableName(name) => ColumnRewrites::for_named_table(schema, name, options),
+            TableObject::TableFunction(_) | TableObject::TableQuery(_) => ColumnRewrites::default(),
         };
-        scale_numeric_literals(&mut insert, schema, &numeric_scales)?;
+        scale_numeric_literals(&mut insert, schema, &rewrites.numeric_scales)?;
 
         if let Some(on_insert) = &self.on {
             match on_insert {
@@ -126,11 +126,7 @@ impl Translator for Insert {
                                 action: on_conflict.action.clone(),
                             };
                             insert.on = Some(translate_on_conflict_do_update::<Forward>(
-                                &resolved,
-                                do_update,
-                                schema,
-                                options,
-                                &numeric_scales,
+                                &resolved, do_update, schema, options, &rewrites,
                             )?);
                         }
                     }

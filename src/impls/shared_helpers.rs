@@ -343,18 +343,129 @@ pub(crate) fn numeric_minor_unit_scales_of_table(
         .collect()
 }
 
-/// The minor-unit scale of every scaled column the named table declares.
+/// Every column-typed rewrite a value must take before it is written into a
+/// table: a vector text literal becomes a `vec_f32` or `vec_f16` call, a uuid
+/// text literal becomes a 16-byte blob conversion under the blob
+/// representation, and a literal for a scaled `NUMERIC` column moves onto its
+/// minor-unit scale.
 ///
-/// Empty when the table cannot be resolved, which leaves the caller emitting
-/// what it was handed rather than scaling against a guess.
-pub(crate) fn numeric_minor_unit_scales(
-    schema: &ParserDB,
-    table_name: &ObjectName,
-) -> Vec<(String, u32)> {
-    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
-        return Vec::new();
-    };
-    numeric_minor_unit_scales_of_table(table, schema)
+/// One home rather than one copy per writer. The per-assignment loop existed
+/// in three places and drifted twice: R110 found all three missing the
+/// scaling, R115 found two still missing the wraps.
+#[derive(Default)]
+pub(crate) struct ColumnRewrites {
+    /// Vector columns, each with whether it is a halfvec.
+    vector_cols: Vec<(String, bool)>,
+    /// UUID columns, collected only under the blob representation, so an
+    /// empty list already encodes the option.
+    uuid_cols: Vec<String>,
+    /// Scaled `NUMERIC` columns and their minor-unit scales.
+    pub(crate) numeric_scales: Vec<(String, u32)>,
+}
+
+impl ColumnRewrites {
+    /// The rewrites `table`'s declared columns require.
+    pub(crate) fn of_table(
+        table: &<ParserDB as DatabaseLike>::Table,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Self {
+        Self {
+            vector_cols: vector_columns_of_table(table, schema).unwrap_or_default(),
+            uuid_cols: if is_blob_uuid_representation(options) {
+                uuid_columns_of_table(table, schema).unwrap_or_default()
+            } else {
+                Vec::new()
+            },
+            numeric_scales: numeric_minor_unit_scales_of_table(table, schema),
+        }
+    }
+
+    /// The rewrites for the named table, or none when it does not resolve,
+    /// which leaves the caller emitting what it was handed rather than
+    /// rewriting against a guess.
+    pub(crate) fn for_named_table(
+        schema: &ParserDB,
+        table_name: &ObjectName,
+        options: &Pg2SqliteOptions,
+    ) -> Self {
+        match table_with_implicit_public_lookup(schema, table_name) {
+            Ok(Some(table)) => Self::of_table(table, schema, options),
+            _ => Self::default(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.vector_cols.is_empty() && self.uuid_cols.is_empty() && self.numeric_scales.is_empty()
+    }
+
+    /// Finishes a translated value written into `column`.
+    ///
+    /// Each rewrite touches only a literal and leaves every other shape
+    /// alone, so `excluded.col`, an already-wrapped call, and an expression
+    /// the translator already scaled all pass through unchanged.
+    pub(crate) fn finish_value(
+        &self,
+        column: &str,
+        value: Expr,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Expr, Error> {
+        let mut value = if let Some(is_halfvec) = self
+            .vector_cols
+            .iter()
+            .find(|(col, _)| col.eq_ignore_ascii_case(column))
+            .map(|(_, is_halfvec)| *is_halfvec)
+        {
+            maybe_wrap_text_vector_literal(value, is_halfvec)
+        } else if self.uuid_cols.iter().any(|col| col.eq_ignore_ascii_case(column)) {
+            maybe_wrap_text_uuid_literal(value, options)?
+        } else {
+            value
+        };
+        scale_literal_for_column(&mut value, column, &self.numeric_scales)?;
+        Ok(value)
+    }
+
+    /// Finishes every value an assignment writes.
+    ///
+    /// The tuple spelling, `SET (a, b) = (1, 2)`, is zipped name by name.
+    /// SQLite accepts that shape, so skipping it would store the wrong value
+    /// rather than fail.
+    pub(crate) fn finish_assignment(
+        &self,
+        target: &AssignmentTarget,
+        value: Expr,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Expr, Error> {
+        if self.is_empty() {
+            return Ok(value);
+        }
+        match target {
+            AssignmentTarget::ColumnName(name) => {
+                match last_ident(name) {
+                    Some(column) => self.finish_value(&column.value, value, options),
+                    None => Ok(value),
+                }
+            }
+            AssignmentTarget::Tuple(names) => {
+                let Expr::Tuple(items) = value else { return Ok(value) };
+                if items.len() != names.len() {
+                    return Ok(Expr::Tuple(items));
+                }
+                names
+                    .iter()
+                    .zip(items)
+                    .map(|(name, item)| {
+                        match last_ident(name) {
+                            Some(column) => self.finish_value(&column.value, item, options),
+                            None => Ok(item),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, Error>>()
+                    .map(Expr::Tuple)
+            }
+        }
+    }
 }
 
 /// Rewrites a literal written into `column` as minor units, in place.
@@ -375,59 +486,27 @@ pub(crate) fn scale_literal_for_column(
     Ok(())
 }
 
-/// Rewrites every literal an assignment writes into a scaled column.
-///
-/// The tuple spelling, `SET (a, b) = (1, 2)`, is zipped name by name. SQLite
-/// accepts that shape, so leaving it out would store the wrong number rather
-/// than fail.
-pub(crate) fn scale_assignment_literals(
-    target: &AssignmentTarget,
-    value: &mut Expr,
-    scales: &[(String, u32)],
-) -> Result<(), Error> {
-    if scales.is_empty() {
-        return Ok(());
-    }
-    match target {
-        AssignmentTarget::ColumnName(name) => {
-            if let Some(column) = last_ident(name) {
-                scale_literal_for_column(value, &column.value, scales)?;
-            }
-        }
-        AssignmentTarget::Tuple(names) => {
-            let Expr::Tuple(items) = value else { return Ok(()) };
-            if items.len() != names.len() {
-                return Ok(());
-            }
-            for (name, item) in names.iter().zip(items.iter_mut()) {
-                if let Some(column) = last_ident(name) {
-                    scale_literal_for_column(item, &column.value, scales)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Translates DO UPDATE assignments and WHERE inside an ON CONFLICT clause.
 ///
-/// `scales` carries the target table's scaled columns, since a DO UPDATE writes
-/// into the same columns the insert does and has to move a literal onto the
-/// same scale. Empty for the reverse direction, which never unscales.
+/// `rewrites` carries the target table's column-typed rewrites, since a DO
+/// UPDATE writes into the same columns the insert does. Empty for the reverse
+/// direction, which never unwraps or unscales.
 pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
     on_conflict: &sqlparser::ast::OnConflict,
     do_update: &sqlparser::ast::DoUpdate,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
-    scales: &[(String, u32)],
+    rewrites: &ColumnRewrites,
 ) -> Result<sqlparser::ast::OnInsert, Error> {
     let assignments = do_update
         .assignments
         .iter()
         .map(|a| {
-            let mut value = D::translate_expr(&a.value, schema, options)?;
-            scale_assignment_literals(&a.target, &mut value, scales)?;
-            Ok(Assignment { target: a.target.clone(), value })
+            let value = D::translate_expr(&a.value, schema, options)?;
+            Ok(Assignment {
+                target: a.target.clone(),
+                value: rewrites.finish_assignment(&a.target, value, options)?,
+            })
         })
         .collect::<Result<Vec<_>, Error>>()?;
     let selection = do_update
@@ -1423,59 +1502,29 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     }
 
     // Best-effort: falls back to passthrough for unknown tables (CTEs, etc.).
-    // All three wraps are forward-only. Reverse receives an already-rewritten
-    // input, and it never unscales a NUMERIC either, so scaling here would put
-    // the two directions out of step rather than into it.
-    let (vector_cols, uuid_cols, numeric_scales) = if D::IS_FORWARD {
+    // Forward-only. Reverse receives an already-rewritten input, and it never
+    // unwraps or unscales, so rewriting here would put the two directions out
+    // of step rather than into it.
+    let rewrites = if D::IS_FORWARD {
         match &update.table.relation {
             TableFactor::Table { name, .. } => {
-                table_with_implicit_public_lookup(schema, name)
-                    .ok()
-                    .flatten()
-                    .map(|table| {
-                        let v = vector_columns_of_table(table, schema).unwrap_or_default();
-                        let u = if is_blob_uuid_representation(options) {
-                            uuid_columns_of_table(table, schema).unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
-                        (v, u, numeric_minor_unit_scales_of_table(table, schema))
-                    })
-                    .unwrap_or_default()
+                ColumnRewrites::for_named_table(schema, name, options)
             }
-            _ => (Vec::new(), Vec::new(), Vec::new()),
+            _ => ColumnRewrites::default(),
         }
     } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        ColumnRewrites::default()
     };
 
     let assignments = update
         .assignments
         .iter()
         .map(|a| {
-            let translated_value = D::translate_expr(&a.value, schema, options)?;
-            let column_name = match &a.target {
-                AssignmentTarget::ColumnName(name) => last_ident(name).map(|i| i.value.clone()),
-                AssignmentTarget::Tuple(_) => None,
-            };
-            let mut final_value = match column_name.as_deref() {
-                Some(name) => {
-                    if let Some(is_halfvec) = vector_cols
-                        .iter()
-                        .find(|(col, _)| col.eq_ignore_ascii_case(name))
-                        .map(|(_, is_halfvec)| *is_halfvec)
-                    {
-                        maybe_wrap_text_vector_literal(translated_value, is_halfvec)
-                    } else if uuid_cols.iter().any(|col| col.eq_ignore_ascii_case(name)) {
-                        maybe_wrap_text_uuid_literal(translated_value, options)?
-                    } else {
-                        translated_value
-                    }
-                }
-                None => translated_value,
-            };
-            scale_assignment_literals(&a.target, &mut final_value, &numeric_scales)?;
-            Ok(Assignment { target: a.target.clone(), value: final_value })
+            let value = D::translate_expr(&a.value, schema, options)?;
+            Ok(Assignment {
+                target: a.target.clone(),
+                value: rewrites.finish_assignment(&a.target, value, options)?,
+            })
         })
         .collect::<Result<Vec<_>, Error>>()?;
 

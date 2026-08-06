@@ -34,7 +34,7 @@ use crate::{
             validate_schema_qualified_object_name_for_sqlite,
         },
         query_builder::single_expr_query,
-        shared_helpers::{minor_unit_scale, scale_decimal_literal},
+        shared_helpers::ColumnRewrites,
     },
     options::Pg2SqliteOptions,
     traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
@@ -55,22 +55,19 @@ fn generate_maintenance_trigger_body(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<sqlparser::ast::BeginEndStatements, crate::errors::Error> {
+    // The rewrites come from the trigger's own table, whose name is still the
+    // PostgreSQL one at this point. `target_table_name` may already be the
+    // redirected RLS backing table, which the schema does not hold.
+    let rewrites = ColumnRewrites::for_named_table(schema, &trigger.table_name, options);
     let assignments = trigger
         .maintenance_assignments(schema)?
         .map(|(col, expr)| {
             let value = expr.translate(schema, options)?;
-            // The column is in hand, so the scale is read off it rather than
-            // looked up by name. D1 makes a NUMERIC column an INTEGER of minor
-            // units, and this UPDATE writes into it like any other.
-            let scaled = match minor_unit_scale(&col.attribute().data_type) {
-                Some(scale) => scale_decimal_literal(&value, scale)?.unwrap_or(value),
-                None => value,
-            };
             Ok(Assignment {
                 target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
                     Ident::new(col.column_name()),
                 )])),
-                value: scaled,
+                value: rewrites.finish_value(col.column_name(), value, options)?,
             })
         })
         .collect::<Result<Vec<_>, crate::errors::Error>>()?;

@@ -266,3 +266,72 @@ fn the_cast_spelling_accepts_and_refuses_the_same_set() {
         .translate(&blob_opts())
         .expect_err("a malformed cast operand is not a PostgreSQL UUID");
 }
+
+const OTHER_UUID: &str = "660e8400-e29b-41d4-a716-446655440000";
+const OTHER_BYTES: [u8; 16] = [
+    0x66, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00,
+];
+
+/// Applies a whole translated script and reads `tag` back as bytes.
+fn tag_after(pg: &str) -> Vec<u8> {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(&translate(pg, &blob_opts())).expect("the emitted script must apply");
+    conn.query_row("SELECT tag FROM u", [], |r| r.get(0)).unwrap()
+}
+
+/// The upsert's assignment list writes into the same BLOB column the plain
+/// UPDATE does, so the same literal has to arrive as the same 16 bytes.
+#[test]
+fn upsert_uuid_text_literal_wraps_for_blob_representation() {
+    let stored = tag_after(&format!(
+        "CREATE TABLE u (id INT PRIMARY KEY, tag UUID);
+         INSERT INTO u (id, tag) VALUES (1, '{UUID_HEX_STR}');
+         INSERT INTO u (id, tag) VALUES (1, '{UUID_HEX_STR}')
+             ON CONFLICT (id) DO UPDATE SET tag = '{OTHER_UUID}';"
+    ));
+    assert_eq!(stored, OTHER_BYTES, "the DO UPDATE literal must arrive as 16 bytes");
+}
+
+/// A maintenance trigger body is an UPDATE this crate builds itself, so its
+/// assignment takes the same wrap.
+#[test]
+fn trigger_row_assignment_uuid_text_literal_wraps_for_blob_representation() {
+    let stored = tag_after(&format!(
+        "CREATE TABLE u (id INT PRIMARY KEY, n INT, tag UUID);
+         CREATE FUNCTION f() RETURNS TRIGGER AS $$
+         BEGIN
+             NEW.tag := '{OTHER_UUID}';
+             RETURN NEW;
+         END;
+         $$ LANGUAGE plpgsql;
+         CREATE TRIGGER tr BEFORE UPDATE ON u FOR EACH ROW EXECUTE FUNCTION f();
+         INSERT INTO u (id, n, tag) VALUES (1, 0, '{UUID_HEX_STR}');
+         UPDATE u SET n = 1 WHERE id = 1;"
+    ));
+    assert_eq!(stored, OTHER_BYTES, "the trigger's literal must arrive as 16 bytes");
+}
+
+/// The tuple spelling skipped the wrap even on the plain UPDATE path, since
+/// the wrap resolved one column name and a tuple has several.
+#[test]
+fn tuple_update_uuid_text_literal_wraps_for_blob_representation() {
+    let stored = tag_after(&format!(
+        "CREATE TABLE u (id INT PRIMARY KEY, n INT, tag UUID);
+         INSERT INTO u (id, n, tag) VALUES (1, 0, '{UUID_HEX_STR}');
+         UPDATE u SET (n, tag) = (7, '{OTHER_UUID}') WHERE id = 1;"
+    ));
+    assert_eq!(stored, OTHER_BYTES, "the tuple assignment's literal must arrive as 16 bytes");
+}
+
+/// Guards the fix. `excluded.tag` is an identifier, not a literal, and must
+/// pass through so the upsert reads the already-wrapped inserted value.
+#[test]
+fn excluded_reference_in_do_update_stays_untouched() {
+    let stored = tag_after(&format!(
+        "CREATE TABLE u (id INT PRIMARY KEY, tag UUID);
+         INSERT INTO u (id, tag) VALUES (1, '{UUID_HEX_STR}');
+         INSERT INTO u (id, tag) VALUES (1, '{OTHER_UUID}')
+             ON CONFLICT (id) DO UPDATE SET tag = excluded.tag;"
+    ));
+    assert_eq!(stored, OTHER_BYTES, "excluded.tag carries the wrapped inserted value");
+}

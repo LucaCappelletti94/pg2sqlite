@@ -336,7 +336,7 @@ impl ReverseTranslator for Insert {
                 options,
                 // Reverse never unscales a NUMERIC, so there is nothing to
                 // move here either.
-                &[],
+                &crate::impls::shared_helpers::ColumnRewrites::default(),
             )?);
         }
 
