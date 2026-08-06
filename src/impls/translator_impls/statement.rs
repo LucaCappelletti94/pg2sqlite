@@ -419,9 +419,19 @@ fn translate_create_table(
         return Ok(role_filtered);
     }
 
-    if create_table.has_row_level_security(schema)? {
-        validate_table_policies(create_table, schema, options)?;
-        let rls_statements = generate_rls_statements(create_table, schema, options)?;
+    // The RLS pipeline gets the schema's own node, not this statement's.
+    // After an ALTER TABLE ADD or DROP COLUMN the schema holds a modified
+    // clone, and sql-traits' `policies` answers empty for a node the graph no
+    // longer matches while `has_row_level_security` still answers true, so the
+    // raw node degrades the wrapper to deny-by-default. The asymmetry is
+    // written up in docs/sql_traits_policies_on_stale_node.md. The role arm
+    // below already resolves the same way.
+    let table = schema
+        .table(create_table.table_schema(), create_table.table_name())
+        .unwrap_or(create_table);
+    if table.has_row_level_security(schema)? {
+        validate_table_policies(table, schema, options)?;
+        let rls_statements = generate_rls_statements(table, schema, options)?;
         return build_create_table_statements(create_table, schema, options, Some(rls_statements));
     }
 
@@ -610,8 +620,21 @@ fn translate_alter_table(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Vec<Statement>, Error> {
-    let normalized_name =
-        normalize_schema_qualified_object_name_for_sqlite(schema, &alter_table.name)?;
+    // An RLS table is translated as a view over a suffixed backing table, and
+    // a view cannot be altered, so the statement lands on the backing table
+    // the way TRUNCATE's does. No wrapper rebuild is needed: every generated
+    // RLS object is built from the one final schema snapshot, so the view and
+    // triggers already speak the post-ALTER shape, and this redirected ALTER
+    // is what brings the backing table up to it. A rename never reaches here
+    // on a secured table, `reject_rename_of_secured_table` refuses it first.
+    let normalized_name = if table_has_implicit_public_rls(schema, &alter_table.name)? {
+        append_suffix(
+            &normalize_schema_qualified_object_name_for_sqlite(schema, &alter_table.name)?,
+            options.get_rls_table_suffix(),
+        )
+    } else {
+        normalize_schema_qualified_object_name_for_sqlite(schema, &alter_table.name)?
+    };
     reject_untranslatable_alter_table_clauses(alter_table, schema)?;
 
     let mut statements = Vec::with_capacity(alter_table.operations.len());

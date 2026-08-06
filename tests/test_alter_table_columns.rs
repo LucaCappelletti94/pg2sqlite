@@ -396,3 +396,53 @@ fn a_clause_from_another_database_is_refused_as_not_postgresql()
 
     Ok(())
 }
+
+/// `ALTER TABLE` on a table with row level security must land on the backing
+/// table, the way TRUNCATE already does. The wrapper needs no rebuild: every
+/// generated RLS object is built from the one final schema snapshot, so the
+/// view and triggers already speak the post-ALTER shape, and the redirected
+/// ALTER is what brings the backing table up to it. Unredirected, the
+/// statement names the view and SQLite answers `Cannot add a column to a
+/// view`.
+#[test]
+fn alter_on_a_protected_table_lands_on_the_backing_table() -> Result<(), Box<dyn std::error::Error>>
+{
+    use pg2sqlite::prelude::SessionVariableMapping;
+
+    let options = Pg2SqliteOptions::default()
+        .with_session_user_role("authenticated".to_string())
+        .with_rls_audit_table_name("rls_audit".to_string())
+        .with_session_variable(SessionVariableMapping::current_setting(
+            "app.user_id",
+            "current_app_user_text",
+        ));
+    let translated = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT, gone TEXT);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY p ON docs TO authenticated USING (true) WITH CHECK (true);
+             ALTER TABLE docs ADD COLUMN extra TEXT;
+             ALTER TABLE docs DROP COLUMN gone;",
+        )?
+        .translate(&options)?;
+
+    let mut conn = SqliteConnection::establish(":memory:")?;
+    for statement in &translated {
+        diesel::sql_query(statement.to_string()).execute(&mut conn)?;
+    }
+
+    // The write goes through the view, which the INSTEAD OF trigger forwards,
+    // and the read comes back through the view too, so the added column is
+    // proven visible where consumers actually look.
+    diesel::sql_query("INSERT INTO docs (id, owner, extra) VALUES (1, 'o', 'visible')")
+        .execute(&mut conn)?;
+
+    #[derive(QueryableByName)]
+    struct Extra {
+        #[diesel(sql_type = Text)]
+        extra: String,
+    }
+    let read: Extra = diesel::sql_query("SELECT extra FROM docs").get_result(&mut conn)?;
+    assert_eq!(read.extra, "visible", "the added column must be visible through the view");
+    Ok(())
+}

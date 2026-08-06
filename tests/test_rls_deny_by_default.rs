@@ -267,3 +267,43 @@ fn select_only_table_blocks_inserts_and_silently_ignores_other_writes() {
         conn.query_row("SELECT COUNT(*) FROM documents_rls", [], |r| r.get(0)).unwrap();
     assert_eq!(count, 1, "no row may be added or removed");
 }
+
+/// A policy must survive a column `ALTER` on its table.
+///
+/// The raw `CREATE TABLE` statement used to be handed to the RLS pipeline, and
+/// after an `ALTER` the schema holds a modified clone that node no longer
+/// matches, so `policies` answered empty while `has_row_level_security` still
+/// answered true, and the wrapper degraded to deny-by-default: every INSERT
+/// through the view died with `permission denied: no INSERT policy`.
+///
+/// The `ALTER` sits above the seed rows because the wrapper's triggers speak
+/// the final column set, so DML written between the wrapper and the `ALTER`
+/// would reference a column the backing table does not hold yet, the known
+/// cost of translating against one schema snapshot.
+#[test]
+fn a_policy_survives_an_alter_add_column_on_its_table() {
+    let opts = rls_opts();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(
+        "CREATE TABLE notes (
+             id INTEGER PRIMARY KEY,
+             owner_id INTEGER NOT NULL
+         );
+         ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY notes_select ON notes
+             FOR SELECT
+             USING (owner_id = current_setting('app.user_id')::integer);
+         CREATE POLICY notes_insert ON notes
+             FOR INSERT
+             WITH CHECK (owner_id = current_setting('app.user_id')::integer);
+         ALTER TABLE notes ADD COLUMN note TEXT;
+         INSERT INTO notes (id, owner_id, note) VALUES (3, 42, 'kept');",
+        &opts,
+    ))
+    .expect("the emitted script must apply, ALTER included");
+
+    let note: String = conn
+        .query_row("SELECT note FROM notes WHERE id = 3", [], |row| row.get(0))
+        .expect("the row must be visible through the view");
+    assert_eq!(note, "kept");
+}
