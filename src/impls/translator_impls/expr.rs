@@ -888,31 +888,15 @@ fn translate_at_time_zone(
     ))
 }
 
-/// Check if a data type is a pgvector type (vector or halfvec).
-fn is_vector_type(data_type: &DataType) -> bool {
-    if let DataType::Custom(name, _) = data_type
-        && let Some(ident) = name.0.first().and_then(|p| p.as_ident())
-    {
-        let type_name = ident.value.to_lowercase();
-        return type_name == "vector" || type_name == "halfvec";
-    }
-    false
-}
-
-/// Check if a data type is the halfvec (16-bit float vector) type specifically.
-fn is_halfvec_type(data_type: &DataType) -> bool {
-    if let DataType::Custom(name, _) = data_type
-        && let Some(ident) = name.0.first().and_then(|p| p.as_ident())
-    {
-        return ident.value.to_lowercase() == "halfvec";
-    }
-    false
-}
-
 /// Translate a vector type cast to the appropriate sqlite-vec function.
 ///
 /// - `'[1,2,3]'::vector` → `vec_f32('[1,2,3]')` (32-bit float)
 /// - `'[1,2,3]'::halfvec` → `vec_f16('[1,2,3]')` (16-bit float)
+///
+/// The predicates come from `vector.rs`, which reads the LAST path segment of
+/// the type name, so `public.vector` counts. A local copy here read the FIRST
+/// segment, and the qualified spelling fell through to `CAST(... AS BLOB)`,
+/// which stores the text bytes as the vector.
 fn translate_vector_cast(
     expr: &Expr,
     data_type: &DataType,
@@ -920,7 +904,11 @@ fn translate_vector_cast(
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
     let translated_expr = expr.translate(schema, options)?;
-    let func_name = if is_halfvec_type(data_type) { "vec_f16" } else { "vec_f32" };
+    let func_name = if crate::impls::translator_impls::vector::is_halfvec_data_type(data_type) {
+        "vec_f16"
+    } else {
+        "vec_f32"
+    };
 
     Ok(simple_function_expr(func_name, vec![translated_expr], None))
 }
@@ -1602,7 +1590,7 @@ impl Translator for Expr {
                 translate_binary_op(left, op, right, schema, options)?
             }
             Expr::Cast { expr, data_type, format, .. } => {
-                if is_vector_type(data_type) {
+                if crate::impls::translator_impls::vector::is_vector_data_type(data_type) {
                     return translate_vector_cast(expr, data_type, schema, options);
                 }
                 // PG `'...'::uuid` under Blob representation: lower to the

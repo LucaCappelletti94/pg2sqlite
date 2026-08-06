@@ -183,6 +183,44 @@ fn test_halfvec_cast_to_vec_f16() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The schema-qualified spelling of the same cast. pgvector commonly lives in
+/// a named schema, and a qualified type cast is ordinary PostgreSQL, so
+/// `'...'::public.vector` must lower exactly like `'...'::vector`. It used to
+/// fall through to `CAST('[1,2]' AS BLOB)`, which applies cleanly and stores
+/// the text bytes as the vector.
+#[test]
+fn qualified_vector_cast_lowers_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
+    let translated = Pg2Sqlite::default()
+        .sql("SELECT '[1,2]'::public.vector AS v;")?
+        .translate(&Pg2SqliteOptions::default())?;
+    let select_stmt = translated[0].to_string();
+
+    assert!(
+        select_stmt.contains("vec_f32('[1,2]')"),
+        "a qualified ::vector cast should lower to vec_f32(), got: {select_stmt}"
+    );
+    assert!(
+        !select_stmt.to_uppercase().contains("AS BLOB"),
+        "the CAST AS BLOB fallback stores text bytes as the vector, got: {select_stmt}"
+    );
+    Ok(())
+}
+
+/// The halfvec twin, which has its own copy of the same predicate.
+#[test]
+fn qualified_halfvec_cast_lowers_to_vec_f16() -> Result<(), Box<dyn std::error::Error>> {
+    let translated = Pg2Sqlite::default()
+        .sql("SELECT '[1,2]'::public.halfvec AS v;")?
+        .translate(&Pg2SqliteOptions::default())?;
+    let select_stmt = translated[0].to_string();
+
+    assert!(
+        select_stmt.contains("vec_f16('[1,2]')"),
+        "a qualified ::halfvec cast should lower to vec_f16(), got: {select_stmt}"
+    );
+    Ok(())
+}
+
 #[test]
 fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
