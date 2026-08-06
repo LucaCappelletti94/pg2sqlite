@@ -13,7 +13,7 @@ use alloc::{
 use sql_traits::{
     errors::LookupError,
     structs::ParserDB,
-    traits::{ColumnLike, DatabaseLike, TableLike, TriggerLike},
+    traits::{ColumnLike, TableLike, TriggerLike},
 };
 use sqlparser::{
     ast::{
@@ -356,24 +356,27 @@ impl Translator for CreateTrigger {
         let mut normalized_trigger = self.clone();
         normalized_trigger.table_name = normalized_source_table_name;
 
-        let can_use_trigger_traits = normalized_trigger
-            .table_name
-            .0
-            .last()
-            .and_then(|part| part.as_ident())
-            .is_some_and(|ident| schema.table(None, ident.value.as_str()).is_some());
+        // The sql-traits trigger machinery resolves the table by its declared
+        // spelling, so the traits-facing trigger carries the registry name
+        // while the emitted trigger keeps the normalized one. The split
+        // halves re-normalize on their own translate pass.
+        let resolved_table = table_with_implicit_public_lookup(schema, &source_table_name)?;
+        let can_use_trigger_traits = resolved_table.is_some();
+
+        let mut trigger_for_helpers = self.clone();
+        if let Some(table) = resolved_table {
+            trigger_for_helpers.table_name = table.name.clone();
+        }
 
         if can_use_trigger_traits
             && let Some((insert_trigger, non_insert_trigger)) =
-                split_before_insert_maintenance_trigger(&normalized_trigger, schema)
+                split_before_insert_maintenance_trigger(&trigger_for_helpers, schema)
         {
             let mut translated = Vec::new();
             translated.extend(non_insert_trigger.translate(schema, options)?);
             translated.extend(insert_trigger.translate(schema, options)?);
             return Ok(translated);
         }
-
-        let trigger_for_helpers = normalized_trigger.clone();
 
         let CreateTrigger {
             or_alter,

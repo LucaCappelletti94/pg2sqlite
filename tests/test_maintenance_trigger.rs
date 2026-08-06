@@ -476,3 +476,142 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Schema-qualified declarations (R117)
+// ---------------------------------------------------------------------------
+
+/// Whether the table was declared as `brands` or `public.brands`, and
+/// whichever way the trigger spells it, the emitted script is one and the
+/// same. Before the fix a qualified declaration missed the maintenance path
+/// and fell to the plpgsql refusal for `NEW` assignments.
+#[test]
+fn all_four_qualification_combinations_emit_the_same_script()
+-> Result<(), Box<dyn std::error::Error>> {
+    let spell = |decl: &str, on: &str| {
+        format!(
+            "CREATE TABLE {decl} (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    edited_at TEXT
+);
+
+CREATE OR REPLACE FUNCTION update_brands_edited_at() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.edited_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_update_brands_edited_at
+BEFORE UPDATE ON {on}
+FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();"
+        )
+    };
+
+    let baseline = Pg2Sqlite::default()
+        .sql(&spell("brands", "brands"))?
+        .translate_to_sql(&Pg2SqliteOptions::default())?;
+
+    for (decl, on) in [
+        ("brands", "public.brands"),
+        ("public.brands", "brands"),
+        ("public.brands", "public.brands"),
+    ] {
+        let translated = Pg2Sqlite::default()
+            .sql(&spell(decl, on))?
+            .translate_to_sql(&Pg2SqliteOptions::default())?;
+        assert_eq!(
+            translated, baseline,
+            "declaring {decl} and triggering on {on} must not change the emitted script"
+        );
+    }
+
+    // The shared script runs and the trigger stamps the row.
+    let mut connection = SqliteConnection::establish(":memory:")?;
+    for stmt in &baseline {
+        diesel::sql_query(stmt.clone()).execute(&mut connection)?;
+    }
+    diesel::insert_into(brands::table)
+        .values(&NewBrand {
+            id: 1,
+            name: "Adidas".to_string(),
+            edited_at: Some("2020-01-01".to_string()),
+        })
+        .execute(&mut connection)?;
+    diesel::update(brands::table.filter(brands::id.eq(1)))
+        .set(brands::name.eq("Nike"))
+        .execute(&mut connection)?;
+    let count = diesel::update(
+        brands::table.filter(brands::id.eq(1).and(brands::edited_at.ne("2020-01-01"))),
+    )
+    .set(brands::name.eq("Verified"))
+    .execute(&mut connection)?;
+    assert_eq!(count, 1, "the maintenance trigger must have stamped edited_at");
+
+    Ok(())
+}
+
+/// The RLS redirect engages for a declaration it never saw before the fix:
+/// the whole script is qualified the way pg_dump spells it, and the trigger
+/// must land on the backing table all the same. A mixed spelling, declaring
+/// `public.brands` and altering `brands`, is refused earlier by the schema
+/// build itself, so the uniform shape is the one this pins.
+#[test]
+fn a_qualified_rls_declaration_still_lands_on_the_backing_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    let sql = "
+CREATE TABLE public.brands (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    edited_at TEXT
+);
+
+ALTER TABLE public.brands ENABLE ROW LEVEL SECURITY;
+CREATE POLICY brands_select_all ON public.brands FOR SELECT USING (true);
+CREATE POLICY brands_insert_all ON public.brands FOR INSERT WITH CHECK (true);
+CREATE POLICY brands_update_all ON public.brands FOR UPDATE USING (true) WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION update_brands_edited_at() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.edited_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_update_brands_edited_at
+BEFORE UPDATE ON public.brands
+FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
+";
+
+    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+
+    let trigger_sql = translated
+        .iter()
+        .map(ToString::to_string)
+        .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
+        .expect("translated trigger statement should exist");
+    assert!(
+        trigger_sql.contains("UPDATE OF id, name ON brands_rls"),
+        "maintenance trigger should target the backing table: {trigger_sql}"
+    );
+
+    let mut connection = SqliteConnection::establish(":memory:")?;
+    diesel::sql_query("PRAGMA foreign_keys = ON").execute(&mut connection)?;
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut connection)?;
+    for stmt in translated {
+        diesel::sql_query(stmt.to_string()).execute(&mut connection)?;
+    }
+    diesel::sql_query(
+        "INSERT INTO brands (id, name, edited_at) VALUES (1, 'Adidas', '2020-01-01')",
+    )
+    .execute(&mut connection)?;
+    diesel::sql_query("UPDATE brands SET name = 'Nike' WHERE id = 1").execute(&mut connection)?;
+
+    let updated =
+        brands::table.filter(brands::id.eq(1)).select(Brand::as_select()).first(&mut connection)?;
+    assert_eq!(updated.name, "Nike");
+
+    Ok(())
+}
