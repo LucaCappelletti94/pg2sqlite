@@ -522,3 +522,72 @@ fn a_malformed_quoted_default_is_refused() {
         .to_string();
     assert!(error.contains("price"), "the refusal must name the column, got: {error}");
 }
+
+// ---------------------------------------------------------------------------
+// INSERT ... SELECT scaling (R112)
+// ---------------------------------------------------------------------------
+
+/// The SELECT spelling of an insert must store what the VALUES spelling
+/// stores. Before the fix the projected literal reached the STRICT table at
+/// face value, so a fractional literal failed as a REAL into an INTEGER
+/// column and a whole number stored a hundredfold too small.
+#[test]
+fn an_insert_select_literal_is_scaled_like_values() {
+    let select = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT, price NUMERIC(10,2));
+         INSERT INTO t SELECT 1, 0, 1.50;
+         SELECT price FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    let values = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 0, 1.50);
+         SELECT price FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(select, values, "the two spellings of the same insert must agree");
+    assert_eq!(select, vec![Some("150".to_string())]);
+}
+
+/// An alias on the projection does not change the value, so `1.50 AS price`
+/// scales exactly like the bare literal.
+#[test]
+fn an_aliased_projected_literal_is_scaled() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT, price NUMERIC(10,2));
+         INSERT INTO t SELECT 1, 0, 1.50 AS price;
+         SELECT price FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("150".to_string())]);
+}
+
+/// Every arm of a set operation feeds the same target columns, so the
+/// literals of each arm scale, exactly as every VALUES row does.
+#[test]
+fn every_arm_of_a_set_operation_scales() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT, price NUMERIC(10,2));
+         INSERT INTO t SELECT 1, 0, 1.50 UNION ALL SELECT 2, 0, 2.50;
+         SELECT price FROM t ORDER BY id;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("150".to_string()), Some("250".to_string())]);
+}
+
+/// Guards the fix. A projected column is already in minor units and a
+/// computed projection cannot be scaled without guessing, so a SELECT from
+/// another table passes through untouched, wildcard and named alike.
+#[test]
+fn a_select_from_another_table_is_unchanged() {
+    let rows = run_translated_with(
+        "CREATE TABLE src (id INT PRIMARY KEY, n INT, price NUMERIC(10,2));
+         CREATE TABLE t (id INT PRIMARY KEY, n INT, price NUMERIC(10,2));
+         INSERT INTO src VALUES (1, 0, 1.50);
+         INSERT INTO t SELECT * FROM src;
+         INSERT INTO t SELECT id + 1, n, price FROM src;
+         SELECT price FROM t ORDER BY id;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("150".to_string()), Some("150".to_string())]);
+}

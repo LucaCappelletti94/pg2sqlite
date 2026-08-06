@@ -16,7 +16,7 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, IndexLike, TableLike, UniqueIndexLike},
 };
-use sqlparser::ast::{Insert, SetExpr, TableObject};
+use sqlparser::ast::{Insert, SelectItem, SetExpr, TableObject};
 
 use super::helpers::Forward;
 use crate::{
@@ -495,8 +495,8 @@ fn wrap_vector_text_literals(insert: &mut Insert, schema: &ParserDB) {
 /// count of minor units the column now holds.
 ///
 /// Bails out on the same unresolvable shapes as its vector and UUID siblings,
-/// leaving the insert verbatim. Only the `VALUES` form is handled: a `SELECT`
-/// source needs projection position mapped to column, which is R112.
+/// leaving the insert verbatim. Both source forms are handled: a VALUES row
+/// and a SELECT projection map position to target column the same way.
 fn scale_numeric_literals(
     insert: &mut Insert,
     schema: &ParserDB,
@@ -518,13 +518,68 @@ fn scale_numeric_literals(
     };
 
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
+    scale_insert_source_body(source.body.as_mut(), &column_names, scales)
+}
 
-    for row in &mut values.rows {
-        for (index, expr) in row.content.iter_mut().enumerate() {
-            let Some(column) = column_names.get(index) else { break };
-            scale_literal_for_column(expr, column, scales)?;
+/// Applies the D1 scaling to one arm of an insert source, recursing through
+/// set operations and nested parentheses.
+///
+/// A VALUES row and a SELECT projection map position to target column the
+/// same way, and every arm of a set operation feeds the same columns. Only a
+/// literal projection is rewritten, aliased or bare: a projected column is
+/// already in minor units and a computed projection cannot be scaled without
+/// guessing, and a projection list containing a wildcard cannot be mapped
+/// positionally, so those pass through. A fractional literal that survives
+/// unscaled fails loudly on the STRICT table rather than storing a wrong
+/// number.
+fn scale_insert_source_body(
+    body: &mut SetExpr,
+    column_names: &[String],
+    scales: &[(String, u32)],
+) -> Result<(), crate::errors::Error> {
+    match body {
+        SetExpr::Values(values) => {
+            for row in &mut values.rows {
+                for (index, expr) in row.content.iter_mut().enumerate() {
+                    let Some(column) = column_names.get(index) else { break };
+                    scale_literal_for_column(expr, column, scales)?;
+                }
+            }
         }
+        SetExpr::Select(select) => {
+            // A wildcard expands to an unknown count and Spark's
+            // `expr AS (a, b)` expands one item to several columns, so
+            // neither projection list can be mapped positionally.
+            if select.projection.iter().any(|item| {
+                matches!(
+                    item,
+                    SelectItem::Wildcard(_)
+                        | SelectItem::QualifiedWildcard(..)
+                        | SelectItem::ExprWithAliases { .. }
+                )
+            }) {
+                return Ok(());
+            }
+            for (index, item) in select.projection.iter_mut().enumerate() {
+                let Some(column) = column_names.get(index) else { break };
+                match item {
+                    SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                        scale_literal_for_column(expr, column, scales)?;
+                    }
+                    SelectItem::Wildcard(_)
+                    | SelectItem::QualifiedWildcard(..)
+                    | SelectItem::ExprWithAliases { .. } => {}
+                }
+            }
+        }
+        SetExpr::Query(query) => {
+            scale_insert_source_body(query.body.as_mut(), column_names, scales)?;
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            scale_insert_source_body(left, column_names, scales)?;
+            scale_insert_source_body(right, column_names, scales)?;
+        }
+        _ => {}
     }
     Ok(())
 }
