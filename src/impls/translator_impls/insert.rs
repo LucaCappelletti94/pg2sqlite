@@ -23,8 +23,8 @@ use crate::{
     impls::{
         object_name::{last_ident, last_ident_value_or_display, table_with_implicit_public_lookup},
         shared_helpers::{
-            ColumnRewrites, is_default_keyword, scale_literal_for_column,
-            translate_on_conflict_do_update, translate_returning,
+            ColumnRewrites, carries_default_keyword, is_default_keyword, scale_literal_for_column,
+            substituted_assignment_default, translate_on_conflict_do_update, translate_returning,
         },
         translator_impls::{
             rls,
@@ -125,6 +125,17 @@ impl Translator for Insert {
                                 )?,
                                 action: on_conflict.action.clone(),
                             };
+                            // PostgreSQL accepts DEFAULT in a DO UPDATE list
+                            // and stores the declared default, so it is
+                            // substituted here, where the target table is in
+                            // hand, before the shared translator runs.
+                            let substituted = substitute_do_update_defaults(
+                                do_update,
+                                &insert.table,
+                                schema,
+                                options,
+                            )?;
+                            let do_update = substituted.as_ref().unwrap_or(do_update);
                             insert.on = Some(translate_on_conflict_do_update::<Forward>(
                                 &resolved, do_update, schema, options, &rewrites,
                             )?);
@@ -227,6 +238,45 @@ fn unresolvable_constraint(constraint: &str, table: &str) -> crate::errors::Erro
     ))
 }
 
+/// Substitutes declared defaults into a DO UPDATE assignment list, or answers
+/// `None` when no assignment carries the `DEFAULT` keyword.
+///
+/// PostgreSQL accepts the keyword there and stores the declared default,
+/// measured on PostgreSQL 16. The substitution happens before the shared
+/// translator runs, so the raw PostgreSQL default flows through the ordinary
+/// translate and finish pipeline like any written value.
+fn substitute_do_update_defaults(
+    do_update: &sqlparser::ast::DoUpdate,
+    table_object: &TableObject,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<sqlparser::ast::DoUpdate>, crate::errors::Error> {
+    if !do_update.assignments.iter().any(|a| carries_default_keyword(&a.value)) {
+        return Ok(None);
+    }
+    let TableObject::TableName(table_name) = table_object else {
+        return Err(default_without_a_named_table(table_object));
+    };
+    let Some(table) = table_with_implicit_public_lookup(schema, table_name)? else {
+        return Err(unknown_default_table(table_name));
+    };
+
+    let assignments = do_update
+        .assignments
+        .iter()
+        .map(|a| {
+            let substituted =
+                substituted_assignment_default(&a.target, &a.value, table, schema, options)?;
+            Ok(sqlparser::ast::Assignment {
+                target: a.target.clone(),
+                value: substituted.unwrap_or_else(|| a.value.clone()),
+            })
+        })
+        .collect::<Result<Vec<_>, crate::errors::Error>>()?;
+
+    Ok(Some(sqlparser::ast::DoUpdate { assignments, selection: do_update.selection.clone() }))
+}
+
 /// Replaces every `DEFAULT` in a `VALUES` row with the column's declared
 /// default, since SQLite accepts the keyword only in `INSERT INTO t DEFAULT
 /// VALUES` and rejects it inside a row with `near "DEFAULT": syntax error`.
@@ -285,7 +335,7 @@ fn substitute_default_values(
 }
 
 /// The expression a `DEFAULT` in a `VALUES` row stands for.
-fn default_expr_for_column(
+pub(crate) fn default_expr_for_column(
     table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
     column_name: &str,
     schema: &ParserDB,

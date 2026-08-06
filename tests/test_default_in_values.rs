@@ -147,3 +147,94 @@ fn values_without_a_default_still_insert() {
 
     assert_eq!(schema::t::table.count().get_result::<i64>(&mut conn).expect("count"), 2);
 }
+
+/// One text line read back through a raw query, for the tables below that no
+/// diesel schema declares.
+#[derive(QueryableByName)]
+struct Line {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    line: String,
+}
+
+fn read_line(conn: &mut SqliteConnection, sql: &str) -> String {
+    diesel::sql_query(sql).get_result::<Line>(conn).expect("read").line
+}
+
+/// PostgreSQL accepts `DEFAULT` in an UPDATE assignment too and stores the
+/// declared default, measured on PostgreSQL 16. SQLite has no form of it, so
+/// the keyword has to be substituted here exactly as in a VALUES row.
+#[test]
+fn update_set_default_stores_the_declared_default() {
+    let mut conn = apply(
+        "CREATE TABLE u (id INTEGER PRIMARY KEY, c INTEGER DEFAULT 9);
+         INSERT INTO u (id, c) VALUES (1, 7);
+         UPDATE u SET c = DEFAULT WHERE id = 1;",
+    );
+    assert_eq!(read_line(&mut conn, "SELECT CAST(c AS TEXT) AS line FROM u"), "9");
+}
+
+/// With no declared default PostgreSQL stores NULL, measured on 16.
+#[test]
+fn update_set_default_without_a_declared_default_stores_null() {
+    let mut conn = apply(
+        "CREATE TABLE u (id INTEGER PRIMARY KEY, a INTEGER);
+         INSERT INTO u (id, a) VALUES (1, 5);
+         UPDATE u SET a = DEFAULT WHERE id = 1;",
+    );
+    assert_eq!(
+        read_line(&mut conn, "SELECT coalesce(CAST(a AS TEXT), '<null>') AS line FROM u"),
+        "<null>"
+    );
+}
+
+/// The tuple spelling substitutes per position, measured on PostgreSQL 16:
+/// `SET (c, d) = (DEFAULT, 40)` stores the declared 9 beside the given 40.
+#[test]
+fn a_tuple_update_substitutes_each_default() {
+    let mut conn = apply(
+        "CREATE TABLE u (id INTEGER PRIMARY KEY, c INTEGER DEFAULT 9, d INTEGER DEFAULT 4);
+         INSERT INTO u (id, c, d) VALUES (1, 7, 8);
+         UPDATE u SET (c, d) = (DEFAULT, 40) WHERE id = 1;",
+    );
+    assert_eq!(read_line(&mut conn, "SELECT c || '|' || d AS line FROM u"), "9|40");
+}
+
+/// The upsert's assignment list is the same write through a different door,
+/// measured on PostgreSQL 16.
+#[test]
+fn an_upsert_do_update_substitutes_the_default() {
+    let mut conn = apply(
+        "CREATE TABLE u (id INTEGER PRIMARY KEY, c INTEGER DEFAULT 9);
+         INSERT INTO u (id, c) VALUES (1, 7);
+         INSERT INTO u (id, c) VALUES (1, 7) ON CONFLICT (id) DO UPDATE SET c = DEFAULT;",
+    );
+    assert_eq!(read_line(&mut conn, "SELECT CAST(c AS TEXT) AS line FROM u"), "9");
+}
+
+/// The substituted default is a raw PostgreSQL literal and runs through the
+/// ordinary pipeline, so a scaled NUMERIC default lands in minor units.
+#[test]
+fn update_set_default_on_a_scaled_numeric_stores_minor_units() {
+    let mut conn = apply(
+        "CREATE TABLE u (id INTEGER PRIMARY KEY, price NUMERIC(10,2) DEFAULT 1.50);
+         INSERT INTO u (id, price) VALUES (1, 9.99);
+         UPDATE u SET price = DEFAULT WHERE id = 1;",
+    );
+    assert_eq!(read_line(&mut conn, "SELECT CAST(price AS TEXT) AS line FROM u"), "150");
+}
+
+/// The same refusal the INSERT door gives: the statement could only fail,
+/// since the column is NOT NULL and declares nothing to fall back to.
+/// PostgreSQL fails at run time instead, which is the one deliberate
+/// divergence, recorded at the INSERT arm it mirrors.
+#[test]
+fn update_set_default_on_not_null_without_a_default_is_refused() {
+    let error = translate_err(
+        "CREATE TABLE u (id INTEGER PRIMARY KEY, b INTEGER NOT NULL);
+         UPDATE u SET b = DEFAULT WHERE id = 1;",
+    );
+    assert!(
+        error.contains("declares no default"),
+        "expected the INSERT door's wording, got {error}"
+    );
+}

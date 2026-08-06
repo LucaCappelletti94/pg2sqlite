@@ -27,7 +27,7 @@ pub(crate) mod expr;
 mod function;
 mod helpers;
 mod index_column;
-mod insert;
+pub(crate) mod insert;
 mod order_by_expr;
 pub mod plpgsql;
 pub mod postgis;

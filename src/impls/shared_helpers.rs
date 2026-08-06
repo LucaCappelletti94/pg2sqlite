@@ -539,18 +539,84 @@ pub(crate) fn is_default_keyword(expr: &Expr) -> bool {
     )
 }
 
-/// Returns the error for a `DEFAULT` outside an `INSERT`.
+/// True when `expr` carries the `DEFAULT` keyword, directly or as a tuple
+/// element.
+#[must_use]
+pub(crate) fn carries_default_keyword(expr: &Expr) -> bool {
+    match expr {
+        Expr::Tuple(items) => items.iter().any(is_default_keyword),
+        other => is_default_keyword(other),
+    }
+}
+
+/// Substitutes the declared default for a `DEFAULT` keyword an assignment
+/// writes, or answers `None` when there is nothing to substitute.
 ///
-/// Inside one it is substituted for the column's declared default, which is
-/// what `insert.rs` does before the source is translated, so anything reaching
-/// here is in a context where PostgreSQL does not allow the keyword either: it
-/// answers "DEFAULT is not allowed in this context".
+/// PostgreSQL accepts the keyword in an UPDATE assignment and in a DO UPDATE
+/// list, storing the declared default, NULL when none is declared, measured
+/// on PostgreSQL 16. The substituted expression is the raw PostgreSQL default,
+/// so the caller's ordinary translate and finish pipeline scales and wraps it
+/// like any written value. The tuple spelling substitutes per position.
+pub(crate) fn substituted_assignment_default(
+    target: &AssignmentTarget,
+    value: &Expr,
+    table: &<ParserDB as DatabaseLike>::Table,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<Expr>, Error> {
+    let default_for = |name: &ObjectName| -> Result<Expr, Error> {
+        match last_ident(name) {
+            Some(column) => {
+                crate::impls::translator_impls::insert::default_expr_for_column(
+                    table,
+                    &column.value,
+                    schema,
+                    options,
+                )
+            }
+            None => Err(default_outside_an_insert_error()),
+        }
+    };
+
+    match target {
+        AssignmentTarget::ColumnName(name) => {
+            if is_default_keyword(value) {
+                default_for(name).map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+        AssignmentTarget::Tuple(names) => {
+            let Expr::Tuple(items) = value else { return Ok(None) };
+            if items.len() != names.len() || !items.iter().any(is_default_keyword) {
+                return Ok(None);
+            }
+            names
+                .iter()
+                .zip(items)
+                .map(
+                    |(name, item)| {
+                        if is_default_keyword(item) { default_for(name) } else { Ok(item.clone()) }
+                    },
+                )
+                .collect::<Result<Vec<_>, Error>>()
+                .map(|items| Some(Expr::Tuple(items)))
+        }
+    }
+}
+
+/// Returns the error for a `DEFAULT` with no column to read a default from.
+///
+/// A VALUES row of an INSERT and an UPDATE assignment both tie the keyword to
+/// a column and substitute the declared default before translation. Anything
+/// reaching here is in a position with no column, which PostgreSQL rejects
+/// too, or names a table the schema does not hold.
 #[must_use]
 pub(crate) fn default_outside_an_insert_error() -> Error {
     Error::UnsupportedSQLiteFeature(
-        "DEFAULT is only meaningful in a VALUES row of an INSERT, where it stands for the \
-         column's declared default. PostgreSQL rejects it anywhere else, and SQLite has no form \
-         of it at all."
+        "DEFAULT stands for a column's declared default, and only a VALUES row of an INSERT or \
+         an UPDATE assignment on a declared table ties it to a column. PostgreSQL rejects it in \
+         other positions too, and SQLite has no form of it at all."
             .to_string(),
     )
 }
@@ -1505,22 +1571,40 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     // Forward-only. Reverse receives an already-rewritten input, and it never
     // unwraps or unscales, so rewriting here would put the two directions out
     // of step rather than into it.
-    let rewrites = if D::IS_FORWARD {
+    let (rewrites, target_table) = if D::IS_FORWARD {
         match &update.table.relation {
             TableFactor::Table { name, .. } => {
-                ColumnRewrites::for_named_table(schema, name, options)
+                match table_with_implicit_public_lookup(schema, name) {
+                    Ok(Some(table)) => {
+                        (ColumnRewrites::of_table(table, schema, options), Some(table))
+                    }
+                    _ => (ColumnRewrites::default(), None),
+                }
             }
-            _ => ColumnRewrites::default(),
+            _ => (ColumnRewrites::default(), None),
         }
     } else {
-        ColumnRewrites::default()
+        (ColumnRewrites::default(), None)
     };
 
     let assignments = update
         .assignments
         .iter()
         .map(|a| {
-            let value = D::translate_expr(&a.value, schema, options)?;
+            // PostgreSQL stores the declared default for `SET col = DEFAULT`,
+            // so the keyword is substituted before translation, while the
+            // default is still the raw PostgreSQL expression.
+            let substituted = match target_table {
+                Some(table) => {
+                    substituted_assignment_default(&a.target, &a.value, table, schema, options)?
+                }
+                None => None,
+            };
+            if D::IS_FORWARD && substituted.is_none() && carries_default_keyword(&a.value) {
+                return Err(default_outside_an_insert_error());
+            }
+            let source = substituted.as_ref().unwrap_or(&a.value);
+            let value = D::translate_expr(source, schema, options)?;
             Ok(Assignment {
                 target: a.target.clone(),
                 value: rewrites.finish_assignment(&a.target, value, options)?,
