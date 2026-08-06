@@ -98,3 +98,76 @@ fn ilike_matches_case_insensitively_with_case_sensitive_like_pragma() {
     // "goodbye" (id=4) must not appear
     assert!(rows.iter().all(|r| r.id != 4), "Row with 'goodbye' must not match");
 }
+
+// ---------------------------------------------------------------------------
+// ESCAPE and the lower() fold (R91)
+// ---------------------------------------------------------------------------
+
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
+
+/// PostgreSQL, measured on 16 with `ESCAPE 'X'`: `'aXbc' ILIKE 'aXb_'` is
+/// false, because `X` escapes the `b` and the pattern is three characters.
+/// Before the fix the pattern was lowered while the escape stayed `X`, so the
+/// escape vanished from the pattern and SQLite answered true.
+#[test]
+fn a_letter_escape_is_lowered_with_the_pattern() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         INSERT INTO t (id, s) VALUES (1, 'aXbc');
+         SELECT count(*) FROM t WHERE s ILIKE 'aXb_' ESCAPE 'X';",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("0".to_string())], "the escaped b must stay a literal");
+}
+
+/// The other direction of the same fold: `'a%bc' ILIKE 'aX%b_' ESCAPE 'X'` is
+/// true in PostgreSQL, since `X%` is a literal percent, and the unlowered
+/// escape turned it back into a live wildcard chased by a literal `x`.
+#[test]
+fn an_escaped_wildcard_survives_the_lowering() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         INSERT INTO t (id, s) VALUES (1, 'a%bc');
+         SELECT count(*) FROM t WHERE s ILIKE 'aX%b_' ESCAPE 'X';",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("1".to_string())], "the escaped percent must stay a literal");
+}
+
+/// Guards the fix. A backslash has no case, so its output is unchanged and
+/// the escaped wildcard keeps working.
+#[test]
+fn a_backslash_escape_is_untouched() {
+    let translated = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+              SELECT count(*) FROM t WHERE s ILIKE '50\\%' ESCAPE '\\';",
+        )
+        .unwrap()
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .unwrap()
+        .join("\n");
+    assert!(translated.contains("ESCAPE '\\'"), "the escape must survive verbatim: {translated}");
+
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         INSERT INTO t (id, s) VALUES (1, '50%');
+         SELECT count(*) FROM t WHERE s ILIKE '50\\%' ESCAPE '\\';",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("1".to_string())]);
+}
+
+/// An escape character whose lowering is not one character would shift the
+/// pattern instead of escaping in it, so it is refused rather than folded.
+#[test]
+fn an_escape_whose_lowering_grows_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql("SELECT 'a' ILIKE 'a' ESCAPE 'İ';")
+        .unwrap()
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect_err("a length-changing fold cannot escape anything")
+        .to_string();
+    assert!(error.contains("escape"), "the refusal must name the construct: {error}");
+}

@@ -1673,7 +1673,7 @@ impl Translator for Expr {
                     any: *any,
                     expr: Box::new(wrap_with_lower(translated_expr)),
                     pattern: Box::new(wrap_with_lower(translated_pattern)),
-                    escape_char: escape_char.clone(),
+                    escape_char: lowered_ilike_escape(escape_char.as_ref())?,
                 }
             }
             Expr::Extract { field, expr, .. } => translate_extract(field, expr, schema, options)?,
@@ -1878,6 +1878,42 @@ impl Translator for Expr {
 /// direction rebuilds this call to recognise its own output.
 pub(crate) fn wrap_with_lower(expr: Expr) -> Expr {
     simple_function_expr("lower", vec![expr], None)
+}
+
+/// Lowers an `ILIKE` escape character with the operands.
+///
+/// The `ILIKE` rewrite folds both operands through `lower()`, so a letter
+/// escape left unfolded no longer occurs in the lowered pattern and stops
+/// escaping: an escaped literal becomes a live wildcard and the reverse, with
+/// no error anywhere, measured on both databases under `ESCAPE 'X'`. A
+/// character whose lowering is not exactly one character would shift the
+/// pattern instead of escaping in it, so it is refused. Anything that is not
+/// a one-character single-quoted string is left verbatim: PostgreSQL rejects
+/// it at run time and SQLite rejects the emission the same way, unchanged by
+/// this fold.
+fn lowered_ilike_escape(
+    escape_char: Option<&ValueWithSpan>,
+) -> Result<Option<ValueWithSpan>, crate::errors::Error> {
+    let Some(escape) = escape_char else { return Ok(None) };
+    let Value::SingleQuotedString(original) = &escape.value else {
+        return Ok(Some(escape.clone()));
+    };
+    let mut characters = original.chars();
+    let (Some(_), None) = (characters.next(), characters.next()) else {
+        return Ok(Some(escape.clone()));
+    };
+
+    let lowered = original.to_lowercase();
+    if lowered.chars().count() != 1 {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "ILIKE ... ESCAPE '{original}' cannot be translated: ILIKE becomes LIKE over \
+             lower()ed operands, and lowercasing this escape character changes its length, \
+             which would shift the pattern instead of escaping in it. Use a caseless escape \
+             character such as a backslash."
+        )));
+    }
+
+    Ok(Some(ValueWithSpan { value: Value::SingleQuotedString(lowered), span: escape.span }))
 }
 
 /// Maps a PostgreSQL collation name onto the SQLite collation that orders the
