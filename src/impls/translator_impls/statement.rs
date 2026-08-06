@@ -45,13 +45,13 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        AlterTable, AlterTableOperation, BeginTransactionKind, BinaryOperator, CascadeOption,
-        ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction, CreateTableOptions,
-        CreateView, Delete, DescribeAlias, DiscardObject, ExceptionWhen, Expr, FromTable, Ident,
-        Merge, ObjectName, ObjectType, Query, RenameTable, RenameTableNameKind, Set, SqlOption,
-        Statement, TableFactor, TableWithJoins, TransactionAccessMode, TransactionMode,
-        TransactionModifier, Truncate, TruncateIdentityOption, UnaryOperator, VacuumStatement,
-        ViewColumnDef, helpers::attached_token::AttachedToken,
+        AlterTable, AlterTableOperation, AlterTableType, BeginTransactionKind, BinaryOperator,
+        CascadeOption, ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction,
+        CreateTableOptions, CreateView, Delete, DescribeAlias, DiscardObject, ExceptionWhen, Expr,
+        FromTable, Ident, Merge, ObjectName, ObjectType, Query, RenameTable, RenameTableNameKind,
+        Set, SqlOption, Statement, TableFactor, TableWithJoins, TransactionAccessMode,
+        TransactionMode, TransactionModifier, Truncate, TruncateIdentityOption, UnaryOperator,
+        VacuumStatement, ViewColumnDef, helpers::attached_token::AttachedToken,
     },
     dialect::SQLiteDialect,
 };
@@ -612,6 +612,7 @@ fn translate_alter_table(
 ) -> Result<Vec<Statement>, Error> {
     let normalized_name =
         normalize_schema_qualified_object_name_for_sqlite(schema, &alter_table.name)?;
+    reject_untranslatable_alter_table_clauses(alter_table, schema)?;
 
     let mut statements = Vec::with_capacity(alter_table.operations.len());
     for operation in &alter_table.operations {
@@ -620,14 +621,88 @@ fn translate_alter_table(
         else {
             continue;
         };
+        // Every field is named rather than spread from the input, so a field
+        // added upstream fails to compile here instead of reaching SQLite
+        // unexamined. Four of them did exactly that before this was tightened.
         statements.push(Statement::AlterTable(AlterTable {
             name: normalized_name.clone(),
             operations: vec![translated],
-            ..alter_table.clone()
+            // Cleared above: refused when it cannot be proven redundant.
+            if_exists: false,
+            // Inheritance, which `CREATE TABLE ... INHERITS` already refuses,
+            // so this names the same single table either way.
+            only: false,
+            location: None,
+            on_cluster: None,
+            table_type: None,
+            end_token: alter_table.end_token.clone(),
         }));
     }
 
     Ok(statements)
+}
+
+/// Refuses the `ALTER TABLE` clauses that cannot reach SQLite, so
+/// [`translate_alter_table`] can clear the rest when it rebuilds the statement.
+///
+/// SQLite has none of these, but that is not the interesting part: nearly
+/// everything this crate translates is a syntax error in SQLite. What decides
+/// each answer is whether the clause carries meaning that would be lost.
+///
+/// `ON CLUSTER` is ClickHouse and the three `table_type` spellings are
+/// Snowflake. PostgreSQL rejects all of them outright, so a file carrying one
+/// is not the input this crate accepts, which is the reason worth reporting.
+/// Only `ICEBERG` currently reaches this: `DYNAMIC` and `EXTERNAL` are refused
+/// by the parser under the PostgreSQL dialect, as is Hive's `SET LOCATION`, and
+/// all three are named anyway so a parser change cannot reopen the hole
+/// quietly.
+///
+/// `IF EXISTS` is the one that changes behaviour. PostgreSQL skips a missing
+/// table where SQLite raises, so the clause may only be dropped once the table
+/// is known to exist. When it is not declared the statement is refused rather
+/// than skipped: emitting nothing would reproduce PostgreSQL exactly, but the
+/// schema is built from the input rather than from a live database, so an
+/// absent table almost always means the `CREATE TABLE` was left out of the
+/// batch, and that is indistinguishable from a deliberate guard.
+fn reject_untranslatable_alter_table_clauses(
+    alter_table: &AlterTable,
+    schema: &ParserDB,
+) -> Result<(), Error> {
+    let foreign = if alter_table.on_cluster.is_some() {
+        Some("ON CLUSTER, which is ClickHouse")
+    } else if let Some(table_type) = alter_table.table_type.as_ref() {
+        Some(match table_type {
+            AlterTableType::Iceberg => "ICEBERG, which is Snowflake",
+            AlterTableType::Dynamic => "DYNAMIC, which is Snowflake",
+            AlterTableType::External => "EXTERNAL, which is Snowflake",
+        })
+    } else if alter_table.location.is_some() {
+        Some("SET LOCATION, which is Hive")
+    } else {
+        None
+    };
+
+    if let Some(clause) = foreign {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "ALTER TABLE {} carries {clause}. PostgreSQL rejects that spelling, so a file \
+             containing it is not the input this crate translates. Remove the clause.",
+            alter_table.name
+        )));
+    }
+
+    if alter_table.if_exists
+        && table_with_implicit_public_lookup(schema, &alter_table.name)?.is_none()
+    {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "ALTER TABLE IF EXISTS {} names a table the translation schema does not declare. \
+             PostgreSQL skips the statement where SQLite would raise, and emitting nothing here \
+             would silently discard the change for an input that merely omitted the CREATE TABLE. \
+             Include the table's definition in the same translation batch, or drop the IF EXISTS.",
+            alter_table.name
+        )));
+    }
+
+    Ok(())
 }
 
 /// Translates a single `ALTER TABLE` operation.

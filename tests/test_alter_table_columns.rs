@@ -279,3 +279,120 @@ fn enable_row_level_security_emits_no_alter_and_still_builds_the_wrapper()
 
     Ok(())
 }
+
+/// `IF EXISTS` and `ONLY` are PostgreSQL clauses SQLite has no form for, and
+/// both used to ride an `..alter_table.clone()` spread straight into the
+/// output, where SQLite answered `near "EXISTS": syntax error` and `near "t":
+/// syntax error`. Both are droppable once the table is known: `IF EXISTS`
+/// because the guard is redundant when the table demonstrably exists, and
+/// `ONLY` because it concerns inheritance and `CREATE TABLE ... INHERITS` is
+/// already refused, so no descendants can exist and the statement names just
+/// this table.
+///
+/// Asserted by applying the emitted DDL and using the column, because a test
+/// that only checked the text for the absence of `EXISTS` would pass for output
+/// SQLite still refuses.
+#[test]
+fn if_exists_and_only_are_dropped_and_the_column_still_arrives()
+-> Result<(), Box<dyn std::error::Error>> {
+    for clause in ["IF EXISTS", "ONLY"] {
+        let mut conn = apply(&format!(
+            "{BASE} ALTER TABLE {clause} t ADD COLUMN s TEXT; ALTER TABLE {clause} t ADD COLUMN flag BOOLEAN;"
+        ))?;
+
+        diesel::insert_into(docs::table)
+            .values((docs::id.eq(1), docs::a.eq("base"), docs::s.eq("v"), docs::flag.eq(1)))
+            .execute(&mut conn)?;
+        let row: (Option<String>, Option<i32>) =
+            docs::table.select((docs::s, docs::flag)).first(&mut conn)?;
+        assert_eq!(row, (Some("v".to_owned()), Some(1)), "clause {clause}");
+    }
+
+    Ok(())
+}
+
+/// The clauses attach to every operation, not only `ADD COLUMN`, and a rename
+/// is the spelling R86's own evidence used: `ALTER TABLE IF EXISTS t RENAME TO
+/// t2` answered `near "EXISTS": syntax error`. A rename takes a different path
+/// through the operation translator, so it needs its own case.
+///
+/// Proven by renaming and then reading through the new name, which fails if the
+/// rename did not happen as well as if the emitted DDL will not run.
+#[test]
+fn the_clauses_are_dropped_for_a_rename_too() -> Result<(), Box<dyn std::error::Error>> {
+    #[derive(QueryableByName, Debug)]
+    struct Renamed {
+        #[diesel(sql_type = Text)]
+        name: String,
+    }
+
+    for clause in ["IF EXISTS", "ONLY"] {
+        let mut conn = apply(&format!("{BASE} ALTER TABLE {clause} t RENAME TO t2;"))?;
+        // `sqlite_master` is the only way to observe that the table now answers
+        // to the new name, which no typed query over a renamed table can express.
+        let rows: Vec<Renamed> = diesel::sql_query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('t', 't2')",
+        )
+        .load(&mut conn)?;
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["t2"], "clause {clause} should have renamed t to t2");
+    }
+
+    Ok(())
+}
+
+/// The guard cannot simply be dropped when the table is absent, because
+/// PostgreSQL skips and SQLite would error, so the two disagree. Emitting
+/// nothing would reproduce PostgreSQL exactly but would silently discard the
+/// change for an input that merely forgot its `CREATE TABLE`, which the
+/// translator cannot tell apart from a deliberate guard. So it is refused, and
+/// the message names the table.
+#[test]
+fn if_exists_over_an_undeclared_table_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let error = Pg2Sqlite::default()
+        .sql(&format!("{BASE} ALTER TABLE IF EXISTS absent_table ADD COLUMN s TEXT;"))?
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("a guard over a table the schema does not declare has no faithful translation")
+        .to_string();
+
+    assert!(error.contains("absent_table"), "the error must name the table, got: {error}");
+    assert!(error.contains("IF EXISTS"), "the error must name the clause, got: {error}");
+
+    Ok(())
+}
+
+/// Two more clauses leak through the same spread, and neither is PostgreSQL:
+/// `ON CLUSTER` is ClickHouse and `ICEBERG` is Snowflake. Verified on
+/// PostgreSQL 16, which answers `syntax error at or near "ON"` and `at or near
+/// "ICEBERG"`, so a file carrying either is not the input this crate accepts
+/// and that is the reason the refusal gives. Saying SQLite lacks them would be
+/// true and useless, since nearly everything this crate translates is a syntax
+/// error in SQLite.
+///
+/// Each case asserts the clause is named as well as the reason. Checking only
+/// for the word PostgreSQL would pass for any of the crate's other refusals,
+/// several of which mention it, so the test would not prove this path ran.
+#[test]
+fn a_clause_from_another_database_is_refused_as_not_postgresql()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (statement, clause) in [
+        ("ALTER TABLE t ON CLUSTER c ADD COLUMN s TEXT", "ON CLUSTER"),
+        ("ALTER ICEBERG TABLE t ADD COLUMN s TEXT", "ICEBERG"),
+    ] {
+        let error = Pg2Sqlite::default()
+            .sql(&format!("{BASE} {statement};"))?
+            .translate(&Pg2SqliteOptions::default())
+            .expect_err("this spelling is not PostgreSQL")
+            .to_string();
+        assert!(
+            error.contains(clause),
+            "the error must name {clause}, got: {error} for {statement}"
+        );
+        assert!(
+            error.contains("PostgreSQL rejects"),
+            "the reason must be that PostgreSQL rejects the spelling, got: {error}"
+        );
+    }
+
+    Ok(())
+}
