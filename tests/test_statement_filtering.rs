@@ -224,9 +224,13 @@ fn set_statement_timeout_is_dropped() {
 
 #[test]
 fn create_policy_filtered() {
-    let sql = "CREATE POLICY my_policy ON t FOR SELECT USING (true);";
+    // The policy's table must exist in the document, as PostgreSQL itself
+    // refuses a policy on an absent relation. The table is the one emitted
+    // statement, so the policy contributes nothing.
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY); \
+               CREATE POLICY my_policy ON t FOR SELECT USING (true);";
     let count = translate_count(sql).unwrap();
-    assert_eq!(count, 0, "CREATE POLICY should be filtered");
+    assert_eq!(count, 1, "CREATE POLICY itself should emit nothing");
 }
 
 #[test]

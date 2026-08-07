@@ -104,14 +104,15 @@ fn bench_rls_translation(c: &mut Criterion) {
             "app.tenant_id",
             "current_tenant",
         ))
-        .with_rls_audit_table_name("rls_violations")
-        // rls_grants.sql is a partial fragment with FKs into groups.sql.
-        .with_dangling_foreign_keys_allowed();
+        .with_rls_audit_table_name("rls_violations");
 
     let mut group = c.benchmark_group("rls_translation");
 
+    // rls_grants.sql references tables groups.sql creates, so the two are
+    // benched as one reference-closed document.
+    let groups_plus_grants = format!("{GROUPS_SQL}\n{RLS_GRANTS_SQL}");
     let fixtures: &[(&str, &str)] =
-        &[("rls_basic_1.2KB", RLS_BASIC_SQL), ("rls_grants_21KB", RLS_GRANTS_SQL)];
+        &[("rls_basic_1.2KB", RLS_BASIC_SQL), ("groups_plus_rls_grants_25KB", &groups_plus_grants)];
 
     for (name, sql) in fixtures {
         group.throughput(Throughput::Bytes(sql.len() as u64));

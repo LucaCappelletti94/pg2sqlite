@@ -1,9 +1,11 @@
-//! Reference-closed translation: `ParserDB::validate_foreign_key_targets`
-//! wired into the emission boundary, with the
-//! `with_dangling_foreign_keys_allowed` opt-out.
+//! Reference-closed translation: a foreign key naming a table or column the
+//! document does not declare, or declares only later, fails the schema build
+//! the way the script would fail PostgreSQL's sequential DDL apply. There is
+//! no opt-out, so a fragment becomes translatable by declaring its targets
+//! earlier in the same document.
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 const DANGLING_TABLE: &str =
     "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT REFERENCES missing_table(id));";
@@ -15,17 +17,6 @@ CREATE TABLE child (id INT PRIMARY KEY, parent_id INT REFERENCES parent(missing_
 const FORWARD_REFERENCE: &str = "\
 CREATE TABLE child (id INT PRIMARY KEY, parent_id INT REFERENCES parent(id));
 CREATE TABLE parent (id INT PRIMARY KEY);";
-
-#[test]
-fn dangling_foreign_keys_disallowed_by_default() {
-    assert!(!Pg2SqliteOptions::default().is_dangling_foreign_keys_allowed());
-}
-
-#[test]
-fn with_dangling_foreign_keys_allowed_sets_flag() {
-    let options = Pg2SqliteOptions::default().with_dangling_foreign_keys_allowed();
-    assert!(options.is_dangling_foreign_keys_allowed());
-}
 
 #[test]
 fn dangling_table_fails_translate_to_sql() {
@@ -74,28 +65,26 @@ fn dangling_column_fails_translate_to_sql() {
 }
 
 #[test]
-fn forward_reference_translates() {
-    let statements = Pg2Sqlite::default()
+fn a_forward_reference_is_refused_as_postgres_applies_ddl_in_order() {
+    let err = Pg2Sqlite::default()
         .sql(FORWARD_REFERENCE)
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("forward references are order-insensitive and must translate");
-    assert!(!statements.is_empty());
+        .expect_err("PostgreSQL applies DDL in order, so a forward reference must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("parent"), "error should name the missing target: {msg}");
+    assert!(msg.contains("child"), "error should name the owning table: {msg}");
 }
 
 #[test]
-fn opt_out_translates_dangling_table() {
-    let options = Pg2SqliteOptions::default().with_dangling_foreign_keys_allowed();
+fn closing_the_document_translates_the_former_fragment() {
     let sql = Pg2Sqlite::default()
+        .sql("CREATE TABLE missing_table (id INT PRIMARY KEY);")
+        .unwrap()
         .sql(DANGLING_TABLE)
         .unwrap()
-        .translate_to_sql(&options)
-        .expect("opt-out must permit dangling FK targets");
-    let joined = sql.join("\n");
-    assert!(
-        joined.to_lowercase().contains("references"),
-        "opt-out must preserve the dead REFERENCES text: {joined}"
-    );
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("declaring the target in the same document must translate");
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
     for s in &sql {
         diesel::sql_query(s.as_str()).execute(&mut conn).unwrap();
@@ -103,12 +92,13 @@ fn opt_out_translates_dangling_table() {
 }
 
 #[test]
-fn opt_out_builds_manifest_for_dangling_table() {
-    let options = Pg2SqliteOptions::default().with_dangling_foreign_keys_allowed();
+fn closing_the_document_builds_the_manifest() {
     let manifest = Pg2Sqlite::default()
+        .sql("CREATE TABLE missing_table (id INT PRIMARY KEY);")
+        .unwrap()
         .sql(DANGLING_TABLE)
         .unwrap()
-        .translation_manifest(&options)
-        .expect("opt-out must permit manifest over dangling FK targets");
+        .translation_manifest(&Pg2SqliteOptions::default())
+        .expect("declaring the target in the same document must build the manifest");
     assert!(manifest.iter().any(|entry| entry.logical == "child"));
 }

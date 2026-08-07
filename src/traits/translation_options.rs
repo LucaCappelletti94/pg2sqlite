@@ -318,13 +318,4 @@ pub trait TranslationOptions {
     /// Returns whether a write denied by a policy's `USING` clause raises
     /// rather than affecting zero rows.
     fn is_strict_rls_write_deny(&self) -> bool;
-
-    #[must_use]
-    /// Permits foreign keys whose target table or columns do not resolve in the
-    /// document. Default is to fail on the first dangling reference, as
-    /// Postgres does at DDL apply.
-    fn with_dangling_foreign_keys_allowed(self) -> Self;
-
-    /// Returns whether dangling foreign key targets are permitted.
-    fn is_dangling_foreign_keys_allowed(&self) -> bool;
 }

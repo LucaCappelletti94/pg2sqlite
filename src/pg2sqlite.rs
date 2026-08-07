@@ -478,10 +478,6 @@ impl Pg2Sqlite {
         let schema_statements = Self::schema_statements_for_translation(&normalized_statements);
         let schema = Self::build_translation_schema(schema_statements)?;
 
-        if !options.is_dangling_foreign_keys_allowed() {
-            schema.validate_foreign_key_targets()?;
-        }
-
         let mut options = options.clone();
         populate_prewalk_catalogs(&normalized_statements, &schema, &mut options);
         let options = options;
@@ -637,10 +633,6 @@ impl Pg2Sqlite {
         };
 
         let schema = self.build_schema()?;
-
-        if !options.is_dangling_foreign_keys_allowed() {
-            schema.validate_foreign_key_targets()?;
-        }
 
         let role = options.get_session_user_role().and_then(|name| schema.role(name));
 

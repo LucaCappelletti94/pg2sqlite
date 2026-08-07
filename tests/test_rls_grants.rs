@@ -354,23 +354,15 @@ fn translation_options() -> Pg2SqliteOptions {
 }
 
 fn setup_database(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let options = translation_options();
 
-    // Load and translate groups.sql first
-    let groups_sql = include_str!("fixtures/groups.sql");
-    let groups_translated = Pg2Sqlite::default().sql(groups_sql)?.translate(&options)?;
-    for stmt in &groups_translated {
-        diesel::sql_query(stmt.to_string()).execute(connection)?;
-    }
-
-    // Partial fragment: FKs to `owners`/`users` resolve in groups.sql, a
-    // separate unit above, so opt out of the reference-closure check.
-    let grants_sql = include_str!("fixtures/rls_grants.sql");
-    let grants_options = translation_options().with_dangling_foreign_keys_allowed();
-    let grants_translated = Pg2Sqlite::default().sql(grants_sql)?.translate(&grants_options)?;
-    for stmt in &grants_translated {
+    // groups.sql and rls_grants.sql form one reference-closed document: the
+    // grants fixture's FKs resolve against tables groups.sql creates.
+    let translated = Pg2Sqlite::default()
+        .sql(include_str!("fixtures/groups.sql"))?
+        .sql(include_str!("fixtures/rls_grants.sql"))?
+        .translate(&options)?;
+    for stmt in &translated {
         diesel::sql_query(stmt.to_string()).execute(connection)?;
     }
 

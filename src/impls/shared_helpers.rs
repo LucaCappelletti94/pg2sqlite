@@ -2442,6 +2442,14 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 alias: alias.clone(),
             }
         }
+        TableFactor::UnpivotExpr { .. } => {
+            return Err(Error::UnsupportedSQLiteFeature(
+                "UNPIVOT over an expression (Redshift object unpivoting) is not supported. \
+                 Neither PostgreSQL nor SQLite has this construct. Unpivot a JSON document \
+                 with json_each instead."
+                    .to_string(),
+            ));
+        }
         TableFactor::MatchRecognize {
             table,
             partition_by,
