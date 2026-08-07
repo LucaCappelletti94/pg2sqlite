@@ -232,6 +232,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "interval-arithmetic",
     "on-conflict-do-nothing",
     "foreign-key-match",
+    "serial-columns",
 ];
 
 #[test]

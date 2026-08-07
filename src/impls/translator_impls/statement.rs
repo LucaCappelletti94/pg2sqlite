@@ -770,8 +770,16 @@ fn translate_alter_table_operation(
                 if_not_exists: *if_not_exists,
                 // Route through the same translator the CREATE TABLE path uses so
                 // type mapping, STRICT-legal types, and the parenthesisation
-                // SQLite requires of a non-literal DEFAULT all apply.
-                column_def: translate_column_def(column_def, &alter_table.name, schema, options)?,
+                // SQLite requires of a non-literal DEFAULT all apply. No primary
+                // key columns are passed: SQLite cannot add a primary key with
+                // ALTER TABLE, so an added column is never its rowid alias.
+                column_def: translate_column_def(
+                    column_def,
+                    &alter_table.name,
+                    &[],
+                    schema,
+                    options,
+                )?,
                 column_position: column_position.clone(),
             }))
         }

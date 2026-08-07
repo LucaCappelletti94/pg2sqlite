@@ -290,6 +290,22 @@ impl Translator for DataType {
     }
 }
 
+/// True when `data_type` is one of PostgreSQL's serial pseudo-types.
+///
+/// They reach the parser as a custom name rather than a `DataType` variant, so
+/// they are recognised by the same name lookup that maps them onto `INTEGER`.
+/// Each is shorthand for `integer NOT NULL DEFAULT nextval('...')`, which is
+/// why a serial column needs a value source and not merely a type.
+pub(crate) fn is_serial_type(data_type: &DataType) -> bool {
+    let DataType::Custom(name, _) = data_type else { return false };
+    name.0.last().and_then(|part| part.as_ident()).is_some_and(|ident| {
+        matches!(
+            ident.value.to_ascii_lowercase().as_str(),
+            "serial" | "smallserial" | "bigserial" | "largeserial"
+        )
+    })
+}
+
 /// Maps the PostgreSQL and extension types that reach the parser as a custom
 /// name rather than as a `DataType` variant of their own.
 fn translate_custom_type(

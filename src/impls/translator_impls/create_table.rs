@@ -155,6 +155,23 @@ impl Translator for CreateTable {
             None => None,
         };
 
+        // The primary key as the table constraints declare it, which a column
+        // on its own cannot see and which decides whether it is SQLite's rowid
+        // alias. A column that spells `PRIMARY KEY` inline is recognised by
+        // `translate_column_def` itself.
+        let primary_key_columns: Vec<String> = self
+            .constraints
+            .iter()
+            .filter_map(|constraint| {
+                match constraint {
+                    TableConstraint::PrimaryKey(primary_key) => Some(&primary_key.columns),
+                    _ => None,
+                }
+            })
+            .flatten()
+            .map(|column| column.column.to_string())
+            .collect();
+
         // Every field is named so a field added upstream fails to compile here
         // instead of leaking through a spread, the defect this rebuild fixes.
         let mut created_table = Self {
@@ -163,7 +180,7 @@ impl Translator for CreateTable {
             columns: self
                 .columns
                 .iter()
-                .map(|c| translate_column_def(c, &self.name, schema, options))
+                .map(|c| translate_column_def(c, &self.name, &primary_key_columns, schema, options))
                 .collect::<Result<Vec<_>, _>>()?,
             constraints: self
                 .constraints

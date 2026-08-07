@@ -14,7 +14,7 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, ObjectName,
+    CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Ident, ObjectName,
     TimezoneInfo, Value, ValueWithSpan,
 };
 
@@ -25,7 +25,7 @@ use crate::{
         shared_helpers::{minor_unit_scale, scale_decimal_literal},
         translator_impls::{
             data_type::{
-                character_length, character_length_bound_expr, exact_numeric_info,
+                character_length, character_length_bound_expr, exact_numeric_info, is_serial_type,
                 numeric_precision_and_scale, numeric_precision_bound_expr,
             },
             uuid::{is_blob_uuid_representation, is_uuid_data_type, uuid_blob_length_check_expr},
@@ -94,55 +94,53 @@ fn quoted_decimal_as_number(text: &str) -> Option<Expr> {
 /// column does not identify it: two tables may both have a `created_at`. Both
 /// callers, `CREATE TABLE` and `ALTER TABLE ADD COLUMN`, know the name.
 ///
+/// `primary_key_columns` is the table's primary key as its table constraints
+/// declare it, which the column alone cannot see and which decides whether the
+/// column is SQLite's rowid alias. `ALTER TABLE ADD COLUMN` passes none, since
+/// SQLite cannot add a primary key that way.
+///
 /// This is a free function rather than a [`Translator`] impl for the same
 /// reason: the trait's signature has nowhere to put the table, and an impl
 /// that reported an unqualified column would be the defect this exists to fix.
 pub(crate) fn translate_column_def(
     column: &ColumnDef,
     table: &ObjectName,
+    primary_key_columns: &[String],
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<ColumnDef, crate::errors::Error> {
-    // GENERATED AS IDENTITY (identity columns) must be handled here because we
-    // need to know both the data type and whether the column is a PRIMARY KEY,
-    // information that is only available at the ColumnDef level.
+    // Both an identity column and a serial ask SQLite to supply values, which
+    // it does only through the rowid alias, so both need the translated type
+    // and the table's key before anything else is decided.
     let has_identity = column
         .options
         .iter()
         .any(|o| matches!(&o.option, ColumnOption::Generated { generation_expr: None, .. }));
+    let is_serial = is_serial_type(&column.data_type);
 
-    if has_identity {
+    if has_identity || is_serial {
         let translated_type = column.data_type.translate(schema, options)?;
-        let is_integer_pk = matches!(translated_type, DataType::Integer(None))
-            && column.options.iter().any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)));
-
-        if is_integer_pk {
-            // INTEGER PRIMARY KEY is a rowid alias in SQLite and already auto-assigns.
-            // Drop the identity clause entirely, which is exactly how SERIAL translates.
-            let translated_options = column
-                .options
-                .iter()
-                .filter(|o| {
-                    !matches!(o.option, ColumnOption::Generated { generation_expr: None, .. })
-                })
-                .map(|o| o.translate(schema, options))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect();
-            return Ok(ColumnDef {
-                name: column.name.clone(),
-                data_type: translated_type,
-                options: translated_options,
-            });
+        if !is_rowid_alias(&translated_type, column, primary_key_columns) {
+            return Err(no_value_source(&column.name, is_serial));
         }
 
-        return Err(Error::UnsupportedSQLiteFeature(format!(
-            "GENERATED AS IDENTITY on column '{}' cannot be expressed in SQLite. \
-             Only INTEGER PRIMARY KEY columns are rowid aliases that auto-assign. \
-             Use an INTEGER PRIMARY KEY column or manage sequencing in the application.",
-            column.name
-        )));
+        // INTEGER PRIMARY KEY is a rowid alias in SQLite and already
+        // auto-assigns, so the identity clause is dropped, which is exactly
+        // how a serial translates.
+        let translated_options = column
+            .options
+            .iter()
+            .filter(|o| !matches!(o.option, ColumnOption::Generated { generation_expr: None, .. }))
+            .map(|o| o.translate(schema, options))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        return Ok(ColumnDef {
+            name: column.name.clone(),
+            data_type: translated_type,
+            options: translated_options,
+        });
     }
 
     // D1 makes a scaled NUMERIC column an INTEGER of minor units, and the
@@ -222,6 +220,46 @@ pub(crate) fn translate_column_def(
         data_type: column.data_type.translate(schema, options)?,
         options: translated_options,
     })
+}
+
+/// True when the translated column will be SQLite's rowid alias, the one place
+/// SQLite assigns a value on its own.
+///
+/// The type must be exactly `INTEGER` and the column must be the whole primary
+/// key. Both spellings of the key count, the column's own `PRIMARY KEY` option
+/// and a single-column `PRIMARY KEY (n)` table constraint, because SQLite makes
+/// an alias of either: measured on 3.46.0, `CREATE TABLE x (n INTEGER, t TEXT,
+/// PRIMARY KEY (n)) STRICT` assigns 1 and 2 to two rows that name no value. A
+/// composite key is not an alias, so a serial inside one has no value source.
+fn is_rowid_alias(
+    translated_type: &DataType,
+    column: &ColumnDef,
+    primary_key_columns: &[String],
+) -> bool {
+    if !matches!(translated_type, DataType::Integer(None)) {
+        return false;
+    }
+    column.options.iter().any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)))
+        || matches!(primary_key_columns, [only] if only.eq_ignore_ascii_case(&column.name.value))
+}
+
+/// Reports a column that asks SQLite to supply its values where SQLite cannot.
+///
+/// PostgreSQL's `SERIAL` is shorthand for `integer NOT NULL DEFAULT
+/// nextval('...')`, so it is the same request an identity column makes, and
+/// SQLite grants it only through the rowid alias. Left alone, a serial off the
+/// key emitted a plain `INTEGER` and every row stored NULL in silence, while
+/// the identity spelling and the literal `DEFAULT nextval('...')` both already
+/// refused.
+fn no_value_source(column: &Ident, is_serial: bool) -> Error {
+    let construct = if is_serial { "SERIAL" } else { "GENERATED AS IDENTITY" };
+    Error::UnsupportedSQLiteFeature(format!(
+        "{construct} on column '{column}' cannot be expressed in SQLite. It asks the database to \
+         supply the value, and SQLite does that only for an INTEGER PRIMARY KEY, which is its \
+         rowid alias, so a column that is not the whole primary key has no value source. Make it \
+         the table's INTEGER PRIMARY KEY, or declare it INTEGER NOT NULL and supply the value on \
+         every insert."
+    ))
 }
 
 /// Reports what a column's declared type loses on the way to SQLite.
