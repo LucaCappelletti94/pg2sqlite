@@ -1,9 +1,10 @@
-//! The playground keeps its own lockfile while taking this crate as a path
-//! dependency, so a root pin bump that is not mirrored there compiles this
-//! crate's current source against an older dependency API, and the first
-//! evidence used to be a red Pages deploy (R101). This fails the drift at
-//! test time instead: every git dependency the two lockfiles share must
-//! agree on its pinned revision.
+//! The playground and the fuzz workspace keep their own lockfiles while
+//! taking this crate as a path dependency, so a root pin bump that is not
+//! mirrored there compiles this crate's current source against an older
+//! dependency API. The first evidence used to be a red Pages deploy (R101)
+//! or a fuzz build failing with 92 import errors (R80 phase 3). This fails
+//! the drift at test time instead: every git dependency a satellite
+//! lockfile shares with the root must agree on its pinned revision.
 
 use std::collections::BTreeMap;
 
@@ -28,11 +29,10 @@ fn git_revisions(lockfile: &str) -> BTreeMap<String, String> {
     revisions
 }
 
-#[test]
-fn the_playground_lockfile_matches_the_root_pins() {
+/// Asserts every git pin `satellite` shares with the root lockfile agrees.
+fn assert_lockfile_matches_root(satellite_path: &str) {
     let root = std::fs::read_to_string("Cargo.lock").expect("the root lockfile");
-    let playground = std::fs::read_to_string("examples/web-playground/Cargo.lock")
-        .expect("the playground lockfile");
+    let satellite = std::fs::read_to_string(satellite_path).expect("the satellite lockfile");
 
     let root_revisions = git_revisions(&root);
     assert!(
@@ -40,21 +40,32 @@ fn the_playground_lockfile_matches_the_root_pins() {
         "the root lockfile carries git pins for sql-traits and sqlparser, so an empty map means \
          the parser broke, not that there is nothing to compare"
     );
-    let playground_revisions = git_revisions(&playground);
+    let satellite_revisions = git_revisions(&satellite);
 
     let disagreements: Vec<String> = root_revisions
         .iter()
         .filter_map(|(name, root_revision)| {
-            let playground_revision = playground_revisions.get(name)?;
-            (playground_revision != root_revision)
-                .then(|| format!("{name}: root {root_revision}, playground {playground_revision}"))
+            let satellite_revision = satellite_revisions.get(name)?;
+            (satellite_revision != root_revision).then(|| {
+                format!("{name}: root {root_revision}, {satellite_path} {satellite_revision}")
+            })
         })
         .collect();
 
     assert!(
         disagreements.is_empty(),
-        "the playground lockfile pins different git revisions than the root. Run \
-         `cargo update -p <name> --precise <revision>` in examples/web-playground:\n{}",
+        "{satellite_path} pins different git revisions than the root. Run \
+         `cargo update -p <name> --precise <revision>` against it:\n{}",
         disagreements.join("\n")
     );
+}
+
+#[test]
+fn the_playground_lockfile_matches_the_root_pins() {
+    assert_lockfile_matches_root("examples/web-playground/Cargo.lock");
+}
+
+#[test]
+fn the_fuzz_lockfile_matches_the_root_pins() {
+    assert_lockfile_matches_root("fuzz/Cargo.lock");
 }
