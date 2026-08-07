@@ -18,11 +18,11 @@ fn tsvector_tsquery_match() {
          SELECT * FROM articles WHERE to_tsvector('english', title || ' ' || body) @@ to_tsquery('english', 'hello & world');"
     );
     let output = translate(&sql);
-    // Should translate @@ to FTS5 MATCH
     assert!(
         output.contains("MATCH") || output.contains("fts"),
         "Expected FTS5 MATCH translation: {output}"
     );
+    apply_translated_pg(&sql);
 }
 
 #[test]
@@ -38,6 +38,7 @@ fn tsvector_tsquery_single_column() {
         output.contains("MATCH") || output.contains("fts"),
         "Expected FTS5 translation: {output}"
     );
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -51,6 +52,7 @@ fn view_with_case_expression() {
     let output = translate(sql);
     assert!(output.contains("CASE"), "Expected CASE: {output}");
     assert!(output.contains("WHEN"), "Expected WHEN: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -62,6 +64,7 @@ fn view_with_coalesce() {
     ";
     let output = translate(sql);
     assert!(output.contains("COALESCE"), "Expected COALESCE: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -73,6 +76,7 @@ fn view_with_cast() {
     ";
     let output = translate(sql);
     assert!(output.contains("CAST"), "Expected CAST: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -84,6 +88,7 @@ fn view_with_between() {
     ";
     let output = translate(sql);
     assert!(output.contains("BETWEEN"), "Expected BETWEEN: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -95,6 +100,7 @@ fn view_with_in_list() {
     ";
     let output = translate(sql);
     assert!(output.contains("IN ("), "Expected IN list: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -107,6 +113,7 @@ fn view_with_exists_subquery() {
     ";
     let output = translate(sql);
     assert!(output.contains("EXISTS"), "Expected EXISTS: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -119,6 +126,7 @@ fn view_with_in_subquery() {
     ";
     let output = translate(sql);
     assert!(output.contains("IN (SELECT"), "Expected IN subquery: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -130,6 +138,7 @@ fn view_with_is_null() {
     ";
     let output = translate(sql);
     assert!(output.contains("IS NULL"), "Expected IS NULL: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -141,6 +150,7 @@ fn view_with_like() {
     ";
     let output = translate(sql);
     assert!(output.contains("LIKE"), "Expected LIKE: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -153,6 +163,7 @@ fn view_with_not_exists() {
     ";
     let output = translate(sql);
     assert!(output.contains("NOT EXISTS"), "Expected NOT EXISTS: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -165,6 +176,7 @@ fn view_with_json_access_operator_arrow() {
     ";
     let output = translate(sql);
     assert!(output.contains("->"), "Expected JSON access operator in output: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -177,6 +189,7 @@ fn view_with_json_access_operator_arrow_text() {
     ";
     let output = translate(sql);
     assert!(output.contains("->>"), "Expected JSON text access operator in output: {output}");
+    apply_translated_pg(sql);
 }
 
 #[test]
@@ -193,4 +206,25 @@ fn view_with_chained_json_access_operators() {
         "Expected chained JSON access output: {output}"
     );
     assert!(output.contains("->>"), "Expected chained JSON text access output: {output}");
+    apply_translated_pg(sql);
+}
+
+/// Translates `pg` with default options and executes every emitted statement
+/// against an in-memory SQLite connection.
+/// Translated DDL cannot be expressed via diesel's typed DSL, so sql_query is
+/// used here to prove the emitted SQL is accepted by SQLite.
+fn apply_translated_pg(pg: &str) {
+    use diesel::prelude::*;
+    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+    let stmts = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate");
+    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
+    for s in &stmts {
+        diesel::sql_query(s.to_string())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{s}"));
+    }
 }

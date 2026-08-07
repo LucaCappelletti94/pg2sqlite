@@ -20,6 +20,7 @@ fn localtimestamp_to_datetime_localtime() {
         lower.contains("datetime(") && lower.contains("localtime"),
         "localtimestamp should become datetime('now', 'localtime'): {result}"
     );
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -31,6 +32,7 @@ fn localtime_to_time_localtime() {
         lower.contains("time(") && lower.contains("localtime"),
         "localtime should become time('now', 'localtime'): {result}"
     );
+    sqlite_accepts(&result);
 }
 
 /// Inverted from `to_json_renames_to_json`. The rename emitted `json('hello')`,
@@ -46,6 +48,7 @@ fn to_json_converts_rather_than_reinterprets() {
         lower.contains("json_quote(") && !lower.contains("to_json"),
         "to_json should convert through json_quote: {result}"
     );
+    sqlite_accepts(&result);
 }
 
 /// Inverted from `to_jsonb_renames_to_json`, for the same reason.
@@ -58,6 +61,7 @@ fn to_jsonb_converts_rather_than_reinterprets() {
         lower.contains("json_quote(") && !lower.contains("to_jsonb"),
         "to_jsonb should convert through json_quote: {result}"
     );
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -66,6 +70,7 @@ fn jsonb_set_renames_to_json_set() {
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(lower.contains("json_set("), "jsonb_set should rename to json_set: {result}");
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -74,6 +79,7 @@ fn jsonb_insert_renames_to_json_insert() {
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(lower.contains("json_insert("), "jsonb_insert should rename to json_insert: {result}");
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -82,6 +88,16 @@ fn jsonb_each_renames_to_json_each() {
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(lower.contains("json_each("), "jsonb_each should rename to json_each: {result}");
+    // Pins R121: json_each() in scalar SELECT position is refused by SQLite. Goes
+    // red when the defect is fixed, which is the point.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    let err = conn
+        .prepare(&result)
+        .expect_err("R121 pin: SQLite should refuse json_each in scalar position");
+    assert!(
+        err.to_string().contains("no such function: json_each"),
+        "expected json_each error: {err}"
+    );
 }
 
 #[test]
@@ -90,6 +106,16 @@ fn json_each_text_renames_to_json_each() {
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(lower.contains("json_each("), "json_each_text should rename to json_each: {result}");
+    // Pins R121: json_each() in scalar SELECT position is refused by SQLite. Goes
+    // red when the defect is fixed, which is the point.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    let err = conn
+        .prepare(&result)
+        .expect_err("R121 pin: SQLite should refuse json_each in scalar position");
+    assert!(
+        err.to_string().contains("no such function: json_each"),
+        "expected json_each error: {err}"
+    );
 }
 
 #[test]
@@ -98,6 +124,16 @@ fn jsonb_each_text_renames_to_json_each() {
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(lower.contains("json_each("), "jsonb_each_text should rename to json_each: {result}");
+    // Pins R121: json_each() in scalar SELECT position is refused by SQLite. Goes
+    // red when the defect is fixed, which is the point.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    let err = conn
+        .prepare(&result)
+        .expect_err("R121 pin: SQLite should refuse json_each in scalar position");
+    assert!(
+        err.to_string().contains("no such function: json_each"),
+        "expected json_each error: {err}"
+    );
 }
 
 #[test]
@@ -109,6 +145,7 @@ fn quote_literal_renames_to_quote() {
         lower.contains("quote(") && !lower.contains("quote_literal"),
         "quote_literal should rename to quote: {result}"
     );
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -116,6 +153,7 @@ fn mod_to_modulo_operator() {
     let sql = "SELECT mod(10, 3)";
     let result = translate_sql(sql, &default_opts()).unwrap();
     assert!(result.contains('%'), "mod(a, b) should become (a % b): {result}");
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -127,6 +165,7 @@ fn div_to_integer_division() {
         lower.contains("cast(") && lower.contains("/ ") && lower.contains("integer"),
         "div(a, b) should become CAST(a / b AS INTEGER): {result}"
     );
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -138,6 +177,7 @@ fn trunc_single_arg_to_cast_integer() {
         lower.contains("cast(") && lower.contains("integer"),
         "trunc(x) should become CAST(x AS INTEGER): {result}"
     );
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -146,6 +186,7 @@ fn make_date_to_printf() {
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(lower.contains("printf("), "make_date should become printf: {result}");
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -154,6 +195,7 @@ fn make_time_to_printf() {
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(lower.contains("printf("), "make_time should become printf: {result}");
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -162,6 +204,7 @@ fn make_timestamp_to_printf() {
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(lower.contains("printf("), "make_timestamp should become printf: {result}");
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -173,6 +216,7 @@ fn json_extract_path_to_json_extract() {
         lower.contains("json_extract("),
         "json_extract_path should become json_extract: {result}"
     );
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -184,6 +228,7 @@ fn jsonb_extract_path_to_json_extract() {
         lower.contains("json_extract("),
         "jsonb_extract_path should become json_extract: {result}"
     );
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -195,6 +240,7 @@ fn json_extract_path_text_to_json_extract() {
         lower.contains("json_extract("),
         "json_extract_path_text should become json_extract: {result}"
     );
+    sqlite_accepts(&result);
 }
 
 #[test]
@@ -206,4 +252,14 @@ fn jsonb_extract_path_text_to_json_extract() {
         lower.contains("json_extract("),
         "jsonb_extract_path_text should become json_extract: {result}"
     );
+    sqlite_accepts(&result);
+}
+
+/// Executes `sql` against an in-memory SQLite to prove the translator's output
+/// is valid. The translated SQL is dynamically generated by the translator.
+fn sqlite_accepts(sql: &str) {
+    rusqlite::Connection::open_in_memory()
+        .expect("in-memory SQLite")
+        .execute_batch(sql)
+        .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{sql}"));
 }

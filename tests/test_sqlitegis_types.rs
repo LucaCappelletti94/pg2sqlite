@@ -20,6 +20,11 @@ fn geometry_column_translates_to_blob() {
         joined.to_ascii_uppercase().contains("BLOB"),
         "expected BLOB for geometry column, got: {joined}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &sqlite {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted DDL must run in SQLite: {e}\n{stmt}"));
+    }
 }
 
 #[test]
@@ -34,6 +39,11 @@ fn geography_column_translates_to_blob() {
         joined.to_ascii_uppercase().contains("BLOB"),
         "expected BLOB for geography column, got: {joined}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &sqlite {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted DDL must run in SQLite: {e}\n{stmt}"));
+    }
 }
 
 #[test]

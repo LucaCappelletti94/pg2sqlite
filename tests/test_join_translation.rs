@@ -229,6 +229,14 @@ fn test_join_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_uppercase().contains("ILIKE"),
         "Should not contain ILIKE, got: {select_stmt}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+        {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+        conn.prepare(&select_stmt).unwrap();
+    }
 
     Ok(())
 }
@@ -269,6 +277,14 @@ fn test_join_now_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_uppercase().contains("NOW()"),
         "Should not contain NOW(), got: {select_stmt}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+        {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+        conn.prepare(&select_stmt).unwrap();
+    }
 
     Ok(())
 }
@@ -317,6 +333,14 @@ fn test_join_least_greatest_translation() -> Result<(), Box<dyn std::error::Erro
         !select_stmt.to_uppercase().contains("GREATEST"),
         "Should not contain GREATEST, got: {select_stmt}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+        {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+        conn.prepare(&select_stmt).unwrap();
+    }
 
     Ok(())
 }
@@ -360,6 +384,14 @@ fn test_join_subquery_function_translation() -> Result<(), Box<dyn std::error::E
         !select_stmt.to_lowercase().contains("string_agg"),
         "Should not contain string_agg, got: {select_stmt}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+        {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+        conn.prepare(&select_stmt).unwrap();
+    }
 
     Ok(())
 }
@@ -409,6 +441,14 @@ fn test_multiple_joins_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_uppercase().contains("ILIKE"),
         "Should not contain ILIKE, got: {select_stmt}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+        {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+        conn.prepare(&select_stmt).unwrap();
+    }
 
     Ok(())
 }
@@ -448,6 +488,14 @@ fn test_left_join_translation() -> Result<(), Box<dyn std::error::Error>> {
         select_stmt.to_uppercase().contains(" LIKE "),
         "ILIKE should translate to LIKE, got: {select_stmt}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+        {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+        conn.prepare(&select_stmt).unwrap();
+    }
 
     Ok(())
 }

@@ -7,6 +7,7 @@ mod run_translated_helper;
 mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use run_translated_helper::run_translated_with;
+use rusqlite::Connection as SqliteConn;
 use translate_helpers::translate_default as translate;
 
 fn translate_result(sql: &str) -> Result<Vec<String>, String> {
@@ -18,6 +19,18 @@ fn translate_result(sql: &str) -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Executes all statements emitted by translating `sql` against real in-memory
+/// SQLite. Used after substring asserts to prove the translated output runs
+/// without error.
+fn execute_translated(sql: &str) {
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    let script = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
+    conn.execute_batch(&script)
+        .unwrap_or_else(|e| panic!("translated SQL must execute in SQLite: {e}\n{script}"));
+}
+
 #[test]
 fn basic_btree_index() {
     let sql = "
@@ -27,6 +40,7 @@ fn basic_btree_index() {
     let output = translate(sql);
     assert!(output.contains("CREATE INDEX"), "Expected CREATE INDEX: {output}");
     assert!(output.contains("idx_users_name"), "Expected index name: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -37,6 +51,7 @@ fn unique_index() {
     ";
     let output = translate(sql);
     assert!(output.contains("UNIQUE"), "Expected UNIQUE index: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -47,6 +62,7 @@ fn index_if_not_exists() {
     ";
     let output = translate(sql);
     assert!(output.contains("IF NOT EXISTS"), "Expected IF NOT EXISTS: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -58,6 +74,7 @@ fn multi_column_index() {
     let output = translate(sql);
     assert!(output.contains("name"), "Expected name column: {output}");
     assert!(output.contains("age"), "Expected age column: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -72,6 +89,7 @@ fn gin_tsvector_index_to_fts5() {
         output.contains("fts5") || output.contains("FTS") || output.contains("articles"),
         "Expected FTS5 or table reference: {output}"
     );
+    execute_translated(sql);
 }
 
 #[test]
@@ -85,6 +103,7 @@ fn gin_tsvector_single_column() {
         output.contains("fts5") || output.contains("content") || output.contains("docs"),
         "Expected FTS5 or column reference: {output}"
     );
+    execute_translated(sql);
 }
 
 #[test]
@@ -99,6 +118,7 @@ fn gist_tsvector_index() {
         output.contains("fts5") || output.contains("articles"),
         "Expected FTS5 translation: {output}"
     );
+    execute_translated(sql);
 }
 
 #[test]
@@ -111,6 +131,7 @@ fn hash_index() {
     // Hash indexes can't be directly translated - should become regular index or be
     // dropped
     assert!(output.contains("users"), "Expected table still present: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -121,6 +142,7 @@ fn expression_index() {
     ";
     let output = translate(sql);
     assert!(output.contains("users"), "Expected output: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -134,6 +156,7 @@ fn partial_index() {
         output.contains("WHERE") || output.contains("users"),
         "Expected index or table: {output}"
     );
+    execute_translated(sql);
 }
 
 #[test]
@@ -146,6 +169,7 @@ fn concurrently_is_dropped() {
     let output = translate(sql);
     assert!(!output.contains("CONCURRENTLY"), "CONCURRENTLY must be stripped: {output}");
     assert!(output.contains("idx_name"), "Index name should be preserved: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -158,6 +182,7 @@ fn include_clause_is_dropped() {
     let output = translate(sql);
     assert!(!output.contains("INCLUDE"), "INCLUDE clause must be stripped: {output}");
     assert!(output.contains("idx_name"), "Index name should be preserved: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -170,6 +195,7 @@ fn using_btree_is_dropped() {
     let output = translate(sql);
     assert!(!output.contains("USING"), "USING clause must be stripped: {output}");
     assert!(output.contains("idx_name"), "Index name should be preserved: {output}");
+    execute_translated(sql);
 }
 
 #[test]
@@ -222,6 +248,7 @@ fn gist_tsvector_translates_to_fts5() {
         "Expected articles_fts table name, got: {}",
         translated_sql[1]
     );
+    execute_translated(sql);
 }
 
 #[test]
@@ -274,6 +301,7 @@ fn gin_tsvector_translates_to_fts5() {
         "Expected UPDATE trigger, got: {}",
         translated_sql[4]
     );
+    execute_translated(sql);
 }
 
 /// The index path had the mirror image of the table-constraint defect: it
@@ -304,6 +332,10 @@ fn unique_index_nulls_distinct_is_translated() {
     assert!(
         !sql.to_uppercase().contains("NULLS"),
         "the clause has no SQLite form and must not reach the output: {sql}"
+    );
+    execute_translated(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         CREATE UNIQUE INDEX i ON t (s) NULLS DISTINCT;",
     );
 }
 

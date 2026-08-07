@@ -133,6 +133,13 @@ fn test_now_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should not contain NOW(), got: {select_stmt}"
     );
 
+    // Execute DDL statements and prepare the SELECT to verify SQLite accepts them.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
+    conn.prepare(&select_stmt).unwrap();
+
     Ok(())
 }
 
@@ -212,6 +219,13 @@ fn test_string_agg_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_lowercase().contains("string_agg"),
         "Should not contain string_agg, got: {select_stmt}"
     );
+
+    // Execute DDL statements and prepare the SELECT to verify SQLite accepts them.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
+    conn.prepare(&select_stmt).unwrap();
 
     Ok(())
 }
@@ -305,6 +319,13 @@ fn test_ilike_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_uppercase().contains("ILIKE"),
         "Should not contain ILIKE, got: {select_stmt}"
     );
+
+    // Execute DDL statements and prepare the SELECT to verify SQLite accepts them.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
+    conn.prepare(&select_stmt).unwrap();
 
     Ok(())
 }

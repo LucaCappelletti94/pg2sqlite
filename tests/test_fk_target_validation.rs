@@ -2,6 +2,7 @@
 //! wired into the emission boundary, with the
 //! `with_dangling_foreign_keys_allowed` opt-out.
 
+use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
 
 const DANGLING_TABLE: &str =
@@ -95,6 +96,10 @@ fn opt_out_translates_dangling_table() {
         joined.to_lowercase().contains("references"),
         "opt-out must preserve the dead REFERENCES text: {joined}"
     );
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    for s in &sql {
+        diesel::sql_query(s.as_str()).execute(&mut conn).unwrap();
+    }
 }
 
 #[test]

@@ -169,6 +169,10 @@ fn test_concat_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_uppercase().contains("CONCAT"),
         "CONCAT function should not appear in output, got: {select_stmt}"
     );
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+    for s in &translated {
+        diesel::sql_query(s.to_string()).execute(&mut conn)?;
+    }
 
     Ok(())
 }
@@ -190,6 +194,10 @@ fn test_concat_two_args() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
 
     assert!(select_stmt.contains("||"), "Should use || operator, got: {select_stmt}");
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+    for s in &translated {
+        diesel::sql_query(s.to_string()).execute(&mut conn)?;
+    }
 
     Ok(())
 }
@@ -215,6 +223,10 @@ fn test_concat_single_arg() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_uppercase().contains("CONCAT"),
         "CONCAT should not appear, got: {select_stmt}"
     );
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+    for s in &translated {
+        diesel::sql_query(s.to_string()).execute(&mut conn)?;
+    }
 
     Ok(())
 }
@@ -345,6 +357,10 @@ fn test_generated_column_translation() -> Result<(), Box<dyn std::error::Error>>
         create_stmt.contains("GENERATED ALWAYS AS"),
         "Should preserve GENERATED ALWAYS AS, got: {create_stmt}"
     );
+    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
+    for s in &translated {
+        diesel::sql_query(s.to_string()).execute(&mut conn)?;
+    }
 
     Ok(())
 }

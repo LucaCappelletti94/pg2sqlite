@@ -55,12 +55,14 @@ fn matching_ids(predicate: &str) -> Vec<i64> {
 fn is_json_is_never_emitted_verbatim() {
     let out = translate_ok(&format!("{FIXTURE}SELECT id FROM docs WHERE payload IS JSON;"));
     assert!(!out.contains("IS JSON"), "translated output must not contain IS JSON: {out}");
+    matching_ids("payload IS JSON");
 }
 
 #[test]
 fn is_json_becomes_json_valid() {
     let out = translate_ok(&format!("{FIXTURE}SELECT id FROM docs WHERE payload IS JSON;"));
     assert!(out.contains("json_valid(payload)"), "got: {out}");
+    matching_ids("payload IS JSON");
 }
 
 #[test]
@@ -89,6 +91,7 @@ fn shape_predicates_guard_json_type_behind_a_case() {
     let out = translate_ok(&format!("{FIXTURE}SELECT id FROM docs WHERE payload IS JSON ARRAY;"));
     assert!(out.contains("CASE WHEN json_valid(payload)"), "got: {out}");
     assert!(out.contains("json_type(payload) = 'array'"), "got: {out}");
+    matching_ids("payload IS JSON ARRAY");
 }
 
 #[test]

@@ -163,17 +163,21 @@ fn a_qualified_rename_target_is_rejected() {
 /// the two pins below: identical input bar the rename, wildly different result.
 #[test]
 fn row_level_security_without_a_rename_builds_its_object_set() {
-    let emitted = rls_translation(
+    let stmts = rls_translation(
         "CREATE TABLE t2 (id INT PRIMARY KEY, owner TEXT);
          ALTER TABLE t2 ENABLE ROW LEVEL SECURITY;
          CREATE POLICY p ON t2 USING (owner = current_setting('app.user'));",
-    )
-    .join("\n");
-
+    );
+    let emitted = stmts.join("\n");
     assert!(
         emitted.contains("CREATE VIEW t2") && emitted.contains("t2_rls"),
         "the control must emit the backing table and the view, got:\n{emitted}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &stmts {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted DDL failed: {e}\n{stmt}"));
+    }
 }
 
 /// Renaming a table that is also placed under row level security is refused,
@@ -229,18 +233,22 @@ fn rename_below_row_level_security_is_refused() {
 /// A rename with no row level security anywhere is untouched by the refusal.
 #[test]
 fn a_rename_without_row_level_security_still_translates() {
-    let emitted = Pg2Sqlite::default()
+    let stmts: Vec<String> = Pg2Sqlite::default()
         .sql("CREATE TABLE t (id INT PRIMARY KEY, a TEXT); ALTER TABLE t RENAME TO t2;")
         .expect("parse")
         .translate(&rls_options())
         .expect("a plain rename must still translate")
         .iter()
         .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-
+        .collect();
+    let emitted = stmts.join("\n");
     assert!(
         emitted.contains("ALTER TABLE t RENAME TO t2"),
         "the rename must still be emitted, got:\n{emitted}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &stmts {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted DDL failed: {e}\n{stmt}"));
+    }
 }

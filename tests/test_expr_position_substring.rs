@@ -59,6 +59,14 @@ fn test_position_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_uppercase().contains("POSITION"),
         "Should not contain POSITION, got: {select_stmt}"
     );
+    // Apply DDL then prepare the SELECT to prove SQLite accepts the output.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected DDL: {e}\n{stmt}"));
+    }
+    conn.prepare(&select_stmt)
+        .unwrap_or_else(|e| panic!("SQLite rejected SELECT at prepare: {e}\n{select_stmt}"));
 
     Ok(())
 }
@@ -134,6 +142,14 @@ fn test_substring_translation() -> Result<(), Box<dyn std::error::Error>> {
         select_stmt.to_uppercase().contains("SUBSTR"),
         "SUBSTRING should translate to SUBSTR, got: {select_stmt}"
     );
+    // Apply DDL then prepare the SELECT to prove SQLite accepts the output.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected DDL: {e}\n{stmt}"));
+    }
+    conn.prepare(&select_stmt)
+        .unwrap_or_else(|e| panic!("SQLite rejected SELECT at prepare: {e}\n{select_stmt}"));
 
     Ok(())
 }
@@ -200,6 +216,14 @@ fn test_substring_no_length_translation() -> Result<(), Box<dyn std::error::Erro
         select_stmt.to_uppercase().contains("SUBSTR"),
         "SUBSTRING should translate to SUBSTR, got: {select_stmt}"
     );
+    // Apply DDL then prepare the SELECT to prove SQLite accepts the output.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected DDL: {e}\n{stmt}"));
+    }
+    conn.prepare(&select_stmt)
+        .unwrap_or_else(|e| panic!("SQLite rejected SELECT at prepare: {e}\n{select_stmt}"));
 
     Ok(())
 }

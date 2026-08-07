@@ -4,6 +4,7 @@
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use rusqlite::Connection;
 use sqlparser::{
     ast::{
         BinaryOperator, Expr, Ident, Join, JoinConstraint, JoinOperator, ObjectName,
@@ -13,6 +14,15 @@ use sqlparser::{
     parser::Parser,
 };
 use translate_helpers::translate_default as translate;
+
+/// Execute each non-empty statement in `output` (newline-joined) against an
+/// in-memory SQLite to prove the translator emits valid SQL.
+fn execute_all(output: &str) {
+    let conn = Connection::open_in_memory().unwrap();
+    for s in output.split('\n').filter(|s| !s.trim().is_empty()) {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
+}
 
 fn parse_expr(sql: &str) -> Expr {
     Parser::new(&PostgreSqlDialect {}).try_with_sql(sql).unwrap().parse_expr().unwrap()
@@ -27,6 +37,7 @@ fn forward_update_basic() {
     let output = translate(sql);
     assert!(output.contains("UPDATE"), "Expected UPDATE in output: {output}");
     assert!(output.contains("name = 'Bob'"), "Expected updated value in output: {output}");
+    execute_all(&output);
 }
 
 #[test]
@@ -41,6 +52,7 @@ fn forward_update_from_is_preserved() {
     let output = translate(sql);
     assert!(output.contains("UPDATE"), "Expected UPDATE in output: {output}");
     assert!(output.contains("FROM teams"), "Expected FROM clause in output: {output}");
+    execute_all(&output);
 }
 
 #[test]
@@ -54,6 +66,7 @@ fn forward_update_translates_assignment_expressions() {
         output.contains("datetime('now')"),
         "Expected now() to translate to datetime('now'): {output}"
     );
+    execute_all(&output);
 }
 
 #[test]
@@ -124,19 +137,25 @@ fn forward_update_limit_translates_expressions() {
     };
     update.limit = Some(parse_expr("NOW()"));
 
-    let output = Pg2Sqlite::default()
+    let stmts = Pg2Sqlite::default()
         .sql(schema_sql)
         .unwrap()
         .statement(update_stmt)
         .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
+        .unwrap();
+
+    let output = stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
         output.contains("LIMIT") && output.contains("datetime('now')"),
         "Expected translated LIMIT expression in UPDATE: {output}"
     );
+
+    // Execute DDL statements. The UPDATE uses LIMIT which requires
+    // SQLITE_ENABLE_UPDATE_DELETE_LIMIT at compile time, so only the DDL
+    // (non-Update) statements are run here to prove SQLite accepts the schema.
+    let conn = Connection::open_in_memory().unwrap();
+    for s in stmts.iter().filter(|s| !matches!(s, Statement::Update(_))) {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
 }

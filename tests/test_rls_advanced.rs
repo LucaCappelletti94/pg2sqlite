@@ -48,6 +48,25 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .join("\n")
 }
 
+/// Executes every translated statement in an in-memory SQLite connection.
+/// Uses the standard RLS options from make_options().
+fn execute_rls_ddl(pg_sql: &str) {
+    let stmts = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&make_options()).unwrap();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &stmts {
+        conn.execute_batch(&format!("{stmt};")).expect("translated RLS DDL must execute in SQLite");
+    }
+}
+
+/// Like execute_rls_ddl but uses caller-supplied options.
+fn execute_rls_ddl_with_opts(pg_sql: &str, options: &Pg2SqliteOptions) {
+    let stmts = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(options).unwrap();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &stmts {
+        conn.execute_batch(&format!("{stmt};")).expect("translated RLS DDL must execute in SQLite");
+    }
+}
+
 #[test]
 fn exists_in_policy_using() {
     let sql = r#"
@@ -74,6 +93,7 @@ fn exists_in_policy_using() {
     "#;
     let output = translate(sql);
     assert!(output.contains("EXISTS"), "Expected EXISTS in view: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -102,6 +122,7 @@ fn in_subquery_in_policy() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IN (SELECT"), "Expected IN subquery: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -133,6 +154,7 @@ fn update_with_check_resolves_against_new_row() {
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
     assert!(output.contains("owner_id = NEW.owner_id"), "SET must assign NEW: {output}");
     assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -163,6 +185,7 @@ fn compound_identifier_renamed_in_trigger() {
         output.contains("NEW.owner_id") || output.contains("OLD.owner_id"),
         "Expected NEW/OLD prefix for compound identifier: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -192,6 +215,7 @@ fn current_setting_in_binary_op() {
         output.contains("current_app_user()"),
         "Expected current_app_user() function: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -222,6 +246,7 @@ fn current_user_in_nested_expr() {
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"));
     let output = translate_with_options(sql, &options);
     assert!(output.contains("current_app_username()"), "Expected current_app_username(): {output}");
+    execute_rls_ddl_with_opts(sql, &options);
 }
 
 #[test]
@@ -320,6 +345,7 @@ fn readonly_rls_table_no_write_triggers() {
         !output.contains("delete_trigger"),
         "Should NOT have delete trigger for readonly: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -350,6 +376,7 @@ fn monitoring_triggers_in_monitor_mode() {
     assert!(output.contains("rls_monitor_update"), "Expected monitor update trigger: {output}");
     // In monitor mode (default), should have severity 'warning'
     assert!(output.contains("warning"), "Expected 'warning' severity in monitor mode: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -380,6 +407,7 @@ fn monitoring_triggers_in_strict_mode() {
     assert!(output.contains("RAISE(ABORT"), "Expected RAISE(ABORT) in strict mode: {output}");
     // In strict mode, severity should be 'error'
     assert!(output.contains("error"), "Expected 'error' severity in strict mode: {output}");
+    execute_rls_ddl_with_opts(sql, &options);
 }
 
 #[test]
@@ -406,6 +434,7 @@ fn validation_view_generated() {
     "#;
     let output = translate(sql);
     assert!(output.contains("_violations"), "Expected validation view with _violations: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -435,6 +464,7 @@ fn audit_table_generated() {
         output.contains("CREATE TABLE IF NOT EXISTS rls_audit"),
         "Expected audit table creation: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -462,6 +492,7 @@ fn is_null_in_policy() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IS NULL"), "Expected IS NULL in transformed policy: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -489,6 +520,7 @@ fn in_list_in_policy() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IN ("), "Expected IN list in transformed policy: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -516,6 +548,7 @@ fn between_in_policy() {
     "#;
     let output = translate(sql);
     assert!(output.contains("BETWEEN"), "Expected BETWEEN in transformed policy: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -568,6 +601,7 @@ fn is_not_null_in_policy() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IS NOT NULL"), "Expected IS NOT NULL in transformed policy: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -595,6 +629,7 @@ fn unary_not_in_policy() {
     "#;
     let output = translate(sql);
     assert!(output.contains("NOT"), "Expected NOT in transformed policy: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -626,6 +661,7 @@ fn nested_parens_in_policy() {
         output.contains("category") && output.contains("status"),
         "Expected nested conditions in policy: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -655,6 +691,7 @@ fn update_check_with_not_operator() {
     assert!(output.contains("NOT NEW.is_archived"), "NOT must apply to NEW: {output}");
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
     assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -686,6 +723,7 @@ fn update_check_with_nested_expr() {
     assert!(output.contains("NEW.status"), "nested OR arm must reference NEW: {output}");
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
     assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -713,6 +751,7 @@ fn update_check_with_is_null() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IS NULL"), "Expected IS NULL in update check: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -740,6 +779,7 @@ fn update_check_with_is_not_null() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IS NOT NULL"), "Expected IS NOT NULL in update check: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -767,6 +807,7 @@ fn update_check_with_in_list() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IN ("), "Expected IN list in update check: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -798,6 +839,7 @@ fn update_check_with_exists_subquery() {
     "#;
     let output = translate(sql);
     assert!(output.contains("EXISTS"), "Expected EXISTS in update check: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -829,6 +871,7 @@ fn update_check_with_in_subquery() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IN (SELECT"), "Expected IN subquery in update check: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -859,6 +902,7 @@ fn update_check_with_compound_identifier() {
     // NEW.owner_id rather than check_compound_rls.owner_id.
     assert!(output.contains("NEW.owner_id"), "compound ref must become NEW: {output}");
     assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -906,6 +950,7 @@ fn outer_table_ref_is_null_in_subquery() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IS NULL"), "Expected IS NULL in subquery: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -953,6 +998,7 @@ fn outer_table_ref_in_list_in_subquery() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IN ("), "Expected IN list in subquery: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1004,6 +1050,7 @@ fn outer_table_ref_nested_in_subquery() {
         output.contains("status") && output.contains("priority"),
         "Expected nested expr in subquery: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1024,6 +1071,7 @@ fn for_all_policy() {
         output.contains("CREATE VIEW simple_rls"),
         "Expected RLS view for FOR ALL policy: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1051,6 +1099,7 @@ fn update_check_with_between() {
     "#;
     let output = translate(sql);
     assert!(output.contains("BETWEEN"), "Expected BETWEEN in update check: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1085,6 +1134,7 @@ fn update_check_with_subquery() {
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
     assert!(output.contains("SELECT MAX(max_val) FROM limits"), "subquery preserved: {output}");
     assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1114,6 +1164,7 @@ fn policy_with_cast_on_session_var() {
         output.contains("current_app_user()"),
         "Expected cast to be removed and function mapped: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1138,6 +1189,7 @@ fn readonly_rls_with_monitoring_triggers() {
         "Expected monitoring triggers on readonly: {output}"
     );
     assert!(output.contains("_violations"), "Expected validation view on readonly: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1171,6 +1223,7 @@ fn subquery_in_policy() {
         output.contains("SELECT") && output.contains("access_groups"),
         "Expected subquery referencing access_groups: {output}"
     );
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1218,6 +1271,7 @@ fn outer_table_ref_is_not_null_in_subquery() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IS NOT NULL"), "Expected IS NOT NULL in subquery: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1267,6 +1321,7 @@ fn outer_table_ref_between_in_subquery() {
     "#;
     let output = translate(sql);
     assert!(output.contains("BETWEEN"), "Expected BETWEEN in subquery: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1314,6 +1369,7 @@ fn outer_table_ref_unary_not_in_subquery() {
     "#;
     let output = translate(sql);
     assert!(output.contains("NOT"), "Expected NOT in subquery: {output}");
+    execute_rls_ddl(sql);
 }
 
 #[test]
@@ -1397,4 +1453,5 @@ fn in_subquery_with_outer_table_ref_in_using() {
     "#;
     let output = translate(sql);
     assert!(output.contains("IN (SELECT"), "Expected IN subquery: {output}");
+    execute_rls_ddl(sql);
 }

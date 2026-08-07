@@ -147,6 +147,29 @@ fn uuid_text_to_blob_function_name_override_is_honoured() {
         !translated.contains("unhex(replace("),
         "default unhex+replace must not appear when a UDF is configured, got:\n{translated}"
     );
+    // The INSERT references a caller-registered UDF that cannot run without
+    // registration. Execute DDL with execute_batch; prepare (not execute) the
+    // INSERT so SQLite validates the table reference and SQL syntax without
+    // needing the UDF at call time.
+    let stmts = Pg2Sqlite::default().sql(&schema).unwrap().translate(&opts).unwrap();
+    let conn = Connection::open_in_memory().unwrap();
+    for stmt in &stmts {
+        let s = stmt.to_string();
+        let up = s.trim_start().to_ascii_uppercase();
+        if up.starts_with("CREATE") || up.starts_with("ALTER") {
+            conn.execute_batch(&format!("{s};"))
+                .unwrap_or_else(|e| panic!("DDL must execute in SQLite: {e}\n{s}"));
+        } else {
+            // uuid_text_to_blob is a caller-registered UDF absent in the test
+            // process; accept that specific error so SQLite still validates the
+            // table and column references.
+            match conn.prepare(&s) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("no such function: uuid_text_to_blob") => {}
+                Err(e) => panic!("translated SQL must prepare in SQLite: {e}\n{s}"),
+            }
+        }
+    }
 }
 
 #[test]
@@ -169,6 +192,12 @@ fn uuid_cast_in_select_lowers_to_conversion_call() {
         stmt.contains("unhex") || stmt.contains("uuid_text_to_blob"),
         "translated SELECT must invoke the text-to-blob conversion, got: {stmt}"
     );
+    // Execute the SELECT to prove SQLite accepts it (unhex is a built-in function).
+    let conn = Connection::open_in_memory().unwrap();
+    conn.prepare(&stmt)
+        .unwrap_or_else(|e| panic!("translated SELECT must prepare in SQLite: {e}\n{stmt}"));
+    conn.execute_batch(&format!("{stmt};"))
+        .unwrap_or_else(|e| panic!("translated SELECT must execute in SQLite: {e}\n{stmt}"));
 }
 
 #[test]

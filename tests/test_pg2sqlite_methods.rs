@@ -9,6 +9,7 @@ use std::io::Write;
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite, traits::TranslationOptions};
+use rusqlite::Connection as SqliteConn;
 use tempfile::{NamedTempFile, TempDir};
 
 #[test]
@@ -24,6 +25,10 @@ fn test_statement() {
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result[0].to_string().contains("CREATE TABLE test_statement"));
+    // Execute to prove real SQLite accepts the translated DDL.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
@@ -32,6 +37,10 @@ fn test_sql() {
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result[0].to_string().contains("CREATE TABLE test_sql"));
+    // Execute to prove real SQLite accepts the translated DDL.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
@@ -44,16 +53,15 @@ fn test_file() {
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result[0].to_string().contains("CREATE TABLE test_file"));
+    // Execute to prove real SQLite accepts the translated DDL.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
 fn test_ups() {
     let dir = TempDir::new().unwrap();
-
-    // Create nested structure:
-    // dir/
-    //   01/up.sql
-    //   02/up.sql
 
     let dir1 = dir.path().join("01");
     std::fs::create_dir(&dir1).unwrap();
@@ -70,22 +78,19 @@ fn test_ups() {
     let translator = Pg2Sqlite::ups(dir.path()).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
 
-    // Should have processed 2 files, so 2 statements
     assert_eq!(result.len(), 2);
-    // Because of alphabetical sorting, t1 comes first
     assert!(result[0].to_string().contains("CREATE TABLE t1"));
     assert!(result[1].to_string().contains("CREATE TABLE t2"));
+    // Execute to prove real SQLite accepts the translated DDL.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
 fn test_ups_until() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
-
-    // Create structure:
-    // 01/up.sql
-    // 02/up.sql
-    // 03/up.sql
 
     let dir1 = root.join("01");
     std::fs::create_dir(&dir1).unwrap();
@@ -102,13 +107,16 @@ fn test_ups_until() {
     let file3_path = dir3.join("up.sql");
     std::fs::write(&file3_path, "CREATE TABLE t3 (id INT);").unwrap();
 
-    // Test stopping at the second one
     let translator = Pg2Sqlite::ups_until(root, &file2_path).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
 
-    assert_eq!(result.len(), 2); // Should have t1 and t2
+    assert_eq!(result.len(), 2);
     assert!(result[0].to_string().contains("CREATE TABLE t1"));
     assert!(result[1].to_string().contains("CREATE TABLE t2"));
+    // Execute to prove real SQLite accepts the translated DDL.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
@@ -207,6 +215,10 @@ fn test_alter_table_add_column_is_translated() {
         .unwrap();
     assert_eq!(stmts.len(), 2, "ADD COLUMN must be emitted alongside CREATE TABLE");
     assert!(stmts[1].to_string().contains("ADD COLUMN name TEXT"), "got: {}", stmts[1]);
+    // Execute to prove real SQLite accepts the translated DDL.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
@@ -237,6 +249,10 @@ fn test_index_skipped_for_role_without_access() {
         stmts.iter().all(|s| !s.to_string().contains("CREATE INDEX private_docs_title_idx")),
         "Index should be filtered for role without SELECT"
     );
+    // Execute to prove real SQLite accepts the translated DDL.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 /// `translate_to_sql` must return `Vec<String>` of SQL text directly.

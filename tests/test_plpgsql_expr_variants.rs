@@ -6,7 +6,8 @@
 mod helpers;
 
 use helpers::translate_sql;
-use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use rusqlite::Connection as SqliteConn;
 
 fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
@@ -21,8 +22,7 @@ fn uuid_options() -> Pg2SqliteOptions {
 fn plpgsql_combined_expr_types_transformed() {
     // Test multiple expression types together in one trigger
     let options = uuid_options();
-    let sql = translate_sql(
-        r#"
+    let sql = r#"
         CREATE TABLE t (id BLOB PRIMARY KEY, val REAL, name TEXT);
         CREATE OR REPLACE FUNCTION combined_fn() RETURNS TRIGGER AS $$
         BEGIN
@@ -32,23 +32,25 @@ fn plpgsql_combined_expr_types_transformed() {
         END;
         $$ LANGUAGE plpgsql;
         CREATE TRIGGER combined_trigger BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION combined_fn();
-        "#,
-        &options,
-    )
-    .unwrap();
-    let lower = sql.to_lowercase();
+        "#;
+    let sql_str = translate_sql(sql, &options).unwrap();
+    let lower = sql_str.to_lowercase();
 
     assert!(
         !lower.contains("gen_random_uuid"),
-        "gen_random_uuid should be translated alongside CEIL+FLOOR: {sql}"
+        "gen_random_uuid should be translated alongside CEIL+FLOOR: {sql_str}"
     );
+    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
 fn plpgsql_position_expr_transformed() {
     let options = uuid_options();
-    let sql = translate_sql(
-        r#"
+    let sql = r#"
         CREATE TABLE t (id BLOB PRIMARY KEY, val INTEGER);
         CREATE OR REPLACE FUNCTION pos_fn() RETURNS TRIGGER AS $$
         BEGIN
@@ -57,23 +59,25 @@ fn plpgsql_position_expr_transformed() {
         END;
         $$ LANGUAGE plpgsql;
         CREATE TRIGGER pos_trigger BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION pos_fn();
-        "#,
-        &options,
-    )
-    .unwrap();
-    let lower = sql.to_lowercase();
+        "#;
+    let sql_str = translate_sql(sql, &options).unwrap();
+    let lower = sql_str.to_lowercase();
 
     assert!(
         !lower.contains("gen_random_uuid"),
-        "gen_random_uuid should be translated alongside POSITION: {sql}"
+        "gen_random_uuid should be translated alongside POSITION: {sql_str}"
     );
+    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
 fn plpgsql_ceil_floor_expr_transformed() {
     let options = uuid_options();
-    let sql = translate_sql(
-        r#"
+    let sql = r#"
         CREATE TABLE t (id BLOB PRIMARY KEY, val REAL);
         CREATE OR REPLACE FUNCTION ceil_fn() RETURNS TRIGGER AS $$
         BEGIN
@@ -82,16 +86,19 @@ fn plpgsql_ceil_floor_expr_transformed() {
         END;
         $$ LANGUAGE plpgsql;
         CREATE TRIGGER ceil_trigger BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION ceil_fn();
-        "#,
-        &options,
-    )
-    .unwrap();
-    let lower = sql.to_lowercase();
+        "#;
+    let sql_str = translate_sql(sql, &options).unwrap();
+    let lower = sql_str.to_lowercase();
 
     assert!(
         !lower.contains("gen_random_uuid"),
-        "gen_random_uuid should be translated alongside CEIL: {sql}"
+        "gen_random_uuid should be translated alongside CEIL: {sql_str}"
     );
+    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 /// Renamed from `plpgsql_at_time_zone_time_zone_field_transformed`, which
@@ -101,8 +108,7 @@ fn plpgsql_ceil_floor_expr_transformed() {
 #[test]
 fn plpgsql_at_time_zone_is_transformed() {
     let options = uuid_options();
-    let sql = translate_sql(
-        r#"
+    let sql = r#"
         CREATE TABLE t (id BLOB PRIMARY KEY, ts TEXT);
         CREATE OR REPLACE FUNCTION tz_fn() RETURNS TRIGGER AS $$
         DECLARE
@@ -114,22 +120,25 @@ fn plpgsql_at_time_zone_is_transformed() {
         END;
         $$ LANGUAGE plpgsql;
         CREATE TRIGGER tz_trigger BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION tz_fn();
-        "#,
-        &options,
-    )
-    .unwrap();
-    let lower = sql.to_lowercase();
+        "#;
+    let sql_str = translate_sql(sql, &options).unwrap();
+    let lower = sql_str.to_lowercase();
 
     assert!(
         !lower.contains("at time zone"),
-        "AT TIME ZONE has no SQLite equivalent and must not survive: {sql}"
+        "AT TIME ZONE has no SQLite equivalent and must not survive: {sql_str}"
     );
     assert!(
         lower.contains("datetime(datetime('now'))"),
-        "NOW() AT TIME ZONE 'UTC' should become datetime(datetime('now')): {sql}"
+        "NOW() AT TIME ZONE 'UTC' should become datetime(datetime('now')): {sql_str}"
     );
     assert!(
         !lower.contains("gen_random_uuid"),
-        "gen_random_uuid should be translated in trigger with AT TIME ZONE: {sql}"
+        "gen_random_uuid should be translated in trigger with AT TIME ZONE: {sql_str}"
     );
+    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }

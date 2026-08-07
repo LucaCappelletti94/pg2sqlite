@@ -35,9 +35,18 @@ fn refuse(pg: &str) -> String {
 
 #[test]
 fn a_scaled_numeric_becomes_an_integer() {
-    let sql = translate("CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));");
+    let stmts = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));")
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate");
+    let sql = stmts.join("\n");
     assert!(sql.contains("price INTEGER"), "expected a scaled integer column: {sql}");
     assert!(!sql.to_uppercase().contains("REAL"), "REAL is what loses the exactness: {sql}");
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
 }
 
 /// SQLite promotes an overflowing integer to REAL with no error, so the bound
@@ -60,8 +69,17 @@ fn the_precision_bound_is_emitted_and_enforced() {
 /// `NUMERIC(p)` is scale 0 in PostgreSQL, so it is already a plain integer.
 #[test]
 fn an_unscaled_numeric_is_a_plain_integer() {
-    let sql = translate("CREATE TABLE t (id INT PRIMARY KEY, n NUMERIC(10));");
+    let stmts = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id INT PRIMARY KEY, n NUMERIC(10));")
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate");
+    let sql = stmts.join("\n");
     assert!(sql.contains("n INTEGER"), "{sql}");
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
 }
 
 /// i64 holds 10^18 - 1 but not 10^19 - 1, so 19 digits cannot be a scaled

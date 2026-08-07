@@ -57,6 +57,12 @@ fn test_fk_points_to_rls_backing_table() -> Result<(), Box<dyn std::error::Error
         "FK should not point to users view, got: {posts_create}"
     );
 
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
+
     Ok(())
 }
 

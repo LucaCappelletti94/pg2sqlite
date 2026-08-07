@@ -472,20 +472,27 @@ fn test_at_at_operator_translation() -> Result<(), Box<dyn std::error::Error>> {
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
     let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
-
-    // Find the SELECT statement
     let select_stmt = translated_sql
         .iter()
         .find(|s| s.starts_with("SELECT"))
         .expect("Should have a SELECT statement");
 
-    // Should contain FTS5 MATCH syntax
     assert!(
         select_stmt.contains("documents_fts"),
         "Should reference documents_fts table, got: {select_stmt}"
     );
     assert!(select_stmt.contains("MATCH"), "Should contain MATCH keyword, got: {select_stmt}");
     assert!(select_stmt.contains("IN"), "Should use IN subquery, got: {select_stmt}");
+
+    // Execute translated DDL/DQL to prove SQLite accepts it.
+    // Translated statements cannot be expressed via diesel's typed DSL.
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
+    for stmt in &translated {
+        diesel::sql_query(stmt.to_string())
+            .execute(&mut connection)
+            .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{stmt}"));
+    }
 
     Ok(())
 }
@@ -572,14 +579,12 @@ fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> 
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
-    // Find the SELECT statement
     let select_stmt = translated
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
         .expect("Should have a SELECT statement")
         .to_string();
 
-    // Should contain FTS5 prefix syntax (prog*) not PostgreSQL syntax (prog:*)
     assert!(
         select_stmt.contains("prog*"),
         "Should translate :* to * for prefix matching, got: {select_stmt}"
@@ -588,6 +593,16 @@ fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> 
         !select_stmt.contains("prog:*"),
         "Should not contain PostgreSQL prefix syntax :*, got: {select_stmt}"
     );
+
+    // Execute translated DDL/DQL to prove SQLite accepts it.
+    // Translated statements cannot be expressed via diesel's typed DSL.
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
+    for stmt in &translated {
+        diesel::sql_query(stmt.to_string())
+            .execute(&mut connection)
+            .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{stmt}"));
+    }
 
     Ok(())
 }
@@ -642,26 +657,31 @@ fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>> {
+    let options = Pg2SqliteOptions::default();
+
     // Test AND operator (&)
     let sql_and = "
         CREATE TABLE docs (id SERIAL PRIMARY KEY, body TEXT NOT NULL);
         CREATE INDEX idx ON docs USING GIN (to_tsvector('english', body));
         SELECT * FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('rust & safety');
     ";
-
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql_and)?.translate(&options)?;
-    let select = translated
+    let translated_and = Pg2Sqlite::default().sql(sql_and)?.translate(&options)?;
+    let select = translated_and
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
         .unwrap()
         .to_string();
-
-    // & should become space (implicit AND in FTS5)
     assert!(
         select.contains("rust safety") || select.contains("rust  safety"),
         "AND operator should translate to space, got: {select}"
     );
+    let mut conn_and =
+        diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
+    for stmt in &translated_and {
+        diesel::sql_query(stmt.to_string())
+            .execute(&mut conn_and)
+            .unwrap_or_else(|e| panic!("translated AND statement must execute: {e}\n{stmt}"));
+    }
 
     // Test OR operator (|)
     let sql_or = "
@@ -669,15 +689,20 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
         CREATE INDEX idx2 ON docs2 USING GIN (to_tsvector('english', body));
         SELECT * FROM docs2 WHERE to_tsvector('english', body) @@ to_tsquery('rust | python');
     ";
-
-    let translated = Pg2Sqlite::default().sql(sql_or)?.translate(&options)?;
-    let select = translated
+    let translated_or = Pg2Sqlite::default().sql(sql_or)?.translate(&options)?;
+    let select = translated_or
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
         .unwrap()
         .to_string();
-
     assert!(select.contains("rust OR python"), "OR operator should translate to OR, got: {select}");
+    let mut conn_or =
+        diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
+    for stmt in &translated_or {
+        diesel::sql_query(stmt.to_string())
+            .execute(&mut conn_or)
+            .unwrap_or_else(|e| panic!("translated OR statement must execute: {e}\n{stmt}"));
+    }
 
     // Test NOT operator (!)
     let sql_not = "
@@ -685,15 +710,20 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
         CREATE INDEX idx3 ON docs3 USING GIN (to_tsvector('english', body));
         SELECT * FROM docs3 WHERE to_tsvector('english', body) @@ to_tsquery('rust & !python');
     ";
-
-    let translated = Pg2Sqlite::default().sql(sql_not)?.translate(&options)?;
-    let select = translated
+    let translated_not = Pg2Sqlite::default().sql(sql_not)?.translate(&options)?;
+    let select = translated_not
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
         .unwrap()
         .to_string();
-
     assert!(select.contains("NOT python"), "NOT operator should translate to NOT, got: {select}");
+    let mut conn_not =
+        diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
+    for stmt in &translated_not {
+        diesel::sql_query(stmt.to_string())
+            .execute(&mut conn_not)
+            .unwrap_or_else(|e| panic!("translated NOT statement must execute: {e}\n{stmt}"));
+    }
 
     Ok(())
 }
@@ -825,11 +855,20 @@ fn test_at_at_operator_with_custom_primary_key() -> Result<(), Box<dyn std::erro
         .expect("Should have a SELECT statement")
         .to_string();
 
-    // Should use post_id, not id
     assert!(
         select_stmt.contains("post_id IN"),
         "Should use post_id in subquery, got: {select_stmt}"
     );
+
+    // Execute translated DDL/DQL to prove SQLite accepts it.
+    // Translated statements cannot be expressed via diesel's typed DSL.
+    let mut connection =
+        diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
+    for stmt in &translated {
+        diesel::sql_query(stmt.to_string())
+            .execute(&mut connection)
+            .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{stmt}"));
+    }
 
     Ok(())
 }

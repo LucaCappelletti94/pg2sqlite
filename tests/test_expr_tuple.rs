@@ -60,6 +60,12 @@ fn test_tuple_equality_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should contain tuple (x, y), got: {select_stmt}"
     );
 
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &translated {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
+
     Ok(())
 }
 
@@ -121,6 +127,12 @@ fn test_tuple_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
 
     assert!(select_stmt.contains("IN"), "Should contain IN clause, got: {select_stmt}");
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &translated {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
 
     Ok(())
 }

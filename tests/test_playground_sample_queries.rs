@@ -38,6 +38,7 @@ use pg2sqlite::prelude::{
 };
 use rusqlite::{Connection, ffi::sqlite3_auto_extension};
 use sqlite_vec::sqlite3_vec_init;
+use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Dialect {
@@ -538,6 +539,9 @@ fn run_reverse_chips(pg_schema: &str, chips: &[ReverseCanned], options: &Pg2Sqli
                     chip.label,
                     chip.expect_pg_contains,
                 );
+                Parser::parse_sql(&PostgreSqlDialect {}, pg).unwrap_or_else(|e| {
+                    panic!("[reverse / {}] output must parse as PostgreSQL: {e}\n{pg}", chip.label)
+                });
             }
             (Expectation::Negative, Err(_)) => {}
             (Expectation::Positive, Err(e)) => {

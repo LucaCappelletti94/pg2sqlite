@@ -104,18 +104,21 @@ fn off_corr_rejects() {
 fn off_var_pop_still_works() {
     let sql = translate_off("SELECT var_pop(v) FROM t;").expect("var_pop should translate");
     assert!(sql.contains("avg(v * v)"), "{sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
 fn off_var_samp_still_works() {
     let sql = translate_off("SELECT var_samp(v) FROM t;").expect("var_samp should translate");
     assert!(sql.contains("sum(v * v)") && sql.contains("count(v) - 1"), "{sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
 fn off_variance_still_works() {
     let sql = translate_off("SELECT variance(v) FROM t;").expect("variance should translate");
     assert!(sql.contains("sum(v * v)"), "{sql}");
+    sqlite_parses(&sql);
 }
 
 /// Both covariances are closed forms over `sum`, `avg`, and `count`, so they
@@ -126,6 +129,7 @@ fn off_variance_still_works() {
 fn off_covar_pop_still_works() {
     let sql = translate_off("SELECT covar_pop(a, b) FROM t;").expect("covar_pop should translate");
     assert!(!sql.contains("sqrt"), "covar_pop must need no math function: {sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
@@ -133,6 +137,7 @@ fn off_covar_samp_still_works() {
     let sql =
         translate_off("SELECT covar_samp(a, b) FROM t;").expect("covar_samp should translate");
     assert!(!sql.contains("sqrt"), "covar_samp must need no math function: {sql}");
+    sqlite_parses(&sql);
 }
 
 // ---------- option ON: scalar math functions pass through ----------
@@ -141,30 +146,35 @@ fn off_covar_samp_still_works() {
 fn on_sqrt_passes_through() {
     let sql = translate_on("SELECT sqrt(2.0);").expect("sqrt should translate when math ON");
     assert!(sql.contains("sqrt("), "{sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
 fn on_ln_passes_through() {
     let sql = translate_on("SELECT ln(2.0);").expect("ln should translate when math ON");
     assert!(sql.contains("ln("), "{sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
 fn on_exp_passes_through() {
     let sql = translate_on("SELECT exp(1.0);").expect("exp should translate when math ON");
     assert!(sql.contains("exp("), "{sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
 fn on_log_passes_through() {
     let sql = translate_on("SELECT log(100.0);").expect("log should translate when math ON");
     assert!(sql.contains("log("), "{sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
 fn on_log10_passes_through() {
     let sql = translate_on("SELECT log10(100.0);").expect("log10 should translate when math ON");
     assert!(sql.contains("log10("), "{sql}");
+    sqlite_parses(&sql);
 }
 
 // ---------- option ON: power renamed, cbrt translated ----------
@@ -174,12 +184,14 @@ fn on_power_renames_to_pow() {
     let sql = translate_on("SELECT power(2.0, 3.0);").expect("power should translate when math ON");
     assert!(sql.contains("pow(2.0, 3.0)"), "expected pow(2.0, 3.0) in: {sql}");
     assert!(!sql.contains("power("), "should not contain power(: {sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
 fn on_cbrt_translates_to_pow_one_third() {
     let sql = translate_on("SELECT cbrt(27.0);").expect("cbrt should translate when math ON");
     assert!(sql.contains("pow(27.0, (1.0 / 3.0))"), "expected pow(27.0, (1.0 / 3.0)) in: {sql}");
+    sqlite_parses(&sql);
 }
 
 // ---------- option ON: sqrt-dependent aggregates translate ----------
@@ -189,6 +201,7 @@ fn on_stddev_pop_translates() {
     let sql = translate_on("SELECT stddev_pop(v) FROM t;")
         .expect("stddev_pop should translate when math ON");
     assert!(sql.contains("sqrt("), "{sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
@@ -196,6 +209,7 @@ fn on_stddev_translates() {
     let sql =
         translate_on("SELECT stddev(v) FROM t;").expect("stddev should translate when math ON");
     assert!(sql.contains("sqrt("), "{sql}");
+    sqlite_parses(&sql);
 }
 
 #[test]
@@ -203,6 +217,26 @@ fn on_corr_translates() {
     let sql =
         translate_on("SELECT corr(a, b) FROM t;").expect("corr should translate when math ON");
     assert!(sql.contains("sqrt("), "{sql}");
+    sqlite_parses(&sql);
+}
+
+/// Runs the emitted SQL against an in-memory SQLite with a fixture table.
+/// Math functions such as `sqrt`, `pow`, `ln`, `exp`, `log`, and `log10` are
+/// caller-registered and absent in the bundled SQLite; that specific error is
+/// accepted as proof that SQLite parsed the rest of the statement correctly.
+fn sqlite_parses(sql: &str) {
+    let mut conn = establish_connection();
+    conn.batch_execute("CREATE TABLE t (v REAL, a REAL, b REAL, n REAL) STRICT;").unwrap();
+    const MATH_FNS: &[&str] = &["sqrt", "pow", "ln", "exp", "log", "log10"];
+    match conn.batch_execute(sql) {
+        Ok(()) => {}
+        Err(e)
+            if {
+                let m = e.to_string();
+                MATH_FNS.iter().any(|f| m.contains(&format!("no such function: {f}")))
+            } => {}
+        Err(e) => panic!("SQLite rejected emitted SQL: {e}\n{sql}"),
+    }
 }
 
 // ---------- var_samp unaffected by the option ----------

@@ -3,7 +3,7 @@
 //! Verifies that PG functions inside the AS SELECT subquery are translated
 //! (e.g. `now()` → `datetime('now')`), not cloned verbatim.
 
-use diesel::{Connection, RunQueryDsl, SqliteConnection};
+use diesel::{Connection, RunQueryDsl, SqliteConnection, connection::SimpleConnection};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 fn translate(sql: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -24,6 +24,11 @@ fn create_table_as_select_translates_functions() -> Result<(), Box<dyn std::erro
         !output.contains("now()"),
         "raw now() should not leak through to SQLite, got:\n{output}"
     );
+    let mut exec_conn = SqliteConnection::establish(":memory:").unwrap();
+    exec_conn.batch_execute("CREATE TABLE source (id INTEGER, created_at TEXT) STRICT;").unwrap();
+    exec_conn
+        .batch_execute(&format!("{output};"))
+        .unwrap_or_else(|e| panic!("translated CTAS failed: {e}\n{output}"));
 
     Ok(())
 }

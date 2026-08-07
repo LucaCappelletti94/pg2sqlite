@@ -27,6 +27,28 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .join("\n")
 }
 
+/// Translates `sql` with default options and executes every emitted statement
+/// in an in-memory SQLite connection, verifying the output is valid SQLite.
+fn execute_trigger_ddl(sql: &str) {
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &stmts {
+        conn.execute_batch(&format!("{stmt};"))
+            .expect("translated trigger DDL must execute in SQLite");
+    }
+}
+
+/// Like `execute_trigger_ddl` but uses caller-supplied options.
+fn execute_trigger_ddl_with_opts(sql: &str, options: &Pg2SqliteOptions) {
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(options).unwrap();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &stmts {
+        conn.execute_batch(&format!("{stmt};"))
+            .expect("translated trigger DDL must execute in SQLite");
+    }
+}
+
 #[test]
 fn if_elsif_translates() {
     let sql = include_str!("fixtures/trigger_elsif_else.sql");
@@ -34,6 +56,7 @@ fn if_elsif_translates() {
     // The IF/ELSIF blocks should produce separate INSERT statements
     // with injected conditions
     assert!(output.contains("INSERT"), "Expected INSERT statements from trigger: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -59,6 +82,7 @@ fn if_else_translates() {
     "#;
     let output = translate(sql);
     assert!(output.contains("INSERT"), "Expected INSERT from trigger: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -69,6 +93,7 @@ fn set_variable_binding_in_trigger() {
     let output = translate(sql);
     // Should produce INSERT statements with proper variable substitution
     assert!(output.contains("INSERT"), "Expected INSERT statements from trigger: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -101,6 +126,7 @@ fn declare_default_values_are_available_without_assignment() {
         !output.contains("VALUES (v_log_id, v_msg)"),
         "Raw undeclared variable references should not remain in trigger SQL: {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -129,6 +155,7 @@ fn declare_default_uuid_uses_configured_uuid_function() {
         output.contains("uuid7()"),
         "DECLARE UUID default should honor configured uuid function name: {output}"
     );
+    execute_trigger_ddl_with_opts(sql, &options);
 }
 
 #[test]
@@ -196,6 +223,7 @@ fn trigger_with_on_conflict_do_nothing() {
         output.contains("INSERT OR IGNORE") || output.contains("INSERT"),
         "Expected INSERT (possibly OR IGNORE): {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -229,6 +257,7 @@ fn multiple_triggers_translate() {
     let output = translate(sql);
     assert!(output.contains("order_insert_trigger"), "Expected insert trigger: {output}");
     assert!(output.contains("order_update_trigger"), "Expected update trigger: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -253,6 +282,7 @@ fn if_with_update_in_trigger() {
     let output = translate(sql);
     assert!(output.contains("UPDATE"), "Expected UPDATE in trigger body: {output}");
     assert!(output.contains("counter_trigger"), "Expected trigger to be created: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -276,6 +306,7 @@ fn if_with_delete_in_trigger() {
     "#;
     let output = translate(sql);
     assert!(output.contains("DELETE"), "Expected DELETE in trigger body: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -298,6 +329,7 @@ fn trigger_new_values_translated() {
     "#;
     let output = translate(sql);
     assert!(output.contains("NEW.id"), "Expected NEW.id reference: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -320,6 +352,7 @@ fn trigger_with_multiple_statements() {
     "#;
     let output = translate(sql);
     assert!(output.contains("INSERT"), "Expected INSERT in trigger: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -344,6 +377,7 @@ fn query_statement_runs_standard_translation_pipeline() {
         output.contains("datetime('now')"),
         "Expected query statement expressions to be translated through standard pipeline: {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -355,6 +389,7 @@ fn uuid_function_in_trigger() {
         output.contains("INSERT") || output.contains("todo_history"),
         "Expected INSERT: {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -385,6 +420,7 @@ fn schema_qualified_uuid_function_in_trigger() {
         !output.contains("public.gen_random_uuid"),
         "Schema-qualified UUID function should not remain in output: {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -421,6 +457,7 @@ fn if_with_insert_and_condition() {
         output.contains("shipped") || output.contains("delivered"),
         "Expected condition values: {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -448,6 +485,7 @@ fn trigger_with_union_in_insert() {
         output.contains("INSERT") || output.contains("log_table"),
         "Expected INSERT into log_table: {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -474,6 +512,7 @@ fn if_with_delete_existing_where() {
         output.contains("DELETE") || output.contains("archive_trigger"),
         "Expected DELETE or trigger: {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -495,6 +534,7 @@ fn trigger_with_bare_values_insert() {
     "#;
     let output = translate(sql);
     assert!(output.contains("INSERT"), "Expected INSERT: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -521,6 +561,7 @@ fn trigger_with_select_into() {
     "#;
     let output = translate(sql);
     assert!(output.contains("INSERT"), "Expected INSERT: {output}");
+    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -547,6 +588,7 @@ fn trigger_multiple_inserts_on_conflict() {
         output.contains("INSERT") || output.contains("stats"),
         "Expected INSERT or stats: {output}"
     );
+    execute_trigger_ddl(sql);
 }
 
 /// A PL/pgSQL function with `RAISE INFO 'msg'` (one space after INFO) was

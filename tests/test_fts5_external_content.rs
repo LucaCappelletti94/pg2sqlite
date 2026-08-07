@@ -18,6 +18,13 @@ fn test_fts5_uses_external_content_mode() -> Result<(), Box<dyn std::error::Erro
     assert!(out.contains("content="), "FTS5 must use content= (external content mode), got: {out}");
     assert!(out.contains("content_rowid="), "FTS5 must specify content_rowid=, got: {out}");
 
+    // Execute all translated statements to verify the output is valid SQLite.
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};"))?;
+        }
+    }
     Ok(())
 }
 
@@ -92,6 +99,13 @@ fn test_fts5_backfill_insert_is_generated() -> Result<(), Box<dyn std::error::Er
         out.contains("INSERT INTO") && out.contains("SELECT"),
         "Expected backfill INSERT ... SELECT: {out}"
     );
+    // Execute all translated statements to verify the output is valid SQLite.
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};"))?;
+        }
+    }
     Ok(())
 }
 
@@ -164,5 +178,12 @@ fn test_fts5_partial_index_generates_when_clause_in_triggers()
         out.contains("WHEN") && out.contains("published"),
         "Expected 'WHEN published' in trigger output: {out}"
     );
+    // Execute all translated statements to verify the output is valid SQLite.
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};"))?;
+        }
+    }
     Ok(())
 }

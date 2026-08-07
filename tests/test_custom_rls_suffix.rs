@@ -10,6 +10,7 @@ use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
     traits::TranslationOptions,
 };
+use rusqlite::Connection;
 
 fn make_options_with_suffix(suffix: &str) -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -49,6 +50,10 @@ fn test_custom_suffix_renames_backing_table() {
         sql_output.contains("CREATE VIEW documents "),
         "View should still be named 'documents' (no suffix), got:\n{sql_output}"
     );
+    let conn = Connection::open_in_memory().unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};")).unwrap();
+    }
 }
 
 /// Snapshot of the full translation output with a custom suffix so that any
@@ -94,4 +99,8 @@ fn test_custom_suffix_in_foreign_keys() {
         !sql_output.contains("REFERENCES users_rls"),
         "FK must not reference 'users_rls' when custom suffix is set, got:\n{sql_output}"
     );
+    let conn = Connection::open_in_memory().unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};")).unwrap();
+    }
 }

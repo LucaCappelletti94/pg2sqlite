@@ -32,6 +32,7 @@ fn view_with_inner_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("JOIN"), "Expected JOIN: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -44,6 +45,7 @@ fn view_with_left_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("LEFT"), "Expected LEFT JOIN: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -56,6 +58,7 @@ fn view_with_right_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("RIGHT"), "Expected RIGHT JOIN: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -71,6 +74,7 @@ fn view_with_full_outer_join() {
         output.contains("FULL") || output.contains("OUTER"),
         "Expected FULL OUTER JOIN: {output}"
     );
+    exec_translated(&sql);
 }
 
 #[test]
@@ -83,6 +87,7 @@ fn view_with_cross_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("CROSS JOIN"), "Expected CROSS JOIN: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -94,6 +99,7 @@ fn view_with_natural_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("NATURAL"), "Expected NATURAL JOIN: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -105,6 +111,7 @@ fn view_with_derived_table() {
     );
     let output = translate(&sql);
     assert!(output.contains("adults"), "Expected derived table alias: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -118,6 +125,7 @@ fn view_with_union() {
     );
     let output = translate(&sql);
     assert!(output.contains("UNION"), "Expected UNION: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -133,6 +141,7 @@ fn view_with_group_by_having() {
     let output = translate(&sql);
     assert!(output.contains("GROUP BY"), "Expected GROUP BY: {output}");
     assert!(output.contains("HAVING"), "Expected HAVING: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -144,6 +153,7 @@ fn view_with_order_by() {
     );
     let output = translate(&sql);
     assert!(output.contains("ORDER BY"), "Expected ORDER BY: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -159,6 +169,7 @@ fn view_with_multiple_joins() {
     let output = translate(&sql);
     assert!(output.contains("JOIN"), "Expected JOINs: {output}");
     assert!(output.contains("full_data"), "Expected view name: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -172,6 +183,7 @@ fn view_with_nested_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("JOIN"), "Expected nested JOIN: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -183,6 +195,7 @@ fn view_with_using_join() {
     ";
     let output = translate(sql);
     assert!(output.contains("USING"), "Expected USING: {output}");
+    exec_translated(sql);
 }
 
 #[test]
@@ -195,6 +208,7 @@ fn insert_select_with_inner_join() {
     let output = translate(&sql);
     assert!(output.contains("INSERT INTO"), "Expected INSERT INTO: {output}");
     assert!(output.contains("JOIN"), "Expected JOIN: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -206,6 +220,7 @@ fn insert_select_with_left_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("LEFT"), "Expected LEFT: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -217,6 +232,7 @@ fn insert_select_with_left_outer_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("LEFT"), "Expected LEFT: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -228,6 +244,7 @@ fn insert_select_with_right_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("RIGHT"), "Expected RIGHT: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -239,6 +256,7 @@ fn insert_select_with_full_outer_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("FULL"), "Expected FULL: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -250,6 +268,7 @@ fn insert_select_with_cross_join() {
     );
     let output = translate(&sql);
     assert!(output.contains("CROSS JOIN"), "Expected CROSS JOIN: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -262,6 +281,7 @@ fn insert_select_with_natural_join() {
     ";
     let output = translate(sql);
     assert!(output.contains("NATURAL"), "Expected NATURAL: {output}");
+    exec_translated(sql);
 }
 
 #[test]
@@ -273,6 +293,7 @@ fn insert_select_with_derived_table() {
     );
     let output = translate(&sql);
     assert!(output.contains("INSERT INTO"), "Expected INSERT INTO: {output}");
+    exec_translated(&sql);
 }
 
 #[test]
@@ -285,6 +306,7 @@ fn insert_select_with_using_join() {
     ";
     let output = translate(sql);
     assert!(output.contains("USING"), "Expected USING join: {output}");
+    exec_translated(sql);
 }
 
 #[test]
@@ -296,6 +318,7 @@ fn view_body_translates_now() {
     ";
     let output = translate(sql);
     assert!(output.contains("datetime('now')"), "Expected datetime('now') in view body: {output}");
+    exec_translated(sql);
 }
 
 #[test]
@@ -306,6 +329,7 @@ fn group_by_translates_expressions() {
     ";
     let output = translate(sql);
     assert!(output.contains("GROUP BY datetime('now')"), "Expected translated GROUP BY: {output}");
+    exec_translated(sql);
 }
 
 #[test]
@@ -316,6 +340,7 @@ fn having_translates_expressions() {
     ";
     let output = translate(sql);
     assert!(output.contains("HAVING datetime('now')"), "Expected translated HAVING: {output}");
+    exec_translated(sql);
 }
 
 #[test]
@@ -326,6 +351,7 @@ fn cte_body_translates_expressions() {
     ";
     let output = translate(sql);
     assert!(output.contains("datetime('now')"), "Expected datetime('now') in CTE body: {output}");
+    exec_translated(sql);
 }
 
 #[test]
@@ -351,6 +377,7 @@ fn named_window_translates_expressions() {
         output.contains("datetime('now')"),
         "Expected datetime('now') in named window: {output}"
     );
+    exec_translated(sql);
 }
 
 fn empty_schema() -> ParserDB {
@@ -440,6 +467,7 @@ fn test_wildcard_select_column_translation() -> Result<(), Box<dyn std::error::E
         "Should contain qualified wildcard, got: {select_stmt}"
     );
 
+    exec_translated(sql);
     Ok(())
 }
 
@@ -499,4 +527,15 @@ fn test_wildcard_semantic() -> Result<(), Box<dyn std::error::Error>> {
     assert!((results[1].price.unwrap() - 19.99).abs() < 0.01);
 
     Ok(())
+}
+
+fn exec_translated(pg_sql: &str) {
+    use diesel::connection::SimpleConnection;
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    let stmts =
+        Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    for s in &stmts {
+        conn.batch_execute(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected translated statement: {s}\n{e}"));
+    }
 }

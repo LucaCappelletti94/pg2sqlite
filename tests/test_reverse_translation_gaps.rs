@@ -7,6 +7,7 @@
 //!   RELEASE SAVEPOINT)
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY, val TEXT, num INT);";
 
@@ -32,6 +33,8 @@ fn reverse_unicode_to_ascii() {
     let pg = reverse(SCHEMA, "SELECT unicode('A') FROM t;");
     assert!(pg.contains("ascii"), "Expected ascii in output: {pg}");
     assert!(!pg.contains("unicode"), "Should not contain unicode: {pg}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &pg)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{pg}"));
 }
 
 #[test]
@@ -39,6 +42,8 @@ fn reverse_json_object_to_json_build_object() {
     let pg = reverse(SCHEMA, "SELECT json_object('key', 'value') FROM t;");
     assert!(pg.contains("json_build_object"), "Expected json_build_object in output: {pg}");
     assert!(!pg.contains("json_object("), "Should not contain json_object(: {pg}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &pg)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{pg}"));
 }
 
 #[test]
@@ -46,16 +51,17 @@ fn reverse_json_array_to_json_build_array() {
     let pg = reverse(SCHEMA, "SELECT json_array(1, 2, 3) FROM t;");
     assert!(pg.contains("json_build_array"), "Expected json_build_array in output: {pg}");
     assert!(!pg.contains("json_array("), "Should not contain json_array(: {pg}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &pg)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{pg}"));
 }
 
 #[test]
 fn reverse_rename_within_group_translates_exprs() {
-    // json_group_array reverses to json_agg (Rename path).
-    // The ORDER BY clause inside the function should also be reverse-translated.
     let pg = reverse(SCHEMA, "SELECT json_group_array(val ORDER BY datetime('now')) FROM t;");
     assert!(pg.contains("json_agg"), "Expected json_agg: {pg}");
-    // The datetime('now') should be reverse-translated to NOW()
     assert!(pg.contains("NOW()"), "Expected ORDER BY expr to be reverse-translated to NOW(): {pg}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &pg)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{pg}"));
 }
 
 #[test]
@@ -64,6 +70,8 @@ fn reverse_commit() {
     assert!(!stmts.is_empty(), "COMMIT should reverse OK");
     let out = &stmts[0];
     assert!(out.contains("COMMIT"), "Expected COMMIT in output: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, out)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{out}"));
 }
 
 #[test]
@@ -72,6 +80,8 @@ fn reverse_rollback() {
     assert!(!stmts.is_empty(), "ROLLBACK should reverse OK");
     let out = &stmts[0];
     assert!(out.contains("ROLLBACK"), "Expected ROLLBACK in output: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, out)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{out}"));
 }
 
 #[test]
@@ -80,6 +90,8 @@ fn reverse_begin() {
     assert!(!stmts.is_empty(), "BEGIN should reverse OK");
     let out = &stmts[0];
     assert!(out.contains("BEGIN"), "Expected BEGIN in output: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, out)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{out}"));
 }
 
 #[test]
@@ -91,6 +103,8 @@ fn reverse_savepoint() {
         out.contains("SAVEPOINT") && out.contains("sp1"),
         "Expected SAVEPOINT sp1 in output: {out}"
     );
+    Parser::parse_sql(&PostgreSqlDialect {}, out)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{out}"));
 }
 
 #[test]
@@ -102,4 +116,6 @@ fn reverse_release_savepoint() {
         out.contains("RELEASE") && out.contains("sp1"),
         "Expected RELEASE SAVEPOINT sp1 in output: {out}"
     );
+    Parser::parse_sql(&PostgreSqlDialect {}, out)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{out}"));
 }

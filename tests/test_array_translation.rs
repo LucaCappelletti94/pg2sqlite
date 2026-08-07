@@ -88,6 +88,10 @@ fn array_columns_become_text() {
         let out =
             translate_json(&format!("CREATE TABLE t (id INT PRIMARY KEY, tags {declaration});"));
         assert!(out.contains("tags TEXT"), "{declaration} should map to TEXT, got: {out}");
+        run_translated_with(
+            &format!("CREATE TABLE t (id INT PRIMARY KEY, tags {declaration}); SELECT id FROM t;"),
+            &json_arrays(),
+        );
     }
 }
 
@@ -95,6 +99,7 @@ fn array_columns_become_text() {
 fn array_literal_becomes_json_array() {
     let out = translate_json("SELECT ARRAY[1, 2, 3];");
     assert!(out.contains("json_array(1, 2, 3)"), "got: {out}");
+    run_translated("SELECT ARRAY[1, 2, 3];");
 }
 
 #[test]
@@ -106,12 +111,14 @@ fn array_literal_evaluates_to_a_json_array() {
 fn nested_array_literals_translate_elementwise() {
     let out = translate_json("SELECT ARRAY[ARRAY[1], ARRAY[2]];");
     assert!(out.contains("json_array(json_array(1), json_array(2))"), "got: {out}");
+    run_translated("SELECT ARRAY[ARRAY[1], ARRAY[2]];");
 }
 
 #[test]
 fn literal_subscript_folds_to_a_constant_json_path() {
     let out = translate_json("CREATE TABLE t (tags TEXT[]);\nSELECT tags[2] FROM t;");
     assert!(out.contains("json_extract(tags, '$[1]')"), "got: {out}");
+    run_translated("CREATE TABLE t (tags TEXT[]);\nSELECT tags[2] FROM t;");
 }
 
 /// PostgreSQL reads a subscript below the lower bound as a miss, so the
@@ -121,6 +128,7 @@ fn subscript_below_the_lower_bound_is_null() {
     let out = translate_json("CREATE TABLE t (tags TEXT[]);\nSELECT tags[0] FROM t;");
     assert!(out.contains("NULL"), "got: {out}");
     assert!(!out.contains("$[-1]"), "must not emit a negative JSON path index: {out}");
+    run_translated("CREATE TABLE t (tags TEXT[]);\nSELECT tags[0] FROM t;");
 }
 
 #[test]
@@ -139,6 +147,7 @@ fn computed_subscript_is_guarded() {
     let out = translate_json("CREATE TABLE t (tags TEXT[], i INT);\nSELECT tags[i] FROM t;");
     assert!(out.contains("CASE WHEN i >= 1"), "got: {out}");
     assert!(out.contains("'$[' || (i - 1) || ']'"), "got: {out}");
+    run_translated("CREATE TABLE t (tags TEXT[], i INT);\nSELECT tags[i] FROM t;");
 }
 
 #[test]
@@ -162,6 +171,7 @@ fn slice_subscript_is_rejected() {
 fn array_agg_becomes_json_group_array() {
     let out = translate_json("CREATE TABLE t (v INT);\nSELECT array_agg(v) FROM t;");
     assert!(out.contains("json_group_array(v)"), "got: {out}");
+    run_translated("CREATE TABLE t (v INT);\nSELECT array_agg(v) FROM t;");
 }
 
 #[test]
@@ -179,6 +189,7 @@ fn array_agg_accumulates_the_rows() {
 fn cardinality_becomes_json_array_length() {
     let out = translate_json("CREATE TABLE t (tags TEXT[]);\nSELECT cardinality(tags) FROM t;");
     assert!(out.contains("json_array_length(tags)"), "got: {out}");
+    run_translated("CREATE TABLE t (tags TEXT[]);\nSELECT cardinality(tags) FROM t;");
 }
 
 /// PostgreSQL counts an empty array as zero elements.
@@ -357,6 +368,7 @@ fn unnest_in_from_becomes_a_named_json_each_projection() {
     let out =
         translate_json("CREATE TABLE t (tags TEXT[]);\nSELECT x FROM unnest(ARRAY[1, 2]) AS x;");
     assert!(out.contains("SELECT value AS x FROM json_each(json_array(1, 2))"), "got: {out}");
+    run_translated("CREATE TABLE t (tags TEXT[]);\nSELECT x FROM unnest(ARRAY[1, 2]) AS x;");
 }
 
 #[test]
@@ -411,6 +423,7 @@ fn eq_any_over_a_literal_still_folds_to_in() {
     let out =
         translate_json("CREATE TABLE t (v INT);\nSELECT * FROM t WHERE v = ANY(ARRAY[1, 2]);");
     assert!(out.contains("v IN (1, 2)"), "got: {out}");
+    run_translated("CREATE TABLE t (v INT);\nSELECT * FROM t WHERE v = ANY(ARRAY[1, 2]);");
 }
 
 #[test]
@@ -418,6 +431,7 @@ fn eq_any_over_an_array_column_scans_json_each() {
     let out =
         translate_json("CREATE TABLE t (tags TEXT[]);\nSELECT * FROM t WHERE 'a' = ANY(tags);");
     assert!(out.contains("EXISTS (SELECT 1 FROM json_each(tags) WHERE 'a' = value)"), "got: {out}");
+    run_translated("CREATE TABLE t (tags TEXT[]);\nSELECT * FROM t WHERE 'a' = ANY(tags);");
 }
 
 #[test]
@@ -435,6 +449,7 @@ fn gt_all_over_an_array_column_negates_the_failing_rows() {
         translate_json("CREATE TABLE t (v INT, ns INT[]);\nSELECT * FROM t WHERE v > ALL(ns);");
     assert!(out.contains("NOT EXISTS"), "got: {out}");
     assert!(out.contains("IS NOT TRUE"), "got: {out}");
+    run_translated("CREATE TABLE t (v INT, ns INT[]);\nSELECT * FROM t WHERE v > ALL(ns);");
 }
 
 #[test]

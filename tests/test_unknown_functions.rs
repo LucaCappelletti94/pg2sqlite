@@ -167,4 +167,14 @@ fn the_configured_uuid_function_name_translates() {
         emitted.iter().any(|statement| statement.contains("uuid7")),
         "the configured name should reach the output: {emitted:?}"
     );
+    let conn = Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in &emitted {
+        // uuid7 is a caller-registered UDF absent in the test process; accept
+        // that specific error so SQLite still validates the surrounding SQL.
+        match conn.execute_batch(&format!("{statement};")) {
+            Ok(()) => {}
+            Err(e) if e.to_string().contains("no such function: uuid7") => {}
+            Err(e) => panic!("SQLite rejected statement: {e}\n{statement}"),
+        }
+    }
 }

@@ -11,6 +11,7 @@ mod helpers;
 
 use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use rusqlite::Connection;
 
 fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
@@ -38,6 +39,7 @@ fn plpgsql_function_clauses_transformed() {
     let lower = sql.to_lowercase();
 
     assert!(!lower.contains("gen_random_uuid"), "gen_random_uuid should be translated: {sql}");
+    exec_translated_str(&sql);
 }
 
 #[test]
@@ -68,6 +70,7 @@ fn plpgsql_window_frame_bounds_transformed() {
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated alongside window frame: {sql}"
     );
+    exec_translated_str(&sql);
 }
 
 #[test]
@@ -93,6 +96,7 @@ fn plpgsql_compound_field_access_dot_transformed() {
     let lower = sql.to_lowercase();
 
     assert!(!lower.contains("gen_random_uuid"), "gen_random_uuid should be translated: {sql}");
+    exec_translated_str(&sql);
 }
 
 #[test]
@@ -122,6 +126,7 @@ fn plpgsql_delete_with_returning_transformed() {
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated in delete trigger: {sql}"
     );
+    exec_translated_str(&sql);
 }
 
 #[test]
@@ -151,6 +156,7 @@ fn plpgsql_insert_on_conflict_transformed() {
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated in upsert trigger: {sql}"
     );
+    exec_translated_str(&sql);
 }
 
 #[test]
@@ -182,4 +188,13 @@ fn plpgsql_if_condition_translates_now() {
         !lower.contains("now()"),
         "now() should be translated to datetime('now') in IF condition: {sql}"
     );
+    exec_translated_str(&sql);
+}
+
+fn exec_translated_str(sql_str: &str) {
+    let conn = Connection::open_in_memory().unwrap();
+    for line in sql_str.lines().filter(|l| !l.trim().is_empty()) {
+        conn.execute_batch(&format!("{line};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected: {line}\n{e}"));
+    }
 }

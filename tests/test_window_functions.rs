@@ -9,6 +9,7 @@
 
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use rusqlite::Connection as SqliteConn;
 
 diesel::table! {
     /// Test table for items (used in ROW_NUMBER and NTILE tests).
@@ -225,6 +226,19 @@ fn test_row_number() -> Result<(), Box<dyn std::error::Error>> {
         "ORDER BY should be present in OVER clause, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -263,6 +277,19 @@ fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
         "ORDER BY should be present, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -292,6 +319,19 @@ fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
         "DENSE_RANK() should pass through, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -319,6 +359,19 @@ fn test_ntile() -> Result<(), Box<dyn std::error::Error>> {
         "NTILE() should pass through, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -354,6 +407,19 @@ fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
         "LEAD() should pass through, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -389,6 +455,19 @@ fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
         "LAST_VALUE() should pass through, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -419,6 +498,19 @@ fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
         "NTH_VALUE() should pass through, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -459,6 +551,19 @@ fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
         "COUNT() should pass through, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -493,6 +598,19 @@ fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
         "UNBOUNDED PRECEDING should be present, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -522,6 +640,19 @@ fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
         "RANGE BETWEEN should pass through, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -555,6 +686,19 @@ fn test_filter_clause_to_case() -> Result<(), Box<dyn std::error::Error>> {
         "FILTER keyword should not appear in output, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -583,6 +727,19 @@ fn test_filter_clause_aggregate_to_case() -> Result<(), Box<dyn std::error::Erro
         "FILTER should be converted to CASE WHEN, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 

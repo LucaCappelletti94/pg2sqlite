@@ -10,6 +10,7 @@ use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
     traits::TranslationOptions,
 };
+use rusqlite::Connection as SqliteConn;
 
 fn make_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -64,6 +65,11 @@ fn test_both_session_variable_patterns_are_mapped() {
         !sql_output.contains("current_setting"),
         "All current_setting() references should be replaced, got:\n{sql_output}"
     );
+    // Execute the emitted statements to prove real SQLite accepts the translated
+    // schema.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    let script = translated.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
+    conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated SQL must execute: {e}"));
 }
 
 /// When only one of the two required session-variable mappings is provided,

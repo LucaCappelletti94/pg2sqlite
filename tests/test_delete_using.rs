@@ -222,6 +222,22 @@ fn test_delete_using_with_rls_table() -> Result<(), Box<dyn std::error::Error>> 
         sql_str.contains("users_rls"),
         "DELETE USING should reference users_rls backing table in EXISTS subquery, got: {sql_str}"
     );
+    // Pins R123: DELETE USING renames the table to users_rls but leaves predicates
+    // as users.id. Goes red when the defect is fixed, which is the point.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    let mut pin_triggered = false;
+    for stmt in &translated {
+        let s = stmt.to_string();
+        let result = conn.execute_batch(&format!("{s};"));
+        if let Err(err) = &result {
+            assert!(
+                err.to_string().contains("no such column: users.id"),
+                "expected users.id column error: {err}"
+            );
+            pin_triggered = true;
+        }
+    }
+    assert!(pin_triggered, "R123 pin: expected DELETE to fail with no such column error");
 
     Ok(())
 }

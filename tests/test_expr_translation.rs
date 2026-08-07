@@ -7,6 +7,7 @@
 
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use rusqlite::Connection as SqliteConn;
 
 diesel::table! {
     /// Test table for items with categories (used in IN list tests).
@@ -195,6 +196,19 @@ fn test_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(select_stmt.contains("IN ("), "Should contain IN clause, got: {select_stmt}");
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -281,6 +295,19 @@ fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should contain IN (SELECT ...), got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -368,6 +395,19 @@ fn test_between_translation() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(select_stmt.contains("BETWEEN"), "Should contain BETWEEN, got: {select_stmt}");
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -460,6 +500,19 @@ fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
     assert!(select_stmt.contains("WHEN"), "Should contain WHEN, got: {select_stmt}");
     assert!(select_stmt.contains("END"), "Should contain END, got: {select_stmt}");
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -552,6 +605,19 @@ fn test_scalar_subquery_translation() -> Result<(), Box<dyn std::error::Error>> 
 
     assert!(select_stmt.contains("(SELECT"), "Should contain scalar subquery, got: {select_stmt}");
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 
@@ -653,6 +719,19 @@ fn test_extract_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should not contain EXTRACT, got: {select_stmt}"
     );
 
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
+    // SQL.
+    {
+        let conn = SqliteConn::open_in_memory()?;
+        let ddl = translated
+            .iter()
+            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute_batch(&ddl)?;
+        conn.prepare(&select_stmt)?;
+    }
     Ok(())
 }
 

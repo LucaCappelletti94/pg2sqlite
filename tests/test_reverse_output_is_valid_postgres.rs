@@ -239,6 +239,8 @@ fn insert_or_replace_assigns_from_excluded() {
     assert!(out.contains("ON CONFLICT(id)"), "conflict target is the primary key: {out}");
     assert!(out.contains("s = EXCLUDED.s"), "every non-key column is overwritten: {out}");
     assert!(out.contains("n = EXCLUDED.n"), "every non-key column is overwritten: {out}");
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]

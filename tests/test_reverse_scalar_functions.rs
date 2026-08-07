@@ -5,6 +5,7 @@
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sql_traits::structs::ParserDB;
+use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 fn schema() -> ParserDB {
     Pg2Sqlite::default()
@@ -39,6 +40,8 @@ fn ifnull_becomes_coalesce() {
     let out = ok("SELECT ifnull(n, 0) FROM t");
     assert!(out.contains("COALESCE"), "expected COALESCE in: {out}");
     assert!(out.contains("COALESCE(n, 0)"), "expected COALESCE(n, 0) in: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -48,6 +51,8 @@ fn iif_becomes_case_when() {
     assert!(out.contains("THEN"), "expected THEN in: {out}");
     assert!(out.contains("ELSE"), "expected ELSE in: {out}");
     assert!(!out.to_ascii_lowercase().contains("iif"), "iif survived into: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -57,6 +62,8 @@ fn total_becomes_coalesce_sum() {
     assert!(out.contains("SUM"), "expected SUM in: {out}");
     assert!(out.contains('0'), "expected 0 in: {out}");
     assert!(!out.to_ascii_lowercase().contains("total("), "total( survived into: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -65,6 +72,8 @@ fn hex_becomes_encode_hex() {
     assert!(out.contains("encode"), "expected encode in: {out}");
     assert!(out.contains("'hex'"), "expected 'hex' in: {out}");
     assert!(!out.to_ascii_lowercase().contains("hex("), "hex( survived into: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -73,6 +82,8 @@ fn unhex_becomes_decode_hex() {
     assert!(out.contains("decode"), "expected decode in: {out}");
     assert!(out.contains("'hex'"), "expected 'hex' in: {out}");
     assert!(!out.to_ascii_lowercase().contains("unhex("), "unhex( survived into: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -81,6 +92,8 @@ fn unixepoch_becomes_extract_epoch() {
     assert!(out.contains("EXTRACT"), "expected EXTRACT in: {out}");
     assert!(out.contains("EPOCH"), "expected EPOCH in: {out}");
     assert!(!out.to_ascii_lowercase().contains("unixepoch("), "unixepoch( survived into: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 // ---------- rejected cases ----------
@@ -171,6 +184,8 @@ fn random_round_trip_recognises_forward_emitted_pattern() {
         out.to_ascii_lowercase().contains("random()"),
         "expected random() in round-trip output: {out}"
     );
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 // ---------- GLOB -> LIKE conversion ----------
@@ -180,6 +195,8 @@ fn glob_star_converts_to_like_percent() {
     let out = ok("SELECT s FROM t WHERE s GLOB 'a*'");
     assert!(out.contains("LIKE 'a%'"), "expected LIKE 'a%' in: {out}");
     assert!(!out.contains("GLOB"), "GLOB survived into: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -187,6 +204,8 @@ fn glob_question_converts_to_like_underscore() {
     let out = ok("SELECT s FROM t WHERE s GLOB 'a?b'");
     assert!(out.contains("LIKE 'a_b'"), "expected LIKE 'a_b' in: {out}");
     assert!(!out.contains("GLOB"), "GLOB survived into: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -200,6 +219,8 @@ fn glob_literal_percent_in_pattern_is_escaped_for_like() {
     );
     assert!(out.contains("ESCAPE"), "expected ESCAPE clause for escaped literal, got: {out}");
     assert!(!out.contains("GLOB"), "GLOB survived into: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]

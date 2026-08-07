@@ -13,6 +13,7 @@
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use rusqlite::Connection as SqliteConn;
 
 /// Helper: translate SQL and return the output or error string.
 fn translate(sql: &str) -> Result<String, String> {
@@ -28,6 +29,18 @@ fn translate_ok(sql: &str) -> String {
     let stmts =
         Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
     stmts.iter().find(|s| matches!(s, sqlparser::ast::Statement::Query(_))).unwrap().to_string()
+}
+
+/// Executes all statements emitted by translating `sql` against a real
+/// in-memory SQLite. Use after a substring assert to prove the output is
+/// accepted by SQLite, not just parseable.
+fn execute_all(sql: &str) {
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    let script = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
+    conn.execute_batch(&script)
+        .unwrap_or_else(|e| panic!("translated SQL must execute in SQLite: {e}\n{script}"));
 }
 
 #[test]
@@ -54,6 +67,7 @@ fn concat_single_arg_passthrough() {
         output.contains("name"),
         "Single arg CONCAT should pass through the expression, got: {output}"
     );
+    execute_all(sql);
 }
 
 #[test]
@@ -62,6 +76,7 @@ fn concat_multiple_args_uses_string_concat() {
                SELECT concat(first_name, ' ', last_name) FROM t;";
     let output = translate(sql).unwrap();
     assert!(output.contains("||"), "Multi-arg CONCAT should use ||, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -84,6 +99,7 @@ fn concat_ws_separator_plus_single_value() {
     let output = translate(sql).unwrap();
     // With separator + single value, result is just the value (no || operator)
     assert!(!output.contains("||"), "CONCAT_WS with single value should not use ||, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -92,6 +108,7 @@ fn concat_ws_separator_plus_multiple_values() {
                SELECT concat_ws(', ', first_name, last_name) FROM t;";
     let output = translate(sql).unwrap();
     assert!(output.contains("||"), "CONCAT_WS with multiple values should use ||, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -101,6 +118,7 @@ fn filter_clause_on_count_star() {
     let output = translate(sql).unwrap();
     assert!(output.contains("CASE WHEN"), "FILTER should become CASE WHEN, got: {output}");
     assert!(!output.contains("FILTER"), "FILTER clause should be removed, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -110,6 +128,7 @@ fn filter_clause_on_named_aggregate() {
     let output = translate(sql).unwrap();
     assert!(output.contains("CASE WHEN"), "FILTER should become CASE WHEN, got: {output}");
     assert!(!output.contains("FILTER"), "FILTER clause should be removed, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -125,6 +144,7 @@ fn string_agg_becomes_group_concat() {
         !output.to_lowercase().contains("string_agg"),
         "string_agg should be replaced, got: {output}"
     );
+    execute_all(sql);
 }
 
 #[test]
@@ -133,6 +153,7 @@ fn strpos_becomes_instr() {
                SELECT strpos(name, 'test') FROM t;";
     let output = translate(sql).unwrap();
     assert!(output.contains("INSTR"), "strpos should become INSTR, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -143,6 +164,7 @@ fn chr_becomes_char() {
     assert!(output.contains("char"), "chr should become char, got: {output}");
     // Make sure "chr" is not present
     assert!(!output.contains("chr("), "chr should be renamed to char, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -151,6 +173,7 @@ fn least_becomes_min() {
                SELECT least(a, b) FROM t;";
     let output = translate(sql).unwrap();
     assert!(output.contains("MIN"), "LEAST should become MIN, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -159,6 +182,7 @@ fn greatest_becomes_max() {
                SELECT greatest(a, b) FROM t;";
     let output = translate(sql).unwrap();
     assert!(output.contains("MAX"), "GREATEST should become MAX, got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -200,6 +224,7 @@ fn filter_rewrite_count_with_filter() {
     let lower = output.to_lowercase();
     assert!(lower.contains("case when"), "expected CASE WHEN from FILTER rewrite: {output}");
     assert!(!lower.contains("filter"), "FILTER clause should be removed: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -249,6 +274,7 @@ fn json_agg_translates_to_json_group_array() {
     let out = translate_ok(&sql);
     assert!(out.contains("json_group_array"), "json_agg should become json_group_array: {out}");
     assert!(!out.contains("json_agg"), "Should not contain json_agg: {out}");
+    execute_all(&sql);
 }
 
 #[test]
@@ -257,6 +283,7 @@ fn jsonb_agg_translates_to_json_group_array() {
     let out = translate_ok(&sql);
     assert!(out.contains("json_group_array"), "jsonb_agg should become json_group_array: {out}");
     assert!(!out.contains("jsonb_agg"), "Should not contain jsonb_agg: {out}");
+    execute_all(&sql);
 }
 
 #[test]
@@ -268,6 +295,7 @@ fn json_object_agg_translates_to_json_group_object() {
         "json_object_agg should become json_group_object: {out}"
     );
     assert!(!out.contains("json_object_agg"), "Should not contain json_object_agg: {out}");
+    execute_all(&sql);
 }
 
 #[test]
@@ -279,6 +307,7 @@ fn jsonb_object_agg_translates_to_json_group_object() {
         "jsonb_object_agg should become json_group_object: {out}"
     );
     assert!(!out.contains("jsonb_object_agg"), "Should not contain jsonb_object_agg: {out}");
+    execute_all(&sql);
 }
 
 #[test]
@@ -287,6 +316,7 @@ fn now_becomes_datetime_now() {
                SELECT now();";
     let output = translate(sql).unwrap();
     assert!(output.contains("datetime"), "NOW() should become datetime('now'), got: {output}");
+    execute_all(sql);
 }
 
 #[test]
@@ -302,4 +332,5 @@ fn schema_qualified_now_becomes_datetime_now() {
         !output.to_lowercase().contains("pg_catalog.now"),
         "schema-qualified NOW should be rewritten, got: {output}"
     );
+    execute_all(sql);
 }

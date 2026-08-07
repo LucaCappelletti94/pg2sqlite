@@ -84,6 +84,31 @@ fn p3_corr_needs_sqrt_and_the_covariances_do_not() {
     assert!(translate("SELECT corr(x, y) FROM m;").contains("sqrt("));
     assert!(!translate("SELECT covar_pop(x, y) FROM m;").contains("sqrt("));
     assert!(!translate("SELECT covar_samp(x, y) FROM m;").contains("sqrt("));
+    // Verify the translated queries execute in SQLite (empty table, empty results,
+    // but SQL must be valid). corr uses sqrt so the connection registers it.
+    {
+        let mut conn = establish_connection();
+        // Nullable<Double> so sqrt propagates NULL when the aggregate over an
+        // empty table returns NULL, avoiding a type-mismatch error.
+        conn.register_sql_function::<
+            diesel::sql_types::Nullable<Double>,
+            diesel::sql_types::Nullable<Double>,
+            _,
+            _,
+            _,
+        >("sqrt", true, |x: Option<f64>| x.map(|v| v.sqrt()))
+        .expect("register sqrt");
+        conn.batch_execute(
+            "CREATE TABLE m (id INTEGER PRIMARY KEY, x REAL NOT NULL, y REAL NOT NULL)",
+        )
+        .expect("create table");
+        conn.batch_execute(&format!("{};", translate("SELECT corr(x, y) FROM m;")))
+            .expect("corr executes in SQLite");
+        conn.batch_execute(&format!("{};", translate("SELECT covar_pop(x, y) FROM m;")))
+            .expect("covar_pop executes in SQLite");
+        conn.batch_execute(&format!("{};", translate("SELECT covar_samp(x, y) FROM m;")))
+            .expect("covar_samp executes in SQLite");
+    }
 }
 
 #[test]

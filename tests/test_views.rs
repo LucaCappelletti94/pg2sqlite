@@ -295,6 +295,12 @@ fn test_or_replace_view_emits_drop_then_create() {
         create.to_uppercase().contains("CREATE VIEW"),
         "Second statement should be CREATE VIEW, got: {create}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in &stmts {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+    }
 }
 
 #[test]

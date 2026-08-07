@@ -7,8 +7,32 @@
 
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
+
+use std::sync::Once;
+
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use sqlite_vec::sqlite3_vec_init;
 use translate_helpers::translate_default as translate;
+
+/// Register sqlite-vec once per process so connections used by execute helpers
+/// have vec0 and vec_distance_* available.
+///
+/// SAFETY: `sqlite3_vec_init` has the real C signature `(db, pzErrMsg, pApi) ->
+/// int`; the transmute restores it for `sqlite3_auto_extension`. rusqlite FFI
+/// is the only path to this API; diesel does not expose it.
+fn register_sqlite_vec_once() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::os::raw::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite3_vec_init as *const ())));
+    });
+}
 
 fn translate_err(sql: &str) -> String {
     let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
@@ -32,6 +56,7 @@ fn fts_gin_with_compound_identifier() {
         output.contains("fts5") || output.contains("articles"),
         "Expected FTS5 or articles: {output}"
     );
+    execute_emitted(sql);
 }
 
 #[test]
@@ -42,6 +67,7 @@ fn fts_gin_with_nested_expression() {
     ";
     let output = translate(sql);
     assert!(output.contains("fts5") || output.contains("docs"), "Expected FTS5 or docs: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -55,6 +81,7 @@ fn fts_gin_with_cast() {
         output.contains("fts5") || output.contains("items"),
         "Expected FTS5 or items: {output}"
     );
+    execute_emitted(sql);
 }
 
 // Note: DROP TABLE tests use separate translation calls to avoid schema
@@ -92,6 +119,7 @@ fn vacuum_passes_through() {
     ";
     let output = translate(sql);
     assert!(output.contains("VACUUM"), "Expected VACUUM: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -107,6 +135,7 @@ fn begin_commit_passes_through() {
         output.contains("BEGIN") || output.contains("COMMIT"),
         "Expected transaction: {output}"
     );
+    execute_emitted(sql);
 }
 
 #[test]
@@ -118,6 +147,7 @@ fn savepoint_passes_through() {
     ";
     let output = translate(sql);
     assert!(output.contains("SAVEPOINT"), "Expected SAVEPOINT: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -130,6 +160,7 @@ fn insert_with_select_translates() {
     let output = translate(sql);
     assert!(output.contains("INSERT INTO"), "Expected INSERT INTO: {output}");
     assert!(output.contains("SELECT"), "Expected SELECT: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -140,6 +171,7 @@ fn standalone_select_query() {
     ";
     let output = translate(sql);
     assert!(output.contains("SELECT"), "Expected SELECT: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -150,6 +182,7 @@ fn standalone_select_with_order_by() {
     ";
     let output = translate(sql);
     assert!(output.contains("ORDER BY"), "Expected ORDER BY: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -165,6 +198,7 @@ fn table_with_check_constraint() {
     ";
     let output = translate(sql);
     assert!(output.contains("CHECK"), "Expected CHECK constraint: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -180,6 +214,7 @@ fn table_with_unique_constraint() {
     ";
     let output = translate(sql);
     assert!(output.contains("UNIQUE"), "Expected UNIQUE constraint: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -194,6 +229,7 @@ fn table_with_composite_pk_constraint() {
     ";
     let output = translate(sql);
     assert!(output.contains("PRIMARY KEY"), "Expected PRIMARY KEY: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -215,6 +251,7 @@ fn fts_gin_with_multiple_columns_concat() {
     ";
     let output = translate(sql);
     assert!(output.contains("fts5") || output.contains("posts"), "Expected FTS5: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -226,6 +263,7 @@ fn expression_index_with_function() {
     let output = translate(sql);
     // Expression indexes may or may not be supported
     assert!(output.contains("users"), "Expected table reference: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -236,6 +274,7 @@ fn partial_index_with_complex_where() {
     ";
     let output = translate(sql);
     assert!(output.contains("orders"), "Expected table reference: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -246,6 +285,7 @@ fn btree_index_explicit() {
     ";
     let output = translate(sql);
     assert!(output.contains("CREATE INDEX"), "Expected CREATE INDEX: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -261,6 +301,7 @@ fn fts_tsvector_match_with_prefix() {
         output.contains("fts") || output.contains("MATCH") || output.contains("articles"),
         "Expected FTS: {output}"
     );
+    execute_emitted(sql);
 }
 
 #[test]
@@ -272,6 +313,7 @@ fn query_with_subquery_in_where() {
     ";
     let output = translate(sql);
     assert!(output.contains("IN (SELECT"), "Expected subquery: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -282,6 +324,7 @@ fn gist_index_fts_translation() {
     ";
     let output = translate(sql);
     assert!(output.contains("fts5") || output.contains("docs"), "Expected FTS5 or docs: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -292,6 +335,7 @@ fn unique_index_translates() {
     ";
     let output = translate(sql);
     assert!(output.contains("UNIQUE"), "Expected UNIQUE: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -302,6 +346,7 @@ fn multicolumn_index_translates() {
     ";
     let output = translate(sql);
     assert!(output.contains("CREATE INDEX"), "Expected CREATE INDEX: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -312,6 +357,7 @@ fn forward_delete_simple() {
     ";
     let output = translate(sql);
     assert!(output.contains("DELETE FROM"), "Expected DELETE FROM: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -323,6 +369,7 @@ fn forward_update_simple() {
     let output = translate(sql);
     assert!(output.contains("UPDATE"), "Expected UPDATE in output: {output}");
     assert!(output.contains("WHERE"), "Expected WHERE clause in output: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -334,6 +381,7 @@ fn forward_insert_with_values() {
     let output = translate(sql);
     assert!(output.contains("INSERT INTO"), "Expected INSERT: {output}");
     assert!(output.contains("Alice"), "Expected Alice: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -347,6 +395,7 @@ fn forward_insert_on_conflict_do_nothing() {
         output.contains("INSERT OR IGNORE") || output.contains("ON CONFLICT"),
         "Expected INSERT OR IGNORE or ON CONFLICT: {output}"
     );
+    execute_emitted(sql);
 }
 
 #[test]
@@ -358,6 +407,7 @@ fn drop_trigger_translates() {
     // DROP TRIGGER should strip the ON table_name for SQLite
     let output = translate(sql);
     assert!(output.contains("DROP TRIGGER"), "Expected DROP TRIGGER: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -369,6 +419,7 @@ fn drop_index_translates() {
     ";
     let output = translate(sql);
     assert!(output.contains("DROP INDEX"), "Expected DROP INDEX: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -379,6 +430,7 @@ fn fts_gin_single_column() {
     ";
     let output = translate(sql);
     assert!(output.contains("fts5") || output.contains("articles"), "Expected FTS5: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -392,6 +444,7 @@ fn table_with_foreign_key() {
     ";
     let output = translate(sql);
     assert!(output.contains("REFERENCES"), "Expected REFERENCES: {output}");
+    execute_emitted(sql);
 }
 
 /// `ALTER TABLE ... ADD COLUMN` is translated, not filtered. SQLite has
@@ -408,6 +461,7 @@ fn alter_table_add_column_is_translated() {
         output.contains("ALTER TABLE users ADD COLUMN age INTEGER"),
         "ADD COLUMN must be emitted with the mapped type: {output}"
     );
+    execute_emitted(sql);
 }
 
 #[test]
@@ -418,6 +472,7 @@ fn create_function_is_filtered() {
     ";
     let output = translate(sql);
     assert!(!output.contains("CREATE FUNCTION"), "CREATE FUNCTION should be filtered: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -428,6 +483,7 @@ fn grant_is_filtered() {
     ";
     let output = translate(sql);
     assert!(!output.contains("GRANT"), "GRANT should be filtered: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -438,6 +494,7 @@ fn concat_to_concatenation() {
     ";
     let output = translate(sql);
     assert!(output.contains("||"), "Expected || concatenation: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -448,6 +505,7 @@ fn concat_ws_to_concatenation_with_separator() {
     ";
     let output = translate(sql);
     assert!(output.contains("||"), "Expected || concatenation: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -462,6 +520,7 @@ fn aggregate_with_filter_clause() {
         output.contains("CASE WHEN") || output.contains("COUNT"),
         "Expected CASE WHEN or COUNT: {output}"
     );
+    execute_emitted(sql);
 }
 
 #[test]
@@ -472,6 +531,7 @@ fn sum_with_filter_clause() {
     ";
     let output = translate(sql);
     assert!(output.contains("CASE WHEN") || output.contains("SUM"), "Expected CASE WHEN: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -485,6 +545,7 @@ fn column_default_unary_op() {
     let output = translate(sql);
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
     assert!(output.contains("-1"), "Expected -1: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -497,6 +558,7 @@ fn column_default_nested() {
     ";
     let output = translate(sql);
     assert!(output.contains("42"), "Expected 42: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -509,6 +571,7 @@ fn column_default_binary_op() {
     ";
     let output = translate(sql);
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -521,6 +584,7 @@ fn column_default_cast() {
     ";
     let output = translate(sql);
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -535,6 +599,7 @@ fn generated_column_stored() {
     ";
     let output = translate(sql);
     assert!(output.contains("GENERATED ALWAYS AS"), "Expected GENERATED: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -579,6 +644,7 @@ fn table_fk_to_rls_table() {
         .join("\n");
     // FK should reference users_rls (the underlying table)
     assert!(output.contains("users_rls"), "Expected users_rls reference: {output}");
+    execute_emitted_with_options(sql, &options);
 }
 
 #[test]
@@ -621,6 +687,7 @@ fn column_fk_to_rls_table() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(output.contains("users_rls"), "Expected users_rls FK reference: {output}");
+    execute_emitted_with_options(sql, &options);
 }
 
 #[test]
@@ -645,6 +712,7 @@ fn check_constraint_with_function_removed() {
         .join("\n");
     // CHECK with function should be removed
     assert!(output.contains("items"), "Expected items table: {output}");
+    execute_emitted_with_options(sql, &options);
 }
 
 #[test]
@@ -723,6 +791,23 @@ fn delete_using_with_rls_table_join() {
     assert!(output.contains("DELETE"), "Expected DELETE: {output}");
     // JOIN references to users should be renamed to users_rls
     assert!(output.contains("users_rls"), "Expected users_rls in DELETE USING: {output}");
+    // Pins R123: DELETE USING renames the relation to users_rls but leaves
+    // predicate qualifiers as users.id. Goes red when the defect is fixed,
+    // which is the point.
+    register_sqlite_vec_once();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate_to_sql(&options).unwrap();
+    let mut r123_err = String::new();
+    for s in &stmts {
+        if let Err(e) = conn.execute_batch(&format!("{s};")) {
+            r123_err = e.to_string();
+            break;
+        }
+    }
+    assert!(
+        r123_err.contains("no such column: users.id"),
+        "Pins R123: expected 'no such column: users.id', got: {r123_err}"
+    );
 }
 
 #[test]
@@ -736,6 +821,7 @@ fn vector_type_cast() {
     ";
     let output = translate(sql);
     assert!(output.contains("vec_f32"), "Expected vec_f32 cast: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -749,6 +835,7 @@ fn hamming_distance_operator() {
     ";
     let output = translate(sql);
     assert!(output.contains("vec_distance_hamming"), "Expected vec_distance_hamming: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -760,6 +847,7 @@ fn any_eq_to_in_subquery() {
     ";
     let output = translate(sql);
     assert!(output.contains("IN (SELECT"), "Expected IN (SELECT: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -771,6 +859,7 @@ fn all_ne_to_not_in_subquery() {
     ";
     let output = translate(sql);
     assert!(output.contains("NOT IN (SELECT"), "Expected NOT IN (SELECT: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -784,6 +873,7 @@ fn column_default_identifier() {
     let output = translate(sql);
     assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
     assert!(output.contains("active"), "Expected active: {output}");
+    execute_emitted(sql);
 }
 
 #[test]
@@ -808,6 +898,7 @@ fn or_replace_trigger() {
         output.contains("DROP TRIGGER IF EXISTS") || output.contains("TRIGGER"),
         "Expected trigger handling: {output}"
     );
+    execute_emitted(sql);
 }
 
 #[test]
@@ -855,6 +946,7 @@ fn before_trigger_on_rls_table() {
         .join("\n");
     // BEFORE trigger should be redirected to items_rls table
     assert!(output.contains("items_rls"), "Expected items_rls redirect: {output}");
+    execute_emitted_with_options(sql, &options);
 }
 
 #[test]
@@ -869,6 +961,7 @@ fn insert_on_conflict_do_update_translates_expressions() {
         output.contains("datetime('now')"),
         "Expected datetime('now') in ON CONFLICT DO UPDATE: {output}"
     );
+    execute_emitted(sql);
 }
 
 #[test]
@@ -882,4 +975,33 @@ fn insert_returning_translates_expressions() {
         output.contains("datetime('now')"),
         "Expected datetime('now') in INSERT RETURNING: {output}"
     );
+    execute_emitted(sql);
+}
+/// Execute every emitted statement against an in-memory SQLite connection.
+///
+/// Registers sqlite-vec so tests involving vector types (vec0, vec_f32,
+/// vec_distance_*) can execute the translated DDL and DML. rusqlite is used
+/// directly because diesel does not expose `sqlite3_auto_extension`.
+fn execute_emitted(sql: &str) {
+    register_sqlite_vec_once();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .unwrap();
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
+}
+
+fn execute_emitted_with_options(sql: &str, options: &Pg2SqliteOptions) {
+    register_sqlite_vec_once();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate_to_sql(options).unwrap();
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
 }

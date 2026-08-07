@@ -27,6 +27,13 @@ fn fts5_generated_trigger_sql_handles_quoted_identifiers() {
         translated.iter().any(|sql| sql.contains("CREATE TRIGGER docs_fts_ai")),
         "Expected generated FTS5 trigger in translated SQL"
     );
+    // Execute all translated statements to verify the output is valid SQLite.
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};")).expect("translated SQL must execute in SQLite");
+        }
+    }
 }
 
 #[test]
@@ -48,4 +55,15 @@ fn vec0_generated_trigger_sql_handles_quoted_identifiers() {
             .any(|sql| sql.contains("CREATE TRIGGER \"embeddings-bad_embedding_vec_ai\"")),
         "Expected generated vec0 trigger in translated SQL"
     );
+    // Execute translated DDL, skipping vec0 virtual tables that need the
+    // sqlite-vec extension loaded (unavailable in the standard test runtime).
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in &translated {
+            if stmt.contains("USING vec0") {
+                continue;
+            }
+            conn.execute_batch(&format!("{stmt};")).expect("translated SQL must execute in SQLite");
+        }
+    }
 }

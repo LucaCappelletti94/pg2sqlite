@@ -11,6 +11,7 @@
 
 mod helpers;
 
+use diesel::{Connection, connection::SimpleConnection, sqlite::SqliteConnection};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 /// Helper: translate SQL and return the output or error string.
@@ -27,18 +28,27 @@ fn translate_count(sql: &str) -> Result<usize, String> {
 fn vacuum_passes_through() {
     let output = translate("VACUUM;").unwrap();
     assert!(output.contains("VACUUM"), "VACUUM should pass through, got: {output}");
+    exec_stmts(&output);
 }
 
 #[test]
 fn commit_passes_through() {
     let output = translate("COMMIT;").unwrap();
     assert!(output.contains("COMMIT"), "COMMIT should pass through, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&format!("BEGIN;\n{output};")).unwrap();
+    }
 }
 
 #[test]
 fn rollback_passes_through() {
     let output = translate("ROLLBACK;").unwrap();
     assert!(output.contains("ROLLBACK"), "ROLLBACK should pass through, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&format!("BEGIN;\n{output};")).unwrap();
+    }
 }
 
 #[test]
@@ -50,18 +60,30 @@ fn start_transaction_passes_through() {
         output.contains("TRANSACTION") || output.contains("BEGIN"),
         "START TRANSACTION should pass through, got: {output}"
     );
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&format!("{output};\nROLLBACK;")).unwrap();
+    }
 }
 
 #[test]
 fn savepoint_passes_through() {
     let output = translate("SAVEPOINT sp1;").unwrap();
     assert!(output.contains("SAVEPOINT"), "SAVEPOINT should pass through, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&format!("{output};")).unwrap();
+    }
 }
 
 #[test]
 fn release_savepoint_passes_through() {
     let output = translate("RELEASE SAVEPOINT sp1;").unwrap();
     assert!(output.contains("RELEASE"), "RELEASE SAVEPOINT should pass through, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&format!("SAVEPOINT sp1;\n{output};")).unwrap();
+    }
 }
 
 #[test]
@@ -70,6 +92,7 @@ fn drop_table_strips_cascade() {
     let output = translate("DROP TABLE IF EXISTS t CASCADE;").unwrap();
     assert!(output.contains("DROP TABLE"), "DROP TABLE should be present, got: {output}");
     assert!(!output.contains("CASCADE"), "CASCADE should be stripped, got: {output}");
+    exec_stmts(&output);
 }
 
 #[test]
@@ -77,6 +100,7 @@ fn drop_table_if_exists() {
     let output = translate("DROP TABLE IF EXISTS t;").unwrap();
     assert!(output.contains("DROP TABLE"), "DROP TABLE should be present, got: {output}");
     assert!(output.contains("IF EXISTS"), "IF EXISTS should be preserved, got: {output}");
+    exec_stmts(&output);
 }
 
 #[test]
@@ -87,6 +111,7 @@ fn drop_view_strips_restrict() {
     let output = translate(sql).unwrap();
     assert!(output.contains("DROP VIEW"), "DROP VIEW should be present, got: {output}");
     assert!(!output.contains("RESTRICT"), "RESTRICT should be stripped, got: {output}");
+    exec_stmts(&output);
 }
 
 #[test]
@@ -96,6 +121,7 @@ fn drop_index() {
                DROP INDEX idx_name;";
     let output = translate(sql).unwrap();
     assert!(output.contains("DROP INDEX"), "DROP INDEX should be present, got: {output}");
+    exec_stmts(&output);
 }
 
 #[test]
@@ -105,6 +131,10 @@ fn drop_trigger_strips_table_name() {
     assert!(output.contains("DROP TRIGGER"), "DROP TRIGGER should be present, got: {output}");
     // The ON my_table should be removed for SQLite
     assert!(!output.contains("ON my_table"), "ON table_name should be stripped, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&format!("{output};")).unwrap();
+    }
 }
 
 #[test]
@@ -240,4 +270,12 @@ fn mixed_statements_filters_correctly() {
         stmts.len(),
         stmts.iter().map(ToString::to_string).collect::<Vec<_>>()
     );
+}
+
+fn exec_stmts(sql_str: &str) {
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    for line in sql_str.lines().filter(|l| !l.trim().is_empty()) {
+        conn.batch_execute(&format!("{line};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected translated statement: {line}\n{e}"));
+    }
 }

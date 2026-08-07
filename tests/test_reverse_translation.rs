@@ -1,7 +1,10 @@
 //! Tests for reverse translation (SQLite → PostgreSQL) and roundtrip scenarios.
 
 use pg2sqlite::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite};
-use sqlparser::{dialect::SQLiteDialect, parser::Parser};
+use sqlparser::{
+    dialect::{PostgreSqlDialect, SQLiteDialect},
+    parser::Parser,
+};
 
 /// Helper to create a translator with schema from PostgreSQL DDL.
 fn setup_translator(pg_ddl: &str) -> Pg2Sqlite {
@@ -32,6 +35,8 @@ mod roundtrip {
         assert!(pg_sql.contains("SELECT"));
         assert!(pg_sql.contains("users"));
         assert!(pg_sql.contains("Alice"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -48,6 +53,8 @@ mod roundtrip {
         assert_eq!(pg_stmts.len(), 1);
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("INSERT INTO users"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -64,6 +71,8 @@ mod roundtrip {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("ON CONFLICT"));
         assert!(pg_sql.contains("DO NOTHING"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -86,6 +95,8 @@ mod roundtrip {
         assert!(pg_sql.contains("email = EXCLUDED.email"));
         // PK should NOT be in the SET clause
         assert!(!pg_sql.contains("id = EXCLUDED.id"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -105,6 +116,8 @@ mod roundtrip {
         assert!(pg_sql.contains("role_id"));
         assert!(pg_sql.contains("DO UPDATE SET"));
         assert!(pg_sql.contains("granted_at = EXCLUDED.granted_at"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -124,6 +137,8 @@ mod roundtrip {
         assert!(pg_sql.contains("name ="));
         assert!(pg_sql.contains("email ="));
         assert!(pg_sql.contains("WHERE"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -140,6 +155,8 @@ mod roundtrip {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("DELETE FROM users"));
         assert!(pg_sql.contains("WHERE"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -156,6 +173,8 @@ mod roundtrip {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("NOW()"));
         assert!(!pg_sql.contains("datetime"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -172,6 +191,8 @@ mod roundtrip {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("EXTRACT(YEAR FROM"));
         assert!(!pg_sql.contains("strftime"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -189,6 +210,8 @@ mod roundtrip {
         assert!(pg_sql.contains("POSITION"));
         assert!(pg_sql.contains("IN"));
         assert!(!pg_sql.contains("INSTR"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -205,6 +228,8 @@ mod roundtrip {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("string_agg"));
         assert!(!pg_sql.contains("group_concat"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -221,6 +246,8 @@ mod roundtrip {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("chr("));
         assert!(!pg_sql.contains("char("));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     /// A SELECT with a JOIN passes through the reverse translator with the
@@ -243,6 +270,8 @@ mod roundtrip {
         assert!(pg_sql.contains("JOIN"), "Output should contain JOIN: {pg_sql}");
         assert!(pg_sql.contains("users"), "Output should reference 'users': {pg_sql}");
         assert!(pg_sql.contains("posts"), "Output should reference 'posts': {pg_sql}");
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     /// A SELECT with GROUP BY and HAVING passes through the reverse translator
@@ -263,6 +292,8 @@ mod roundtrip {
         assert!(pg_sql.contains("GROUP BY"), "Output should contain GROUP BY: {pg_sql}");
         assert!(pg_sql.contains("HAVING"), "Output should contain HAVING: {pg_sql}");
         assert!(pg_sql.contains("category"), "Output should reference 'category': {pg_sql}");
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     /// A SELECT with an IN subquery passes through the reverse translator with
@@ -286,6 +317,8 @@ mod roundtrip {
         assert!(pg_sql.contains("IN"), "Output should contain IN clause: {pg_sql}");
         assert!(pg_sql.contains("SELECT"), "Output should contain nested SELECT: {pg_sql}");
         assert!(pg_sql.contains("users"), "Output should reference 'users': {pg_sql}");
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 }
 
@@ -429,6 +462,8 @@ mod errors {
         let stmt = &result.unwrap()[0];
         let output = stmt.to_string();
         assert!(output.contains("ON CONFLICT"), "Expected ON CONFLICT in reversed SQL: {output}");
+        Parser::parse_sql(&PostgreSqlDialect {}, &output)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -445,6 +480,8 @@ mod errors {
             .expect("reverse should resolve known explicit schema");
         let output = reversed[0].to_string();
         assert!(output.contains("ON CONFLICT"), "expected ON CONFLICT in reversed SQL: {output}");
+        Parser::parse_sql(&PostgreSqlDialect {}, &output)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -608,6 +645,8 @@ mod vector_functions {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("<->"));
         assert!(!pg_sql.contains("vec_distance_L2"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -624,6 +663,8 @@ mod vector_functions {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("<=>"));
         assert!(!pg_sql.contains("vec_distance_cosine"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -640,6 +681,8 @@ mod vector_functions {
         let pg_sql = pg_stmts[0].to_string();
         assert!(pg_sql.contains("::vector"));
         assert!(!pg_sql.contains("vec_f32"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 
     #[test]
@@ -657,5 +700,7 @@ mod vector_functions {
         assert!(pg_sql.contains("WITH"), "Expected WITH in CTE roundtrip: {pg_sql}");
         assert!(pg_sql.contains("cte"), "Expected cte alias in CTE roundtrip: {pg_sql}");
         assert!(pg_sql.contains("users"), "Expected users table in CTE roundtrip: {pg_sql}");
+        Parser::parse_sql(&PostgreSqlDialect {}, &pg_sql)
+            .expect("reverse output must parse as PostgreSQL");
     }
 }

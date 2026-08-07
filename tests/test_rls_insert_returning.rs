@@ -149,6 +149,9 @@ fn plain_insert_still_uses_view_path() {
         last.contains("INSERT INTO documents (") && !last.contains("documents_rls"),
         "plain INSERT must target the view, got: {last}"
     );
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(RLS_SCHEMA, &opts)).expect("apply schema");
+    conn.execute_batch(&format!("{last};")).unwrap();
 }
 
 #[test]
@@ -179,6 +182,9 @@ fn insert_returning_through_custom_rls_suffix() {
         last.contains("INSERT INTO documents_inner"),
         "rewrite must use the configured suffix, got: {last}"
     );
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(RLS_SCHEMA, &custom_opts)).expect("apply schema");
+    conn.execute_batch(&format!("{last};")).unwrap();
 }
 
 #[test]

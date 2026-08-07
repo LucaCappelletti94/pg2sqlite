@@ -68,6 +68,10 @@ fn open_with_sqrt() -> SqliteConnection {
 fn p2_var_samp_to_closed_form() {
     let out = translate("SELECT var_samp(v) FROM m;");
     assert!(out.contains("sum(v * v)") && out.contains("count(v) - 1"), "{out}");
+    let mut conn = establish_connection();
+    seed(&mut conn);
+    // Translated aggregate SQL cannot be expressed via diesel's typed DSL.
+    sql_query(out).execute(&mut conn).expect("translated var_samp query must execute");
 }
 
 #[test]
@@ -77,12 +81,20 @@ fn p2_stddev_samp_wraps_var_samp_in_sqrt() {
         out.contains("sqrt(") && out.contains("sum(v * v)") && out.contains("count(v) - 1"),
         "{out}"
     );
+    let mut conn = open_with_sqrt();
+    seed(&mut conn);
+    // Translated aggregate SQL cannot be expressed via diesel's typed DSL.
+    sql_query(out).execute(&mut conn).expect("translated stddev_samp query must execute");
 }
 
 #[test]
 fn p2_variance_aliases_to_var_samp() {
     let out = translate("SELECT variance(v) FROM m;");
     assert!(out.contains("sum(v * v)") && out.contains("count(v) - 1"), "{out}");
+    let mut conn = establish_connection();
+    seed(&mut conn);
+    // Translated aggregate SQL cannot be expressed via diesel's typed DSL.
+    sql_query(out).execute(&mut conn).expect("translated variance query must execute");
 }
 
 #[test]
@@ -92,12 +104,23 @@ fn p2_stddev_aliases_to_stddev_samp() {
         out.contains("sqrt(") && out.contains("sum(v * v)") && out.contains("count(v) - 1"),
         "{out}"
     );
+    let mut conn = open_with_sqrt();
+    seed(&mut conn);
+    // Translated aggregate SQL cannot be expressed via diesel's typed DSL.
+    sql_query(out).execute(&mut conn).expect("translated stddev query must execute");
 }
 
 #[test]
 fn p2_var_samp_with_group_by() {
     let out = translate("SELECT g, var_samp(v) FROM m GROUP BY g;");
     assert!(out.contains("sum(v * v)") && out.contains("GROUP BY g"), "{out}");
+    let mut conn = establish_connection();
+    // Create a table with a g column so the translated SELECT can execute.
+    // Translated DDL/DQL cannot be expressed via diesel's typed DSL.
+    sql_query("CREATE TABLE m (id INTEGER PRIMARY KEY, g INTEGER NOT NULL, v REAL NOT NULL)")
+        .execute(&mut conn)
+        .expect("create m with g column");
+    sql_query(out).execute(&mut conn).expect("translated group-by query must execute");
 }
 
 #[test]

@@ -27,6 +27,12 @@ fn test_is_distinct_from_translation_form() -> Result<(), Box<dyn std::error::Er
     assert!(out.contains(" IS "), "Should contain IS, got: {out}");
     assert!(!out.contains("CASE"), "Should NOT use CASE expression, got: {out}");
 
+    // Execute the translated query against a connection that has the fixture table.
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch("CREATE TABLE pairs (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")?;
+        conn.execute_batch(&format!("{out};"))?;
+    }
     Ok(())
 }
 

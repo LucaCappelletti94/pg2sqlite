@@ -6,7 +6,8 @@
 
 mod helpers;
 
-use helpers::translate_sql;
+use diesel::prelude::*;
+use helpers::{translate_sql, translate_statements};
 use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
 
 fn uuid_options() -> Pg2SqliteOptions {
@@ -42,8 +43,7 @@ fn plpgsql_substitute_variable_in_like_pattern() {
 #[test]
 fn plpgsql_substitute_variable_in_extract() {
     let options = uuid_options();
-    let sql = translate_sql(
-        r#"
+    let pg = r#"
         CREATE TABLE t (id BLOB PRIMARY KEY, ts TEXT, val INTEGER);
         CREATE OR REPLACE FUNCTION extract_fn() RETURNS TRIGGER AS $$
         DECLARE
@@ -56,23 +56,26 @@ fn plpgsql_substitute_variable_in_extract() {
         END;
         $$ LANGUAGE plpgsql;
         CREATE TRIGGER extract_trigger BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION extract_fn();
-        "#,
-        &options,
-    )
-    .unwrap();
+        "#;
+    let sql = translate_sql(pg, &options).unwrap();
     let lower = sql.to_lowercase();
-
     assert!(
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated in trigger with EXTRACT: {sql}"
     );
+    let stmts = translate_statements(pg, &options).unwrap();
+    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("connect");
+    for s in &stmts {
+        diesel::sql_query(s.to_string())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("translated DDL must execute: {e}\n{s}"));
+    }
 }
 
 #[test]
 fn plpgsql_substitute_variable_in_trim() {
     let options = uuid_options();
-    let sql = translate_sql(
-        r#"
+    let pg = r#"
         CREATE TABLE t (id BLOB PRIMARY KEY, name TEXT);
         CREATE OR REPLACE FUNCTION trim_fn() RETURNS TRIGGER AS $$
         DECLARE
@@ -83,23 +86,26 @@ fn plpgsql_substitute_variable_in_trim() {
         END;
         $$ LANGUAGE plpgsql;
         CREATE TRIGGER trim_trigger BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION trim_fn();
-        "#,
-        &options,
-    )
-    .unwrap();
+        "#;
+    let sql = translate_sql(pg, &options).unwrap();
     let lower = sql.to_lowercase();
-
     assert!(
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated in trigger with TRIM: {sql}"
     );
+    let stmts = translate_statements(pg, &options).unwrap();
+    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("connect");
+    for s in &stmts {
+        diesel::sql_query(s.to_string())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("translated DDL must execute: {e}\n{s}"));
+    }
 }
 
 #[test]
 fn plpgsql_substitute_variable_in_substring() {
     let options = uuid_options();
-    let sql = translate_sql(
-        r#"
+    let pg = r#"
         CREATE TABLE t (id BLOB PRIMARY KEY, prefix TEXT);
         CREATE OR REPLACE FUNCTION substr_fn() RETURNS TRIGGER AS $$
         DECLARE
@@ -110,14 +116,18 @@ fn plpgsql_substitute_variable_in_substring() {
         END;
         $$ LANGUAGE plpgsql;
         CREATE TRIGGER substr_trigger BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION substr_fn();
-        "#,
-        &options,
-    )
-    .unwrap();
+        "#;
+    let sql = translate_sql(pg, &options).unwrap();
     let lower = sql.to_lowercase();
-
     assert!(
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated in trigger with SUBSTRING: {sql}"
     );
+    let stmts = translate_statements(pg, &options).unwrap();
+    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("connect");
+    for s in &stmts {
+        diesel::sql_query(s.to_string())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("translated DDL must execute: {e}\n{s}"));
+    }
 }

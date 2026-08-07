@@ -148,6 +148,22 @@ fn date_trunc_preserves_window_over() {
     let lower = sql.to_lowercase();
     assert!(lower.contains("strftime"), "expected strftime: {sql}");
     assert!(lower.contains("over"), "expected OVER clause preserved: {sql}");
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (id INT PRIMARY KEY, user_id INT, created_at TEXT);",
+        )
+        .unwrap();
+        // Pins R120: strftime() may not be used as a window function. Goes red when the
+        // defect is fixed, which is the point.
+        let err = conn
+            .prepare(&sql)
+            .expect_err("R120 pin: SQLite should refuse strftime() as window function");
+        assert!(
+            err.to_string().contains("may not be used as a window function"),
+            "expected window function error: {err}"
+        );
+    }
 }
 
 #[test]
@@ -206,4 +222,20 @@ fn date_trunc_over_partition_translation_preserves_structure() {
     let lower = sql.to_lowercase();
     assert!(lower.contains("over (partition by"), "OVER PARTITION BY should be preserved: {sql}");
     assert!(lower.contains("user_id"), "partition column should be preserved: {sql}");
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (id INT PRIMARY KEY, user_id INT, created_at TEXT);",
+        )
+        .unwrap();
+        // Pins R120: strftime() may not be used as a window function. Goes red when the
+        // defect is fixed, which is the point.
+        let err = conn
+            .prepare(&sql)
+            .expect_err("R120 pin: SQLite should refuse strftime() as window function");
+        assert!(
+            err.to_string().contains("may not be used as a window function"),
+            "expected window function error: {err}"
+        );
+    }
 }

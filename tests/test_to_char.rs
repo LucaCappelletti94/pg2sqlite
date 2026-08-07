@@ -24,6 +24,7 @@ fn to_char_yyyy_mm_dd() {
         "to_char('YYYY-MM-DD') should produce strftime('%Y-%m-%d', ...), got: {output}"
     );
     assert!(!output.contains("to_char"), "Output should not contain to_char: {output}");
+    assert_all_stmts_parse_as_sqlite(&sql);
 }
 
 #[test]
@@ -34,6 +35,7 @@ fn to_char_hh24_mi_ss() {
         output.contains("strftime('%H:%M:%S'"),
         "to_char('HH24:MI:SS') should produce strftime('%H:%M:%S', ...), got: {output}"
     );
+    assert_all_stmts_parse_as_sqlite(&sql);
 }
 
 #[test]
@@ -44,6 +46,7 @@ fn to_char_full_datetime() {
         output.contains("strftime('%Y-%m-%d %H:%M:%S'"),
         "to_char full datetime should produce strftime('%Y-%m-%d %H:%M:%S', ...), got: {output}"
     );
+    assert_all_stmts_parse_as_sqlite(&sql);
 }
 
 #[test]
@@ -54,6 +57,7 @@ fn to_char_yyyy_only() {
         output.contains("strftime('%Y'"),
         "to_char('YYYY') should produce strftime('%Y', ...), got: {output}"
     );
+    assert_all_stmts_parse_as_sqlite(&sql);
 }
 
 #[test]
@@ -64,6 +68,7 @@ fn to_char_yy_only() {
         output.contains("strftime('%y'"),
         "to_char('YY') should produce strftime('%y', ...), got: {output}"
     );
+    assert_all_stmts_parse_as_sqlite(&sql);
 }
 
 #[test]
@@ -74,6 +79,7 @@ fn to_char_hh12_mi() {
         output.contains("strftime('%I:%M'"),
         "to_char('HH12:MI') should produce strftime('%I:%M', ...), got: {output}"
     );
+    assert_all_stmts_parse_as_sqlite(&sql);
 }
 
 #[test]
@@ -84,6 +90,7 @@ fn to_char_hh_mi_alias_for_hh12() {
         output.contains("strftime('%I:%M'"),
         "to_char('HH:MI') should produce strftime('%I:%M', ...) (HH=HH12), got: {output}"
     );
+    assert_all_stmts_parse_as_sqlite(&sql);
 }
 
 #[test]
@@ -98,6 +105,7 @@ fn to_char_args_swapped_format_before_column() {
         format_pos < col_pos,
         "Format string should appear before column in strftime output: {output}"
     );
+    assert_all_stmts_parse_as_sqlite(&sql);
 }
 
 #[test]
@@ -113,6 +121,7 @@ fn to_char_now_also_translated() {
         output.contains("datetime('now')"),
         "NOW() inside to_char should become datetime('now'), got: {output}"
     );
+    assert_all_stmts_parse_as_sqlite(sql);
 }
 
 // Error cases
@@ -159,6 +168,31 @@ fn to_char_preserves_window_over() {
     let lower = output.to_lowercase();
     assert!(lower.contains("strftime"), "expected strftime: {output}");
     assert!(lower.contains("over"), "expected OVER clause preserved: {output}");
+    // Pins R120: strftime() may not be used as a window function. Goes red when the
+    // defect is fixed, which is the point.
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let stmts = pg2sqlite::prelude::Pg2Sqlite::default()
+            .sql(sql)
+            .expect("parse")
+            .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
+            .expect("translate");
+        for stmt in &stmts {
+            let s = stmt.to_string();
+            if s.starts_with("CREATE") {
+                conn.execute_batch(&format!("{s};"))
+                    .unwrap_or_else(|e| panic!("DDL must run in SQLite: {e}\n{s}"));
+            } else {
+                let err = conn
+                    .execute_batch(&format!("{s};"))
+                    .expect_err("R120 pin: SQLite should refuse strftime() as window function");
+                assert!(
+                    err.to_string().contains("may not be used as a window function"),
+                    "expected window function error: {err}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -180,4 +214,17 @@ fn to_char_tz_code_causes_error() {
     assert!(result.is_err(), "TZ timezone code should produce an error");
     let err = result.unwrap_err();
     assert!(!err.is_empty(), "Should have a non-empty error message: {err}");
+}
+
+fn assert_all_stmts_parse_as_sqlite(pg_sql: &str) {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in pg2sqlite::prelude::Pg2Sqlite::default()
+        .sql(pg_sql)
+        .expect("parse")
+        .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("translated statement must run in SQLite: {e}\n{stmt}"));
+    }
 }

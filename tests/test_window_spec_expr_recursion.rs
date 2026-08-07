@@ -42,6 +42,7 @@ fn window_partition_by_date_trunc_is_translated() {
         !out.to_lowercase().contains("date_trunc"),
         "date_trunc must not appear verbatim in output: {out}"
     );
+    execute_all_emitted(&sql);
 }
 
 /// NOW() inside ORDER BY of an inline window spec must become datetime('now').
@@ -60,6 +61,7 @@ fn window_order_by_now_is_translated() {
         !out.to_uppercase().contains("NOW()"),
         "NOW() must not appear verbatim in window ORDER BY output: {out}"
     );
+    execute_all_emitted(&sql);
 }
 
 /// date_trunc inside ORDER BY of an inline window spec must be translated.
@@ -78,6 +80,7 @@ fn window_order_by_date_trunc_is_translated() {
         !out.to_lowercase().contains("date_trunc"),
         "date_trunc must not appear in output: {out}"
     );
+    execute_all_emitted(&sql);
 }
 
 /// date_trunc in both PARTITION BY and ORDER BY of the same window spec.
@@ -96,6 +99,7 @@ fn window_partition_and_order_by_date_trunc_both_translated() {
         "date_trunc in both PARTITION BY and ORDER BY must translate to strftime: {out}"
     );
     assert!(!out.to_lowercase().contains("date_trunc"), "No date_trunc should remain: {out}");
+    execute_all_emitted(&sql);
 }
 
 // Named WINDOW clause — already covered by translate_named_windows, but
@@ -118,6 +122,7 @@ fn named_window_partition_by_date_trunc_is_translated() {
         !out.to_lowercase().contains("date_trunc"),
         "date_trunc must not remain in named WINDOW: {out}"
     );
+    execute_all_emitted(&sql);
 }
 
 // Aggregate function args that contain PG-specific expressions — fixed in
@@ -139,4 +144,18 @@ fn window_aggregate_arg_date_trunc_is_translated() {
         !out.to_lowercase().contains("date_trunc"),
         "date_trunc must not remain in window aggregate arg: {out}"
     );
+    execute_all_emitted(&sql);
+}
+
+fn execute_all_emitted(sql: &str) {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .unwrap();
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
 }

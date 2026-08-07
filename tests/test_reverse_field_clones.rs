@@ -20,6 +20,8 @@ fn reverse_rename_translates_parameters() {
 
     // Should become json_agg(name)
     assert!(lower.contains("json_agg"), "json_group_array should reverse to json_agg: {result}");
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, &result)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -32,6 +34,8 @@ fn reverse_rename_within_group_translates() {
     let lower = result.to_lowercase();
 
     assert!(lower.contains("json_agg"), "json_group_array should reverse to json_agg: {result}");
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, &result)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -45,6 +49,8 @@ fn reverse_rename_preserves_function_structure() {
         lower.contains("json_object_agg"),
         "json_group_object should reverse to json_object_agg: {result}"
     );
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, &result)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -55,6 +61,8 @@ fn reverse_insert_table_name_preserved() {
     let lower = result.to_lowercase();
 
     assert!(lower.contains("insert into t"), "INSERT table name should be preserved: {result}");
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, &result)
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -65,4 +73,6 @@ fn reverse_datetime_now_to_now() {
     let lower = result.to_lowercase();
 
     assert!(lower.contains("now()"), "datetime('now') should reverse to NOW(): {result}");
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, &result)
+        .expect("reverse output must parse as PostgreSQL");
 }

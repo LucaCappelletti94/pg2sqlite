@@ -89,6 +89,7 @@ fn reverse_datetime_unixepoch_to_to_timestamp() {
     let pg = reverse(SCHEMA, "SELECT datetime(num, 'unixepoch') FROM t;");
     assert!(pg.contains("to_timestamp"), "Expected to_timestamp: {pg}");
     assert!(!pg.contains("datetime"), "Should not contain datetime: {pg}");
+    assert_parses_as_pg(&pg);
 }
 
 #[test]
@@ -96,6 +97,7 @@ fn reverse_uuid_to_gen_random_uuid() {
     let pg = reverse(SCHEMA, "SELECT uuid() FROM t;");
     assert!(pg.contains("gen_random_uuid"), "Expected gen_random_uuid: {pg}");
     assert!(!pg.contains(" uuid("), "Should not contain bare uuid(): {pg}");
+    assert_parses_as_pg(&pg);
 }
 
 #[test]
@@ -106,6 +108,7 @@ fn reverse_custom_uuid_function_name() {
     let stmts = translator.reverse_sql("SELECT uuidv7() FROM t;", &schema, &options).unwrap();
     let pg = stmts[0].to_string();
     assert!(pg.contains("gen_random_uuid"), "Expected gen_random_uuid: {pg}");
+    assert_parses_as_pg(&pg);
 }
 
 #[test]
@@ -113,6 +116,7 @@ fn reverse_strftime_year_to_date_trunc() {
     let pg = reverse(EVENTS, "SELECT strftime('%Y-01-01 00:00:00', created_at) FROM events;");
     assert!(pg.contains("date_trunc"), "Expected date_trunc: {pg}");
     assert!(pg.contains("year"), "Expected 'year' field: {pg}");
+    assert_parses_as_pg(&pg);
 }
 
 #[test]
@@ -120,6 +124,7 @@ fn reverse_strftime_month_to_date_trunc() {
     let pg = reverse(EVENTS, "SELECT strftime('%Y-%m-01 00:00:00', created_at) FROM events;");
     assert!(pg.contains("date_trunc"), "Expected date_trunc: {pg}");
     assert!(pg.contains("month"), "Expected 'month' field: {pg}");
+    assert_parses_as_pg(&pg);
 }
 
 #[test]
@@ -127,6 +132,7 @@ fn reverse_strftime_day_to_date_trunc() {
     let pg = reverse(EVENTS, "SELECT strftime('%Y-%m-%d 00:00:00', created_at) FROM events;");
     assert!(pg.contains("date_trunc"), "Expected date_trunc: {pg}");
     assert!(pg.contains("day"), "Expected 'day' field: {pg}");
+    assert_parses_as_pg(&pg);
 }
 
 /// A date-only format is not a `date_trunc`: PostgreSQL's answers a timestamp,
@@ -135,6 +141,7 @@ fn reverse_strftime_day_to_date_trunc() {
 fn reverse_strftime_date_only_is_not_date_trunc() {
     let pg = reverse(EVENTS, "SELECT strftime('%Y-%m-%d', created_at) FROM events;");
     assert!(!pg.contains("date_trunc"), "a bare date is not a truncated timestamp: {pg}");
+    assert_parses_as_pg(&pg);
 }
 
 #[test]
@@ -143,6 +150,7 @@ fn reverse_strftime_extract_still_works() {
     let pg = reverse(EVENTS, "SELECT strftime('%Y', created_at) FROM events;");
     assert!(pg.contains("EXTRACT(YEAR"), "Expected EXTRACT(YEAR): {pg}");
     assert!(!pg.contains("date_trunc"), "Should not contain date_trunc: {pg}");
+    assert_parses_as_pg(&pg);
 }
 
 #[test]
@@ -648,4 +656,8 @@ fn a_lowered_like_with_an_escape_is_not_restored_to_ilike() {
         matches!(where_clause(&pg_sql), sqlparser::ast::Expr::Like { .. }),
         "an escape character must keep the query a LIKE: {pg_sql}"
     );
+}
+
+fn assert_parses_as_pg(sql: &str) {
+    Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("reverse output must parse as PostgreSQL");
 }

@@ -104,6 +104,13 @@ fn test_strpos_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_lowercase().contains("strpos"),
         "strpos should not appear in output, got: {select_stmt}"
     );
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
+    // accepts it.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected emitted SQL: {e}\n{stmt}"));
+    }
 
     Ok(())
 }
@@ -188,6 +195,13 @@ fn test_chr_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_lowercase().contains("chr("),
         "chr should not appear in output, got: {select_stmt}"
     );
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
+    // accepts it.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected emitted SQL: {e}\n{stmt}"));
+    }
 
     Ok(())
 }
@@ -270,6 +284,13 @@ fn test_concat_ws_translation() -> Result<(), Box<dyn std::error::Error>> {
         !select_stmt.to_uppercase().contains("CONCAT_WS"),
         "CONCAT_WS should not appear in output, got: {select_stmt}"
     );
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
+    // accepts it.
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected emitted SQL: {e}\n{stmt}"));
+    }
 
     Ok(())
 }
@@ -402,6 +423,12 @@ fn left_function_to_substr() {
     let sql = translate_sql("SELECT left('hello', 3)", &options).unwrap();
     let lower = sql.to_lowercase();
     assert!(lower.contains("substr("), "expected substr: {sql}");
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
+    // accepts it.
+    rusqlite::Connection::open_in_memory()
+        .expect("in-memory SQLite")
+        .execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{sql}"));
 }
 
 #[test]
@@ -431,6 +458,12 @@ fn right_function_to_substr() {
     let sql = translate_sql("SELECT right('hello', 3)", &options).unwrap();
     let lower = sql.to_lowercase();
     assert!(lower.contains("substr("), "expected substr: {sql}");
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
+    // accepts it.
+    rusqlite::Connection::open_in_memory()
+        .expect("in-memory SQLite")
+        .execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{sql}"));
 }
 
 #[test]

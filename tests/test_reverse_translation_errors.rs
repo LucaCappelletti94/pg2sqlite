@@ -649,6 +649,8 @@ fn reverse_translate_select_succeeds() {
     assert_eq!(result.len(), 1);
     let output = result[0].to_string();
     assert!(output.contains("SELECT"), "Expected SELECT in output, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &output)
+        .unwrap_or_else(|e| panic!("reverse output is not valid PostgreSQL: {e}\n{output}"));
 }
 
 #[test]

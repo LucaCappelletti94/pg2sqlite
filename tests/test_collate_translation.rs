@@ -83,6 +83,12 @@ fn test_collate_translation() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(select_stmt.contains("COLLATE"), "Should contain COLLATE clause, got: {select_stmt}");
 
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &translated {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
+
     Ok(())
 }
 

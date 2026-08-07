@@ -2,6 +2,7 @@
 
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use rusqlite::Connection as SqliteConn;
 use sqlparser::ast::Statement;
 
 fn translate(sql: &str) -> Result<Vec<Statement>, Box<dyn std::error::Error>> {
@@ -56,6 +57,17 @@ fn distinct_on_rewrites_to_window_filter() -> Result<(), Box<dyn std::error::Err
 
     assert!(!upper.contains("DISTINCT ON"), "DISTINCT ON should be rewritten: {query}");
     assert!(upper.contains("ROW_NUMBER"), "Expected ROW_NUMBER rewrite: {query}");
+
+    // Execute DDL then prepare the SELECT to prove real SQLite accepts it.
+    let conn = SqliteConn::open_in_memory()?;
+    let ddl_script = translated
+        .iter()
+        .filter(|s| !matches!(s, Statement::Query(_)))
+        .map(|s| format!("{s};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    conn.execute_batch(&ddl_script)?;
+    conn.prepare(&query)?;
 
     Ok(())
 }

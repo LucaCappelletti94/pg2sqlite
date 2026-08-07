@@ -111,6 +111,17 @@ fn test_vec0_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::e
         "DELETE trigger should be ON embeddings_rls (backing table), got: {delete_trigger}"
     );
 
+    // Execute translated DDL (skip vec0 virtual tables that need the sqlite-vec
+    // extension loaded, which is unavailable in the standard test runtime).
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for s in &translated_sql {
+            if s.contains("USING vec0") {
+                continue;
+            }
+            conn.execute_batch(&format!("{s};")).expect("translated SQL must execute in SQLite");
+        }
+    }
     Ok(())
 }
 
@@ -192,6 +203,18 @@ fn test_role_filtered_vector_translation_keeps_vec0_artifacts()
         "Role-filtered translation should emit vec0 triggers on backing table, got:\n{output}"
     );
 
+    // Execute translated DDL (skip vec0 virtual tables that need the sqlite-vec
+    // extension loaded, which is unavailable in the standard test runtime).
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for stmt in &translated {
+            let s = stmt.to_string();
+            if s.contains("USING vec0") {
+                continue;
+            }
+            conn.execute_batch(&format!("{s};")).expect("translated SQL must execute in SQLite");
+        }
+    }
     Ok(())
 }
 

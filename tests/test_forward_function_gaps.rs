@@ -15,6 +15,18 @@ fn test_ascii_renamed_to_unicode() {
     let output = translate(sql);
     assert!(output.contains("unicode("), "ascii() should be renamed to unicode(), got: {output}");
     assert!(!output.contains("ascii("), "ascii() should no longer appear in output, got: {output}");
+    // Execute translated DDL + query to verify the output is valid SQLite.
+    {
+        let stmts = pg2sqlite::prelude::Pg2Sqlite::default()
+            .sql(sql)
+            .unwrap()
+            .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
+            .unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in &stmts {
+            conn.execute_batch(&format!("{stmt};")).expect("translated SQL must execute in SQLite");
+        }
+    }
 }
 
 #[test]

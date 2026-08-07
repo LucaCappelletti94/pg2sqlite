@@ -17,6 +17,8 @@ fn random_translates_to_float_range() {
     assert!(lower.contains("18446744073709551616"), "expected divisor constant: {sql}");
     assert!(!lower.contains("abs("), "random rewrite should avoid ABS to prevent overflow: {sql}");
     assert!(lower.contains('/'), "expected division operator: {sql}");
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    diesel::sql_query(&sql).execute(&mut conn).unwrap();
 }
 
 #[test]
@@ -53,8 +55,14 @@ fn random_rewrite_handles_sqlite_min_i64_without_overflow() -> Result<(), Box<dy
     Ok(())
 }
 
+/// `random()` is rewritten onto SQLite's integer `random()` normalised into
+/// PostgreSQL's `[0, 1)` domain. The properties asserted are the determinate
+/// ones: every draw lands in the unit interval and 1000 draws cover it. The
+/// chi-squared uniformity check is gone (R94): at p = 0.001 it failed a
+/// correct implementation one run in a thousand by construction, and it was
+/// testing SQLite's PRNG rather than this crate's translation.
 #[test]
-fn random_semantic_uniform_distribution() -> Result<(), Box<dyn std::error::Error>> {
+fn random_covers_the_unit_interval() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "SELECT random() AS val";
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
@@ -70,11 +78,6 @@ fn random_semantic_uniform_distribution() -> Result<(), Box<dyn std::error::Erro
     }
 
     const N: u32 = 1000;
-    const NUM_BUCKETS_USIZE: usize = 10;
-    const NUM_BUCKETS_U32: u32 = 10;
-    const THRESHOLDS: [f64; 9] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
-
-    let mut buckets = vec![0u32; NUM_BUCKETS_USIZE];
     let mut min_val = f64::MAX;
     let mut max_val = f64::MIN;
 
@@ -87,42 +90,19 @@ fn random_semantic_uniform_distribution() -> Result<(), Box<dyn std::error::Erro
         );
         min_val = min_val.min(val);
         max_val = max_val.max(val);
-        // Bucket index: [0.0, 0.1) -> 0, [0.1, 0.2) -> 1, ..., [0.9, 1.0] -> 9
-        let bucket = THRESHOLDS
-            .iter()
-            .position(|&threshold| val < threshold)
-            .unwrap_or(NUM_BUCKETS_USIZE - 1);
-        buckets[bucket] += 1;
     }
 
-    // Check range coverage: with 1000 samples from U[0,1], min should be < 0.05
-    // and max should be > 0.95 (probability of failure < 1e-22 each).
+    // Range coverage: with 1000 samples from U[0,1], the chance the minimum
+    // stays above 0.05 or the maximum below 0.95 is under 1e-22 each, which
+    // is beyond hardware failure rates rather than a once-in-a-thousand
+    // false positive.
     assert!(
         min_val < 0.05,
-        "minimum value {min_val} suspiciously high — distribution may not cover full range"
+        "minimum value {min_val} suspiciously high, the distribution may not cover the range"
     );
     assert!(
         max_val > 0.95,
-        "maximum value {max_val} suspiciously low — distribution may not cover full range"
-    );
-
-    // Chi-squared test for uniformity across 10 buckets.
-    // Expected count per bucket = n / num_buckets = 100.
-    // With df=9, chi-squared critical value at p=0.001 is 27.88.
-    // This gives an extremely low false-positive rate.
-    let expected = f64::from(N) / f64::from(NUM_BUCKETS_U32);
-    let chi_sq: f64 = buckets
-        .iter()
-        .map(|&count| {
-            let diff = f64::from(count) - expected;
-            diff * diff / expected
-        })
-        .sum();
-
-    assert!(
-        chi_sq < 27.88,
-        "chi-squared {chi_sq:.2} exceeds critical value 27.88 (p=0.001, df=9) — \
-         distribution is not uniform. Bucket counts: {buckets:?}"
+        "maximum value {max_val} suspiciously low, the distribution may not cover the range"
     );
 
     Ok(())
@@ -137,6 +117,19 @@ fn with_args_preserves_window_over() {
     let lower = sql.to_lowercase();
     assert!(lower.contains("datetime('now')"), "expected datetime('now'): {sql}");
     assert!(lower.contains("over"), "expected OVER clause preserved: {sql}");
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    // DDL: no typed DSL exists for CREATE TABLE in diesel.
+    diesel::sql_query("CREATE TABLE employees (department_id INT)").execute(&mut conn).unwrap();
+    // Dynamically generated translated SQL cannot be expressed via the typed DSL.
+    // Pins R120: datetime() may not be used as a window function. Goes red when the
+    // defect is fixed, which is the point.
+    let err = diesel::sql_query(&sql)
+        .execute(&mut conn)
+        .expect_err("R120 pin: SQLite should refuse datetime() as window function");
+    assert!(
+        format!("{err}").contains("may not be used as a window function"),
+        "expected window function error: {err}"
+    );
 }
 
 #[test]
@@ -152,6 +145,19 @@ fn now_over_partition_translation_preserves_structure() {
     let lower = sql.to_lowercase();
     assert!(lower.contains("over (partition by"), "OVER PARTITION BY should be preserved: {sql}");
     assert!(lower.contains("department_id"), "partition column should be preserved: {sql}");
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    // DDL: no typed DSL exists for CREATE TABLE in diesel.
+    diesel::sql_query("CREATE TABLE employees (department_id INT)").execute(&mut conn).unwrap();
+    // Dynamically generated translated SQL cannot be expressed via the typed DSL.
+    // Pins R120: datetime() may not be used as a window function. Goes red when the
+    // defect is fixed, which is the point.
+    let err = diesel::sql_query(&sql)
+        .execute(&mut conn)
+        .expect_err("R120 pin: SQLite should refuse datetime() as window function");
+    assert!(
+        format!("{err}").contains("may not be used as a window function"),
+        "expected window function error: {err}"
+    );
 }
 
 #[test]
@@ -161,6 +167,8 @@ fn to_timestamp_epoch() {
     let lower = sql.to_lowercase();
     assert!(lower.contains("datetime("), "expected datetime: {sql}");
     assert!(lower.contains("unixepoch"), "expected 'unixepoch' modifier: {sql}");
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    diesel::sql_query(&sql).execute(&mut conn).unwrap();
 }
 
 #[test]
@@ -227,6 +235,8 @@ fn timestamp_variants_are_now() {
             lower.contains("datetime('now')"),
             "{func} should translate to datetime('now'): {sql}"
         );
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        diesel::sql_query(&sql).execute(&mut conn).unwrap();
     }
 }
 

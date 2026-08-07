@@ -16,7 +16,10 @@ fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
     let options = Pg2SqliteOptions::default();
     let stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
     assert!(!stmts.is_empty(), "Expected at least one statement");
-    stmts[0].to_string()
+    let pg = stmts[0].to_string();
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, &pg)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{pg}"));
+    pg
 }
 
 fn reverse_err(pg_ddl: &str, sqlite_sql: &str) -> String {

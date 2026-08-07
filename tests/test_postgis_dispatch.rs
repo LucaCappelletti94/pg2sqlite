@@ -5,6 +5,7 @@
 //! they don't require the `sqlitegis` cargo feature. End-to-end execution
 //! against the SQLiteGIS extension lives in `test_postgis_diesel.rs`.
 
+use diesel::connection::SimpleConnection;
 use pg2sqlite::{
     impls::translator_impls::postgis,
     prelude::{Pg2SqliteOptions, TranslationOptions},
@@ -30,6 +31,16 @@ fn st_point_passthrough_when_sqlitegis_enabled_and_arity_matches() {
         .expect("ST_Point/2 is in SQLiteGIS catalog and should pass through");
     let joined = translated.join("\n").to_ascii_uppercase();
     assert!(joined.contains("ST_POINT"), "got: {joined}");
+    let mut conn = helpers::establish_connection();
+    for stmt in &translated {
+        // ST_Point is a SQLiteGIS UDF absent in the test process; accept that
+        // specific error as proof that SQLite parsed the rest of the statement.
+        match conn.batch_execute(stmt) {
+            Ok(()) => {}
+            Err(e) if e.to_string().contains("no such function: ST_Point") => {}
+            Err(e) => panic!("SQLite rejected emitted syntax: {e}\n{stmt}"),
+        }
+    }
 }
 
 #[test]

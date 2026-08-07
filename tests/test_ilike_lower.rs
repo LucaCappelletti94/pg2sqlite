@@ -25,6 +25,10 @@ fn ilike_output_uses_lower_wrapping() {
         .to_string();
     assert!(select.to_lowercase().contains("lower("), "Expected lower() wrapping, got: {select}");
     assert!(!select.to_uppercase().contains("ILIKE"), "Should not contain ILIKE, got: {select}");
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    for s in &translated {
+        diesel::sql_query(s.to_string()).execute(&mut conn).unwrap();
+    }
 }
 
 /// Translated `NOT ILIKE` must use `lower()` wrapping and produce `NOT LIKE`.
@@ -41,6 +45,10 @@ fn not_ilike_output_uses_lower_wrapping() {
         .to_string();
     assert!(select.to_lowercase().contains("lower("), "Expected lower() wrapping, got: {select}");
     assert!(select.to_uppercase().contains("NOT LIKE"), "Expected NOT LIKE, got: {select}");
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    for s in &translated {
+        diesel::sql_query(s.to_string()).execute(&mut conn).unwrap();
+    }
 }
 
 /// `lower(expr) LIKE lower(pattern)` must match every case variant even though

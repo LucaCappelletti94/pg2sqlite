@@ -6,11 +6,35 @@
 
 mod helpers;
 
+use std::sync::Once;
+
 use diesel::{
     QueryableByName, connection::SimpleConnection, prelude::*, sql_query, sql_types::Text,
 };
 use helpers::{establish_connection, translate_pg};
 use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use sqlite_vec::sqlite3_vec_init;
+
+/// Register sqlite-vec once per process so connections opened by any test in
+/// this binary have the extension loaded.
+///
+/// SAFETY: `sqlite3_vec_init` is the sqlite-vec C entry point with signature
+/// `(db, pzErrMsg, pApi) -> int`. The transmute restores that type.
+/// rusqlite is used here because diesel does not expose
+/// `sqlite3_auto_extension`.
+fn register_sqlite_vec_once() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::os::raw::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite3_vec_init as *const ())));
+    });
+}
 
 /// Text-bound scalar result for the apply test.
 #[derive(QueryableByName)]
@@ -29,6 +53,7 @@ fn double_colon_text_cast_uses_cast_syntax() {
     let out = tr("SELECT id::text FROM t");
     assert!(out.contains("CAST(id AS TEXT)"), "{out}");
     assert!(!out.contains("::"), "cast operator leaked into output: {out}");
+    sqlite_accepts(&out);
 }
 
 #[test]
@@ -36,6 +61,7 @@ fn double_colon_int_literal_cast_uses_cast_syntax() {
     let out = tr("SELECT '1'::int");
     assert!(out.contains("CAST('1' AS INTEGER)"), "{out}");
     assert!(!out.contains("::"), "cast operator leaked into output: {out}");
+    sqlite_accepts(&out);
 }
 
 /// A NUMERIC column is emitted as an INTEGER of minor units, so a cast to
@@ -55,6 +81,7 @@ fn nested_double_colon_casts_have_no_operator() {
     let out = tr("SELECT (a::int)::text FROM t");
     assert!(!out.contains("::"), "nested cast operator leaked: {out}");
     assert!(out.matches("CAST(").count() >= 2, "expected two CAST calls: {out}");
+    sqlite_accepts(&out);
 }
 
 #[test]
@@ -77,6 +104,7 @@ fn vector_cast_still_lowers_to_vec_f32() {
     let out = tr("SELECT '[1,2,3]'::vector FROM t");
     assert!(out.contains("vec_f32"), "{out}");
     assert!(!out.contains("::"), "{out}");
+    sqlite_syntax_check(&out);
 }
 
 #[test]
@@ -94,6 +122,7 @@ fn uuid_blob_cast_still_lowers_to_conversion() {
         !out.to_uppercase().contains("AS UUID"),
         "uuid cast fell through to generic path: {out}"
     );
+    sqlite_accepts(&out);
 }
 
 /// SQLite has no cast format clause. Cloning `FORMAT` through emitted
@@ -132,4 +161,28 @@ fn array_cast_target_becomes_text_under_json_arrays() {
         .expect("array cast should translate")
         .join("\n");
     assert!(out.contains("CAST(a AS TEXT)"), "{out}");
+    sqlite_accepts(&out);
+}
+
+/// Execute the emitted SQL against an in-memory SQLite to prove it is accepted.
+/// Called from tests that produce standard SQLite output with no extension
+/// functions.
+fn sqlite_accepts(sql: &str) {
+    let mut conn = establish_connection();
+    conn.batch_execute("CREATE TABLE t (id INTEGER, a TEXT, n INTEGER) STRICT;").unwrap();
+    conn.batch_execute(&format!("{sql};"))
+        .unwrap_or_else(|e| panic!("emitted SQL rejected by SQLite: {e}\n{sql}"));
+}
+
+/// Execute emitted SQL that references sqlite-vec extension functions.
+///
+/// Registers sqlite-vec globally so the functions are available, then runs the
+/// statement on a fresh in-memory connection. rusqlite is used directly
+/// because diesel does not expose `sqlite3_auto_extension`.
+fn sqlite_syntax_check(sql: &str) {
+    register_sqlite_vec_once();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t (id INTEGER, a TEXT, embedding BLOB);").unwrap();
+    conn.execute_batch(&format!("{sql};"))
+        .unwrap_or_else(|e| panic!("SQLite rejected emitted SQL: {e}\n{sql}"));
 }

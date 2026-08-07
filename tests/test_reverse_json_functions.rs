@@ -8,6 +8,7 @@
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sql_traits::structs::ParserDB;
+use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 fn schema() -> ParserDB {
     Pg2Sqlite::default()
@@ -26,12 +27,16 @@ fn rev(sqlite_sql: &str) -> Result<String, pg2sqlite::errors::Error> {
         .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
-/// Assert that `rev(sqlite_sql)` succeeds and the output contains `want`.
+/// Assert that `rev(sqlite_sql)` succeeds and the output contains `want`,
+/// then verify the output parses as valid PostgreSQL.
 fn assert_emits(sqlite_sql: &str, want: &str) {
     let out = rev(sqlite_sql).unwrap_or_else(|e| {
         panic!("{sqlite_sql}\n  expected output containing {want:?}, got Err: {e}")
     });
     assert!(out.contains(want), "{sqlite_sql}\n  expected {want:?} in: {out}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &out).unwrap_or_else(|e| {
+        panic!("{sqlite_sql}\n  reverse output is not valid PostgreSQL: {e}\n{out}")
+    });
 }
 
 /// Assert that `rev(sqlite_sql)` fails and the error message contains `want`.

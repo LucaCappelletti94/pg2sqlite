@@ -96,6 +96,14 @@ fn test_audit_table_uses_configured_name() -> Result<(), Box<dyn std::error::Err
         sql
     );
 
+    // Execute the generated DDL against SQLite to verify it runs. The
+    // translated statements are arbitrary CREATE TABLE, VIEW, and TRIGGER
+    // strings that cannot be expressed via diesel's typed DSL.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &translated {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
+
     Ok(())
 }
 
@@ -121,6 +129,14 @@ fn test_triggers_use_configured_audit_table() -> Result<(), Box<dyn std::error::
         custom_audit_name,
         sql
     );
+
+    // Execute the generated DDL against SQLite to verify it runs. The
+    // translated statements are arbitrary CREATE TABLE, VIEW, and TRIGGER
+    // strings that cannot be expressed via diesel's typed DSL.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &translated {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
 
     Ok(())
 }

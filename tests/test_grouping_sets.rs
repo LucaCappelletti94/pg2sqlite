@@ -73,6 +73,13 @@ fn grouping_sets_rewrites_to_union_all() -> Result<(), Box<dyn std::error::Error
 
     assert!(!upper.contains("GROUPING SETS"), "GROUPING SETS should be rewritten: {query}");
     assert!(upper.contains("UNION ALL"), "Expected UNION ALL expansion: {query}");
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in translated.iter().filter(|s| !matches!(s, Statement::Query(_))) {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+        conn.prepare(&query).unwrap();
+    }
 
     Ok(())
 }

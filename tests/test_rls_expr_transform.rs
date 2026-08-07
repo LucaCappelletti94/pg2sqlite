@@ -165,6 +165,7 @@ fn rls_outer_table_ref_in_function_arg() -> Result<(), Box<dyn std::error::Error
     // The inner reference to docs should be renamed to docs_rls (the inner table)
     // inside the EXISTS subquery
     assert!(output.contains("lower("), "lower() function should be preserved, got:\n{output}");
+    let _conn = apply_all(sql)?;
 
     Ok(())
 }

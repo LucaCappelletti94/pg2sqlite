@@ -39,6 +39,8 @@ fn reverse_is_distinct_from_supported() {
     let expr = parse_first_projection_expr("SELECT a IS DISTINCT FROM b FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("IS DISTINCT FROM"), "Expected IS DISTINCT FROM, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -49,6 +51,8 @@ fn reverse_is_not_distinct_from_supported() {
         output.contains("IS NOT DISTINCT FROM"),
         "Expected IS NOT DISTINCT FROM, got: {output}"
     );
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -56,6 +60,8 @@ fn reverse_is_unknown_supported() {
     let expr = parse_first_projection_expr("SELECT (a > b) IS UNKNOWN FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("IS UNKNOWN"), "Expected IS UNKNOWN, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -63,6 +69,8 @@ fn reverse_is_not_unknown_supported() {
     let expr = parse_first_projection_expr("SELECT (a > b) IS NOT UNKNOWN FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("IS NOT UNKNOWN"), "Expected IS NOT UNKNOWN, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -70,6 +78,8 @@ fn reverse_at_time_zone_supported() {
     let expr = parse_first_projection_expr("SELECT ts AT TIME ZONE '+02:00' FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("AT TIME ZONE"), "Expected AT TIME ZONE, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -77,6 +87,8 @@ fn reverse_overlay_supported() {
     let expr = parse_first_projection_expr("SELECT OVERLAY(txt PLACING 'X' FROM 2 FOR 1) FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("OVERLAY"), "Expected OVERLAY, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -84,6 +96,8 @@ fn reverse_any_op_supported() {
     let expr = parse_first_projection_expr("SELECT a > ANY(ARRAY[1, 2, 3]) FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("ANY"), "Expected ANY operator, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -91,6 +105,8 @@ fn reverse_all_op_supported() {
     let expr = parse_first_projection_expr("SELECT a <> ALL(ARRAY[1, 2, 3]) FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("ALL"), "Expected ALL operator, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -98,6 +114,8 @@ fn reverse_similar_to_supported() {
     let expr = parse_first_projection_expr("SELECT txt SIMILAR TO '%x%' FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("SIMILAR TO"), "Expected SIMILAR TO, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }
 
 #[test]
@@ -105,4 +123,6 @@ fn reverse_is_normalized_supported() {
     let expr = parse_first_projection_expr("SELECT txt IS NORMALIZED FROM t;");
     let output = reverse_expr(&expr);
     assert!(output.contains("IS NORMALIZED"), "Expected IS NORMALIZED, got: {output}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {output}"))
+        .expect("reverse output must parse as PostgreSQL");
 }

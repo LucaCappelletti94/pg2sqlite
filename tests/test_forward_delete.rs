@@ -4,12 +4,22 @@
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use rusqlite::Connection;
 use sqlparser::{
     ast::{Expr, Statement},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
 use translate_helpers::translate_default as translate;
+
+/// Execute each non-empty statement in `output` (newline-joined) against an
+/// in-memory SQLite to prove the translator emits valid SQL.
+fn execute_all(output: &str) {
+    let conn = Connection::open_in_memory().unwrap();
+    for s in output.split('\n').filter(|s| !s.trim().is_empty()) {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
+}
 
 fn parse_expr(sql: &str) -> Expr {
     Parser::new(&PostgreSqlDialect {}).try_with_sql(sql).unwrap().parse_expr().unwrap()
@@ -42,6 +52,7 @@ fn delete_using_converts_to_exists() {
         output.contains("EXISTS") || output.contains("DELETE"),
         "Expected EXISTS or DELETE: {output}"
     );
+    execute_all(&output);
 }
 
 #[test]
@@ -53,6 +64,7 @@ fn delete_using_with_condition() {
     ";
     let output = translate(sql);
     assert!(output.contains("DELETE") || output.contains("EXISTS"), "Expected DELETE: {output}");
+    execute_all(&output);
 }
 
 #[test]
@@ -63,6 +75,7 @@ fn delete_basic() {
     ";
     let output = translate(sql);
     assert!(output.contains("DELETE"), "Expected DELETE: {output}");
+    execute_all(&output);
 }
 
 #[test]
@@ -73,6 +86,7 @@ fn delete_all() {
     ";
     let output = translate(sql);
     assert!(output.contains("DELETE"), "Expected DELETE: {output}");
+    execute_all(&output);
 }
 
 #[test]
@@ -86,6 +100,7 @@ fn delete_where_translates_expressions() {
         output.contains("datetime('now')"),
         "Expected datetime('now') in DELETE WHERE: {output}"
     );
+    execute_all(&output);
 }
 
 #[test]
@@ -99,6 +114,7 @@ fn delete_returning_translates_expressions() {
         output.contains("datetime('now')"),
         "Expected datetime('now') in DELETE RETURNING: {output}"
     );
+    execute_all(&output);
 }
 
 #[test]
@@ -115,16 +131,14 @@ fn delete_order_by_and_limit_translate_expressions() {
     delete.order_by = vec![parse_order_by_expr("SELECT 1 ORDER BY NOW();")];
     delete.limit = Some(parse_expr("NOW()"));
 
-    let output = Pg2Sqlite::default()
+    let stmts = Pg2Sqlite::default()
         .sql(schema_sql)
         .unwrap()
         .statement(delete_stmt)
         .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
+        .unwrap();
+
+    let output = stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
         output.contains("ORDER BY")
@@ -132,4 +146,12 @@ fn delete_order_by_and_limit_translate_expressions() {
             && output.contains("datetime('now')"),
         "Expected translated ORDER BY/LIMIT expressions in DELETE: {output}"
     );
+
+    // Execute DDL statements. The DELETE uses ORDER BY/LIMIT which requires
+    // SQLITE_ENABLE_UPDATE_DELETE_LIMIT at compile time, so only the DDL
+    // (non-Delete) statements are run here to prove SQLite accepts the schema.
+    let conn = Connection::open_in_memory().unwrap();
+    for s in stmts.iter().filter(|s| !matches!(s, Statement::Delete(_))) {
+        conn.execute_batch(&format!("{s};")).unwrap();
+    }
 }

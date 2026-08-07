@@ -95,6 +95,11 @@ fn execute_function_in_a_trigger_still_translates() -> Result<(), Box<dyn std::e
         statements.iter().any(|s| s.to_string().contains("CREATE TRIGGER")),
         "the trigger must still be emitted: {statements:?}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &statements {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted statement must run in SQLite: {e}\n{stmt}"));
+    }
 
     Ok(())
 }

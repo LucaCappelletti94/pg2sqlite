@@ -8,6 +8,10 @@
 //! - string_agg with nested expressions and ORDER BY clause
 //! - COUNT/SUM DISTINCT passthrough
 
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
+use run_translated_helper::run_translated_with;
+
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
@@ -125,6 +129,7 @@ fn string_agg_with_order_by_preserves_order_clause() {
     let out = translate_ok(&sql);
     assert!(out.contains("group_concat"), "Should rename to group_concat: {out}");
     assert!(out.to_uppercase().contains("ORDER BY"), "ORDER BY must be preserved: {out}");
+    run_translated_with(&sql, &Pg2SqliteOptions::default());
 }
 
 /// string_agg(NOW()::text, ',') — the NOW() inside the aggregate arg must be
@@ -142,6 +147,7 @@ fn string_agg_translates_nested_now_in_args() {
         !out.to_uppercase().contains("NOW()"),
         "NOW() must not appear verbatim in output: {out}"
     );
+    run_translated_with(&sql, &Pg2SqliteOptions::default());
 }
 
 /// COUNT(DISTINCT col) passes through unchanged — SQLite supports this.
@@ -150,6 +156,10 @@ fn count_distinct_passes_through() {
     let out = translate_ok(&format!("{SCHEMA} SELECT COUNT(DISTINCT val) FROM t;"));
     assert!(out.to_uppercase().contains("COUNT"), "COUNT should be present: {out}");
     assert!(out.to_uppercase().contains("DISTINCT"), "DISTINCT must be preserved: {out}");
+    run_translated_with(
+        &format!("{SCHEMA} SELECT COUNT(DISTINCT val) FROM t;"),
+        &Pg2SqliteOptions::default(),
+    );
 }
 
 /// SUM(DISTINCT col) passes through — SQLite supports aggregate DISTINCT.
@@ -158,4 +168,8 @@ fn sum_distinct_passes_through() {
     let out = translate_ok(&format!("{SCHEMA} SELECT SUM(DISTINCT val) FROM t;"));
     assert!(out.to_uppercase().contains("SUM"), "SUM should be present: {out}");
     assert!(out.to_uppercase().contains("DISTINCT"), "DISTINCT must be preserved: {out}");
+    run_translated_with(
+        &format!("{SCHEMA} SELECT SUM(DISTINCT val) FROM t;"),
+        &Pg2SqliteOptions::default(),
+    );
 }

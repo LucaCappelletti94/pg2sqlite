@@ -175,7 +175,12 @@ fn test_drop_table_translation() -> Result<(), Box<dyn std::error::Error>> {
     let drop_str = translated[0].to_string();
     assert!(drop_str.contains("DROP TABLE"), "Should contain DROP TABLE: {drop_str}");
     assert!(drop_str.contains("users"), "Should contain table name: {drop_str}");
-
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY);").unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }
 
@@ -186,7 +191,11 @@ fn test_drop_table_if_exists_translation() -> Result<(), Box<dyn std::error::Err
     assert_eq!(translated.len(), 1);
     let drop_str = translated[0].to_string();
     assert!(drop_str.contains("IF EXISTS"), "Should contain IF EXISTS: {drop_str}");
-
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }
 
@@ -218,7 +227,12 @@ fn test_drop_table_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> 
     assert_eq!(translated.len(), 1);
     let drop_str = translated[0].to_string();
     assert!(!drop_str.contains("CASCADE"), "CASCADE should be stripped: {drop_str}");
-
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY);").unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }
 
@@ -229,7 +243,12 @@ fn test_drop_table_restrict_stripped() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(translated.len(), 1);
     let drop_str = translated[0].to_string();
     assert!(!drop_str.contains("RESTRICT"), "RESTRICT should be stripped: {drop_str}");
-
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY);").unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }
 
@@ -344,7 +363,13 @@ fn test_drop_index_translation() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(translated.len(), 1);
     let drop_str = translated[0].to_string();
     assert!(drop_str.contains("DROP INDEX"), "Should contain DROP INDEX: {drop_str}");
-
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);").unwrap();
+    conn.execute_batch("CREATE INDEX idx_name ON t (name);").unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }
 
@@ -382,7 +407,11 @@ fn test_drop_trigger_translation() -> Result<(), Box<dyn std::error::Error>> {
 
     // SQLite DROP TRIGGER syntax doesn't include ON table_name
     assert!(!drop_str.contains(" ON "), "ON table_name should be stripped for SQLite: {drop_str}");
-
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }
 
@@ -397,7 +426,11 @@ fn test_drop_trigger_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     assert!(drop_str.contains("IF EXISTS"), "IF EXISTS should be preserved: {drop_str}");
     // Should not contain ON table_name
     assert!(!drop_str.contains(" ON "), "ON table should be stripped: {drop_str}");
-
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }
 
@@ -410,7 +443,14 @@ fn test_drop_trigger_cascade_stripped() -> Result<(), Box<dyn std::error::Error>
 
     assert!(!drop_str.contains("CASCADE"), "CASCADE should be stripped: {drop_str}");
     assert!(!drop_str.contains(" ON "), "ON table should be stripped: {drop_str}");
-
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE my_table (id INTEGER PRIMARY KEY);").unwrap();
+    conn.execute_batch("CREATE TRIGGER my_trigger AFTER INSERT ON my_table BEGIN SELECT 1; END;")
+        .unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }
 

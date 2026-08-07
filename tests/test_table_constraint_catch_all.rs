@@ -6,7 +6,8 @@
 mod helpers;
 
 use helpers::translate_sql;
-use pg2sqlite::prelude::Pg2SqliteOptions;
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use rusqlite::Connection as SqliteConn;
 
 fn default_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -15,41 +16,45 @@ fn default_options() -> Pg2SqliteOptions {
 #[test]
 fn pk_constraint_columns_translated() {
     // A simple PRIMARY KEY constraint should pass through correctly
-    let options = default_options();
-    let sql = translate_sql(
-        r#"
+    let sql = r#"
         CREATE TABLE t (
             id INTEGER,
             name TEXT,
             PRIMARY KEY (id)
         );
-        "#,
-        &options,
-    )
-    .unwrap();
-    let lower = sql.to_lowercase();
+        "#;
+    let options = default_options();
+    let sql_str = translate_sql(sql, &options).unwrap();
+    let lower = sql_str.to_lowercase();
 
-    assert!(lower.contains("primary key"), "PRIMARY KEY should appear in output: {sql}");
+    assert!(lower.contains("primary key"), "PRIMARY KEY should appear in output: {sql_str}");
+    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
 fn unique_constraint_columns_translated() {
     // A UNIQUE constraint with expression should translate the expression
-    let options = default_options();
-    let sql = translate_sql(
-        r#"
+    let sql = r#"
         CREATE TABLE t (
             id INTEGER PRIMARY KEY,
             email TEXT,
             UNIQUE (email)
         );
-        "#,
-        &options,
-    )
-    .unwrap();
-    let lower = sql.to_lowercase();
+        "#;
+    let options = default_options();
+    let sql_str = translate_sql(sql, &options).unwrap();
+    let lower = sql_str.to_lowercase();
 
-    assert!(lower.contains("unique"), "UNIQUE should appear in output: {sql}");
+    assert!(lower.contains("unique"), "UNIQUE should appear in output: {sql_str}");
+    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 #[test]
@@ -98,8 +103,7 @@ fn exclude_constraint_is_rejected() {
 /// Guards the fix from refusing the constraints that do translate.
 #[test]
 fn the_translatable_constraints_still_translate() {
-    let sql = translate_sql(
-        "CREATE TABLE parent (id INTEGER PRIMARY KEY);
+    let sql = "CREATE TABLE parent (id INTEGER PRIMARY KEY);
          CREATE TABLE t (
             id INTEGER,
             parent_id INTEGER,
@@ -108,14 +112,18 @@ fn the_translatable_constraints_still_translate() {
             UNIQUE (s),
             FOREIGN KEY (parent_id) REFERENCES parent (id),
             CHECK (id > 0)
-         );",
-        &default_options(),
-    )
-    .expect("every translatable constraint must survive");
-    let lower = sql.to_lowercase();
+         );";
+    let sql_str =
+        translate_sql(sql, &default_options()).expect("every translatable constraint must survive");
+    let lower = sql_str.to_lowercase();
     for expected in ["primary key", "unique", "foreign key", "check"] {
-        assert!(lower.contains(expected), "{expected} must survive: {sql}");
+        assert!(lower.contains(expected), "{expected} must survive: {sql_str}");
     }
+    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&default_options()).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
 
 /// `NULLS NOT DISTINCT` makes two NULL rows collide, which SQLite cannot do:
@@ -140,13 +148,16 @@ fn unique_nulls_not_distinct_is_rejected() {
 /// swallowing the harmless spelling.
 #[test]
 fn unique_nulls_distinct_is_translated() {
-    let sql = translate_sql(
-        "CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, UNIQUE NULLS DISTINCT (s));",
-        &default_options(),
-    )
-    .expect("NULLS DISTINCT matches SQLite and must translate");
+    let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, UNIQUE NULLS DISTINCT (s));";
+    let sql_str = translate_sql(sql, &default_options())
+        .expect("NULLS DISTINCT matches SQLite and must translate");
     assert!(
-        !sql.to_uppercase().contains("NULLS"),
-        "the clause has no SQLite form and must not reach the output: {sql}"
+        !sql_str.to_uppercase().contains("NULLS"),
+        "the clause has no SQLite form and must not reach the output: {sql_str}"
     );
+    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&default_options()).unwrap();
+    let conn = SqliteConn::open_in_memory().unwrap();
+    conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }

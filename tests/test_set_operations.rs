@@ -21,6 +21,12 @@ fn test_union_query_translation() {
     let output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(output.contains("UNION"), "Output should contain UNION keyword, got:\n{output}");
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+    }
 }
 
 /// UNION ALL (no deduplication) must survive translation.
@@ -39,6 +45,12 @@ fn test_union_all_translation() {
         output.contains("UNION ALL"),
         "Output should contain UNION ALL keyword, got:\n{output}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+    }
 }
 
 /// INTERSECT must survive translation.
@@ -57,6 +69,12 @@ fn test_intersect_translation() {
         output.contains("INTERSECT"),
         "Output should contain INTERSECT keyword, got:\n{output}"
     );
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+    }
 }
 
 /// EXCEPT must survive translation.
@@ -72,6 +90,12 @@ fn test_except_translation() {
     let output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(output.contains("EXCEPT"), "Output should contain EXCEPT keyword, got:\n{output}");
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};")).unwrap();
+        }
+    }
 }
 
 /// UNION ALL translated SQL executes correctly in an in-memory SQLite DB

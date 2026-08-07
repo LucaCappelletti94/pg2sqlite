@@ -108,6 +108,11 @@ fn test_fts5_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::e
         delete_trigger.contains("ON documents_rls"),
         "DELETE trigger should be ON documents_rls (backing table), got: {delete_trigger}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &translated_sql {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted DDL failed: {e}\n{stmt}"));
+    }
 
     Ok(())
 }

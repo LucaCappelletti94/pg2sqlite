@@ -3,17 +3,13 @@
 
 mod helpers;
 
-use helpers::translate_sql;
+use helpers::{translate_sql, translate_statements};
 use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
 
 #[test]
 fn plpgsql_trigger_translates_function_in_window_partition() {
-    // A trigger body containing a function with OVER (PARTITION BY
-    // gen_random_uuid()) should translate gen_random_uuid → uuidv7 even inside
-    // the window spec.
     let options = Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob);
-    let sql = translate_sql(
-        r#"
+    let raw = r#"
         CREATE TABLE events (id UUID, department_id UUID, created_at TIMESTAMP);
         CREATE OR REPLACE FUNCTION test_func()
         RETURNS TRIGGER AS $$
@@ -27,25 +23,24 @@ fn plpgsql_trigger_translates_function_in_window_partition() {
             AFTER INSERT ON events
             FOR EACH ROW
             EXECUTE FUNCTION test_func();
-        "#,
-        &options,
-    )
-    .unwrap();
+        "#;
+    let sql = translate_sql(raw, &options).unwrap();
     let lower = sql.to_lowercase();
-    // UUID function should be translated in trigger body
     assert!(
         lower.contains("uuid()"),
         "gen_random_uuid should be translated to uuid() in trigger body: {sql}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &translate_statements(raw, &options).unwrap() {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
 }
 
 #[test]
 fn plpgsql_trigger_translates_subquery_order_by() {
-    // A trigger body with an ORDER BY expression containing gen_random_uuid()
-    // inside a subquery. The gen_random_uuid should be translated.
     let options = Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob);
-    let sql = translate_sql(
-        r#"
+    let raw = r#"
         CREATE TABLE items (id UUID, name TEXT);
         CREATE OR REPLACE FUNCTION order_test()
         RETURNS TRIGGER AS $$
@@ -59,24 +54,24 @@ fn plpgsql_trigger_translates_subquery_order_by() {
             AFTER INSERT ON items
             FOR EACH ROW
             EXECUTE FUNCTION order_test();
-        "#,
-        &options,
-    )
-    .unwrap();
+        "#;
+    let sql = translate_sql(raw, &options).unwrap();
     let lower = sql.to_lowercase();
     assert!(
         lower.contains("uuid()"),
         "gen_random_uuid in trigger body should be translated to uuid(): {sql}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &translate_statements(raw, &options).unwrap() {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
 }
 
 #[test]
 fn plpgsql_trigger_translates_union_all_body() {
-    // A trigger with UNION ALL in the body: both sides should have
-    // gen_random_uuid translated.
     let options = Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob);
-    let sql = translate_sql(
-        r#"
+    let raw = r#"
         CREATE TABLE log (id UUID, msg TEXT);
         CREATE OR REPLACE FUNCTION union_test()
         RETURNS TRIGGER AS $$
@@ -92,17 +87,19 @@ fn plpgsql_trigger_translates_union_all_body() {
             AFTER INSERT ON log
             FOR EACH ROW
             EXECUTE FUNCTION union_test();
-        "#,
-        &options,
-    )
-    .unwrap();
+        "#;
+    let sql = translate_sql(raw, &options).unwrap();
     let lower = sql.to_lowercase();
-    // Both sides of UNION should have uuid translated
     let count = lower.matches("uuid()").count();
     assert!(
         count >= 2,
         "expected at least 2 uuid() occurrences in UNION ALL body, got {count}: {sql}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for s in &translate_statements(raw, &options).unwrap() {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
+    }
 }
 
 #[test]

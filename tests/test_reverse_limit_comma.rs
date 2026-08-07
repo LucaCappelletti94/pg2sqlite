@@ -5,7 +5,9 @@
 //! the trap: `LIMIT 5, 10` is offset 5 and limit 10. Measured on both, it
 //! returns rows 6 through 10 of ten, as does `LIMIT 10 OFFSET 5`.
 
+use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY);";
 
@@ -26,6 +28,8 @@ fn the_comma_form_becomes_limit_offset() {
     assert!(!pg.contains("5, 10"), "PostgreSQL has no comma form: {pg}");
     assert!(pg.contains("LIMIT 10"), "10 is the count: {pg}");
     assert!(pg.contains("OFFSET 5"), "5 is the offset: {pg}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &pg)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{pg}"));
 }
 
 /// The explicit spelling already reverses and must be untouched, which is what
@@ -35,6 +39,8 @@ fn the_explicit_form_is_unchanged() {
     let pg = reverse("SELECT id FROM t ORDER BY id LIMIT 10 OFFSET 5");
     assert!(pg.contains("LIMIT 10"), "{pg}");
     assert!(pg.contains("OFFSET 5"), "{pg}");
+    Parser::parse_sql(&PostgreSqlDialect {}, &pg)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{pg}"));
 }
 
 /// Both numbers survive a round trip, which the comma form loses if either
@@ -42,12 +48,22 @@ fn the_explicit_form_is_unchanged() {
 #[test]
 fn a_round_trip_preserves_both_numbers() {
     let pg = reverse("SELECT id FROM t ORDER BY id LIMIT 5, 10");
-    let back = Pg2Sqlite::default()
+    Parser::parse_sql(&PostgreSqlDialect {}, &pg)
+        .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{pg}"));
+    // Forward-translate the reversed PG to verify it produces valid SQLite.
+    // Translated DDL/DQL cannot be expressed via diesel's typed DSL.
+    let fwd_stmts = Pg2Sqlite::default()
         .sql(&format!("{SCHEMA}{pg};"))
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("forward")
-        .join("\n");
+        .expect("forward");
+    let back = fwd_stmts.join("\n");
     assert!(back.contains("LIMIT 10"), "{back}");
     assert!(back.contains("OFFSET 5"), "{back}");
+    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
+    for s in &fwd_stmts {
+        diesel::sql_query(s.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("forward translated SQL must execute: {e}\n{s}"));
+    }
 }

@@ -321,5 +321,10 @@ fn uuid_function_name_accepts_str_literal() -> Result<(), Box<dyn std::error::Er
         ddl.contains("my_uuid_fn"),
         "Custom UUID function name must appear in DEFAULT, got: {ddl}"
     );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for stmt in &translated {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{stmt}"));
+    }
     Ok(())
 }

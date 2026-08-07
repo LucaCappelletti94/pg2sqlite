@@ -59,6 +59,13 @@ fn test_is_true_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should contain IS TRUE, got: {select_stmt}"
     );
 
+    // Execute all translated statements to verify the output is valid SQLite.
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};"))?;
+        }
+    }
     Ok(())
 }
 
@@ -129,6 +136,13 @@ fn test_is_false_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should contain IS FALSE, got: {select_stmt}"
     );
 
+    // Execute all translated statements to verify the output is valid SQLite.
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};"))?;
+        }
+    }
     Ok(())
 }
 
@@ -195,6 +209,13 @@ fn test_is_not_true_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should contain IS NOT TRUE, got: {select_stmt}"
     );
 
+    // Execute all translated statements to verify the output is valid SQLite.
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};"))?;
+        }
+    }
     Ok(())
 }
 
@@ -222,5 +243,12 @@ fn test_is_not_false_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should contain IS NOT FALSE, got: {select_stmt}"
     );
 
+    // Execute all translated statements to verify the output is valid SQLite.
+    {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        for stmt in &translated {
+            conn.execute_batch(&format!("{stmt};"))?;
+        }
+    }
     Ok(())
 }

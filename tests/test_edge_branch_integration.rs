@@ -21,7 +21,7 @@ use sqlparser::{
         ObjectName, ObjectNamePart, Query, SetExpr, SqlOption, Statement, TableObject,
         TriggerExecBodyType,
     },
-    dialect::PostgreSqlDialect,
+    dialect::{PostgreSqlDialect, SQLiteDialect},
     parser::Parser,
     tokenizer::Span,
 };
@@ -905,4 +905,6 @@ fn rls_view_generation_covers_subquery_join_transform_paths() {
     assert!(sql.contains("docs_rls"), "expected backing table rename in SQL: {sql}");
     assert!(sql.contains("EXISTS"), "expected EXISTS policy to be preserved: {sql}");
     assert!(sql.contains("JOIN"), "expected JOIN subquery rewrite path: {sql}");
+    Parser::parse_sql(&SQLiteDialect {}, &sql)
+        .expect("generated RLS view SQL must parse as SQLite");
 }

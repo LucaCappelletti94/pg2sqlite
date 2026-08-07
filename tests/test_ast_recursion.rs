@@ -9,6 +9,7 @@
 //! 6. plpgsql GROUP BY expression inside trigger body
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use rusqlite::Connection;
 use sqlparser::ast::Statement;
 
 const SCHEMA: &str = "
@@ -62,6 +63,7 @@ fn window_frame_preceding_expr_is_translated() {
     let out = translate_ok(&sql);
     assert!(!out.contains("now()"), "now() must be translated inside PRECEDING bound: {out}");
     assert!(out.contains("datetime('now')"), "Expected datetime('now') in PRECEDING bound: {out}");
+    exec_translated(&sql);
 }
 
 /// An expression inside a window-frame `FOLLOWING` bound must be translated.
@@ -78,6 +80,7 @@ fn window_frame_following_expr_is_translated() {
     let out = translate_ok(&sql);
     assert!(!out.contains("now()"), "now() must be translated inside FOLLOWING bound: {out}");
     assert!(out.contains("datetime('now')"), "Expected datetime('now') in FOLLOWING bound: {out}");
+    exec_translated(&sql);
 }
 
 /// `date_trunc` inside the `ORDER BY` clause of `string_agg` must be
@@ -95,6 +98,7 @@ fn string_agg_order_by_clause_translates_date_trunc() {
         "date_trunc inside ORDER BY clause must be translated: {out}"
     );
     assert!(out.contains("strftime"), "Expected strftime in the ORDER BY clause: {out}");
+    exec_translated(&sql);
 }
 
 /// `now()` inside the `ORDER BY` clause of `string_agg` must become
@@ -112,6 +116,7 @@ fn string_agg_order_by_clause_translates_now() {
         out.contains("datetime('now')"),
         "Expected datetime('now') in the ORDER BY clause: {out}"
     );
+    exec_translated(&sql);
 }
 
 /// The expression inside a `LATERAL VIEW` clause must be translated.
@@ -129,6 +134,29 @@ fn lateral_view_expr_is_translated() {
     let out = translate_ok(&sql);
     assert!(!out.contains("now()"), "now() inside LATERAL VIEW must be translated: {out}");
     assert!(out.contains("datetime('now')"), "Expected datetime('now') inside LATERAL VIEW: {out}");
+    // Pins R122: LATERAL VIEW passes through and SQLite refuses it. Goes red when
+    // the defect is fixed, which is the point.
+    {
+        let conn = Connection::open_in_memory().unwrap();
+        let stmts = Pg2Sqlite::default()
+            .sql(&sql)
+            .unwrap()
+            .translate(&Pg2SqliteOptions::default())
+            .unwrap();
+        let mut pin_triggered = false;
+        for s in &stmts {
+            let sql_str = s.to_string();
+            let result = conn.execute_batch(&format!("{sql_str};"));
+            if let Err(err) = &result {
+                assert!(
+                    err.to_string().contains("near \"VIEW\": syntax error"),
+                    "expected LATERAL VIEW error: {err}"
+                );
+                pin_triggered = true;
+            }
+        }
+        assert!(pin_triggered, "R122 pin: expected LATERAL VIEW to be refused by SQLite");
+    }
 }
 
 /// When a plpgsql trigger uses `date_trunc` in an `IF` condition, the
@@ -155,6 +183,7 @@ FOR EACH ROW EXECUTE FUNCTION fn_if_cond();
     let out = translate_all(sql);
     assert!(!out.contains("date_trunc"), "date_trunc in IF condition must be translated: {out}");
     assert!(out.contains("strftime"), "Expected strftime in translated IF condition: {out}");
+    exec_translated(sql);
 }
 
 /// IF / ELSIF: both branches have their conditions translated.
@@ -181,6 +210,7 @@ FOR EACH ROW EXECUTE FUNCTION fn_elsif_cond();
     let out = translate_all(sql);
     assert!(!out.contains("date_trunc"), "date_trunc in ELSIF condition must be translated: {out}");
     assert!(out.contains("strftime"), "Expected strftime in translated ELSIF condition: {out}");
+    exec_translated(sql);
 }
 
 /// A subquery in the FROM clause of an INSERT inside a trigger body must have
@@ -210,6 +240,7 @@ FOR EACH ROW EXECUTE FUNCTION fn_derived();
         "date_trunc inside derived subquery must be translated: {out}"
     );
     assert!(out.contains("strftime"), "Expected strftime in translated derived subquery: {out}");
+    exec_translated(sql);
 }
 
 /// A PG-specific expression in a `GROUP BY` inside a trigger's SELECT must
@@ -237,4 +268,15 @@ FOR EACH ROW EXECUTE FUNCTION fn_group_by();
     let out = translate_all(sql);
     assert!(!out.contains("date_trunc"), "date_trunc in GROUP BY must be translated: {out}");
     assert!(out.contains("strftime"), "Expected strftime in translated GROUP BY: {out}");
+    exec_translated(sql);
+}
+
+fn exec_translated(pg_sql: &str) {
+    let conn = Connection::open_in_memory().unwrap();
+    let stmts =
+        Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected: {s}\n{e}"));
+    }
 }

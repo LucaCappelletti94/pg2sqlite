@@ -89,12 +89,14 @@ fn writable_nonrls_table_has_no_deny_triggers() {
         !joined.contains("widgets__readonly"),
         "writable table must not get deny triggers, got:\n{joined}"
     );
+    let _ = apply(SCHEMA);
 }
 
 #[test]
 fn non_selectable_table_is_omitted_without_triggers() {
     let joined = translate(SCHEMA).join("\n");
     assert!(!joined.contains("audit_logs"), "non-selectable table must be omitted, got:\n{joined}");
+    let _ = apply(SCHEMA);
 }
 
 #[test]
@@ -109,6 +111,7 @@ fn deny_trigger_names_are_deterministic() {
         assert!(joined.contains(event), "expected {event} trigger, got:\n{joined}");
     }
     assert!(joined.contains("RAISE(ABORT"), "deny triggers must RAISE(ABORT), got:\n{joined}");
+    let _ = apply(SCHEMA);
 }
 
 #[test]
@@ -196,9 +199,6 @@ CREATE TRIGGER \"orders__readonly_update\" BEFORE UPDATE ON orders FOR EACH ROW 
 
 #[test]
 fn custom_suffix_renames_triggers_and_dodges_collision() {
-    // A schema that collides with the default marker translates cleanly once
-    // the marker is reconfigured, mirroring the RLS `with_rls_table_suffix`
-    // escape hatch.
     let schema = "\
 CREATE ROLE app_user;
 CREATE TABLE orders (id INTEGER PRIMARY KEY, item TEXT NOT NULL);
@@ -206,15 +206,16 @@ GRANT SELECT ON orders TO app_user;
 CREATE TABLE \"orders__readonly_insert\" (x INTEGER);
 ";
     let opts = options().with_readonly_deny_trigger_suffix("__ro");
-    let joined = Pg2Sqlite::default()
+    // Keep the stmt vec to execute after the substring checks.
+    let stmts: Vec<String> = Pg2Sqlite::default()
         .sql(schema)
         .expect("parse")
         .translate(&opts)
         .expect("custom marker avoids the default collision")
         .iter()
         .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect();
+    let joined = stmts.join("\n");
     for name in ["orders__ro_insert", "orders__ro_update", "orders__ro_delete"] {
         assert!(joined.contains(name), "expected trigger {name}, got:\n{joined}");
     }
@@ -222,6 +223,14 @@ CREATE TABLE \"orders__readonly_insert\" (x INTEGER);
         !joined.contains("orders__readonly_insert BEFORE"),
         "default marker must not be used, got:\n{joined}"
     );
+    // Execute translated DDL to prove it is accepted by SQLite.
+    // Translated DDL cannot be expressed via diesel's typed DSL.
+    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
+    for stmt in &stmts {
+        diesel::sql_query(stmt.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("translated DDL must execute: {e}\n{stmt}"));
+    }
 }
 
 #[test]
