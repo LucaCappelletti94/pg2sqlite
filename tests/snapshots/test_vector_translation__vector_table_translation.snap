@@ -1,10 +1,9 @@
 ---
 source: tests/test_vector_translation.rs
-assertion_line: 383
 expression: translated_sql
 ---
 CREATE TABLE items (id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, embedding BLOB) STRICT
 CREATE VIRTUAL TABLE items_embedding_vec USING vec0 (id_id INTEGER PRIMARY KEY, embedding float[384])
 CREATE TRIGGER items_embedding_vec_ai AFTER INSERT ON items BEGIN INSERT INTO items_embedding_vec (id_id, embedding) SELECT NEW.id, NEW.embedding WHERE NEW.embedding IS NOT NULL; END
 CREATE TRIGGER items_embedding_vec_ad AFTER DELETE ON items BEGIN DELETE FROM items_embedding_vec WHERE id_id = OLD.id; END
-CREATE TRIGGER items_embedding_vec_au AFTER UPDATE OF embedding, id ON items BEGIN UPDATE items_embedding_vec SET embedding = NEW.embedding, id_id = NEW.id WHERE id_id = OLD.id; END
+CREATE TRIGGER items_embedding_vec_au AFTER UPDATE OF embedding, id ON items BEGIN DELETE FROM items_embedding_vec WHERE id_id = OLD.id; INSERT INTO items_embedding_vec (id_id, embedding) SELECT NEW.id, NEW.embedding WHERE NEW.embedding IS NOT NULL; END

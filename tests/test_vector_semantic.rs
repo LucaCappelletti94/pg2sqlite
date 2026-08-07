@@ -441,6 +441,118 @@ fn test_update_trigger_syncs_to_vec0() -> Result<()> {
     Ok(())
 }
 
+/// R126 update path: vec0 cannot store NULL, so an update TO NULL must not
+/// forward NULL into the shadow table. It deletes the shadow row instead,
+/// mirroring the insert trigger's rule that a NULL embedding stays out of
+/// the index.
+#[test]
+fn an_update_to_null_removes_the_row_from_the_index() -> Result<()> {
+    register_sqlite_vec();
+
+    let sql = "
+        CREATE TABLE items (
+            id INTEGER PRIMARY KEY,
+            embedding vector(4)
+        );
+    ";
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+
+    let db = Connection::open_in_memory()?;
+    for stmt in &translated {
+        db.execute_batch(&stmt.to_string())?;
+    }
+
+    let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
+    db.execute("INSERT INTO items (id, embedding) VALUES (1, ?)", [v1.as_bytes()])?;
+    let count: i32 =
+        db.query_row("SELECT COUNT(*) FROM items_embedding_vec", [], |row| row.get(0))?;
+    assert_eq!(count, 1, "the inserted vector should be indexed");
+
+    db.execute("UPDATE items SET embedding = NULL WHERE id = 1", [])
+        .expect("an update to NULL is valid PostgreSQL and must not crash on the sync trigger");
+
+    let count: i32 =
+        db.query_row("SELECT COUNT(*) FROM items_embedding_vec", [], |row| row.get(0))?;
+    assert_eq!(count, 0, "a NULL embedding cannot stay in the vec0 index");
+
+    Ok(())
+}
+
+/// R126 update path: a row born with a NULL embedding has no shadow row, so
+/// the old in-place UPDATE matched nothing and the row silently never joined
+/// the index. The trigger must create the shadow row.
+#[test]
+fn a_null_row_updated_to_a_vector_joins_the_index() -> Result<()> {
+    register_sqlite_vec();
+
+    let sql = "
+        CREATE TABLE items (
+            id INTEGER PRIMARY KEY,
+            embedding vector(4)
+        );
+    ";
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+
+    let db = Connection::open_in_memory()?;
+    for stmt in &translated {
+        db.execute_batch(&stmt.to_string())?;
+    }
+
+    db.execute("INSERT INTO items (id, embedding) VALUES (1, NULL)", [])?;
+    let count: i32 =
+        db.query_row("SELECT COUNT(*) FROM items_embedding_vec", [], |row| row.get(0))?;
+    assert_eq!(count, 0, "a NULL embedding stays out of the index at insert");
+
+    let v1: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0];
+    db.execute("UPDATE items SET embedding = ? WHERE id = 1", [v1.as_bytes()])?;
+
+    let (id, distance): (i32, f64) = db.query_row(
+        "SELECT id_id, distance FROM items_embedding_vec WHERE embedding MATCH ? LIMIT 1",
+        [v1.as_bytes()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(id, 1, "the updated row must join the index");
+    assert!(distance < 0.01, "the indexed value must be the updated vector");
+
+    Ok(())
+}
+
+/// Guard for the trigger's other duty: a primary key update moves the shadow
+/// row to the new key.
+#[test]
+fn a_pk_update_moves_the_indexed_row() -> Result<()> {
+    register_sqlite_vec();
+
+    let sql = "
+        CREATE TABLE items (
+            id INTEGER PRIMARY KEY,
+            embedding vector(4)
+        );
+    ";
+
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+
+    let db = Connection::open_in_memory()?;
+    for stmt in &translated {
+        db.execute_batch(&stmt.to_string())?;
+    }
+
+    let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
+    db.execute("INSERT INTO items (id, embedding) VALUES (1, ?)", [v1.as_bytes()])?;
+    db.execute("UPDATE items SET id = 2 WHERE id = 1", [])?;
+
+    let indexed_pk: i32 =
+        db.query_row("SELECT id_id FROM items_embedding_vec", [], |row| row.get(0))?;
+    assert_eq!(indexed_pk, 2, "the shadow row must follow the primary key");
+
+    Ok(())
+}
+
 #[test]
 fn test_delete_trigger_removes_from_vec0() -> Result<()> {
     register_sqlite_vec();

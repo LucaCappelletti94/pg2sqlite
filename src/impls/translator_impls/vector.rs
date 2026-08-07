@@ -214,11 +214,20 @@ fn create_vec0_triggers(
              DELETE FROM {vec_table_quoted} WHERE {vec_pk_column_quoted} = {old_pk}; \
              END"
         ),
-        // Update vector sync on vector value or PK changes.
+        // Update sync on vector value or PK changes, as delete plus
+        // conditional insert. An in-place UPDATE is wrong three ways, all
+        // measured on sqlite-vec 0.1.9: vec0 silently ignores both a NULL
+        // assignment and a primary key change (each reports success and
+        // leaves the row untouched, so the index serves stale vectors), and
+        // a row born with a NULL embedding has no shadow row to update, so
+        // it silently never joins the index. The conditional insert is the
+        // insert trigger's rule: a NULL embedding stays out of the index.
+        // UPSERT is not an option, SQLite refuses it on virtual tables.
         format!(
             "CREATE TRIGGER {update_trigger_name} AFTER UPDATE OF {column_name_quoted}, {} ON {trigger_table_quoted} BEGIN \
-             UPDATE {vec_table_quoted} SET {column_name_quoted} = {new_vec_col}, {vec_pk_column_quoted} = {new_pk} \
-             WHERE {vec_pk_column_quoted} = {old_pk}; \
+             DELETE FROM {vec_table_quoted} WHERE {vec_pk_column_quoted} = {old_pk}; \
+             INSERT INTO {vec_table_quoted} ({vec_pk_column_quoted}, {column_name_quoted}) \
+             SELECT {new_pk}, {new_vec_col} WHERE {new_vec_col} IS NOT NULL; \
              END",
             quote_identifier(pk_column)
         ),
@@ -434,8 +443,9 @@ mod tests {
             "update trigger should fire on vector or PK updates: {update_trigger_sql}"
         );
         assert!(
-            update_trigger_sql.contains("id_id = NEW.id"),
-            "update trigger should update vector row identity: {update_trigger_sql}"
+            update_trigger_sql
+                .contains("SELECT NEW.id, NEW.embedding WHERE NEW.embedding IS NOT NULL"),
+            "update trigger should reinsert the row under the new key, skipping NULL: {update_trigger_sql}"
         );
         assert!(
             update_trigger_sql.contains("WHERE id_id = OLD.id"),

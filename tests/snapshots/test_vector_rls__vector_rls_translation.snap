@@ -14,4 +14,4 @@ CREATE VIEW embeddings_rls_violations AS SELECT id, content, embedding FROM embe
 CREATE VIRTUAL TABLE embeddings_embedding_vec USING vec0 (id_id INTEGER PRIMARY KEY, embedding float[384])
 CREATE TRIGGER embeddings_embedding_vec_ai AFTER INSERT ON embeddings_rls BEGIN INSERT INTO embeddings_embedding_vec (id_id, embedding) SELECT NEW.id, NEW.embedding WHERE NEW.embedding IS NOT NULL; END
 CREATE TRIGGER embeddings_embedding_vec_ad AFTER DELETE ON embeddings_rls BEGIN DELETE FROM embeddings_embedding_vec WHERE id_id = OLD.id; END
-CREATE TRIGGER embeddings_embedding_vec_au AFTER UPDATE OF embedding, id ON embeddings_rls BEGIN UPDATE embeddings_embedding_vec SET embedding = NEW.embedding, id_id = NEW.id WHERE id_id = OLD.id; END
+CREATE TRIGGER embeddings_embedding_vec_au AFTER UPDATE OF embedding, id ON embeddings_rls BEGIN DELETE FROM embeddings_embedding_vec WHERE id_id = OLD.id; INSERT INTO embeddings_embedding_vec (id_id, embedding) SELECT NEW.id, NEW.embedding WHERE NEW.embedding IS NOT NULL; END
