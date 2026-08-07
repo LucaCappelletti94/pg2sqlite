@@ -16,6 +16,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
@@ -1357,6 +1358,7 @@ fn rls_read_predicate(
 ) -> Result<PolicyPredicate, Error> {
     let ctx = RlsTriggerContext::new(table, options);
     let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select])?;
+    reject_self_referential_read_policy(&select_policies, table)?;
 
     combine_policy_predicates(
         &select_policies,
@@ -1367,6 +1369,55 @@ fn rls_read_predicate(
         schema,
         Some(ctx.as_rename_tuple()),
     )
+}
+
+/// Refuses a read-path policy whose predicate reads the table it guards.
+///
+/// PostgreSQL cannot evaluate one. Reading the table applies the policy, and
+/// the policy reads the table, so it answers `infinite recursion detected in
+/// policy for relation`, measured on PostgreSQL 17 as a non-superuser for the
+/// plain, CTE and set-operation spellings alike. The translated form is a view
+/// selecting from the backing table, so the same predicate makes SQLite answer
+/// `view <table> is circularly defined` wherever the inner reference is not
+/// renamed, and where it is renamed the view works and filters, which accepts
+/// and evaluates input the source database refuses.
+///
+/// Only the read path is refused, which is where PostgreSQL draws the line
+/// too. A `WITH CHECK` predicate, and the `USING` predicate of an
+/// `INSERT`-only, `UPDATE`-only or `DELETE`-only policy, all read the table
+/// under its SELECT policy rather than their own, so nothing recurses and
+/// PostgreSQL runs them. Those were measured and are left alone.
+fn reject_self_referential_read_policy(
+    policies: &[&CreatePolicy],
+    table: &CreateTable,
+) -> Result<(), Error> {
+    let guarded = table.table_name();
+    for policy in policies {
+        let Some(predicate) = policy.using.as_ref() else { continue };
+        let reads_itself = sqlparser::ast::visit_relations(predicate, |relation| {
+            if crate::impls::object_name::last_ident(relation)
+                .is_some_and(|ident| ident.value.eq_ignore_ascii_case(guarded))
+            {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break();
+
+        if reads_itself {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "The read policy {} on {guarded} reads {guarded} in its own USING predicate, \
+                 which PostgreSQL cannot evaluate: reading the table applies the policy and the \
+                 policy reads the table, so PostgreSQL answers `infinite recursion detected in \
+                 policy for relation \"{guarded}\"`. Rewrite the predicate over another table, or \
+                 restrict the policy to INSERT, UPDATE or DELETE, where PostgreSQL does evaluate \
+                 a self reference.",
+                policy.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Generates the CREATE VIEW SQL statement for a table with RLS.

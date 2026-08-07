@@ -264,12 +264,20 @@ FOR DELETE USING (
 
 ALTER TABLE ownable_owners ENABLE ROW LEVEL SECURITY;
 
+-- A read policy cannot consult the table it guards: PostgreSQL answers
+-- `infinite recursion detected in policy for relation "ownable_owners"`.
+-- A view can, because PostgreSQL runs one with its owner's rights and so
+-- bypasses the base table's row level security, which is the standard way to
+-- express "any owner of this ownable may see all of its owner rows".
+CREATE VIEW ownable_owners_unfiltered AS
+SELECT ownable_id, owner_id FROM ownable_owners;
+
 -- SELECT: Can view if has viewer access to the ownable (owner, admin, or grantee)
 CREATE POLICY ownable_owners_select_policy ON ownable_owners
 FOR SELECT USING (
     -- is_ownable_owner
     EXISTS (
-        SELECT 1 FROM ownable_owners oo2
+        SELECT 1 FROM ownable_owners_unfiltered oo2
         WHERE oo2.ownable_id = ownable_owners.ownable_id
           AND (oo2.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -343,6 +351,12 @@ FOR DELETE USING (
 
 ALTER TABLE ownable_administrators ENABLE ROW LEVEL SECURITY;
 
+-- Same reason as `ownable_owners_unfiltered`: a read policy cannot consult the
+-- table it guards, and a view bypasses the base table's row level security in
+-- PostgreSQL because it runs with its owner's rights.
+CREATE VIEW ownable_administrators_unfiltered AS
+SELECT ownable_id, administrator_id FROM ownable_administrators;
+
 -- SELECT: Can view if has viewer access to the ownable
 CREATE POLICY ownable_admins_select_policy ON ownable_administrators
 FOR SELECT USING (
@@ -357,7 +371,7 @@ FOR SELECT USING (
     )
     -- is_ownable_admin
     OR EXISTS (
-        SELECT 1 FROM ownable_administrators oa2
+        SELECT 1 FROM ownable_administrators_unfiltered oa2
         WHERE oa2.ownable_id = ownable_administrators.ownable_id
           AND (oa2.administrator_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 

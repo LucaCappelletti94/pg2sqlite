@@ -587,4 +587,26 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT s || 'x' FROM t;",
                     ],
     ),
+    (
+        "rls-view-reads",
+        &[
+                // A declared view over an RLS table reads the backing table,
+                // as PostgreSQL does, which is what lets a policy consult its
+                // own table through one. A `security_invoker` view keeps
+                // reading the policy view. The self-referential policy itself
+                // is refused, so it is deliberately absent: a refused row
+                // reaches neither the sweep nor the floor.
+                "CREATE TABLE vr (id INTEGER PRIMARY KEY, owner_id INT);
+                 ALTER TABLE vr ENABLE ROW LEVEL SECURITY;
+                 CREATE VIEW vr_all AS SELECT id, owner_id FROM vr;
+                 CREATE POLICY vr_p ON vr FOR SELECT USING (
+                     EXISTS (SELECT 1 FROM vr_all a WHERE a.id = vr.id AND a.owner_id > 0));
+                 CREATE POLICY vr_w ON vr FOR INSERT WITH CHECK (true);
+                 INSERT INTO vr (id, owner_id) VALUES (1, 2);",
+                "CREATE TABLE vi (id INTEGER PRIMARY KEY, owner_id INT);
+                 ALTER TABLE vi ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY vi_p ON vi FOR SELECT USING (owner_id > 0);
+                 CREATE VIEW vi_seen WITH (security_invoker = true) AS SELECT id FROM vi;",
+                    ],
+    ),
 ];

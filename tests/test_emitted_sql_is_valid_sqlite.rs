@@ -234,6 +234,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "foreign-key-match",
     "serial-columns",
     "boolean-to-text",
+    "rls-view-reads",
 ];
 
 #[test]

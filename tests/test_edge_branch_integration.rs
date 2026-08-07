@@ -881,12 +881,16 @@ fn rls_view_generation_covers_subquery_join_transform_paths() {
             team_id INTEGER NOT NULL
         );
         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+        -- Reads `memberships` rather than `docs` in the derived table. The
+        -- shape under test is the derived-table and JOIN rewrite, and a policy
+        -- whose read predicate reads its own table is refused per F8, since
+        -- PostgreSQL answers `infinite recursion detected` for one.
         CREATE POLICY docs_select ON docs
             FOR SELECT
             USING (
                 EXISTS (
                     SELECT d.owner_id
-                    FROM (SELECT owner_id, team_id FROM docs) AS d
+                    FROM (SELECT user_id AS owner_id, team_id FROM memberships) AS d
                     JOIN (teams t JOIN memberships m ON t.id = m.team_id)
                       ON m.team_id = d.team_id
                     WHERE d.owner_id = docs.owner_id
