@@ -573,76 +573,82 @@ impl PlPgSqlPreprocessor {
     }
 
     /// Tries to transform a single SELECT INTO statement.
+    ///
+    /// Handled shapes, each with an optional leading `WITH` clause that moves
+    /// inside the generated subquery, since `SET` has no place for it:
+    ///
+    /// - `SELECT <exprs> INTO <vars> FROM ...` becomes one `SET var = (SELECT
+    ///   expr FROM ... LIMIT 1);` per variable.
+    /// - `SELECT <exprs> INTO <vars>;` with no FROM clause, the plpgsql
+    ///   spelling of `var := expr`, becomes `SET var = (SELECT expr LIMIT 1);`.
+    ///
+    /// Keywords are located at the top nesting level only, outside strings and
+    /// parentheses, so a CTE body's own SELECT or FROM never splits the
+    /// statement. Anything left untransformed keeps its INTO and is refused
+    /// loudly by the trigger body translator rather than emitted.
     fn try_transform_select_into_stmt(stmt: &str, _context: &PlPgSqlContext) -> String {
-        let stmt_upper = stmt.to_uppercase();
+        // The main SELECT is the first top-level one: CTE bodies sit inside
+        // parentheses, so a WITH prefix is skipped naturally.
+        let Some(select_pos) = Self::find_top_level_keyword(stmt, "SELECT", 0) else {
+            return stmt.to_string();
+        };
+        let Some(into_pos) = Self::find_top_level_keyword(stmt, "INTO", select_pos) else {
+            return stmt.to_string();
+        };
+        let from_pos = Self::find_top_level_keyword(stmt, "FROM", into_pos);
 
-        // Check if this is a SELECT ... INTO ... FROM statement
-        let select_pos = stmt_upper.find("SELECT");
-        let into_pos = stmt_upper.find(" INTO ");
+        // A WITH prefix belongs inside each generated subquery.
+        let with_pos = Self::find_top_level_keyword(stmt, "WITH", 0).filter(|w| *w < select_pos);
+        let prefix = &stmt[..with_pos.unwrap_or(select_pos)];
+        let with_part = with_pos.map_or("", |w| &stmt[w..select_pos]);
 
-        // Find FROM that comes AFTER INTO (not before, which could be in comments)
-        let from_pos = into_pos.and_then(|i| stmt_upper[i..].find(" FROM ").map(|f| f + i));
+        let columns_part = stmt[select_pos + "SELECT".len()..into_pos].trim();
+        let vars_end = from_pos.unwrap_or_else(|| stmt.rfind(';').unwrap_or(stmt.len()));
+        let vars_part = stmt[into_pos + "INTO".len()..vars_end].trim();
+        let from_part = from_pos.map_or("", |f| stmt[f..].trim_end());
 
-        // Must have SELECT, INTO, FROM in that order
-        match (select_pos, into_pos, from_pos) {
-            (Some(s), Some(i), Some(f)) if s < i && i < f => {
-                // Preserve any content before SELECT (like BEGIN, comments, whitespace)
-                let prefix = &stmt[..s];
+        let columns = Self::split_top_level_csv(columns_part);
+        let vars = Self::split_top_level_csv(vars_part);
 
-                // Extract parts:
-                // - columns: between SELECT and INTO
-                // - variables: between INTO and FROM
-                // - rest: FROM onwards
-
-                let columns_part = stmt[s + 6..i].trim();
-                let vars_part = stmt[i + 6..f].trim();
-                let from_part = &stmt[f..];
-
-                // Parse column names
-                let columns = Self::split_top_level_csv(columns_part);
-
-                // Parse variable names
-                let vars = Self::split_top_level_csv(vars_part);
-
-                if columns.len() != vars.len() || columns.is_empty() {
-                    // Can't transform, return as-is
-                    return stmt.to_string();
-                }
-
-                // Generate SET statements for each variable
-                // SET var = (SELECT col FROM ... LIMIT 1);
-                let mut result = String::new();
-
-                // Preserve prefix (like BEGIN)
-                result.push_str(prefix);
-
-                // Get indentation from SELECT position
-                let select_line_start = stmt[..s].rfind('\n').map_or(0, |p| p + 1);
-                let indent = &stmt[select_line_start..s];
-
-                for (i, (col, var)) in columns.iter().zip(vars.iter()).enumerate() {
-                    // Build a subquery for each variable
-                    let subquery = format!("(SELECT {col}{}", from_part.trim_end_matches(';'));
-                    // Add LIMIT 1 if not present
-                    let subquery = if subquery.to_uppercase().contains(" LIMIT ") {
-                        format!("{subquery})")
-                    } else {
-                        format!("{subquery} LIMIT 1)")
-                    };
-
-                    if i > 0 {
-                        result.push_str(indent);
-                    }
-                    let _ = write!(result, "SET {var} = {subquery};");
-                    if i < columns.len() - 1 {
-                        result.push('\n');
-                    }
-                }
-
-                result
-            }
-            _ => stmt.to_string(),
+        // A variable slot that is not a bare name (INTO STRICT var, a record
+        // field, ...) has no SET spelling here. Left as-is, the INTO reaches
+        // the trigger body translator, which refuses it naming the statement.
+        if columns.len() != vars.len()
+            || columns.is_empty()
+            || vars.iter().any(|var| var.chars().any(char::is_whitespace))
+        {
+            return stmt.to_string();
         }
+
+        let mut result = String::new();
+        result.push_str(prefix);
+
+        // Get indentation from the position of WITH or SELECT.
+        let stmt_start = with_pos.unwrap_or(select_pos);
+        let line_start = stmt[..stmt_start].rfind('\n').map_or(0, |p| p + 1);
+        let indent = &stmt[line_start..stmt_start];
+
+        for (i, (col, var)) in columns.iter().zip(vars.iter()).enumerate() {
+            let body = format!("{with_part}SELECT {col} {}", from_part.trim_end_matches(';'));
+            // Add LIMIT 1 if not present. PostgreSQL's SELECT INTO takes the
+            // first row, which a SQLite scalar subquery does anyway, so a
+            // LIMIT hiding inside a CTE body suppressing this one is harmless.
+            let subquery = if body.to_uppercase().contains(" LIMIT ") {
+                format!("({})", body.trim_end())
+            } else {
+                format!("({} LIMIT 1)", body.trim_end())
+            };
+
+            if i > 0 {
+                result.push_str(indent);
+            }
+            let _ = write!(result, "SET {var} = {subquery};");
+            if i < columns.len() - 1 {
+                result.push('\n');
+            }
+        }
+
+        result
     }
 
     /// Splits a comma-separated SQL fragment on top-level commas only.
@@ -698,6 +704,67 @@ impl PlPgSqlPreprocessor {
         }
 
         parts
+    }
+
+    /// Finds the first top-level occurrence of `keyword` at or after `start`.
+    ///
+    /// Top-level means outside string literals and at parenthesis depth zero,
+    /// and the match must be delimited by non-word characters, so `FROM` inside
+    /// a CTE body or a column named `INTOX` never matches. ASCII case
+    /// insensitive. Comments are not tracked, matching the rest of this
+    /// preprocessor.
+    fn find_top_level_keyword(stmt: &str, keyword: &str, start: usize) -> Option<usize> {
+        let bytes = stmt.as_bytes();
+        let mut paren_depth = 0usize;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut chars = stmt.char_indices().peekable();
+
+        while let Some((idx, ch)) = chars.next() {
+            if in_single_quote {
+                if ch == '\'' {
+                    if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                        chars.next();
+                    } else {
+                        in_single_quote = false;
+                    }
+                }
+                continue;
+            }
+            if in_double_quote {
+                if ch == '"' {
+                    in_double_quote = false;
+                }
+                continue;
+            }
+            match ch {
+                '\'' => in_single_quote = true,
+                '"' => in_double_quote = true,
+                '(' => paren_depth += 1,
+                ')' => paren_depth = paren_depth.saturating_sub(1),
+                _ => {
+                    if paren_depth == 0
+                        && idx >= start
+                        && stmt[idx..].len() >= keyword.len()
+                        && stmt[idx..idx + keyword.len()].eq_ignore_ascii_case(keyword)
+                        && !Self::is_word_byte(bytes.get(idx.wrapping_sub(1)).copied(), idx == 0)
+                        && !Self::is_word_byte(bytes.get(idx + keyword.len()).copied(), false)
+                    {
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// True when `byte` continues an identifier. `at_boundary` marks the string
+    /// edges, which always delimit.
+    fn is_word_byte(byte: Option<u8>, at_boundary: bool) -> bool {
+        if at_boundary {
+            return false;
+        }
+        byte.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
     }
 
     /// Transforms variable assignments from := to SET syntax.

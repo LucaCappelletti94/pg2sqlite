@@ -277,6 +277,20 @@ impl PlPgSqlTranslator {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, Error> {
+        // The preprocessor rewrites `SELECT <exprs> INTO <vars> [FROM ...]`
+        // into SET bindings before parsing. An INTO surviving to this point is
+        // a shape it could not rewrite (INTO STRICT, a record field target),
+        // and emitting it would fail in SQLite as `near "INTO": syntax error`.
+        if let SetExpr::Select(select) = &*query.body
+            && let Some(into) = &select.into
+        {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "SELECT ... INTO {} inside a trigger body has no SET rewrite: only plain \
+                 variable names can receive a SELECT INTO binding, and SQLite has no SELECT \
+                 INTO of its own.",
+                into.targets.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+            )));
+        }
         let transformed_statements = if let Some(with) = &query.with {
             if let SetExpr::Insert(Statement::Insert(insert)) = &*query.body {
                 Self::transform_with_insert_to_subquery(with, insert, context, options)?
