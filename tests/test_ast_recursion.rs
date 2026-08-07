@@ -119,43 +119,64 @@ fn string_agg_order_by_clause_translates_now() {
     exec_translated(&sql);
 }
 
-/// The expression inside a `LATERAL VIEW` clause must be translated.
-/// `now()` should become `datetime('now')` even in a LATERAL VIEW position.
+/// Flipped R122 pin. `LATERAL VIEW` is HiveQL: PostgreSQL spells lateral
+/// iteration as a FROM item and SQLite answered `near "VIEW": syntax error`
+/// when the clause passed through, so the translator now refuses it.
 #[test]
-fn lateral_view_expr_is_translated() {
-    // LATERAL VIEW is a Hive/Spark extension also accepted by sqlparser's
-    // PostgreSQL dialect visitor; it populates Select::lateral_views.
+fn a_lateral_view_clause_is_refused() {
     let sql = format!(
         "{SCHEMA}
          SELECT ts_val
          FROM t
          LATERAL VIEW now() v AS ts_val;"
     );
-    let out = translate_ok(&sql);
-    assert!(!out.contains("now()"), "now() inside LATERAL VIEW must be translated: {out}");
-    assert!(out.contains("datetime('now')"), "Expected datetime('now') inside LATERAL VIEW: {out}");
-    // Pins R122: LATERAL VIEW passes through and SQLite refuses it. Goes red when
-    // the defect is fixed, which is the point.
-    {
-        let conn = Connection::open_in_memory().unwrap();
-        let stmts = Pg2Sqlite::default()
+    let err = Pg2Sqlite::default()
+        .sql(&sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("LATERAL VIEW is HiveQL and has no SQLite grammar");
+    let message = err.to_string();
+    assert!(message.contains("LATERAL VIEW"), "the refusal should name the clause: {message}");
+}
+
+/// `CLUSTER BY`, `DISTRIBUTE BY`, and `SORT BY` are the neighbouring Hive
+/// clauses at the same translation site, measured passing through into
+/// `near "BY": syntax error` while fixing R122, so they are refused with it.
+#[test]
+fn the_hive_ordering_clauses_are_refused() {
+    for (clause, tail) in [
+        ("CLUSTER BY", "SELECT id FROM t CLUSTER BY id;"),
+        ("DISTRIBUTE BY", "SELECT id FROM t DISTRIBUTE BY id;"),
+        ("SORT BY", "SELECT id FROM t SORT BY id;"),
+    ] {
+        let sql = format!("{SCHEMA}\n{tail}");
+        let err = Pg2Sqlite::default()
             .sql(&sql)
             .unwrap()
             .translate(&Pg2SqliteOptions::default())
-            .unwrap();
-        let mut pin_triggered = false;
-        for s in &stmts {
-            let sql_str = s.to_string();
-            let result = conn.execute_batch(&format!("{sql_str};"));
-            if let Err(err) = &result {
-                assert!(
-                    err.to_string().contains("near \"VIEW\": syntax error"),
-                    "expected LATERAL VIEW error: {err}"
-                );
-                pin_triggered = true;
-            }
-        }
-        assert!(pin_triggered, "R122 pin: expected LATERAL VIEW to be refused by SQLite");
+            .expect_err("a Hive ordering clause has no SQLite grammar");
+        let message = err.to_string();
+        assert!(message.contains(clause), "the refusal should name {clause}: {message}");
+    }
+}
+
+/// `QUALIFY` is Snowflake and Teradata grammar, and `CONNECT BY` without
+/// `PRIOR` slipped past the expression-level Oracle refusal. Both were
+/// measured emitting SQL SQLite refuses while fixing R122.
+#[test]
+fn qualify_and_connect_by_clauses_are_refused() {
+    for (clause, tail) in [
+        ("QUALIFY", "SELECT id FROM t QUALIFY row_number() OVER (ORDER BY id) = 1;"),
+        ("CONNECT BY", "SELECT id FROM t CONNECT BY id = 2;"),
+    ] {
+        let sql = format!("{SCHEMA}\n{tail}");
+        let err = Pg2Sqlite::default()
+            .sql(&sql)
+            .unwrap()
+            .translate(&Pg2SqliteOptions::default())
+            .expect_err("a foreign SELECT clause has no SQLite grammar");
+        let message = err.to_string();
+        assert!(message.contains(clause), "the refusal should name {clause}: {message}");
     }
 }
 

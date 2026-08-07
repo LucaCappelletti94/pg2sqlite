@@ -193,7 +193,6 @@ fn reverse_statement_covers_expression_and_limit_checker_variants() {
         if let SetExpr::Select(select) = query.body.as_mut() {
             select.projection = vec![SelectItem::UnnamedExpr(expr)];
             select.group_by = GroupByExpr::Expressions(vec![parse_expr("1")], vec![]);
-            select.qualify = Some(parse_expr("1 = 1"));
         }
         query.limit_clause = Some(LimitClause::LimitOffset {
             limit: Some(parse_expr("10")),

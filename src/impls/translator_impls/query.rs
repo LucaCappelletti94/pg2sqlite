@@ -1404,27 +1404,6 @@ mod tests {
         };
 
         select.prewhere = Some(parse_expr("now()"));
-        select.cluster_by = vec![parse_expr("now()")];
-        select.distribute_by = vec![parse_expr("now()")];
-        select.sort_by = vec![sqlparser::ast::OrderByExpr {
-            expr: parse_expr("now()"),
-            options: sqlparser::ast::OrderByOptions {
-                sort: Some(sqlparser::ast::OrderBySort::Asc),
-                nulls_first: Some(false),
-            },
-            with_fill: None,
-        }];
-        select.connect_by = vec![
-            sqlparser::ast::ConnectByKind::ConnectBy {
-                connect_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                nocycle: false,
-                relationships: vec![parse_expr("now()")],
-            },
-            sqlparser::ast::ConnectByKind::StartWith {
-                start_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                condition: Box::new(parse_expr("now()")),
-            },
-        ];
 
         query.settings = Some(vec![sqlparser::ast::Setting {
             key: sqlparser::ast::Ident::new("x"),
@@ -1449,26 +1428,6 @@ mod tests {
                 .as_ref()
                 .is_some_and(|expr| expr.to_string().contains("datetime('now')"))
         );
-        assert!(select.cluster_by[0].to_string().contains("datetime('now')"));
-        assert!(select.distribute_by[0].to_string().contains("datetime('now')"));
-        assert!(select.sort_by[0].expr.to_string().contains("datetime('now')"));
-
-        match &select.connect_by[0] {
-            sqlparser::ast::ConnectByKind::ConnectBy { relationships, .. } => {
-                assert!(relationships[0].to_string().contains("datetime('now')"));
-            }
-            sqlparser::ast::ConnectByKind::StartWith { .. } => {
-                panic!("unexpected connect by variant: {:?}", select.connect_by[0]);
-            }
-        }
-        match &select.connect_by[1] {
-            sqlparser::ast::ConnectByKind::StartWith { condition, .. } => {
-                assert!(condition.to_string().contains("datetime('now')"));
-            }
-            sqlparser::ast::ConnectByKind::ConnectBy { .. } => {
-                panic!("unexpected connect by variant: {:?}", select.connect_by[1]);
-            }
-        }
 
         assert!(
             translated
@@ -1489,5 +1448,61 @@ mod tests {
             }
             other => panic!("unexpected second pipe operator variant: {other:?}"),
         }
+    }
+
+    /// R122: the SELECT clauses foreign to both PostgreSQL and SQLite refuse
+    /// rather than translate through into SQL SQLite cannot parse.
+    #[test]
+    fn foreign_select_clauses_are_refused() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let refused = |mutate: &dyn Fn(&mut sqlparser::ast::Select), needle: &str| {
+            let mut query = parse_query("SELECT id FROM users");
+            let SetExpr::Select(select) = query.body.as_mut() else {
+                panic!("expected select");
+            };
+            mutate(select);
+            let err = query
+                .translate(&schema, &options)
+                .expect_err("a foreign SELECT clause must refuse");
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        };
+
+        refused(
+            &|select| {
+                select.lateral_views = vec![sqlparser::ast::LateralView {
+                    lateral_view: parse_expr("now()"),
+                    lateral_view_name: sqlparser::ast::ObjectName::from(vec![
+                        sqlparser::ast::Ident::new("v"),
+                    ]),
+                    lateral_col_alias: vec![sqlparser::ast::Ident::new("c")],
+                    outer: false,
+                }];
+            },
+            "LATERAL VIEW",
+        );
+        refused(&|select| select.cluster_by = vec![parse_expr("now()")], "CLUSTER BY");
+        refused(&|select| select.distribute_by = vec![parse_expr("now()")], "DISTRIBUTE BY");
+        refused(
+            &|select| {
+                select.sort_by = vec![sqlparser::ast::OrderByExpr {
+                    expr: parse_expr("now()"),
+                    options: sqlparser::ast::OrderByOptions { sort: None, nulls_first: None },
+                    with_fill: None,
+                }];
+            },
+            "SORT BY",
+        );
+        refused(&|select| select.qualify = Some(parse_expr("id = 1")), "QUALIFY");
+        refused(
+            &|select| {
+                select.connect_by = vec![sqlparser::ast::ConnectByKind::StartWith {
+                    start_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                    condition: Box::new(parse_expr("now()")),
+                }];
+            },
+            "CONNECT BY",
+        );
     }
 }

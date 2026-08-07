@@ -328,27 +328,6 @@ mod tests {
         };
 
         select.prewhere = Some(parse_expr("datetime('now')"));
-        select.cluster_by = vec![parse_expr("datetime('now')")];
-        select.distribute_by = vec![parse_expr("datetime('now')")];
-        select.sort_by = vec![sqlparser::ast::OrderByExpr {
-            expr: parse_expr("datetime('now')"),
-            options: sqlparser::ast::OrderByOptions {
-                sort: Some(sqlparser::ast::OrderBySort::Asc),
-                nulls_first: Some(false),
-            },
-            with_fill: None,
-        }];
-        select.connect_by = vec![
-            sqlparser::ast::ConnectByKind::ConnectBy {
-                connect_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                nocycle: false,
-                relationships: vec![parse_expr("datetime('now')")],
-            },
-            sqlparser::ast::ConnectByKind::StartWith {
-                start_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
-                condition: Box::new(parse_expr("datetime('now')")),
-            },
-        ];
 
         query.settings = Some(vec![sqlparser::ast::Setting {
             key: sqlparser::ast::Ident::new("x"),
@@ -373,26 +352,6 @@ mod tests {
                 .as_ref()
                 .is_some_and(|expr| expr.to_string().to_lowercase().contains("now()"))
         );
-        assert!(select.cluster_by[0].to_string().to_lowercase().contains("now()"));
-        assert!(select.distribute_by[0].to_string().to_lowercase().contains("now()"));
-        assert!(select.sort_by[0].expr.to_string().to_lowercase().contains("now()"));
-
-        match &select.connect_by[0] {
-            sqlparser::ast::ConnectByKind::ConnectBy { relationships, .. } => {
-                assert!(relationships[0].to_string().to_lowercase().contains("now()"));
-            }
-            sqlparser::ast::ConnectByKind::StartWith { .. } => {
-                panic!("unexpected connect by variant: {:?}", select.connect_by[0]);
-            }
-        }
-        match &select.connect_by[1] {
-            sqlparser::ast::ConnectByKind::StartWith { condition, .. } => {
-                assert!(condition.to_string().to_lowercase().contains("now()"));
-            }
-            sqlparser::ast::ConnectByKind::ConnectBy { .. } => {
-                panic!("unexpected connect by variant: {:?}", select.connect_by[1]);
-            }
-        }
 
         assert!(translated.settings.as_ref().is_some_and(|settings| {
             settings[0].value.to_string().to_lowercase().contains("now()")
@@ -410,5 +369,61 @@ mod tests {
             }
             other => panic!("unexpected second pipe operator variant: {other:?}"),
         }
+    }
+
+    /// R122: the refusal of foreign SELECT clauses is shared code, so the
+    /// reverse direction refuses the same six clauses.
+    #[test]
+    fn reverse_foreign_select_clauses_are_refused() {
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+
+        let refused = |mutate: &dyn Fn(&mut sqlparser::ast::Select), needle: &str| {
+            let mut query = parse_query("SELECT id FROM users");
+            let sqlparser::ast::SetExpr::Select(select) = query.body.as_mut() else {
+                panic!("expected select");
+            };
+            mutate(select);
+            let err = query
+                .reverse_translate(&schema, &options)
+                .expect_err("a foreign SELECT clause must refuse");
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        };
+
+        refused(
+            &|select| {
+                select.lateral_views = vec![sqlparser::ast::LateralView {
+                    lateral_view: parse_expr("datetime('now')"),
+                    lateral_view_name: sqlparser::ast::ObjectName::from(vec![
+                        sqlparser::ast::Ident::new("v"),
+                    ]),
+                    lateral_col_alias: vec![sqlparser::ast::Ident::new("c")],
+                    outer: false,
+                }];
+            },
+            "LATERAL VIEW",
+        );
+        refused(&|select| select.cluster_by = vec![parse_expr("id")], "CLUSTER BY");
+        refused(&|select| select.distribute_by = vec![parse_expr("id")], "DISTRIBUTE BY");
+        refused(
+            &|select| {
+                select.sort_by = vec![sqlparser::ast::OrderByExpr {
+                    expr: parse_expr("id"),
+                    options: sqlparser::ast::OrderByOptions { sort: None, nulls_first: None },
+                    with_fill: None,
+                }];
+            },
+            "SORT BY",
+        );
+        refused(&|select| select.qualify = Some(parse_expr("id = 1")), "QUALIFY");
+        refused(
+            &|select| {
+                select.connect_by = vec![sqlparser::ast::ConnectByKind::StartWith {
+                    start_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+                    condition: Box::new(parse_expr("id")),
+                }];
+            },
+            "CONNECT BY",
+        );
     }
 }

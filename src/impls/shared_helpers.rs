@@ -18,17 +18,17 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, BinaryOperator, ConnectByKind, DataType, Expr, ExprWithAlias,
+    Assignment, AssignmentTarget, BinaryOperator, DataType, Expr, ExprWithAlias,
     ExprWithAliasAndOrderBy, Fetch, FromTable, FunctionArg, FunctionArgExpr,
     FunctionArgumentClause, FunctionArgumentList, FunctionArguments, GroupByExpr, HavingBound,
-    Ident, Join, JoinConstraint, JoinOperator, LateralView, LimitClause, ListAggOnOverflow,
-    Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy,
-    OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, SetExpr, Setting,
-    Statement, SymbolDefinition, TableAlias, TableFactor, TableFunctionArgs, TableSample,
-    TableSampleBucket, TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins,
-    UnaryOperator, UpdateTableFromKind, Value, ValueWithSpan, Values, WindowFrame,
-    WindowFrameBound, WindowSpec, WindowType, With, WithFill, XmlNamespaceDefinition,
-    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption, visit_expressions,
+    Ident, Join, JoinConstraint, JoinOperator, LimitClause, ListAggOnOverflow, Measure,
+    NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr,
+    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, SetExpr, Setting, Statement,
+    SymbolDefinition, TableAlias, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
+    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, UnaryOperator,
+    UpdateTableFromKind, Value, ValueWithSpan, Values, WindowFrame, WindowFrameBound, WindowSpec,
+    WindowType, With, WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause,
+    XmlTableColumn, XmlTableColumnOption, visit_expressions,
 };
 
 use crate::{
@@ -1138,36 +1138,6 @@ fn translate_pipe_operator<D: TranslationDirection>(
     })
 }
 
-pub(crate) fn translate_connect_by_kinds<D: TranslationDirection>(
-    connect_by_kinds: &[ConnectByKind],
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<Vec<ConnectByKind>, Error> {
-    connect_by_kinds
-        .iter()
-        .map(|connect_by| {
-            Ok(match connect_by {
-                ConnectByKind::ConnectBy { connect_token, nocycle, relationships } => {
-                    ConnectByKind::ConnectBy {
-                        connect_token: connect_token.clone(),
-                        nocycle: *nocycle,
-                        relationships: relationships
-                            .iter()
-                            .map(|expr| D::translate_expr(expr, schema, options))
-                            .collect::<Result<Vec<_>, _>>()?,
-                    }
-                }
-                ConnectByKind::StartWith { start_token, condition } => {
-                    ConnectByKind::StartWith {
-                        start_token: start_token.clone(),
-                        condition: Box::new(D::translate_expr(condition, schema, options)?),
-                    }
-                }
-            })
-        })
-        .collect()
-}
-
 pub(crate) fn translate_query_settings<D: TranslationDirection>(
     settings: Option<&Vec<Setting>>,
     schema: &ParserDB,
@@ -1441,21 +1411,6 @@ fn translate_function_argument_clause<D: TranslationDirection>(
     })
 }
 
-/// Translate a [`LateralView`], recursively translating its `lateral_view`
-/// expression.
-pub(crate) fn translate_lateral_view<D: TranslationDirection>(
-    lv: &LateralView,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<LateralView, Error> {
-    Ok(LateralView {
-        lateral_view: D::translate_expr(&lv.lateral_view, schema, options)?,
-        lateral_view_name: lv.lateral_view_name.clone(),
-        lateral_col_alias: lv.lateral_col_alias.clone(),
-        outer: lv.outer,
-    })
-}
-
 pub(crate) fn translate_named_windows<D: TranslationDirection>(
     named_windows: &[NamedWindowDefinition],
     schema: &ParserDB,
@@ -1717,12 +1672,65 @@ pub(crate) fn translate_top_shared<D: TranslationDirection>(
     .transpose()
 }
 
+/// Refuses the SELECT clauses that exist in neither PostgreSQL nor SQLite.
+///
+/// sqlparser's visitor accepts these dialect extensions on the way in, and
+/// every one of them used to translate through into SQL SQLite refuses with a
+/// syntax error, measured while fixing R122. Each message names the clause and
+/// its home dialect. The empty fields in the rebuilt `Select` below are this
+/// guard's postcondition.
+fn reject_foreign_select_clauses(select: &sqlparser::ast::Select) -> Result<(), Error> {
+    if !select.lateral_views.is_empty() {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "LATERAL VIEW is HiveQL, and neither PostgreSQL nor SQLite has the clause. \
+             PostgreSQL spells lateral iteration as a FROM item, `FROM t, LATERAL (...)`."
+                .to_string(),
+        ));
+    }
+    if !select.cluster_by.is_empty() {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "CLUSTER BY is HiveQL, and neither PostgreSQL nor SQLite has the clause. \
+             Use ORDER BY."
+                .to_string(),
+        ));
+    }
+    if !select.distribute_by.is_empty() {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "DISTRIBUTE BY is HiveQL, and neither PostgreSQL nor SQLite has the clause."
+                .to_string(),
+        ));
+    }
+    if !select.sort_by.is_empty() {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "SORT BY is HiveQL, and neither PostgreSQL nor SQLite has the clause. \
+             Use ORDER BY."
+                .to_string(),
+        ));
+    }
+    if select.qualify.is_some() {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "QUALIFY is Snowflake and Teradata grammar, and neither PostgreSQL nor SQLite has \
+             the clause. Filter window function results in an outer query's WHERE."
+                .to_string(),
+        ));
+    }
+    if !select.connect_by.is_empty() {
+        return Err(Error::UnsupportedSQLiteFeature(
+            "CONNECT BY is Oracle grammar, and neither PostgreSQL nor SQLite has the clause. \
+             Use a recursive CTE, WITH RECURSIVE, for hierarchical queries."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Shared SELECT translation used by both forward and reverse paths.
 pub(crate) fn translate_select_shared<D: TranslationDirection>(
     select: &sqlparser::ast::Select,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<sqlparser::ast::Select, Error> {
+    reject_foreign_select_clauses(select)?;
     let selection = select
         .selection
         .as_ref()
@@ -1745,22 +1753,6 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         .as_ref()
         .map(|expr| D::translate_expr(expr, schema, options))
         .transpose()?;
-    let cluster_by = select
-        .cluster_by
-        .iter()
-        .map(|expr| D::translate_expr(expr, schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
-    let distribute_by = select
-        .distribute_by
-        .iter()
-        .map(|expr| D::translate_expr(expr, schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
-    let sort_by = select
-        .sort_by
-        .iter()
-        .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
-        .collect::<Result<Vec<_>, _>>()?;
-    let connect_by = translate_connect_by_kinds::<D>(&select.connect_by, schema, options)?;
 
     let translated = sqlparser::ast::Select {
         select_token: select.select_token.clone(),
@@ -1770,27 +1762,19 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         projection,
         into: select.into.clone(),
         from,
-        lateral_views: select
-            .lateral_views
-            .iter()
-            .map(|lv| translate_lateral_view::<D>(lv, schema, options))
-            .collect::<Result<Vec<_>, _>>()?,
+        lateral_views: Vec::new(),
         prewhere,
         selection,
         group_by: translate_group_by_expr::<D>(&select.group_by, schema, options)?,
-        cluster_by,
-        distribute_by,
-        sort_by,
+        cluster_by: Vec::new(),
+        distribute_by: Vec::new(),
+        sort_by: Vec::new(),
         having,
         named_window: translate_named_windows::<D>(&select.named_window, schema, options)?,
-        qualify: select
-            .qualify
-            .as_ref()
-            .map(|e| D::translate_expr(e, schema, options))
-            .transpose()?,
+        qualify: None,
         window_before_qualify: select.window_before_qualify,
         value_table_mode: select.value_table_mode,
-        connect_by,
+        connect_by: Vec::new(),
         flavor: select.flavor,
         exclude: select.exclude.clone(),
         optimizer_hints: select.optimizer_hints.clone(),
