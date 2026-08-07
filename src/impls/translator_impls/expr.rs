@@ -1798,6 +1798,15 @@ impl Translator for Expr {
             Expr::IsNotDistinctFrom(left, right) => {
                 translate_distinct_comparison(left, right, true, schema, options)?
             }
+            Expr::Like { negated, any, expr, pattern, escape_char } => {
+                Expr::Like {
+                    negated: *negated,
+                    any: *any,
+                    expr: Box::new(expr.translate(schema, options)?),
+                    pattern: Box::new(pattern.translate(schema, options)?),
+                    escape_char: sqlite_like_escape(escape_char.clone()),
+                }
+            }
             Expr::ILike { negated, any, expr, pattern, escape_char } => {
                 let translated_expr = expr.translate(schema, options)?;
                 let translated_pattern = pattern.translate(schema, options)?;
@@ -1806,7 +1815,7 @@ impl Translator for Expr {
                     any: *any,
                     expr: Box::new(wrap_with_lower(translated_expr)),
                     pattern: Box::new(wrap_with_lower(translated_pattern)),
-                    escape_char: lowered_ilike_escape(escape_char.as_ref())?,
+                    escape_char: sqlite_like_escape(lowered_ilike_escape(escape_char.as_ref())?),
                 }
             }
             Expr::Extract { field, expr, .. } => translate_extract(field, expr, schema, options)?,
@@ -1997,7 +2006,7 @@ impl Translator for Expr {
             // All remaining variants: delegate structural recursion to shared helper.
             // This covers: Identifier, CompoundIdentifier, Value, Nested,
             // IsNull, IsNotNull, IsTrue/IsFalse/IsNotTrue/IsNotFalse, Exists,
-            // Like, InList, InSubquery, Between, Case, Subquery, Tuple,
+            // InList, InSubquery, Between, Case, Subquery, Tuple,
             // RLike, JsonAccess, QualifiedWildcard, Struct,
             // Named, Dictionary, Map, MemberOf, etc.
             _ => translate_expr_recursive::<Forward>(self, schema, options)?,
@@ -2047,6 +2056,32 @@ fn lowered_ilike_escape(
     }
 
     Ok(Some(ValueWithSpan { value: Value::SingleQuotedString(lowered), span: escape.span }))
+}
+
+/// The escape character a translated `LIKE` carries.
+///
+/// PostgreSQL's `LIKE` escapes with a backslash unless the statement names
+/// another character, while SQLite's has no escape character at all until one
+/// is named, so `'100%' LIKE '100\%'` is true on one engine and false on the
+/// other. Naming the backslash restores the PostgreSQL reading and changes
+/// nothing for a pattern that holds no backslash, and it does not cost the
+/// index scan that `LIKE 'abc%'` gets, measured on 3.46.0 and 3.51.1.
+///
+/// PostgreSQL spells "no escape character" as `ESCAPE ''`, which is what
+/// SQLite's bare `LIKE` already means, so that clause is dropped rather than
+/// forwarded: SQLite refuses the empty spelling with `ESCAPE expression must
+/// be a single character`.
+fn sqlite_like_escape(escape_char: Option<ValueWithSpan>) -> Option<ValueWithSpan> {
+    match &escape_char {
+        None => {
+            Some(ValueWithSpan {
+                value: Value::SingleQuotedString("\\".to_string()),
+                span: sqlparser::tokenizer::Span::empty(),
+            })
+        }
+        Some(escape) if escape.value == Value::SingleQuotedString(String::new()) => None,
+        Some(_) => escape_char,
+    }
 }
 
 /// Maps a PostgreSQL collation name onto the SQLite collation that orders the

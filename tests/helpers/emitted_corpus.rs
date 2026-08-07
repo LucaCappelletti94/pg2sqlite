@@ -39,6 +39,17 @@ pub fn sweep_options() -> Pg2SqliteOptions {
         .with_rls_audit_table_name("rls_violations")
 }
 
+/// What a corpus row's translation adds on top of the translated fixture.
+///
+/// The fixture is identified by value rather than by position, because a row
+/// can make the translator emit a statement the fixture alone does not: a row
+/// holding a LIKE gets the case-sensitivity pragma prepended, and counting
+/// then drops the pragma and re-creates a fixture table instead.
+#[must_use]
+pub fn row_statements(setup: &[String], all: &[String]) -> Vec<String> {
+    all.iter().filter(|statement| !setup.contains(statement)).cloned().collect()
+}
+
 /// Every corpus group: `(label, cases)`.
 pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
     (
@@ -470,6 +481,22 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT date '2026-08-07' - date '2026-08-01';",
                 "SELECT extract(epoch from (ts - ts)) FROM t;",
                 "SELECT date_part('epoch', ts - ts) FROM t;",
+                    ],
+    ),
+    (
+        "like-escape",
+        &[
+                // PostgreSQL's LIKE escapes with a backslash unless the
+                // statement names another character. These carry the escape
+                // the forward direction now attaches, the lowered ILIKE form
+                // of it, and the empty spelling that means "no escape at
+                // all", which SQLite refuses and so must be dropped.
+                r"SELECT s LIKE '100\%' FROM t;",
+                r"SELECT s NOT LIKE 'a\_b' FROM t;",
+                r"SELECT s ILIKE '100\%' FROM t;",
+                "SELECT s LIKE 'a#_b' ESCAPE '#' FROM t;",
+                r"SELECT s LIKE 'a\b' ESCAPE '' FROM t;",
+                r"SELECT s ILIKE 'A\B' ESCAPE '' FROM t;",
                     ],
     ),
 ];

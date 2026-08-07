@@ -9,6 +9,10 @@
 //! script a fresh database and stops a script at its first error, so rows
 //! sharing a script would mask one another.
 //!
+//! Each row's own statements are picked out of its translation by
+//! `row_statements`, shared with the sweep test so both proofs run the same
+//! script.
+//!
 //! Refused rows emit nothing: a refusal never reaches SQLite, so it has no
 //! floor to check.
 
@@ -34,9 +38,11 @@ fn main() {
             let Ok(all) = parsed.translate_to_sql(&options) else {
                 continue;
             };
-            let emitted = &all[setup.len().min(all.len())..];
-            let statements: Vec<String> =
-                setup.iter().chain(emitted.iter()).map(|s| format!("{s};")).collect();
+            let statements: Vec<String> = setup
+                .iter()
+                .chain(row_statements(&setup, &all).iter())
+                .map(|statement| format!("{statement};"))
+                .collect();
             scripts.push(format!("-- corpus {label} {index}\n{}", statements.join("\n")));
         }
     }

@@ -138,6 +138,13 @@ fn translate_glob_to_like(
     })
 }
 
+/// True when `escape` names a backslash, the character PostgreSQL's `LIKE`
+/// escapes with when the statement names none, and so the one the forward
+/// direction attaches to every `LIKE` it emits.
+fn is_backslash_escape(escape: &ValueWithSpan) -> bool {
+    matches!(&escape.value, Value::SingleQuotedString(character) if character == "\\")
+}
+
 /// Return true when `expr` matches the exact shape emitted by the forward
 /// translator for PostgreSQL's `random()`:
 /// `(CAST(random() AS REAL) + 9223372036854775808.0) / 18446744073709551616.0`.
@@ -264,10 +271,18 @@ impl ReverseTranslator for Expr {
             // PostgreSQL 16, the two readings agree, including on non-ASCII
             // case and on patterns holding wildcards.
             //
-            // Only without ESCAPE. `lower()` folds a letter escape character,
-            // and the two readings then disagree: with ESCAPE 'X',
-            // `'aXbc' ILIKE 'aXb_'` is false while the lowered form is true.
-            Expr::Like { negated, any, expr, pattern, escape_char: None } => {
+            // A backslash escape counts as absent here, and comes back off:
+            // it is what PostgreSQL's LIKE escapes with when nothing is
+            // written, so the two spellings read the same, and it is the one
+            // the forward direction now attaches to every emitted LIKE.
+            //
+            // Any other escape blocks the restore. `lower()` folds a letter
+            // escape character, and the two readings then disagree: with
+            // ESCAPE 'X', `'aXbc' ILIKE 'aXb_'` is false while the lowered
+            // form is true.
+            Expr::Like { negated, any, expr, pattern, escape_char }
+                if escape_char.as_ref().is_none_or(is_backslash_escape) =>
+            {
                 match (forward_lower_argument(expr), forward_lower_argument(pattern)) {
                     (Some(subject), Some(target)) => {
                         Ok(Expr::ILike {

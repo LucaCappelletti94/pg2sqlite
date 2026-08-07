@@ -21,7 +21,7 @@
 #[path = "helpers/emitted_corpus.rs"]
 mod emitted_corpus;
 
-use emitted_corpus::{CORPUS_GROUPS, FIXTURE, sweep_options};
+use emitted_corpus::{CORPUS_GROUPS, FIXTURE, row_statements, sweep_options};
 use pg2sqlite::prelude::Pg2Sqlite;
 use rusqlite::{Connection, functions::FunctionFlags};
 
@@ -101,8 +101,8 @@ fn sweep(label: &str, cases: &[&str]) -> Vec<String> {
             Ok(Err(_)) => continue,
             Ok(Ok(all)) => all,
         };
-        let emitted = &all[setup.len().min(all.len())..];
-        if let Err(why) = sqlite_accepts(&setup, emitted) {
+        let emitted = row_statements(&setup, &all);
+        if let Err(why) = sqlite_accepts(&setup, &emitted) {
             bugs.push(format!("[{label}] {case}\n      -> {why}"));
         }
     }
@@ -226,7 +226,7 @@ fn remediation_constructs() {
 
 /// The groups added by the 2026-08-07 crate review, one per finding whose fix
 /// changed what reaches SQLite.
-const REVIEW_GROUPS: &[&str] = &["date-arithmetic"];
+const REVIEW_GROUPS: &[&str] = &["date-arithmetic", "like-escape"];
 
 #[test]
 fn review_finding_constructs() {
