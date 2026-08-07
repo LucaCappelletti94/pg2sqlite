@@ -66,6 +66,7 @@ fn SampleBadge(name: &'static str, icon: SampleIcon, active: bool) -> Element {
         // The editor no longer holds the uploaded migrations, so drop the file
         // list rather than leave a stale order the user could drag.
         state.input_files.clone().set(Vec::new());
+        state.request_immediate_translation();
     };
 
     rsx! {

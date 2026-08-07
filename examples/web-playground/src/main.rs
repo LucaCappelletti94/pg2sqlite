@@ -49,20 +49,29 @@ fn App() -> Element {
     // prop-drilling.
     let state = use_context_provider(AppState::new);
 
-    // Auto-translate: schedule a translation 700ms after the last edit. The
-    // snapshot comparison in the spawned task discards a stale run if another
-    // edit arrived first.
+    // Auto-translate: schedule a translation 700ms after the last edit, or
+    // right away when `translate_now` moved (discrete edits). The snapshot
+    // comparison in the spawned task discards a stale debounced run.
+    let mut seen_translate_now = use_signal(|| 0u32);
     use_effect(move || {
         let input_snapshot = state.pg_input.read().clone();
         let opts_snapshot = state.options.read().clone();
+        let generation = *state.translate_now.read();
+        // Peek: subscribing would re-run the effect on its own write below.
+        let immediate = generation != *seen_translate_now.peek();
+        if immediate {
+            seen_translate_now.set(generation);
+        }
 
         spawn_local(async move {
-            TimeoutFuture::new(DEBOUNCE_MS).await;
-            // If the user typed more since the timer was set, a newer task owns this input.
-            let current_input = state.pg_input.peek().clone();
-            let current_opts = state.options.peek().clone();
-            if current_input != input_snapshot || current_opts != opts_snapshot {
-                return;
+            if !immediate {
+                TimeoutFuture::new(DEBOUNCE_MS).await;
+                // If the user typed more since the timer was set, a newer task owns this input.
+                let current_input = state.pg_input.peek().clone();
+                let current_opts = state.options.peek().clone();
+                if current_input != input_snapshot || current_opts != opts_snapshot {
+                    return;
+                }
             }
             run_translate(state, &input_snapshot, &opts_snapshot);
         });

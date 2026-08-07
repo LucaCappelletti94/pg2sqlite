@@ -140,6 +140,7 @@ fn load_files(state: AppState, mut picked: Vec<FileData>, by_path: bool) {
         if !collected.is_empty() {
             state.pg_input.clone().set(concat_files(&collected));
             state.input_files.clone().set(collected);
+            state.request_immediate_translation();
         }
     });
 }
@@ -156,6 +157,7 @@ fn move_file(state: AppState, from: usize, to: usize) {
         list.insert(at, item);
     }
     state.pg_input.clone().set(concat_files(&files.read()));
+    state.request_immediate_translation();
 }
 
 fn remove_file(state: AppState, index: usize) {
@@ -165,6 +167,7 @@ fn remove_file(state: AppState, index: usize) {
     }
     files.write().remove(index);
     state.pg_input.clone().set(concat_files(&files.read()));
+    state.request_immediate_translation();
 }
 
 /// Concatenate file contents joined by a blank line so adjacent files stay

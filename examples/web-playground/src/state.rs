@@ -114,6 +114,9 @@ pub struct AppState {
     /// Kept alongside `pg_input` so the pane can reorder and remove files,
     /// rebuilding `pg_input` from this list.
     pub input_files: Signal<Vec<(String, String)>>,
+    /// Bumped after a discrete edit (sample badge, file operation) so the
+    /// auto-translate watcher skips its typing debounce.
+    pub translate_now: Signal<u32>,
     pub sqlite_output: Signal<Option<String>>,
     pub translation_error: Signal<Option<TranslationError>>,
     pub apply_error: Signal<Option<String>>,
@@ -137,6 +140,7 @@ impl AppState {
         Self {
             pg_input: Signal::new(seed.sql.to_string()),
             input_files: Signal::new(Vec::new()),
+            translate_now: Signal::new(0),
             sqlite_output: Signal::new(None),
             translation_error: Signal::new(None),
             apply_error: Signal::new(None),
@@ -149,5 +153,12 @@ impl AppState {
             reverse_input: Signal::new(String::new()),
             reverse_output: Signal::new(None),
         }
+    }
+
+    /// Call after setting `pg_input` from a discrete action rather than typing.
+    pub fn request_immediate_translation(&self) {
+        let mut counter = self.translate_now;
+        let next = counter.peek().wrapping_add(1);
+        counter.set(next);
     }
 }
