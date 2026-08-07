@@ -244,7 +244,7 @@ fn truncate_to_scale(
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
     let factor = match literal_integer(scale) {
-        Some(digits) => number_literal(&format!("{:.10}", 10f64.powi(digits))),
+        Some(digits) => number_literal(&literal_power_of_ten(digits)),
         None if options.are_math_functions_available() => {
             simple_function_expr(
                 "pow",
@@ -279,6 +279,32 @@ fn truncate_to_scale(
         op: BinaryOperator::Divide,
         right: Box::new(factor),
     })))
+}
+
+/// The decimal text of `10^digits` with ten fractional places, the exact
+/// output the old `format!("{:.10}", 10f64.powi(digits))` produced over the
+/// scales `trunc` meets, built without `powi`, which is a `std` method on a
+/// primitive and broke the `no_std` build (R92). Ten fractional places also
+/// bound the negative side: below `10^-10` the old float formatting rounded
+/// to zero, and this does the same.
+fn literal_power_of_ten(digits: i32) -> String {
+    if digits >= 0 {
+        let mut text = String::from("1");
+        for _ in 0..digits {
+            text.push('0');
+        }
+        text.push_str(".0000000000");
+        text
+    } else {
+        let mut decimals = ['0'; 10];
+        let position = digits.unsigned_abs() as usize;
+        if (1..=10).contains(&position) {
+            decimals[position - 1] = '1';
+        }
+        let mut text = String::from("0.");
+        text.extend(decimals);
+        text
+    }
 }
 
 /// The value of `expr` when it is an integer literal, with an optional sign.
@@ -2327,5 +2353,16 @@ mod tests {
         let expr = parse_expr("col");
         let wrapped = wrap_with_coalesce(expr);
         assert_eq!(wrapped.to_string(), "COALESCE(col, '')");
+    }
+
+    #[test]
+    fn literal_power_of_ten_matches_the_float_formatting_it_replaced() {
+        for digits in -12..=18 {
+            assert_eq!(
+                super::literal_power_of_ten(digits),
+                format!("{:.10}", 10f64.powi(digits)),
+                "digits = {digits}"
+            );
+        }
     }
 }
