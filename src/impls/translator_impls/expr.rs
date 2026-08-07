@@ -1388,7 +1388,12 @@ fn translate_binary_op(
                         .to_string(),
                 ));
             }
-            _ => {}
+            other => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "The {other} operator has no SQLite translation. Emitting it would fail at \
+                     prepare time, since SQLite has no such operator."
+                )));
+            }
         }
     }
 
@@ -1592,6 +1597,48 @@ fn translate_binary_op(
                 None,
             ));
         }
+        // s ^@ p is exact prefix comparison with no pattern semantics, so a
+        // LIKE translation would misread % and _ in the prefix.
+        BinaryOperator::PGStartsWith => {
+            let translated_left = left.translate(schema, options)?;
+            let translated_right = right.translate(schema, options)?;
+            let prefix_len = simple_function_expr("length", vec![translated_right.clone()], None);
+            let head = simple_function_expr(
+                "substr",
+                vec![translated_left, integer_literal(1), prefix_len],
+                None,
+            );
+            return Ok(Expr::BinaryOp {
+                left: Box::new(head),
+                op: BinaryOperator::Eq,
+                right: Box::new(translated_right),
+            });
+        }
+        // jsonpath has no json1 counterpart, so refuse rather than emit the
+        // operator SQLite cannot tokenise.
+        BinaryOperator::AtQuestion => {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                "@? (jsonpath exists) is not supported: SQLite's json1 has no jsonpath engine. \
+                 Rewrite the check as json_type(doc, '$.path') IS NOT NULL with a SQLite JSON \
+                 path."
+                    .to_string(),
+            ));
+        }
+        // OPERATOR(pg_catalog.<op>) is PostgreSQL's schema-qualified operator
+        // spelling. A known operator unwraps and re-dispatches through this
+        // function, so it keeps its specific handling (pow for ^, the POSIX
+        // regex refusal for ~). An operator this crate cannot name is refused
+        // rather than emitted, since SQLite has no OPERATOR() grammar.
+        BinaryOperator::PGCustomBinaryOperator(parts) => {
+            let Some(plain) = unwrap_pg_catalog_operator(parts) else {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "OPERATOR({}) has no SQLite translation: only pg_catalog operators with a \
+                     plain spelling can be unwrapped.",
+                    parts.join(".")
+                )));
+            };
+            return translate_binary_op(left, &plain, right, schema, options);
+        }
         _ => {}
     }
 
@@ -1628,6 +1675,43 @@ fn translate_binary_op(
         left: Box::new(left.translate(schema, options)?),
         op: op.clone(),
         right: Box::new(right.translate(schema, options)?),
+    })
+}
+
+/// Maps the operator inside `OPERATOR(pg_catalog.<op>)` to its plain spelling.
+///
+/// A single-segment path is accepted too, since `OPERATOR(+)` means the same
+/// search-path lookup landing on the built-in operator.
+fn unwrap_pg_catalog_operator(parts: &[String]) -> Option<BinaryOperator> {
+    let name = match parts {
+        [op] => op.as_str(),
+        [schema, op] if schema.eq_ignore_ascii_case("pg_catalog") => op.as_str(),
+        _ => return None,
+    };
+    Some(match name {
+        "+" => BinaryOperator::Plus,
+        "-" => BinaryOperator::Minus,
+        "*" => BinaryOperator::Multiply,
+        "/" => BinaryOperator::Divide,
+        "%" => BinaryOperator::Modulo,
+        "=" => BinaryOperator::Eq,
+        "<>" | "!=" => BinaryOperator::NotEq,
+        "<" => BinaryOperator::Lt,
+        "<=" => BinaryOperator::LtEq,
+        ">" => BinaryOperator::Gt,
+        ">=" => BinaryOperator::GtEq,
+        "||" => BinaryOperator::StringConcat,
+        "&" => BinaryOperator::BitwiseAnd,
+        "|" => BinaryOperator::BitwiseOr,
+        "#" => BinaryOperator::PGBitwiseXor,
+        "^" => BinaryOperator::PGExp,
+        "<<" => BinaryOperator::PGBitwiseShiftLeft,
+        ">>" => BinaryOperator::PGBitwiseShiftRight,
+        "~" => BinaryOperator::PGRegexMatch,
+        "~*" => BinaryOperator::PGRegexIMatch,
+        "!~" => BinaryOperator::PGRegexNotMatch,
+        "!~*" => BinaryOperator::PGRegexNotIMatch,
+        _ => return None,
     })
 }
 

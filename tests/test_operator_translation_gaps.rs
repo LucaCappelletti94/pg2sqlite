@@ -118,6 +118,65 @@ fn prefix_cube_root_rejects_when_math_unavailable() {
     assert!(msg.contains("||/") || msg.contains("math"), "error must name ||/ or math: {msg}");
 }
 
+// ============================================================
+// R80 phase 2: operators that used to pass through untranslated
+// ============================================================
+
+/// `^@` is PostgreSQL's starts-with operator, and the passthrough emitted
+/// `s ^@ 'a'`, which SQLite refuses with `unrecognized token: "^"`. It is
+/// exact prefix comparison, no pattern semantics, so it becomes substr.
+#[test]
+fn starts_with_operator_translates_and_answers() {
+    let sql = tr("SELECT 'abc' ^@ 'ab' AS r");
+    let mut conn = establish_connection();
+    let hit = sql_query(&sql).load::<ScalarInt>(&mut conn).expect("^@ must run");
+    assert_eq!(hit[0].r, 1, "'abc' starts with 'ab': {sql}");
+
+    let miss = tr("SELECT 'abc' ^@ 'b' AS r");
+    let rows = sql_query(&miss).load::<ScalarInt>(&mut conn).expect("^@ must run");
+    assert_eq!(rows[0].r, 0, "'abc' does not start with 'b': {miss}");
+
+    // A LIKE wildcard in the prefix is literal for ^@, which is the trap a
+    // LIKE-based translation would fall into.
+    let literal = tr("SELECT 'abc' ^@ '%b' AS r");
+    let rows = sql_query(&literal).load::<ScalarInt>(&mut conn).expect("^@ must run");
+    assert_eq!(rows[0].r, 0, "the prefix is literal, not a pattern: {literal}");
+}
+
+/// `@?` is PostgreSQL's jsonpath-exists operator. json1 has no jsonpath
+/// engine, so it is refused rather than emitted as the old passthrough,
+/// which failed with `unrecognized token: "@"`.
+#[test]
+fn jsonpath_exists_operator_is_refused() {
+    let err = tr_err("SELECT '{\"a\":1}'::jsonb @? '$.a'");
+    let msg = err.to_string();
+    assert!(msg.contains("@?"), "the refusal should name the operator: {msg}");
+}
+
+/// `OPERATOR(pg_catalog.+)` is PostgreSQL's schema-qualified operator
+/// spelling for plain `+`. The passthrough emitted it verbatim, `near "(":
+/// syntax error`. A known operator unwraps and rides its normal translation.
+#[test]
+fn operator_syntax_unwraps_known_operators() {
+    let sql = tr("SELECT 2 OPERATOR(pg_catalog.+) 3 AS r");
+    let mut conn = establish_connection();
+    let rows = sql_query(&sql).load::<ScalarInt>(&mut conn).expect("unwrapped + must run");
+    assert_eq!(rows[0].r, 5, "OPERATOR(pg_catalog.+) is plain addition: {sql}");
+}
+
+/// The unwrap re-dispatches through the normal operator translation, so a
+/// wrapped operator keeps its specific handling: `^` becomes pow and `~`
+/// keeps the POSIX regex refusal.
+#[test]
+fn operator_syntax_redispatches_through_operator_rules() {
+    let sql = tr("SELECT 2 OPERATOR(pg_catalog.^) 3");
+    assert_eq!(sql, "SELECT pow(2, 3)", "wrapped ^ must become pow: {sql}");
+
+    let err = tr_err("SELECT 'a' OPERATOR(pg_catalog.~) 'b'");
+    let msg = err.to_string();
+    assert!(msg.contains("POSIX regex"), "wrapped ~ keeps the regex refusal: {msg}");
+}
+
 #[test]
 fn pg_abs_prefix_translates_to_abs() {
     // @ x is PostgreSQL's prefix absolute-value operator; SQLite has abs().
