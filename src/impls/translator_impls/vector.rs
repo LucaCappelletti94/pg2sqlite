@@ -206,7 +206,7 @@ fn create_vec0_triggers(
         format!(
             "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON {trigger_table_quoted} BEGIN \
              INSERT INTO {vec_table_quoted} ({vec_pk_column_quoted}, {column_name_quoted}) \
-             VALUES ({new_pk}, {new_vec_col}); \
+             SELECT {new_pk}, {new_vec_col} WHERE {new_vec_col} IS NOT NULL; \
              END"
         ),
         format!(
@@ -264,6 +264,10 @@ pub fn generate_vec0_statements(
     let mut statements = Vec::new();
 
     for vec_col in &vector_cols {
+        // vec0 requires an explicit dimension count; skip columns without one.
+        if vec_col.dimensions.is_none() {
+            continue;
+        }
         let vec_table_name = format!("{table_name}_{}_vec", vec_col.column_name);
 
         let create_vec0 = create_vec0_virtual_table(&vec_table_name, &pk_column, vec_col);
