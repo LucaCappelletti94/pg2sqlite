@@ -26,7 +26,7 @@ use crate::{
     errors::Error,
     impls::{
         function_helpers::simple_function_expr, shared_helpers::translate_expr_recursive,
-        translator_impls::expr::wrap_with_lower,
+        temporal_arithmetic::reverse_temporal_arithmetic, translator_impls::expr::wrap_with_lower,
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
@@ -197,6 +197,13 @@ impl ReverseTranslator for Expr {
         // descent would try to reverse-translate random() inside it (and reject it).
         if is_forward_random_pattern(self) {
             return Ok(simple_function_expr("random", vec![], None));
+        }
+
+        // Same, for the date arithmetic the forward direction lowers onto
+        // julianday and unixepoch: those two functions have no PostgreSQL name
+        // of their own and would be rejected one at a time.
+        if let Some(restored) = reverse_temporal_arithmetic(self, schema, options) {
+            return restored;
         }
 
         match self {

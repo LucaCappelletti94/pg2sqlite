@@ -25,14 +25,18 @@ use sqlparser::ast::{
 
 use crate::{
     impls::{
-        datetime_helpers::{build_strftime_call, datetime_field_key, strftime_mapping_for_key},
+        datetime_helpers::{
+            DatePartKey, build_strftime_call, datetime_field_key, strftime_mapping_for_key,
+        },
         expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq},
         function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
         query_builder::{from_relation, plain_table_factor, single_expr_query},
         shared_helpers::{
             declared_numeric_precision, every_declared_type_matches, function_argument_exprs,
-            numeric_scale, rescale_minor_units, scale_decimal_literal, translate_expr_recursive,
+            is_integral_expression, numeric_scale, rescale_minor_units, scale_decimal_literal,
+            translate_expr_recursive,
         },
+        temporal_arithmetic::{epoch_of_temporal_difference, translate_temporal_binary_op},
         timezone::{
             TimestampAwareness, flipped_shifting_offset, normalize_timezone_modifier_for_sqlite,
             timestamp_awareness,
@@ -235,6 +239,14 @@ fn translate_extract(
              YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH."
         ))
     })?;
+    // `extract(epoch from (a - b))` asks for the seconds in a difference
+    // PostgreSQL answers as an interval, which erases the interval before it
+    // needs a value of its own.
+    if key == DatePartKey::Epoch
+        && let Some(result) = epoch_of_temporal_difference(expr, schema, options)
+    {
+        return result;
+    }
     let (format_str, cast_type) = strftime_mapping_for_key(key);
 
     // Build: CAST(strftime('format', expr) AS cast_type)
@@ -789,28 +801,6 @@ fn translate_numeric_cast(
          an INTEGER of minor units and the cast has to know how far to move the point. The type \
          of `{expr}` cannot be resolved here. Cast it to a declared NUMERIC first."
     )))
-}
-
-/// True when `expr` is a whole number by construction, so its scale is 0.
-fn is_integral_expression(expr: &Expr, schema: &ParserDB) -> bool {
-    match expr {
-        Expr::Nested(inner) => is_integral_expression(inner, schema),
-        Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
-            is_integral_expression(expr, schema)
-        }
-        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
-            !digits.contains('.') && !digits.contains(['e', 'E'])
-        }
-        Expr::Cast { data_type, .. } => matches!(data_type, DataType::Integer(_)),
-        _ => {
-            every_declared_type_matches(expr, schema, |declared| {
-                let lowered = declared.to_ascii_lowercase();
-                ["int", "smallint", "bigint", "serial"]
-                    .iter()
-                    .any(|integral| lowered.starts_with(integral))
-            })
-        }
-    }
 }
 
 /// A single-quoted string as an expression.
@@ -1669,6 +1659,12 @@ fn translate_binary_op(
                 return Ok(simple_function_expr("datetime", args, None));
             }
         }
+    }
+
+    // Every other `+`/`-` over a date, a timestamp or a time. Left alone it
+    // reaches SQLite as arithmetic over the text those values are held in.
+    if let Some(result) = translate_temporal_binary_op(left, op, right, schema, options) {
+        return result;
     }
 
     Ok(Expr::BinaryOp {

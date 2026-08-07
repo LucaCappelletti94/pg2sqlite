@@ -200,6 +200,28 @@ pub(crate) fn every_declared_type_matches(
         .is_some()
 }
 
+/// True when `expr` is a whole number by construction, so its scale is 0.
+pub(crate) fn is_integral_expression(expr: &Expr, schema: &ParserDB) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_integral_expression(inner, schema),
+        Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
+            is_integral_expression(expr, schema)
+        }
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
+            !digits.contains('.') && !digits.contains(['e', 'E'])
+        }
+        Expr::Cast { data_type, .. } => matches!(data_type, DataType::Integer(_)),
+        _ => {
+            every_declared_type_matches(expr, schema, |declared| {
+                let lowered = declared.to_ascii_lowercase();
+                ["int", "smallint", "bigint", "serial"]
+                    .iter()
+                    .any(|integral| lowered.starts_with(integral))
+            })
+        }
+    }
+}
+
 /// The scale of `expr` when it is a `NUMERIC` value held as minor units.
 pub(crate) fn numeric_scale(expr: &Expr, schema: &ParserDB) -> Option<u32> {
     numeric_precision_and_scale_of(expr, schema).map(|(_, scale)| scale)

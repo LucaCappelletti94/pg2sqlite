@@ -147,6 +147,7 @@ fn every_corpus_group_is_swept() {
         vec!["ddl"],
         vec!["types"],
         REMEDIATION_GROUPS.to_vec(),
+        REVIEW_GROUPS.to_vec(),
     ]
     .concat();
     for (name, _) in CORPUS_GROUPS {
@@ -221,4 +222,13 @@ const REMEDIATION_GROUPS: &[&str] = &[
 #[test]
 fn remediation_constructs() {
     report(REMEDIATION_GROUPS);
+}
+
+/// The groups added by the 2026-08-07 crate review, one per finding whose fix
+/// changed what reaches SQLite.
+const REVIEW_GROUPS: &[&str] = &["date-arithmetic"];
+
+#[test]
+fn review_finding_constructs() {
+    report(REVIEW_GROUPS);
 }

@@ -455,4 +455,21 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                  INSERT INTO pol2 (id, ts) VALUES (1, '2000-01-01 00:00:00');",
                     ],
     ),
+    (
+        "date-arithmetic",
+        &[
+                // Date arithmetic without an INTERVAL used to emit `+`/`-`
+                // over the text SQLite holds a date in, answering 0 and 2033.
+                // These carry the new emissions: julianday differences,
+                // date() over a shifted Julian day, and unixepoch with the
+                // 'subsec' modifier, which is 3.42 and so inside the floor.
+                "SELECT d - d FROM t;",
+                "SELECT d + n FROM t;",
+                "SELECT d - 7 FROM t;",
+                "SELECT 7 + d FROM t;",
+                "SELECT date '2026-08-07' - date '2026-08-01';",
+                "SELECT extract(epoch from (ts - ts)) FROM t;",
+                "SELECT date_part('epoch', ts - ts) FROM t;",
+                    ],
+    ),
 ];

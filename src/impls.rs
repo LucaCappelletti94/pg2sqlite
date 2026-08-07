@@ -22,5 +22,6 @@ pub(crate) mod query_builder;
 pub mod reverse_translator_impls;
 pub(crate) mod shared_helpers;
 pub(crate) mod sqlite_functions;
+pub(crate) mod temporal_arithmetic;
 pub(crate) mod timezone;
 pub mod translator_impls;

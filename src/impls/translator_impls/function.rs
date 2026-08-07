@@ -26,7 +26,7 @@ use super::{
 use crate::{
     impls::{
         datetime_helpers::{
-            build_date_trunc_quarter_call, build_date_trunc_week_call,
+            DatePartKey, build_date_trunc_quarter_call, build_date_trunc_week_call,
             build_date_trunc_year_span_call, build_strftime_call, parse_date_part_key,
             strftime_mapping_for_key,
         },
@@ -40,6 +40,7 @@ use crate::{
             translate_function_arguments, unanimous_declared,
         },
         sqlite_functions::is_sqlite_builtin,
+        temporal_arithmetic::epoch_of_temporal_difference,
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
@@ -1762,6 +1763,13 @@ impl Translator for Function {
                          week, dow, doy, epoch."
                     ))
                 })?;
+                // The same composite `extract(epoch from (a - b))` takes,
+                // spelled as a function.
+                if key == DatePartKey::Epoch
+                    && let Some(result) = epoch_of_temporal_difference(&ts_expr, schema, options)
+                {
+                    return result;
+                }
                 let (format_str, cast_type) = strftime_mapping_for_key(key);
 
                 let translated_ts = ts_expr.translate(schema, options)?;
