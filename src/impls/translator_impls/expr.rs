@@ -377,6 +377,109 @@ fn translate_boolean_cast(
     })
 }
 
+/// The word PostgreSQL renders a boolean literal as, when `expr` is one.
+fn boolean_literal_word(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Nested(inner) => boolean_literal_word(inner),
+        Expr::Value(ValueWithSpan { value: Value::Boolean(value), .. }) => {
+            Some(if *value { "true" } else { "false" })
+        }
+        _ => None,
+    }
+}
+
+/// True when `expr` is boolean, either by construction or by the declared type
+/// of the column it names.
+///
+/// SQLite has no boolean type, so a translated boolean is the integer 1 or 0
+/// and nothing downstream can tell it from a count. Anything this does not
+/// recognise is left alone, which keeps a value that merely happens to be 1
+/// from being rendered as a word.
+fn is_boolean_expression(expr: &Expr, schema: &ParserDB) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_boolean_expression(inner, schema),
+        Expr::Cast { data_type, .. } => {
+            matches!(data_type, DataType::Boolean | DataType::Bool)
+        }
+        // Boolean by construction, whatever the operands are.
+        Expr::Value(ValueWithSpan { value: Value::Boolean(_), .. })
+        | Expr::UnaryOp { op: UnaryOperator::Not, .. }
+        | Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::IsTrue(_)
+        | Expr::IsNotTrue(_)
+        | Expr::IsFalse(_)
+        | Expr::IsNotFalse(_)
+        | Expr::IsUnknown(_)
+        | Expr::IsNotUnknown(_)
+        | Expr::IsDistinctFrom(_, _)
+        | Expr::IsNotDistinctFrom(_, _)
+        | Expr::InList { .. }
+        | Expr::InSubquery { .. }
+        | Expr::InUnnest { .. }
+        | Expr::Between { .. }
+        | Expr::Like { .. }
+        | Expr::ILike { .. }
+        | Expr::SimilarTo { .. }
+        | Expr::RLike { .. }
+        | Expr::AnyOp { .. }
+        | Expr::AllOp { .. }
+        | Expr::Exists { .. } => true,
+        Expr::BinaryOp { op, .. } => {
+            matches!(
+                op,
+                BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq
+                    | BinaryOperator::And
+                    | BinaryOperator::Or
+                    | BinaryOperator::Xor
+            )
+        }
+        _ => {
+            every_declared_type_matches(expr, schema, |declared| {
+                matches!(declared.to_ascii_lowercase().as_str(), "boolean" | "bool")
+            })
+        }
+    }
+}
+
+/// Renders a boolean operand the way PostgreSQL renders one as text.
+///
+/// PostgreSQL writes the words, so `CAST(TRUE AS TEXT)` is `'true'` and
+/// `'x' || TRUE` is `'xtrue'`, while the translated integer gave `'1'` and
+/// `'x1'`. A literal folds straight to its word. Anything else becomes a CASE
+/// with no ELSE, so a NULL boolean stays NULL rather than reading as false.
+///
+/// The condition is the value's own truthiness rather than a comparison
+/// against 1, because a translated boolean column is a bare `INTEGER` with no
+/// CHECK and can hold any integer. Measured on 3.46.0: over 1, 0, NULL and 5
+/// this answers true, false, NULL and true, matching PostgreSQL's truthiness,
+/// where `CASE x WHEN 1 ... WHEN 0 ...` answers NULL for the 5.
+fn render_boolean_as_text(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    if let Some(word) = boolean_literal_word(expr) {
+        return Ok(string_literal(word));
+    }
+    let value = expr.translate(schema, options)?;
+    Ok(Expr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: None,
+        conditions: vec![
+            CaseWhen { condition: value.clone(), result: string_literal("true") },
+            CaseWhen { condition: not_predicate(value), result: string_literal("false") },
+        ],
+        else_result: None,
+    })
+}
+
 /// Builds `expr IN ('a', 'b', ...)`.
 fn string_set_membership(expr: Expr, values: &[&str]) -> Expr {
     Expr::InList {
@@ -1434,6 +1537,27 @@ fn translate_binary_op(
         return Ok(concatenated);
     }
 
+    // `||` over a boolean renders it, since PostgreSQL writes the word there
+    // too: `'x' || TRUE` is `xtrue`, where the translated integer gave `x1`.
+    // Only the boolean side is wrapped, so a text or numeric operand keeps
+    // concatenating exactly as it did.
+    if *op == BinaryOperator::StringConcat
+        && (is_boolean_expression(left, schema) || is_boolean_expression(right, schema))
+    {
+        let rendered = |side: &Expr| -> Result<Expr, crate::errors::Error> {
+            if is_boolean_expression(side, schema) {
+                render_boolean_as_text(side, schema, options)
+            } else {
+                side.translate(schema, options)
+            }
+        };
+        return Ok(Expr::BinaryOp {
+            left: Box::new(rendered(left)?),
+            op: BinaryOperator::StringConcat,
+            right: Box::new(rendered(right)?),
+        });
+    }
+
     // Array overlap. Rewritten over `json_each` rather than passed through,
     // which emitted `json_array(1, 2) && json_array(2, 3)` and failed at the
     // `&`. Gated on the array representation like every other array operation.
@@ -1743,12 +1867,20 @@ impl Translator for Expr {
                 if let Some(info) = exact_numeric_info(data_type) {
                     return translate_numeric_cast(expr, info, schema, options);
                 }
+                let translated_type = data_type.translate(schema, options)?;
+                // A boolean rendered as text reads `true` or `false` in
+                // PostgreSQL, and the translated integer would give `1`.
+                if matches!(translated_type, sqlparser::ast::DataType::Text)
+                    && is_boolean_expression(expr, schema)
+                {
+                    return render_boolean_as_text(expr, schema, options);
+                }
                 // SQLite only accepts the `CAST(x AS type)` spelling, not
                 // PostgreSQL's `x::type` operator nor TRY_CAST / SAFE_CAST, so
                 // force `CastKind::Cast` regardless of how the source wrote it.
                 Expr::Cast {
                     expr: Box::new(expr.translate(schema, options)?),
-                    data_type: data_type.translate(schema, options)?,
+                    data_type: translated_type,
                     format: None,
                     kind: CastKind::Cast,
                 }

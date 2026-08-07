@@ -572,4 +572,19 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                  INSERT INTO ser3 (tag) VALUES ('a'), ('b');",
                     ],
     ),
+    (
+        "boolean-to-text",
+        &[
+                // A boolean rendered as text reads the word, so the cast grows
+                // a CASE and the concat operand is wrapped. The last two rows
+                // are the shapes that must NOT grow one, since only a boolean
+                // operand is rewritten.
+                "SELECT CAST(b AS TEXT) FROM t;",
+                "SELECT CAST(TRUE AS TEXT), FALSE::text FROM t;",
+                "SELECT CAST(n > 1 AS TEXT) FROM t;",
+                "SELECT 'x' || b, b || 'x' FROM t;",
+                "SELECT CAST(n AS TEXT), n || 'x' FROM t;",
+                "SELECT s || 'x' FROM t;",
+                    ],
+    ),
 ];

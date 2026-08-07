@@ -233,6 +233,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "on-conflict-do-nothing",
     "foreign-key-match",
     "serial-columns",
+    "boolean-to-text",
 ];
 
 #[test]
