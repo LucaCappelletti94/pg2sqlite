@@ -239,7 +239,38 @@ pub fn reverse_function(
                     return FunctionReversal::ToTimestampFromEpoch;
                 }
             }
-            FunctionReversal::PassThrough
+            // Anything else has no PostgreSQL spelling: PostgreSQL has no
+            // datetime function, so a call that is neither a zone shift nor
+            // an epoch conversion cannot be emitted. The refusal names the
+            // modifier when there is exactly one, and stays generic for a
+            // chain, whose first modifier alone would mislead (R98).
+            let sole_modifier = if let FunctionArguments::List(list) = args
+                && list.args.len() == 2
+                && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                    ValueWithSpan { value: Value::SingleQuotedString(modifier), .. },
+                )))) = list.args.get(1)
+            {
+                Some(modifier.clone())
+            } else {
+                None
+            };
+            FunctionReversal::Reject(match sole_modifier {
+                Some(modifier) => {
+                    format!(
+                        "the datetime modifier '{modifier}' has no PostgreSQL form. PostgreSQL has \
+                     no datetime function, and only a time zone modifier or unixepoch can be \
+                     rewritten onto AT TIME ZONE or to_timestamp. Express the arithmetic with \
+                     interval arithmetic or date_trunc before translating."
+                    )
+                }
+                None => {
+                    "this datetime call has no PostgreSQL form. PostgreSQL has no datetime \
+                         function, and only datetime('now'), a single timestamp argument, one \
+                         time zone modifier, or unixepoch can be rewritten onto NOW(), AT TIME \
+                         ZONE, or to_timestamp."
+                        .to_string()
+                }
+            })
         }
         // strftime('%Y-01-01 00:00:00', expr) -> date_trunc('year', expr)
         // strftime('%Y', expr) -> EXTRACT(YEAR FROM expr)

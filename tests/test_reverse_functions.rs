@@ -16,6 +16,16 @@ fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
     stmts[0].to_string()
 }
 
+fn reverse_err(pg_ddl: &str, sqlite_sql: &str) -> String {
+    let translator = Pg2Sqlite::default().sql(pg_ddl).unwrap();
+    let schema = translator.build_schema().unwrap();
+    let options = Pg2SqliteOptions::default();
+    translator
+        .reverse_sql(sqlite_sql, &schema, &options)
+        .expect_err("this SQLite has no PostgreSQL spelling")
+        .to_string()
+}
+
 const SCHEMA: &str = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);";
 const EVENTS: &str =
     "CREATE TABLE events (id INT PRIMARY KEY, created_at TIMESTAMP, category TEXT);";
@@ -204,10 +214,33 @@ fn reverse_min_single_arg_stays_min() {
     assert!(!pg.contains("LEAST"), "Single-arg MIN should not become LEAST: {pg}");
 }
 
+/// Inverts the R98 pin. PostgreSQL has no `datetime` function, so a modifier
+/// that is neither a time zone nor `unixepoch` has nothing to reverse onto,
+/// and passing the call through emitted SQL PostgreSQL refuses.
 #[test]
-fn reverse_datetime_passthrough() {
-    let pg = reverse(EVENTS, "SELECT datetime(created_at, '+1 day') FROM events;");
-    assert!(pg.contains("datetime"), "Expected datetime passthrough: {pg}");
+fn an_untranslatable_datetime_modifier_is_refused() {
+    for modifier in ["+1 day", "start of month", "weekday 0"] {
+        let error =
+            reverse_err(EVENTS, &format!("SELECT datetime(created_at, '{modifier}') FROM events;"));
+        assert!(error.contains(modifier), "the refusal must name the modifier: {error}");
+    }
+}
+
+/// A modifier chain has no single zone to reverse onto either, and naming
+/// only its first modifier would mislead, so the refusal is the generic one.
+#[test]
+fn a_datetime_modifier_chain_is_refused() {
+    let error = reverse_err(EVENTS, "SELECT datetime(created_at, 'utc', '+1 day') FROM events;");
+    assert!(error.contains("datetime"), "the refusal must name the function: {error}");
+}
+
+/// Guards the fix. The zone and epoch spellings keep their reversals.
+#[test]
+fn zone_and_epoch_spellings_still_reverse() {
+    let zone = reverse(EVENTS, "SELECT datetime(created_at, 'utc') FROM events;");
+    assert!(zone.contains("AT TIME ZONE"), "the zone reversal must survive: {zone}");
+    let epoch = reverse(EVENTS, "SELECT datetime(id, 'unixepoch') FROM events;");
+    assert!(epoch.contains("to_timestamp"), "the epoch reversal must survive: {epoch}");
 }
 
 #[test]
