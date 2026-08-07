@@ -239,7 +239,7 @@ fn translate_extract(
 
     // Build: CAST(strftime('format', expr) AS cast_type)
     let translated_expr = expr.translate(schema, options)?;
-    let strftime_call = build_strftime_call(format_str, translated_expr, None);
+    let strftime_call = build_strftime_call(format_str, translated_expr);
 
     Ok(Expr::Cast {
         expr: Box::new(strftime_call),

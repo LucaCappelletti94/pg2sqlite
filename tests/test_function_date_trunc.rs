@@ -137,33 +137,22 @@ fn date_trunc_unsupported_granularity_produces_helpful_error() {
     }
 }
 
+/// Flipped R120 pin. `date_trunc(...) OVER (...)` is not PostgreSQL, which
+/// accepts OVER only on a window or aggregate function, and the old
+/// passthrough emitted `strftime(...) OVER (...)`, which SQLite refuses with
+/// `may not be used as a window function`. The translator now refuses.
 #[test]
-fn date_trunc_preserves_window_over() {
+fn date_trunc_with_an_over_clause_is_refused() {
     let options = Pg2SqliteOptions::default();
-    let sql = translate_sql(
+    let err = translate_sql(
         "SELECT date_trunc('day', created_at) OVER (PARTITION BY user_id) FROM events",
         &options,
     )
-    .unwrap();
-    let lower = sql.to_lowercase();
-    assert!(lower.contains("strftime"), "expected strftime: {sql}");
-    assert!(lower.contains("over"), "expected OVER clause preserved: {sql}");
-    {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE events (id INT PRIMARY KEY, user_id INT, created_at TEXT);",
-        )
-        .unwrap();
-        // Pins R120: strftime() may not be used as a window function. Goes red when the
-        // defect is fixed, which is the point.
-        let err = conn
-            .prepare(&sql)
-            .expect_err("R120 pin: SQLite should refuse strftime() as window function");
-        assert!(
-            err.to_string().contains("may not be used as a window function"),
-            "expected window function error: {err}"
-        );
-    }
+    .expect_err("OVER on date_trunc() is not PostgreSQL");
+    assert!(
+        err.contains("date_trunc") && err.contains("OVER"),
+        "the refusal should name the function and OVER: {err}"
+    );
 }
 
 #[test]
@@ -209,33 +198,23 @@ fn date_trunc_without_over_semantic() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+/// The guard the flipped pin above leaves behind: a real window aggregate in
+/// the same shape keeps its OVER clause and the emitted SQL prepares.
 #[test]
-fn date_trunc_over_partition_translation_preserves_structure() {
-    // strftime is not a valid SQLite window function, but the translation
-    // should preserve the OVER clause structure for functions that are.
+fn a_window_aggregate_over_partition_still_translates() {
     let options = Pg2SqliteOptions::default();
-    let sql = translate_sql(
-        "SELECT date_trunc('day', created_at) OVER (PARTITION BY user_id) FROM events",
-        &options,
-    )
-    .unwrap();
+    let sql =
+        translate_sql("SELECT COUNT(created_at) OVER (PARTITION BY user_id) FROM events", &options)
+            .unwrap();
     let lower = sql.to_lowercase();
-    assert!(lower.contains("over (partition by"), "OVER PARTITION BY should be preserved: {sql}");
-    assert!(lower.contains("user_id"), "partition column should be preserved: {sql}");
+    assert!(lower.contains("over (partition by"), "OVER PARTITION BY should survive: {sql}");
+    assert!(lower.contains("user_id"), "partition column should survive: {sql}");
     {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE events (id INT PRIMARY KEY, user_id INT, created_at TEXT);",
         )
         .unwrap();
-        // Pins R120: strftime() may not be used as a window function. Goes red when the
-        // defect is fixed, which is the point.
-        let err = conn
-            .prepare(&sql)
-            .expect_err("R120 pin: SQLite should refuse strftime() as window function");
-        assert!(
-            err.to_string().contains("may not be used as a window function"),
-            "expected window function error: {err}"
-        );
+        conn.prepare(&sql).expect("COUNT OVER must prepare in SQLite");
     }
 }

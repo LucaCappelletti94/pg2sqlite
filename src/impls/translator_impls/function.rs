@@ -226,6 +226,24 @@ fn null_ignoring_extremum(
     Ok(simple_function_expr(if greatest { "MAX" } else { "MIN" }, rotations, None))
 }
 
+/// Refuses an `OVER` clause on a function that is neither a window function
+/// nor an aggregate.
+///
+/// PostgreSQL rejects such input outright, so it is not PostgreSQL, and the
+/// translated call would fail in SQLite as `may not be used as a window
+/// function` long after translation reported success.
+fn reject_over_on_scalar(func: &Function) -> Result<(), crate::errors::Error> {
+    if func.over.is_some() {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "{}() cannot take an OVER clause: PostgreSQL accepts OVER only on a window or \
+             aggregate function, and SQLite refuses the translated call the same way. Remove \
+             the OVER clause.",
+            func.name
+        )));
+    }
+    Ok(())
+}
+
 /// Builds PostgreSQL's `trunc(x, n)`, which truncates toward zero, out of
 /// SQLite's parts.
 ///
@@ -1613,8 +1631,8 @@ impl Translator for Function {
                 }))
             }
             FunctionTranslation::WithArgs { name, args } => {
-                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
-                Ok(simple_function_expr(&name, args, translated_over))
+                reject_over_on_scalar(&func)?;
+                Ok(simple_function_expr(&name, args, None))
             }
             FunctionTranslation::ToConcatenation => {
                 // CONCAT(a, b, c) -> COALESCE(a, '') || COALESCE(b, '') || COALESCE(c, '')
@@ -1653,6 +1671,7 @@ impl Translator for Function {
                 })
             }
             FunctionTranslation::DateTrunc => {
+                reject_over_on_scalar(&func)?;
                 // date_trunc(field, timestamp) -> strftime(format, timestamp)
                 let exprs = extract_exactly(&func.args, 2, "date_trunc")?;
                 let field_expr = exprs[0];
@@ -1672,7 +1691,6 @@ impl Translator for Function {
                 };
 
                 let translated_ts = ts_expr.translate(schema, options)?;
-                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
 
                 // The finer units are a format string that zeros the
                 // sub-granularity components rather than dropping them:
@@ -1689,34 +1707,19 @@ impl Translator for Function {
                     "year" | "years" => "%Y-01-01 00:00:00",
                     // The rest are calendar arithmetic, not a format.
                     "week" | "weeks" => {
-                        return Ok(build_date_trunc_week_call(translated_ts, translated_over));
+                        return Ok(build_date_trunc_week_call(translated_ts));
                     }
                     "quarter" | "quarters" => {
-                        return Ok(build_date_trunc_quarter_call(translated_ts, translated_over));
+                        return Ok(build_date_trunc_quarter_call(translated_ts));
                     }
                     "decade" | "decades" => {
-                        return Ok(build_date_trunc_year_span_call(
-                            translated_ts,
-                            10,
-                            0,
-                            translated_over,
-                        ));
+                        return Ok(build_date_trunc_year_span_call(translated_ts, 10, 0));
                     }
                     "century" | "centuries" => {
-                        return Ok(build_date_trunc_year_span_call(
-                            translated_ts,
-                            100,
-                            1,
-                            translated_over,
-                        ));
+                        return Ok(build_date_trunc_year_span_call(translated_ts, 100, 1));
                     }
                     "millennium" | "millennia" => {
-                        return Ok(build_date_trunc_year_span_call(
-                            translated_ts,
-                            1000,
-                            1,
-                            translated_over,
-                        ));
+                        return Ok(build_date_trunc_year_span_call(translated_ts, 1000, 1));
                     }
                     other => {
                         return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
@@ -1727,10 +1730,11 @@ impl Translator for Function {
                     }
                 };
 
-                Ok(build_strftime_call(format_str, translated_ts, translated_over))
+                Ok(build_strftime_call(format_str, translated_ts))
             }
             FunctionTranslation::DatePart => {
                 // date_part('field', expr) -> CAST(strftime(format, expr) AS INTEGER/REAL)
+                reject_over_on_scalar(&func)?;
                 let exprs = extract_exactly(&func.args, 2, "date_part")?;
                 let field_expr = exprs[0];
                 let ts_expr = exprs[1].clone();
@@ -1758,8 +1762,7 @@ impl Translator for Function {
                 let (format_str, cast_type) = strftime_mapping_for_key(key);
 
                 let translated_ts = ts_expr.translate(schema, options)?;
-                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
-                let strftime_call = build_strftime_call(format_str, translated_ts, translated_over);
+                let strftime_call = build_strftime_call(format_str, translated_ts);
 
                 Ok(Expr::Cast {
                     expr: Box::new(strftime_call),
@@ -1769,6 +1772,7 @@ impl Translator for Function {
                 })
             }
             FunctionTranslation::ToChar => {
+                reject_over_on_scalar(&func)?;
                 // to_char(expr, format) -> strftime(mapped_format, expr)
                 let exprs = extract_exactly(&func.args, 2, "to_char")?;
                 let ts_expr = exprs[0].clone();
@@ -1788,8 +1792,7 @@ impl Translator for Function {
                 };
                 let mapped_format = pg_timestamp_format_to_strftime(&format_str)?;
                 let translated_ts = ts_expr.translate(schema, options)?;
-                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
-                Ok(build_strftime_call(&mapped_format, translated_ts, translated_over))
+                Ok(build_strftime_call(&mapped_format, translated_ts))
             }
             FunctionTranslation::ToRandomFloat => {
                 // random() -> (CAST(random() AS REAL) + 9223372036854775808.0) /

@@ -11,7 +11,7 @@ use alloc::{
     vec::Vec,
 };
 
-use sqlparser::ast::{BinaryOperator, CastKind, DataType, DateTimeField, Expr, WindowType};
+use sqlparser::ast::{BinaryOperator, CastKind, DataType, DateTimeField, Expr};
 
 use super::function_helpers::{integer_literal, simple_function_expr, string_literal};
 
@@ -127,14 +127,10 @@ pub(crate) fn datetime_field_from_strftime_format(format: &str) -> Option<DateTi
     }
 }
 
-/// Build `strftime('<format>', <expr>)` with optional window specification.
+/// Build `strftime('<format>', <expr>)`.
 #[must_use]
-pub(crate) fn build_strftime_call(
-    format: &str,
-    value_expr: Expr,
-    over: Option<WindowType>,
-) -> Expr {
-    simple_function_expr("strftime", vec![string_literal(format), value_expr], over)
+pub(crate) fn build_strftime_call(format: &str, value_expr: Expr) -> Expr {
+    simple_function_expr("strftime", vec![string_literal(format), value_expr], None)
 }
 
 fn binary(left: Expr, op: BinaryOperator, right: Expr) -> Expr {
@@ -145,7 +141,7 @@ fn binary(left: Expr, op: BinaryOperator, right: Expr) -> Expr {
 /// number rather than as text.
 fn strftime_number(format: &str, value_expr: Expr) -> Expr {
     Expr::Cast {
-        expr: Box::new(build_strftime_call(format, value_expr, None)),
+        expr: Box::new(build_strftime_call(format, value_expr)),
         data_type: DataType::Integer(None),
         format: None,
         kind: CastKind::Cast,
@@ -161,7 +157,7 @@ fn strftime_number(format: &str, value_expr: Expr) -> Expr {
 /// included. Checked against PostgreSQL 16 on nine dates covering Sundays,
 /// Mondays, and year boundaries.
 #[must_use]
-pub(crate) fn build_date_trunc_week_call(value_expr: Expr, over: Option<WindowType>) -> Expr {
+pub(crate) fn build_date_trunc_week_call(value_expr: Expr) -> Expr {
     simple_function_expr(
         "datetime",
         vec![
@@ -170,7 +166,7 @@ pub(crate) fn build_date_trunc_week_call(value_expr: Expr, over: Option<WindowTy
             string_literal("weekday 1"),
             string_literal("start of day"),
         ],
-        over,
+        None,
     )
 }
 
@@ -183,7 +179,7 @@ pub(crate) fn build_date_trunc_week_call(value_expr: Expr, over: Option<WindowTy
 /// and `/`, so a flat rendering would group the operands the wrong way, and
 /// `Display` adds no parentheses of its own.
 #[must_use]
-pub(crate) fn build_date_trunc_quarter_call(value_expr: Expr, over: Option<WindowType>) -> Expr {
+pub(crate) fn build_date_trunc_quarter_call(value_expr: Expr) -> Expr {
     let month_index = binary(
         strftime_number("%m", value_expr.clone()),
         BinaryOperator::Minus,
@@ -207,7 +203,7 @@ pub(crate) fn build_date_trunc_quarter_call(value_expr: Expr, over: Option<Windo
     simple_function_expr(
         "datetime",
         vec![value_expr, string_literal("start of year"), modifier],
-        over,
+        None,
     )
 }
 
@@ -227,12 +223,7 @@ pub(crate) fn build_date_trunc_quarter_call(value_expr: Expr, over: Option<Windo
 /// so a flat `y - 1 / 100 * 100` would reduce to `y - 0`. When `offset` is
 /// zero both terms are dropped rather than emitted as `- 0` and `+ 0`.
 #[must_use]
-pub(crate) fn build_date_trunc_year_span_call(
-    value_expr: Expr,
-    span: i64,
-    offset: i64,
-    over: Option<WindowType>,
-) -> Expr {
+pub(crate) fn build_date_trunc_year_span_call(value_expr: Expr, span: i64, offset: i64) -> Expr {
     let year = strftime_number("%Y", value_expr);
     let counted_from = if offset == 0 {
         year
@@ -258,6 +249,6 @@ pub(crate) fn build_date_trunc_year_span_call(
             vec![string_literal("%04d-01-01 00:00:00"), period_start],
             None,
         )],
-        over,
+        None,
     )
 }

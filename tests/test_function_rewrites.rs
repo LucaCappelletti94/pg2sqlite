@@ -108,56 +108,39 @@ fn random_covers_the_unit_interval() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Flipped R120 pin. `now() OVER (...)` is not PostgreSQL, which accepts OVER
+/// only on a window or aggregate function, and the old passthrough emitted
+/// `datetime('now') OVER (...)`, which SQLite refuses with `may not be used
+/// as a window function`. The translator now refuses the input.
 #[test]
-fn with_args_preserves_window_over() {
+fn now_with_an_over_clause_is_refused() {
     let options = Pg2SqliteOptions::default();
-    let sql =
+    let err =
         translate_sql("SELECT now() OVER (PARTITION BY department_id) FROM employees", &options)
-            .unwrap();
-    let lower = sql.to_lowercase();
-    assert!(lower.contains("datetime('now')"), "expected datetime('now'): {sql}");
-    assert!(lower.contains("over"), "expected OVER clause preserved: {sql}");
-    let mut conn = SqliteConnection::establish(":memory:").unwrap();
-    // DDL: no typed DSL exists for CREATE TABLE in diesel.
-    diesel::sql_query("CREATE TABLE employees (department_id INT)").execute(&mut conn).unwrap();
-    // Dynamically generated translated SQL cannot be expressed via the typed DSL.
-    // Pins R120: datetime() may not be used as a window function. Goes red when the
-    // defect is fixed, which is the point.
-    let err = diesel::sql_query(&sql)
-        .execute(&mut conn)
-        .expect_err("R120 pin: SQLite should refuse datetime() as window function");
+            .expect_err("OVER on now() is not PostgreSQL");
     assert!(
-        format!("{err}").contains("may not be used as a window function"),
-        "expected window function error: {err}"
+        err.contains("now") && err.contains("OVER"),
+        "the refusal should name the function and OVER: {err}"
     );
 }
 
+/// The guard the flipped pin above leaves behind: a function that IS a window
+/// aggregate keeps its OVER clause through translation and executes.
 #[test]
-fn now_over_partition_translation_preserves_structure() {
-    // datetime('now') is not a valid SQLite window function, but the translation
-    // should faithfully preserve the OVER clause structure so that functions that
-    // ARE valid window functions (like SUM, COUNT) don't lose their window spec
-    // when routed through the WithArgs path.
+fn a_window_aggregate_keeps_its_over_clause() {
     let options = Pg2SqliteOptions::default();
-    let sql =
-        translate_sql("SELECT now() OVER (PARTITION BY department_id) FROM employees", &options)
-            .unwrap();
+    let sql = translate_sql(
+        "SELECT SUM(department_id) OVER (PARTITION BY department_id) FROM employees",
+        &options,
+    )
+    .unwrap();
     let lower = sql.to_lowercase();
-    assert!(lower.contains("over (partition by"), "OVER PARTITION BY should be preserved: {sql}");
-    assert!(lower.contains("department_id"), "partition column should be preserved: {sql}");
+    assert!(lower.contains("over (partition by"), "OVER PARTITION BY should survive: {sql}");
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
     // DDL: no typed DSL exists for CREATE TABLE in diesel.
     diesel::sql_query("CREATE TABLE employees (department_id INT)").execute(&mut conn).unwrap();
     // Dynamically generated translated SQL cannot be expressed via the typed DSL.
-    // Pins R120: datetime() may not be used as a window function. Goes red when the
-    // defect is fixed, which is the point.
-    let err = diesel::sql_query(&sql)
-        .execute(&mut conn)
-        .expect_err("R120 pin: SQLite should refuse datetime() as window function");
-    assert!(
-        format!("{err}").contains("may not be used as a window function"),
-        "expected window function error: {err}"
-    );
+    diesel::sql_query(&sql).execute(&mut conn).expect("SUM OVER must run in SQLite");
 }
 
 #[test]

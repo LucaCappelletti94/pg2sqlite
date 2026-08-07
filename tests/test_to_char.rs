@@ -158,41 +158,21 @@ fn to_char_dynamic_format_causes_error() {
     assert!(err.to_lowercase().contains("literal"), "Error should mention 'literal', got: {err}");
 }
 
-// to_char preserves window OVER clause
+// to_char refuses a window OVER clause, R120
 
+/// Flipped R120 pin. `to_char(...) OVER (...)` is not PostgreSQL, which
+/// accepts OVER only on a window or aggregate function, and the old
+/// passthrough emitted `strftime(...) OVER (...)`, which SQLite refuses with
+/// `may not be used as a window function`. The translator now refuses.
 #[test]
-fn to_char_preserves_window_over() {
+fn to_char_with_an_over_clause_is_refused() {
     let sql = "CREATE TABLE events (id INT PRIMARY KEY, ts TIMESTAMP, user_id INT); \
                SELECT to_char(ts, 'YYYY-MM-DD') OVER (PARTITION BY user_id) FROM events;";
-    let output = translate(sql).unwrap();
-    let lower = output.to_lowercase();
-    assert!(lower.contains("strftime"), "expected strftime: {output}");
-    assert!(lower.contains("over"), "expected OVER clause preserved: {output}");
-    // Pins R120: strftime() may not be used as a window function. Goes red when the
-    // defect is fixed, which is the point.
-    {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        let stmts = pg2sqlite::prelude::Pg2Sqlite::default()
-            .sql(sql)
-            .expect("parse")
-            .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
-            .expect("translate");
-        for stmt in &stmts {
-            let s = stmt.to_string();
-            if s.starts_with("CREATE") {
-                conn.execute_batch(&format!("{s};"))
-                    .unwrap_or_else(|e| panic!("DDL must run in SQLite: {e}\n{s}"));
-            } else {
-                let err = conn
-                    .execute_batch(&format!("{s};"))
-                    .expect_err("R120 pin: SQLite should refuse strftime() as window function");
-                assert!(
-                    err.to_string().contains("may not be used as a window function"),
-                    "expected window function error: {err}"
-                );
-            }
-        }
-    }
+    let err = translate(sql).expect_err("OVER on to_char() is not PostgreSQL");
+    assert!(
+        err.contains("to_char") && err.contains("OVER"),
+        "the refusal should name the function and OVER: {err}"
+    );
 }
 
 #[test]
