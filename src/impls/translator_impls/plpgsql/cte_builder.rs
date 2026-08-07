@@ -30,11 +30,20 @@ impl CteBuilder {
     ///
     /// Transforms `variable := expression` into:
     /// ```sql
-    /// variable(val) AS (SELECT expression)
+    /// variable(val) AS (SELECT expression FROM <dependencies>)
     /// ```
+    ///
+    /// `from` names the variable CTEs the expression itself reads, which is
+    /// what lets one variable be defined in terms of another. Left empty the
+    /// body reads no relation, which is right for a literal or a `NEW`
+    /// reference.
     #[must_use]
-    pub fn create_variable_cte(binding: &VariableBinding, expr: Expr) -> Cte {
-        let select = make_simple_select(vec![SelectItem::UnnamedExpr(expr)], vec![], None);
+    pub fn create_variable_cte(
+        binding: &VariableBinding,
+        expr: Expr,
+        from: Vec<sqlparser::ast::TableWithJoins>,
+    ) -> Cte {
+        let select = make_simple_select(vec![SelectItem::UnnamedExpr(expr)], from, None);
         let query = make_query(None, SetExpr::Select(Box::new(select)));
         Cte {
             alias: TableAlias {
@@ -57,7 +66,7 @@ impl CteBuilder {
             name: name.to_string(),
             expression: String::new(), // Not used in this path
         };
-        Self::create_variable_cte(&binding, expr)
+        Self::create_variable_cte(&binding, expr, vec![])
     }
 
     /// Combines multiple CTEs into a WITH clause.
@@ -102,7 +111,7 @@ mod tests {
             VariableBinding { name: "v_id".to_string(), expression: "uuidv7()".to_string() };
         let expr = Expr::Value(ValueWithSpan::from(Value::Number("1".to_string(), false)));
 
-        let cte = CteBuilder::create_variable_cte(&binding, expr.clone());
+        let cte = CteBuilder::create_variable_cte(&binding, expr.clone(), Vec::new());
         assert_eq!(cte.alias.name.value, "v_id");
         assert_eq!(cte.alias.columns.len(), 1);
 

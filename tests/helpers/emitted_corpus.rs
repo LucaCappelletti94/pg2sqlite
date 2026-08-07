@@ -609,4 +609,59 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                  CREATE VIEW vi_seen WITH (security_invoker = true) AS SELECT id FROM vi;",
                     ],
     ),
+    (
+        "plpgsql-scanner-and-binding",
+        &[
+                // Each row is one of F9's four defects, all of which only
+                // surfaced when the emitted trigger ran: a variable in an
+                // INSERT ... SELECT source, an identifier ending in a keyword,
+                // a dollar-quoted literal, and a variable defined in terms of
+                // another whose name begins with a keyword.
+                "CREATE TABLE ev (id INT PRIMARY KEY);
+                 CREATE TABLE au (label TEXT, src TEXT);
+                 CREATE FUNCTION pf1() RETURNS trigger LANGUAGE plpgsql AS $$
+                 DECLARE v_label TEXT := 'processed';
+                 BEGIN
+                   INSERT INTO au (label, src) SELECT v_label, 'body' FROM (SELECT 1) AS d;
+                   RETURN NEW;
+                 END; $$;
+                 CREATE TRIGGER pt1 AFTER INSERT ON ev FOR EACH ROW EXECUTE FUNCTION pf1();
+                 INSERT INTO ev VALUES (1);",
+                "CREATE TABLE ev2 (id INT PRIMARY KEY);
+                 CREATE TABLE d2 (id INT, preelsif TEXT);
+                 CREATE FUNCTION pf2() RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN
+                   INSERT INTO d2 (id, preelsif) VALUES (NEW.id, 'ok');
+                   RETURN NEW;
+                 END; $$;
+                 CREATE TRIGGER pt2 AFTER INSERT ON ev2 FOR EACH ROW EXECUTE FUNCTION pf2();
+                 INSERT INTO ev2 VALUES (1);",
+                "CREATE TABLE ev3 (id INT PRIMARY KEY);
+                 CREATE TABLE lg (sql_text TEXT);
+                 CREATE FUNCTION pf3() RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN
+                   INSERT INTO lg (sql_text) VALUES ($q$CASE WHEN x ELSIF y THEN 1 END$q$);
+                   RETURN NEW;
+                 END; $$;
+                 CREATE TRIGGER pt3 AFTER INSERT ON ev3 FOR EACH ROW EXECUTE FUNCTION pf3();
+                 INSERT INTO ev3 VALUES (1);",
+                "CREATE TABLE ev4 (id INT PRIMARY KEY, amount INT);
+                 CREATE TABLE au4 (label TEXT, src TEXT);
+                 CREATE FUNCTION pf4() RETURNS trigger LANGUAGE plpgsql AS $$
+                 DECLARE
+                   SELECT_FACTOR FLOAT := 2.0;
+                   v_result FLOAT;
+                 BEGIN
+                   IF NEW.id = 1 THEN
+                     v_result := (SELECT_FACTOR * NEW.amount);
+                     INSERT INTO au4 (label, src) VALUES ('a', CAST(v_result AS TEXT));
+                   ELSIF NEW.id = 2 THEN
+                     INSERT INTO au4 (label, src) VALUES ('b', CAST(v_result AS TEXT));
+                   END IF;
+                   RETURN NEW;
+                 END; $$;
+                 CREATE TRIGGER pt4 AFTER INSERT ON ev4 FOR EACH ROW EXECUTE FUNCTION pf4();
+                 INSERT INTO ev4 VALUES (2, 10);",
+                    ],
+    ),
 ];

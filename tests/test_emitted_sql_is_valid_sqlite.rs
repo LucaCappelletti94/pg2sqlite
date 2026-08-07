@@ -235,6 +235,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "serial-columns",
     "boolean-to-text",
     "rls-view-reads",
+    "plpgsql-scanner-and-binding",
 ];
 
 #[test]

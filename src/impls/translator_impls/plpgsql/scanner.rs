@@ -143,6 +143,52 @@ impl<'a> Scanner<'a> {
         pieces.push(&self.text[start..]);
         pieces
     }
+
+    /// Re-emits every dollar-quoted literal as a single-quoted one, doubling
+    /// any single quote inside it.
+    ///
+    /// `$tag$...$tag$` is PostgreSQL syntax with no SQLite counterpart, so a
+    /// dollar-quoted literal surviving into a trigger body made the emitted
+    /// `CREATE TRIGGER` fail to apply. Doubling is the only escape SQLite has.
+    /// Every other quoted span is copied byte for byte, so a `$` inside an
+    /// ordinary string is not mistaken for a delimiter.
+    pub(crate) fn requote_dollar_literals(&self) -> String {
+        let bytes = self.text.as_bytes();
+        let mut out = String::with_capacity(self.text.len());
+        let mut index = 0;
+
+        while index < bytes.len() {
+            let rest = &self.text[index..];
+            let verbatim = if let Some(after) = rest.strip_prefix("--") {
+                after.find('\n').map_or(rest.len(), |end| end + 3)
+            } else if let Some(after) = rest.strip_prefix("/*") {
+                after.find("*/").map_or(rest.len(), |end| end + 4)
+            } else if bytes[index] == b'\'' {
+                single_quoted_len(rest)
+            } else if bytes[index] == b'"' {
+                double_quoted_len(rest)
+            } else if let Some(span) = dollar_quoted_len(rest) {
+                let tag_len = rest[1..].find('$').map_or(0, |end| end + 2);
+                let inner = &rest[tag_len..span - tag_len];
+                out.push('\'');
+                out.push_str(&inner.replace('\'', "''"));
+                out.push('\'');
+                index += span;
+                continue;
+            } else {
+                // By character, not by byte: a multi-byte character would not
+                // be a slice boundary.
+                let character = rest.chars().next().unwrap_or('\0');
+                out.push(character);
+                index += character.len_utf8();
+                continue;
+            };
+            out.push_str(&rest[..verbatim]);
+            index += verbatim;
+        }
+
+        out
+    }
 }
 
 /// True for a byte that can appear inside an identifier.

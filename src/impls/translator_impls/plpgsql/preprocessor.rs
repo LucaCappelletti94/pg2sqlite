@@ -357,7 +357,11 @@ impl PlPgSqlPreprocessor {
     }
 
     fn transform_body(body: &str, context: &PlPgSqlContext) -> Result<String, Error> {
-        let mut result = body.to_string();
+        // A dollar-quoted literal has no SQLite syntax, so it becomes a
+        // single-quoted one first. Doing it before the keyword rewrites means
+        // every later transform sees an ordinary string it already understands,
+        // rather than a span each would have to learn about separately.
+        let mut result = Scanner::new(body).requote_dollar_literals();
 
         // Transform PostgreSQL ELSIF → ELSEIF (sqlparser uses ELSEIF keyword)
         result = Self::transform_elsif(&result);
@@ -465,68 +469,26 @@ impl PlPgSqlPreprocessor {
         }
     }
 
-    /// Transforms PostgreSQL ELSIF keyword to ELSEIF (which sqlparser expects).
+    /// Rewrites PL/pgSQL's `ELSIF` to the `ELSEIF` SQLite accepts, in live
+    /// code only.
+    ///
+    /// Delegates to the shared scanner rather than tracking quotes itself.
+    /// The hand-rolled version this replaces knew only `'` and `"`, so it
+    /// rewrote inside a dollar-quoted literal, and it checked only the byte
+    /// after the keyword, so a column named `preelsif` came out `preELSEIF`.
+    /// `find_keyword` requires a word boundary on both sides and treats every
+    /// quoted span, dollar quotes included, as untouchable.
     fn transform_elsif(body: &str) -> String {
-        // Use case-insensitive replacement
-        // We need to be careful not to replace ELSIF inside strings
-        let mut result = String::new();
-        let mut chars = body.chars().peekable();
-        let mut in_string = false;
-        let mut string_char = ' ';
-
-        while let Some(c) = chars.next() {
-            // Track string literals
-            if (c == '\'' || c == '"') && !in_string {
-                in_string = true;
-                string_char = c;
-                result.push(c);
-                continue;
-            } else if c == string_char && in_string {
-                in_string = false;
-                result.push(c);
-                continue;
-            }
-
-            if in_string {
-                result.push(c);
-                continue;
-            }
-
-            // Check for ELSIF (case-insensitive)
-            if c.eq_ignore_ascii_case(&'E') {
-                let mut word = String::from(c);
-                let remaining = ['L', 'S', 'I', 'F'];
-                let mut matched = true;
-
-                for expected in remaining {
-                    if let Some(&next) = chars.peek() {
-                        if next.eq_ignore_ascii_case(&expected) {
-                            word.push(chars.next().unwrap());
-                        } else {
-                            matched = false;
-                            break;
-                        }
-                    } else {
-                        matched = false;
-                        break;
-                    }
-                }
-
-                if matched && word.to_uppercase() == "ELSIF" {
-                    // Check that next char is whitespace or end (not part of larger word)
-                    if chars.peek().is_none_or(|&c| !c.is_alphanumeric() && c != '_') {
-                        result.push_str("ELSEIF");
-                    } else {
-                        result.push_str(&word);
-                    }
-                } else {
-                    result.push_str(&word);
-                }
-            } else {
-                result.push(c);
-            }
+        const KEYWORD: &str = "ELSIF";
+        let scanner = Scanner::new(body);
+        let mut result = String::with_capacity(body.len());
+        let mut from = 0;
+        while let Some(offset) = scanner.find_keyword(KEYWORD, from) {
+            result.push_str(&body[from..offset]);
+            result.push_str("ELSEIF");
+            from = offset + KEYWORD.len();
         }
-
+        result.push_str(&body[from..]);
         result
     }
 

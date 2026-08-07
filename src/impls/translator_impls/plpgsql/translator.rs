@@ -13,6 +13,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::ops::ControlFlow;
 
 use sql_traits::structs::ParserDB;
 use sqlparser::{
@@ -20,7 +21,7 @@ use sqlparser::{
         BeginEndStatements, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
         GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, ReturnStatementValue, Select,
         SelectItem, Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
-        ValueWithSpan,
+        ValueWithSpan, visit_expressions, visit_expressions_mut,
     },
     tokenizer::Span,
 };
@@ -179,14 +180,41 @@ impl PlPgSqlTranslator {
             let binding =
                 VariableBinding { name: variable.to_string(), expression: expression.clone() };
 
-            // If the expression is a subquery (from SELECT INTO), store as persistent
-            // Otherwise, store as scoped (will be cleared per IF block)
-            if expression.trim().starts_with('(') && expression.contains("SELECT") {
+            // A `SELECT ... INTO` assignment has to outlive the block it
+            // appears in, an ordinary one does not. Read off the AST rather
+            // than the rendering: the test this replaces asked whether the
+            // rendered text began with `(` and contained `SELECT`, so a
+            // variable named `SELECT_FACTOR` made `(SELECT_FACTOR *
+            // NEW.amount)` look like a subquery and the binding was filed as
+            // persistent, then never resolved.
+            if Self::contains_subquery(&values[0]) {
                 context.add_persistent_binding(binding);
             } else {
                 context.add_binding(binding);
             }
         }
+    }
+
+    /// True when `expression` holds a subquery anywhere inside it.
+    ///
+    /// Distinguishes a `SELECT ... INTO` assignment, whose binding has to
+    /// outlive its block, from an ordinary one. Structural, so no variable
+    /// name can be mistaken for a keyword.
+    fn contains_subquery(expression: &Expr) -> bool {
+        visit_expressions(expression, |expr| {
+            if matches!(
+                expr,
+                Expr::Subquery(_)
+                    | Expr::Exists { .. }
+                    | Expr::InSubquery { .. }
+                    | Expr::InUnnest { .. }
+            ) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
     }
 
     fn translate_if_statement(
@@ -964,14 +992,32 @@ impl PlPgSqlTranslator {
 
         let mut new_insert = insert.clone();
 
-        let mut ctes = Vec::new();
+        // Dependencies first. A variable may be defined in terms of another,
+        // and a CTE can only read one declared before it, so the ones that
+        // reference nothing are emitted first and each later body substitutes
+        // and reads the ones already in scope. Left unordered and
+        // unsubstituted, `v := (other * NEW.x)` emitted a bare `other` and the
+        // trigger failed with `no such column`.
+        let ordered = Self::order_bindings_by_dependency(&modified_bindings);
 
-        for binding in &modified_bindings {
+        let mut ctes = Vec::new();
+        let mut in_scope: Vec<VariableBinding> = Vec::new();
+        for binding in &ordered {
             let translated_expr = Self::translate_uuid_function(&binding.expression, options);
             let expr = Self::parse_expression(&translated_expr)?;
             let expr = expr.translate(schema, options).unwrap_or(expr);
-            let cte = CteBuilder::create_variable_cte(binding, expr);
-            ctes.push(cte);
+            let expr = Self::substitute_variables(&expr, &in_scope);
+            let referenced: Vec<VariableBinding> = in_scope
+                .iter()
+                .filter(|earlier| Self::expr_references_variable(&expr, &earlier.name))
+                .cloned()
+                .collect();
+            ctes.push(CteBuilder::create_variable_cte(
+                binding,
+                expr,
+                Self::variable_cte_tables(&referenced),
+            ));
+            in_scope.push(binding.clone());
         }
 
         let condition = context.current_condition();
@@ -991,6 +1037,24 @@ impl PlPgSqlTranslator {
                 SetExpr::Select(select) => {
                     let mut new_select = select.as_ref().clone();
 
+                    // The CTEs below bind the variables, but a reference to one
+                    // still has to be rewritten to the CTE's column and the CTE
+                    // brought into scope. The VALUES arm does both through
+                    // `transform_values_to_select`, and this arm used to do
+                    // neither, so the emitted trigger named a bare variable and
+                    // failed with `no such column`.
+                    for item in &mut new_select.projection {
+                        if let SelectItem::UnnamedExpr(expr) = item {
+                            *expr = Self::substitute_variables(expr, &modified_bindings);
+                        } else if let SelectItem::ExprWithAlias { expr, .. } = item {
+                            *expr = Self::substitute_variables(expr, &modified_bindings);
+                        }
+                    }
+                    if let Some(selection) = &new_select.selection {
+                        new_select.selection =
+                            Some(Self::substitute_variables(selection, &modified_bindings));
+                    }
+                    new_select.from.extend(Self::variable_cte_tables(&modified_bindings));
                     if let Some(cond) = &condition {
                         let cond_expr = Self::parse_expression(cond)?;
                         new_select.selection = match &new_select.selection {
@@ -1017,7 +1081,37 @@ impl PlPgSqlTranslator {
             }
         }
 
+        // A declared variable with no assignment on this path is NULL in
+        // PostgreSQL, not a column. Left as a bare identifier the emitted
+        // trigger failed with `no such column`, which is what an ELSIF branch
+        // reading a variable the other branch assigned used to do.
+        if let Some(source) = &mut new_insert.source {
+            Self::null_unbound_declarations(source, context, &ordered);
+        }
+
         Statement::Insert(new_insert).translate(schema, options)
+    }
+
+    /// Replaces every declared variable that has no binding here with NULL.
+    ///
+    /// PostgreSQL initialises a `DECLARE`d variable without a default to NULL,
+    /// so a branch that reads one the other branch assigned sees NULL rather
+    /// than an error. Emitted as a bare identifier it was a column reference,
+    /// and SQLite answered `no such column`.
+    fn null_unbound_declarations(
+        query: &mut Query,
+        context: &PlPgSqlContext,
+        bound: &[VariableBinding],
+    ) {
+        let _: ControlFlow<()> = visit_expressions_mut(query, |expr| {
+            if let Expr::Identifier(ident) = expr
+                && context.is_declared_variable(&ident.value)
+                && !bound.iter().any(|binding| binding.name == ident.value)
+            {
+                *expr = Expr::Value(Value::Null.with_empty_span());
+            }
+            ControlFlow::Continue(())
+        });
     }
 
     fn function_arg_references_variable(arg: &FunctionArg, var_name: &str) -> bool {
@@ -1218,6 +1312,74 @@ impl PlPgSqlTranslator {
         }
     }
 
+    /// One `FROM` entry per variable CTE, so a reference to `<var>.val`
+    /// resolves.
+    ///
+    /// Shared by the VALUES and the SELECT source arms, which both attach the
+    /// same CTEs and so both need them in scope.
+    fn variable_cte_tables(bindings: &[VariableBinding]) -> Vec<TableWithJoins> {
+        bindings
+            .iter()
+            .map(|binding| {
+                TableWithJoins {
+                    relation: TableFactor::Table {
+                        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                            binding.name.clone(),
+                        ))]),
+                        alias: None,
+                        args: None,
+                        with_hints: vec![],
+                        version: None,
+                        partitions: vec![],
+                        json_path: None,
+                        sample: None,
+                        index_hints: vec![],
+                        with_ordinality: false,
+                    },
+                    joins: vec![],
+                }
+            })
+            .collect()
+    }
+
+    /// Reorders bindings so one referenced by another comes first.
+    ///
+    /// A stable insertion pass rather than a full topological sort: the lists
+    /// are a handful of declared variables, and a cycle is impossible because
+    /// PL/pgSQL declares each in order and can only reference one already
+    /// declared. A binding whose dependency cannot be placed keeps its
+    /// original position, so the worst case is the behaviour before ordering
+    /// existed rather than a lost binding.
+    fn order_bindings_by_dependency(bindings: &[VariableBinding]) -> Vec<VariableBinding> {
+        let mut ordered: Vec<VariableBinding> = Vec::with_capacity(bindings.len());
+        let mut pending: Vec<&VariableBinding> = bindings.iter().collect();
+
+        while !pending.is_empty() {
+            let ready = pending.iter().position(|candidate| {
+                !pending.iter().any(|other| {
+                    other.name != candidate.name
+                        && Self::expression_names_variable(&candidate.expression, &other.name)
+                })
+            });
+            if let Some(index) = ready {
+                ordered.push(pending.remove(index).clone());
+            } else {
+                // Nothing is free of the others, so stop reordering and keep
+                // what is left in the order it arrived.
+                ordered.extend(pending.iter().map(|binding| (*binding).clone()));
+                break;
+            }
+        }
+
+        ordered
+    }
+
+    /// True when `expression` names `variable` as a whole word.
+    fn expression_names_variable(expression: &str, variable: &str) -> bool {
+        Self::parse_expression(expression)
+            .is_ok_and(|expr| Self::expr_references_variable(&expr, variable))
+    }
+
     #[allow(clippy::too_many_lines)]
     fn transform_values_to_select(
         values: &sqlparser::ast::Values,
@@ -1238,26 +1400,7 @@ impl PlPgSqlTranslator {
             projections.push(SelectItem::UnnamedExpr(substituted));
         }
 
-        let mut from_tables = Vec::new();
-        for binding in bindings {
-            from_tables.push(TableWithJoins {
-                relation: TableFactor::Table {
-                    name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-                        binding.name.clone(),
-                    ))]),
-                    alias: None,
-                    args: None,
-                    with_hints: vec![],
-                    version: None,
-                    partitions: vec![],
-                    json_path: None,
-                    sample: None,
-                    index_hints: vec![],
-                    with_ordinality: false,
-                },
-                joins: vec![],
-            });
-        }
+        let mut from_tables = Self::variable_cte_tables(bindings);
 
         if from_tables.is_empty() {
             from_tables.push(TableWithJoins {
