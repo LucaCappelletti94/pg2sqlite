@@ -1924,7 +1924,7 @@ fn lowered_ilike_escape(
 /// `BINARY` gives, and `pg_collation` reports both as deterministic. Every
 /// other PostgreSQL name is locale dependent, so it has no SQLite counterpart
 /// and no ordering this can promise.
-fn sqlite_collation(collation: &ObjectName) -> Result<ObjectName, crate::errors::Error> {
+pub(crate) fn sqlite_collation(collation: &ObjectName) -> Result<ObjectName, crate::errors::Error> {
     let name = collation
         .0
         .last()

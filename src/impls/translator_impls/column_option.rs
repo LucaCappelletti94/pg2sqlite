@@ -19,7 +19,10 @@ use sqlparser::ast::{
 };
 
 use crate::{
-    impls::object_name::{append_suffix, table_has_implicit_public_rls},
+    impls::{
+        object_name::{append_suffix, table_has_implicit_public_rls},
+        translator_impls::expr::sqlite_collation,
+    },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
 };
@@ -70,10 +73,18 @@ impl Translator for ColumnOptionDef {
             }
             // Silently drop options that are either SQLite defaults or have no
             // SQLite equivalent and no runtime semantic effect.
-            ColumnOption::Null
-            | ColumnOption::Collation(_)
-            | ColumnOption::CharacterSet(_)
-            | ColumnOption::Comment(_) => Ok(None),
+            ColumnOption::Null | ColumnOption::CharacterSet(_) | ColumnOption::Comment(_) => {
+                Ok(None)
+            }
+            // A collation changes every comparison, ordering, and unique check
+            // over the column, so it is mapped or refused by the same rule the
+            // expression path uses, never dropped.
+            ColumnOption::Collation(collation) => {
+                Ok(Some(ColumnOptionDef {
+                    name: self.name.clone(),
+                    option: ColumnOption::Collation(sqlite_collation(collation)?),
+                }))
+            }
             // Generated columns: GENERATED ALWAYS AS (expr) [STORED | VIRTUAL]
             // SQLite supports this syntax since version 3.31.0
             ColumnOption::Generated {

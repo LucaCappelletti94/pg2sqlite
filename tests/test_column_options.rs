@@ -308,10 +308,18 @@ fn referential_action_translation_passthrough_covers_all_variants() {
     }
 }
 
+/// Inverts the R93 pin. A locale collation changes every comparison over the
+/// column and has no SQLite ordering to promise, so dropping it silently was
+/// the one thing D2's buckets do not allow.
 #[test]
-fn collate_option_silently_dropped() {
-    let output = translate(r#"CREATE TABLE t (id INT PRIMARY KEY, col TEXT COLLATE "de_DE");"#);
-    assert!(!output.contains("COLLATE"), "COLLATE should be dropped, got: {output}");
+fn an_unmappable_collation_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql(r#"CREATE TABLE t (id INT PRIMARY KEY, col TEXT COLLATE "de_DE");"#)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("a locale collation has no SQLite ordering to promise")
+        .to_string();
+    assert!(error.to_uppercase().contains("DE_DE"), "the refusal must name the collation: {error}");
 }
 
 #[test]
@@ -324,4 +332,37 @@ fn character_set_option_silently_dropped() {
 fn comment_option_silently_dropped() {
     let output = translate("CREATE TABLE t (id INT PRIMARY KEY, col INT COMMENT 'desc');");
     assert!(!output.contains("COMMENT"), "COMMENT should be dropped, got: {output}");
+}
+
+// ---------------------------------------------------------------------------
+// Column COLLATE mapped or refused (R93)
+// ---------------------------------------------------------------------------
+
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
+
+/// The emitted column carries the collation, and the comparison is observably
+/// case-insensitive through executed SQL.
+#[test]
+fn a_nocase_column_collation_is_emitted_and_observable() {
+    let output = translate("CREATE TABLE t (id INT PRIMARY KEY, s TEXT COLLATE NOCASE);");
+    assert!(output.contains("COLLATE NOCASE"), "the collation must survive: {output}");
+
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT COLLATE NOCASE);
+         INSERT INTO t (id, s) VALUES (1, 'Alpha'), (2, 'ALPHA');
+         SELECT count(*) FROM t WHERE s = 'alpha';",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("2".to_string())], "NOCASE must compare case-insensitively");
+}
+
+/// PostgreSQL's `C` and `POSIX` are byte order, which is SQLite's BINARY.
+#[test]
+fn c_and_posix_collations_become_binary() {
+    for name in [r#""C""#, r#""POSIX""#] {
+        let output =
+            translate(&format!("CREATE TABLE t (id INT PRIMARY KEY, s TEXT COLLATE {name});"));
+        assert!(output.contains("COLLATE BINARY"), "expected BINARY for {name}: {output}");
+    }
 }
