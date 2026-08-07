@@ -13,12 +13,16 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{NullsDistinctOption, TableConstraint};
+use sqlparser::ast::{
+    BinaryOperator, ConstraintReferenceMatchKind, Expr, Ident, NullsDistinctOption, TableConstraint,
+};
 
 use crate::{
     impls::{
         object_name::{append_suffix, table_has_implicit_public_rls},
-        shared_helpers::nulls_not_distinct_not_supported_error,
+        shared_helpers::{
+            match_partial_not_supported_error, nulls_not_distinct_not_supported_error,
+        },
         translator_impls::constraint_characteristic::deferrability_outside_a_foreign_key,
     },
     options::Pg2SqliteOptions,
@@ -28,7 +32,10 @@ use crate::{
 impl Translator for TableConstraint {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Option<TableConstraint>;
+    /// A constraint can translate to none, as a dropped CHECK does, to one, or
+    /// to several: a composite `MATCH FULL` foreign key needs a CHECK beside
+    /// it because SQLite ignores the MATCH clause.
+    type SQLiteEntry = Vec<TableConstraint>;
 
     fn translate(
         &self,
@@ -39,13 +46,15 @@ impl Translator for TableConstraint {
             Self::Check(check_constraint) => {
                 match check_constraint.expr.translate(schema, options) {
                     Ok(translated_expr) => {
-                        Ok(Some(Self::Check(sqlparser::ast::CheckConstraint {
+                        Ok(vec![Self::Check(sqlparser::ast::CheckConstraint {
                             name: check_constraint.name.clone(),
                             expr: Box::new(translated_expr),
                             enforced: check_constraint.enforced,
-                        })))
+                        })])
                     }
-                    Err(_) if options.should_remove_unsupported_check_constraints() => Ok(None),
+                    Err(_) if options.should_remove_unsupported_check_constraints() => {
+                        Ok(Vec::new())
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -67,7 +76,9 @@ impl Translator for TableConstraint {
                     .map(|c| c.translate(schema, options))
                     .transpose()?;
 
-                Ok(Some(Self::ForeignKey(updated_fk)))
+                let mut constraints = vec![Self::ForeignKey(updated_fk)];
+                constraints.extend(match_full_guard(fk_constraint)?);
+                Ok(constraints)
             }
             Self::PrimaryKey(pk_constraint) => {
                 let mut updated_pk = pk_constraint.clone();
@@ -82,7 +93,7 @@ impl Translator for TableConstraint {
                         characteristics,
                     ));
                 }
-                Ok(Some(Self::PrimaryKey(updated_pk)))
+                Ok(vec![Self::PrimaryKey(updated_pk)])
             }
             Self::Unique(unique_constraint) => {
                 if matches!(unique_constraint.nulls_distinct, NullsDistinctOption::NotDistinct) {
@@ -102,7 +113,7 @@ impl Translator for TableConstraint {
                 // the clause is dropped rather than emitted: SQLite rejects it
                 // with `near "NULLS": syntax error`.
                 updated_unique.nulls_distinct = NullsDistinctOption::None;
-                Ok(Some(Self::Unique(updated_unique)))
+                Ok(vec![Self::Unique(updated_unique)])
             }
             // Outcome 2 of the reporting policy in `statement.rs`. The
             // passthrough that used to stand here emitted every one of these
@@ -139,4 +150,75 @@ impl Translator for TableConstraint {
             }
         }
     }
+}
+
+/// The CHECK that makes a composite `MATCH FULL` foreign key behave the way
+/// PostgreSQL does, or `None` when the declaration needs none.
+///
+/// PostgreSQL's MATCH FULL says the key columns are either wholly NULL, which
+/// exempts the row, or wholly non-NULL, which requires a match. SQLite parses
+/// the MATCH clause and then always behaves as MATCH SIMPLE, where one NULL
+/// anywhere exempts the row, so the mixture was accepted in silence. The
+/// foreign key already gives both of PostgreSQL's cases; all that is missing
+/// is refusing the mixture, which is what this CHECK does, and it covers
+/// UPDATE as well as INSERT. Measured against PostgreSQL 17 and SQLite 3.46.0,
+/// the pair accepts and refuses exactly the same rows.
+///
+/// One column needs nothing, since with a single column the two readings
+/// coincide. `MATCH SIMPLE` and an absent clause are what SQLite already does.
+fn match_full_guard(
+    fk: &sqlparser::ast::ForeignKeyConstraint,
+) -> Result<Option<TableConstraint>, crate::errors::Error> {
+    match fk.match_kind {
+        None | Some(ConstraintReferenceMatchKind::Simple) => return Ok(None),
+        Some(ConstraintReferenceMatchKind::Partial) => {
+            return Err(match_partial_not_supported_error());
+        }
+        Some(ConstraintReferenceMatchKind::Full) => {}
+    }
+    if fk.columns.len() < 2 {
+        return Ok(None);
+    }
+
+    let all_null = fk
+        .columns
+        .iter()
+        .map(|column| Expr::IsNull(Box::new(Expr::Identifier(column.clone()))))
+        .reduce(and);
+    let none_null = fk
+        .columns
+        .iter()
+        .map(|column| Expr::IsNotNull(Box::new(Expr::Identifier(column.clone()))))
+        .reduce(and);
+    let (Some(all_null), Some(none_null)) = (all_null, none_null) else {
+        return Ok(None);
+    };
+
+    Ok(Some(TableConstraint::Check(sqlparser::ast::CheckConstraint {
+        // Named, because an anonymous CHECK reports its whole expression and
+        // says nothing about the constraint it stands for.
+        name: Some(Ident::new(guard_name(fk))),
+        expr: Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Nested(Box::new(all_null))),
+            op: BinaryOperator::Or,
+            right: Box::new(Expr::Nested(Box::new(none_null))),
+        }),
+        enforced: None,
+    })))
+}
+
+/// `left AND right`.
+fn and(left: Expr, right: Expr) -> Expr {
+    Expr::BinaryOp { left: Box::new(left), op: BinaryOperator::And, right: Box::new(right) }
+}
+
+/// The guard's constraint name: the foreign key's own name when it has one,
+/// and its column list otherwise. A CHECK name is scoped to its table, so the
+/// table name is not needed to keep it unique.
+fn guard_name(fk: &sqlparser::ast::ForeignKeyConstraint) -> String {
+    let stem = fk.name.as_ref().map_or_else(
+        || fk.columns.iter().map(|column| column.value.as_str()).collect::<Vec<_>>().join("_"),
+        |name| name.value.clone(),
+    );
+    format!("{stem}_match_full")
 }

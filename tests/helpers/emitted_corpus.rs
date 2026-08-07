@@ -532,4 +532,24 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO NOTHING RETURNING id;",
                     ],
     ),
+    (
+        "foreign-key-match",
+        &[
+                // A composite MATCH FULL grows a named CHECK beside the
+                // foreign key, because SQLite ignores the MATCH clause. The
+                // other two rows must not grow one, and they carry their own
+                // parent tables since the shared fixture has no composite key.
+                // MATCH PARTIAL is deliberately absent: it is refused, and a
+                // refused row reaches neither the sweep nor the floor.
+                "CREATE TABLE fkm_parent (a INT, b INT, PRIMARY KEY (a, b));
+                 CREATE TABLE fkm_child (x INT, y INT,
+                     FOREIGN KEY (x, y) REFERENCES fkm_parent (a, b) MATCH FULL);
+                 INSERT INTO fkm_child (x, y) VALUES (NULL, NULL);",
+                "CREATE TABLE fkm_parent2 (a INT, b INT, PRIMARY KEY (a, b));
+                 CREATE TABLE fkm_child2 (x INT, y INT,
+                     FOREIGN KEY (x, y) REFERENCES fkm_parent2 (a, b) MATCH SIMPLE);",
+                "CREATE TABLE fkm_parent3 (a INT PRIMARY KEY);
+                 CREATE TABLE fkm_child3 (x INT REFERENCES fkm_parent3 (a) MATCH FULL);",
+                    ],
+    ),
 ];

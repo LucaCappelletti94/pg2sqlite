@@ -14,13 +14,14 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    ColumnOption, ColumnOptionDef, Expr, ForeignKeyConstraint, FunctionArguments, GeneratedAs,
-    UnaryOperator, Value, ValueWithSpan,
+    ColumnOption, ColumnOptionDef, ConstraintReferenceMatchKind, Expr, ForeignKeyConstraint,
+    FunctionArguments, GeneratedAs, UnaryOperator, Value, ValueWithSpan,
 };
 
 use crate::{
     impls::{
         object_name::{append_suffix, table_has_implicit_public_rls},
+        shared_helpers::match_partial_not_supported_error,
         translator_impls::expr::sqlite_collation,
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -128,6 +129,13 @@ impl Translator for ColumnOptionDef {
                 on_update,
                 characteristics,
             }) => {
+                // A column-level foreign key is single-column by
+                // construction, so MATCH FULL reads the same as the default
+                // MATCH SIMPLE and needs no guard. MATCH PARTIAL is refused
+                // for the same reason the table-level spelling is.
+                if matches!(match_kind, Some(ConstraintReferenceMatchKind::Partial)) {
+                    return Err(match_partial_not_supported_error());
+                }
                 let updated_foreign_table = {
                     if table_has_implicit_public_rls(schema, foreign_table)? {
                         append_suffix(foreign_table, options.get_rls_table_suffix())

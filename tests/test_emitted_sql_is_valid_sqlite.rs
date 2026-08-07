@@ -226,8 +226,13 @@ fn remediation_constructs() {
 
 /// The groups added by the 2026-08-07 crate review, one per finding whose fix
 /// changed what reaches SQLite.
-const REVIEW_GROUPS: &[&str] =
-    &["date-arithmetic", "like-escape", "interval-arithmetic", "on-conflict-do-nothing"];
+const REVIEW_GROUPS: &[&str] = &[
+    "date-arithmetic",
+    "like-escape",
+    "interval-arithmetic",
+    "on-conflict-do-nothing",
+    "foreign-key-match",
+];
 
 #[test]
 fn review_finding_constructs() {

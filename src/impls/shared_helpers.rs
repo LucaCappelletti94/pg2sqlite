@@ -144,6 +144,23 @@ pub(crate) fn nulls_not_distinct_not_supported_error() -> Error {
     )
 }
 
+/// Returns the standardised error for `MATCH PARTIAL` on a foreign key.
+///
+/// PostgreSQL 17 refuses the clause itself, with `MATCH PARTIAL not yet
+/// implemented`, so no valid PostgreSQL input carries one. SQLite parses a
+/// MATCH clause and then always behaves as `MATCH SIMPLE`, so emitting this
+/// one would claim an enforcement neither engine implements.
+#[must_use]
+pub(crate) fn match_partial_not_supported_error() -> Error {
+    Error::UnsupportedSQLiteFeature(
+        "FOREIGN KEY ... MATCH PARTIAL cannot be translated. PostgreSQL does not implement it \
+         either, answering `MATCH PARTIAL not yet implemented`, and SQLite ignores every MATCH \
+         clause, so the emitted constraint would enforce nothing. Use MATCH FULL, which is \
+         translated, or the default MATCH SIMPLE."
+            .to_string(),
+    )
+}
+
 /// The name of the column `expr` refers to.
 ///
 /// The qualifier of a compound name is dropped, since it may be an alias rather

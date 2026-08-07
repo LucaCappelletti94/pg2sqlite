@@ -169,7 +169,7 @@ impl Translator for CreateTable {
                 .constraints
                 .iter()
                 .map(|c| c.translate(schema, options))
-                .collect::<Result<Vec<Option<TableConstraint>>, _>>()?
+                .collect::<Result<Vec<Vec<TableConstraint>>, _>>()?
                 .into_iter()
                 .flatten()
                 .collect(),
