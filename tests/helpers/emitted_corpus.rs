@@ -499,4 +499,25 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 r"SELECT s ILIKE 'A\B' ESCAPE '' FROM t;",
                     ],
     ),
+    (
+        "interval-arithmetic",
+        &[
+                // An interval is lowered onto PostgreSQL's own three counts,
+                // months then days then time, with SQLite's month-end clamp
+                // after the months. These carry every emitted shape: the
+                // clamp, a merged month count, a negated field, the units
+                // SQLite's modifier has no word for, a fraction that spills
+                // downwards, and the leading-field spelling.
+                "SELECT ts + interval '1 month' FROM t;",
+                "SELECT ts - interval '1 month 1 day' FROM t;",
+                "SELECT ts + interval '1 year 2 months' FROM t;",
+                "SELECT ts + interval '1 month -1 day' FROM t;",
+                "SELECT ts + interval '1 week' FROM t;",
+                "SELECT ts + interval '1 decade' FROM t;",
+                "SELECT ts + interval '1.7 months' FROM t;",
+                "SELECT ts + interval '1500 ms' FROM t;",
+                "SELECT ts + interval '90 minutes' FROM t;",
+                "SELECT d + interval '1' month FROM t;",
+                    ],
+    ),
 ];

@@ -89,12 +89,16 @@ fn p1_apply_roundtrip_seven_days_default() {
     assert!((6.9..7.1).contains(&days), "deadline ~7 days, got {days}");
 }
 
-// Phase 2: multi-unit intervals (one modifier per unit)
+// Phase 2: multi-unit intervals
 
+/// A year and a month are one count of months to PostgreSQL, which clamps
+/// the overflowed day once over the total. Two clamped steps land a day
+/// earlier, so the merge is the behaviour and not a tidying up. The dates it
+/// produces are in `test_interval_arithmetic.rs`.
 #[test]
 fn p2_year_and_months() {
     let out = translate("SELECT NOW() + INTERVAL '1 year 2 months' AS future;");
-    assert!(out.contains("+1 year") && out.contains("+2 month"), "{out}");
+    assert!(out.contains("+14 months") && out.contains("floor"), "{out}");
     execute_translated("SELECT NOW() + INTERVAL '1 year 2 months' AS future;");
 }
 

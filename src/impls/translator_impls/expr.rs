@@ -18,9 +18,9 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
-    ExactNumberInfo, Expr, Function, Ident, Interval, JsonKeyUniqueness, JsonPredicateType,
-    ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor,
-    UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    ExactNumberInfo, Expr, Function, Ident, JsonKeyUniqueness, JsonPredicateType, ObjectName,
+    ObjectNamePart, Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor, UnaryOperator,
+    Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::{
@@ -30,6 +30,7 @@ use crate::{
         },
         expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq},
         function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
+        interval::interval_date_modifiers,
         query_builder::{from_relation, plain_table_factor, single_expr_query},
         shared_helpers::{
             declared_numeric_precision, every_declared_type_matches, function_argument_exprs,
@@ -653,38 +654,6 @@ fn extract_string_array_keys(expr: &Expr) -> Option<Vec<&str>> {
             }
         })
         .collect()
-}
-
-/// Split a PG `INTERVAL` value into SQLite date-modifier strings, signed
-/// for addition (`+`) or subtraction (`-`). Returns `None` when the
-/// interval shape is not yet supported (non-literal body, odd token
-/// count, etc.) so the caller can fall through to the existing
-/// standalone-INTERVAL error path.
-///
-/// Examples:
-/// - `INTERVAL '7 days'` with `+` becomes `["+7 days"]`.
-/// - `INTERVAL '1 year 2 months'` with `+` becomes `["+1 year", "+2 months"]`.
-/// - `INTERVAL '7' DAY` (unit in `leading_field`) with `-` becomes `["-7
-///   day"]`.
-fn interval_to_modifiers(interval: &Interval, sign: char) -> Option<Vec<String>> {
-    let body = match interval.value.as_ref() {
-        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => s.clone(),
-        _ => return None,
-    };
-    let trimmed = body.trim();
-
-    if let Some(field) = &interval.leading_field {
-        if trimmed.split_whitespace().count() != 1 {
-            return None;
-        }
-        return Some(vec![format!("{sign}{trimmed} {}", field.to_string().to_lowercase())]);
-    }
-
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    if tokens.is_empty() || !tokens.len().is_multiple_of(2) {
-        return None;
-    }
-    Some(tokens.chunks(2).map(|chunk| format!("{sign}{} {}", chunk[0], chunk[1])).collect())
 }
 
 /// Translate PostgreSQL IS DISTINCT FROM / IS NOT DISTINCT FROM semantics
@@ -1633,10 +1602,10 @@ fn translate_binary_op(
     }
 
     // PG INTERVAL arithmetic: `target + INTERVAL 'N unit'` becomes
-    // `datetime(target, '+N unit', ...)`, and `-` propagates as `-N`.
-    // Only the right-hand interval case is handled here. Standalone
-    // intervals (comparisons, projections) fall through to the
-    // Expr::Interval arm and stay unsupported.
+    // `datetime(target, '+M months', 'floor', '+D days', '+S seconds')`, and
+    // `-` negates every count. Only the right-hand interval case is handled
+    // here. Standalone intervals (comparisons, projections) fall through to
+    // the Expr::Interval arm and stay unsupported.
     if matches!(op, BinaryOperator::Plus | BinaryOperator::Minus) {
         let interval_rhs = match right {
             Expr::Interval(i) => Some(i),
@@ -1648,16 +1617,16 @@ fn translate_binary_op(
             }
             _ => None,
         };
-        if let Some(interval) = interval_rhs {
-            let sign = if matches!(op, BinaryOperator::Plus) { '+' } else { '-' };
-            if let Some(modifiers) = interval_to_modifiers(interval, sign) {
-                let target = left.translate(schema, options)?;
-                let mut args = vec![target];
-                for m in modifiers {
-                    args.push(string_literal(&m));
-                }
-                return Ok(simple_function_expr("datetime", args, None));
+        if let Some(interval) = interval_rhs
+            && let Some(modifiers) =
+                interval_date_modifiers(interval, matches!(op, BinaryOperator::Minus))?
+        {
+            let target = left.translate(schema, options)?;
+            let mut args = vec![target];
+            for modifier in modifiers {
+                args.push(string_literal(&modifier));
             }
+            return Ok(simple_function_expr("datetime", args, None));
         }
     }
 
