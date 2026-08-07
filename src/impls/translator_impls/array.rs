@@ -755,6 +755,16 @@ const JSON_SET_RETURNING: &[(&str, JsonSetShape, bool)] = &[
     ("jsonb_object_keys", JsonSetShape::Key, false),
 ];
 
+/// True when `lowered` names a PostgreSQL set-returning JSON function.
+///
+/// The scalar function path refuses these names with FROM advice, because a
+/// SELECT list cannot hold a set and SQLite provides `json_each` only as a
+/// table. Keeping the predicate beside the mapping table means a name added
+/// there is refused in scalar position on the same edit.
+pub(crate) fn is_json_set_returning(lowered: &str) -> bool {
+    JSON_SET_RETURNING.iter().any(|&(candidate, _, _)| candidate == lowered)
+}
+
 /// Translate `FROM <set returning function>(<json>)` into a derived table over
 /// `json_each`, or refuse the function.
 ///

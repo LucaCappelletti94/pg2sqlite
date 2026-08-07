@@ -182,9 +182,10 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     // where they convert a value into JSON. See `FunctionTranslation::ToJson`.
     // jsonb_set and jsonb_insert are NOT renames: their path and value
     // arguments need translating too. See `FunctionTranslation::JsonSet`.
-    ("jsonb_each", "json_each"),
-    ("json_each_text", "json_each"),
-    ("jsonb_each_text", "json_each"),
+    // jsonb_each, json_each_text, and jsonb_each_text are NOT renames: SQLite's
+    // json_each exists only as a table in FROM, so a scalar rename emits
+    // `no such function` at run time. The whole family is refused in the main
+    // match instead.
     ("ascii", "unicode"),
 ];
 
@@ -647,6 +648,16 @@ fn translate_function(
              In a SELECT list it returns a set, which SQLite cannot express as a scalar."
                 .to_string(),
         ),
+        // The JSON set-returning family, valid only in a FROM clause, where
+        // `array::translate_set_returning_factor` maps it over `json_each`.
+        // The arm also catches `json_each` itself, which would otherwise pass
+        // through as a SQLite builtin and fail identically at run time.
+        srf if array::is_json_set_returning(srf) => FunctionTranslation::Unsupported(format!(
+            "{srf}() returns a set of rows, which a SELECT list cannot hold, and SQLite provides \
+             json_each only as a table. Move the call into the FROM clause, which this crate \
+             translates for a self-contained document, or write `FROM t, json_each(t.col) AS e` \
+             for a column argument."
+        )),
         // encode/decode: PG bytea encoding functions
         "encode" | "decode" => FunctionTranslation::Unsupported(
             "encode/decode are PostgreSQL bytea encoding functions with no direct \

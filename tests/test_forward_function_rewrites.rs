@@ -82,57 +82,57 @@ fn jsonb_insert_renames_to_json_insert() {
     sqlite_accepts(&result);
 }
 
+/// Flipped R121 pin. The scalar rename emitted `json_each(...)` in a SELECT
+/// list, which SQLite refuses with `no such function: json_each`, because its
+/// json_each exists only as a table in FROM. The family now refuses scalar
+/// position naming the FROM rewrite, whose translation
+/// `tests/test_set_returning_functions.rs` proves by execution.
 #[test]
-fn jsonb_each_renames_to_json_each() {
-    let sql = "SELECT jsonb_each('{\"a\": 1}')";
-    let result = translate_sql(sql, &default_opts()).unwrap();
-    let lower = result.to_lowercase();
-    assert!(lower.contains("json_each("), "jsonb_each should rename to json_each: {result}");
-    // Pins R121: json_each() in scalar SELECT position is refused by SQLite. Goes
-    // red when the defect is fixed, which is the point.
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    let err = conn
-        .prepare(&result)
-        .expect_err("R121 pin: SQLite should refuse json_each in scalar position");
+fn jsonb_each_in_a_select_list_is_refused() {
+    let err = translate_sql("SELECT jsonb_each('{\"a\": 1}')", &default_opts())
+        .expect_err("a set returning function in a SELECT list cannot become a scalar");
+    let message = err;
     assert!(
-        err.to_string().contains("no such function: json_each"),
-        "expected json_each error: {err}"
+        message.contains("jsonb_each") && message.contains("FROM"),
+        "the refusal should name the function and the FROM rewrite: {message}"
     );
 }
 
+/// Flipped R121 pin, the `json_each_text` spelling.
 #[test]
-fn json_each_text_renames_to_json_each() {
-    let sql = "SELECT json_each_text('{\"a\": 1}')";
-    let result = translate_sql(sql, &default_opts()).unwrap();
-    let lower = result.to_lowercase();
-    assert!(lower.contains("json_each("), "json_each_text should rename to json_each: {result}");
-    // Pins R121: json_each() in scalar SELECT position is refused by SQLite. Goes
-    // red when the defect is fixed, which is the point.
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    let err = conn
-        .prepare(&result)
-        .expect_err("R121 pin: SQLite should refuse json_each in scalar position");
+fn json_each_text_in_a_select_list_is_refused() {
+    let err = translate_sql("SELECT json_each_text('{\"a\": 1}')", &default_opts())
+        .expect_err("a set returning function in a SELECT list cannot become a scalar");
+    let message = err;
     assert!(
-        err.to_string().contains("no such function: json_each"),
-        "expected json_each error: {err}"
+        message.contains("json_each_text") && message.contains("FROM"),
+        "the refusal should name the function and the FROM rewrite: {message}"
     );
 }
 
+/// Flipped R121 pin, the `jsonb_each_text` spelling.
 #[test]
-fn jsonb_each_text_renames_to_json_each() {
-    let sql = "SELECT jsonb_each_text('{\"a\": 1}')";
-    let result = translate_sql(sql, &default_opts()).unwrap();
-    let lower = result.to_lowercase();
-    assert!(lower.contains("json_each("), "jsonb_each_text should rename to json_each: {result}");
-    // Pins R121: json_each() in scalar SELECT position is refused by SQLite. Goes
-    // red when the defect is fixed, which is the point.
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    let err = conn
-        .prepare(&result)
-        .expect_err("R121 pin: SQLite should refuse json_each in scalar position");
+fn jsonb_each_text_in_a_select_list_is_refused() {
+    let err = translate_sql("SELECT jsonb_each_text('{\"a\": 1}')", &default_opts())
+        .expect_err("a set returning function in a SELECT list cannot become a scalar");
+    let message = err;
     assert!(
-        err.to_string().contains("no such function: json_each"),
-        "expected json_each error: {err}"
+        message.contains("jsonb_each_text") && message.contains("FROM"),
+        "the refusal should name the function and the FROM rewrite: {message}"
+    );
+}
+
+/// The fourth door into the same defect: `json_each` is a PostgreSQL function
+/// too, and it sits in the SQLite builtin list, so scalar position passed it
+/// through rather than renaming it, failing identically at run time.
+#[test]
+fn json_each_in_a_select_list_is_refused() {
+    let err = translate_sql("SELECT json_each('{\"a\": 1}')", &default_opts())
+        .expect_err("a set returning function in a SELECT list cannot become a scalar");
+    let message = err;
+    assert!(
+        message.contains("json_each") && message.contains("FROM"),
+        "the refusal should name the function and the FROM rewrite: {message}"
     );
 }
 
