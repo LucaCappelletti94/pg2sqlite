@@ -19,7 +19,7 @@ use sql_traits::{
 use sqlparser::ast::{
     AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
     ExactNumberInfo, Expr, Function, Ident, Interval, JsonKeyUniqueness, JsonPredicateType,
-    ObjectName, ObjectNamePart, Query, Subscript, TableAlias, TableAliasColumnDef, TableFactor,
+    ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor,
     UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
@@ -1009,20 +1009,73 @@ fn fold_predicates(predicates: Vec<Expr>, op: &BinaryOperator, empty_value: bool
     })
 }
 
+/// The names the quantifier lowering emits: the derived table wrapping the
+/// subquery, and the projection alias the comparison references.
+const QUANTIFIER_ALIAS: &str = "__pg2sqlite_quantifier";
+const QUANTIFIER_ITEM_ALIAS: &str = "__pg2sqlite_item";
+
+/// Names the quantifier subquery's output column `__pg2sqlite_item` inside
+/// its projection.
+///
+/// This is the R105 shape: SQLite has no grammar for a column alias list on
+/// a table alias, so `(SELECT id FROM t) q (item)` cannot be emitted, and
+/// the alias has to ride the projection instead. A set operation's column
+/// names come from its first operand, so the leftmost SELECT is the one to
+/// rename. A subquery without a single expression projection (a wildcard, a
+/// VALUES body) is refused naming the fix, where the old shape emitted SQL
+/// SQLite cannot parse.
+fn alias_quantifier_projection(query: &mut Query) -> Result<(), crate::errors::Error> {
+    fn leftmost_select(set_expr: &mut SetExpr) -> Option<&mut sqlparser::ast::Select> {
+        match set_expr {
+            SetExpr::Select(select) => Some(select),
+            SetExpr::SetOperation { left, .. } => leftmost_select(left),
+            SetExpr::Query(inner) => leftmost_select(&mut inner.body),
+            _ => None,
+        }
+    }
+
+    let refusal = || {
+        crate::errors::Error::UnsupportedSQLiteFeature(
+            "ANY/ALL over this subquery cannot be translated: the rewrite names the compared \
+             column inside the projection, so the subquery must project exactly one named \
+             expression. Project the column explicitly, `SELECT col FROM ...`."
+                .to_string(),
+        )
+    };
+
+    let select = leftmost_select(&mut query.body).ok_or_else(refusal)?;
+    let [item] = select.projection.as_mut_slice() else {
+        // PostgreSQL itself refuses a quantifier subquery with more than one
+        // column, so only the single-item shape reaches this rewrite.
+        return Err(refusal());
+    };
+    match item {
+        SelectItem::UnnamedExpr(expr) => {
+            *item = SelectItem::ExprWithAlias {
+                expr: expr.clone(),
+                alias: Ident::new(QUANTIFIER_ITEM_ALIAS),
+            };
+        }
+        SelectItem::ExprWithAlias { alias, .. } => *alias = Ident::new(QUANTIFIER_ITEM_ALIAS),
+        _ => return Err(refusal()),
+    }
+    Ok(())
+}
+
 /// `EXISTS`/`NOT EXISTS` over the quantifier subquery, aliased so the compared
 /// item has a name the predicate can reference.
 fn build_exists_over_subquery(
     translated_left: &Expr,
     compare_op: &BinaryOperator,
-    translated_subquery: Query,
+    mut translated_subquery: Query,
     negate_comparison: bool,
     negate_exists: bool,
-) -> Expr {
-    const DERIVED_ALIAS: &str = "__pg2sqlite_quantifier";
-    const ITEM_ALIAS: &str = "__pg2sqlite_item";
+) -> Result<Expr, crate::errors::Error> {
+    alias_quantifier_projection(&mut translated_subquery)?;
 
-    let derived_alias = Ident::new(DERIVED_ALIAS);
-    let item_ref = Expr::CompoundIdentifier(vec![derived_alias.clone(), Ident::new(ITEM_ALIAS)]);
+    let derived_alias = Ident::new(QUANTIFIER_ALIAS);
+    let item_ref =
+        Expr::CompoundIdentifier(vec![derived_alias.clone(), Ident::new(QUANTIFIER_ITEM_ALIAS)]);
     let mut comparison = Expr::BinaryOp {
         left: Box::new(translated_left.clone()),
         op: compare_op.clone(),
@@ -1032,7 +1085,7 @@ fn build_exists_over_subquery(
         comparison = not_predicate(comparison);
     }
 
-    Expr::Exists {
+    Ok(Expr::Exists {
         subquery: Box::new(single_expr_query(
             integer_literal(1),
             from_relation(TableFactor::Derived {
@@ -1041,7 +1094,7 @@ fn build_exists_over_subquery(
                 alias: Some(TableAlias {
                     explicit: false,
                     name: derived_alias,
-                    columns: vec![TableAliasColumnDef::from_name(ITEM_ALIAS)],
+                    columns: Vec::new(),
                     at: None,
                 }),
                 sample: None,
@@ -1049,7 +1102,7 @@ fn build_exists_over_subquery(
             Some(comparison),
         )),
         negated: negate_exists,
-    }
+    })
 }
 
 /// Translate a non-equality quantified comparison, `x <op> ANY(...)` or
@@ -1074,13 +1127,13 @@ fn translate_quantified_operation(
     };
 
     if let Expr::Subquery(q) = right {
-        return Ok(build_exists_over_subquery(
+        return build_exists_over_subquery(
             &translated_left,
             compare_op,
             q.translate(schema, options)?,
             negate,
             negate,
-        ));
+        );
     }
     if let Some(elements) = quantifier_elements(right) {
         let predicates = elements

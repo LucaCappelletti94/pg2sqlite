@@ -66,6 +66,11 @@ fn any_eq_array_literal_translates_to_in_list() {
     sqlite_accepts(sql);
 }
 
+/// Flipped R124 pin. The lowering emitted `(SELECT id FROM t)
+/// __pg2sqlite_quantifier (__pg2sqlite_item)`, the derived-table column
+/// alias list R105 established SQLite has no grammar for. The item column is
+/// now aliased inside the projection, so the emitted query prepares and
+/// answers PostgreSQL's `> ANY` semantics.
 #[test]
 fn any_gt_subquery_translates_to_exists() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
@@ -75,26 +80,10 @@ fn any_gt_subquery_translates_to_exists() {
         output.contains("EXISTS"),
         "> ANY(subquery) should translate via EXISTS, got: {output}"
     );
-    // Pins R124: ANY/ALL lowering emits a derived-table column alias list that
-    // SQLite has no grammar for. Goes red when the defect is fixed, which is the
-    // point.
-    register_sqlite_vec_once();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    let stmts = Pg2Sqlite::default()
-        .sql(sql)
-        .expect("parse")
-        .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
-    let mut r124_err = String::new();
-    for stmt in &stmts {
-        if let Err(e) = conn.execute_batch(&format!("{stmt};")) {
-            r124_err = e.to_string();
-            break;
-        }
-    }
-    assert!(
-        r124_err.contains("near \"(\""),
-        "Pins R124: expected 'near \"(\"' syntax error, got: {r124_err}"
+    assert_eq!(
+        quantifier_survivors(sql),
+        vec![1, 10],
+        "> ANY keeps rows whose val beats the smallest id"
     );
 }
 
@@ -132,6 +121,7 @@ fn all_neq_array_literal_translates_to_not_in_list() {
     sqlite_accepts(sql);
 }
 
+/// Flipped R124 pin, the `ALL` half of the shape above.
 #[test]
 fn all_gt_subquery_translates_to_not_exists() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
@@ -141,27 +131,45 @@ fn all_gt_subquery_translates_to_not_exists() {
         output.contains("NOT EXISTS"),
         "> ALL(subquery) should translate via NOT EXISTS, got: {output}"
     );
-    // Pins R124: ANY/ALL lowering emits a derived-table column alias list that
-    // SQLite has no grammar for. Goes red when the defect is fixed, which is the
-    // point.
-    register_sqlite_vec_once();
+    assert_eq!(
+        quantifier_survivors(sql),
+        vec![1],
+        "> ALL keeps only rows whose val beats the largest id"
+    );
+}
+
+/// Seeds `t` with `(1, 20), (7, 0), (10, 5)`, runs the translated statements,
+/// and returns the ids the translated SELECT keeps.
+fn quantifier_survivors(sql: &str) -> Vec<i64> {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     let stmts = Pg2Sqlite::default()
         .sql(sql)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate");
-    let mut r124_err = String::new();
+    let mut survivors = Vec::new();
     for stmt in &stmts {
-        if let Err(e) = conn.execute_batch(&format!("{stmt};")) {
-            r124_err = e.to_string();
-            break;
+        let text = stmt.to_string();
+        if text.starts_with("SELECT") {
+            let mut prepared = conn
+                .prepare(&text)
+                .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{text}"));
+            survivors = prepared
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+        } else {
+            conn.execute_batch(&format!("{text};"))
+                .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{text}"));
+            if text.starts_with("CREATE TABLE") {
+                conn.execute_batch("INSERT INTO t (id, val) VALUES (1, 20), (7, 0), (10, 5);")
+                    .expect("seed rows");
+            }
         }
     }
-    assert!(
-        r124_err.contains("near \"(\""),
-        "Pins R124: expected 'near \"(\"' syntax error, got: {r124_err}"
-    );
+    survivors.sort_unstable();
+    survivors
 }
 
 #[test]
