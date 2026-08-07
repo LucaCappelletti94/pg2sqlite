@@ -102,8 +102,14 @@ fn forward_delete_translation_covers_using_join_rls_and_without_keyword_from() {
         .expect("expected rewritten EXISTS selection")
         .to_string();
     assert!(selection_sql.contains("EXISTS"), "unexpected selection: {selection_sql}");
-    assert!(selection_sql.contains("docs_rls"), "unexpected selection: {selection_sql}");
-    assert!(selection_sql.contains("teams_rls"), "unexpected selection: {selection_sql}");
+    // R123: the EXISTS subquery reads the policy views under their declared
+    // names, never the `_rls` backing tables, so SELECT policies apply to the
+    // USING read the way PostgreSQL applies them.
+    assert!(
+        selection_sql.contains("FROM docs d JOIN teams t"),
+        "unexpected selection: {selection_sql}"
+    );
+    assert!(!selection_sql.contains("_rls"), "unexpected selection: {selection_sql}");
 
     let stmt = parse_statement("DELETE FROM docs WHERE id = 1");
     let Statement::Delete(mut delete) = stmt else {

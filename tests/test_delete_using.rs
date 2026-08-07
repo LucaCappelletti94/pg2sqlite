@@ -162,8 +162,8 @@ FOR EACH ROW EXECUTE FUNCTION propagate_delete();
     Ok(())
 }
 
-/// Test that DELETE...USING correctly references RLS backing tables in the
-/// EXISTS subquery.
+/// Test that DELETE...USING reads the RLS policy view in the EXISTS
+/// subquery.
 ///
 /// ## Note on RLS Translation and Diesel ORM
 ///
@@ -179,6 +179,13 @@ FOR EACH ROW EXECUTE FUNCTION propagate_delete();
 ///
 /// The backing table schemas in tests are ONLY for verifying the translation
 /// implementation works correctly.
+///
+/// Flipped R123 pin. The USING-to-EXISTS rewrite renamed the relation to the
+/// `users_rls` backing table while the predicate kept `users.id` qualifiers,
+/// so SQLite answered `no such column: users.id`. The rewrite now leaves the
+/// relation alone: the RLS machinery emits a policy-filtering view under the
+/// original name, reading it is PostgreSQL's semantics for a USING table,
+/// and the qualifiers match it by construction.
 #[test]
 fn test_delete_using_with_rls_table() -> Result<(), Box<dyn std::error::Error>> {
     use pg2sqlite::traits::TranslationOptions;
@@ -214,30 +221,31 @@ fn test_delete_using_with_rls_table() -> Result<(), Box<dyn std::error::Error>> 
     let delete_stmt = translated
         .iter()
         .find(|stmt| stmt.to_string().starts_with("DELETE"))
-        .expect("Should have DELETE statement");
-
-    let sql_str = delete_stmt.to_string();
+        .expect("Should have DELETE statement")
+        .to_string();
 
     assert!(
-        sql_str.contains("users_rls"),
-        "DELETE USING should reference users_rls backing table in EXISTS subquery, got: {sql_str}"
+        delete_stmt.contains("FROM users WHERE"),
+        "DELETE USING should read the policy view, not the backing table: {delete_stmt}"
     );
-    // Pins R123: DELETE USING renames the table to users_rls but leaves predicates
-    // as users.id. Goes red when the defect is fixed, which is the point.
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    let mut pin_triggered = false;
+
+    // The whole batch must apply, and the DELETE must then remove exactly the
+    // posts whose author is inactive when re-run against seeded rows.
+    let conn = rusqlite::Connection::open_in_memory()?;
     for stmt in &translated {
-        let s = stmt.to_string();
-        let result = conn.execute_batch(&format!("{s};"));
-        if let Err(err) = &result {
-            assert!(
-                err.to_string().contains("no such column: users.id"),
-                "expected users.id column error: {err}"
-            );
-            pin_triggered = true;
-        }
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{stmt}"));
     }
-    assert!(pin_triggered, "R123 pin: expected DELETE to fail with no such column error");
+    conn.execute_batch(
+        "INSERT INTO users_rls (id, username, active) VALUES (1, 'a', 1), (2, 'b', 0);
+         INSERT INTO posts (id, author_id, title) VALUES (10, 1, 'keep'), (20, 2, 'drop');",
+    )?;
+    conn.execute_batch(&format!("{delete_stmt};"))?;
+    let surviving: Vec<i64> = conn
+        .prepare("SELECT id FROM posts ORDER BY id")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(surviving, vec![10], "only the inactive author's post is deleted");
 
     Ok(())
 }

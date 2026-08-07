@@ -10,19 +10,16 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Delete, Expr, SetExpr, Statement, TableFactor};
+use sqlparser::ast::{Delete, Expr, Statement};
 
 use super::helpers::{Forward, translate_table_with_joins};
 use crate::{
     impls::{
-        function_helpers::integer_literal,
-        object_name::{append_suffix, table_has_implicit_public_rls},
-        query_builder::single_expr_query,
-        shared_helpers::translate_delete_core,
-        translator_impls::postgis,
+        function_helpers::integer_literal, query_builder::single_expr_query,
+        shared_helpers::translate_delete_core, translator_impls::postgis,
     },
     options::Pg2SqliteOptions,
-    traits::{TranslationOptions, translator::Translator},
+    traits::translator::Translator,
 };
 
 impl Translator for Delete {
@@ -53,31 +50,14 @@ impl Translator for Delete {
 
             // `SELECT 1 FROM <using> WHERE <original predicate>`, the EXISTS body
             // that replaces the USING clause SQLite has no syntax for.
-            let mut subquery =
+            //
+            // An RLS table keeps its declared name here deliberately: the RLS
+            // machinery emits a policy-filtering view under that name, and
+            // PostgreSQL applies SELECT policies to a USING read, so the view
+            // is the correct relation. Renaming to the backing table would
+            // bypass the policies and strand the predicate's qualifiers.
+            let subquery =
                 single_expr_query(integer_literal(1), translated_using, original_selection);
-
-            // Walk the FROM clause and update table names for RLS tables
-            // Tables with RLS are renamed to table_rls (backing table), and we need
-            // to reference the backing table in queries, not the view.
-            let rls_suffix = options.get_rls_table_suffix();
-
-            if let SetExpr::Select(ref mut select) = *subquery.body {
-                for table_with_joins in &mut select.from {
-                    if let TableFactor::Table { name, .. } = &mut table_with_joins.relation
-                        && table_has_implicit_public_rls(schema, name)?
-                    {
-                        *name = append_suffix(name, rls_suffix);
-                    }
-
-                    for join in &mut table_with_joins.joins {
-                        if let TableFactor::Table { name, .. } = &mut join.relation
-                            && table_has_implicit_public_rls(schema, name)?
-                        {
-                            *name = append_suffix(name, rls_suffix);
-                        }
-                    }
-                }
-            }
 
             delete.selection = Some(Expr::Exists { subquery: Box::new(subquery), negated: false });
 

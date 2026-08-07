@@ -747,6 +747,13 @@ fn materialized_view_error() {
     assert!(result.is_err(), "Expected error for MATERIALIZED VIEW");
 }
 
+/// Flipped R123 pin, and the proof the view read is load bearing. The old
+/// rewrite renamed the USING relation to the `users_rls` backing table,
+/// which both stranded the `users.id` qualifiers (`no such column`) and
+/// bypassed the SELECT policies PostgreSQL applies to a USING read. The
+/// EXISTS subquery now reads the policy view: with the session user set to
+/// owner 2 the predicate's owner-1 row is invisible and nothing is deleted,
+/// and switching the session to owner 1 deletes exactly that row's order.
 #[test]
 fn delete_using_with_rls_table_join() {
     use pg2sqlite::{prelude::SessionVariableMapping, traits::TranslationOptions};
@@ -779,35 +786,52 @@ fn delete_using_with_rls_table_join() {
             "app.user_id",
             "current_app_user",
         ));
-    let output = Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&options)
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(output.contains("DELETE"), "Expected DELETE: {output}");
-    // JOIN references to users should be renamed to users_rls
-    assert!(output.contains("users_rls"), "Expected users_rls in DELETE USING: {output}");
-    // Pins R123: DELETE USING renames the relation to users_rls but leaves
-    // predicate qualifiers as users.id. Goes red when the defect is fixed,
-    // which is the point.
-    register_sqlite_vec_once();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate_to_sql(&options).unwrap();
-    let mut r123_err = String::new();
-    for s in &stmts {
-        if let Err(e) = conn.execute_batch(&format!("{s};")) {
-            r123_err = e.to_string();
-            break;
-        }
-    }
+    let delete_stmt =
+        stmts.iter().find(|s| s.starts_with("DELETE")).expect("should emit the DELETE").clone();
     assert!(
-        r123_err.contains("no such column: users.id"),
-        "Pins R123: expected 'no such column: users.id', got: {r123_err}"
+        delete_stmt.contains("FROM users WHERE"),
+        "the EXISTS subquery should read the policy view: {delete_stmt}"
     );
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let session_user = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(2));
+    let session_user_for_fn = std::sync::Arc::clone(&session_user);
+    conn.create_scalar_function(
+        "current_app_user",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+        move |_| Ok(session_user_for_fn.load(std::sync::atomic::Ordering::Relaxed)),
+    )
+    .unwrap();
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{s}"));
+    }
+    conn.execute_batch(
+        "INSERT INTO users_rls (id, owner_id) VALUES (5, 1), (6, 2);
+         INSERT INTO orders (id, user_id, amount) VALUES (100, 5, 10), (200, 6, 20);",
+    )
+    .unwrap();
+
+    let surviving = |conn: &rusqlite::Connection| -> Vec<i64> {
+        conn.prepare("SELECT id FROM orders ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+
+    // Session user 2: the owner-1 users row the predicate wants is hidden by
+    // the SELECT policy, so the DELETE must remove nothing.
+    conn.execute_batch(&format!("{delete_stmt};")).unwrap();
+    assert_eq!(surviving(&conn), vec![100, 200], "a policy-hidden row must not match USING");
+
+    // Session user 1: the same row is now visible and exactly its order goes.
+    session_user.store(1, std::sync::atomic::Ordering::Relaxed);
+    conn.execute_batch(&format!("{delete_stmt};")).unwrap();
+    assert_eq!(surviving(&conn), vec![200], "the visible owner-1 row drives the delete");
 }
 
 #[test]
