@@ -1,0 +1,49 @@
+name: Upstream Heads
+
+# The committed lockfile pins `sql-traits` and `sqlparser` to exact revisions,
+# but a consumer resolving the named branches gets their current heads and
+# therefore different code. This job builds what such a consumer would build,
+# so an upstream change that breaks the next consumer resolution fails here
+# rather than downstream. The schedule catches upstream drift while this
+# repository is quiet.
+
+on:
+  schedule:
+    - cron: "37 5 * * *" # Run daily
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  branch-heads:
+    name: Consumer Resolution (branch heads)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-heads-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-heads-
+
+      # Only the runner's working copy of the lockfile moves. The committed
+      # pins stay authoritative for every other job.
+      - name: Move the git pins to their branch heads
+        run: cargo update -p sql-traits -p sqlparser
+
+      - name: Build the consumer resolution
+        run: cargo check --all-targets --all-features
