@@ -4,11 +4,13 @@
 #
 # The declared floor lives in one place, FLOOR below, and must match the version
 # the README and the D3 decision state. The check is differential: every
-# snapshot under tests/snapshots is executed against both the floor build and a
-# recent build, and only a failure that appears on the floor alone is reported.
-# That cancels out failures caused by extensions this harness does not load
-# (sqlitegis, sqlite-vec) and by snapshots that are fragments of a larger
-# script, neither of which says anything about the version.
+# snapshot under tests/snapshots, plus every translated row of the validity
+# sweep corpus (emitted by examples/floor_corpus.rs), is executed against both
+# the floor build and a recent build, and only a failure that appears on the
+# floor alone is reported. That cancels out failures caused by extensions this
+# harness does not load (sqlitegis, sqlite-vec, the registered UUID function)
+# and by snapshots that are fragments of a larger script, neither of which says
+# anything about the version.
 #
 # Usage: scripts/check_sqlite_floor.sh
 set -euo pipefail
@@ -58,8 +60,18 @@ destination.write_text("\x01".join(scripts))
 print(f"{len(scripts)} snapshot scripts", file=sys.stderr)
 PYTHON
 
-"${work}/${FLOOR}/runsql" "${work}/corpus.sql" | sort > "${work}/floor.txt"
-"${work}/${RECENT}/runsql" "${work}/corpus.sql" | sort > "${work}/recent.txt"
+# The sweep corpus, one script per translated row, same 0x01-separated format.
+# Emitted fresh by the crate so a corpus row added to the sweep is a floor
+# check on the next run with no further wiring.
+(cd "${repository}" && cargo run --release --quiet --example floor_corpus) \
+    > "${work}/corpus-rows.sql"
+combined="${work}/combined.sql"
+cat "${work}/corpus.sql" > "${combined}"
+printf '\x01' >> "${combined}"
+cat "${work}/corpus-rows.sql" >> "${combined}"
+
+"${work}/${FLOOR}/runsql" "${combined}" | sort > "${work}/floor.txt"
+"${work}/${RECENT}/runsql" "${combined}" | sort > "${work}/recent.txt"
 
 if regressions="$(comm -23 "${work}/floor.txt" "${work}/recent.txt")" && [[ -z "${regressions}" ]]; then
     echo "emitted SQL runs on SQLite ${FLOOR}: no failure that a newer SQLite does not also have"
