@@ -19,10 +19,11 @@ use alloc::{
 
 use sql_traits::{
     errors::LookupError,
+    structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::{
-    CreatePolicyCommand, CreatePolicyType, CreateTable, Expr, Function, FunctionArg,
+    CreatePolicy, CreatePolicyCommand, CreatePolicyType, CreateTable, Expr, Function, FunctionArg,
     FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments, HavingBound,
     Ident, JoinConstraint, JoinOperator, ListAggOnOverflow, Statement, TableFactor, Value,
     WindowType,
@@ -40,7 +41,8 @@ use crate::{
         },
         shared_helpers::{join_constraint_mut, join_constraint_ref},
     },
-    traits::{SessionVariablePattern, TranslationOptions},
+    options::Pg2SqliteOptions,
+    traits::{SessionVariablePattern, TranslationOptions, translator::Translator},
 };
 
 const RLS_VIOLATION_ERROR: &str = "new row violates row-level security policy";
@@ -85,19 +87,15 @@ enum PolicyPredicate {
 ///   access. That covers both an empty set and a restrictive-only set.
 /// * A permissive policy carrying no predicate grants every row, so it
 ///   contributes TRUE rather than nothing. Same for a restrictive one.
-fn combine_policy_predicates<O: TranslationOptions, DB: DatabaseLike>(
-    policies: &[&DB::Policy],
+fn combine_policy_predicates(
+    policies: &[&CreatePolicy],
     clause: PolicyClause,
     prefix: Option<&str>,
-    options: &O,
-    table: &DB::Table,
-    schema: &DB,
+    options: &Pg2SqliteOptions,
+    table: &CreateTable,
+    schema: &ParserDB,
     table_rename: Option<(&str, &str)>,
-) -> Result<PolicyPredicate, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
+) -> Result<PolicyPredicate, Error> {
     // Both sets are resolved once here rather than inside the recursive
     // transformer, which keeps that transformer total and avoids re-querying the
     // schema at every node it visits.
@@ -135,6 +133,13 @@ where
         };
         let Some(expr) = expr else { continue };
         let transformed = transform_expr(expr, options, table, schema, prefix, table_rename, facts);
+        // The transformer above owns the RLS rewrites: session variables, NEW
+        // and OLD prefixes, backing table renames. The forward expression
+        // translator then owns the PostgreSQL to SQLite semantics, so a policy
+        // cannot smuggle an untranslated operator or function into the emitted
+        // view or trigger guard, where it would fail at apply time (ILIKE) or
+        // lie dormant until the first read (now, date_trunc).
+        let transformed = transformed.translate(schema, options)?;
         // A literally-true predicate constrains nothing, so it contributes no
         // conjunct. `USING (true)` is the idiomatic public-access policy, and
         // without this fold it emits dead SQL such as
@@ -177,23 +182,17 @@ where
     }
 }
 
-fn collect_column_names<DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-) -> Result<Vec<String>, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-{
+fn collect_column_names(
+    table: &CreateTable,
+    schema: &ParserDB,
+) -> Result<Vec<String>, LookupError> {
     Ok(table.columns(schema)?.map(|c| c.column_name().to_string()).collect())
 }
 
-fn collect_pk_column_names<DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-) -> Result<Vec<String>, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-{
+fn collect_pk_column_names(
+    table: &CreateTable,
+    schema: &ParserDB,
+) -> Result<Vec<String>, LookupError> {
     Ok(table.primary_key_columns(schema)?.map(|c| c.column_name().to_string()).collect())
 }
 
@@ -203,10 +202,7 @@ where
 ///
 /// Returns [`LookupError`] if the table is present but its metadata cannot be
 /// resolved in `schema`.
-pub fn table_has_rls<DB: DatabaseLike>(table_name: &str, schema: &DB) -> Result<bool, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-{
+pub fn table_has_rls(table_name: &str, schema: &ParserDB) -> Result<bool, LookupError> {
     match schema.table(None, table_name) {
         Some(table) => table.has_row_level_security(schema),
         None => Ok(false),
@@ -223,15 +219,12 @@ where
 ///
 /// Returns [`LookupError`] if the table's metadata cannot be resolved in
 /// `schema`.
-pub fn resolve_trigger_table_name<DB: DatabaseLike>(
+pub fn resolve_trigger_table_name(
     base_name: &str,
-    table: &DB::Table,
-    schema: &DB,
+    table: &CreateTable,
+    schema: &ParserDB,
     options: &impl TranslationOptions,
-) -> Result<String, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-{
+) -> Result<String, LookupError> {
     if table.has_row_level_security(schema)? {
         let suffix = options.get_rls_table_suffix();
         Ok(format!("{base_name}{suffix}"))
@@ -255,15 +248,11 @@ fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> Strin
         .join(" AND ")
 }
 
-fn filter_policies<'a, DB: DatabaseLike>(
-    table: &'a DB::Table,
-    schema: &'a DB,
+fn filter_policies<'a>(
+    table: &'a CreateTable,
+    schema: &'a ParserDB,
     commands: &[CreatePolicyCommand],
-) -> Result<Vec<&'a DB::Policy>, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
+) -> Result<Vec<&'a CreatePolicy>, LookupError> {
     let mut policies = Vec::new();
     for policy in table.policies(schema)? {
         let command = policy.command();
@@ -280,10 +269,7 @@ struct RlsTriggerContext<'a> {
 }
 
 impl<'a> RlsTriggerContext<'a> {
-    fn new<O: TranslationOptions, DB: DatabaseLike>(table: &'a DB::Table, options: &O) -> Self
-    where
-        DB::Table: TableLike<DB = DB>,
-    {
+    fn new(table: &'a CreateTable, options: &Pg2SqliteOptions) -> Self {
         let table_name = table.table_name();
         let inner_table_name = format!("{}{}", table_name, options.get_rls_table_suffix());
         Self { table_name, inner_table_name }
@@ -543,9 +529,9 @@ fn extract_current_setting_name(func: &Function) -> Option<String> {
 /// Returns `Error::SessionVariableMappingNotFound` if a
 /// `current_setting('name')` or `current_user` pattern is found in the
 /// expression but no corresponding SQLite function mapping is configured.
-pub fn validate_session_variables<O: TranslationOptions>(
+pub fn validate_session_variables(
     expr: &Expr,
-    options: &O,
+    options: &Pg2SqliteOptions,
     table_name: &str,
     policy_name: &str,
 ) -> Result<(), Error> {
@@ -579,15 +565,11 @@ pub fn validate_session_variables<O: TranslationOptions>(
 ///
 /// Returns `Error::SessionVariableMappingNotFound` if any policy contains
 /// a session variable pattern without a corresponding SQLite function mapping.
-pub fn validate_table_policies<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<(), Error>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
+pub fn validate_table_policies(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), Error> {
     for policy in table.policies(schema)? {
         if let Some(using_expr) = policy.using_expression(schema) {
             validate_session_variables(using_expr, options, table.table_name(), policy.name())?;
@@ -650,11 +632,11 @@ impl<'a> ColumnRefStrategy<'a> {
     }
 }
 
-fn transform_function_argument_clause_rls<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_function_argument_clause_rls(
     clause: &FunctionArgumentClause,
-    options: &O,
-    table: &DB::Table,
-    schema: &DB,
+    options: &Pg2SqliteOptions,
+    table: &CreateTable,
+    schema: &ParserDB,
     strategy: &ColumnRefStrategy<'_>,
 ) -> FunctionArgumentClause {
     match clause {
@@ -694,11 +676,11 @@ fn transform_function_argument_clause_rls<O: TranslationOptions, DB: DatabaseLik
     }
 }
 
-fn transform_window_frame_bound_rls<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_window_frame_bound_rls(
     bound: &sqlparser::ast::WindowFrameBound,
-    options: &O,
-    table: &DB::Table,
-    schema: &DB,
+    options: &Pg2SqliteOptions,
+    table: &CreateTable,
+    schema: &ParserDB,
     strategy: &ColumnRefStrategy<'_>,
 ) -> sqlparser::ast::WindowFrameBound {
     match bound {
@@ -717,16 +699,13 @@ fn transform_window_frame_bound_rls<O: TranslationOptions, DB: DatabaseLike>(
 }
 
 #[allow(clippy::too_many_lines)]
-fn transform_expr_generic<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_expr_generic(
     expr: &Expr,
-    options: &O,
-    table: &DB::Table,
-    schema: &DB,
+    options: &Pg2SqliteOptions,
+    table: &CreateTable,
+    schema: &ParserDB,
     strategy: &ColumnRefStrategy<'_>,
-) -> Expr
-where
-    DB::Table: TableLike<DB = DB>,
-{
+) -> Expr {
     let recurse = |e: &Expr| transform_expr_generic(e, options, table, schema, strategy);
 
     match expr {
@@ -963,18 +942,15 @@ where
     }
 }
 
-fn transform_expr<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_expr(
     expr: &Expr,
-    options: &O,
-    table: &DB::Table,
-    schema: &DB,
+    options: &Pg2SqliteOptions,
+    table: &CreateTable,
+    schema: &ParserDB,
     prefix: Option<&str>,
     table_rename: Option<(&str, &str)>,
     facts: ResolvedSchemaFacts<'_>,
-) -> Expr
-where
-    DB::Table: TableLike<DB = DB>,
-{
+) -> Expr {
     transform_expr_generic(
         expr,
         options,
@@ -989,18 +965,15 @@ where
     )
 }
 
-fn transform_query<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_query(
     query: &sqlparser::ast::Query,
-    options: &O,
-    table: &DB::Table,
-    schema: &DB,
+    options: &Pg2SqliteOptions,
+    table: &CreateTable,
+    schema: &ParserDB,
     prefix: Option<&str>,
     outer_table: Option<(&str, &str)>,
     facts: ResolvedSchemaFacts<'_>,
-) -> sqlparser::ast::Query
-where
-    DB::Table: TableLike<DB = DB>,
-{
+) -> sqlparser::ast::Query {
     let mut transformed = query.clone();
     let rls_suffix = options.get_rls_table_suffix();
     let context = SubqueryTransformContext {
@@ -1057,14 +1030,11 @@ where
     transformed
 }
 
-fn transform_subquery_expression<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_subquery_expression(
     expr: &Expr,
-    context: &SubqueryTransformContext<'_, O, DB>,
+    context: &SubqueryTransformContext<'_>,
     subquery_table_renames: &[(String, String)],
-) -> Expr
-where
-    DB::Table: TableLike<DB = DB>,
-{
+) -> Expr {
     let (options, table, schema, prefix) =
         (context.options, context.table, context.schema, context.prefix);
     let facts = context.facts();
@@ -1094,13 +1064,10 @@ where
     transform_expr(&transformed, options, table, schema, prefix, None, facts)
 }
 
-struct SubqueryTransformContext<'a, O: TranslationOptions, DB: DatabaseLike>
-where
-    DB::Table: TableLike<DB = DB>,
-{
-    options: &'a O,
-    table: &'a DB::Table,
-    schema: &'a DB,
+struct SubqueryTransformContext<'a> {
+    options: &'a Pg2SqliteOptions,
+    table: &'a CreateTable,
+    schema: &'a ParserDB,
     prefix: Option<&'a str>,
     outer_table: Option<(&'a str, &'a str)>,
     rls_suffix: &'a str,
@@ -1111,10 +1078,7 @@ where
     rls_table_names: &'a [String],
 }
 
-impl<'a, O: TranslationOptions, DB: DatabaseLike> SubqueryTransformContext<'a, O, DB>
-where
-    DB::Table: TableLike<DB = DB>,
-{
+impl<'a> SubqueryTransformContext<'a> {
     fn facts(&self) -> ResolvedSchemaFacts<'a> {
         ResolvedSchemaFacts {
             lowercased_columns: self.lowercased_columns,
@@ -1127,13 +1091,11 @@ where
     }
 }
 
-fn transform_table_with_joins_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_table_with_joins_for_subquery(
     table_with_joins: &mut sqlparser::ast::TableWithJoins,
-    context: &SubqueryTransformContext<'_, O, DB>,
+    context: &SubqueryTransformContext<'_>,
     subquery_table_renames: &mut Vec<(String, String)>,
-) where
-    DB::Table: TableLike<DB = DB>,
-{
+) {
     transform_table_factor_for_subquery(
         &mut table_with_joins.relation,
         context,
@@ -1150,13 +1112,11 @@ fn transform_table_with_joins_for_subquery<O: TranslationOptions, DB: DatabaseLi
     }
 }
 
-fn transform_table_factor_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_table_factor_for_subquery(
     factor: &mut TableFactor,
-    context: &SubqueryTransformContext<'_, O, DB>,
+    context: &SubqueryTransformContext<'_>,
     subquery_table_renames: &mut Vec<(String, String)>,
-) where
-    DB::Table: TableLike<DB = DB>,
-{
+) {
     match factor {
         TableFactor::Table { name, .. } => {
             let old_name =
@@ -1204,13 +1164,11 @@ fn transform_table_factor_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
     }
 }
 
-fn transform_join_operator_for_subquery<O: TranslationOptions, DB: DatabaseLike>(
+fn transform_join_operator_for_subquery(
     join_operator: &mut JoinOperator,
-    context: &SubqueryTransformContext<'_, O, DB>,
+    context: &SubqueryTransformContext<'_>,
     subquery_table_renames: &[(String, String)],
-) where
-    DB::Table: TableLike<DB = DB>,
-{
+) {
     let rewrite_constraint = |constraint: &mut JoinConstraint| {
         if let JoinConstraint::On(expr) = constraint {
             *expr = transform_subquery_expression(expr, context, subquery_table_renames);
@@ -1372,10 +1330,7 @@ fn transform_outer_table_refs(
     }
 }
 
-fn try_transform_session_function<O: TranslationOptions>(
-    func: &Function,
-    options: &O,
-) -> Option<Expr> {
+fn try_transform_session_function(func: &Function, options: &Pg2SqliteOptions) -> Option<Expr> {
     if let Some(setting_name) = extract_current_setting_name(func) {
         let pattern = SessionVariablePattern::CurrentSetting { name: setting_name };
         if let Some(sqlite_func) = options.find_session_variable_function(&pattern) {
@@ -1395,16 +1350,12 @@ fn make_function_call(func_name: &str) -> Expr {
 /// Single source of truth for whether a table's view denies every row, shared
 /// by the view generator and the decision to emit validation triggers, so the
 /// two cannot drift into disagreeing about the same table.
-fn rls_read_predicate<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<PolicyPredicate, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
-    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+fn rls_read_predicate(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<PolicyPredicate, Error> {
+    let ctx = RlsTriggerContext::new(table, options);
     let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select])?;
 
     combine_policy_predicates(
@@ -1424,16 +1375,12 @@ where
 ///
 /// Infallible, but returns a `Result` to match the other RLS generators.
 #[allow(clippy::unnecessary_wraps)]
-pub fn generate_rls_view_sql<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<String, Error>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
-    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+pub fn generate_rls_view_sql(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<String, Error> {
+    let ctx = RlsTriggerContext::new(table, options);
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
     let table_name_quoted = quote_identifier(table_name);
@@ -1458,16 +1405,12 @@ where
     ))
 }
 
-fn generate_insert_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<String, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
-    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+fn generate_insert_trigger_sql(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<String, Error> {
+    let ctx = RlsTriggerContext::new(table, options);
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
     let table_rename = Some(ctx.as_rename_tuple());
@@ -1544,16 +1487,12 @@ where
 /// covers that case for the view path, and no rewrite happens for the
 /// backing-table path (since the rewrite is gated on a real policy that
 /// can be checked).
-fn generate_insert_check_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<Option<String>, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
-    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+fn generate_insert_check_trigger_sql(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<String>, Error> {
+    let ctx = RlsTriggerContext::new(table, options);
     let _ = ctx.table_name; // suppress unused-variable warning; we only need
     // `inner_table_name` and the rename tuple here.
     let inner_table_name = &ctx.inner_table_name;
@@ -1576,6 +1515,9 @@ where
         if let Some(expr) = policy.check_expression(schema) {
             let transformed =
                 transform_expr(expr, options, table, schema, Some("NEW"), table_rename, facts);
+            // Same rule as combine_policy_predicates: the forward translator
+            // owns the semantics of what the guard evaluates.
+            let transformed = transformed.translate(schema, options)?;
             check_conditions.push(format!("({transformed})"));
         }
     }
@@ -1592,16 +1534,12 @@ where
 }
 
 /// Generates INSTEAD OF UPDATE trigger SQL.
-fn generate_update_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<String, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
-    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+fn generate_update_trigger_sql(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<String, Error> {
+    let ctx = RlsTriggerContext::new(table, options);
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
     let table_rename = Some(ctx.as_rename_tuple());
@@ -1716,16 +1654,12 @@ where
 }
 
 /// Generates INSTEAD OF DELETE trigger SQL.
-fn generate_delete_trigger_sql<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<String, LookupError>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
-    let ctx = RlsTriggerContext::new::<O, DB>(table, options);
+fn generate_delete_trigger_sql(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<String, Error> {
+    let ctx = RlsTriggerContext::new(table, options);
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
     let table_rename = Some(ctx.as_rename_tuple());
@@ -1789,16 +1723,12 @@ enum RlsStatementMode {
     ReadOnly,
 }
 
-fn generate_rls_statements_with_mode<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
+fn generate_rls_statements_with_mode(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
     mode: RlsStatementMode,
-) -> Result<Vec<Statement>, Error>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
+) -> Result<Vec<Statement>, Error> {
     // Validate that audit table name is configured
     let audit_table_name =
         options.get_rls_audit_table_name().ok_or(Error::RlsAuditTableNameRequired)?;
@@ -1895,15 +1825,11 @@ where
 ///
 /// Returns an error if the generated SQL cannot be parsed by the SQLite dialect
 /// parser.
-pub fn generate_rls_statements<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<Vec<Statement>, Error>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
+pub fn generate_rls_statements(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<Statement>, Error> {
     generate_rls_statements_with_mode(table, schema, options, RlsStatementMode::ReadWrite)
 }
 
@@ -1917,29 +1843,22 @@ where
 ///
 /// Returns an error if the generated SQL cannot be parsed by the SQLite dialect
 /// parser.
-pub fn generate_readonly_rls_statements<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
-) -> Result<Vec<Statement>, Error>
-where
-    DB::Table: TableLike<DB = DB>,
-    DB::Policy: PolicyLike<DB = DB>,
-{
+pub fn generate_readonly_rls_statements(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<Statement>, Error> {
     generate_rls_statements_with_mode(table, schema, options, RlsStatementMode::ReadOnly)
 }
 
 /// Renames a CREATE TABLE statement to use the inner table name for RLS.
 /// Also updates any foreign key references to other RLS tables.
 #[must_use]
-pub fn rename_table_for_rls<O: TranslationOptions, DB: DatabaseLike>(
+pub fn rename_table_for_rls(
     create_table: &CreateTable,
-    options: &O,
-    _schema: &DB,
-) -> CreateTable
-where
-    DB::Table: TableLike<DB = DB>,
-{
+    options: &Pg2SqliteOptions,
+    _schema: &ParserDB,
+) -> CreateTable {
     let suffix = options.get_rls_table_suffix();
     let mut renamed = create_table.clone();
     renamed.name = append_suffix(&renamed.name, suffix);
@@ -2122,15 +2041,12 @@ WHERE NOT EXISTS (
 /// # Errors
 ///
 /// Returns an error if the generated SQL cannot be parsed.
-pub fn generate_rls_validation_statements<O: TranslationOptions, DB: DatabaseLike>(
-    table: &DB::Table,
-    schema: &DB,
-    options: &O,
+pub fn generate_rls_validation_statements(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
     audit_table_name: &str,
-) -> Result<Vec<Statement>, Error>
-where
-    DB::Table: TableLike<DB = DB>,
-{
+) -> Result<Vec<Statement>, Error> {
     let dialect = sqlparser::dialect::SQLiteDialect {};
     let mut statements = Vec::new();
 

@@ -860,11 +860,14 @@ fn classify_unrecognised_function(
 /// Whether an option that names a function names this one.
 ///
 /// The UUID options exist precisely to point at a host-registered function, so
-/// setting one is a declaration that the destination has it.
+/// setting one is a declaration that the destination has it. A session
+/// variable mapping is the same declaration: its target function is what the
+/// mapping tells this crate to emit, so the destination must register it.
 fn declares_function_by_option(name: &str, options: &Pg2SqliteOptions) -> bool {
     let matches = |declared: &str| declared.to_ascii_lowercase() == name;
     matches(options.get_uuid_function_name())
         || options.get_uuid_text_to_blob_function_name().is_some_and(matches)
+        || options.get_session_variables().iter().any(|m| matches(&m.sqlite_function))
 }
 
 /// Returns the positional arg count when it can be determined from the
