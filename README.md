@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(
         sqlite_statements[1].to_string(),
-        "INSERT OR IGNORE INTO users (username) VALUES ('alice')"
+        "INSERT INTO users (username) VALUES ('alice') ON CONFLICT DO NOTHING"
     );
 
     Ok(())

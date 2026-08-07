@@ -59,7 +59,6 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
             "INSERT INTO t DEFAULT VALUES;",
             "INSERT INTO t (id) VALUES (1) ON CONFLICT DO NOTHING;",
             "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET n = 1;",
-            "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) WHERE n > 0 DO UPDATE SET n = 1;",
             "INSERT INTO t (id) VALUES (1) RETURNING id;",
             "INSERT INTO t (id, n) SELECT id, t_id FROM u;",
             "UPDATE t SET n = 1 WHERE id = 1;",
@@ -518,6 +517,19 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT ts + interval '1500 ms' FROM t;",
                 "SELECT ts + interval '90 minutes' FROM t;",
                 "SELECT d + interval '1' month FROM t;",
+                    ],
+    ),
+    (
+        "on-conflict-do-nothing",
+        &[
+                // DO NOTHING keeps the upsert clause rather than becoming
+                // INSERT OR IGNORE, so the conflict target has to reach
+                // SQLite in a form it accepts, and a bare SELECT source has
+                // to carry the WHERE SQLite needs to parse the clause at all.
+                "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO NOTHING;",
+                "INSERT INTO t (id, n) SELECT id, t_id FROM u ON CONFLICT (id) DO NOTHING;",
+                "INSERT INTO t (id, n) SELECT id, t_id FROM u ON CONFLICT (id) DO UPDATE SET n = 1;",
+                "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO NOTHING RETURNING id;",
                     ],
     ),
 ];

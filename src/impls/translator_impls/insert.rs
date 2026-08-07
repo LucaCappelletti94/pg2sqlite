@@ -109,9 +109,25 @@ impl Translator for Insert {
                 sqlparser::ast::OnInsert::OnConflict(on_conflict) => {
                     match &on_conflict.action {
                         sqlparser::ast::OnConflictAction::DoNothing => {
-                            // SQLite uses INSERT OR IGNORE
-                            insert.or = Some(sqlparser::ast::SqliteOnConflict::Ignore);
-                            insert.on = None;
+                            // PostgreSQL suppresses a conflict on the arbiter
+                            // index and nothing else, which is exactly what
+                            // SQLite's upsert clause does. `INSERT OR IGNORE`
+                            // suppresses every constraint failure the
+                            // statement can raise, so a CHECK or NOT NULL
+                            // violation PostgreSQL reports became a silently
+                            // skipped row. The target needs the same lookup
+                            // `DO UPDATE` gives it, since it is no longer
+                            // discarded.
+                            insert.on = Some(sqlparser::ast::OnInsert::OnConflict(
+                                sqlparser::ast::OnConflict {
+                                    conflict_target: resolve_conflict_target(
+                                        on_conflict.conflict_target.as_ref(),
+                                        &insert.table,
+                                        schema,
+                                    )?,
+                                    action: sqlparser::ast::OnConflictAction::DoNothing,
+                                },
+                            ));
                         }
                         sqlparser::ast::OnConflictAction::DoUpdate(do_update) => {
                             // The conflict target has to name columns before it
@@ -149,8 +165,35 @@ impl Translator for Insert {
                 }
             }
         }
+
+        if matches!(insert.on, Some(sqlparser::ast::OnInsert::OnConflict(_))) {
+            disambiguate_upsert_source(&mut insert);
+        }
         Ok(insert)
     }
+}
+
+/// Gives a bare `SELECT` source the `WHERE` clause SQLite needs to tell an
+/// upsert clause apart from the tail of the select.
+///
+/// This is the spelling SQLite's grammar requires, not a way around it: the
+/// ambiguity is in SQLite's own parser, and its documentation states that a
+/// select feeding an upsert must carry a `WHERE` even when the condition is
+/// trivial. Without one, `INSERT INTO t (a) SELECT a FROM u ON CONFLICT (a)
+/// DO NOTHING` answers `near "DO": syntax error`. Measured on 3.46.0, a
+/// source ending in `WHERE`, `GROUP BY`, `ORDER BY` or `LIMIT`, a set
+/// operation, and a `VALUES` list all parse unaided, so only the bare form is
+/// touched, and `WHERE true` selects every row it is added to.
+fn disambiguate_upsert_source(insert: &mut Insert) {
+    let Some(source) = insert.source.as_deref_mut() else { return };
+    let SetExpr::Select(select) = source.body.as_mut() else { return };
+    if select.selection.is_some() {
+        return;
+    }
+    select.selection = Some(sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan {
+        value: sqlparser::ast::Value::Boolean(true),
+        span: sqlparser::tokenizer::Span::empty(),
+    }));
 }
 
 /// Resolves `ON CONFLICT ON CONSTRAINT <name>` to the column list SQLite needs.

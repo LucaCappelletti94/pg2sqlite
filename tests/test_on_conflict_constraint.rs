@@ -14,9 +14,10 @@
 //! every column joined by an underscore, and a primary key is auto-named
 //! `<table>_pkey`.
 //!
-//! Note the asymmetry this closes: `DO NOTHING` with the same target already
-//! worked, since it becomes `INSERT OR IGNORE` and the target is irrelevant.
-//! Only `DO UPDATE` was broken.
+//! `DO NOTHING` needs the same resolution, and gets it through the same
+//! lookup. It used to become `INSERT OR IGNORE`, which discarded the target
+//! entirely, until F4 made it keep the upsert clause so a CHECK or NOT NULL
+//! violation stops being suppressed along with the conflict.
 
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
@@ -171,8 +172,9 @@ fn an_unknown_constraint_is_rejected() {
     );
 }
 
-/// Guards the fix: `DO NOTHING` already worked, becoming `INSERT OR IGNORE`,
-/// and must keep working with a named constraint it never needed to resolve.
+/// `DO NOTHING` with a named constraint resolves the constraint to its
+/// columns, the same way `DO UPDATE` does, and still ignores the conflicting
+/// row.
 #[test]
 fn do_nothing_with_a_named_constraint_still_ignores() {
     let mut conn = apply(&format!(
