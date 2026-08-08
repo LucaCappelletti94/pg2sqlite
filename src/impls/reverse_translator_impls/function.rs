@@ -546,6 +546,26 @@ fn build_reverse_function(
     }))
 }
 
+/// `floor(extract(epoch from now()))::bigint`, which is what SQLite's
+/// `unixepoch()` answers.
+///
+/// SQLite gives whole seconds as an integer, measured, while
+/// `extract(epoch from now())` gives `1786200937.154282`, so neither the floor
+/// nor the cast is decoration.
+fn current_epoch_seconds() -> Expr {
+    let epoch = Expr::Extract {
+        field: DateTimeField::Epoch,
+        syntax: ExtractSyntax::From,
+        expr: Box::new(simple_function_expr("NOW", vec![], None)),
+    };
+    Expr::Cast {
+        expr: Box::new(simple_function_expr("floor", vec![epoch], None)),
+        data_type: DataType::BigInt(None),
+        format: None,
+        kind: CastKind::DoubleColon,
+    }
+}
+
 /// Writes out the comma SQLite's one-argument `group_concat` joins with, since
 /// PostgreSQL's `string_agg` has no one-argument form.
 fn with_default_separator(mut reversed: Expr) -> Expr {
@@ -974,6 +994,10 @@ pub fn reverse_translate_function(
             // drops the fraction.
             let exprs = function_argument_exprs(&func.args);
             let value = match exprs.as_slice() {
+                // unixepoch() is the current time, and SQLite answers it as
+                // whole seconds, which is why the floor and the cast are here:
+                // `extract(epoch from now())` carries a fraction.
+                [] => return Ok(current_epoch_seconds()),
                 [value] => value,
                 [
                     value,
@@ -983,8 +1007,8 @@ pub fn reverse_translate_function(
                 ] if modifier == "subsec" => value,
                 _ => {
                     return Err(Error::UnsupportedSQLiteFeature(
-                        "unixepoch() reverses only as unixepoch(x) or unixepoch(x, 'subsec'), \
-                         which are the two forms EXTRACT(EPOCH FROM x) covers."
+                        "unixepoch reverses as unixepoch(), unixepoch(x) or \
+                         unixepoch(x, 'subsec'). Any other modifier has no PostgreSQL form."
                             .to_string(),
                     ));
                 }

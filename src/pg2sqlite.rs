@@ -775,6 +775,20 @@ impl Pg2Sqlite {
     /// assert_eq!(pg[0].to_string(), "SELECT s FROM t WHERE s LIKE 'a%'");
     /// ```
     ///
+    /// # A zone-free timestamp gains a zone
+    ///
+    /// SQLite's one-argument `datetime(x)` converts to UTC when the value
+    /// carries an offset and otherwise only tidies the printed form. It comes
+    /// back as `x AT TIME ZONE 'UTC'`, which is exact for the first case and,
+    /// for the second, right about the clock reading while turning a plain
+    /// timestamp into a zone-aware one: SQLite answers `2026-08-08 15:04:05`
+    /// where PostgreSQL answers `2026-08-08 15:04:05+00`.
+    ///
+    /// Splitting on the column's declared type would fix that and break the
+    /// other side, since forward translation emits this same call for `AT TIME
+    /// ZONE 'UTC'` over either kind of operand, so no single reversal is right
+    /// about both.
+    ///
     /// # Errors
     ///
     /// Returns [`crate::errors::Error::ParserError`] if parsing fails,

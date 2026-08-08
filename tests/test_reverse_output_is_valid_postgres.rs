@@ -151,6 +151,8 @@ fn scalar_functions_reverse_to_postgres_spellings() {
         ("SELECT hex(s) FROM t", Emits("encode")),
         ("SELECT unhex(s) FROM t", Emits("decode")),
         ("SELECT unixepoch(s) FROM t", Emits("EXTRACT")),
+        // SQLite answers whole seconds, so the fraction is floored off.
+        ("SELECT unixepoch() FROM t", Emits("floor(EXTRACT(EPOCH FROM NOW()))::BIGINT")),
         // Already correct.
         ("SELECT group_concat(s, ',') FROM t", Emits("string_agg(s, ',')")),
         // PostgreSQL has no one-argument string_agg, so the comma SQLite
