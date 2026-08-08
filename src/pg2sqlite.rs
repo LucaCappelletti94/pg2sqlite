@@ -26,6 +26,7 @@ use tempfile::TempDir;
 
 use crate::{
     impls::{
+        emitted_namespace::{Source, reject_name_collisions, sourced},
         object_name::last_ident_value_or_display,
         translator_impls::{
             create_index::{FtsTranslation, analyze_fts_index},
@@ -482,21 +483,33 @@ impl Pg2Sqlite {
         populate_prewalk_catalogs(&normalized_statements, &schema, &mut options);
         let options = options;
 
-        let mut result: Vec<Statement> = normalized_statements
+        let translated = normalized_statements
             .iter()
             .map(|statement| statement.translate(&schema, &options))
-            .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+            .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?;
 
         // If any table has RLS enabled and audit table name is configured,
         // prepend the audit table creation statement
-        let has_rls_tables = schema.has_rls_tables()?;
+        let audit_table = schema
+            .has_rls_tables()?
+            .then(|| options.get_rls_audit_table_name())
+            .flatten()
+            .map(generate_rls_audit_table)
+            .transpose()?;
 
-        if has_rls_tables && let Some(audit_table_name) = options.get_rls_audit_table_name() {
-            let audit_table_stmt = generate_rls_audit_table(audit_table_name)?;
-            result.insert(0, audit_table_stmt);
+        // Every name the script defines has to be free when it defines it:
+        // PostgreSQL has a namespace per schema and names a trigger within its
+        // table, SQLite has one of each for the whole database.
+        reject_name_collisions(
+            audit_table
+                .iter()
+                .map(|statement| (Source::Generated("the row-security audit table"), statement))
+                .chain(sourced(&normalized_statements, &translated)),
+        )?;
+
+        let mut result: Vec<Statement> = translated.into_iter().flatten().collect();
+        if let Some(audit_table) = audit_table {
+            result.insert(0, audit_table);
         }
 
         // PostgreSQL's LIKE is case-sensitive. SQLite's is case-insensitive for

@@ -278,6 +278,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "cube-root",
     "array-join",
     "returning-scope",
+    "name-reuse",
 ];
 
 #[test]

@@ -155,6 +155,25 @@ pub enum Error {
         /// Candidate schema names where the table exists.
         schemas: Vec<String>,
     },
+    /// Error when two objects the translation emits would carry the same
+    /// SQLite name.
+    #[error(
+        "Two {kind} in the emitted schema are both named '{name}', one from {first} and one \
+         from {second}. {reason}, so the second definition cannot apply. Rename one of them at \
+         the source."
+    )]
+    EmittedNameCollision {
+        /// What the two definitions are, in the plural.
+        kind: String,
+        /// The SQLite name both would take.
+        name: String,
+        /// Where the definition that holds the name came from.
+        first: String,
+        /// Where the definition that could not have it came from.
+        second: String,
+        /// Why the two namespaces disagree.
+        reason: String,
+    },
     /// Error when an upsert (INSERT OR REPLACE) does not include primary key
     /// columns.
     #[error(

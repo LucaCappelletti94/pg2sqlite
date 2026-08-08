@@ -773,4 +773,33 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "UPDATE t SET n = u.id FROM u WHERE u.t_id = t.id RETURNING t.id;",
             ],
     ),
+    (
+        "name-reuse",
+        &[
+                // A dropped name is free again, which the collision check has
+                // to agree with. Each row emits the DROP and the second
+                // definition, so the floor runs the sequence rather than the
+                // pieces.
+                "CREATE TABLE nr1 (id INT PRIMARY KEY, n INT);
+                 CREATE VIEW nrv AS SELECT id FROM nr1;
+                 DROP VIEW nrv;
+                 CREATE VIEW nrv AS SELECT n AS id FROM nr1;",
+                "CREATE TABLE nr2 (id INT PRIMARY KEY, n INT);
+                 CREATE INDEX nri ON nr2 (n);
+                 DROP INDEX nri;
+                 CREATE INDEX nri ON nr2 (id);",
+                "CREATE TABLE nr3 (id INT PRIMARY KEY, n INT);
+                 CREATE INDEX nrj ON nr3 (n);
+                 DROP TABLE nr3;
+                 CREATE TABLE nr4 (id INT PRIMARY KEY, n INT);
+                 CREATE INDEX nrj ON nr4 (n);",
+                "CREATE TABLE nr5 (id INT PRIMARY KEY, n INT);
+                 CREATE TABLE nr6 (id INT PRIMARY KEY, n INT);
+                 CREATE FUNCTION nrf() RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN NEW.n := 1; RETURN NEW; END; $$;
+                 CREATE TRIGGER nrt BEFORE INSERT ON nr5 FOR EACH ROW EXECUTE FUNCTION nrf();
+                 DROP TRIGGER nrt ON nr5;
+                 CREATE TRIGGER nrt BEFORE INSERT ON nr6 FOR EACH ROW EXECUTE FUNCTION nrf();",
+            ],
+    ),
 ];
