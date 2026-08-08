@@ -68,7 +68,12 @@ WHERE user_id IN (SELECT id FROM users WHERE active = false);
 "#;
 
 fn bench_schema_translation(c: &mut Criterion) {
-    let options = Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob);
+    // `groups.sql` defaults a key to `uuidv7()`, which is refused unless the
+    // destination's version 7 generator is named, so the fixtures do not
+    // translate without this.
+    let options = Pg2SqliteOptions::default()
+        .with_uuid_representation(UuidRepresentation::Blob)
+        .with_uuid_v7_function_name("uuid7");
     let mut group = c.benchmark_group("schema_translation");
 
     let fixtures: &[(&str, &str)] = &[
@@ -94,6 +99,7 @@ fn bench_rls_translation(c: &mut Criterion) {
     // RLS fixtures require session variable configuration
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
+        .with_uuid_v7_function_name("uuid7")
         .with_session_user_role("authenticated")
         .with_session_variable(SessionVariableMapping::current_user("current_app_user"))
         .with_session_variable(SessionVariableMapping::current_setting(
