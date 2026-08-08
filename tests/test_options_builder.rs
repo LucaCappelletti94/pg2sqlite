@@ -35,7 +35,8 @@ fn all_builder_methods_chain() {
     let options = Pg2SqliteOptions::default()
         .remove_unsupported_check_constraints()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_function_name("app_uuid".to_string())
+        .with_uuid_v7_function_name("uuid7")
         .with_rls_table_suffix("_backing")
         .with_session_user_role("app_user")
         .with_session_variable(SessionVariableMapping::current_user("get_current_user"))
@@ -44,7 +45,8 @@ fn all_builder_methods_chain() {
 
     assert!(options.should_remove_unsupported_check_constraints());
     assert_eq!(options.get_uuid_representation(), Some(UuidRepresentation::Blob));
-    assert_eq!(options.get_uuid_function_name(), "uuidv7");
+    assert_eq!(options.get_uuid_function_name(), "app_uuid");
+    assert_eq!(options.get_uuid_v7_function_name(), Some("uuid7"));
     assert_eq!(options.get_rls_table_suffix(), "_backing");
     assert_eq!(options.get_session_user_role(), Some("app_user"));
     assert_eq!(options.get_session_variables().len(), 1);

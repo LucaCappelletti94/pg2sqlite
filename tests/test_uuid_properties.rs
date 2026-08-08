@@ -152,9 +152,13 @@ fn get_create_table_sql(
         (UuidVersion::V7, UuidRepresentation::Text) => "uuidv7_text",
     };
 
-    let options = Pg2SqliteOptions::default()
-        .with_uuid_representation(repr)
-        .with_uuid_function_name(uuid_func_name.to_string());
+    let options = Pg2SqliteOptions::default().with_uuid_representation(repr);
+    // The two generators are named separately, so the version under test picks
+    // which option carries the name.
+    let options = match version {
+        UuidVersion::V4 => options.with_uuid_function_name(uuid_func_name),
+        UuidVersion::V7 => options.with_uuid_v7_function_name(uuid_func_name),
+    };
 
     let translated = translator.translate(&options).unwrap();
     translated[0].to_string()

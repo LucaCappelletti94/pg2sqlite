@@ -356,6 +356,12 @@ pub fn reverse_function(
         "vec_f32" => FunctionReversal::ToVectorCast,
         // vec_f16(expr) -> expr::halfvec
         "vec_f16" => FunctionReversal::ToHalfvecCast,
+        // The declared version 7 generator -> uuidv7(). Checked before the
+        // random one, so a caller who pointed both options at one name gets
+        // the reading that keeps the creation-time ordering.
+        name if options.get_uuid_v7_function_name() == Some(name) => {
+            FunctionReversal::Rename("uuidv7".to_string())
+        }
         // uuid() / custom UUID function -> gen_random_uuid()
         name if name == options.get_uuid_function_name() => {
             FunctionReversal::Rename("gen_random_uuid".to_string())

@@ -55,6 +55,24 @@ fn raise_ignore_statement() -> Statement {
     )))
 }
 
+/// Whether `stmt` calls `uuidv7()` anywhere, under any schema qualifier.
+fn calls_uuid_v7(stmt: &Statement) -> bool {
+    let found: ControlFlow<()> = visit_expressions(stmt, |expr| {
+        if let Expr::Function(func) = expr
+            && func
+                .name
+                .0
+                .last()
+                .and_then(ObjectNamePart::as_ident)
+                .is_some_and(|ident| ident.value.eq_ignore_ascii_case("uuidv7"))
+        {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    });
+    found.is_break()
+}
+
 impl PlPgSqlTranslator {
     /// Translates a PL/pgSQL function body to `SQLite` statements.
     ///
@@ -82,6 +100,21 @@ impl PlPgSqlTranslator {
         let mut result = Vec::new();
 
         context.seed_default_bindings();
+
+        // One check for the whole body, before anything is rewritten. Every
+        // later site that could meet a `uuidv7()` either renames it or hands
+        // it to a translator whose refusal is swallowed by an `unwrap_or`, and
+        // none of them can report, so the guard sits where the parse is
+        // complete and the error channel is open.
+        if options.get_uuid_v7_function_name().is_none() {
+            for stmt in &body.statements {
+                if calls_uuid_v7(stmt) {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        crate::impls::translator_impls::function::uuid_v7_not_declared(),
+                    ));
+                }
+            }
+        }
 
         for stmt in &body.statements {
             let translated = Self::translate_statement(stmt, &mut context, schema, options)?;
@@ -817,11 +850,16 @@ impl PlPgSqlTranslator {
                     || func.name.to_string().to_ascii_lowercase(),
                     |ident| ident.value.to_ascii_lowercase(),
                 );
-                if matches!(
-                    func_name.as_str(),
-                    "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7"
-                ) {
-                    let new_name = options.get_uuid_function_name();
+                let renamed = match func_name.as_str() {
+                    "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => {
+                        Some(options.get_uuid_function_name())
+                    }
+                    // An undeclared `uuidv7` never reaches here: the body was
+                    // refused whole before any of it was rewritten.
+                    "uuidv7" => options.get_uuid_v7_function_name(),
+                    _ => None,
+                };
+                if let Some(new_name) = renamed {
                     func.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(new_name))]);
                 }
                 Self::transform_function_parts(func, context, options);
@@ -1631,17 +1669,21 @@ impl PlPgSqlTranslator {
             return parsed_expr.to_string();
         }
 
-        let target_func = options.get_uuid_function_name();
+        let random = options.get_uuid_function_name();
+        // The version 7 spellings are left alone when nothing was declared.
+        // An undeclared body was already refused, so the only way here is a
+        // declared name.
+        let ordered = options.get_uuid_v7_function_name().unwrap_or("uuidv7");
 
         expr_str
-            .replace("gen_random_uuid()", &format!("{target_func}()"))
-            .replace("GEN_RANDOM_UUID()", &format!("{target_func}()"))
-            .replace("uuid_generate_v4()", &format!("{target_func}()"))
-            .replace("UUID_GENERATE_V4()", &format!("{target_func}()"))
-            .replace("uuidv4()", &format!("{target_func}()"))
-            .replace("UUIDV4()", &format!("{target_func}()"))
-            .replace("uuidv7()", &format!("{target_func}()"))
-            .replace("UUIDV7()", &format!("{target_func}()"))
+            .replace("gen_random_uuid()", &format!("{random}()"))
+            .replace("GEN_RANDOM_UUID()", &format!("{random}()"))
+            .replace("uuid_generate_v4()", &format!("{random}()"))
+            .replace("UUID_GENERATE_V4()", &format!("{random}()"))
+            .replace("uuidv4()", &format!("{random}()"))
+            .replace("UUIDV4()", &format!("{random}()"))
+            .replace("uuidv7()", &format!("{ordered}()"))
+            .replace("UUIDV7()", &format!("{ordered}()"))
     }
 
     fn parse_expression(expr_str: &str) -> Result<Expr, Error> {
@@ -1702,18 +1744,22 @@ mod tests {
 
     #[test]
     fn uuid_function_translation_and_expression_parsing_behave_as_expected() {
-        let options = Pg2SqliteOptions::default().with_uuid_function_name("uuid7".to_string());
+        let options = Pg2SqliteOptions::default()
+            .with_uuid_function_name("app_uuid".to_string())
+            .with_uuid_v7_function_name("uuid7");
+        // The random spellings take the random name and the ordered one takes
+        // its own, which is the whole point of the two options.
         let translated = PlPgSqlTranslator::translate_uuid_function(
             "gen_random_uuid() + uuidv4() + uuidv7()",
             &options,
         );
-        assert_eq!(translated, "uuid7() + uuid7() + uuid7()");
+        assert_eq!(translated, "app_uuid() + app_uuid() + uuid7()");
 
         let qualified = PlPgSqlTranslator::translate_uuid_function(
             "public.gen_random_uuid() + pg_catalog.uuid_generate_v4()",
             &options,
         );
-        assert_eq!(qualified, "uuid7() + uuid7()");
+        assert_eq!(qualified, "app_uuid() + app_uuid()");
 
         let parsed = PlPgSqlTranslator::parse_expression("1 + 2").unwrap();
         assert_eq!(parsed.to_string(), "1 + 2");
@@ -2094,7 +2140,7 @@ mod tests {
             "test".to_string(),
         )
         .unwrap();
-        let options = Pg2SqliteOptions::default();
+        let options = Pg2SqliteOptions::default().with_uuid_v7_function_name("uuid7");
 
         let mut ctx = PlPgSqlContext::new();
         ctx.add_binding(VariableBinding {

@@ -52,8 +52,11 @@ pub struct TranslationStats {
 pub struct WebOptions {
     pub uuid_representation: Option<UuidRepresentation>,
     pub array_representation: Option<ArrayRepresentation>,
-    /// Empty means "leave at the crate default" (currently `uuidv7`).
+    /// Empty means "leave at the crate default", which is `uuid`.
     pub uuid_function_name: String,
+    /// Empty means "the destination has no version 7 generator", which is the
+    /// crate default and makes `uuidv7()` a refusal.
+    pub uuid_v7_function_name: String,
     /// Empty means "don't configure", which is fine for non-RLS schemas.
     pub rls_audit_table_name: String,
     pub session_variables: Vec<SessionVariableMapping>,
@@ -65,6 +68,7 @@ impl Default for WebOptions {
             uuid_representation: Some(UuidRepresentation::Blob),
             array_representation: Some(ArrayRepresentation::Json),
             uuid_function_name: String::new(),
+            uuid_v7_function_name: String::new(),
             rls_audit_table_name: String::new(),
             session_variables: Vec::new(),
         }
@@ -82,6 +86,9 @@ impl WebOptions {
         }
         if !self.uuid_function_name.is_empty() {
             opts = opts.with_uuid_function_name(self.uuid_function_name.clone());
+        }
+        if !self.uuid_v7_function_name.is_empty() {
+            opts = opts.with_uuid_v7_function_name(self.uuid_v7_function_name.clone());
         }
         if !self.rls_audit_table_name.is_empty() {
             opts = opts.with_rls_audit_table_name(self.rls_audit_table_name.clone());

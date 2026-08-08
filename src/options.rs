@@ -23,9 +23,13 @@ pub struct Pg2SqliteOptions {
     remove_unsupported_check_constraints: bool,
     /// The representation of UUIDs in `SQLite`.
     uuid_representation: Option<UuidRepresentation>,
-    /// The name of the function to use for UUID generation.
+    /// The name of the function to use for random UUID generation.
     /// Its runtime return type must match `uuid_representation`.
     uuid_function_name: String,
+    /// The name of the destination's version 7 UUID generator. `None` means
+    /// the destination has none, and `uuidv7()` is refused rather than
+    /// answered with a random value. Set via `with_uuid_v7_function_name`.
+    uuid_v7_function_name: Option<String>,
     /// Optional UDF name for converting text UUID literals to 16-byte
     /// BLOBs at INSERT/UPDATE time. `None` means "emit
     /// `unhex(replace(literal, '-', ''))` inline" (pure SQLite, no UDF
@@ -111,6 +115,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             remove_unsupported_check_constraints: bool::arbitrary(u)?,
             uuid_representation: Option::<UuidRepresentation>::arbitrary(u)?,
             uuid_function_name: String::arbitrary(u)?,
+            uuid_v7_function_name: Option::<String>::arbitrary(u)?,
             uuid_text_to_blob_function_name: Option::<String>::arbitrary(u)?,
             array_representation: Option::<ArrayRepresentation>::arbitrary(u)?,
             rls_table_suffix: String::arbitrary(u)?,
@@ -137,6 +142,7 @@ impl Default for Pg2SqliteOptions {
             remove_unsupported_check_constraints: false,
             uuid_representation: None,
             uuid_function_name: "uuid".to_string(),
+            uuid_v7_function_name: None,
             uuid_text_to_blob_function_name: None,
             array_representation: None,
             rls_table_suffix: "_rls".to_string(),
@@ -268,6 +274,15 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn get_uuid_function_name(&self) -> &str {
         &self.uuid_function_name
+    }
+
+    fn with_uuid_v7_function_name(mut self, name: impl Into<String>) -> Self {
+        self.uuid_v7_function_name = Some(name.into());
+        self
+    }
+
+    fn get_uuid_v7_function_name(&self) -> Option<&str> {
+        self.uuid_v7_function_name.as_deref()
     }
 
     fn with_uuid_text_to_blob_function_name(mut self, name: impl Into<String>) -> Self {

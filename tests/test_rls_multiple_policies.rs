@@ -43,7 +43,7 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_session_user_role("authenticated".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
@@ -74,7 +74,7 @@ fn test_multiple_policies_translation_snapshot() -> Result<(), Box<dyn std::erro
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(

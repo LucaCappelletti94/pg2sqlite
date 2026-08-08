@@ -15,7 +15,7 @@ use rusqlite::Connection as SqliteConn;
 fn make_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string())
         // UUID-based identity mapping
@@ -81,7 +81,7 @@ fn test_missing_session_variable_for_current_setting_fails() {
     // Provide ONLY the current_user mapping; omit current_setting('app.user_id')
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"));

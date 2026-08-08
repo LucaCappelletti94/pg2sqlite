@@ -79,7 +79,7 @@ fn translate_and_setup()
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(
@@ -105,7 +105,7 @@ fn test_tenant_isolation_translation_snapshot() -> Result<(), Box<dyn std::error
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_setting(

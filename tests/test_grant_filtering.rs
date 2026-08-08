@@ -213,7 +213,7 @@ fn translation_options() -> Pg2SqliteOptions {
 
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_session_user_role("app_user")
         .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_user("current_app_user"))

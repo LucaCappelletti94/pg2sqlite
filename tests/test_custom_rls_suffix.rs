@@ -15,7 +15,7 @@ use rusqlite::Connection;
 fn make_options_with_suffix(suffix: &str) -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_rls_table_suffix(suffix)
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string())
@@ -76,7 +76,7 @@ fn test_custom_suffix_in_foreign_keys() {
     let sql = include_str!("fixtures/rls_fk_simple.sql");
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_rls_table_suffix("_secure")
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string())

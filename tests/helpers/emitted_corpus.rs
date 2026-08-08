@@ -41,6 +41,7 @@ pub fn sweep_options() -> Pg2SqliteOptions {
         .with_array_representation(ArrayRepresentation::Json)
         .with_math_functions_available()
         .with_rls_audit_table_name("rls_violations")
+        .with_uuid_v7_function_name("uuid7")
         .with_user_defined_functions([
             "var_pop",
             "var_samp",
@@ -692,6 +693,30 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT var_pop(DISTINCT r) FROM t;",
                 "SELECT n, corr(r, r) FROM t GROUP BY n HAVING stddev_pop(r) > 0;",
                 "SELECT variance(r) FILTER (WHERE n > 0) FROM t;",
+            ],
+    ),
+    (
+        "uuid-version",
+        &[
+                // The two generators reach two names. Each row carries its own
+                // UUID table, since the shared fixture has no UUID column, and
+                // the column default is the shape SQLite's DDL grammar is
+                // fussiest about, since it only takes a parenthesised call.
+                "CREATE TABLE uv (id UUID PRIMARY KEY DEFAULT uuidv7(), label TEXT);
+                 INSERT INTO uv (label) VALUES ('a');",
+                "CREATE TABLE uw (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), label TEXT);
+                 INSERT INTO uw (label) VALUES ('a');",
+                "SELECT uuidv7(), gen_random_uuid(), uuidv4(), uuid_generate_v4();",
+                "CREATE TABLE ux (id INT PRIMARY KEY);
+                 CREATE TABLE uy (id UUID);
+                 CREATE FUNCTION uf() RETURNS trigger LANGUAGE plpgsql AS $$
+                 DECLARE v_id UUID := uuidv7();
+                 BEGIN
+                   INSERT INTO uy (id) VALUES (v_id);
+                   RETURN NEW;
+                 END; $$;
+                 CREATE TRIGGER ut AFTER INSERT ON ux FOR EACH ROW EXECUTE FUNCTION uf();
+                 INSERT INTO ux VALUES (1);",
             ],
     ),
 ];

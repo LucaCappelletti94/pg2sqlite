@@ -113,7 +113,7 @@ fn uuid_blob_cast_still_lowers_to_conversion() {
     // own branch, not the generic CAST path.
     let opts = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string());
+        .with_uuid_v7_function_name("uuidv7");
     let out = translate_pg("SELECT '11111111-1111-1111-1111-111111111111'::uuid FROM t", &opts)
         .expect("translation failed")
         .join("\n");

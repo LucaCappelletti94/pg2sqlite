@@ -353,9 +353,10 @@ fn translate_function(
              Rewrite as: MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1"
                 .to_string(),
         ),
-        "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7" => {
+        "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => {
             FunctionTranslation::Rename(options.get_uuid_function_name().to_string())
         }
+        "uuidv7" => uuid_v7_translation(options),
         // NOW() -> datetime('now')
         "now" => FunctionTranslation::WithArgs {
             name: "datetime".to_string(),
@@ -779,6 +780,30 @@ fn classify_statistical_aggregate(name: &str, options: &Pg2SqliteOptions) -> Fun
     ))
 }
 
+/// What `uuidv7()` becomes.
+///
+/// A version 7 UUID carries the millisecond it was made in its first 48 bits,
+/// so its byte order is a creation order, which is the whole reason a schema
+/// asks for one. Answering it with the random generator would keep the type
+/// and lose that, silently, so the name is refused until the caller says the
+/// destination has one and what it is called there.
+fn uuid_v7_translation(options: &Pg2SqliteOptions) -> FunctionTranslation {
+    match options.get_uuid_v7_function_name() {
+        Some(name) => FunctionTranslation::Rename(name.to_string()),
+        None => FunctionTranslation::Unsupported(uuid_v7_not_declared()),
+    }
+}
+
+/// The refusal `uuidv7()` carries, shared with the PL/pgSQL body path.
+pub(crate) fn uuid_v7_not_declared() -> String {
+    "uuidv7() makes a UUID ordered by creation time, and SQLite has no such function: the \
+     uuid.c extension SQLite itself ships generates version 4 only. Translating it to the \
+     random generator would keep the type and silently drop the ordering the schema is \
+     asking for. Name the destination's version 7 function with \
+     with_uuid_v7_function_name(\"uuid7\"), which is what SQLean's uuid module calls its own."
+        .to_string()
+}
+
 /// Classifies a name no earlier arm recognised.
 ///
 /// The default is a hard error. Emitting an unrecognised name produces SQL
@@ -839,6 +864,7 @@ fn classify_unrecognised_function(
 fn declares_function_by_option(name: &str, options: &Pg2SqliteOptions) -> bool {
     let matches = |declared: &str| declared.to_ascii_lowercase() == name;
     matches(options.get_uuid_function_name())
+        || options.get_uuid_v7_function_name().is_some_and(matches)
         || options.get_uuid_text_to_blob_function_name().is_some_and(matches)
         || options.get_session_variables().iter().any(|m| matches(&m.sqlite_function))
 }

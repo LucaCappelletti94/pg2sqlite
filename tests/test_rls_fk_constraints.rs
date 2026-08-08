@@ -21,7 +21,7 @@ use helpers::{Count, establish_connection, set_session_user_id};
 fn translation_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string())
+        .with_uuid_v7_function_name("uuidv7")
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",

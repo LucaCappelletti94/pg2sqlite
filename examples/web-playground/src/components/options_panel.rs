@@ -25,6 +25,7 @@ pub fn OptionsPanel() -> Element {
                 UuidRepRow {}
                 ArrayRepRow {}
                 UuidFunctionRow {}
+                UuidV7FunctionRow {}
                 RlsAuditRow {}
                 SessionVarsRow {}
             }
@@ -136,6 +137,31 @@ fn UuidFunctionRow() -> Element {
                         let mut options = state.options;
                         let mut opts = options.read().clone();
                         opts.uuid_function_name = evt.value();
+                        options.set(opts);
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn UuidV7FunctionRow() -> Element {
+    let state: AppState = use_context();
+    let current = state.options.read().uuid_v7_function_name.clone();
+
+    rsx! {
+        div { class: "options-row",
+            span { class: "options-label", "UUID v7 function name" }
+            div { class: "options-control",
+                input {
+                    r#type: "text",
+                    placeholder: "uuid7",
+                    value: current,
+                    oninput: move |evt| {
+                        let mut options = state.options;
+                        let mut opts = options.read().clone();
+                        opts.uuid_v7_function_name = evt.value();
                         options.set(opts);
                     },
                 }

@@ -119,12 +119,40 @@ pub trait TranslationOptions {
     fn get_uuid_representation(&self) -> Option<UuidRepresentation>;
 
     #[must_use]
-    /// Sets the UUID generation function name; the runtime return type must
-    /// match the configured UUID representation.
+    /// Sets the name of the destination's random-UUID generator, which is what
+    /// `gen_random_uuid()`, `uuid_generate_v4()` and `uuidv4()` translate to.
+    /// The runtime return type must match the configured UUID representation.
+    ///
+    /// This does not answer `uuidv7()`, whose value is ordered by creation
+    /// time rather than random. That one has its own name, set through
+    /// [`with_uuid_v7_function_name`](TranslationOptions::with_uuid_v7_function_name).
     fn with_uuid_function_name(self, name: impl Into<String>) -> Self;
 
-    /// Returns the name of the function to use for UUID generation.
+    /// Returns the name of the function to use for random UUID generation.
     fn get_uuid_function_name(&self) -> &str;
+
+    #[must_use]
+    /// Sets the name of the destination's version 7 UUID generator, which is
+    /// what `uuidv7()` translates to.
+    ///
+    /// Unset by default, and `uuidv7()` is then refused rather than answered
+    /// with a random UUID, because the first 48 bits of a version 7 value are
+    /// the millisecond it was created and a schema asking for one is usually
+    /// buying that ordering. SQLite's bundled `uuid.c` has no version 7
+    /// generator at all, and SQLean's `uuid` module calls its own `uuid7`, so
+    /// the name is taken from the caller rather than assumed.
+    ///
+    /// # Example
+    /// ```
+    /// use pg2sqlite::prelude::*;
+    ///
+    /// let options = Pg2SqliteOptions::default().with_uuid_v7_function_name("uuid7");
+    /// assert_eq!(options.get_uuid_v7_function_name(), Some("uuid7"));
+    /// ```
+    fn with_uuid_v7_function_name(self, name: impl Into<String>) -> Self;
+
+    /// Returns the configured version 7 UUID generator name, if set.
+    fn get_uuid_v7_function_name(&self) -> Option<&str>;
 
     #[must_use]
     /// Sets a UDF name for converting text UUID literals to 16-byte BLOBs at

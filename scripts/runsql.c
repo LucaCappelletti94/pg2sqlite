@@ -50,6 +50,37 @@ static int register_statistical_aggregates(sqlite3 *db) {
     return SQLITE_OK;
 }
 
+/* The two UUID generators, registered as stubs returning distinct sixteen-byte
+ * blobs.
+ *
+ * SQLite ships neither: `uuid()` comes from the loadable `uuid.c` extension
+ * and a version 7 generator from sqlean. The values need only satisfy the
+ * length CHECK the translator puts on a UUID column and differ between calls,
+ * so a primary key does not collide for a reason unrelated to the version
+ * being checked.
+ */
+static void stub_uuid(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    static unsigned long long next = 1;
+    unsigned char value[16] = {0};
+    unsigned long long counter = next++;
+    (void)argc;
+    (void)argv;
+    for (int byte = 15; byte >= 8; byte--) {
+        value[byte] = (unsigned char)(counter & 0xff);
+        counter >>= 8;
+    }
+    sqlite3_result_blob(context, value, sizeof(value), SQLITE_TRANSIENT);
+}
+
+static int register_uuid_generators(sqlite3 *db) {
+    static const char *const names[] = {"uuid", "uuid7"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
+        int rc = sqlite3_create_function(db, names[i], 0, SQLITE_UTF8, NULL, stub_uuid, NULL, NULL);
+        if (rc != SQLITE_OK) return rc;
+    }
+    return SQLITE_OK;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: runsql <corpus>\n");
@@ -92,8 +123,9 @@ int main(int argc, char **argv) {
             failed++;
             continue;
         }
-        if (register_statistical_aggregates(db) != SQLITE_OK) {
-            printf("FAIL cannot register statistical aggregates :: %s\n", label);
+        if (register_statistical_aggregates(db) != SQLITE_OK ||
+            register_uuid_generators(db) != SQLITE_OK) {
+            printf("FAIL cannot register the stub functions :: %s\n", label);
             failed++;
             sqlite3_close(db);
             continue;

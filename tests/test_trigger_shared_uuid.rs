@@ -156,7 +156,7 @@ struct EntityInputInsert {
 fn test_trigger_translation_uses_last_insert_rowid() {
     let pg_sql = "
         CREATE TABLE entities (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            id UUID PRIMARY KEY DEFAULT uuidv7(),
             name TEXT NOT NULL
         );
 
@@ -166,7 +166,7 @@ fn test_trigger_translation_uses_last_insert_rowid() {
         );
 
         CREATE TABLE parent_relations (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            id UUID PRIMARY KEY DEFAULT uuidv7(),
             entity_id UUID NOT NULL REFERENCES entities(id),
             parent_name TEXT NOT NULL
         );
@@ -176,7 +176,7 @@ fn test_trigger_translation_uses_last_insert_rowid() {
         DECLARE
             v_new_id UUID;
         BEGIN
-            v_new_id := gen_random_uuid();
+            v_new_id := uuidv7();
 
             INSERT INTO entities (id, name) VALUES (v_new_id, NEW.name);
             INSERT INTO ownables (id, owner) VALUES (v_new_id, 'system');
@@ -194,7 +194,7 @@ fn test_trigger_translation_uses_last_insert_rowid() {
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string());
+        .with_uuid_v7_function_name("uuidv7");
 
     let translated = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap();
 
@@ -228,7 +228,7 @@ fn test_trigger_translation_uses_last_insert_rowid() {
 fn test_trigger_shared_uuid_works_in_sqlite() {
     let pg_sql = "
         CREATE TABLE entities (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            id UUID PRIMARY KEY DEFAULT uuidv7(),
             name TEXT NOT NULL
         );
 
@@ -242,7 +242,7 @@ fn test_trigger_shared_uuid_works_in_sqlite() {
         DECLARE
             v_new_id UUID;
         BEGIN
-            v_new_id := gen_random_uuid();
+            v_new_id := uuidv7();
 
             INSERT INTO entities (id, name) VALUES (v_new_id, NEW.name);
             INSERT INTO ownables (id, owner) VALUES (v_new_id, NEW.owner);
@@ -265,7 +265,7 @@ fn test_trigger_shared_uuid_works_in_sqlite() {
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string());
+        .with_uuid_v7_function_name("uuidv7");
 
     let translated = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap();
 
@@ -310,7 +310,7 @@ fn test_trigger_shared_uuid_works_in_sqlite() {
 fn test_trigger_three_tables_shared_uuid() {
     let pg_sql = "
         CREATE TABLE entities (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            id UUID PRIMARY KEY DEFAULT uuidv7(),
             name TEXT NOT NULL
         );
 
@@ -329,7 +329,7 @@ fn test_trigger_three_tables_shared_uuid() {
         DECLARE
             v_new_id UUID;
         BEGIN
-            v_new_id := gen_random_uuid();
+            v_new_id := uuidv7();
 
             INSERT INTO entities (id, name) VALUES (v_new_id, NEW.name);
             INSERT INTO ownables (id, owner) VALUES (v_new_id, 'system');
@@ -351,7 +351,7 @@ fn test_trigger_three_tables_shared_uuid() {
 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string());
+        .with_uuid_v7_function_name("uuidv7");
 
     let translated = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap();
 

@@ -23,6 +23,8 @@ mod emitted_corpus;
 #[path = "helpers/statistical_aggregates.rs"]
 mod statistical_aggregates;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use emitted_corpus::{CORPUS_GROUPS, FIXTURE, row_statements, sweep_options};
 use pg2sqlite::prelude::{Pg2Sqlite, TranslationOptions};
 use rusqlite::{Connection, functions::FunctionFlags};
@@ -67,6 +69,19 @@ fn sqlite_accepts(setup: &[String], stmts: &[String]) -> Result<(), String> {
     .map_err(|e| format!("pow UDF registration failed: {e}"))?;
     register_statistical_aggregates(&conn)
         .map_err(|e| format!("statistical aggregate registration failed: {e}"))?;
+    // The two UUID generators. Distinct sixteen-byte values, because the
+    // emitted column carries a length CHECK and often a primary key, so a
+    // constant would pass the first insert and fail the second for a reason
+    // that has nothing to do with the translation.
+    for name in ["uuid", "uuid7"] {
+        conn.create_scalar_function(name, 0, FunctionFlags::default(), |_| {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let mut value = [0u8; 16];
+            value[8..].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+            Ok(value.to_vec())
+        })
+        .map_err(|e| format!("{name} UDF registration failed: {e}"))?;
+    }
     for s in setup {
         conn.execute_batch(&format!("{s};")).map_err(|e| format!("setup rejected: {e}"))?;
     }
@@ -257,6 +272,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "rls-view-reads",
     "plpgsql-scanner-and-binding",
     "statistical-aggregates",
+    "uuid-version",
 ];
 
 #[test]

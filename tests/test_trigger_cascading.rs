@@ -189,7 +189,7 @@ FOR EACH ROW EXECUTE FUNCTION audit_inventory_creation();
     // Translate the SQL
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
-        .with_uuid_function_name("uuidv7".to_string());
+        .with_uuid_v7_function_name("uuidv7");
     let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
     // Snapshot the translated SQL for consistency checking
