@@ -70,6 +70,42 @@ SELECT extract(epoch from timestamp '2024-03-05 14:07:09.123456');
 -- SQLite:     1709647629.123
 ```
 
+PostgreSQL raises an error where SQLite quietly answers something. Dividing by zero gives NULL, a cast of text that does not parse gives whatever prefix did parse, and integer arithmetic that leaves the 64-bit range degrades to a float instead of failing. None of the three has a general translation, since the SQLite answer is produced by the engine rather than by anything the emitted SQL says.
+
+```sql
+SELECT 1 / 0;
+-- PostgreSQL: ERROR division by zero
+-- SQLite:     NULL
+
+SELECT CAST('12abc' AS INTEGER);
+-- PostgreSQL: ERROR invalid input syntax for type integer: "12abc"
+-- SQLite:     12
+
+SELECT 9223372036854775807 + 1;
+-- PostgreSQL: ERROR bigint out of range
+-- SQLite:     9.22337203685478e+18, and typeof() answers 'real'
+```
+
+A `NUMERIC(p,s)` column is the exception to the third: it is stored as a scaled integer under a `CHECK` that bounds it, so `NUMERIC(10,2)` emits `CHECK (amount BETWEEN -9999999999 AND 9999999999)` and overflowing it fails. An `INTEGER` or `BIGINT` column carries no such bound.
+
+Text comparison follows the collation. PostgreSQL uses the database's, which under a UTF-8 locale orders case-insensitively for the purpose of ranking letters, while SQLite's default `BINARY` collation compares byte by byte, so every upper-case letter sorts before every lower-case one. This reaches `ORDER BY`, `<`, `>`, `BETWEEN`, `MIN` and `MAX`, not only explicit comparisons.
+
+```sql
+SELECT 'a' < 'B';
+-- PostgreSQL under en_US.utf8: true
+-- SQLite:                      false
+```
+
+Declaring the PostgreSQL column or database `C` collation makes PostgreSQL compare byte by byte too, which is what SQLite already does.
+
+`now()` becomes `datetime('now')`, which answers UTC text with whole seconds. PostgreSQL answers a `timestamp with time zone` with microseconds, so the zone, the sub-second part and the type all differ. `CURRENT_TIMESTAMP` is passed through and answers the same UTC text.
+
+```sql
+SELECT now();
+-- PostgreSQL: 2026-08-08 15:08:14.548696+00
+-- translated: SELECT datetime('now')  ->  2026-08-08 15:08:14
+```
+
 ## License
 
 This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
