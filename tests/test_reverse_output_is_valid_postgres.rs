@@ -152,7 +152,11 @@ fn scalar_functions_reverse_to_postgres_spellings() {
         ("SELECT unhex(s) FROM t", Emits("decode")),
         ("SELECT unixepoch(s) FROM t", Emits("EXTRACT")),
         // Already correct.
-        ("SELECT group_concat(s, ',') FROM t", Emits("string_agg")),
+        ("SELECT group_concat(s, ',') FROM t", Emits("string_agg(s, ',')")),
+        // PostgreSQL has no one-argument string_agg, so the comma SQLite
+        // joins with is written out.
+        ("SELECT group_concat(s) FROM t", Emits("string_agg(s, ',')")),
+        ("SELECT group_concat(DISTINCT s) FROM t", Emits("string_agg(DISTINCT s, ',')")),
         ("SELECT instr(s, 'a') FROM t", Emits("POSITION")),
         ("SELECT unicode(s) FROM t", Emits("ascii")),
         ("SELECT min(n, 1) FROM t", Emits("LEAST")),

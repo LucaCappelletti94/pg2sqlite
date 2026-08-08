@@ -44,7 +44,6 @@ use crate::{
 /// Simple reverse renames: `(sqlite_name, pg_name)`.
 /// Checked before the main match for a compact fast path.
 const REVERSE_RENAMES: &[(&str, &str)] = &[
-    ("group_concat", "string_agg"),
     ("json_group_array", "json_agg"),
     ("json_group_object", "json_object_agg"),
     ("unicode", "ascii"),
@@ -116,6 +115,11 @@ pub enum FunctionReversal {
     ToDecodeHex,
     /// Translate unixepoch(x) to EXTRACT(EPOCH FROM x).
     ToExtractEpoch,
+    /// Translate `group_concat(x)` to `string_agg(x, ',')`.
+    ///
+    /// SQLite's one-argument spelling joins with a comma. PostgreSQL has no
+    /// one-argument `string_agg`, so the comma is written out.
+    ToStringAgg,
     /// Reject the named SQLite-only construct with the reason string.
     Reject(String),
 }
@@ -209,6 +213,9 @@ pub fn reverse_function(
     }
 
     match func_name.as_str() {
+        // group_concat(x) joins with a comma, and string_agg has no
+        // one-argument form, so the arity decides rather than the name.
+        "group_concat" => FunctionReversal::ToStringAgg,
         // datetime('now') -> NOW(), datetime(x) -> x AT TIME ZONE 'UTC'
         "datetime" => {
             if let FunctionArguments::List(list) = args
@@ -501,6 +508,18 @@ fn build_reverse_function(
     }))
 }
 
+/// Writes out the comma SQLite's one-argument `group_concat` joins with, since
+/// PostgreSQL's `string_agg` has no one-argument form.
+fn with_default_separator(mut reversed: Expr) -> Expr {
+    if let Expr::Function(function) = &mut reversed
+        && let FunctionArguments::List(list) = &mut function.args
+        && list.args.len() == 1
+    {
+        list.args.push(FunctionArg::Unnamed(FunctionArgExpr::Expr(string_literal(","))));
+    }
+    reversed
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn reverse_translate_function(
     func: &Function,
@@ -515,6 +534,15 @@ pub fn reverse_translate_function(
                 schema,
                 options,
             )
+        }
+        FunctionReversal::ToStringAgg => {
+            let reversed = build_reverse_function(
+                ObjectName::from(vec![Ident::new("string_agg")]),
+                func,
+                schema,
+                options,
+            )?;
+            Ok(with_default_separator(reversed))
         }
         FunctionReversal::ToNow => {
             // datetime('now') -> NOW()
