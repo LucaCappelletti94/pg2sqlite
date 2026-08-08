@@ -28,7 +28,7 @@ use crate::{
         datetime_helpers::{
             DatePartKey, build_date_part_expr, build_date_trunc_quarter_call,
             build_date_trunc_week_call, build_date_trunc_year_span_call, build_strftime_call,
-            parse_date_part_key,
+            parse_date_part_key, pg_to_char_format_to_strftime,
         },
         expr_helpers::case_when,
         function_helpers::{
@@ -891,61 +891,6 @@ fn function_arg_count(args: &FunctionArguments) -> Option<i32> {
     }
 }
 
-/// Convert a PostgreSQL `TO_CHAR` timestamp format string to a SQLite
-/// `strftime` format.
-///
-/// Applies longest-first substitutions to avoid partial matches (`YYYY` before
-/// `YY`, `HH24`/`HH12` before `HH`), then validates that only known strftime
-/// specifiers and safe separator characters remain.
-fn pg_timestamp_format_to_strftime(pg_format: &str) -> Result<String, crate::errors::Error> {
-    const REPLACEMENTS: &[(&str, &str)] = &[
-        ("YYYY", "%Y"),
-        ("HH24", "%H"),
-        ("HH12", "%I"),
-        ("YY", "%y"),
-        ("MM", "%m"),
-        ("DD", "%d"),
-        ("HH", "%I"),
-        ("MI", "%M"),
-        ("SS", "%S"),
-    ];
-    let mut result = pg_format.to_string();
-    for (pg_code, strftime_code) in REPLACEMENTS {
-        result = result.replace(pg_code, strftime_code);
-    }
-    // Validate: every % must be followed by a known specifier letter;
-    // all other characters must be safe separators.
-    let safe_specs: &[u8] = b"YymMdHIMS";
-    let is_safe_sep = |c: char| matches!(c, '-' | ':' | '.' | '/' | ',' | '_' | ' ' | 'T');
-    let mut chars = result.char_indices().peekable();
-    while let Some((_i, c)) = chars.next() {
-        if c == '%' {
-            match chars.next() {
-                Some((_, spec)) if safe_specs.contains(&(spec as u8)) => {}
-                Some((_, spec)) => {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                        "to_char format '{pg_format}' produces unsupported strftime specifier \
-                         '%{spec}'. Supported PG codes: YYYY, YY, MM, DD, HH24, HH12, HH, \
-                         MI, SS. For number formatting use printf() or CAST."
-                    )));
-                }
-                None => {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                        "to_char format '{pg_format}' ends with a bare '%'"
-                    )));
-                }
-            }
-        } else if !is_safe_sep(c) {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                "to_char format '{pg_format}' contains unsupported character '{c}'. \
-                 Supported separators: - : . / , _ (space) T. \
-                 For number formatting codes (9, 0, FM, L, ...) use printf() or CAST."
-            )));
-        }
-    }
-    Ok(result)
-}
-
 /// True when `expr` already carries JSON, so `to_json` has nothing to convert.
 ///
 /// Recognised syntactically, which covers what this translator itself emits and
@@ -1710,7 +1655,7 @@ impl Translator for Function {
                         ));
                     }
                 };
-                let mapped_format = pg_timestamp_format_to_strftime(&format_str)?;
+                let mapped_format = pg_to_char_format_to_strftime(&format_str)?;
                 let translated_ts = ts_expr.translate(schema, options)?;
                 Ok(build_strftime_call(&mapped_format, translated_ts))
             }

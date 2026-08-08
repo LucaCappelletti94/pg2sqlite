@@ -14,6 +14,7 @@ use alloc::{
 use sqlparser::ast::{BinaryOperator, CastKind, DataType, DateTimeField, Expr};
 
 use super::function_helpers::{integer_literal, simple_function_expr, string_literal};
+use crate::errors::Error;
 
 /// Canonical date/time part keys used for shared mappings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +154,93 @@ pub(crate) fn datetime_field_from_strftime_format(format: &str) -> Option<DateTi
         "%j" => Some(DateTimeField::DayOfYear),
         _ => None,
     }
+}
+
+/// The `to_char` template codes and the `strftime` specifiers they lower onto.
+///
+/// Read forwards by the `to_char` translation and backwards by the `strftime`
+/// reversal, so the two cannot drift apart. Longest codes first, since the
+/// forward pass substitutes in order and `HH24` must be taken before `HH`.
+const TO_CHAR_CODES: &[(&str, &str)] = &[
+    ("YYYY", "%Y"),
+    ("HH24", "%H"),
+    ("HH12", "%I"),
+    ("YY", "%y"),
+    ("MM", "%m"),
+    ("DD", "%d"),
+    ("HH", "%I"),
+    ("MI", "%M"),
+    ("SS", "%S"),
+];
+
+/// Characters a template may carry between codes.
+const TO_CHAR_SEPARATORS: &[char] = &['-', ':', '.', '/', ',', '_', ' ', 'T'];
+
+/// Lower a PostgreSQL `to_char` template onto a SQLite `strftime` format.
+pub(crate) fn pg_to_char_format_to_strftime(pg_format: &str) -> Result<String, Error> {
+    let mut result = pg_format.to_string();
+    for (pg_code, strftime_code) in TO_CHAR_CODES {
+        result = result.replace(pg_code, strftime_code);
+    }
+    // Every `%` must now introduce a specifier this mapping produced, and
+    // everything else must be one of the separators.
+    let mut chars = result.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some(spec) if "YymMdHIMS".contains(spec) => {}
+                Some(spec) => {
+                    return Err(Error::UnsupportedSQLiteFeature(format!(
+                        "to_char format '{pg_format}' produces unsupported strftime specifier \
+                         '%{spec}'. Supported PG codes: YYYY, YY, MM, DD, HH24, HH12, HH, MI, \
+                         SS. For number formatting use printf() or CAST."
+                    )));
+                }
+                None => {
+                    return Err(Error::UnsupportedSQLiteFeature(format!(
+                        "to_char format '{pg_format}' ends with a bare '%'"
+                    )));
+                }
+            }
+        } else if !TO_CHAR_SEPARATORS.contains(&c) {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "to_char format '{pg_format}' contains unsupported character '{c}'. \
+                 Supported separators: - : . / , _ (space) T. \
+                 For number formatting codes (9, 0, FM, L, ...) use printf() or CAST."
+            )));
+        }
+    }
+    Ok(result)
+}
+
+/// The `to_char` template that answers what `format` answers, when every
+/// specifier in it has one.
+///
+/// `%y` is absent on purpose: SQLite has no such specifier and answers NULL for
+/// it, so calling it `YY` would equate a null with two digits. A `T` comes back
+/// quoted, because PostgreSQL reads a bare one as the start of `TH` or `TM`.
+#[must_use]
+pub(crate) fn strftime_format_to_pg_to_char(format: &str) -> Option<String> {
+    let mut template = String::with_capacity(format.len());
+    let mut chars = format.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let spec = chars.next()?;
+            // SQLite has no `%y`, so there is no call here to name.
+            if spec == 'y' {
+                return None;
+            }
+            let (code, _) = TO_CHAR_CODES.iter().find(|(_, strftime)| strftime.ends_with(spec))?;
+            template.push_str(code);
+        } else if c == 'T' {
+            template.push_str("\"T\"");
+        } else if TO_CHAR_SEPARATORS.contains(&c) {
+            template.push(c);
+        } else {
+            return None;
+        }
+    }
+    Some(template)
 }
 
 /// Build `strftime('<format>', <expr>)`.

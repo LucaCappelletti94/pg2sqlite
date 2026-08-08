@@ -23,7 +23,7 @@ use super::helpers::{Reverse, reverse_translate_window_type};
 use crate::{
     errors::Error,
     impls::{
-        datetime_helpers::datetime_field_from_strftime_format,
+        datetime_helpers::{datetime_field_from_strftime_format, strftime_format_to_pg_to_char},
         function_helpers::{
             extract_exactly, function_arg_expr_or_err, integer_literal, simple_function_expr,
             string_literal,
@@ -120,6 +120,9 @@ pub enum FunctionReversal {
     /// SQLite's one-argument spelling joins with a comma. PostgreSQL has no
     /// one-argument `string_agg`, so the comma is written out.
     ToStringAgg,
+    /// Translate `strftime(fmt, x)` to `to_char(x, template)`, the string
+    /// naming the PostgreSQL template.
+    ToChar(String),
     /// Reject the named SQLite-only construct with the reason string.
     Reject(String),
 }
@@ -143,6 +146,55 @@ fn reverse_strftime_to_date_trunc_field(format: &str) -> Option<&'static str> {
         "%Y-%m-%d %H:%M:%S" => Some("second"),
         _ => None,
     }
+}
+
+/// What a `strftime` call becomes, or why it cannot become anything.
+///
+/// PostgreSQL has no `strftime`, so a format outside the three tables, a
+/// format that is not a literal, and the extra modifier arguments SQLite
+/// allows after the timestamp all have to be refused rather than forwarded.
+fn reverse_strftime(args: &FunctionArguments) -> FunctionReversal {
+    let FunctionArguments::List(list) = args else {
+        return FunctionReversal::Reject(strftime_rejection("a call with no argument list"));
+    };
+    if list.args.len() != 2 {
+        return FunctionReversal::Reject(strftime_rejection(
+            "a call with anything but a format and a timestamp, since SQLite's trailing date \
+             modifiers have no PostgreSQL form",
+        ));
+    }
+    let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+        value: Value::SingleQuotedString(format),
+        ..
+    })))) = list.args.first()
+    else {
+        return FunctionReversal::Reject(strftime_rejection(
+            "a format that is not a string literal, which cannot be read at translation time",
+        ));
+    };
+
+    if let Some(field) = reverse_strftime_to_date_trunc_field(format) {
+        return FunctionReversal::ToDateTrunc(field.to_string());
+    }
+    if let Some(field) = datetime_field_from_strftime_format(format) {
+        return FunctionReversal::ToExtract(field);
+    }
+    if let Some(template) = strftime_format_to_pg_to_char(format) {
+        return FunctionReversal::ToChar(template);
+    }
+    FunctionReversal::Reject(strftime_rejection(&format!("the format '{format}'")))
+}
+
+/// The refusal every unreversible `strftime` shares, which names what does
+/// reverse so the author can pick one.
+fn strftime_rejection(subject: &str) -> String {
+    format!(
+        "strftime has no PostgreSQL equivalent, and this is {subject}. These reverse: the six \
+         truncating formats ('%Y-01-01 00:00:00', '%Y-%m-01 00:00:00', '%Y-%m-%d 00:00:00', \
+         '%Y-%m-%d %H:00:00', '%Y-%m-%d %H:%M:00', '%Y-%m-%d %H:%M:%S') become date_trunc, a \
+         single field (%Y %m %d %H %M %S %f %s %V %G %u %w %j) becomes EXTRACT, and a format \
+         built from %Y %m %d %H %I %M %S with separators becomes to_char."
+    )
 }
 
 /// The PostgreSQL zone for a SQLite `datetime` timezone modifier.
@@ -296,22 +348,8 @@ pub fn reverse_function(
         }
         // strftime('%Y-01-01 00:00:00', expr) -> date_trunc('year', expr)
         // strftime('%Y', expr) -> EXTRACT(YEAR FROM expr)
-        "strftime" => {
-            if let FunctionArguments::List(list) = args
-                && list.args.len() == 2
-                && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                    ValueWithSpan { value: Value::SingleQuotedString(format), .. },
-                )))) = list.args.first()
-            {
-                if let Some(field) = reverse_strftime_to_date_trunc_field(format) {
-                    return FunctionReversal::ToDateTrunc(field.to_string());
-                }
-                if let Some(field) = datetime_field_from_strftime_format(format) {
-                    return FunctionReversal::ToExtract(field);
-                }
-            }
-            FunctionReversal::PassThrough
-        }
+        // strftime('%Y-%m-%d', expr) -> to_char(expr, 'YYYY-MM-DD')
+        "strftime" => reverse_strftime(args),
         // INSTR(str, substr) -> POSITION(substr IN str)
         "instr" => FunctionReversal::ToPosition,
         // min(a, b, ...) -> LEAST(a, b, ...)
@@ -543,6 +581,13 @@ pub fn reverse_translate_function(
                 options,
             )?;
             Ok(with_default_separator(reversed))
+        }
+        FunctionReversal::ToChar(template) => {
+            // SQLite writes the format first, PostgreSQL writes it second.
+            let exprs = extract_exactly(&func.args, 2, "strftime")?;
+            let timestamp =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[1], schema, options)?;
+            Ok(simple_function_expr("to_char", vec![timestamp, string_literal(&template)], None))
         }
         FunctionReversal::ToNow => {
             // datetime('now') -> NOW()

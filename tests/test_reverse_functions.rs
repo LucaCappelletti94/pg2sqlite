@@ -140,12 +140,13 @@ fn reverse_strftime_week() {
 }
 
 /// `%W` is the Sunday based week and has no PostgreSQL field: `EXTRACT(WEEK)`
-/// is the ISO one, so reversing it that way would change the answer.
+/// is the ISO one, so reversing it that way would change the answer. Nothing
+/// else claims it either, so it is refused.
 #[test]
 fn reverse_strftime_sunday_week_is_not_extract_week() {
-    let pg = reverse(EVENTS, "SELECT strftime('%W', created_at) FROM events;");
-    assert!(!pg.contains("EXTRACT(WEEK"), "a Sunday based week is not the ISO one: {pg}");
-    assert_parses_as_pg(&pg);
+    let error = reverse_err(EVENTS, "SELECT strftime('%W', created_at) FROM events;");
+    assert!(!error.contains("EXTRACT(WEEK"), "a Sunday based week is not the ISO one: {error}");
+    assert!(error.contains("%W"), "the message names the format: {error}");
 }
 
 #[test]
@@ -271,13 +272,13 @@ fn zone_and_epoch_spellings_still_reverse() {
     assert_parses_as_pg(&epoch);
 }
 
+/// `%X` is not a format any of the three tables claims, and PostgreSQL has no
+/// `strftime` to fall back on, so it is refused rather than forwarded.
 #[test]
 fn reverse_strftime_unsupported_format() {
-    // %X is not a recognized simple format
-    let pg = reverse(EVENTS, "SELECT strftime('%X', created_at) FROM events;");
-    // Should pass through as strftime since format isn't recognized
-    assert!(pg.contains("strftime"), "Expected strftime passthrough: {pg}");
-    assert_parses_as_pg(&pg);
+    let error = reverse_err(EVENTS, "SELECT strftime('%X', created_at) FROM events;");
+    assert!(error.contains("%X"), "the message names the format: {error}");
+    assert!(error.contains("date_trunc"), "the message lists what does reverse: {error}");
 }
 
 #[test]

@@ -179,6 +179,27 @@ fn sqlite_only_functions_are_rejected() {
     ]);
 }
 
+/// PostgreSQL has no `strftime`. Three tables decide what one becomes, and
+/// every format outside them is refused rather than forwarded.
+#[test]
+fn strftime_becomes_a_postgres_spelling_or_nothing() {
+    check(&[
+        ("SELECT strftime('%Y-01-01 00:00:00', s) FROM t", Emits("date_trunc('year', s)")),
+        ("SELECT strftime('%Y', s) FROM t", Emits("EXTRACT(YEAR FROM s)")),
+        ("SELECT strftime('%Y-%m-%d', s) FROM t", Emits("to_char(s, 'YYYY-MM-DD')")),
+        ("SELECT strftime('%H:%M:%S', s) FROM t", Emits("to_char(s, 'HH24:MI:SS')")),
+        // PostgreSQL reads a bare template `T` as the start of `TH` or `TM`.
+        ("SELECT strftime('%Y-%m-%dT%H', s) FROM t", Emits("to_char(s, 'YYYY-MM-DD\"T\"HH24')")),
+        // The Sunday based week, which no PostgreSQL field matches.
+        ("SELECT strftime('%W', s) FROM t", Rejected),
+        // SQLite has no `%y`, so the call answers NULL and names nothing.
+        ("SELECT strftime('%y', s) FROM t", Rejected),
+        // SQLite's trailing date modifiers have no PostgreSQL form.
+        ("SELECT strftime('%Y', s, 'utc') FROM t", Rejected),
+        ("SELECT strftime(s, s) FROM t", Rejected),
+    ]);
+}
+
 #[test]
 fn glob_has_no_postgres_operator() {
     check(&[
