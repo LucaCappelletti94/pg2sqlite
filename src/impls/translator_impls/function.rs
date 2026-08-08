@@ -252,10 +252,17 @@ fn truncate_to_scale(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
-    // A scale beyond `i32` is not one `literal_power_of_ten` can build, so it
-    // takes the computed path exactly as a non-literal scale does.
-    let factor = match integer_literal_value(scale).and_then(|n| i32::try_from(n).ok()) {
-        Some(digits) => number_literal(&literal_power_of_ten(digits)),
+    // A literal scale outside the foldable range is refused rather than sent
+    // down the computed path: `pow(10, 400)` is infinity, which reaches the
+    // same wrong answer by a longer route.
+    let factor = match integer_literal_value(scale) {
+        Some(places) => {
+            let digits = i32::try_from(places)
+                .ok()
+                .filter(|digits| FOLDABLE_SCALES.contains(digits))
+                .ok_or_else(|| unfoldable_scale_error(places))?;
+            number_literal(&literal_power_of_ten(digits))
+        }
         None if options.are_math_functions_available() => {
             simple_function_expr(
                 "pow",
@@ -292,13 +299,26 @@ fn truncate_to_scale(
     })))
 }
 
-/// The decimal text of `10^digits` with ten fractional places, the exact
-/// output the old `format!("{:.10}", 10f64.powi(digits))` produced over the
-/// scales `trunc` meets, built without `powi`, which is a `std` method on a
-/// primitive and broke the `no_std` build (R92). Ten fractional places also
-/// bound the negative side: below `10^-10` the old float formatting rounded
-/// to zero, and this does the same.
+/// The scales `truncate_to_scale` can fold, which are properties of the
+/// destination rather than a chosen comfort.
+///
+/// Above 18 the `CAST(... AS INTEGER)` cannot hold `10^n` times an operand of
+/// magnitude one or more and saturates at the i64 maximum, measured:
+/// `trunc(1.5, 18)` answers 1.5 while `trunc(1.5, 19)` answers
+/// 0.9223372036854776. Below -323 the factor is zero as a double, `1e-323`
+/// being the last nonzero one, so the shape would divide by zero.
+const FOLDABLE_SCALES: core::ops::RangeInclusive<i32> = -323..=18;
+
+/// The exact decimal text of `10^digits`, for a `digits` inside
+/// [`FOLDABLE_SCALES`].
+///
+/// Built by hand rather than with `powi`, which is a `std` method on a
+/// primitive and broke the no_std build (R92). It used to stop at ten
+/// fractional places, reproducing what `format!("{:.10}", ...)` had printed,
+/// which made every scale below -10 a literal zero and the emitted statement a
+/// division by it.
 fn literal_power_of_ten(digits: i32) -> String {
+    debug_assert!(FOLDABLE_SCALES.contains(&digits), "caller bounds the scale: {digits}");
     if digits >= 0 {
         let mut text = String::from("1");
         for _ in 0..digits {
@@ -307,15 +327,26 @@ fn literal_power_of_ten(digits: i32) -> String {
         text.push_str(".0000000000");
         text
     } else {
-        let mut decimals = ['0'; 10];
-        let position = digits.unsigned_abs() as usize;
-        if (1..=10).contains(&position) {
-            decimals[position - 1] = '1';
-        }
         let mut text = String::from("0.");
-        text.extend(decimals);
+        for _ in 1..digits.unsigned_abs() {
+            text.push('0');
+        }
+        text.push('1');
         text
     }
+}
+
+/// Refuses a literal scale the fold cannot serve.
+fn unfoldable_scale_error(places: i64) -> crate::errors::Error {
+    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        "trunc(x, {places}) cannot be translated. The translation multiplies by 10^{places}, \
+         cuts to a whole number and divides back, which holds only for {} to {} places: above \
+         that the cut saturates at the largest 64-bit integer and answers a fraction of the \
+         truncation, and below it the factor is zero as a double and the emitted statement \
+         divides by it. Round the value in the application, or use fewer places.",
+        FOLDABLE_SCALES.start(),
+        FOLDABLE_SCALES.end(),
+    ))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2198,14 +2229,26 @@ mod tests {
         assert_eq!(wrapped.to_string(), "COALESCE(col, '')");
     }
 
+    /// Flipped F35 pin. This asserted that the factor's *text* matched
+    /// `format!("{:.10}", 10f64.powi(digits))` down to -12, which pinned a
+    /// rendering rather than a number and which is exactly the clamp that made
+    /// every scale below -10 a literal zero.
     #[test]
-    fn literal_power_of_ten_matches_the_float_formatting_it_replaced() {
-        for digits in -12..=18 {
-            assert_eq!(
-                super::literal_power_of_ten(digits),
-                format!("{:.10}", 10f64.powi(digits)),
-                "digits = {digits}"
-            );
+    fn literal_power_of_ten_writes_the_exact_factor() {
+        for digits in -323..=18 {
+            let written: f64 =
+                super::literal_power_of_ten(digits).parse().expect("the factor parses");
+            // Against the decimal rather than `powi`, which underflows to zero
+            // at -323 where the written literal is exact. That limit is what
+            // the clamp inherited.
+            let expected: f64 = format!("1e{digits}").parse().expect("the reference parses");
+            // Bit identity: the two spellings must denote the same double, not
+            // merely a close one.
+            assert_eq!(written.to_bits(), expected.to_bits(), "digits = {digits}");
         }
+
+        // The clamp used to round this one away entirely.
+        assert_eq!(super::literal_power_of_ten(-11), "0.00000000001");
+        assert_eq!(format!("{:.10}", 10f64.powi(-11)), "0.0000000000");
     }
 }
