@@ -489,12 +489,26 @@ fn array_lower_bound(array: Expr) -> Expr {
 }
 
 /// `array_to_string(a, sep)`:
-/// `(SELECT group_concat(value, sep ORDER BY key) FROM json_each(a))`.
+/// `CASE WHEN a IS NOT NULL THEN coalesce((SELECT group_concat(value, sep ORDER
+/// BY key) FROM json_each(a)), '') END`.
+///
+/// `group_concat` of zero rows is NULL where PostgreSQL answers the empty
+/// string, and an array is empty either because it holds nothing or because
+/// everything in it is NULL, which both engines skip. `coalesce` alone is not
+/// enough: `json_each` over a NULL array yields no rows either, so it would
+/// answer the empty string where PostgreSQL answers NULL. Only the array says
+/// which of the two happened, so it is read twice, once to ask and once to
+/// walk.
 #[must_use]
 fn array_to_string(array: Expr, separator: Expr) -> Expr {
-    scalar_subquery_over_json_each(
+    let joined = scalar_subquery_over_json_each(
         ordered_aggregate("group_concat", vec![json_each_column(VALUE_COLUMN), separator]),
-        array,
+        array.clone(),
+        None,
+    );
+    case_when(
+        Expr::IsNotNull(Box::new(array)),
+        simple_function_expr("coalesce", vec![joined, string_literal("")], None),
         None,
     )
 }

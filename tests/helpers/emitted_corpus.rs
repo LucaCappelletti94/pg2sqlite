@@ -751,4 +751,13 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT cbrt(r) FROM t;",
             ],
     ),
+    (
+        "array-join",
+        &[
+                // The three outcomes: something to join, nothing to join, and
+                // no array at all.
+                "SELECT array_to_string(tags, ',') FROM t;",
+                "SELECT array_to_string(ARRAY[]::text[], ','), array_to_string(ARRAY['a'], ',');",
+            ],
+    ),
 ];

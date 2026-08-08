@@ -276,6 +276,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "case-folding",
     "subsecond-precision",
     "cube-root",
+    "array-join",
 ];
 
 #[test]

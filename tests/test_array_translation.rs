@@ -248,8 +248,8 @@ fn array_to_string_joins_in_element_order() {
         run_translated(&format!(
             "{TAGS_FIXTURE}SELECT array_to_string(tags, ',') FROM t ORDER BY id;"
         )),
-        vec![Some("a,b,a".to_string()), None],
-        "an empty array joins to no rows, so group_concat yields NULL"
+        vec![Some("a,b,a".to_string()), Some(String::new())],
+        "an empty array joins to the empty string, as PostgreSQL does"
     );
 }
 
