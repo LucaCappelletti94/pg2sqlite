@@ -730,4 +730,16 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT lower(s), upper(s) FROM t WHERE s ILIKE '%ß%';",
             ],
     ),
+    (
+        "subsecond-precision",
+        &[
+                // The four sites that used to round to whole seconds, plus the
+                // NULL guard the same builder grew.
+                "SELECT extract(epoch from ts), date_part('epoch', ts) FROM t;",
+                "SELECT to_timestamp(r) FROM t;",
+                "SELECT make_time(8, 15, 0.5), make_time(8, 15, 7);",
+                "SELECT make_timestamp(2024, 3, 5, 14, 7, 9.5), make_date(2024, 3, 5);",
+                "SELECT make_time(n, n, r) FROM t;",
+            ],
+    ),
 ];

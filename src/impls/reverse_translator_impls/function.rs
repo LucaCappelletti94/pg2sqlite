@@ -239,6 +239,21 @@ pub fn reverse_function(
                     return FunctionReversal::ToTimestampFromEpoch;
                 }
             }
+            // `datetime(e, 'unixepoch', 'subsec')` is the same conversion with
+            // the fraction kept, which `to_timestamp` carries anyway.
+            if let FunctionArguments::List(list) = args
+                && list.args.len() == 3
+                && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                    ValueWithSpan { value: Value::SingleQuotedString(epoch), .. },
+                )))) = list.args.get(1)
+                && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                    ValueWithSpan { value: Value::SingleQuotedString(subsec), .. },
+                )))) = list.args.get(2)
+                && epoch == "unixepoch"
+                && subsec == "subsec"
+            {
+                return FunctionReversal::ToTimestampFromEpoch;
+            }
             // Anything else has no PostgreSQL spelling: PostgreSQL has no
             // datetime function, so a call that is neither a zone shift nor
             // an epoch conversion cannot be emitted. The refusal names the
@@ -881,10 +896,28 @@ pub fn reverse_translate_function(
             Ok(simple_function_expr("decode", vec![inner, string_literal("hex")], None))
         }
         FunctionReversal::ToExtractEpoch => {
-            // unixepoch(x) -> EXTRACT(EPOCH FROM x)
-            let exprs = extract_exactly(&func.args, 1, "unixepoch")?;
+            // unixepoch(x) and unixepoch(x, 'subsec') -> EXTRACT(EPOCH FROM x).
+            // The forward direction emits the second form, since the first
+            // drops the fraction.
+            let exprs = function_argument_exprs(&func.args);
+            let value = match exprs.as_slice() {
+                [value] => value,
+                [
+                    value,
+                    Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString(modifier), ..
+                    }),
+                ] if modifier == "subsec" => value,
+                _ => {
+                    return Err(Error::UnsupportedSQLiteFeature(
+                        "unixepoch() reverses only as unixepoch(x) or unixepoch(x, 'subsec'), \
+                         which are the two forms EXTRACT(EPOCH FROM x) covers."
+                            .to_string(),
+                    ));
+                }
+            };
             let inner =
-                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+                crate::prelude::ReverseTranslator::reverse_translate(*value, schema, options)?;
             Ok(Expr::Extract {
                 field: DateTimeField::Epoch,
                 syntax: ExtractSyntax::From,

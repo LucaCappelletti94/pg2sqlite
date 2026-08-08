@@ -25,9 +25,7 @@ use sqlparser::ast::{
 
 use crate::{
     impls::{
-        datetime_helpers::{
-            DatePartKey, build_strftime_call, datetime_field_key, strftime_mapping_for_key,
-        },
+        datetime_helpers::{DatePartKey, build_date_part_expr, datetime_field_key},
         expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq},
         function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
         interval::interval_date_modifiers,
@@ -248,18 +246,7 @@ fn translate_extract(
     {
         return result;
     }
-    let (format_str, cast_type) = strftime_mapping_for_key(key);
-
-    // Build: CAST(strftime('format', expr) AS cast_type)
-    let translated_expr = expr.translate(schema, options)?;
-    let strftime_call = build_strftime_call(format_str, translated_expr);
-
-    Ok(Expr::Cast {
-        expr: Box::new(strftime_call),
-        data_type: cast_type,
-        format: None,
-        kind: CastKind::Cast,
-    })
+    Ok(build_date_part_expr(key, expr.translate(schema, options)?))
 }
 /// True when `expr` is an array: an `ARRAY[...]` literal, or a column declared
 /// with an array type.

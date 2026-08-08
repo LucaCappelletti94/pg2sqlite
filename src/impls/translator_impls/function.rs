@@ -26,9 +26,9 @@ use super::{
 use crate::{
     impls::{
         datetime_helpers::{
-            DatePartKey, build_date_trunc_quarter_call, build_date_trunc_week_call,
-            build_date_trunc_year_span_call, build_strftime_call, parse_date_part_key,
-            strftime_mapping_for_key,
+            DatePartKey, build_date_part_expr, build_date_trunc_quarter_call,
+            build_date_trunc_week_call, build_date_trunc_year_span_call, build_strftime_call,
+            parse_date_part_key,
         },
         expr_helpers::case_when,
         function_helpers::{
@@ -40,7 +40,7 @@ use crate::{
             translate_function_arguments, unanimous_declared,
         },
         sqlite_functions::is_sqlite_builtin,
-        temporal_arithmetic::epoch_of_temporal_difference,
+        temporal_arithmetic::{epoch_of_temporal_difference, subsecond_timestamp_from_epoch},
     },
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
@@ -79,8 +79,15 @@ enum FunctionTranslation {
     ToIntegerDiv,
     /// Transform trunc(x) to CAST(x AS INTEGER), trunc(x, n) to round(x, n)
     ToTrunc,
-    /// Transform make_date/make_time/make_timestamp to printf(format, args...)
-    ToMakePrintf { format: &'static str, arg_count: usize, func_label: &'static str },
+    /// Transform make_date/make_time/make_timestamp to a printf over the parts.
+    /// `format` covers every argument except a trailing fractional-seconds
+    /// one, which `fractional_seconds` marks and which is rendered separately.
+    ToMakePrintf {
+        format: &'static str,
+        arg_count: usize,
+        func_label: &'static str,
+        fractional_seconds: bool,
+    },
     /// Transform json_extract_path(j, keys...) to json_extract(j, '$.k1.k2...')
     ToJsonExtractPath,
     /// Transform `jsonb_set` and `jsonb_insert` to the `json_set`,
@@ -451,16 +458,19 @@ fn translate_function(
             format: "%04d-%02d-%02d",
             arg_count: 3,
             func_label: "make_date",
+            fractional_seconds: false,
         },
         "make_time" => FunctionTranslation::ToMakePrintf {
-            format: "%02d:%02d:%02d",
+            format: "%02d:%02d:",
             arg_count: 3,
             func_label: "make_time",
+            fractional_seconds: true,
         },
         "make_timestamp" => FunctionTranslation::ToMakePrintf {
-            format: "%04d-%02d-%02d %02d:%02d:%02d",
+            format: "%04d-%02d-%02d %02d:%02d:",
             arg_count: 6,
             func_label: "make_timestamp",
+            fractional_seconds: true,
         },
         // round over a NUMERIC needs the column's scale, so it is decided at
         // emission where the schema is in hand.
@@ -1167,6 +1177,73 @@ fn json_path_not_literal(label: &str, path: &Expr) -> crate::errors::Error {
     ))
 }
 
+/// `rtrim(rtrim(x, '0'), '.')`, which turns `09.500` into `09.5` and `09.000`
+/// into `09`.
+fn trim_trailing_zeros(rendered: Expr) -> Expr {
+    let without_zeros = simple_function_expr("rtrim", vec![rendered, string_literal("0")], None);
+    simple_function_expr("rtrim", vec![without_zeros, string_literal(".")], None)
+}
+
+/// `make_date`, `make_time` and `make_timestamp` over their already-translated
+/// parts.
+///
+/// Two things `printf` alone gets wrong. It renders a NULL argument as zero,
+/// so any NULL used to produce a plausible wrong string where PostgreSQL
+/// answers NULL, which the guard fixes. And `%02d` truncates the seconds,
+/// which is this item: the seconds are formatted to six decimal places and
+/// trimmed instead, so a whole second reads `07` and a fractional one keeps
+/// every digit PostgreSQL keeps.
+fn make_closed_form(format: &str, parts: &[Expr], fractional_seconds: bool) -> Expr {
+    let (head, seconds) = if fractional_seconds {
+        let (last, rest) = parts.split_last().expect("a fractional-seconds make has parts");
+        (rest, Some(last))
+    } else {
+        (parts, None)
+    };
+
+    let mut printf_args = vec![string_literal(format)];
+    printf_args.extend(head.iter().cloned());
+    let mut body = simple_function_expr("printf", printf_args, None);
+
+    if let Some(seconds) = seconds {
+        body = Expr::BinaryOp {
+            left: Box::new(body),
+            op: BinaryOperator::StringConcat,
+            right: Box::new(rendered_seconds(seconds)),
+        };
+    }
+
+    let present = parts
+        .iter()
+        .map(|part| Expr::IsNotNull(Box::new(part.clone())))
+        .reduce(|left, right| {
+            Expr::BinaryOp { left: Box::new(left), op: BinaryOperator::And, right: Box::new(right) }
+        })
+        .expect("a make function has at least one argument");
+    case_when(present, body, None)
+}
+
+/// The seconds slot: `07` when whole, `00.5` and `00.000001` when not.
+fn rendered_seconds(seconds: &Expr) -> Expr {
+    let is_whole = Expr::BinaryOp {
+        left: Box::new(seconds.clone()),
+        op: BinaryOperator::Eq,
+        right: Box::new(Expr::Cast {
+            expr: Box::new(seconds.clone()),
+            data_type: DataType::Integer(None),
+            format: None,
+            kind: CastKind::Cast,
+        }),
+    };
+    let whole = simple_function_expr("printf", vec![string_literal("%02d"), seconds.clone()], None);
+    let fractional = trim_trailing_zeros(simple_function_expr(
+        "printf",
+        vec![string_literal("%09.6f"), seconds.clone()],
+        None,
+    ));
+    case_when(is_whole, whole, Some(fractional))
+}
+
 /// `left(s, n)`: the first `n` characters, or all but the last `|n|` when `n`
 /// is negative.
 ///
@@ -1563,17 +1640,7 @@ impl Translator for Function {
                 {
                     return result;
                 }
-                let (format_str, cast_type) = strftime_mapping_for_key(key);
-
-                let translated_ts = ts_expr.translate(schema, options)?;
-                let strftime_call = build_strftime_call(format_str, translated_ts);
-
-                Ok(Expr::Cast {
-                    expr: Box::new(strftime_call),
-                    data_type: cast_type,
-                    format: None,
-                    kind: CastKind::Cast,
-                })
+                Ok(build_date_part_expr(key, ts_expr.translate(schema, options)?))
             }
             FunctionTranslation::ToChar => {
                 reject_over_on_scalar(&func)?;
@@ -1633,10 +1700,8 @@ impl Translator for Function {
                 Ok(right_closed_form(s, n))
             }
             FunctionTranslation::ToTimestampEpoch => {
-                // to_timestamp(epoch) → datetime(epoch, 'unixepoch')
                 let exprs = extract_exactly(&func.args, 1, "to_timestamp")?;
-                let epoch = exprs[0].translate(schema, options)?;
-                Ok(simple_function_expr("datetime", vec![epoch, string_literal("unixepoch")], None))
+                Ok(subsecond_timestamp_from_epoch(exprs[0].translate(schema, options)?))
             }
             FunctionTranslation::ToModulo => {
                 // mod(a, b) → (a % b)
@@ -1689,13 +1754,18 @@ impl Translator for Function {
                     }
                 }
             }
-            FunctionTranslation::ToMakePrintf { format, arg_count, func_label } => {
+            FunctionTranslation::ToMakePrintf {
+                format,
+                arg_count,
+                func_label,
+                fractional_seconds,
+            } => {
                 let exprs = extract_exactly(&func.args, arg_count, func_label)?;
-                let mut printf_args = vec![string_literal(format)];
-                for e in &exprs {
-                    printf_args.push(e.translate(schema, options)?);
-                }
-                Ok(simple_function_expr("printf", printf_args, None))
+                let translated = exprs
+                    .iter()
+                    .map(|e| e.translate(schema, options))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(make_closed_form(format, &translated, fractional_seconds))
             }
             FunctionTranslation::ToJsonExtractPath => {
                 // json_extract_path(j, 'k1', 'k2') → json_extract(j, '$.k1.k2')

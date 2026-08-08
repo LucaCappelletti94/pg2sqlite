@@ -274,6 +274,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "statistical-aggregates",
     "uuid-version",
     "case-folding",
+    "subsecond-precision",
 ];
 
 #[test]

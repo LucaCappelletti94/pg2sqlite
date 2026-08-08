@@ -22,6 +22,7 @@ use sqlparser::ast::{
 };
 
 use super::{
+    datetime_helpers::build_subsecond_unixepoch_call,
     function_helpers::{simple_function_expr, string_literal},
     shared_helpers::{function_argument_exprs, is_integral_expression, unanimous_declared},
 };
@@ -288,13 +289,36 @@ fn subsec_epoch_difference(
     // seconds, so it carries the fraction AND keeps the difference out of
     // integer division. Dropping it would make `extract(epoch from (a - b)) /
     // 60` divide as integers where PostgreSQL divides a numeric.
-    let subsec_epoch =
-        |value| simple_function_expr("unixepoch", vec![value, string_literal("subsec")], None);
     Ok(Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(subsec_epoch(left.translate(schema, options)?)),
+        left: Box::new(build_subsecond_unixepoch_call(left.translate(schema, options)?)),
         op: BinaryOperator::Minus,
-        right: Box::new(subsec_epoch(right.translate(schema, options)?)),
+        right: Box::new(build_subsecond_unixepoch_call(right.translate(schema, options)?)),
     })))
+}
+
+/// `to_timestamp(e)`: the instant `e` seconds after the epoch, rendered the
+/// way PostgreSQL renders it.
+///
+/// `'subsec'` is what keeps the fraction, and it always renders three decimal
+/// places, so `to_timestamp(1709647629)` would come out `...09.000` where
+/// PostgreSQL writes `...09`. Trimming the trailing zeros and then the point
+/// answers both cases, and the point stops the trim from eating a zero second.
+/// Equality against a translated timestamp literal, which keeps its own
+/// spelling, needs the two texts to agree.
+pub(crate) fn subsecond_timestamp_from_epoch(epoch: Expr) -> Expr {
+    let rendered = simple_function_expr(
+        "datetime",
+        vec![epoch, string_literal("unixepoch"), string_literal("subsec")],
+        None,
+    );
+    trim_trailing_zeros(rendered)
+}
+
+/// `rtrim(rtrim(x, '0'), '.')`, which turns `09.500` into `09.5` and `09.000`
+/// into `09`.
+fn trim_trailing_zeros(rendered: Expr) -> Expr {
+    let without_zeros = simple_function_expr("rtrim", vec![rendered, string_literal("0")], None);
+    simple_function_expr("rtrim", vec![without_zeros, string_literal(".")], None)
 }
 
 /// Restore the PostgreSQL spelling of whatever this module emitted.
@@ -304,9 +328,9 @@ fn subsec_epoch_difference(
 /// translator keeps each emission and its inverse in one file: a change to one
 /// that forgets the other is visible on the screen.
 ///
-/// The three, in the order they appear below: a day count between two dates, a
-/// date moved by whole days, and the seconds in a difference PostgreSQL
-/// answers as an interval.
+/// The four, in the order they appear below: a day count between two dates, a
+/// date moved by whole days, the seconds in a difference PostgreSQL answers as
+/// an interval, and an instant built from an epoch.
 pub(crate) fn reverse_temporal_arithmetic(
     expr: &Expr,
     schema: &ParserDB,
@@ -343,6 +367,10 @@ pub(crate) fn reverse_temporal_arithmetic(
         return Some(reversed_epoch_difference(from, subtracted, schema, options));
     }
 
+    if let Some(epoch) = trimmed_subsecond_datetime_argument(expr) {
+        return Some(reversed_to_timestamp(epoch, schema, options));
+    }
+
     None
 }
 
@@ -372,6 +400,54 @@ fn subsec_epoch_argument(expr: &Expr) -> Option<&Expr> {
         }
         _ => None,
     }
+}
+
+/// The epoch argument of `rtrim(rtrim(datetime(e, 'unixepoch', 'subsec'), '0'),
+/// '.')`.
+fn trimmed_subsecond_datetime_argument(expr: &Expr) -> Option<&Expr> {
+    let inner = rtrim_argument(expr, ".")?;
+    let rendered = rtrim_argument(inner, "0")?;
+    let Expr::Function(function) = rendered else { return None };
+    if !named(function, "datetime") {
+        return None;
+    }
+    match function_argument_exprs(&function.args).as_slice() {
+        [
+            epoch,
+            Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(unixepoch), .. }),
+            Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(subsec), .. }),
+        ] if unixepoch == "unixepoch" && subsec == "subsec" => Some(epoch),
+        _ => None,
+    }
+}
+
+/// The first argument of `rtrim(x, <cut>)`.
+fn rtrim_argument<'a>(expr: &'a Expr, cut: &str) -> Option<&'a Expr> {
+    let Expr::Function(function) = expr else { return None };
+    if !named(function, "rtrim") {
+        return None;
+    }
+    match function_argument_exprs(&function.args).as_slice() {
+        [value, Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(set), .. })]
+            if set == cut =>
+        {
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
+/// `to_timestamp(e)` over the reversed epoch.
+fn reversed_to_timestamp(
+    epoch: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, Error> {
+    Ok(simple_function_expr(
+        "to_timestamp",
+        vec![ReverseTranslator::reverse_translate(epoch, schema, options)?],
+        None,
+    ))
 }
 
 fn named(function: &Function, name: &str) -> bool {

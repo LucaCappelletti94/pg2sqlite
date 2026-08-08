@@ -94,6 +94,8 @@ pub(crate) fn strftime_mapping_for_key(key: DatePartKey) -> (&'static str, DataT
         DatePartKey::Second => ("%f", DataType::Real),
         DatePartKey::DayOfWeek => ("%w", DataType::Integer(None)),
         DatePartKey::DayOfYear => ("%j", DataType::Integer(None)),
+        // `build_date_part_expr` answers EPOCH before reaching here, so `%s`,
+        // which has no fractional part, is never emitted.
         DatePartKey::Epoch => ("%s", DataType::Real),
         // %V is the ISO week, Monday based, where %W is Sunday based and
         // disagrees at every year boundary. Same for %G against %Y and %u
@@ -102,6 +104,32 @@ pub(crate) fn strftime_mapping_for_key(key: DatePartKey) -> (&'static str, DataT
         DatePartKey::IsoYear => ("%G", DataType::Integer(None)),
         DatePartKey::IsoDayOfWeek => ("%u", DataType::Integer(None)),
     }
+}
+
+/// The whole of one date part, which for `EPOCH` is not a `strftime` call.
+///
+/// `strftime('%s', x)` answers whole seconds, so it drops the fraction
+/// PostgreSQL carries. `unixepoch(x, 'subsec')` keeps it, and is SQLite 3.42,
+/// inside the declared floor. SQLite holds milliseconds where PostgreSQL holds
+/// microseconds, so the two agree to three decimal places and no further.
+#[must_use]
+pub(crate) fn build_date_part_expr(key: DatePartKey, value_expr: Expr) -> Expr {
+    if key == DatePartKey::Epoch {
+        return build_subsecond_unixepoch_call(value_expr);
+    }
+    let (format_str, cast_type) = strftime_mapping_for_key(key);
+    Expr::Cast {
+        expr: Box::new(build_strftime_call(format_str, value_expr)),
+        data_type: cast_type,
+        format: None,
+        kind: CastKind::Cast,
+    }
+}
+
+/// `unixepoch(x, 'subsec')`, the seconds since the epoch with the fraction.
+#[must_use]
+pub(crate) fn build_subsecond_unixepoch_call(value_expr: Expr) -> Expr {
+    simple_function_expr("unixepoch", vec![value_expr, string_literal("subsec")], None)
 }
 
 /// Parse a SQLite `strftime` format into a PostgreSQL date-time field.

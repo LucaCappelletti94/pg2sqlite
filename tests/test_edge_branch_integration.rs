@@ -642,8 +642,8 @@ fn forward_expr_translation_covers_remaining_fts_extract_and_timezone_paths() {
     let translated_epoch =
         extract_epoch.translate(&schema, &options).expect("EXTRACT(EPOCH) should now be supported");
     assert!(
-        translated_epoch.to_string().contains("strftime('%s'"),
-        "EXTRACT(EPOCH) should use strftime('%s', ...), got: {translated_epoch}"
+        translated_epoch.to_string().contains("unixepoch(created_at, 'subsec')"),
+        "EXTRACT(EPOCH) should keep the fraction, got: {translated_epoch}"
     );
 
     // `created_at` is declared TEXT here, so the cast is what says which of the
