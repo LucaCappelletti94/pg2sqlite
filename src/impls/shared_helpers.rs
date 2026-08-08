@@ -19,7 +19,7 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     Assignment, AssignmentTarget, BinaryOperator, DataType, Expr, ExprWithAlias,
-    ExprWithAliasAndOrderBy, Fetch, FromTable, FunctionArg, FunctionArgExpr,
+    ExprWithAliasAndOrderBy, Fetch, FromTable, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentClause, FunctionArgumentList, FunctionArguments, GroupByExpr, HavingBound,
     Ident, Join, JoinConstraint, JoinOperator, LimitClause, ListAggOnOverflow, Measure,
     NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr,
@@ -172,6 +172,39 @@ pub(crate) fn referenced_column_name(expr: &Expr) -> Option<&str> {
         Expr::Nested(inner) => referenced_column_name(inner),
         _ => None,
     }
+}
+
+/// Every column name `expr` mentions, in the order it mentions them.
+///
+/// The plural sibling of [`referenced_column_name`], which answers for a single
+/// reference. A compound name contributes its last part, since the qualifier
+/// may be an alias, and anything that is not a reference contributes nothing.
+#[must_use]
+pub(crate) fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
+    match expr {
+        Expr::Identifier(ident) => vec![ident.value.clone()],
+        Expr::CompoundIdentifier(idents) => {
+            idents.last().map(|i| vec![i.value.clone()]).unwrap_or_default()
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            let mut columns = extract_columns_from_expr(left);
+            columns.extend(extract_columns_from_expr(right));
+            columns
+        }
+        Expr::Nested(inner) => extract_columns_from_expr(inner),
+        Expr::Function(function) => extract_columns_from_function(function),
+        Expr::Cast { expr, .. } => extract_columns_from_expr(expr),
+        _ => Vec::new(),
+    }
+}
+
+/// Every column name the arguments of `function` mention.
+#[must_use]
+pub(crate) fn extract_columns_from_function(function: &Function) -> Vec<String> {
+    function_argument_exprs(&function.args)
+        .into_iter()
+        .flat_map(extract_columns_from_expr)
+        .collect()
 }
 
 /// Fold over every column in the schema named by `expr`, stopping as soon as
@@ -2713,7 +2746,9 @@ mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
         ast::{
-            Expr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, Statement, TableFactor,
+            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgOperator,
+            FunctionArgumentList, FunctionArguments, Ident, JoinConstraint, JoinOperator,
+            ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Statement, TableFactor,
             ValueWithSpan,
         },
         dialect::PostgreSqlDialect,
@@ -2721,9 +2756,9 @@ mod tests {
     };
 
     use super::{
-        TranslationDirection, translate_join, translate_join_constraint, translate_join_operator,
-        translate_returning, translate_select_item, translate_table_factor,
-        translate_table_with_joins,
+        TranslationDirection, extract_columns_from_expr, extract_columns_from_function,
+        translate_join, translate_join_constraint, translate_join_operator, translate_returning,
+        translate_select_item, translate_table_factor, translate_table_with_joins,
     };
     use crate::{errors::Error, prelude::Pg2SqliteOptions};
 
@@ -2983,5 +3018,51 @@ mod tests {
             panic!("expected alias expression");
         };
         assert!(matches!(expr, Expr::Nested(_)));
+    }
+
+    #[test]
+    fn extract_helpers_cover_named_and_non_expr_argument_shapes() {
+        let named_func = Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("f"))]),
+            uses_odbc_syntax: false,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::Named {
+                        name: Ident::new("x"),
+                        arg: FunctionArgExpr::Expr(parse_expr("tbl.col")),
+                        operator: FunctionArgOperator::RightArrow,
+                    },
+                    FunctionArg::Unnamed(FunctionArgExpr::Wildcard),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: FunctionArguments::None,
+        };
+        let cols = extract_columns_from_function(&named_func);
+        assert_eq!(cols, vec!["col".to_string()]);
+
+        let none_args_func = Function { args: FunctionArguments::None, ..named_func.clone() };
+        assert!(extract_columns_from_function(&none_args_func).is_empty());
+
+        assert!(extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new())).is_empty());
+        assert_eq!(
+            extract_columns_from_expr(&Expr::Nested(Box::new(parse_expr("a + b")))),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            extract_columns_from_expr(&Expr::Cast {
+                expr: Box::new(parse_expr("payload")),
+                data_type: sqlparser::ast::DataType::Text,
+                format: None,
+                kind: sqlparser::ast::CastKind::Cast,
+            }),
+            vec!["payload".to_string()]
+        );
+        assert_eq!(extract_columns_from_expr(&Expr::Function(named_func)), vec!["col".to_string()]);
     }
 }

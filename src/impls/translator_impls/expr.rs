@@ -31,9 +31,9 @@ use crate::{
         interval::interval_date_modifiers,
         query_builder::{from_relation, plain_table_factor, single_expr_query},
         shared_helpers::{
-            declared_numeric_precision, every_declared_type_matches, function_argument_exprs,
-            is_integral_expression, numeric_scale, rescale_minor_units, scale_decimal_literal,
-            translate_expr_recursive,
+            declared_numeric_precision, every_declared_type_matches, extract_columns_from_function,
+            function_argument_exprs, is_integral_expression, numeric_scale, rescale_minor_units,
+            scale_decimal_literal, translate_expr_recursive,
         },
         temporal_arithmetic::{epoch_of_temporal_difference, translate_temporal_binary_op},
         timezone::{
@@ -53,30 +53,6 @@ use crate::{
     prelude::{Pg2SqliteOptions, Translator},
     traits::TranslationOptions,
 };
-
-/// Extract column names from a function's arguments (recursively).
-fn extract_columns_from_function(func: &Function) -> Vec<String> {
-    function_argument_exprs(&func.args).into_iter().flat_map(extract_columns_from_expr).collect()
-}
-
-/// Extract column identifiers from an expression.
-fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
-    match expr {
-        Expr::Identifier(ident) => vec![ident.value.clone()],
-        Expr::CompoundIdentifier(idents) => {
-            idents.last().map(|i| vec![i.value.clone()]).unwrap_or_default()
-        }
-        Expr::BinaryOp { left, right, .. } => {
-            let mut cols = extract_columns_from_expr(left);
-            cols.extend(extract_columns_from_expr(right));
-            cols
-        }
-        Expr::Nested(inner) => extract_columns_from_expr(inner),
-        Expr::Function(func) => extract_columns_from_function(func),
-        Expr::Cast { expr, .. } => extract_columns_from_expr(expr),
-        _ => Vec::new(),
-    }
-}
 
 /// Extract the search query string from a to_tsquery expression.
 fn extract_query_from_tsquery(func: &Function) -> Option<String> {
@@ -2310,9 +2286,8 @@ mod tests {
     };
 
     use super::{
-        extract_columns_from_expr, extract_columns_from_function, extract_query_from_tsquery,
-        is_sqlite_fixed_offset, normalize_at_time_zone_modifier, translate_any_all_to_in,
-        translate_extract, translate_trim,
+        extract_query_from_tsquery, is_sqlite_fixed_offset, normalize_at_time_zone_modifier,
+        translate_any_all_to_in, translate_extract, translate_trim,
     };
     use crate::prelude::{Pg2SqliteOptions, Translator};
 
@@ -2326,52 +2301,6 @@ mod tests {
             .expect("sql should parse")
             .parse_expr()
             .expect("expression should parse")
-    }
-
-    #[test]
-    fn extract_helpers_cover_named_and_non_expr_argument_shapes() {
-        let named_func = Function {
-            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("f"))]),
-            uses_odbc_syntax: false,
-            args: FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: None,
-                args: vec![
-                    FunctionArg::Named {
-                        name: Ident::new("x"),
-                        arg: FunctionArgExpr::Expr(parse_expr("tbl.col")),
-                        operator: FunctionArgOperator::RightArrow,
-                    },
-                    FunctionArg::Unnamed(FunctionArgExpr::Wildcard),
-                ],
-                clauses: vec![],
-            }),
-            filter: None,
-            null_treatment: None,
-            over: None,
-            within_group: vec![],
-            parameters: FunctionArguments::None,
-        };
-        let cols = extract_columns_from_function(&named_func);
-        assert_eq!(cols, vec!["col".to_string()]);
-
-        let none_args_func = Function { args: FunctionArguments::None, ..named_func.clone() };
-        assert!(extract_columns_from_function(&none_args_func).is_empty());
-
-        assert!(extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new())).is_empty());
-        assert_eq!(
-            extract_columns_from_expr(&Expr::Nested(Box::new(parse_expr("a + b")))),
-            vec!["a".to_string(), "b".to_string()]
-        );
-        assert_eq!(
-            extract_columns_from_expr(&Expr::Cast {
-                expr: Box::new(parse_expr("payload")),
-                data_type: sqlparser::ast::DataType::Text,
-                format: None,
-                kind: sqlparser::ast::CastKind::Cast,
-            }),
-            vec!["payload".to_string()]
-        );
-        assert_eq!(extract_columns_from_expr(&Expr::Function(named_func)), vec!["col".to_string()]);
     }
 
     #[test]

@@ -30,7 +30,10 @@ use crate::{
             prefixed_quoted_identifier, quote_identifier, quoted_ident, sql_string_literal,
             sqlite_unqualified_object_name, table_with_implicit_public_lookup,
         },
-        shared_helpers::{function_argument_exprs, nulls_not_distinct_not_supported_error},
+        shared_helpers::{
+            extract_columns_from_expr, function_argument_exprs,
+            nulls_not_distinct_not_supported_error,
+        },
         translator_impls::{postgis, rls::resolve_trigger_table_name},
     },
     prelude::{Pg2SqliteOptions, TranslationOptions, Translator},
@@ -43,32 +46,6 @@ pub(crate) enum FtsTranslation {
     Fts5 { table_name: ObjectName, columns: Vec<String> },
     /// Index pattern not supported (e.g., JSONB, arrays, spatial data)
     Unsupported(String),
-}
-
-/// Extract column identifiers from an expression.
-fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
-    match expr {
-        Expr::Identifier(ident) => vec![ident.value.clone()],
-        Expr::CompoundIdentifier(idents) => {
-            // For compound identifiers like "table.column", take the last part
-            idents.last().map(|i| vec![i.value.clone()]).unwrap_or_default()
-        }
-        Expr::BinaryOp { left, right, .. } => {
-            let mut cols = extract_columns_from_expr(left);
-            cols.extend(extract_columns_from_expr(right));
-            cols
-        }
-        Expr::Nested(inner) => extract_columns_from_expr(inner),
-        Expr::Function(func) => {
-            function_argument_exprs(&func.args)
-                .into_iter()
-                .flat_map(extract_columns_from_expr)
-                .collect()
-        }
-        Expr::Cast { expr, .. } => extract_columns_from_expr(expr),
-        // For other expression types (values, literals, etc.), return empty
-        _ => Vec::new(),
-    }
 }
 
 /// Check if `expr` contains a `to_tsvector` call and return its column list.
