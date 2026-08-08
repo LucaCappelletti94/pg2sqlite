@@ -719,4 +719,15 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                  INSERT INTO ux VALUES (1);",
             ],
     ),
+    (
+        "case-folding",
+        &[
+                // Non-ASCII text through the ILIKE lowering and through the
+                // bare folding functions. The answers diverge from PostgreSQL,
+                // which is documented rather than fixed, so what these check is
+                // that the emitted SQL still runs on the floor build.
+                "SELECT s FROM t WHERE s ILIKE 'Ä%';",
+                "SELECT lower(s), upper(s) FROM t WHERE s ILIKE '%ß%';",
+            ],
+    ),
 ];

@@ -46,6 +46,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Semantic differences
+
+SQLite folds case for ASCII letters only, so `ILIKE`, `lower` and `upper` answer differently from PostgreSQL whenever the text is not ASCII. PostgreSQL folds by the database collation, which under a UTF-8 locale covers the whole of Unicode.
+
+```sql
+SELECT 'ÄBC' ILIKE 'äbc';
+-- PostgreSQL under en_US.utf8: true
+-- translated: SELECT lower('ÄBC') LIKE lower('äbc') ESCAPE '\'  -> 0
+
+SELECT lower('ÄBC');
+-- PostgreSQL under en_US.utf8: äbc
+-- SQLite: Äbc
+```
+
+Two things make them agree. Building SQLite with `SQLITE_ENABLE_ICU` replaces `lower` and `upper` with Unicode-aware versions, which is what the translated `ILIKE` runs through. Giving the PostgreSQL column or database the `C` collation makes PostgreSQL fold ASCII only, which is what SQLite already does.
+
 ## License
 
 This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).

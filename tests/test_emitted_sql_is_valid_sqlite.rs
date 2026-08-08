@@ -273,6 +273,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "plpgsql-scanner-and-binding",
     "statistical-aggregates",
     "uuid-version",
+    "case-folding",
 ];
 
 #[test]
