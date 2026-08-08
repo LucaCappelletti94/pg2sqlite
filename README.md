@@ -62,6 +62,14 @@ SELECT lower('ÄBC');
 
 Two things make them agree. Building SQLite with `SQLITE_ENABLE_ICU` replaces `lower` and `upper` with Unicode-aware versions, which is what the translated `ILIKE` runs through. Giving the PostgreSQL column or database the `C` collation makes PostgreSQL fold ASCII only, which is what SQLite already does.
 
+SQLite's date functions hold milliseconds where PostgreSQL holds microseconds, so a timestamp keeps three decimal places and loses the rest. `make_time` and `make_timestamp` are exact, because they format the argument they are given rather than going through those functions.
+
+```sql
+SELECT extract(epoch from timestamp '2024-03-05 14:07:09.123456');
+-- PostgreSQL: 1709647629.123456
+-- SQLite:     1709647629.123
+```
+
 ## License
 
 This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
