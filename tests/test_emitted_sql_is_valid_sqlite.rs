@@ -280,6 +280,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "returning-scope",
     "name-reuse",
     "to-char-template",
+    "index-clauses",
 ];
 
 #[test]

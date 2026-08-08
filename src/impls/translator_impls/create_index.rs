@@ -334,6 +334,66 @@ fn try_spatial_index_routing(
     }
     Ok(Some(statements))
 }
+/// Reports the PostgreSQL-only clauses the regular index path drops.
+///
+/// Each one is result-neutral, so the index still enforces what it enforced,
+/// but D2 puts a result-neutral drop in the warn bucket rather than the silent
+/// one. Only the clauses a `PostgreSqlDialect` parse can deliver are here:
+/// `index_options` and `alter_options` belong to other dialects and never
+/// arrive populated.
+fn report_dropped_index_clauses(index: &CreateIndex) {
+    if !index.include.is_empty() {
+        let included = index.include.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        let key = index.columns.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+            construct: "index INCLUDE".to_string(),
+            from: format!("({key}) INCLUDE ({included})"),
+            to: format!("({key})"),
+            location: index.table_name.to_string(),
+            reason: "SQLite has no covering index, so a query PostgreSQL answers from the index \
+                     alone, an index-only scan, visits the table here instead. An INCLUDE \
+                     column is payload rather than key, so nothing about which rows the index \
+                     accepts changes."
+                .to_string(),
+        });
+    }
+
+    if let Some(method) = &index.using {
+        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+            construct: "index method".to_string(),
+            from: format!("USING {method}"),
+            to: "a SQLite b-tree index".to_string(),
+            location: index.table_name.to_string(),
+            reason: "SQLite builds one kind of index, so the emitted one serves whatever a \
+                     b-tree serves. For hash and BRIN that loses nothing, since a b-tree \
+                     answers equality and ranges alike, but a method chosen for a query shape \
+                     a b-tree cannot serve no longer serves it."
+                .to_string(),
+        });
+    }
+
+    if index.concurrently {
+        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+            construct: "CREATE INDEX CONCURRENTLY".to_string(),
+            reason: "SQLite builds an index while holding a write lock and has no concurrent \
+                     form. The resulting index is identical, so only the lock the build takes \
+                     differs."
+                .to_string(),
+        });
+    }
+
+    if !index.with.is_empty() {
+        let parameters = index.with.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+            construct: "index storage parameters".to_string(),
+            reason: format!(
+                "SQLite has no storage parameters, so WITH ({parameters}) is dropped. These \
+                 tune how PostgreSQL lays the index out on disk and say nothing about what it \
+                 answers."
+            ),
+        });
+    }
+}
 
 impl Translator for CreateIndex {
     type Schema = ParserDB;
@@ -388,6 +448,8 @@ impl Translator for CreateIndex {
         if self.nulls_distinct == Some(false) {
             return Err(nulls_not_distinct_not_supported_error());
         }
+
+        report_dropped_index_clauses(self);
 
         // Regular index - translate normally, explicitly dropping PG-only fields
         // (using, concurrently, include, nulls_distinct, with, index_options,

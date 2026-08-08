@@ -812,4 +812,15 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT to_char(ts, 'YYYYT'), to_char(ts, 'TSS') FROM t;",
             ],
     ),
+    (
+        "index-clauses",
+        &[
+                // The four clauses the regular index path drops. Each one
+                // still has to leave an index SQLite accepts.
+                "CREATE INDEX ix_include ON t (n) INCLUDE (s);",
+                "CREATE UNIQUE INDEX ix_hash ON t USING hash (n);",
+                "CREATE INDEX CONCURRENTLY ix_conc ON t (s);",
+                "CREATE INDEX ix_with ON t (n) WITH (fillfactor = 70);",
+            ],
+    ),
 ];
