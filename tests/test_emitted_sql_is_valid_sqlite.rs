@@ -279,6 +279,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "array-join",
     "returning-scope",
     "name-reuse",
+    "to-char-template",
 ];
 
 #[test]

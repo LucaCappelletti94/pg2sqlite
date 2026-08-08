@@ -60,15 +60,13 @@ fn to_char_yyyy_only() {
     assert_all_stmts_parse_as_sqlite(&sql);
 }
 
+/// Flipped F33 pin. This asserted `strftime('%y', ...)`, which parses and then
+/// answers NULL, because SQLite has no `%y` at all.
 #[test]
 fn to_char_yy_only() {
     let sql = format!("{TABLE} SELECT to_char(ts, 'YY') FROM t;");
-    let output = translate(&sql).unwrap();
-    assert!(
-        output.contains("strftime('%y'"),
-        "to_char('YY') should produce strftime('%y', ...), got: {output}"
-    );
-    assert_all_stmts_parse_as_sqlite(&sql);
+    let error = translate(&sql).expect_err("the two-digit year has no SQLite specifier");
+    assert!(error.contains("YY"), "{error}");
 }
 
 #[test]

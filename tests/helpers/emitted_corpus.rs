@@ -802,4 +802,14 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                  CREATE TRIGGER nrt BEFORE INSERT ON nr6 FOR EACH ROW EXECUTE FUNCTION nrf();",
             ],
     ),
+    (
+        "to-char-template",
+        &[
+                // The quoted literal run, which the scan added, and the two
+                // bare-T positions PostgreSQL does read literally.
+                "SELECT to_char(ts, 'YYYY-MM-DD\"T\"HH24:MI:SS') FROM t;",
+                "SELECT to_char(ts, '\"100%\" YYYY') FROM t;",
+                "SELECT to_char(ts, 'YYYYT'), to_char(ts, 'TSS') FROM t;",
+            ],
+    ),
 ];

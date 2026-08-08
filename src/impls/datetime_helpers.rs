@@ -160,12 +160,14 @@ pub(crate) fn datetime_field_from_strftime_format(format: &str) -> Option<DateTi
 ///
 /// Read forwards by the `to_char` translation and backwards by the `strftime`
 /// reversal, so the two cannot drift apart. Longest codes first, since the
-/// forward pass substitutes in order and `HH24` must be taken before `HH`.
+/// scan takes the first match and `HH24` must be tried before `HH`.
+///
+/// `YY` is absent: SQLite has no `%y` and answers NULL for it, so a template
+/// carrying a two-digit year has no lowering at all.
 const TO_CHAR_CODES: &[(&str, &str)] = &[
     ("YYYY", "%Y"),
     ("HH24", "%H"),
     ("HH12", "%I"),
-    ("YY", "%y"),
     ("MM", "%m"),
     ("DD", "%d"),
     ("HH", "%I"),
@@ -174,43 +176,109 @@ const TO_CHAR_CODES: &[(&str, &str)] = &[
 ];
 
 /// Characters a template may carry between codes.
+///
+/// `T` is here because it is the ISO separator, but PostgreSQL only reads it
+/// as a literal when the next character is neither `H` nor `M`, which is what
+/// `bare_t_is_literal` checks.
 const TO_CHAR_SEPARATORS: &[char] = &['-', ':', '.', '/', ',', '_', ' ', 'T'];
 
 /// Lower a PostgreSQL `to_char` template onto a SQLite `strftime` format.
+///
+/// A left-to-right scan rather than a substitution, because a quoted run is
+/// literal text and a substitution cannot see the quotes.
 pub(crate) fn pg_to_char_format_to_strftime(pg_format: &str) -> Result<String, Error> {
-    let mut result = pg_format.to_string();
-    for (pg_code, strftime_code) in TO_CHAR_CODES {
-        result = result.replace(pg_code, strftime_code);
+    let mut result = String::with_capacity(pg_format.len());
+    let mut rest = pg_format;
+
+    while !rest.is_empty() {
+        if let Some(after_quote) = rest.strip_prefix('"') {
+            let Some(end) = after_quote.find('"') else {
+                return Err(unsupported_template(
+                    pg_format,
+                    "carries an unterminated quote. A literal run is written \"like this\".",
+                ));
+            };
+            push_quoted_literal(&mut result, &after_quote[..end], pg_format)?;
+            rest = &after_quote[end + 1..];
+            continue;
+        }
+
+        if let Some((code, specifier)) =
+            TO_CHAR_CODES.iter().find(|(code, _)| rest.starts_with(code))
+        {
+            result.push_str(specifier);
+            rest = &rest[code.len()..];
+            continue;
+        }
+
+        if rest.starts_with("YY") {
+            return Err(unsupported_template(
+                pg_format,
+                "asks for the two-digit year YY, which SQLite has no specifier for: its \
+                 strftime answers NULL for '%y'. Use YYYY.",
+            ));
+        }
+
+        let character = rest.chars().next().unwrap_or_default();
+        if character == 'T' && !bare_t_is_literal(rest) {
+            return Err(unsupported_template(
+                pg_format,
+                "carries a bare T before an hour or a minute, which PostgreSQL reads as the \
+                 start of TH or TM rather than as a separator. Write the ISO separator as \
+                 \"T\".",
+            ));
+        }
+        if !TO_CHAR_SEPARATORS.contains(&character) {
+            return Err(unsupported_template(
+                pg_format,
+                &format!(
+                    "contains '{character}'. Supported codes: YYYY, MM, DD, HH24, HH12, HH, \
+                     MI, SS. Supported separators: - : . / , _ (space) T, and any text in \
+                     double quotes. For number formatting codes (9, 0, FM, L, ...) use \
+                     printf() or CAST."
+                ),
+            ));
+        }
+        result.push(character);
+        rest = &rest[character.len_utf8()..];
     }
-    // Every `%` must now introduce a specifier this mapping produced, and
-    // everything else must be one of the separators.
-    let mut chars = result.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            match chars.next() {
-                Some(spec) if "YymMdHIMS".contains(spec) => {}
-                Some(spec) => {
-                    return Err(Error::UnsupportedSQLiteFeature(format!(
-                        "to_char format '{pg_format}' produces unsupported strftime specifier \
-                         '%{spec}'. Supported PG codes: YYYY, YY, MM, DD, HH24, HH12, HH, MI, \
-                         SS. For number formatting use printf() or CAST."
-                    )));
-                }
-                None => {
-                    return Err(Error::UnsupportedSQLiteFeature(format!(
-                        "to_char format '{pg_format}' ends with a bare '%'"
-                    )));
-                }
-            }
-        } else if !TO_CHAR_SEPARATORS.contains(&c) {
-            return Err(Error::UnsupportedSQLiteFeature(format!(
-                "to_char format '{pg_format}' contains unsupported character '{c}'. \
-                 Supported separators: - : . / , _ (space) T. \
-                 For number formatting codes (9, 0, FM, L, ...) use printf() or CAST."
-            )));
+
+    Ok(result)
+}
+
+/// True when PostgreSQL reads the `T` starting `rest` as a literal.
+///
+/// `TH` is the ordinal suffix, so `'DDTH'` answers `08TH`, and `TM` is the
+/// translation-mode prefix, so `'DDTMI'` answers a year digit. Every other
+/// following character leaves the `T` alone.
+fn bare_t_is_literal(rest: &str) -> bool {
+    !matches!(rest.as_bytes().get(1), Some(b'H' | b'M'))
+}
+
+/// Copy a quoted run into the format, doubling every `%`.
+///
+/// SQLite reads a `%` as introducing a specifier and answers NULL for one it
+/// does not know, so an undoubled percent would take the whole call with it.
+fn push_quoted_literal(result: &mut String, literal: &str, pg_format: &str) -> Result<(), Error> {
+    if literal.contains('\\') {
+        return Err(unsupported_template(
+            pg_format,
+            "escapes a character inside a quoted run with a backslash, which this translation \
+             does not read.",
+        ));
+    }
+    for character in literal.chars() {
+        if character == '%' {
+            result.push_str("%%");
+        } else {
+            result.push(character);
         }
     }
-    Ok(result)
+    Ok(())
+}
+
+fn unsupported_template(pg_format: &str, reason: &str) -> Error {
+    Error::UnsupportedSQLiteFeature(format!("to_char format '{pg_format}' {reason}"))
 }
 
 /// The `to_char` template that answers what `format` answers, when every
