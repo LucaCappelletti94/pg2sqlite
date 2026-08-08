@@ -39,7 +39,10 @@ rand = "0.10.1"
 # `optional = true` on regular dependencies. Still test-only: nothing
 # in `src/` references it unless `feature = "sqlitegis"` is set.
 [dependencies.sqlitegis]
-version = "0.1.0"
+# 0.1.5 is the floor rather than a preference: the ellipsoid measures
+# `ST_LengthSpheroid`, `ST_AreaSpheroid` and `ST_PerimeterSpheroid` arrived in
+# it, and the geography routing emits all three.
+version = "0.1.5"
 default-features = false
 features = ["sqlite", "diesel-sqlite"]
 optional = true

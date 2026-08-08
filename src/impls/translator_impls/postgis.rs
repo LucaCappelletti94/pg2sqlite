@@ -99,10 +99,29 @@ pub(crate) const POSTGIS_FUNCTION_CATALOG: &[(&str, i32)] = &[
     ("st_xmax", 1),
     ("st_ymin", 1),
     ("st_ymax", 1),
+    // -- Linear referencing (planar) --
+    ("st_segmentize", 2),
+    ("st_lineinterpolatepoint", 2),
+    ("st_lineinterpolatepoints", 2),
+    ("st_linesubstring", 3),
     // -- Geodetic (SRID 4326) --
     ("st_distancesphere", 2),
     ("st_distancespheroid", 2),
     ("st_lengthsphere", 1),
+    ("st_lengthspheroid", 1),
+    ("st_length2dspheroid", 1),
+    ("st_areasphere", 1),
+    ("st_areaspheroid", 1),
+    ("st_perimetersphere", 1),
+    ("st_perimeterspheroid", 1),
+    ("st_segmentizesphere", 2),
+    ("st_segmentizespheroid", 2),
+    ("st_lineinterpolatepointsphere", 2),
+    ("st_lineinterpolatepointspheroid", 2),
+    ("st_lineinterpolatepointssphere", 2),
+    ("st_lineinterpolatepointsspheroid", 2),
+    ("st_linesubstringsphere", 3),
+    ("st_linesubstringspheroid", 3),
     ("st_azimuth", 2),
     ("st_project", 3),
     ("st_closestpoint", 2),
@@ -249,6 +268,39 @@ pub(crate) fn is_spatial_data_type(dt: &str) -> bool {
     lower == "geometry" || lower == "geography"
 }
 
+/// The SQLiteGIS name a measurement takes when its operand is a `geography`
+/// column.
+///
+/// PostgreSQL measures `geometry` in the plane and `geography` on the WGS84
+/// ellipsoid, and the translator used to send both to the planar
+/// implementation, so a one-degree diagonal answered 1.41 where PostgreSQL
+/// answers 156899.57 metres.
+///
+/// `None` means the call is not a measurement, or its operand is not resolvably
+/// `geography`, and it keeps the spelling it came with. An operand the schema
+/// does not settle is left planar rather than guessed at, because the two
+/// readings differ in unit as well as magnitude.
+pub(crate) fn geography_measure_name(
+    name: &str,
+    first_argument: Option<&Expr>,
+    schema: &ParserDB,
+) -> Option<&'static str> {
+    const MEASURES: &[(&str, &str)] = &[
+        ("st_distance", "ST_DistanceSpheroid"),
+        ("st_dwithin", "ST_DWithinSpheroid"),
+        ("st_length", "ST_LengthSpheroid"),
+        ("st_area", "ST_AreaSpheroid"),
+        ("st_perimeter", "ST_PerimeterSpheroid"),
+    ];
+    let lower = name.to_ascii_lowercase();
+    let (_, routed) = MEASURES.iter().find(|(measure, _)| *measure == lower)?;
+    let operand = first_argument?;
+    every_declared_type_matches(operand, schema, |declared| {
+        declared.trim().eq_ignore_ascii_case("geography")
+    })
+    .then_some(*routed)
+}
+
 // When the input contains a `SELECT ... WHERE ST_*(col, expr) ...` over a
 // column whose table has a translated spatial index, the rewrite injects a
 // `WHERE <table>.rowid IN (SELECT id FROM <rtree> WHERE bbox-conditions)`
@@ -265,7 +317,10 @@ use sqlparser::{
 };
 
 use crate::{
-    impls::{generated_sql::parse_single_generated_sql, shared_helpers::function_argument_exprs},
+    impls::{
+        generated_sql::parse_single_generated_sql,
+        shared_helpers::{every_declared_type_matches, function_argument_exprs},
+    },
     options::Pg2SqliteOptions,
 };
 

@@ -1492,12 +1492,13 @@ dependencies = [
 
 [[package]]
 name = "sqlitegis"
-version = "0.1.0"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "463cc03b967042f218c604de0f7c8c2f0982e73edbef30e6bef9c95b29d7df14"
+checksum = "3dacc5c55c21481afcf6b6876e69bb8aa03bc4fab27230762f4ba031cd77fe51"
 dependencies = [
  "diesel",
  "geo",
+ "geographiclib-rs",
  "geozero",
  "libsqlite3-sys",
  "serde_json",

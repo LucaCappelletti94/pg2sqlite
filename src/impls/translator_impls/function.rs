@@ -34,6 +34,7 @@ use crate::{
         function_helpers::{
             extract_exactly, integer_literal, number_literal, simple_function_expr, string_literal,
         },
+        object_name::last_ident,
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, every_declared_type_matches,
             function_argument_exprs, numeric_scale, referenced_column_name, rescale_minor_units,
@@ -1515,6 +1516,25 @@ impl Translator for Function {
                  Ordered-set aggregates have no SQLite equivalent.",
                 func.name
             )));
+        }
+
+        // A measurement over a geography column is curved-earth in PostgreSQL,
+        // so it reaches SQLiteGIS under a different name. Decided here rather
+        // than in `translate_function`, which sees no schema and so cannot tell
+        // the two spatial types apart.
+        if options.is_sqlitegis_enabled()
+            && let Some(name) = last_ident(&func.name)
+            && let Some(routed) = postgis::geography_measure_name(
+                &name.value,
+                function_argument_exprs(&func.args).first().copied(),
+                schema,
+            )
+        {
+            return Ok(Expr::Function(Function {
+                name: ObjectName::from(vec![Ident::new(routed)]),
+                args: translate_function_arguments::<Forward>(&func.args, schema, options)?,
+                ..func
+            }));
         }
 
         match translate_function(&func.name, &func.args, options) {
