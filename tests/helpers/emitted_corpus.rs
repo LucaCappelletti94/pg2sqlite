@@ -760,4 +760,17 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT array_to_string(ARRAY[]::text[], ','), array_to_string(ARRAY['a'], ',');",
             ],
     ),
+    (
+        "returning-scope",
+        &[
+                // The two shapes SQLite spells differently, and the two it
+                // already reads, in both statements that carry a RETURNING.
+                "DELETE FROM t WHERE id = 1 RETURNING t.*;",
+                "DELETE FROM t AS a USING u WHERE a.id = u.t_id RETURNING a.id;",
+                "DELETE FROM t USING u WHERE t.id = u.t_id RETURNING t.id;",
+                "UPDATE t SET n = 1 WHERE id = 1 RETURNING t.*;",
+                "UPDATE t AS a SET n = 1 WHERE a.id = 1 RETURNING a.id;",
+                "UPDATE t SET n = u.id FROM u WHERE u.t_id = t.id RETURNING t.id;",
+            ],
+    ),
 ];

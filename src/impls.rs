@@ -20,6 +20,7 @@ pub(crate) mod interval;
 pub(crate) mod object_name;
 pub(crate) mod placeholder;
 pub(crate) mod query_builder;
+pub(crate) mod returning_scope;
 pub mod reverse_translator_impls;
 pub(crate) mod shared_helpers;
 pub(crate) mod sqlite_functions;

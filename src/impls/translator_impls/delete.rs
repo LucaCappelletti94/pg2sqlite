@@ -15,8 +15,11 @@ use sqlparser::ast::{Delete, Expr, Statement};
 use super::helpers::{Forward, translate_table_with_joins};
 use crate::{
     impls::{
-        function_helpers::integer_literal, query_builder::single_expr_query,
-        shared_helpers::translate_delete_core, translator_impls::postgis,
+        function_helpers::integer_literal,
+        query_builder::single_expr_query,
+        returning_scope::{delete_target, scope_returning_to_target},
+        shared_helpers::translate_delete_core,
+        translator_impls::postgis,
     },
     options::Pg2SqliteOptions,
     traits::translator::Translator,
@@ -37,19 +40,36 @@ impl Translator for Delete {
 
         let mut delete = Delete { selection, from, returning, order_by, limit, ..self.clone() };
 
-        if let Some(using) = delete.using.take().filter(|u| !u.is_empty()) {
+        // Translated up front because the RETURNING scope check needs the
+        // relations these introduce, whether or not the fold below runs.
+        let translated_using = delete
+            .using
+            .take()
+            .filter(|using| !using.is_empty())
+            .map(|using| {
+                using
+                    .iter()
+                    .map(|twj| translate_table_with_joins(twj, schema, options))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+
+        delete.returning = scope_returning_to_target(
+            delete.returning.take(),
+            delete_target(&delete.from),
+            translated_using.as_deref().unwrap_or_default(),
+            schema,
+            "USING",
+        )?;
+
+        if let Some(translated_using) = translated_using {
             // Convert DELETE FROM T USING U WHERE cond
             // to DELETE FROM T WHERE EXISTS (SELECT 1 FROM U WHERE cond)
 
-            let translated_using = using
-                .iter()
-                .map(|twj| translate_table_with_joins(twj, schema, options))
-                .collect::<Result<Vec<_>, _>>()?;
-
             let original_selection = delete.selection;
 
-            // `SELECT 1 FROM <using> WHERE <original predicate>`, the EXISTS body
-            // that replaces the USING clause SQLite has no syntax for.
+            // `SELECT 1 FROM <using> WHERE <original predicate>`, the EXISTS
+            // body that replaces the USING clause SQLite has no syntax for.
             //
             // An RLS table keeps its declared name here deliberately: the RLS
             // machinery emits a policy-filtering view under that name, and
@@ -60,8 +80,6 @@ impl Translator for Delete {
                 single_expr_query(integer_literal(1), translated_using, original_selection);
 
             delete.selection = Some(Expr::Exists { subquery: Box::new(subquery), negated: false });
-
-            delete.using = None;
         }
 
         // Spatial predicate rewriting: route `ST_*` WHERE predicates over

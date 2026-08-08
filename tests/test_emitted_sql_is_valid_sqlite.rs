@@ -277,6 +277,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "subsecond-precision",
     "cube-root",
     "array-join",
+    "returning-scope",
 ];
 
 #[test]
