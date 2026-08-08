@@ -16,11 +16,12 @@ use alloc::{
 use sql_traits::{
     errors::LookupError,
     structs::ParserDB,
-    traits::{ColumnLike, DatabaseLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike, TriggerLike},
 };
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ConflictTarget, DoUpdate, Expr, Ident, Insert, ObjectName,
-    ObjectNamePart, OnConflict, OnConflictAction, OnInsert, SqliteOnConflict, TableObject,
+    ObjectNamePart, OnConflict, OnConflictAction, OnInsert, ReferentialAction, SqliteOnConflict,
+    TableObject,
 };
 
 use super::helpers::Reverse;
@@ -32,6 +33,87 @@ use crate::{
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
+
+/// Refuses `INSERT OR REPLACE` on a table where SQLite's delete-then-insert is
+/// observably different from the update PostgreSQL would run.
+///
+/// SQLite deletes the conflicting rows and inserts a new one, PostgreSQL
+/// updates the row in place. Where nothing hangs off the delete the two agree,
+/// and those keep translating. Three things hang off it, each measured on both
+/// engines: a trigger of any kind fires on one side and not the other, a child
+/// row is deleted or blanked on one side and untouched on the other, and a
+/// second unique constraint lets SQLite delete two rows where PostgreSQL raises
+/// a duplicate key.
+fn reject_unfaithful_replace(
+    schema: &ParserDB,
+    table: &<ParserDB as DatabaseLike>::Table,
+) -> Result<(), Error> {
+    let name = table.table_name();
+
+    // Any kind, not just a delete trigger: SQLite fires the INSERT one and
+    // PostgreSQL fires the UPDATE one, so the two agree only when there is
+    // none.
+    if let Some(trigger) = table.triggers(schema)?.next() {
+        return Err(unfaithful_replace(
+            name,
+            &format!(
+                "the trigger '{}' fires differently: SQLite deletes and inserts, so its INSERT \
+                 triggers run, while PostgreSQL updates, so its UPDATE triggers run instead",
+                trigger.name()
+            ),
+        ));
+    }
+
+    for other in schema.tables() {
+        for foreign_key in other.foreign_keys(schema)? {
+            let Some(action) = row_changing_delete_action(foreign_key) else { continue };
+            if foreign_key.referenced_table(schema)?.table_name() != name {
+                continue;
+            }
+            return Err(unfaithful_replace(
+                name,
+                &format!(
+                    "'{}' references it ON DELETE {action}, so SQLite's delete reaches those \
+                     rows while PostgreSQL's update leaves them alone",
+                    other.table_name()
+                ),
+            ));
+        }
+    }
+
+    // The primary key counts as one, so a second is a second arbiter.
+    if table.unique_indices(schema)?.count() > 1 {
+        return Err(unfaithful_replace(
+            name,
+            "it carries more than one unique constraint, so SQLite resolves a conflict on any of \
+             them, deleting every row that collides, while PostgreSQL can name only one arbiter \
+             and raises a duplicate key on the others",
+        ));
+    }
+
+    Ok(())
+}
+
+/// The `ON DELETE` actions that change a child row, spelled as written.
+fn row_changing_delete_action(
+    foreign_key: &<ParserDB as DatabaseLike>::ForeignKey,
+) -> Option<&'static str> {
+    match foreign_key.attribute().on_delete? {
+        ReferentialAction::Cascade => Some("CASCADE"),
+        ReferentialAction::SetNull => Some("SET NULL"),
+        ReferentialAction::SetDefault => Some("SET DEFAULT"),
+        ReferentialAction::NoAction | ReferentialAction::Restrict => None,
+    }
+}
+
+fn unfaithful_replace(table: &str, because: &str) -> Error {
+    Error::UnsupportedSQLiteFeature(format!(
+        "INSERT OR REPLACE INTO {table} cannot be reversed faithfully, because {because}. \
+         SQLite's REPLACE deletes the conflicting rows and inserts a new one, which PostgreSQL \
+         has no single statement for. Write the upsert by hand, or a DELETE followed by an \
+         INSERT if the delete's effects are what you want."
+    ))
+}
 
 /// Resolve the target table for reverse upsert reconstruction.
 ///
@@ -291,7 +373,11 @@ impl ReverseTranslator for Insert {
                     // one, so every column not named in the INSERT list reverts to its
                     // default. We must set those columns to DEFAULT in the DO UPDATE
                     // clause; DO NOTHING would silently preserve the old values.
+                    //
+                    // The update only stands in for the delete where nothing
+                    // observes the delete, which is what the check enforces.
                     let resolved_table = resolve_insert_table(schema, &self.table)?;
+                    reject_unfaithful_replace(schema, resolved_table)?;
                     let table_name = resolved_table.table_name().to_string();
                     let pk_columns = get_primary_key_columns(schema, resolved_table)?;
                     let column_idents: Vec<Ident> = self
