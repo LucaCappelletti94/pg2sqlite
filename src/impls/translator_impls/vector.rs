@@ -39,14 +39,12 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
 };
-use sqlparser::ast::{
-    CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Statement, Value, ValueWithSpan,
-};
+use sqlparser::ast::{CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Statement};
 
 use crate::{
     errors::Error,
     impls::{
-        function_helpers::simple_function_expr,
+        function_helpers::{simple_function_expr, single_quoted_literal},
         generated_sql::parse_generated_sql,
         object_name::{
             last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
@@ -313,7 +311,7 @@ fn make_vec_conversion_call(arg: Expr, is_halfvec: bool) -> Expr {
 /// the `vec_f32` / `vec_f16` calls the cast translator already lowers
 /// `'[...]'::vector` to) are left alone, so this helper is idempotent.
 pub(crate) fn maybe_wrap_text_vector_literal(expr: Expr, is_halfvec: bool) -> Expr {
-    if matches!(&expr, Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(_), .. })) {
+    if single_quoted_literal(&expr).is_some() {
         make_vec_conversion_call(expr, is_halfvec)
     } else {
         expr

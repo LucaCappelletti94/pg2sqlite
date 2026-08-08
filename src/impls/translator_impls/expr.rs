@@ -27,7 +27,10 @@ use crate::{
     impls::{
         datetime_helpers::{DatePartKey, build_date_part_expr, datetime_field_key},
         expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq},
-        function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
+        function_helpers::{
+            integer_literal, number_literal, simple_function_expr, single_quoted_literal,
+            string_literal,
+        },
         interval::interval_date_modifiers,
         query_builder::{from_relation, plain_table_factor, single_expr_query},
         shared_helpers::{
@@ -59,8 +62,8 @@ fn extract_query_from_tsquery(func: &Function) -> Option<String> {
     // to_tsquery can have 1 or 2 args: to_tsquery('query') or to_tsquery('config',
     // 'query'). The query is always the last expression argument.
     for expr in function_argument_exprs(&func.args).into_iter().rev() {
-        if let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) = expr {
-            return Some(s.clone());
+        if let Some(text) = single_quoted_literal(expr) {
+            return Some(text.to_string());
         }
     }
     None
@@ -266,7 +269,7 @@ fn translate_boolean_cast(
     const FALSE_SPELLINGS: [&str; 10] =
         ["f", "fa", "fal", "fals", "false", "n", "no", "of", "off", "0"];
 
-    if let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), .. }) = expr {
+    if let Some(text) = single_quoted_literal(expr) {
         let spelling = text.trim().to_ascii_lowercase();
         if TRUE_SPELLINGS.contains(&spelling.as_str()) {
             return Ok(number_literal("1"));
@@ -711,15 +714,7 @@ fn extract_string_array_keys(expr: &Expr) -> Option<Vec<&str>> {
     let Expr::Array(Array { elem, .. }) = expr else {
         return None;
     };
-    elem.iter()
-        .map(|e| {
-            if let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) = e {
-                Some(s.as_str())
-            } else {
-                None
-            }
-        })
-        .collect()
+    elem.iter().map(single_quoted_literal).collect()
 }
 
 /// Translate PostgreSQL IS DISTINCT FROM / IS NOT DISTINCT FROM semantics
@@ -855,13 +850,9 @@ fn translate_at_time_zone(
 ) -> Result<Expr, crate::errors::Error> {
     let translated_timestamp = timestamp.translate(schema, options)?;
 
-    let modifier = match time_zone {
-        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(value), .. }) => {
-            normalize_at_time_zone_modifier(value)
-        }
-        _ => None,
-    }
-    .ok_or_else(|| {
+    let modifier = single_quoted_literal(time_zone)
+        .and_then(normalize_at_time_zone_modifier)
+        .ok_or_else(|| {
         crate::errors::Error::UnsupportedSQLiteFeature(
             "AT TIME ZONE supports only literal UTC/local or fixed offsets (+HH:MM/-HH:MM) in SQLite translation."
                 .to_string(),

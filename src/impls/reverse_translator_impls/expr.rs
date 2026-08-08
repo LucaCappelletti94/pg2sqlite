@@ -25,8 +25,10 @@ use super::{function::reverse_translate_function, helpers::Reverse};
 use crate::{
     errors::Error,
     impls::{
-        function_helpers::simple_function_expr, shared_helpers::translate_expr_recursive,
-        temporal_arithmetic::reverse_temporal_arithmetic, translator_impls::expr::wrap_with_lower,
+        function_helpers::{simple_function_expr, single_quoted_literal},
+        shared_helpers::translate_expr_recursive,
+        temporal_arithmetic::reverse_temporal_arithmetic,
+        translator_impls::expr::wrap_with_lower,
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
@@ -108,8 +110,7 @@ fn translate_glob_to_like(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, Error> {
-    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(glob_pat), .. }) = right
-    else {
+    let Some(glob_pat) = single_quoted_literal(right) else {
         return Err(Error::UnsupportedSQLiteFeature(
             "GLOB with a non-literal pattern cannot be converted to LIKE at translation time; \
              bind the constant pattern before translation"

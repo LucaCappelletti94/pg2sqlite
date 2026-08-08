@@ -35,6 +35,23 @@ pub(crate) fn string_literal(s: &str) -> Expr {
     })
 }
 
+/// The text of `expr` when it is a single-quoted string literal.
+///
+/// The read next to [`string_literal`], which is the write. Borrows rather
+/// than cloning, since several callers only compare the text.
+///
+/// Single quotes only. A double-quoted `"x"` is an identifier in PostgreSQL
+/// and parses as one under both dialects this crate uses, so
+/// `Value::DoubleQuotedString` never reaches a translator and an arm for it
+/// would be dead.
+#[must_use]
+pub(crate) fn single_quoted_literal(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), .. }) => Some(text),
+        _ => None,
+    }
+}
+
 /// Create a numeric literal expression from a string representation.
 #[must_use]
 pub(crate) fn number_literal(n: &str) -> Expr {

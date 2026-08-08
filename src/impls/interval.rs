@@ -30,9 +30,9 @@ use alloc::{
     vec::Vec,
 };
 
-use sqlparser::ast::{Expr, Interval, Value, ValueWithSpan};
+use sqlparser::ast::Interval;
 
-use crate::errors::Error;
+use crate::{errors::Error, impls::function_helpers::single_quoted_literal};
 
 /// Microseconds in a day. PostgreSQL keeps days apart from microseconds
 /// because a day is not always 24 hours in a zone that observes daylight
@@ -235,11 +235,7 @@ fn unit_pairs(interval: &Interval) -> Option<Vec<(&str, String)>> {
     if interval.last_field.is_some() {
         return None;
     }
-    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(body), .. }) =
-        interval.value.as_ref()
-    else {
-        return None;
-    };
+    let body = single_quoted_literal(interval.value.as_ref())?;
     let tokens: Vec<&str> = body.split_whitespace().collect();
 
     // `INTERVAL '1' MONTH` puts the unit in a clause of its own.

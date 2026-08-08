@@ -29,7 +29,7 @@ use sql_traits::{
 use sqlparser::ast::{BinaryOperator, DataType, Expr, Ident, Value, ValueWithSpan};
 
 use crate::{
-    impls::function_helpers::{simple_function_expr, string_literal},
+    impls::function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
     prelude::Pg2SqliteOptions,
     traits::{TranslationOptions, UuidRepresentation},
 };
@@ -126,7 +126,7 @@ pub(crate) fn maybe_wrap_text_uuid_literal(
     expr: Expr,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
-    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), .. }) = &expr else {
+    let Some(text) = single_quoted_literal(&expr) else {
         return Ok(expr);
     };
     let Some(hex) = canonical_uuid_hex(text) else {

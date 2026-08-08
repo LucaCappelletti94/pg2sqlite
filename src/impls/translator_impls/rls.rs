@@ -34,7 +34,7 @@ use crate::{
     errors::Error,
     impls::{
         expr_helpers::{for_each_child_expr, map_expr_children},
-        function_helpers::simple_function_expr,
+        function_helpers::{simple_function_expr, single_quoted_literal},
         generated_sql::{parse_generated_sql, parse_single_generated_sql},
         object_name::{
             append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier,
@@ -493,17 +493,6 @@ fn function_name_lower(func: &Function) -> String {
         .map_or_else(String::new, |ident| ident.value.to_lowercase())
 }
 
-fn extract_string_literal(expr: &Expr) -> Option<String> {
-    if let Expr::Value(value) = expr {
-        match &value.value {
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Some(s.clone()),
-            _ => None,
-        }
-    } else {
-        None
-    }
-}
-
 fn extract_current_setting_name(func: &Function) -> Option<String> {
     if function_name_lower(func) != "current_setting" {
         return None;
@@ -513,7 +502,7 @@ fn extract_current_setting_name(func: &Function) -> Option<String> {
             match arg {
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
                 | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. } => {
-                    extract_string_literal(expr)
+                    single_quoted_literal(expr).map(ToString::to_string)
                 }
                 _ => None,
             }
@@ -2183,14 +2172,14 @@ mod tests {
 
     use super::{
         ResolvedSchemaFacts, SubqueryTransformContext, extract_current_setting_name,
-        extract_string_literal, filter_policies, generate_delete_trigger_sql,
-        generate_insert_trigger_sql, generate_readonly_rls_statements, generate_rls_audit_table,
-        generate_rls_statements, generate_rls_validation_statements, generate_update_trigger_sql,
-        rename_table_for_rls, transform_expr, transform_join_operator_for_subquery,
-        transform_query, transform_table_factor_for_subquery, validate_session_variables,
-        validate_table_policies,
+        filter_policies, generate_delete_trigger_sql, generate_insert_trigger_sql,
+        generate_readonly_rls_statements, generate_rls_audit_table, generate_rls_statements,
+        generate_rls_validation_statements, generate_update_trigger_sql, rename_table_for_rls,
+        transform_expr, transform_join_operator_for_subquery, transform_query,
+        transform_table_factor_for_subquery, validate_session_variables, validate_table_policies,
     };
     use crate::{
+        impls::function_helpers::single_quoted_literal,
         prelude::{Pg2SqliteOptions, TranslationOptions},
         traits::translation_options::SessionVariableMapping,
     };
@@ -2223,19 +2212,18 @@ mod tests {
     #[test]
     fn extract_helpers_cover_string_literal_and_current_setting_edge_paths() {
         assert_eq!(
-            extract_string_literal(&Expr::Value(sqlparser::ast::ValueWithSpan::from(
+            single_quoted_literal(&Expr::Value(sqlparser::ast::ValueWithSpan::from(
                 sqlparser::ast::Value::SingleQuotedString("x".to_string()),
-            )))
-            .as_deref(),
+            ))),
             Some("x")
         );
         assert!(
-            extract_string_literal(&Expr::Value(sqlparser::ast::ValueWithSpan::from(
+            single_quoted_literal(&Expr::Value(sqlparser::ast::ValueWithSpan::from(
                 sqlparser::ast::Value::Boolean(true),
             )))
             .is_none()
         );
-        assert!(extract_string_literal(&parse_expr("other_col")).is_none());
+        assert!(single_quoted_literal(&parse_expr("other_col")).is_none());
 
         let not_setting = Function {
             name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("other"))]),
