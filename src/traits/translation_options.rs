@@ -236,11 +236,10 @@ pub trait TranslationOptions {
     /// built with `SQLITE_ENABLE_MATH_FUNCTIONS`, so the translator assumes
     /// they are absent by default.
     ///
-    /// With this off, `sqrt(x)` and the aggregates whose closed form needs it
-    /// (`stddev`, `stddev_pop`, `stddev_samp`, `corr`) are rejected. With it on
-    /// they translate, and the caller is responsible for the destination
-    /// actually having the functions, whether from the build flag or a
-    /// registered UDF.
+    /// With this off, `sqrt(x)` and the operators that lower onto the math
+    /// functions (`^`, `|/`, `||/`) are rejected. With it on they translate,
+    /// and the caller is responsible for the destination actually having the
+    /// functions, whether from the build flag or a registered UDF.
     fn with_math_functions_available(self) -> Self;
 
     /// Returns whether the destination is declared to have the math functions.

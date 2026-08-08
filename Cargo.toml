@@ -29,7 +29,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 diesel = { version = "2.3.9", features = ["sqlite"] }
 insta = "1.47.2"
 rosetta-uuid = { version = "0.1.2", features = ["diesel", "sqlite"] }
-rusqlite = { version = "0.35", features = ["bundled", "functions"] }
+rusqlite = { version = "0.35", features = ["bundled", "functions", "window"] }
 sqlite-vec = "0.1.9"
 zerocopy = "0.8.48"
 rand = "0.10.1"

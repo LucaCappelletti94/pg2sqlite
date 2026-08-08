@@ -91,26 +91,6 @@ enum FunctionTranslation {
     /// value to JSON, keeping SQL NULL and leaving an argument that is already
     /// JSON alone.
     ToJson,
-    /// Population variance: var_pop(x) becomes avg(x*x) - avg(x)*avg(x).
-    VarPop,
-    /// Population standard deviation: stddev_pop(x) becomes sqrt(var_pop(x)).
-    StddevPop,
-    /// Sample variance: var_samp(x) becomes
-    /// (sum(x*x) - sum(x)*sum(x)/count(x)) / (count(x) - 1).
-    /// PG `variance` aliases to this.
-    VarSamp,
-    /// Sample standard deviation: stddev_samp(x) becomes sqrt(var_samp(x)).
-    /// PG `stddev` aliases to this.
-    StddevSamp,
-    /// Population covariance: covar_pop(x, y) becomes
-    /// avg(x*y) - avg(x) * avg(y).
-    CovarPop,
-    /// Sample covariance: covar_samp(x, y) becomes
-    /// (sum(x*y) - sum(x) * sum(y) / count(*)) / (count(*) - 1).
-    CovarSamp,
-    /// Pearson correlation: corr(x, y) becomes
-    /// covar_pop(x, y) / (sqrt(var_pop(x)) * sqrt(var_pop(y))).
-    Corr,
     /// No translation needed
     PassThrough,
     /// An array function whose body is rewritten over `json_each` /
@@ -409,49 +389,10 @@ fn translate_function(
             "{original_name} is not supported as an aggregate in SQLite. \
              Consider loading a custom extension or rewriting with bitwise expressions."
         )),
-        "stddev_pop" => {
-            if options.are_math_functions_available() {
-                FunctionTranslation::StddevPop
-            } else {
-                FunctionTranslation::Unsupported(
-                    "stddev_pop() needs sqrt() to compute the closed-form result, \
-                     which is not available in standard SQLite. \
-                     Call with_math_functions_available() on Pg2SqliteOptions when \
-                     your SQLite build includes SQLITE_ENABLE_MATH_FUNCTIONS."
-                        .to_string(),
-                )
-            }
+        "var_pop" | "var_samp" | "variance" | "stddev" | "stddev_pop" | "stddev_samp"
+        | "covar_pop" | "covar_samp" | "corr" => {
+            classify_statistical_aggregate(&original_name, options)
         }
-        "stddev" | "stddev_samp" => {
-            if options.are_math_functions_available() {
-                FunctionTranslation::StddevSamp
-            } else {
-                FunctionTranslation::Unsupported(
-                    "stddev/stddev_samp() needs sqrt() to compute the closed-form result, \
-                     which is not available in standard SQLite. \
-                     Call with_math_functions_available() on Pg2SqliteOptions when \
-                     your SQLite build includes SQLITE_ENABLE_MATH_FUNCTIONS."
-                        .to_string(),
-                )
-            }
-        }
-        "var_pop" => FunctionTranslation::VarPop,
-        "variance" | "var_samp" => FunctionTranslation::VarSamp,
-        "corr" => {
-            if options.are_math_functions_available() {
-                FunctionTranslation::Corr
-            } else {
-                FunctionTranslation::Unsupported(
-                    "corr() needs sqrt() to compute the closed-form result, \
-                     which is not available in standard SQLite. \
-                     Call with_math_functions_available() on Pg2SqliteOptions when \
-                     your SQLite build includes SQLITE_ENABLE_MATH_FUNCTIONS."
-                        .to_string(),
-                )
-            }
-        }
-        "covar_pop" => FunctionTranslation::CovarPop,
-        "covar_samp" => FunctionTranslation::CovarSamp,
         "regr_slope" | "regr_intercept" | "regr_r2" | "regr_avgx" | "regr_avgy"
         | "regr_sxx" | "regr_syy" | "regr_sxy" | "regr_count" => {
             FunctionTranslation::Unsupported(
@@ -805,6 +746,37 @@ fn translate_function(
 
         _ => classify_unrecognised_function(&original_name, args, options),
     }
+}
+
+/// Classifies one of PostgreSQL's nine statistical aggregates.
+///
+/// SQLite has none of them, and none can be assembled out of the aggregates it
+/// does have. The closed forms this replaced, `avg(x*x) - avg(x)*avg(x)` and
+/// its relatives, cancel catastrophically: over ten money values one cent
+/// apart around 123456789.01 the population variance came out 2.0 where
+/// PostgreSQL answers 0.000824999, and over fifty values just above 1e9 it
+/// went negative, so the standard deviation over them was NULL. A single pass
+/// cannot do better, because the accumulator has to carry a running mean,
+/// which is a stateful aggregate rather than an expression.
+///
+/// So the call passes through to whatever the destination registered under
+/// that name, and refuses when the caller has not said there is one. The
+/// declaration is per name rather than one switch over the family, because the
+/// family does not arrive as one: an off-the-shelf extension supplies the six
+/// univariate spellings and nothing supplies `covar_pop`, `covar_samp` or
+/// `corr`.
+fn classify_statistical_aggregate(name: &str, options: &Pg2SqliteOptions) -> FunctionTranslation {
+    if options.declares_user_defined_function(name) {
+        return FunctionTranslation::PassThrough;
+    }
+    FunctionTranslation::Unsupported(format!(
+        "{name}() is a PostgreSQL statistical aggregate and SQLite has no equivalent. It cannot be \
+         rewritten over avg, sum and count without losing precision: a running mean is stateful, \
+         and the closed form is wrong by orders of magnitude once the values are large and close \
+         together. Register an implementation on the destination, through diesel's #[aggregate] \
+         or rusqlite's create_window_function, and declare it with \
+         with_user_defined_functions([\"{name}\"])."
+    ))
 }
 
 /// Classifies a name no earlier arm recognised.
@@ -1167,211 +1139,6 @@ fn json_path_not_literal(label: &str, path: &Expr) -> crate::errors::Error {
          converted to the JSONPath SQLite takes, and {path} cannot be converted at translation \
          time."
     ))
-}
-
-/// Extract and translate the single argument of an aggregate like
-/// `var_pop(x)` or `stddev_pop(x)`. Errors when the call has no positional
-/// argument expression.
-fn single_aggregate_arg(
-    args: &FunctionArguments,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-    func_name: &str,
-) -> Result<Expr, crate::errors::Error> {
-    let exprs = function_argument_exprs(args);
-    let first = exprs.into_iter().next().ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(format!(
-            "{func_name} requires one argument expression"
-        ))
-    })?;
-    first.translate(schema, options)
-}
-
-/// Build the population-variance closed form `avg(x*x) - avg(x) * avg(x)`.
-/// `x` is cloned twice for the squared term and twice more for the mean
-/// product, so the caller passes the already-translated expression.
-fn var_pop_closed_form(x: Expr) -> Expr {
-    let x_squared = Expr::BinaryOp {
-        left: Box::new(x.clone()),
-        op: BinaryOperator::Multiply,
-        right: Box::new(x.clone()),
-    };
-    let avg_x_squared = simple_function_expr("avg", vec![x_squared], None);
-    let avg_x = simple_function_expr("avg", vec![x], None);
-    let avg_x_times_avg_x = Expr::BinaryOp {
-        left: Box::new(avg_x.clone()),
-        op: BinaryOperator::Multiply,
-        right: Box::new(avg_x),
-    };
-    Expr::BinaryOp {
-        left: Box::new(avg_x_squared),
-        op: BinaryOperator::Minus,
-        right: Box::new(avg_x_times_avg_x),
-    }
-}
-
-/// Build the sample-variance closed form
-/// `(sum(x*x) - sum(x) * sum(x) / count(x)) / (count(x) - 1)`. Numerator
-/// and denominator are wrapped in `Nested` so the rendered SQL keeps the
-/// correct precedence around the outer division.
-fn var_samp_closed_form(x: Expr) -> Expr {
-    let x_squared = Expr::BinaryOp {
-        left: Box::new(x.clone()),
-        op: BinaryOperator::Multiply,
-        right: Box::new(x.clone()),
-    };
-    let sum_x_squared = simple_function_expr("sum", vec![x_squared], None);
-    let sum_x = simple_function_expr("sum", vec![x.clone()], None);
-    let count_x = simple_function_expr("count", vec![x], None);
-
-    let sum_x_times_sum_x = Expr::BinaryOp {
-        left: Box::new(sum_x.clone()),
-        op: BinaryOperator::Multiply,
-        right: Box::new(sum_x),
-    };
-    let correction = Expr::BinaryOp {
-        left: Box::new(sum_x_times_sum_x),
-        op: BinaryOperator::Divide,
-        right: Box::new(count_x.clone()),
-    };
-    let numerator = Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(sum_x_squared),
-        op: BinaryOperator::Minus,
-        right: Box::new(correction),
-    }));
-    let denominator = Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(count_x),
-        op: BinaryOperator::Minus,
-        right: Box::new(number_literal("1")),
-    }));
-    Expr::BinaryOp {
-        left: Box::new(numerator),
-        op: BinaryOperator::Divide,
-        right: Box::new(denominator),
-    }
-}
-
-/// Extract and translate exactly two argument expressions, as required
-/// by bivariate aggregates such as `covar_pop(x, y)` or `corr(x, y)`.
-fn two_aggregate_args(
-    args: &FunctionArguments,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-    func_name: &str,
-) -> Result<(Expr, Expr), crate::errors::Error> {
-    let exprs = function_argument_exprs(args);
-    if exprs.len() < 2 {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-            "{func_name} requires two argument expressions"
-        )));
-    }
-    let mut iter = exprs.into_iter();
-    let x = iter.next().unwrap();
-    let y = iter.next().unwrap();
-    Ok((x.translate(schema, options)?, y.translate(schema, options)?))
-}
-
-/// Build the population-covariance closed form
-/// `avg(x*y) - avg(x) * avg(y)`.
-fn covar_pop_closed_form(x: &Expr, y: &Expr) -> Expr {
-    let (x, y) = (paired_with(x, y), paired_with(y, x));
-    let xy = Expr::BinaryOp {
-        left: Box::new(x.clone()),
-        op: BinaryOperator::Multiply,
-        right: Box::new(y.clone()),
-    };
-    let avg_xy = simple_function_expr("avg", vec![xy], None);
-    let mean_x = simple_function_expr("avg", vec![x], None);
-    let mean_y = simple_function_expr("avg", vec![y], None);
-    let avg_x_times_avg_y = Expr::BinaryOp {
-        left: Box::new(mean_x),
-        op: BinaryOperator::Multiply,
-        right: Box::new(mean_y),
-    };
-    Expr::BinaryOp {
-        left: Box::new(avg_xy),
-        op: BinaryOperator::Minus,
-        right: Box::new(avg_x_times_avg_y),
-    }
-}
-
-/// `CASE WHEN <partner> IS NOT NULL THEN <value> END`, so an aggregate over the
-/// result sees only the rows where both inputs are present.
-///
-/// PostgreSQL's bivariate aggregates are defined over the complete pairs, so
-/// every marginal inside one has to be taken over the same row set as the joint
-/// term. Taking `avg(x)` over its own non-NULL rows and `avg(x*y)` over the
-/// pairs breaks the identity these closed forms rest on.
-fn paired_with(value: &Expr, partner: &Expr) -> Expr {
-    case_when(Expr::IsNotNull(Box::new(partner.clone())), value.clone(), None)
-}
-
-/// Build the sample-covariance closed form
-/// `(sum(x*y) - sum(x) * sum(y) / count(x*y)) / (count(x*y) - 1)`.
-///
-/// The pair count is `count(x*y)` rather than `count(*)`: the product is NULL
-/// whenever either input is, so counting it counts exactly the rows
-/// PostgreSQL averages over, where `count(*)` counted every row in the group.
-fn covar_samp_closed_form(x: &Expr, y: &Expr) -> Expr {
-    let (x, y) = (paired_with(x, y), paired_with(y, x));
-    let xy = Expr::BinaryOp {
-        left: Box::new(x.clone()),
-        op: BinaryOperator::Multiply,
-        right: Box::new(y.clone()),
-    };
-    let sum_xy = simple_function_expr("sum", vec![xy.clone()], None);
-    let total_x = simple_function_expr("sum", vec![x], None);
-    let total_y = simple_function_expr("sum", vec![y], None);
-    let count_star = simple_function_expr("count", vec![xy], None);
-
-    let sum_x_times_sum_y = Expr::BinaryOp {
-        left: Box::new(total_x),
-        op: BinaryOperator::Multiply,
-        right: Box::new(total_y),
-    };
-    let correction = Expr::BinaryOp {
-        left: Box::new(sum_x_times_sum_y),
-        op: BinaryOperator::Divide,
-        right: Box::new(count_star.clone()),
-    };
-    let numerator = Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(sum_xy),
-        op: BinaryOperator::Minus,
-        right: Box::new(correction),
-    }));
-    let denominator = Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(count_star),
-        op: BinaryOperator::Minus,
-        right: Box::new(number_literal("1")),
-    }));
-    Expr::BinaryOp {
-        left: Box::new(numerator),
-        op: BinaryOperator::Divide,
-        right: Box::new(denominator),
-    }
-}
-
-/// Build the Pearson correlation closed form
-/// `covar_pop(x, y) / (sqrt(var_pop(x)) * sqrt(var_pop(y)))`.
-///
-/// The two deviations are paired here as well, which is not automatic: the
-/// numerator pairs itself inside `covar_pop_closed_form`, but `var_pop` of a
-/// bare column would still spread over rows whose partner is NULL, and the
-/// ratio of terms taken over different row sets is not a correlation.
-fn corr_closed_form(x: &Expr, y: &Expr) -> Expr {
-    let numerator = covar_pop_closed_form(x, y);
-    let stddev_x = simple_function_expr("sqrt", vec![var_pop_closed_form(paired_with(x, y))], None);
-    let stddev_y = simple_function_expr("sqrt", vec![var_pop_closed_form(paired_with(y, x))], None);
-    let denominator = Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(stddev_x),
-        op: BinaryOperator::Multiply,
-        right: Box::new(stddev_y),
-    }));
-    Expr::BinaryOp {
-        left: Box::new(Expr::Nested(Box::new(numerator))),
-        op: BinaryOperator::Divide,
-        right: Box::new(denominator),
-    }
 }
 
 /// `left(s, n)`: the first `n` characters, or all but the last `|n|` when `n`
@@ -2009,22 +1776,6 @@ impl Translator for Function {
                     None,
                 ))
             }
-            FunctionTranslation::VarPop => {
-                let x = single_aggregate_arg(&func.args, schema, options, "var_pop")?;
-                Ok(var_pop_closed_form(x))
-            }
-            FunctionTranslation::StddevPop => {
-                let x = single_aggregate_arg(&func.args, schema, options, "stddev_pop")?;
-                Ok(simple_function_expr("sqrt", vec![var_pop_closed_form(x)], None))
-            }
-            FunctionTranslation::VarSamp => {
-                let x = single_aggregate_arg(&func.args, schema, options, "var_samp")?;
-                Ok(var_samp_closed_form(x))
-            }
-            FunctionTranslation::StddevSamp => {
-                let x = single_aggregate_arg(&func.args, schema, options, "stddev_samp")?;
-                Ok(simple_function_expr("sqrt", vec![var_samp_closed_form(x)], None))
-            }
             FunctionTranslation::Extremum { greatest } => {
                 let exprs = function_argument_exprs(&func.args);
                 let arguments = exprs
@@ -2218,18 +1969,6 @@ impl Translator for Function {
                     right: Box::new(number_literal("3.0")),
                 }));
                 Ok(simple_function_expr("pow", vec![x, exponent], None))
-            }
-            FunctionTranslation::CovarPop => {
-                let (x, y) = two_aggregate_args(&func.args, schema, options, "covar_pop")?;
-                Ok(covar_pop_closed_form(&x, &y))
-            }
-            FunctionTranslation::CovarSamp => {
-                let (x, y) = two_aggregate_args(&func.args, schema, options, "covar_samp")?;
-                Ok(covar_samp_closed_form(&x, &y))
-            }
-            FunctionTranslation::Corr => {
-                let (x, y) = two_aggregate_args(&func.args, schema, options, "corr")?;
-                Ok(corr_closed_form(&x, &y))
             }
             FunctionTranslation::Array(kind) => {
                 array::translate_array_function(kind, &func.args, schema, options)

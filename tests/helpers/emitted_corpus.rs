@@ -29,7 +29,11 @@ CREATE TABLE u (id INT PRIMARY KEY, t_id INT, s TEXT);
 ";
 
 /// Every capability switched on, so a construct is never rejected merely for
-/// lacking an opt-in.
+/// lacking an opt-in. Declaring the nine statistical aggregates is one such
+/// opt-in: SQLite has none of them, so the translator refuses each until the
+/// caller says the destination carries it. The sweep's connection registers
+/// exactly these, and `the_sweep_declares_every_registered_aggregate` holds
+/// the two lists together.
 #[must_use]
 pub fn sweep_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -37,6 +41,17 @@ pub fn sweep_options() -> Pg2SqliteOptions {
         .with_array_representation(ArrayRepresentation::Json)
         .with_math_functions_available()
         .with_rls_audit_table_name("rls_violations")
+        .with_user_defined_functions([
+            "var_pop",
+            "var_samp",
+            "variance",
+            "stddev_pop",
+            "stddev",
+            "stddev_samp",
+            "covar_pop",
+            "covar_samp",
+            "corr",
+        ])
 }
 
 /// What a corpus row's translation adds on top of the translated fixture.
@@ -663,5 +678,20 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                  CREATE TRIGGER pt4 AFTER INSERT ON ev4 FOR EACH ROW EXECUTE FUNCTION pf4();
                  INSERT INTO ev4 VALUES (2, 10);",
                     ],
+    ),
+    (
+        "statistical-aggregates",
+        &[
+                // The three clauses the old closed forms discarded, plus a
+                // grouped call. Each name reaches SQLite verbatim because the
+                // sweep options declare it, so what these prove is that the
+                // call arrives whole rather than rebuilt.
+                "SELECT var_pop(r) OVER (PARTITION BY n) FROM t;",
+                "SELECT stddev_samp(r) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) \
+                 FROM t;",
+                "SELECT var_pop(DISTINCT r) FROM t;",
+                "SELECT n, corr(r, r) FROM t GROUP BY n HAVING stddev_pop(r) > 0;",
+                "SELECT variance(r) FILTER (WHERE n > 0) FROM t;",
+            ],
     ),
 ];

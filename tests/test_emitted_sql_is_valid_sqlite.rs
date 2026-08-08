@@ -20,10 +20,13 @@
 
 #[path = "helpers/emitted_corpus.rs"]
 mod emitted_corpus;
+#[path = "helpers/statistical_aggregates.rs"]
+mod statistical_aggregates;
 
 use emitted_corpus::{CORPUS_GROUPS, FIXTURE, row_statements, sweep_options};
-use pg2sqlite::prelude::Pg2Sqlite;
+use pg2sqlite::prelude::{Pg2Sqlite, TranslationOptions};
 use rusqlite::{Connection, functions::FunctionFlags};
+use statistical_aggregates::{STATISTICAL_AGGREGATES, register_statistical_aggregates};
 
 /// A SQLite complaint that means the translator emitted something wrong, as
 /// opposed to the corpus referencing a name it never declared.
@@ -31,11 +34,26 @@ fn is_translator_fault(msg: &str) -> bool {
     msg.contains("syntax error") || msg.contains("unrecognized token") || msg.contains("no such")
 }
 
+/// The corpus rows over `var_pop` and friends only reach SQLite because the
+/// sweep options declare those names, and they only run because this
+/// connection carries them. Either half alone would make the rows assert
+/// nothing.
+#[test]
+fn the_sweep_declares_every_registered_aggregate() {
+    let options = sweep_options();
+    for name in STATISTICAL_AGGREGATES {
+        assert!(
+            options.declares_user_defined_function(name),
+            "sweep_options must declare {name}, which the sweep connection registers"
+        );
+    }
+}
+
 fn sqlite_accepts(setup: &[String], stmts: &[String]) -> Result<(), String> {
     let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
     // Register sqrt and pow so the sweep can validate SQL emitted when math
     // functions are enabled in the sweep options. Both are needed because ^ and
-    // ||/ translate to pow(), and stddev/corr translate to sqrt().
+    // ||/ translate to pow().
     conn.create_scalar_function("sqrt", 1, FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
         let x: f64 = ctx.get(0)?;
         Ok(x.sqrt())
@@ -47,6 +65,8 @@ fn sqlite_accepts(setup: &[String], stmts: &[String]) -> Result<(), String> {
         Ok(base.powf(exp))
     })
     .map_err(|e| format!("pow UDF registration failed: {e}"))?;
+    register_statistical_aggregates(&conn)
+        .map_err(|e| format!("statistical aggregate registration failed: {e}"))?;
     for s in setup {
         conn.execute_batch(&format!("{s};")).map_err(|e| format!("setup rejected: {e}"))?;
     }
@@ -236,6 +256,7 @@ const REVIEW_GROUPS: &[&str] = &[
     "boolean-to-text",
     "rls-view-reads",
     "plpgsql-scanner-and-binding",
+    "statistical-aggregates",
 ];
 
 #[test]

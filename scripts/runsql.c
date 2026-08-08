@@ -12,6 +12,44 @@
 
 #include "sqlite3.h"
 
+/* The nine PostgreSQL statistical aggregates, registered as no-ops returning
+ * NULL.
+ *
+ * SQLite has none of them, and the translator emits each verbatim once the
+ * caller declares the destination carries it. Without a stub here every corpus
+ * row over one would fail with `no such function` on both builds, cancel out
+ * of the differential and check nothing. A stub makes SQLite resolve the name
+ * and then check what this harness is for: whether the surrounding statement,
+ * its window clause, its DISTINCT and its frame, run on the floor version.
+ * The values are irrelevant, so the callbacks do nothing.
+ */
+static void stub_step(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    (void)context;
+    (void)argc;
+    (void)argv;
+}
+
+static void stub_final(sqlite3_context *context) { sqlite3_result_null(context); }
+
+static void stub_value(sqlite3_context *context) { sqlite3_result_null(context); }
+
+static int register_statistical_aggregates(sqlite3 *db) {
+    static const char *const univariate[] = {"var_pop",  "var_samp", "variance",
+                                             "stddev",   "stddev_pop", "stddev_samp"};
+    static const char *const bivariate[] = {"covar_pop", "covar_samp", "corr"};
+    for (size_t i = 0; i < sizeof(univariate) / sizeof(*univariate); i++) {
+        int rc = sqlite3_create_window_function(db, univariate[i], 1, SQLITE_UTF8, NULL, stub_step,
+                                                stub_final, stub_value, stub_step, NULL);
+        if (rc != SQLITE_OK) return rc;
+    }
+    for (size_t i = 0; i < sizeof(bivariate) / sizeof(*bivariate); i++) {
+        int rc = sqlite3_create_window_function(db, bivariate[i], 2, SQLITE_UTF8, NULL, stub_step,
+                                                stub_final, stub_value, stub_step, NULL);
+        if (rc != SQLITE_OK) return rc;
+    }
+    return SQLITE_OK;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: runsql <corpus>\n");
@@ -52,6 +90,12 @@ int main(int argc, char **argv) {
         if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
             printf("FAIL cannot open database :: %s\n", label);
             failed++;
+            continue;
+        }
+        if (register_statistical_aggregates(db) != SQLITE_OK) {
+            printf("FAIL cannot register statistical aggregates :: %s\n", label);
+            failed++;
+            sqlite3_close(db);
             continue;
         }
         char *error = NULL;
