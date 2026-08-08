@@ -862,14 +862,6 @@ fn translate_numeric_cast(
     )))
 }
 
-/// A single-quoted string as an expression.
-fn string_literal_value(value: &str) -> Expr {
-    Expr::Value(ValueWithSpan {
-        value: Value::SingleQuotedString(value.to_string()),
-        span: sqlparser::tokenizer::Span::empty(),
-    })
-}
-
 /// Translate PostgreSQL `expr AT TIME ZONE '...'` to a SQLite `datetime` call.
 ///
 /// The two PostgreSQL operations share this syntax and shift opposite ways: a
@@ -913,7 +905,7 @@ fn translate_at_time_zone(
         // neither agrees on which machine.
         return Ok(simple_function_expr(
             "datetime",
-            vec![translated_timestamp, string_literal_value(&modifier)],
+            vec![translated_timestamp, string_literal(&modifier)],
             None,
         ));
     };
@@ -930,11 +922,7 @@ fn translate_at_time_zone(
         TimestampAwareness::Naive => modifier,
         TimestampAwareness::Aware => negated,
     };
-    Ok(simple_function_expr(
-        "datetime",
-        vec![translated_timestamp, string_literal_value(&applied)],
-        None,
-    ))
+    Ok(simple_function_expr("datetime", vec![translated_timestamp, string_literal(&applied)], None))
 }
 
 /// Translate a vector type cast to the appropriate sqlite-vec function.
