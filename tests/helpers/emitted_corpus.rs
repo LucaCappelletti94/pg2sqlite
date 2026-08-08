@@ -742,4 +742,13 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT make_time(n, n, r) FROM t;",
             ],
     ),
+    (
+        "cube-root",
+        &[
+                // The negative half of the domain, which used to answer NULL,
+                // and the operators that lower onto the same power call.
+                "SELECT cbrt(-8), cbrt(8), cbrt(0);",
+                "SELECT cbrt(r) FROM t;",
+            ],
+    ),
 ];

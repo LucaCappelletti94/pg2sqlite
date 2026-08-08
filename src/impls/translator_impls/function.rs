@@ -1275,6 +1275,35 @@ fn left_closed_form(s: Expr, n: Expr) -> Expr {
     simple_function_expr("substr", vec![s, integer_literal(1), length], None)
 }
 
+/// `cbrt(x)`: the real cube root, which is negative for a negative operand.
+///
+/// `pow(x, 1.0/3.0)` answers NaN for a negative base, and SQLite surfaces NaN
+/// as NULL, so the whole negative half of the domain came back empty. Rooting
+/// the magnitude and putting the sign back covers both halves and keeps NULL
+/// propagating through both calls. `x` is read twice, once for its sign and
+/// once for its magnitude, which is only observable for a volatile operand.
+///
+/// Not bit-exact against PostgreSQL, whose `cbrt` is the correctly rounded C
+/// function where `pow` is not, so a value that is not a perfect cube agrees
+/// to about fifteen significant figures.
+fn cube_root_closed_form(x: Expr) -> Expr {
+    let one_third = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(number_literal("1.0")),
+        op: BinaryOperator::Divide,
+        right: Box::new(number_literal("3.0")),
+    }));
+    let magnitude = simple_function_expr(
+        "pow",
+        vec![simple_function_expr("abs", vec![x.clone()], None), one_third],
+        None,
+    );
+    Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(simple_function_expr("sign", vec![x], None)),
+        op: BinaryOperator::Multiply,
+        right: Box::new(magnitude),
+    }))
+}
+
 /// `right(s, n)`: the last `n` characters, or all but the first `|n|` when `n`
 /// is negative.
 ///
@@ -2056,15 +2085,8 @@ impl Translator for Function {
                 Ok(simple_function_expr("NULLIF", vec![aggregate, string_literal("[]")], None))
             }
             FunctionTranslation::ToCbrt => {
-                // cbrt(x) -> pow(x, (1.0 / 3.0))
                 let exprs = extract_exactly(&func.args, 1, "cbrt")?;
-                let x = exprs[0].translate(schema, options)?;
-                let exponent = Expr::Nested(Box::new(Expr::BinaryOp {
-                    left: Box::new(number_literal("1.0")),
-                    op: BinaryOperator::Divide,
-                    right: Box::new(number_literal("3.0")),
-                }));
-                Ok(simple_function_expr("pow", vec![x, exponent], None))
+                Ok(cube_root_closed_form(exprs[0].translate(schema, options)?))
             }
             FunctionTranslation::Array(kind) => {
                 array::translate_array_function(kind, &func.args, schema, options)

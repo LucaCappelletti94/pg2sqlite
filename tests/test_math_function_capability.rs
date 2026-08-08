@@ -116,10 +116,15 @@ fn on_power_renames_to_pow() {
     sqlite_parses(&sql);
 }
 
+/// The sign is carried outside the power, because a negative base under a
+/// non-integer exponent is NaN. `tests/test_cube_root.rs` holds the numbers.
 #[test]
-fn on_cbrt_translates_to_pow_one_third() {
+fn on_cbrt_roots_the_magnitude_and_restores_the_sign() {
     let sql = translate_on("SELECT cbrt(27.0);").expect("cbrt should translate when math ON");
-    assert!(sql.contains("pow(27.0, (1.0 / 3.0))"), "expected pow(27.0, (1.0 / 3.0)) in: {sql}");
+    assert!(
+        sql.contains("(sign(27.0) * pow(abs(27.0), (1.0 / 3.0)))"),
+        "expected the signed cube root in: {sql}"
+    );
     sqlite_parses(&sql);
 }
 
