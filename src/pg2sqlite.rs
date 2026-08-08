@@ -700,6 +700,12 @@ impl Pg2Sqlite {
 
     /// Reverse translates a single SQLite DML statement to PostgreSQL.
     ///
+    /// Carries the same case-sensitive-matching requirement as
+    /// [`Pg2Sqlite::reverse_sql`], which states it in full: the statement must
+    /// have run on a connection carrying `PRAGMA case_sensitive_like = true`,
+    /// or a plain `LIKE` handed back here matches fewer rows in PostgreSQL
+    /// than it did in SQLite.
+    ///
     /// # Errors
     ///
     /// Returns [`crate::errors::Error::UnsupportedReverseStatement`] for
@@ -737,6 +743,37 @@ impl Pg2Sqlite {
     /// identifier text is preserved verbatim, so a mixed-case SQLite identifier
     /// becomes a case-sensitive PostgreSQL identifier with the same spelling,
     /// which lines up only under a shared schema.
+    ///
+    /// # The caller's side of the bargain: case-sensitive matching
+    ///
+    /// The SQL given here must have run on a connection carrying `PRAGMA
+    /// case_sensitive_like = true`. SQLite's `LIKE` ignores letter case unless
+    /// a connection says otherwise, PostgreSQL's never does, and a plain `LIKE`
+    /// is handed back as a plain `LIKE`, so without that setting the
+    /// PostgreSQL statement matches fewer rows than the SQLite one did.
+    ///
+    /// Forward translation writes that pragma into its own script, but only
+    /// into a script that itself contains a `LIKE`, and a pragma is connection
+    /// state rather than anything held in the database file. An application
+    /// that opens the replica later therefore has to set it, and nothing here
+    /// can tell whether it did.
+    ///
+    /// Handing back `ILIKE` instead would not be the safer default. SQLite
+    /// folds the ASCII letters only, so `'Ä' LIKE 'ä'` is false where
+    /// PostgreSQL's `ILIKE` is true, which trades one wrong answer for another
+    /// and adds a divergence outside ASCII.
+    ///
+    /// ```
+    /// # use pg2sqlite::pg2sqlite::Pg2Sqlite;
+    /// # use pg2sqlite::options::Pg2SqliteOptions;
+    /// # let translator =
+    /// #     Pg2Sqlite::default().sql("CREATE TABLE t (id INT PRIMARY KEY, s TEXT);").unwrap();
+    /// # let schema = translator.build_schema().unwrap();
+    /// let pg = translator
+    ///     .reverse_sql("SELECT s FROM t WHERE s LIKE 'a%'", &schema, &Pg2SqliteOptions::default())
+    ///     .unwrap();
+    /// assert_eq!(pg[0].to_string(), "SELECT s FROM t WHERE s LIKE 'a%'");
+    /// ```
     ///
     /// # Errors
     ///
