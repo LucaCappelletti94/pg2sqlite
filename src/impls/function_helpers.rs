@@ -15,7 +15,7 @@ use alloc::{
 
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident,
-    ObjectName, ObjectNamePart, Value, ValueWithSpan, WindowType,
+    ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan, WindowType,
 };
 
 use crate::errors::Error;
@@ -51,6 +51,25 @@ pub(crate) fn integer_literal(value: i64) -> Expr {
         value: Value::Number(value.to_string(), false),
         span: sqlparser::tokenizer::Span::empty(),
     })
+}
+
+/// The value of `expr` when it is an integer literal, with an optional sign.
+///
+/// The read next to [`integer_literal`], which is the write. Callers that need
+/// a narrower type convert at the call site, so the range a caller accepts is
+/// stated where that caller decides it rather than here.
+#[must_use]
+pub(crate) fn integer_literal_value(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => digits.parse().ok(),
+        Expr::Nested(inner) | Expr::UnaryOp { op: UnaryOperator::Plus, expr: inner } => {
+            integer_literal_value(inner)
+        }
+        Expr::UnaryOp { op: UnaryOperator::Minus, expr: inner } => {
+            integer_literal_value(inner).map(i64::wrapping_neg)
+        }
+        _ => None,
+    }
 }
 
 /// Build a simple function call expression with unnamed positional arguments

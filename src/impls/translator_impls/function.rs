@@ -15,7 +15,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, CastKind, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
     FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart,
-    UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use super::{
@@ -32,7 +32,8 @@ use crate::{
         },
         expr_helpers::case_when,
         function_helpers::{
-            extract_exactly, integer_literal, number_literal, simple_function_expr, string_literal,
+            extract_exactly, integer_literal, integer_literal_value, number_literal,
+            simple_function_expr, string_literal,
         },
         object_name::last_ident,
         shared_helpers::{
@@ -251,7 +252,9 @@ fn truncate_to_scale(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
-    let factor = match literal_integer(scale) {
+    // A scale beyond `i32` is not one `literal_power_of_ten` can build, so it
+    // takes the computed path exactly as a non-literal scale does.
+    let factor = match integer_literal_value(scale).and_then(|n| i32::try_from(n).ok()) {
         Some(digits) => number_literal(&literal_power_of_ten(digits)),
         None if options.are_math_functions_available() => {
             simple_function_expr(
@@ -312,16 +315,6 @@ fn literal_power_of_ten(digits: i32) -> String {
         let mut text = String::from("0.");
         text.extend(decimals);
         text
-    }
-}
-
-/// The value of `expr` when it is an integer literal, with an optional sign.
-fn literal_integer(expr: &Expr) -> Option<i32> {
-    match expr {
-        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => digits.parse().ok(),
-        Expr::UnaryOp { op: UnaryOperator::Minus, expr } => literal_integer(expr).map(|n| -n),
-        Expr::Nested(inner) => literal_integer(inner),
-        _ => None,
     }
 }
 
@@ -1900,10 +1893,13 @@ impl Translator for Function {
                         translate_window_type(func.over.as_ref(), schema, options)?,
                     ));
                 };
-                let Some(target) = literal_integer(places).and_then(|n| u32::try_from(n).ok())
+                let Some(target) =
+                    integer_literal_value(places).and_then(|n| u32::try_from(n).ok())
                 else {
                     return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                        "round({value}, {places}) over a NUMERIC needs the number of places as a                          literal, since the value is held as minor units and the rounding is                          integer arithmetic decided at translation time."
+                        "round({value}, {places}) over a NUMERIC needs the number of places as a \
+                         literal, since the value is held as minor units and the rounding is \
+                         integer arithmetic decided at translation time."
                     )));
                 };
                 // Down to the requested places and back, so the result keeps

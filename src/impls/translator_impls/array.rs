@@ -41,7 +41,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArguments,
     Ident, ObjectName, OrderByExpr, OrderByOptions, SelectItem, SetExpr, SetOperator,
-    SetQuantifier, TableAlias, TableFactor, UnaryOperator, Value, ValueWithSpan, visit_expressions,
+    SetQuantifier, TableAlias, TableFactor, Value, ValueWithSpan, visit_expressions,
 };
 
 use crate::{
@@ -49,7 +49,8 @@ use crate::{
     impls::{
         expr_helpers::{case_when, null_safe_eq, null_safe_neq},
         function_helpers::{
-            extract_exactly, integer_literal, simple_function_expr, string_literal,
+            extract_exactly, integer_literal, integer_literal_value, simple_function_expr,
+            string_literal,
         },
         query_builder::{
             from_relation, make_query, make_simple_select, single_expr_query, table_function_factor,
@@ -330,22 +331,6 @@ pub(crate) fn translate_array_subscript(
 #[must_use]
 fn json_extract_call(document: Expr, path: Expr) -> Expr {
     simple_function_expr("json_extract", vec![document, path], None)
-}
-
-/// Read an integer literal out of an expression so a constant subscript or
-/// dimension argument can be folded at translation time.
-#[must_use]
-pub(crate) fn integer_literal_value(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Value(ValueWithSpan { value: Value::Number(text, _), .. }) => text.parse().ok(),
-        Expr::Nested(inner) | Expr::UnaryOp { op: UnaryOperator::Plus, expr: inner } => {
-            integer_literal_value(inner)
-        }
-        Expr::UnaryOp { op: UnaryOperator::Minus, expr: inner } => {
-            integer_literal_value(inner).map(i64::wrapping_neg)
-        }
-        _ => None,
-    }
 }
 
 /// A PostgreSQL array function whose body has to be rewritten rather than
