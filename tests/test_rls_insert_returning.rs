@@ -208,3 +208,83 @@ fn insert_returning_star_yields_full_row_from_backing_table() {
     assert_eq!(owner_id, Some(42), "owner_id must come back as written");
     assert_eq!(title.as_deref(), Some("star"), "title must come back as written");
 }
+
+/// The default validation mode emits no backing-table guard, so a
+/// RETURNING-bearing insert has to stay on the view, whose row carries only
+/// what the caller wrote. A column the database fills in would come back NULL,
+/// so translation refuses instead of answering wrongly.
+fn monitor_opts() -> Pg2SqliteOptions {
+    Pg2SqliteOptions::default()
+        .with_uuid_representation(UuidRepresentation::Blob)
+        .with_rls_audit_table_name("rls_violations")
+        .with_session_variable(SessionVariableMapping::current_setting(
+            "app.user_id",
+            "current_app_user",
+        ))
+}
+
+fn translate_error(pg_query: &str, opts: &Pg2SqliteOptions) -> String {
+    Pg2Sqlite::default()
+        .sql(&format!("{RLS_SCHEMA};\n{pg_query}"))
+        .expect("parse")
+        .translate(opts)
+        .expect_err("the returned column cannot be answered from the view")
+        .to_string()
+}
+
+#[test]
+fn monitor_mode_refuses_returning_the_assigned_key() {
+    let error = translate_error(
+        "INSERT INTO documents (owner_id, title) VALUES (42, 'x') RETURNING id;",
+        &monitor_opts(),
+    );
+    assert!(error.contains("RETURNING reads id"), "the refusal must name the column: {error}");
+    assert!(
+        error.contains("with_strict_rls_validation"),
+        "the refusal must name the option that makes it work: {error}"
+    );
+}
+
+#[test]
+fn monitor_mode_refuses_returning_star() {
+    let error = translate_error(
+        "INSERT INTO documents (owner_id, title) VALUES (42, 'x') RETURNING *;",
+        &monitor_opts(),
+    );
+    assert!(
+        error.contains("RETURNING reads id"),
+        "a wildcard reads every column, key included: {error}"
+    );
+}
+
+#[test]
+fn monitor_mode_returns_a_column_the_caller_wrote() {
+    let opts = monitor_opts();
+    let conn = open_with_session_user();
+    conn.execute_batch(&translate(RLS_SCHEMA, &opts)).expect("apply schema");
+
+    let sql = translate_query_tail(
+        "INSERT INTO documents (owner_id, title) VALUES (42, 'written') RETURNING title",
+        RLS_SCHEMA,
+        &opts,
+    );
+    let title: Option<String> = conn
+        .query_row(sql.trim_end_matches(";\n").trim_end_matches(';'), [], |r| r.get(0))
+        .expect("a caller-written column comes back through the view");
+
+    assert_eq!(title.as_deref(), Some("written"));
+}
+
+/// The refusal is scoped to policy-bearing tables. An ordinary table returns
+/// its assigned key through the same statement, since nothing is split.
+#[test]
+fn a_table_without_a_policy_still_returns_its_assigned_key() {
+    let plain = "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL);";
+    let translated = Pg2Sqlite::default()
+        .sql(&format!("{plain}\nINSERT INTO notes (body) VALUES ('b') RETURNING id;"))
+        .expect("parse")
+        .translate(&monitor_opts())
+        .expect("an unsplit table needs no rewrite");
+    let last = translated.last().expect("at least one statement").to_string();
+    assert!(last.contains("INSERT INTO notes"), "the insert must be untouched: {last}");
+}
