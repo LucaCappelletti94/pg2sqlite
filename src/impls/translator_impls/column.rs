@@ -88,6 +88,46 @@ fn quoted_decimal_as_number(text: &str) -> Option<Expr> {
     }))
 }
 
+/// The `DEFAULT` a column declares, in the units the translated column stores.
+///
+/// One accessor because two emitters need the same answer: the column
+/// definition, which carries it into the table, and the RLS INSERT trigger,
+/// which has to reproduce it because a SQLite view holds no defaults. A
+/// `NUMERIC(10,2) DEFAULT 1.5` column stores minor units, so both have to read
+/// 150.
+///
+/// # Errors
+///
+/// Returns [`Error::UnsupportedSQLiteFeature`] when a scaled `NUMERIC` column's
+/// default is not one number at the column's scale.
+pub(crate) fn declared_default(column: &ColumnDef) -> Result<Option<Expr>, Error> {
+    column
+        .options
+        .iter()
+        .find_map(|option| {
+            match &option.option {
+                ColumnOption::Default(expr) => Some(expr),
+                _ => None,
+            }
+        })
+        .map(|expr| scaled_default(column, expr))
+        .transpose()
+}
+
+/// A declared default in the units the translated column stores.
+fn scaled_default(column: &ColumnDef, expr: &Expr) -> Result<Expr, Error> {
+    let Some(scale) = minor_unit_scale(&column.data_type) else { return Ok(expr.clone()) };
+    scaled_numeric_default(expr, scale)?.ok_or_else(|| {
+        Error::UnsupportedSQLiteFeature(format!(
+            "the DEFAULT on column '{}' does not land as one number at the column's scale. The \
+             column is a NUMERIC held as an INTEGER of minor units, so the default has to be a \
+             plain literal, which PostgreSQL coerces the same way. Write it as a number at the \
+             column's scale, or drop it.",
+            column.name
+        ))
+    })
+}
+
 /// Translates a column definition, reporting what its declared type loses.
 ///
 /// `table` is taken rather than derived because a warning naming only the
@@ -146,25 +186,18 @@ pub(crate) fn translate_column_def(
     // D1 makes a scaled NUMERIC column an INTEGER of minor units, and the
     // declared DEFAULT writes into it like any other statement, so it scales
     // here, before translation, while the raw literal is still recognisable.
-    let scale = minor_unit_scale(&column.data_type);
     let mut translated_options: Vec<ColumnOptionDef> = column
         .options
         .iter()
         .map(|o| {
-            let (Some(scale), ColumnOption::Default(expr)) = (scale, &o.option) else {
+            let ColumnOption::Default(expr) = &o.option else {
                 return o.translate(schema, options);
             };
-            let Some(scaled) = scaled_numeric_default(expr, scale)? else {
-                return Err(Error::UnsupportedSQLiteFeature(format!(
-                    "the DEFAULT on column '{}' does not land as one number at the column's \
-                     scale. The column is a NUMERIC held as an INTEGER of minor units, so the \
-                     default has to be a plain literal, which PostgreSQL coerces the same way. \
-                     Write it as a number at the column's scale, or drop it.",
-                    column.name
-                )));
-            };
-            ColumnOptionDef { name: o.name.clone(), option: ColumnOption::Default(scaled) }
-                .translate(schema, options)
+            ColumnOptionDef {
+                name: o.name.clone(),
+                option: ColumnOption::Default(scaled_default(column, expr)?),
+            }
+            .translate(schema, options)
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()

@@ -5,6 +5,12 @@
 //! 1. A renamed inner table (e.g., `documents_rls`) containing the actual data
 //! 2. A view with the original table name that filters rows based on policies
 //! 3. INSTEAD OF triggers on the view for INSERT, UPDATE, DELETE operations
+//!
+//! The triggers are the only writers left once a table is split, so they carry
+//! what a view cannot: a column's `DEFAULT`, which the INSERT trigger applies
+//! itself, and a computed column, which it refuses to be told. A view gives
+//! SQLite no way to tell an omitted column from one written NULL, so a default
+//! answers for both.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -16,7 +22,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::ops::ControlFlow;
+use core::{fmt::Write, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
@@ -24,10 +30,10 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::{
-    CreatePolicy, CreatePolicyCommand, CreatePolicyType, CreateTable, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments, HavingBound,
-    Ident, JoinConstraint, JoinOperator, ListAggOnOverflow, Statement, TableFactor, Value,
-    WindowType,
+    ColumnOption, CreatePolicy, CreatePolicyCommand, CreatePolicyType, CreateTable, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments,
+    HavingBound, Ident, JoinConstraint, JoinOperator, ListAggOnOverflow, Statement, TableFactor,
+    Value, VisitMut, VisitorMut, WindowType,
 };
 
 use crate::{
@@ -41,10 +47,224 @@ use crate::{
             schema_and_table_for_lookup, sql_string_literal,
         },
         shared_helpers::{join_constraint_mut, join_constraint_ref},
+        translator_impls::column::declared_default,
     },
     options::Pg2SqliteOptions,
     traits::{SessionVariablePattern, TranslationOptions, translator::Translator},
 };
+
+/// A column of a guarded table, as the write triggers have to see it.
+///
+/// A view is not a table: it carries no defaults, and it cannot compute a
+/// generated column. Both facts have to reach the triggers, which are the only
+/// writers left once the table is split.
+struct TriggerColumn {
+    /// The column's name as the table declares it.
+    name: String,
+    /// The `DEFAULT` the backing table declares, untranslated. `None` when the
+    /// column declares none.
+    default: Option<Expr>,
+    /// The expression SQLite computes the column from, untranslated, for a
+    /// generated column. Such a column refuses to be written and the view
+    /// cannot compute it, so a guard reading it has to compute it instead.
+    generated: Option<Expr>,
+}
+
+impl TriggerColumn {
+    /// The value the forwarding write hands the backing table.
+    ///
+    /// A column the caller omitted arrives NULL, indistinguishable from a NULL
+    /// the caller wrote, so a declared default answers for both.
+    fn forwarded_value(&self) -> Expr {
+        let new_value = prefixed_column_expr("NEW", &self.name);
+        match &self.default {
+            Some(default) => coalesce(new_value, default.clone()),
+            None => new_value,
+        }
+    }
+
+    const fn is_generated(&self) -> bool {
+        self.generated.is_some()
+    }
+}
+
+/// Reads every column of the guarded table the way the write triggers need it.
+///
+/// # Errors
+///
+/// Propagates a lookup failure, and a default that cannot be expressed at the
+/// column's scale.
+fn trigger_columns(table: &CreateTable, schema: &ParserDB) -> Result<Vec<TriggerColumn>, Error> {
+    table
+        .columns(schema)?
+        .map(|column| {
+            let attribute = column.attribute();
+            let generated = attribute.options.iter().find_map(|option| {
+                match &option.option {
+                    ColumnOption::Generated { generation_expr: Some(expr), .. } => {
+                        Some(expr.clone())
+                    }
+                    _ => None,
+                }
+            });
+            Ok(TriggerColumn {
+                name: column.column_name().to_owned(),
+                default: declared_default(attribute)?,
+                generated,
+            })
+        })
+        .collect()
+}
+
+/// `NEW."column"` and friends, as an expression rather than rendered text,
+/// quoted exactly where [`quote_identifier`] quotes so the emitted trigger
+/// reads the way the rest of it does.
+fn prefixed_column_expr(prefix: &str, column: &str) -> Expr {
+    let ident = if quote_identifier(column).starts_with('"') {
+        Ident::with_quote('"', column)
+    } else {
+        Ident::new(column)
+    };
+    Expr::CompoundIdentifier(vec![Ident::new(prefix), ident])
+}
+
+fn coalesce(value: Expr, fallback: Expr) -> Expr {
+    simple_function_expr("COALESCE", vec![value, fallback], None)
+}
+
+/// What a `NEW.<column>` reference in a write guard stands for, when the value
+/// reaching the trigger is not the value the row will carry.
+type GuardSubstitution = (String, Expr);
+
+/// Rewrites those references, so a guard judges the row as it will be stored.
+struct GuardFolder<'a> {
+    substitutions: &'a [GuardSubstitution],
+}
+
+impl VisitorMut for GuardFolder<'_> {
+    type Break = ();
+
+    /// Folded on the way out, so a `NEW.<column>` the fold itself writes is not
+    /// folded again.
+    fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+        if let Expr::CompoundIdentifier(parts) = expr
+            && let [prefix, column] = parts.as_slice()
+            && prefix.value.eq_ignore_ascii_case("NEW")
+            && let Some((_, replacement)) =
+                self.substitutions.iter().find(|(name, _)| name.eq_ignore_ascii_case(&column.value))
+        {
+            *expr = replacement.clone();
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn fold_guard(expr: &mut Expr, substitutions: &[GuardSubstitution]) {
+    let _: ControlFlow<()> = VisitMut::visit(expr, &mut GuardFolder { substitutions });
+}
+
+/// Which write a guard sits in, which decides what a `NEW.<column>` reference
+/// is missing.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum GuardKind {
+    /// A column the caller left out arrives NULL, so a default answers for it.
+    /// A generated column arrives NULL too, and SQLite will compute it.
+    Insert,
+    /// SQLite fills `NEW` from the row on disk, so only a generated column is
+    /// missing: the view holds the value computed before the update.
+    Update,
+}
+
+/// What each `NEW.<column>` reference in a guard has to be replaced by.
+///
+/// # Errors
+///
+/// Propagates a schema lookup failure.
+fn guard_substitutions(
+    columns: &[TriggerColumn],
+    kind: GuardKind,
+    options: &Pg2SqliteOptions,
+    table: &CreateTable,
+    schema: &ParserDB,
+) -> Result<Vec<GuardSubstitution>, Error> {
+    let defaults: Vec<GuardSubstitution> = if kind == GuardKind::Insert {
+        columns
+            .iter()
+            .filter(|column| column.default.is_some())
+            .map(|column| (column.name.clone(), column.forwarded_value()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let ctx = RlsTriggerContext::new(table, options);
+    let lowercased_columns: Vec<String> =
+        table.columns(schema)?.map(|c| c.column_name().to_lowercase()).collect();
+    let rls_table_names: Vec<String> =
+        schema.rls_tables()?.map(|t| t.table_name().to_string()).collect();
+    let facts = ResolvedSchemaFacts {
+        lowercased_columns: &lowercased_columns,
+        rls_table_names: &rls_table_names,
+    };
+
+    let mut substitutions = defaults.clone();
+    for column in columns.iter().filter(|column| column.is_generated()) {
+        let Some(expression) = column.generated.as_ref() else { continue };
+        // The generation expression names bare columns of this same row, so it
+        // goes through the ordinary transformer to reach them as `NEW`. Folding
+        // the defaults into it afterwards covers a column computed from one the
+        // caller left out. PostgreSQL forbids a generation expression from
+        // reading another generated column, so one pass is enough.
+        let mut computed = transform_expr(
+            expression,
+            options,
+            table,
+            schema,
+            Some("NEW"),
+            Some(ctx.as_rename_tuple()),
+            facts,
+        );
+        fold_guard(&mut computed, &defaults);
+        substitutions.push((column.name.clone(), Expr::Nested(Box::new(computed))));
+    }
+
+    Ok(substitutions)
+}
+
+/// Refuses a write that supplies a value for a computed column, the way
+/// PostgreSQL refuses one.
+///
+/// SQLite computes such a column and will not be told its value, so the
+/// forwarding write leaves it out entirely. Leaving it out is invisible to the
+/// caller, who would see a supplied value vanish, hence the guard. What the
+/// guard cannot catch is a caller who writes NULL: on the insert path that is
+/// indistinguishable from omitting the column, and on the update path from
+/// leaving it alone.
+fn refuse_computed_writes(columns: &[TriggerColumn], table_name: &str, guard: GuardKind) -> String {
+    columns.iter().filter(|column| column.is_generated()).fold(String::new(), |mut guards, column| {
+        let supplied = match guard {
+            GuardKind::Insert => {
+                format!("{} IS NOT NULL", prefixed_quoted_identifier("NEW", &column.name))
+            }
+            // SQLite fills NEW from the row on disk, so a difference from OLD
+            // is the statement having assigned the column.
+            GuardKind::Update => {
+                format!(
+                    "{} IS DISTINCT FROM {}",
+                    prefixed_quoted_identifier("NEW", &column.name),
+                    prefixed_quoted_identifier("OLD", &column.name)
+                )
+            }
+        };
+        let message = sql_string_literal(&format!(
+            "cannot write to generated column \"{}\" of \"{table_name}\": SQLite computes it from \
+             the other columns",
+            column.name
+        ));
+        let _ = write!(guards, "SELECT RAISE(ABORT, {message}) WHERE {supplied};\n    ");
+        guards
+    })
+}
 
 const RLS_VIOLATION_ERROR: &str = "new row violates row-level security policy";
 
@@ -88,6 +308,11 @@ enum PolicyPredicate {
 ///   access. That covers both an empty set and a restrictive-only set.
 /// * A permissive policy carrying no predicate grants every row, so it
 ///   contributes TRUE rather than nothing. Same for a restrictive one.
+///
+/// `substitutions` says what a `NEW.<column>` reference stands for where the
+/// value reaching the trigger is not the value the row will carry: a default
+/// for a column the caller left out, and the computation for a generated one.
+/// Empty for a predicate resolved against `OLD` or against the table itself.
 fn combine_policy_predicates(
     policies: &[&CreatePolicy],
     clause: PolicyClause,
@@ -95,8 +320,14 @@ fn combine_policy_predicates(
     options: &Pg2SqliteOptions,
     table: &CreateTable,
     schema: &ParserDB,
-    table_rename: Option<(&str, &str)>,
+    substitutions: &[GuardSubstitution],
 ) -> Result<PolicyPredicate, Error> {
+    // The backing table's name is what a policy naming its own table has to
+    // resolve to, and it follows from the table and the options, so it is read
+    // here rather than passed in and risked disagreeing with the trigger.
+    let ctx = RlsTriggerContext::new(table, options);
+    let table_rename = Some(ctx.as_rename_tuple());
+
     // Both sets are resolved once here rather than inside the recursive
     // transformer, which keeps that transformer total and avoids re-querying the
     // schema at every node it visits.
@@ -133,7 +364,12 @@ fn combine_policy_predicates(
             }
         };
         let Some(expr) = expr else { continue };
-        let transformed = transform_expr(expr, options, table, schema, prefix, table_rename, facts);
+        let mut transformed =
+            transform_expr(expr, options, table, schema, prefix, table_rename, facts);
+        // Folded before translation so a substituted default travels the same
+        // path the column definition sends it down, and lands as the same SQL
+        // the backing table declares.
+        fold_guard(&mut transformed, substitutions);
         // The transformer above owns the RLS rewrites: session variables, NEW
         // and OLD prefixes, backing table renames. The forward expression
         // translator then owns the PostgreSQL to SQLite semantics, so a policy
@@ -1345,7 +1581,6 @@ fn rls_read_predicate(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<PolicyPredicate, Error> {
-    let ctx = RlsTriggerContext::new(table, options);
     let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select])?;
     reject_self_referential_read_policy(&select_policies, table)?;
 
@@ -1356,7 +1591,7 @@ fn rls_read_predicate(
         options,
         table,
         schema,
-        Some(ctx.as_rename_tuple()),
+        &[],
     )
 }
 
@@ -1453,7 +1688,6 @@ fn generate_insert_trigger_sql(
     let ctx = RlsTriggerContext::new(table, options);
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
-    let table_rename = Some(ctx.as_rename_tuple());
     let table_name_quoted = quote_identifier(table_name);
     let inner_table_name_quoted = quote_identifier(inner_table_name);
     let trigger_name = quote_identifier(&format!("{table_name}_insert_trigger"));
@@ -1461,14 +1695,15 @@ fn generate_insert_trigger_sql(
     // Find INSERT policies
     let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert])?;
 
-    // Get all column names for the INSERT statement
-    let columns = collect_column_names(table, schema)?;
+    let columns = trigger_columns(table, schema)?;
+    let written: Vec<&TriggerColumn> =
+        columns.iter().filter(|column| !column.is_generated()).collect();
     let column_list =
-        columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", ");
-    let value_list = columns
+        written.iter().map(|column| quote_identifier(&column.name)).collect::<Vec<_>>().join(", ");
+    let value_list = written
         .iter()
-        .map(|column| prefixed_quoted_identifier("NEW", column))
-        .collect::<Vec<_>>()
+        .map(|column| Ok(column.forwarded_value().translate(schema, options)?.to_string()))
+        .collect::<Result<Vec<_>, Error>>()?
         .join(", ");
 
     let check = combine_policy_predicates(
@@ -1478,11 +1713,13 @@ fn generate_insert_trigger_sql(
         options,
         table,
         schema,
-        table_rename,
+        &guard_substitutions(&columns, GuardKind::Insert, options, table, schema)?,
     )?;
 
-    let forward =
-        format!("INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});");
+    let refuse_computed = refuse_computed_writes(&columns, table_name, GuardKind::Insert);
+    let forward = format!(
+        "{refuse_computed}INSERT INTO {inner_table_name_quoted} ({column_list}) VALUES ({value_list});"
+    );
 
     let trigger_body = if insert_policies.is_empty() {
         // Deny-by-default: PostgreSQL RLS rejects an INSERT when no FOR
@@ -1582,7 +1819,6 @@ fn generate_update_trigger_sql(
     let ctx = RlsTriggerContext::new(table, options);
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
-    let table_rename = Some(ctx.as_rename_tuple());
     let table_name_quoted = quote_identifier(table_name);
     let inner_table_name_quoted = quote_identifier(inner_table_name);
     let trigger_name = quote_identifier(&format!("{table_name}_update_trigger"));
@@ -1599,12 +1835,16 @@ fn generate_update_trigger_sql(
     // SQLite populates NEW fully in an INSTEAD OF UPDATE trigger: a column
     // absent from the statement's SET clause already carries its OLD value. So
     // assigning NEW.col forwards a partial update correctly, and it is the only
-    // form that can store NULL when the caller asks for it.
-    let set_clause = columns
+    // form that can store NULL when the caller asks for it. No default answers
+    // for a NULL here, and none should: the row exists, so nothing is missing.
+    // A computed column is the exception, assigned by nobody but SQLite.
+    let assigned = trigger_columns(table, schema)?;
+    let set_clause = assigned
         .iter()
+        .filter(|column| !column.is_generated())
         .map(|column| {
-            let quoted_column = quote_identifier(column);
-            let new_column = prefixed_quoted_identifier("NEW", column);
+            let quoted_column = quote_identifier(&column.name);
+            let new_column = prefixed_quoted_identifier("NEW", &column.name);
             format!("{quoted_column} = {new_column}")
         })
         .collect::<Vec<_>>()
@@ -1623,8 +1863,11 @@ fn generate_update_trigger_sql(
         options,
         table,
         schema,
-        table_rename,
+        &[],
     )?;
+    // A generated column is the one thing NEW cannot tell the check: the view
+    // still holds the value computed before this update, so the guard computes
+    // it again from the columns the row is about to carry.
     let check = combine_policy_predicates(
         &update_policies,
         PolicyClause::Check,
@@ -1632,7 +1875,7 @@ fn generate_update_trigger_sql(
         options,
         table,
         schema,
-        table_rename,
+        &guard_substitutions(&assigned, GuardKind::Update, options, table, schema)?,
     )?;
 
     // USING selects which existing rows are updatable at all. A row that fails
@@ -1647,7 +1890,10 @@ fn generate_update_trigger_sql(
         Some(predicate) => format!("({pk_where}) AND ({predicate})"),
         None => pk_where.clone(),
     };
-    let forward = format!("UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {row_filter};");
+    let refuse_computed = refuse_computed_writes(&assigned, table_name, GuardKind::Update);
+    let forward = format!(
+        "{refuse_computed}UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {row_filter};"
+    );
 
     // PostgreSQL distinguishes the two ways an UPDATE can be refused, and so must
     // this. USING selects which rows the statement may target, so when nothing
@@ -1702,7 +1948,6 @@ fn generate_delete_trigger_sql(
     let ctx = RlsTriggerContext::new(table, options);
     let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
-    let table_rename = Some(ctx.as_rename_tuple());
     let table_name_quoted = quote_identifier(table_name);
     let inner_table_name_quoted = quote_identifier(inner_table_name);
     let trigger_name = quote_identifier(&format!("{table_name}_delete_trigger"));
@@ -1728,7 +1973,7 @@ fn generate_delete_trigger_sql(
         options,
         table,
         schema,
-        table_rename,
+        &[],
     )?;
 
     let using_denies = delete_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll);

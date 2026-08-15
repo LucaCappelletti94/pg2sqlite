@@ -23,8 +23,9 @@ use crate::{
     impls::{
         object_name::{last_ident, last_ident_value_or_display, table_with_implicit_public_lookup},
         shared_helpers::{
-            ColumnRewrites, carries_default_keyword, is_default_keyword, scale_literal_for_column,
-            substituted_assignment_default, translate_on_conflict_do_update, translate_returning,
+            ColumnRewrites, carries_default_keyword, extract_columns_from_expr, is_default_keyword,
+            scale_literal_for_column, substituted_assignment_default,
+            translate_on_conflict_do_update, translate_returning,
         },
         translator_impls::{
             rls,
@@ -76,7 +77,7 @@ impl Translator for Insert {
         // BEFORE INSERT guard trigger emitted in `rls.rs` keeps WITH
         // CHECK enforcement on this path. Plain INSERTs (no RETURNING)
         // keep going through the view's INSTEAD OF trigger.
-        rewrite_rls_view_insert(&mut insert, schema, options);
+        rewrite_rls_view_insert(&mut insert, schema, options)?;
 
         // Wrap text-literal values targeting `vector` / `halfvec` columns
         // with `vec_f32(...)` / `vec_f16(...)`. The main backing table is
@@ -642,29 +643,38 @@ fn scale_insert_source_body(
 /// INSTEAD OF view path so the behavioural change is opt-in via
 /// RETURNING. Defensive lookups: any failure to resolve the target
 /// table leaves the insert untouched.
-fn rewrite_rls_view_insert(insert: &mut Insert, schema: &ParserDB, options: &Pg2SqliteOptions) {
-    if insert.returning.is_none() {
-        return;
-    }
-    // Symmetric gate with `generate_insert_check_trigger_sql` in
-    // rls.rs: the rewrite is safe only when the backing-table guard
-    // trigger is in place. The guard is emitted in strict mode; in
-    // monitor mode we leave the INSERT pointing at the view so the
-    // existing INSTEAD OF trigger keeps enforcing WITH CHECK. The
-    // (existing) consequence is that RETURNING surfaces NULL for
-    // auto-assigned PKs in monitor mode - call `with_strict_rls_validation()`
-    // to unlock RETURNING through RLS views.
-    if !options.is_strict_rls_validation() {
-        return;
-    }
-    let TableObject::TableName(table_name) = &insert.table else { return };
-    let Ok(Some(_table)) = table_with_implicit_public_lookup(schema, table_name) else {
-        return;
+fn rewrite_rls_view_insert(
+    insert: &mut Insert,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), crate::errors::Error> {
+    let Some(returning) = insert.returning.clone() else { return Ok(()) };
+    let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
+    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
+        return Ok(());
     };
-    let Some(last) = last_ident(table_name) else { return };
+    let Some(last) = last_ident(table_name) else { return Ok(()) };
     let Ok(true) = rls::table_has_rls(&last.value, schema) else {
-        return;
+        return Ok(());
     };
+
+    // Symmetric gate with `generate_insert_check_trigger_sql` in rls.rs: the
+    // rewrite is safe only when the backing-table guard trigger is in place,
+    // which is strict mode. Monitor mode logs rather than blocks, so it emits
+    // no such guard and the insert has to stay on the view, whose row carries
+    // only what the caller wrote.
+    if !options.is_strict_rls_validation() {
+        if let Some(column) = database_filled_column(&returning, table, schema, options)? {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "RETURNING reads {column} back from a view over {}, and a view row holds only what \
+                 the caller wrote, so a column the database fills in would come back NULL. Call \
+                 `with_strict_rls_validation()`, which sends a RETURNING insert straight at the \
+                 backing table, or write {column} out in the insert.",
+                last.value
+            )));
+        }
+        return Ok(());
+    }
 
     // Build the backing-table ObjectName: same schema prefix as the
     // original, but the bare table name gets the configured RLS
@@ -677,6 +687,55 @@ fn rewrite_rls_view_insert(insert: &mut Insert, schema: &ParserDB, options: &Pg2
             sqlparser::ast::ObjectNamePart::Identifier(sqlparser::ast::Ident::new(backing_name));
     }
     insert.table = TableObject::TableName(sqlparser::ast::ObjectName(new_parts));
+    Ok(())
+}
+
+/// The first returned column whose value the database supplies rather than the
+/// caller: a declared default, a generated column, or the integer primary key
+/// SQLite assigns. Those are exactly the columns a view cannot answer for.
+///
+/// # Errors
+///
+/// Propagates a schema lookup failure.
+fn database_filled_column(
+    returning: &[SelectItem],
+    table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<String>, crate::errors::Error> {
+    let every_column = || -> Result<Vec<String>, crate::errors::Error> {
+        Ok(table.columns(schema)?.map(|column| column.column_name().to_owned()).collect())
+    };
+
+    let mut named = Vec::new();
+    for item in returning {
+        match item {
+            SelectItem::UnnamedExpr(expr)
+            | SelectItem::ExprWithAlias { expr, .. }
+            | SelectItem::ExprWithAliases { expr, .. } => {
+                named.extend(extract_columns_from_expr(expr));
+            }
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => {
+                named.extend(every_column()?);
+            }
+        }
+    }
+
+    for name in named {
+        let Some(column) = table.column(&name, schema)? else { continue };
+        let filled = column.attribute().options.iter().any(|option| {
+            matches!(
+                option.option,
+                sqlparser::ast::ColumnOption::Default(_)
+                    | sqlparser::ast::ColumnOption::Generated { generation_expr: Some(_), .. }
+            )
+        }) || is_generated_primary_key(table, &name, schema, options)?;
+        if filled {
+            return Ok(Some(name));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Rewrite each text-literal value at a UUID-column position in a `VALUES`

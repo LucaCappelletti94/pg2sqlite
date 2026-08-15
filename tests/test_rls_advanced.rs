@@ -48,6 +48,19 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .join("\n")
 }
 
+/// The `INSTEAD OF UPDATE` trigger out of a translated script.
+///
+/// An UPDATE names a row that already exists and SQLite fills `NEW` from it, so
+/// nothing in that trigger may fall back to another value. The INSERT trigger
+/// is the opposite case, where a column the caller omitted has to pick up its
+/// declared default, so the assertion has to name the trigger it means.
+fn update_trigger(output: &str) -> &str {
+    output
+        .lines()
+        .find(|line| line.contains("INSTEAD OF UPDATE"))
+        .unwrap_or_else(|| panic!("no INSTEAD OF UPDATE trigger in:\n{output}"))
+}
+
 /// Executes every translated statement in an in-memory SQLite connection.
 /// Uses the standard RLS options from make_options().
 fn execute_rls_ddl(pg_sql: &str) {
@@ -153,7 +166,10 @@ fn update_with_check_resolves_against_new_row() {
     // COALESCE, which used to make `SET owner_id = NULL` a silent no-op.
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
     assert!(output.contains("owner_id = NEW.owner_id"), "SET must assign NEW: {output}");
-    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    assert!(
+        !update_trigger(&output).contains("COALESCE"),
+        "the SET clause must assign NEW.col directly: {output}"
+    );
     execute_rls_ddl(sql);
 }
 
@@ -690,7 +706,10 @@ fn update_check_with_not_operator() {
     let output = translate(sql);
     assert!(output.contains("NOT NEW.is_archived"), "NOT must apply to NEW: {output}");
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
-    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    assert!(
+        !update_trigger(&output).contains("COALESCE"),
+        "the SET clause must assign NEW.col directly: {output}"
+    );
     execute_rls_ddl(sql);
 }
 
@@ -722,7 +741,10 @@ fn update_check_with_nested_expr() {
     assert!(output.contains("NEW.category"), "nested OR arm must reference NEW: {output}");
     assert!(output.contains("NEW.status"), "nested OR arm must reference NEW: {output}");
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
-    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    assert!(
+        !update_trigger(&output).contains("COALESCE"),
+        "the SET clause must assign NEW.col directly: {output}"
+    );
     execute_rls_ddl(sql);
 }
 
@@ -901,7 +923,10 @@ fn update_check_with_compound_identifier() {
     // CHECK context the prefix wins over the backing-table rename, so it becomes
     // NEW.owner_id rather than check_compound_rls.owner_id.
     assert!(output.contains("NEW.owner_id"), "compound ref must become NEW: {output}");
-    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    assert!(
+        !update_trigger(&output).contains("COALESCE"),
+        "the SET clause must assign NEW.col directly: {output}"
+    );
     execute_rls_ddl(sql);
 }
 
@@ -1133,7 +1158,10 @@ fn update_check_with_subquery() {
     assert!(output.contains("NEW.max_allowed"), "WITH CHECK must reference NEW: {output}");
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
     assert!(output.contains("SELECT MAX(max_val) FROM limits"), "subquery preserved: {output}");
-    assert!(!output.contains("COALESCE"), "no COALESCE should remain: {output}");
+    assert!(
+        !update_trigger(&output).contains("COALESCE"),
+        "the SET clause must assign NEW.col directly: {output}"
+    );
     execute_rls_ddl(sql);
 }
 
