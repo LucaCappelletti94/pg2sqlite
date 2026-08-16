@@ -129,6 +129,30 @@ CREATE TABLE grants (
 -- =============================================================================
 
 -- =============================================================================
+-- UNFILTERED COMPANION VIEWS
+--
+-- A policy consults these instead of the guarded tables themselves. Reading a
+-- guarded table applies that table's own policy, so a policy that named one
+-- directly would enter another policy, and the four policies here consult each
+-- other, which PostgreSQL answers with `infinite recursion detected in policy
+-- for relation`. A view runs with its owner's rights, so consulting one asks
+-- the question these policies mean to ask, which is who owns or administers a
+-- thing, rather than which of those rows the asking user may see.
+-- =============================================================================
+
+CREATE VIEW ownables_unfiltered AS
+SELECT id, title, created_by FROM ownables;
+
+CREATE VIEW ownable_owners_unfiltered AS
+SELECT ownable_id, owner_id FROM ownable_owners;
+
+CREATE VIEW ownable_administrators_unfiltered AS
+SELECT ownable_id, administrator_id, granted_by FROM ownable_administrators;
+
+CREATE VIEW grants_unfiltered AS
+SELECT id, ownable_id, grantee_id, grantor_id, role_id FROM grants;
+
+-- =============================================================================
 -- ROW-LEVEL SECURITY POLICIES FOR OWNABLES
 -- =============================================================================
 
@@ -139,7 +163,7 @@ CREATE POLICY ownables_select_policy ON ownables
 FOR SELECT USING (
     -- is_ownable_owner: user is owner directly or via group membership
     EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = ownables.id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -148,7 +172,7 @@ FOR SELECT USING (
     )
     -- is_ownable_admin: user is admin directly or via group membership
     OR EXISTS (
-        SELECT 1 FROM ownable_administrators oa
+        SELECT 1 FROM ownable_administrators_unfiltered oa
         WHERE oa.ownable_id = ownables.id
           AND (oa.administrator_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -157,7 +181,7 @@ FOR SELECT USING (
     )
     -- has_grant: user has viewer or editor grant directly or via group
     OR EXISTS (
-        SELECT 1 FROM grants g
+        SELECT 1 FROM grants_unfiltered g
         WHERE g.ownable_id = ownables.id
           AND g.role_id >= 2  -- viewer or higher
           AND (g.grantee_id = current_setting('app.user_id')::uuid
@@ -179,7 +203,7 @@ FOR UPDATE
 USING (
     -- is_ownable_owner
     EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = ownables.id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -188,7 +212,7 @@ USING (
     )
     -- is_ownable_admin
     OR EXISTS (
-        SELECT 1 FROM ownable_administrators oa
+        SELECT 1 FROM ownable_administrators_unfiltered oa
         WHERE oa.ownable_id = ownables.id
           AND (oa.administrator_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -197,7 +221,7 @@ USING (
     )
     -- has_editor_grant
     OR EXISTS (
-        SELECT 1 FROM grants g
+        SELECT 1 FROM grants_unfiltered g
         WHERE g.ownable_id = ownables.id
           AND g.role_id >= 3  -- editor
           AND (g.grantee_id = current_setting('app.user_id')::uuid
@@ -209,7 +233,7 @@ USING (
 WITH CHECK (
     -- Same as USING clause for UPDATE
     EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = ownables.id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -217,7 +241,7 @@ WITH CHECK (
                             AND gm.group_id = oo.owner_id))
     )
     OR EXISTS (
-        SELECT 1 FROM ownable_administrators oa
+        SELECT 1 FROM ownable_administrators_unfiltered oa
         WHERE oa.ownable_id = ownables.id
           AND (oa.administrator_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -225,7 +249,7 @@ WITH CHECK (
                             AND gm.group_id = oa.administrator_id))
     )
     OR EXISTS (
-        SELECT 1 FROM grants g
+        SELECT 1 FROM grants_unfiltered g
         WHERE g.ownable_id = ownables.id
           AND g.role_id >= 3
           AND (g.grantee_id = current_setting('app.user_id')::uuid
@@ -240,7 +264,7 @@ CREATE POLICY ownables_delete_policy ON ownables
 FOR DELETE USING (
     -- is_ownable_owner
     EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = ownables.id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -249,7 +273,7 @@ FOR DELETE USING (
     )
     -- is_ownable_admin
     OR EXISTS (
-        SELECT 1 FROM ownable_administrators oa
+        SELECT 1 FROM ownable_administrators_unfiltered oa
         WHERE oa.ownable_id = ownables.id
           AND (oa.administrator_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -269,8 +293,6 @@ ALTER TABLE ownable_owners ENABLE ROW LEVEL SECURITY;
 -- A view can, because PostgreSQL runs one with its owner's rights and so
 -- bypasses the base table's row level security, which is the standard way to
 -- express "any owner of this ownable may see all of its owner rows".
-CREATE VIEW ownable_owners_unfiltered AS
-SELECT ownable_id, owner_id FROM ownable_owners;
 
 -- SELECT: Can view if has viewer access to the ownable (owner, admin, or grantee)
 CREATE POLICY ownable_owners_select_policy ON ownable_owners
@@ -286,7 +308,7 @@ FOR SELECT USING (
     )
     -- is_ownable_admin
     OR EXISTS (
-        SELECT 1 FROM ownable_administrators oa
+        SELECT 1 FROM ownable_administrators_unfiltered oa
         WHERE oa.ownable_id = ownable_owners.ownable_id
           AND (oa.administrator_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -295,7 +317,7 @@ FOR SELECT USING (
     )
     -- has_grant
     OR EXISTS (
-        SELECT 1 FROM grants g
+        SELECT 1 FROM grants_unfiltered g
         WHERE g.ownable_id = ownable_owners.ownable_id
           AND g.role_id >= 2
           AND (g.grantee_id = current_setting('app.user_id')::uuid
@@ -310,7 +332,7 @@ CREATE POLICY ownable_owners_insert_policy ON ownable_owners
 FOR INSERT WITH CHECK (
     -- Allow if user is already an owner (can add more owners)
     EXISTS (
-        SELECT 1 FROM ownable_owners oo2
+        SELECT 1 FROM ownable_owners_unfiltered oo2
         WHERE oo2.ownable_id = ownable_owners.ownable_id
           AND (oo2.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -321,11 +343,11 @@ FOR INSERT WITH CHECK (
     OR (
         ownable_owners.owner_id = current_setting('app.user_id')::uuid
         AND NOT EXISTS (
-            SELECT 1 FROM ownable_owners oo2
+            SELECT 1 FROM ownable_owners_unfiltered oo2
             WHERE oo2.ownable_id = ownable_owners.ownable_id
         )
         AND EXISTS (
-            SELECT 1 FROM ownables o
+            SELECT 1 FROM ownables_unfiltered o
             WHERE o.id = ownable_owners.ownable_id
               AND o.created_by = current_setting('app.user_id')::uuid
         )
@@ -336,7 +358,7 @@ FOR INSERT WITH CHECK (
 CREATE POLICY ownable_owners_delete_policy ON ownable_owners
 FOR DELETE USING (
     EXISTS (
-        SELECT 1 FROM ownable_owners oo2
+        SELECT 1 FROM ownable_owners_unfiltered oo2
         WHERE oo2.ownable_id = ownable_owners.ownable_id
           AND (oo2.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -351,18 +373,13 @@ FOR DELETE USING (
 
 ALTER TABLE ownable_administrators ENABLE ROW LEVEL SECURITY;
 
--- Same reason as `ownable_owners_unfiltered`: a read policy cannot consult the
--- table it guards, and a view bypasses the base table's row level security in
--- PostgreSQL because it runs with its owner's rights.
-CREATE VIEW ownable_administrators_unfiltered AS
-SELECT ownable_id, administrator_id FROM ownable_administrators;
 
 -- SELECT: Can view if has viewer access to the ownable
 CREATE POLICY ownable_admins_select_policy ON ownable_administrators
 FOR SELECT USING (
     -- is_ownable_owner
     EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = ownable_administrators.ownable_id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -380,7 +397,7 @@ FOR SELECT USING (
     )
     -- has_grant
     OR EXISTS (
-        SELECT 1 FROM grants g
+        SELECT 1 FROM grants_unfiltered g
         WHERE g.ownable_id = ownable_administrators.ownable_id
           AND g.role_id >= 2
           AND (g.grantee_id = current_setting('app.user_id')::uuid
@@ -394,7 +411,7 @@ FOR SELECT USING (
 CREATE POLICY ownable_admins_insert_policy ON ownable_administrators
 FOR INSERT WITH CHECK (
     EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = ownable_administrators.ownable_id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -407,7 +424,7 @@ FOR INSERT WITH CHECK (
 CREATE POLICY ownable_admins_delete_policy ON ownable_administrators
 FOR DELETE USING (
     EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = ownable_administrators.ownable_id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -434,7 +451,7 @@ FOR SELECT USING (
                  AND gm.group_id = grants.grantee_id)
     -- owner can see all grants
     OR EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = grants.ownable_id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -443,7 +460,7 @@ FOR SELECT USING (
     )
     -- admin can see all grants
     OR EXISTS (
-        SELECT 1 FROM ownable_administrators oa
+        SELECT 1 FROM ownable_administrators_unfiltered oa
         WHERE oa.ownable_id = grants.ownable_id
           AND (oa.administrator_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -459,7 +476,7 @@ FOR INSERT WITH CHECK (
     AND (
         -- is_ownable_owner
         EXISTS (
-            SELECT 1 FROM ownable_owners oo
+            SELECT 1 FROM ownable_owners_unfiltered oo
             WHERE oo.ownable_id = grants.ownable_id
               AND (oo.owner_id = current_setting('app.user_id')::uuid
                    OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -468,7 +485,7 @@ FOR INSERT WITH CHECK (
         )
         -- is_ownable_admin
         OR EXISTS (
-            SELECT 1 FROM ownable_administrators oa
+            SELECT 1 FROM ownable_administrators_unfiltered oa
             WHERE oa.ownable_id = grants.ownable_id
               AND (oa.administrator_id = current_setting('app.user_id')::uuid
                    OR EXISTS (SELECT 1 FROM group_memberships gm 
@@ -489,7 +506,7 @@ CREATE POLICY grants_delete_policy ON grants
 FOR DELETE USING (
     grantor_id = current_setting('app.user_id')::uuid
     OR EXISTS (
-        SELECT 1 FROM ownable_owners oo
+        SELECT 1 FROM ownable_owners_unfiltered oo
         WHERE oo.ownable_id = grants.ownable_id
           AND (oo.owner_id = current_setting('app.user_id')::uuid
                OR EXISTS (SELECT 1 FROM group_memberships gm 

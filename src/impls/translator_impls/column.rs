@@ -28,7 +28,10 @@ use crate::{
                 character_length, character_length_bound_expr, exact_numeric_info, is_serial_type,
                 numeric_precision_and_scale, numeric_precision_bound_expr,
             },
-            uuid::{is_blob_uuid_representation, is_uuid_data_type, uuid_blob_length_check_expr},
+            uuid::{
+                is_blob_uuid_representation, is_uuid_data_type, uuid_blob_length_check_expr,
+                wrap_uuid_column_default,
+            },
         },
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -94,13 +97,19 @@ fn quoted_decimal_as_number(text: &str) -> Option<Expr> {
 /// definition, which carries it into the table, and the RLS INSERT trigger,
 /// which has to reproduce it because a SQLite view holds no defaults. A
 /// `NUMERIC(10,2) DEFAULT 1.5` column stores minor units, so both have to read
-/// 150.
+/// 150. A UUID BLOB column's text-literal default must become the same
+/// binary-conversion expression an explicit insert of that literal would use,
+/// or the trigger and the table definition diverge.
 ///
 /// # Errors
 ///
 /// Returns [`Error::UnsupportedSQLiteFeature`] when a scaled `NUMERIC` column's
-/// default is not one number at the column's scale.
-pub(crate) fn declared_default(column: &ColumnDef) -> Result<Option<Expr>, Error> {
+/// default is not one number at the column's scale, or when a UUID BLOB
+/// column's default is a text literal that is not a valid UUID.
+pub(crate) fn declared_default(
+    column: &ColumnDef,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<Expr>, Error> {
     column
         .options
         .iter()
@@ -110,7 +119,14 @@ pub(crate) fn declared_default(column: &ColumnDef) -> Result<Option<Expr>, Error
                 _ => None,
             }
         })
-        .map(|expr| scaled_default(column, expr))
+        .map(|expr| {
+            let scaled = scaled_default(column, expr)?;
+            if is_uuid_data_type(&column.data_type) && is_blob_uuid_representation(options) {
+                wrap_uuid_column_default(&column.name, scaled, options)
+            } else {
+                Ok(scaled)
+            }
+        })
         .transpose()
 }
 
@@ -193,11 +209,15 @@ pub(crate) fn translate_column_def(
             let ColumnOption::Default(expr) = &o.option else {
                 return o.translate(schema, options);
             };
-            ColumnOptionDef {
-                name: o.name.clone(),
-                option: ColumnOption::Default(scaled_default(column, expr)?),
-            }
-            .translate(schema, options)
+            let scaled = scaled_default(column, expr)?;
+            let default_expr =
+                if is_uuid_data_type(&column.data_type) && is_blob_uuid_representation(options) {
+                    wrap_uuid_column_default(&column.name, scaled, options)?
+                } else {
+                    scaled
+                };
+            ColumnOptionDef { name: o.name.clone(), option: ColumnOption::Default(default_expr) }
+                .translate(schema, options)
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()

@@ -72,25 +72,6 @@ pub(crate) fn sqlite_unqualified_object_name(name: &ObjectName) -> ObjectName {
     name.0.last().cloned().map_or_else(|| name.clone(), |last| ObjectName(vec![last]))
 }
 
-/// Returns the schema and table components used for schema lookup.
-///
-/// Supported forms:
-/// - `table`
-/// - `schema.table`
-///
-/// Any other shape returns `(None, None)`.
-pub(crate) fn schema_and_table_for_lookup(
-    name: &ObjectName,
-) -> (Option<Cow<'_, str>>, Option<Cow<'_, str>>) {
-    match name.0.as_slice() {
-        [single] => (None, single.as_ident().map(ident_lookup_str)),
-        [schema, table] => {
-            (schema.as_ident().map(ident_lookup_str), table.as_ident().map(ident_lookup_str))
-        }
-        _ => (None, None),
-    }
-}
-
 fn unsupported_schema_qualification(name: &ObjectName, reason: &str) -> Error {
     Error::UnsupportedSchemaQualification {
         object_name: name.to_string(),
@@ -296,9 +277,8 @@ mod tests {
     use super::{
         append_suffix, implicit_public_lookup_parts, last_ident,
         normalize_schema_qualified_object_name_for_sqlite, prefixed_quoted_identifier,
-        quote_identifier, quoted_ident, schema_and_table_for_lookup,
-        sqlite_unqualified_object_name, table_with_implicit_public_lookup,
-        validate_schema_qualified_object_name_for_sqlite,
+        quote_identifier, quoted_ident, sqlite_unqualified_object_name,
+        table_with_implicit_public_lookup, validate_schema_qualified_object_name_for_sqlite,
     };
 
     fn name(parts: &[&str]) -> ObjectName {
@@ -314,21 +294,6 @@ mod tests {
 
         let suffixed = append_suffix(&object, "_rls");
         assert_eq!(suffixed.to_string(), "public.users_rls");
-    }
-
-    #[test]
-    fn schema_and_table_lookup_supports_single_two_and_multi_part_names() {
-        let single = name(&["users"]);
-        let (s, t) = schema_and_table_for_lookup(&single);
-        assert!(s.is_none() && t.as_deref() == Some("users"));
-
-        let two = name(&["public", "users"]);
-        let (s, t) = schema_and_table_for_lookup(&two);
-        assert!(s.as_deref() == Some("public") && t.as_deref() == Some("users"));
-
-        let three = name(&["catalog", "public", "users"]);
-        let (s, t) = schema_and_table_for_lookup(&three);
-        assert!(s.is_none() && t.is_none());
     }
 
     #[test]
