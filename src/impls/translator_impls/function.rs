@@ -1487,6 +1487,23 @@ impl Translator for Function {
             )));
         }
 
+        // IGNORE NULLS and RESPECT NULLS are the standard's null treatment for
+        // window functions, and neither engine implements it: PostgreSQL 17.3
+        // and SQLite 3.51.1 both answer a syntax error at NULLS. sqlparser
+        // parses the clause for every dialect, with nothing on
+        // `PostgreSqlDialect` gating it, so it arrives here on names SQLite
+        // does provide (`lag`, `lead`, `first_value`, `last_value`,
+        // `nth_value`) and would ride out through the builtin passthrough
+        // below, which rebuilds with `..func`.
+        if let Some(null_treatment) = func.null_treatment {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "{} with {null_treatment} is not supported in SQLite, which has no null treatment \
+                 for window functions. PostgreSQL does not accept it either, so the input is not \
+                 valid on the source side.",
+                func.name
+            )));
+        }
+
         // A measurement over a geography column is curved-earth in PostgreSQL,
         // so it reaches SQLiteGIS under a different name. Decided here rather
         // than in `translate_function`, which sees no schema and so cannot tell

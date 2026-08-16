@@ -2,14 +2,19 @@
 //!
 //! Window functions in PostgreSQL (ROW_NUMBER, RANK, LAG, LEAD, etc.) are
 //! supported in SQLite 3.25+ with identical syntax, so most translations
-//! are pass-through. The main exception is the FILTER clause, which is
-//! not supported in SQLite.
+//! are pass-through. Two clauses are the exception: FILTER, which SQLite has
+//! no syntax for, and the IGNORE NULLS / RESPECT NULLS null treatment, which
+//! neither engine accepts.
 
 #![allow(dead_code)]
 
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection as SqliteConn;
+
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
+use translate_helpers::translate_default_err as translate_err;
 
 diesel::table! {
     /// Test table for items (used in ROW_NUMBER and NTILE tests).
@@ -1403,4 +1408,29 @@ fn test_aggregate_window_semantic() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// `IGNORE NULLS` and `RESPECT NULLS` are the SQL standard's null treatment
+/// for window functions, and neither engine implements them. PostgreSQL 17.3
+/// answers `syntax error at or near "NULLS"`, and so does SQLite 3.51.1.
+///
+/// `sqlparser` parses the clause for every dialect, with no gate on
+/// `PostgreSqlDialect`, so it reaches the translator on a name like `lag` that
+/// SQLite does provide. Passing the function through then carries the clause
+/// into the output and emits SQL SQLite refuses, which is why this is refused
+/// here rather than left to the engine.
+#[test]
+fn window_null_treatment_is_refused() {
+    for function in ["lag(a)", "lead(a)", "first_value(a)", "last_value(a)", "nth_value(a, 2)"] {
+        for clause in ["IGNORE NULLS", "RESPECT NULLS"] {
+            let err = translate_err(&format!(
+                "CREATE TABLE t (a INTEGER, b INTEGER); \
+                 SELECT {function} {clause} OVER (ORDER BY b) FROM t;"
+            ));
+            assert!(
+                err.contains("NULLS"),
+                "the refusal for {function} {clause} should name the clause, got: {err}"
+            );
+        }
+    }
 }

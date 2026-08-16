@@ -306,7 +306,34 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
         // Function and subquery nodes are not walked. Callers must handle them.
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => expr.clone(),
 
-        _ => expr.clone(),
+        // Dictionary and Map recurse into their children
+        Expr::Dictionary(fields) => {
+            Expr::Dictionary(
+                fields
+                    .iter()
+                    .map(|field| {
+                        sqlparser::ast::DictionaryField {
+                            key: field.key.clone(),
+                            value: Box::new(f(&field.value)),
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        Expr::Map(map) => {
+            Expr::Map(sqlparser::ast::Map {
+                entries: map
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        sqlparser::ast::MapEntry {
+                            key: Box::new(f(&entry.key)),
+                            value: Box::new(f(&entry.value)),
+                        }
+                    })
+                    .collect(),
+            })
+        }
     }
 }
 
@@ -978,7 +1005,18 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => {}
 
         // Remaining leaf-like variants
-        _ => {}
+        // Dictionary and Map recurse into their children
+        Expr::Dictionary(fields) => {
+            for field in fields {
+                f(&field.value);
+            }
+        }
+        Expr::Map(map) => {
+            for entry in &map.entries {
+                f(&entry.key);
+                f(&entry.value);
+            }
+        }
     }
 }
 
@@ -1175,8 +1213,18 @@ pub(crate) fn mutate_expr_children(expr: &mut Expr, f: &mut impl FnMut(&mut Expr
         // Function / Subquery / Exists - skip (callers handle separately)
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => {}
 
-        // Remaining leaf-like variants
-        _ => {}
+        // Dictionary and Map recurse into their children
+        Expr::Dictionary(fields) => {
+            for field in fields {
+                f(&mut field.value);
+            }
+        }
+        Expr::Map(map) => {
+            for entry in &mut map.entries {
+                f(&mut entry.key);
+                f(&mut entry.value);
+            }
+        }
     }
 }
 
@@ -1525,5 +1573,120 @@ mod tests {
         let mut count = 0;
         for_each_child_expr(&expr, &mut |_| count += 1);
         assert_eq!(count, 0, "function children should be skipped");
+    }
+
+    /// `{'k1': 1, 'k2': 2}`. Not reachable from a PostgreSQL parse, since
+    /// `supports_dictionary_syntax` is false on `PostgreSqlDialect`, so the
+    /// node has to be built by hand to exercise the walkers.
+    fn dictionary_expr() -> Expr {
+        Expr::Dictionary(vec![
+            sqlparser::ast::DictionaryField {
+                key: Ident::new("k1"),
+                value: Box::new(num_expr("1")),
+            },
+            sqlparser::ast::DictionaryField {
+                key: Ident::new("k2"),
+                value: Box::new(num_expr("2")),
+            },
+        ])
+    }
+
+    /// `MAP {a: 1}`. Distinct key and value expressions, so a walker that
+    /// visits one twice instead of each once is caught.
+    fn map_literal_expr() -> Expr {
+        Expr::Map(sqlparser::ast::Map {
+            entries: vec![sqlparser::ast::MapEntry {
+                key: Box::new(ident_expr("a")),
+                value: Box::new(num_expr("1")),
+            }],
+        })
+    }
+
+    #[test]
+    fn map_expr_children_rebuilds_dictionary_values() {
+        let result = map_expr_children(&dictionary_expr(), &|e| Expr::Nested(Box::new(e.clone())));
+        // Every value is parenthesized, every key is untouched.
+        assert_eq!(result.to_string(), "{k1: (1), k2: (2)}");
+    }
+
+    #[test]
+    fn map_expr_children_rebuilds_both_halves_of_a_map_entry() {
+        let result = map_expr_children(&map_literal_expr(), &|e| Expr::Nested(Box::new(e.clone())));
+        // Both halves parenthesized. Walking the key twice would render
+        // `(a): (a)`, walking only the value would leave the key bare.
+        assert_eq!(result.to_string(), "MAP {(a): (1)}");
+    }
+
+    #[test]
+    fn for_each_child_expr_visits_dictionary_values() {
+        let mut seen = Vec::new();
+        for_each_child_expr(&dictionary_expr(), &mut |e| seen.push(e.to_string()));
+        assert_eq!(seen, vec!["1", "2"], "both field values, keys are idents not exprs");
+    }
+
+    #[test]
+    fn for_each_child_expr_visits_both_halves_of_a_map_entry() {
+        let mut seen = Vec::new();
+        for_each_child_expr(&map_literal_expr(), &mut |e| seen.push(e.to_string()));
+        assert_eq!(seen, vec!["a", "1"], "key then value, each exactly once");
+    }
+
+    #[test]
+    fn mutate_expr_children_rewrites_dictionary_values_in_place() {
+        let mut expr = dictionary_expr();
+        mutate_expr_children(&mut expr, &mut |e| *e = Expr::Nested(Box::new(e.clone())));
+        assert_eq!(expr.to_string(), "{k1: (1), k2: (2)}");
+    }
+
+    #[test]
+    fn mutate_expr_children_rewrites_both_halves_of_a_map_entry_in_place() {
+        let mut expr = map_literal_expr();
+        mutate_expr_children(&mut expr, &mut |e| *e = Expr::Nested(Box::new(e.clone())));
+        assert_eq!(expr.to_string(), "MAP {(a): (1)}");
+    }
+
+    /// The three walkers that used to end in a catch-all are now exhaustive,
+    /// which is what stops the next `Expr` variant sqlparser adds from being
+    /// silently skipped by some walkers and handled by others. Exhaustiveness
+    /// is enforced by the compiler, so this test records the guarantee and
+    /// pins the drift that motivated it: `Dictionary` and `Map` were handled
+    /// by `try_map_expr_children` alone.
+    #[test]
+    fn every_walker_agrees_on_dictionary_and_map() {
+        for expr in [dictionary_expr(), map_literal_expr()] {
+            let expected = {
+                let mut seen = 0;
+                for_each_child_expr(&expr, &mut |_| seen += 1);
+                seen
+            };
+            assert!(expected > 0, "fixture must have children to be worth walking");
+
+            let mapped = core::cell::Cell::new(0_usize);
+            let _ = map_expr_children(&expr, &|e| {
+                mapped.set(mapped.get() + 1);
+                e.clone()
+            });
+            assert_eq!(mapped.get(), expected, "map_expr_children visited a different child count");
+
+            let mut mutated_expr = expr.clone();
+            let mut mutated = 0;
+            mutate_expr_children(&mut mutated_expr, &mut |_| mutated += 1);
+            assert_eq!(mutated, expected, "mutate_expr_children visited a different child count");
+
+            let tried = core::cell::Cell::new(0_usize);
+            let _: Result<Expr, ()> = try_map_expr_children(
+                &expr,
+                &|e| {
+                    tried.set(tried.get() + 1);
+                    Ok(e.clone())
+                },
+                &|q| Ok(q.clone()),
+            );
+            assert_eq!(
+                tried.get(),
+                expected,
+                "try_map_expr_children visited a different child count"
+            );
+        }
     }
 }
