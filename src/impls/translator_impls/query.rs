@@ -32,6 +32,7 @@ use crate::{
         shared_helpers::TranslationDirection,
     },
     prelude::{Pg2SqliteOptions, Translator},
+    warnings::{TranslationWarning, emit as emit_warning},
 };
 
 pub(crate) const DISTINCT_ON_DERIVED_ALIAS: &str = "__pg2sqlite_distinct_on";
@@ -84,6 +85,14 @@ impl Translator for Query {
             pipe_operators.clone(),
         )? {
             return Ok(rewritten);
+        }
+
+        // Emit warning if FOR UPDATE or FOR SHARE is present
+        if !self.locks.is_empty() || self.for_clause.is_some() {
+            emit_warning(TranslationWarning::LossyDrop {
+                construct: "FOR UPDATE / FOR SHARE".to_string(),
+                reason: "SQLite has no row-level locking; the clause is dropped".to_string(),
+            });
         }
 
         Ok(build_query_envelope(
@@ -484,6 +493,14 @@ fn try_translate_distinct_on_query(
         window_order,
     );
 
+    // Emit warning if FOR UPDATE or FOR SHARE is present
+    if !query.locks.is_empty() || query.for_clause.is_some() {
+        emit_warning(TranslationWarning::LossyDrop {
+            construct: "FOR UPDATE / FOR SHARE".to_string(),
+            reason: "SQLite has no row-level locking; the clause is dropped".to_string(),
+        });
+    }
+
     Ok(Some(build_query_envelope(
         SetExpr::Select(Box::new(outer_select)),
         with,
@@ -861,6 +878,14 @@ fn try_translate_grouping_query(
         branch_select.projection = projection;
         branch_select.group_by = GroupByExpr::Expressions(group_set, Vec::new());
         branches.push(SetExpr::Select(Box::new(branch_select)));
+    }
+
+    // Emit warning if FOR UPDATE or FOR SHARE is present
+    if !query.locks.is_empty() || query.for_clause.is_some() {
+        emit_warning(TranslationWarning::LossyDrop {
+            construct: "FOR UPDATE / FOR SHARE".to_string(),
+            reason: "SQLite has no row-level locking; the clause is dropped".to_string(),
+        });
     }
 
     Ok(Some(build_query_envelope(

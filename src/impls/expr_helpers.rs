@@ -306,7 +306,34 @@ pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr
         // Function and subquery nodes are not walked. Callers must handle them.
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => expr.clone(),
 
-        _ => expr.clone(),
+        // Dictionary and Map recurse into their children
+        Expr::Dictionary(fields) => {
+            Expr::Dictionary(
+                fields
+                    .iter()
+                    .map(|field| {
+                        sqlparser::ast::DictionaryField {
+                            key: field.key.clone(),
+                            value: Box::new(f(&field.value)),
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        Expr::Map(map) => {
+            Expr::Map(sqlparser::ast::Map {
+                entries: map
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        sqlparser::ast::MapEntry {
+                            key: Box::new(f(&entry.key)),
+                            value: Box::new(f(&entry.value)),
+                        }
+                    })
+                    .collect(),
+            })
+        }
     }
 }
 
@@ -978,7 +1005,18 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => {}
 
         // Remaining leaf-like variants
-        _ => {}
+        // Dictionary and Map recurse into their children
+        Expr::Dictionary(fields) => {
+            for field in fields {
+                f(&field.value);
+            }
+        }
+        Expr::Map(map) => {
+            for entry in &map.entries {
+                f(&entry.key);
+                f(&entry.value);
+            }
+        }
     }
 }
 
@@ -1175,8 +1213,18 @@ pub(crate) fn mutate_expr_children(expr: &mut Expr, f: &mut impl FnMut(&mut Expr
         // Function / Subquery / Exists - skip (callers handle separately)
         Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => {}
 
-        // Remaining leaf-like variants
-        _ => {}
+        // Dictionary and Map recurse into their children
+        Expr::Dictionary(fields) => {
+            for field in fields {
+                f(&mut field.value);
+            }
+        }
+        Expr::Map(map) => {
+            for entry in &mut map.entries {
+                f(&mut entry.key);
+                f(&mut entry.value);
+            }
+        }
     }
 }
 
@@ -1525,5 +1573,31 @@ mod tests {
         let mut count = 0;
         for_each_child_expr(&expr, &mut |_| count += 1);
         assert_eq!(count, 0, "function children should be skipped");
+    }
+
+    #[test]
+    fn for_each_child_expr_visits_dictionary_fields() {
+        // Construct Dictionary expression manually (not parseable from PostgreSQL)
+        let expr = Expr::Dictionary(vec![
+            sqlparser::ast::DictionaryField {
+                key: Ident::new("key1"),
+                value: Box::new(Expr::Value(ValueWithSpan {
+                    value: Value::Number("1".to_string(), false),
+                    span: sqlparser::tokenizer::Span::empty(),
+                })),
+            },
+            sqlparser::ast::DictionaryField {
+                key: Ident::new("key2"),
+                value: Box::new(Expr::Value(ValueWithSpan {
+                    value: Value::Number("2".to_string(), false),
+                    span: sqlparser::tokenizer::Span::empty(),
+                })),
+            },
+        ]);
+
+        // Red baseline: for_each_child_expr should visit both dictionary values
+        let mut count = 0;
+        for_each_child_expr(&expr, &mut |_| count += 1);
+        assert_eq!(count, 2, "for_each_child_expr must visit Dictionary field values");
     }
 }
