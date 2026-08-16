@@ -143,6 +143,39 @@ pub(crate) fn maybe_wrap_text_uuid_literal(
     Ok(simple_function_expr("unhex", vec![string_literal(&hex)], None))
 }
 
+/// Converts a UUID column's text-literal `DEFAULT` to a binary-conversion
+/// expression when the representation is Blob.
+///
+/// Non-literal defaults (NULL, function calls, identifiers) pass through
+/// unchanged so callers do not need to special-case them. The error message
+/// names the column because the literal is inside a schema that may contain
+/// many UUID columns, and the generic INSERT-path message does not say which
+/// one needs fixing.
+///
+/// # Errors
+///
+/// Returns an error when the literal is not a valid UUID. `unhex` answers NULL
+/// for anything it cannot parse, and `CHECK (length(id) = 16)` passes on NULL,
+/// so a silently invalid default would store nothing.
+pub(crate) fn wrap_uuid_column_default(
+    column_name: &Ident,
+    expr: Expr,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let Some(text) = single_quoted_literal(&expr) else {
+        return Ok(expr);
+    };
+    if canonical_uuid_hex(text).is_none() {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "column '{}' has a DEFAULT that is not a valid UUID: \"{text}\". PostgreSQL \
+             refuses this at CREATE TABLE time with 'invalid input syntax for type uuid', \
+             and the Blob representation cannot convert it to sixteen bytes.",
+            column_name
+        )));
+    }
+    maybe_wrap_text_uuid_literal(expr, options)
+}
+
 /// Build a column-level `CHECK (length(<col>) = 16)` ColumnOption. The
 /// translator attaches this to every UUID-Blob column so parameterised
 /// callers that skip the text-wrap path (e.g. a Rust app binding a

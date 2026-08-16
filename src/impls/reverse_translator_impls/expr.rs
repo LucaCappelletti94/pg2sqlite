@@ -16,7 +16,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
         BinaryOperator, CastKind, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-        Value, ValueWithSpan,
+        ObjectNamePart, Value, ValueWithSpan,
     },
     tokenizer::Span,
 };
@@ -258,7 +258,7 @@ impl ReverseTranslator for Expr {
                 }
             }
 
-            // SQLite's implicit rowid column does not exist in PostgreSQL.
+            // SQLite identifier `rowid` does not exist in PostgreSQL.
             Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("rowid") => {
                 Err(Error::UnsupportedSQLiteFeature(
                     "rowid: SQLite's implicit rowid column does not exist in PostgreSQL; \
@@ -296,6 +296,28 @@ impl ReverseTranslator for Expr {
                     }
                     _ => translate_expr_recursive::<Reverse>(self, schema, options),
                 }
+            }
+            // `COLLATE NOCASE` is a SQLite-only collation with no PostgreSQL
+            // equivalent. Refuse it so the reverse output is not silently
+            // rejected by the server. Mapping it onto a PostgreSQL collation
+            // would change ordering behaviour; registering it requires a schema
+            // change on the destination. Both workarounds are outside the scope
+            // of the translator.
+            Expr::Collate { collation, .. } => {
+                let name = collation
+                    .0
+                    .last()
+                    .and_then(ObjectNamePart::as_ident)
+                    .map_or_else(|| collation.to_string(), |id| id.value.clone());
+                if name.eq_ignore_ascii_case("NOCASE") {
+                    return Err(Error::UnsupportedSQLiteFeature(format!(
+                        "COLLATE {name} is a SQLite-only collation with no PostgreSQL \
+                         equivalent. Map it to a collation registered in the destination \
+                         database, or drop the COLLATE clause if byte-order ordering is \
+                         acceptable."
+                    )));
+                }
+                translate_expr_recursive::<Reverse>(self, schema, options)
             }
 
             _ => translate_expr_recursive::<Reverse>(self, schema, options),

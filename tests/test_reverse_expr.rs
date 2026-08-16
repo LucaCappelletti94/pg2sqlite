@@ -222,10 +222,35 @@ fn reverse_substring() {
 }
 
 #[test]
-fn reverse_collate() {
-    let pg = reverse(SCHEMA, "SELECT name COLLATE NOCASE FROM users;");
-    assert!(pg.contains("COLLATE"), "Expected COLLATE: {pg}");
-    assert_parses_as_pg(&pg);
+fn reverse_collate_binary_passes_through() {
+    // BINARY is a SQLite collation that passes through the reverse translator
+    // unchanged (it is not the PostgreSQL equivalent, but the translator lets
+    // it through rather than refusing, and the semantic mismatch is separate).
+    let schema = empty_schema();
+    let options = Pg2SqliteOptions::default();
+    let out = Pg2Sqlite::default()
+        .reverse_sql("SELECT name COLLATE BINARY FROM users", &schema, &options)
+        .expect("COLLATE BINARY should pass through the reverse translator")
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(out.contains("COLLATE"), "expected COLLATE in: {out}");
+}
+
+#[test]
+fn reverse_collate_nocase_is_refused() {
+    // NOCASE is a SQLite-only collation. The reverse translator refuses it so
+    // the output does not silently fail on the PostgreSQL server.
+    let schema = empty_schema();
+    let options = Pg2SqliteOptions::default();
+    let err = Pg2Sqlite::default()
+        .reverse_sql("SELECT name COLLATE NOCASE FROM users", &schema, &options)
+        .expect_err("COLLATE NOCASE should be refused by the reverse translator");
+    assert!(
+        err.to_string().to_ascii_lowercase().contains("nocase"),
+        "error must name the collation: {err}"
+    );
 }
 
 #[test]
@@ -480,6 +505,31 @@ fn reverse_wildcard_expr_clones_through() {
     // Wildcard is a leaf node — reverse translation clones it as-is.
     let result = wildcard.reverse_translate(&schema, &options).expect("wildcard should clone");
     assert_eq!(result.to_string(), wildcard.to_string());
+}
+
+/// Brackets are SQLite's identifier quoting, so `ARRAY[1, 2, 3]` is not an
+/// array literal on the way in: it reads a column named `ARRAY` under the alias
+/// `1, 2, 3`, which is what SQLite itself answers for a table declared with
+/// such a column. Reverse translation says the same thing, and this pins that
+/// it does, because reading it as a PostgreSQL array literal would silently
+/// rewrite a legitimate query into a different one.
+///
+/// PostgreSQL does refuse the output, since it reserves `ARRAY` and wants the
+/// identifier quoted. That is a real defect, recorded in
+/// `plans/reverse-translation-defects.md`, and it is not fixed by pretending
+/// the input was something else.
+#[test]
+fn a_bracket_alias_stays_a_column_reference() {
+    let schema = empty_schema();
+    let options = Pg2SqliteOptions::default();
+    let pg = Pg2Sqlite::default()
+        .reverse_sql("SELECT ARRAY[1, 2, 3] FROM users", &schema, &options)
+        .expect("the input reverse-translates")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(pg.contains(r#"ARRAY AS "1, 2, 3""#), "the column reference must survive: {pg}");
 }
 
 fn assert_parses_as_pg(sql: &str) {

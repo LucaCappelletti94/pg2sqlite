@@ -135,7 +135,8 @@ fn json_functions_reverse_to_postgres_spellings() {
         ("SELECT json_extract(payload, '$.a') FROM t", Emits("#>")),
         ("SELECT json_patch(payload, payload) FROM t", Emits("||")),
         // Already correct, kept so a regression shows up here.
-        ("SELECT json_type(payload) FROM t", Emits("json_typeof")),
+        // payload is JSONB in the schema, so json_type picks jsonb_typeof.
+        ("SELECT json_type(payload) FROM t", Emits("jsonb_typeof")),
         ("SELECT json_array_length(payload) FROM t", Emits("jsonb_array_length")),
         ("SELECT json_group_array(s) FROM t", Emits("json_agg")),
         ("SELECT json_array(s) FROM t", Emits("json_build_array")),

@@ -44,7 +44,7 @@ use crate::{
         generated_sql::{parse_generated_sql, parse_single_generated_sql},
         object_name::{
             append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier,
-            schema_and_table_for_lookup, sql_string_literal,
+            sql_string_literal,
         },
         shared_helpers::{join_constraint_mut, join_constraint_ref},
         translator_impls::column::declared_default,
@@ -93,8 +93,12 @@ impl TriggerColumn {
 /// # Errors
 ///
 /// Propagates a lookup failure, and a default that cannot be expressed at the
-/// column's scale.
-fn trigger_columns(table: &CreateTable, schema: &ParserDB) -> Result<Vec<TriggerColumn>, Error> {
+/// column's scale, or a UUID BLOB column whose default is not a valid UUID.
+fn trigger_columns(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<TriggerColumn>, Error> {
     table
         .columns(schema)?
         .map(|column| {
@@ -109,7 +113,7 @@ fn trigger_columns(table: &CreateTable, schema: &ParserDB) -> Result<Vec<Trigger
             });
             Ok(TriggerColumn {
                 name: column.column_name().to_owned(),
-                default: declared_default(attribute)?,
+                default: declared_default(attribute, options)?,
                 generated,
             })
         })
@@ -200,12 +204,7 @@ fn guard_substitutions(
     let ctx = RlsTriggerContext::new(table, options);
     let lowercased_columns: Vec<String> =
         table.columns(schema)?.map(|c| c.column_name().to_lowercase()).collect();
-    let rls_table_names: Vec<String> =
-        schema.rls_tables()?.map(|t| t.table_name().to_string()).collect();
-    let facts = ResolvedSchemaFacts {
-        lowercased_columns: &lowercased_columns,
-        rls_table_names: &rls_table_names,
-    };
+    let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
     let mut substitutions = defaults.clone();
     for column in columns.iter().filter(|column| column.is_generated()) {
@@ -333,12 +332,7 @@ fn combine_policy_predicates(
     // schema at every node it visits.
     let lowercased_columns: Vec<String> =
         table.columns(schema)?.map(|c| c.column_name().to_lowercase()).collect();
-    let rls_table_names: Vec<String> =
-        schema.rls_tables()?.map(|t| t.table_name().to_string()).collect();
-    let facts = ResolvedSchemaFacts {
-        lowercased_columns: &lowercased_columns,
-        rls_table_names: &rls_table_names,
-    };
+    let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
     let mut permissive = Vec::new();
     let mut restrictive = Vec::new();
@@ -472,14 +466,27 @@ pub fn resolve_trigger_table_name(
 
 /// Builds a WHERE clause for row identity using primary key columns if
 /// available, otherwise falls back to all columns.
+///
+/// The keyless fallback uses `IS NOT DISTINCT FROM` rather than `=` because a
+/// primary key cannot be NULL (so `=` is sufficient there) while any other
+/// column can be. `NULL = NULL` evaluates to NULL, which is never true, so the
+/// trigger's forwarding query silently matches zero rows. `IS NOT DISTINCT
+/// FROM` treats two NULLs as equal and is otherwise identical to `=`. Keeping
+/// `=` on the primary-key path avoids changing stored snapshots, since that
+/// path cannot involve NULL.
 fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> String {
-    let identity_cols = if pk_columns.is_empty() { columns } else { pk_columns };
+    let use_null_safe = pk_columns.is_empty();
+    let identity_cols = if use_null_safe { columns } else { pk_columns };
     identity_cols
         .iter()
         .map(|c| {
             let col = quote_identifier(c);
             let old_col = prefixed_quoted_identifier("OLD", c);
-            format!("{col} = {old_col}")
+            if use_null_safe {
+                format!("{col} IS NOT DISTINCT FROM {old_col}")
+            } else {
+                format!("{col} = {old_col}")
+            }
         })
         .collect::<Vec<_>>()
         .join(" AND ")
@@ -815,8 +822,6 @@ pub fn validate_table_policies(
 struct ResolvedSchemaFacts<'a> {
     /// The host table's column names, folded to lower case.
     lowercased_columns: &'a [String],
-    /// Names of every table in the database with row level security enabled.
-    rls_table_names: &'a [String],
 }
 
 /// How column references are rewritten during expression transformation.
@@ -834,7 +839,6 @@ struct ColumnRefStrategy<'a> {
     prefix: Option<&'a str>,
     table_rename: Option<(&'a str, &'a str)>,
     lowercased_columns: &'a [String],
-    rls_table_names: &'a [String],
 }
 
 impl<'a> ColumnRefStrategy<'a> {
@@ -847,10 +851,7 @@ impl<'a> ColumnRefStrategy<'a> {
     }
 
     fn facts(&self) -> ResolvedSchemaFacts<'a> {
-        ResolvedSchemaFacts {
-            lowercased_columns: self.lowercased_columns,
-            rls_table_names: self.rls_table_names,
-        }
+        ResolvedSchemaFacts { lowercased_columns: self.lowercased_columns }
     }
 
     fn has_column(&self, lowercased_name: &str) -> bool {
@@ -1182,12 +1183,7 @@ fn transform_expr(
         options,
         table,
         schema,
-        &ColumnRefStrategy {
-            prefix,
-            table_rename,
-            lowercased_columns: facts.lowercased_columns,
-            rls_table_names: facts.rls_table_names,
-        },
+        &ColumnRefStrategy { prefix, table_rename, lowercased_columns: facts.lowercased_columns },
     )
 }
 
@@ -1210,7 +1206,6 @@ fn transform_query(
         outer_table,
         rls_suffix,
         lowercased_columns: facts.lowercased_columns,
-        rls_table_names: facts.rls_table_names,
     };
 
     if let sqlparser::ast::SetExpr::Select(ref mut select) = *transformed.body {
@@ -1275,13 +1270,18 @@ fn transform_subquery_expression(
         );
     }
 
+    // Subquery table renames only rewrite table-name qualifiers; applying the
+    // outer prefix here would turn `members.col` into `NEW.col`, which is
+    // wrong when `members` is the subquery's own FROM table, not the guarded
+    // outer table. The outer table was already handled by
+    // `transform_outer_table_refs` above.
     for (old_name, new_name) in subquery_table_renames {
         transformed = transform_expr(
             &transformed,
             options,
             table,
             schema,
-            prefix,
+            None,
             Some((old_name.as_str(), new_name.as_str())),
             facts,
         );
@@ -1299,21 +1299,11 @@ struct SubqueryTransformContext<'a> {
     rls_suffix: &'a str,
     /// The host table's column names, lower-cased once by the caller.
     lowercased_columns: &'a [String],
-    /// Names of every table in the database with row level security enabled,
-    /// resolved once by the caller so the subquery walk stays total.
-    rls_table_names: &'a [String],
 }
 
 impl<'a> SubqueryTransformContext<'a> {
     fn facts(&self) -> ResolvedSchemaFacts<'a> {
-        ResolvedSchemaFacts {
-            lowercased_columns: self.lowercased_columns,
-            rls_table_names: self.rls_table_names,
-        }
-    }
-
-    fn has_rls_table(&self, table_name: &str) -> bool {
-        self.rls_table_names.iter().any(|known| known == table_name)
+        ResolvedSchemaFacts { lowercased_columns: self.lowercased_columns }
     }
 }
 
@@ -1352,21 +1342,14 @@ fn transform_table_factor_for_subquery(
                 return;
             }
 
-            let (_table_schema, table_name) = schema_and_table_for_lookup(name);
-            // Membership in a set resolved once by the caller, so this walk stays
-            // total. Resolving per factor would ask the schema about a table it may
-            // not hold, which is exactly the fallible case.
-            let has_rls =
-                table_name.is_some_and(|table_name| context.has_rls_table(table_name.as_ref()));
-            if has_rls {
-                let renamed_name = append_suffix(name, context.rls_suffix);
-                let new_name = last_ident(&renamed_name)
-                    .map_or_else(|| old_name.clone(), |ident| ident.value.clone());
-                subquery_table_renames.push((old_name, new_name));
-                *name = renamed_name;
-            } else {
-                subquery_table_renames.push((old_name.clone(), old_name));
-            }
+            // Every reference keeps the name the policy wrote, so a second
+            // guarded table is read through its view and its own policy filters
+            // what this subquery sees, which is how PostgreSQL evaluates it.
+            // Reading the backing table instead would bypass that policy, and
+            // whether the reference carries an alias cannot be what decides it.
+            // The rename entry is an identity so the qualifier rewrite in
+            // `transform_subquery_expression` leaves the reference alone.
+            subquery_table_renames.push((old_name.clone(), old_name));
         }
         TableFactor::Derived { subquery, .. } => {
             **subquery = transform_query(
@@ -1582,7 +1565,7 @@ fn rls_read_predicate(
     options: &Pg2SqliteOptions,
 ) -> Result<PolicyPredicate, Error> {
     let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select])?;
-    reject_self_referential_read_policy(&select_policies, table)?;
+    reject_self_referential_read_policy(&select_policies, table, schema)?;
 
     combine_policy_predicates(
         &select_policies,
@@ -1595,16 +1578,65 @@ fn rls_read_predicate(
     )
 }
 
-/// Refuses a read-path policy whose predicate reads the table it guards.
+/// Collects the unqualified name of every table that appears in a direct
+/// subquery FROM clause within `expr`, aliased or not. Both spellings are read
+/// through the table's view, so both can close a cycle.
+fn collect_subquery_tables(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
+            collect_query_tables(subquery, out);
+        }
+        Expr::InSubquery { subquery, expr: inner, .. } => {
+            collect_subquery_tables(inner, out);
+            collect_query_tables(subquery, out);
+        }
+        other => {
+            for_each_child_expr(other, &mut |child| collect_subquery_tables(child, out));
+        }
+    }
+}
+
+fn collect_query_tables(query: &sqlparser::ast::Query, out: &mut Vec<String>) {
+    if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+        for twj in &select.from {
+            collect_factor_tables(&twj.relation, out);
+            for join in &twj.joins {
+                collect_factor_tables(&join.relation, out);
+            }
+        }
+        if let Some(sel) = &select.selection {
+            collect_subquery_tables(sel, out);
+        }
+    }
+}
+
+fn collect_factor_tables(factor: &TableFactor, out: &mut Vec<String>) {
+    if let TableFactor::Table { name, .. } = factor
+        && let Some(last) = last_ident(name)
+    {
+        let name_lc = last.value.to_lowercase();
+        if !out.iter().any(|r| r == &name_lc) {
+            out.push(name_lc);
+        }
+    }
+}
+
+/// Refuses a read-path policy whose predicate reads the table it guards, or
+/// where two tables' read policies read each other.
 ///
-/// PostgreSQL cannot evaluate one. Reading the table applies the policy, and
-/// the policy reads the table, so it answers `infinite recursion detected in
-/// policy for relation`, measured on PostgreSQL 17 as a non-superuser for the
-/// plain, CTE and set-operation spellings alike. The translated form is a view
-/// selecting from the backing table, so the same predicate makes SQLite answer
-/// `view <table> is circularly defined` wherever the inner reference is not
-/// renamed, and where it is renamed the view works and filters, which accepts
-/// and evaluates input the source database refuses.
+/// PostgreSQL cannot evaluate a self-referential policy. Reading the table
+/// applies the policy and the policy reads the table, so it answers `infinite
+/// recursion detected in policy for relation`, measured on PostgreSQL 17 as a
+/// non-superuser for the plain, CTE and set-operation spellings alike. The
+/// translated form is a view selecting from the backing table, so the same
+/// predicate makes SQLite answer `view <table> is circularly defined` wherever
+/// the inner reference is not renamed, and where it is renamed the view works
+/// and filters, which accepts and evaluates input the source database refuses.
+///
+/// The same problem arises when table A's read policy reads table B and table
+/// B's read policy reads table A. A policy reads another guarded table through
+/// that table's view, so both views come to reference each other, which SQLite
+/// rejects as a circular view definition the first time either one is queried.
 ///
 /// Only the read path is refused, which is where PostgreSQL draws the line
 /// too. A `WITH CHECK` predicate, and the `USING` predicate of an
@@ -1614,6 +1646,7 @@ fn rls_read_predicate(
 fn reject_self_referential_read_policy(
     policies: &[&CreatePolicy],
     table: &CreateTable,
+    schema: &ParserDB,
 ) -> Result<(), Error> {
     let guarded = table.table_name();
     for policy in policies {
@@ -1639,6 +1672,43 @@ fn reject_self_referential_read_policy(
                  a self reference.",
                 policy.name
             )));
+        }
+
+        // Every table a policy reads is read through its own view, so any
+        // reference here can close a cycle, aliased or not.
+        let mut refs: Vec<String> = Vec::new();
+        collect_subquery_tables(predicate, &mut refs);
+
+        for other_name in &refs {
+            if other_name.eq_ignore_ascii_case(guarded) {
+                continue;
+            }
+            // Check whether the other table has its own read policy reading
+            // back to the guarded table. If so, each view ends up defined in
+            // terms of the other, which SQLite rejects at query time.
+            let Some(other_table) =
+                schema.rls_tables()?.find(|t| t.table_name().eq_ignore_ascii_case(other_name))
+            else {
+                continue;
+            };
+            let other_select =
+                filter_policies(other_table, schema, &[CreatePolicyCommand::Select])?;
+            for other_policy in &other_select {
+                let Some(other_pred) = other_policy.using.as_ref() else { continue };
+                let mut back_refs: Vec<String> = Vec::new();
+                collect_subquery_tables(other_pred, &mut back_refs);
+                if back_refs.iter().any(|r| r.eq_ignore_ascii_case(guarded)) {
+                    return Err(Error::UnsupportedSQLiteFeature(format!(
+                        "The read policy {} on {guarded} and the read policy {} on {other_name} \
+                         read each other, so each view would be defined in terms of the other and \
+                         SQLite would refuse both at query time. PostgreSQL answers `infinite \
+                         recursion detected in policy for relation` for the same pair. Restructure \
+                         one of the policies to read a table that is not guarded, or restrict it \
+                         to INSERT, UPDATE or DELETE.",
+                        policy.name, other_policy.name
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -1695,7 +1765,7 @@ fn generate_insert_trigger_sql(
     // Find INSERT policies
     let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert])?;
 
-    let columns = trigger_columns(table, schema)?;
+    let columns = trigger_columns(table, schema, options)?;
     let written: Vec<&TriggerColumn> =
         columns.iter().filter(|column| !column.is_generated()).collect();
     let column_list =
@@ -1780,12 +1850,7 @@ fn generate_insert_check_trigger_sql(
     let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert])?;
     let lowercased_columns: Vec<String> =
         table.columns(schema)?.map(|c| c.column_name().to_lowercase()).collect();
-    let rls_table_names: Vec<String> =
-        schema.rls_tables()?.map(|t| t.table_name().to_string()).collect();
-    let facts = ResolvedSchemaFacts {
-        lowercased_columns: &lowercased_columns,
-        rls_table_names: &rls_table_names,
-    };
+    let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
     let mut check_conditions = Vec::new();
     for policy in &insert_policies {
@@ -1838,7 +1903,7 @@ fn generate_update_trigger_sql(
     // form that can store NULL when the caller asks for it. No default answers
     // for a NULL here, and none should: the row exists, so nothing is missing.
     // A computed column is the exception, assigned by nobody but SQLite.
-    let assigned = trigger_columns(table, schema)?;
+    let assigned = trigger_columns(table, schema, options)?;
     let set_clause = assigned
         .iter()
         .filter(|column| !column.is_generated())
@@ -2388,22 +2453,13 @@ mod tests {
         traits::{ColumnLike, DatabaseLike, TableLike},
     };
 
-    /// Resolves the two sets the transformer needs, exactly as production
+    /// Resolves the column set the transformer needs, exactly as production
     /// callers do, so these tests exercise the same shapes.
-    fn resolved_sets(
-        table: &<ParserDB as DatabaseLike>::Table,
-        schema: &ParserDB,
-    ) -> (Vec<String>, Vec<String>) {
-        let columns = TableLike::columns(table, schema)
+    fn resolved_sets(table: &<ParserDB as DatabaseLike>::Table, schema: &ParserDB) -> Vec<String> {
+        TableLike::columns(table, schema)
             .expect("columns must resolve")
             .map(|c| c.column_name().to_lowercase())
-            .collect();
-        let rls = schema
-            .rls_tables()
-            .expect("rls tables must resolve")
-            .map(|t| t.table_name().to_string())
-            .collect();
-        (columns, rls)
+            .collect()
     }
     use sqlparser::{
         ast::{
@@ -2540,11 +2596,8 @@ mod tests {
         let options = Pg2SqliteOptions::default().with_session_variable(
             crate::traits::translation_options::SessionVariableMapping::current_user("sqlite_user"),
         );
-        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
-        let facts = ResolvedSchemaFacts {
-            lowercased_columns: &lowercased_columns,
-            rls_table_names: &rls_table_names,
-        };
+        let lowercased_columns = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
         let transformed_current_user = transform_expr(
             &Expr::Identifier(Ident::new("current_user")),
@@ -2603,11 +2656,8 @@ mod tests {
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
-        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
-        let facts = ResolvedSchemaFacts {
-            lowercased_columns: &lowercased_columns,
-            rls_table_names: &rls_table_names,
-        };
+        let lowercased_columns = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
         let mut wildcard_query = parse_query("SELECT * FROM docs");
         let SetExpr::Select(select) = wildcard_query.body.as_mut() else {
@@ -2633,7 +2683,6 @@ mod tests {
             outer_table: Some(("docs", "docs_rls")),
             rls_suffix: options.get_rls_table_suffix(),
             lowercased_columns: &lowercased_columns,
-            rls_table_names: &rls_table_names,
         };
 
         let mut rename_pairs = Vec::new();
@@ -2703,7 +2752,7 @@ mod tests {
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
-        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
+        let lowercased_columns = resolved_sets(table, &schema);
         let context = SubqueryTransformContext {
             options: &options,
             table,
@@ -2712,7 +2761,6 @@ mod tests {
             outer_table: Some(("docs", "docs_rls")),
             rls_suffix: options.get_rls_table_suffix(),
             lowercased_columns: &lowercased_columns,
-            rls_table_names: &rls_table_names,
         };
 
         let mut rename_pairs = Vec::new();
@@ -2748,11 +2796,8 @@ mod tests {
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
-        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
-        let facts = ResolvedSchemaFacts {
-            lowercased_columns: &lowercased_columns,
-            rls_table_names: &rls_table_names,
-        };
+        let lowercased_columns = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
         // Bare identifier, prefix applied.
         let prefixed_ident = transform_expr(
@@ -2800,11 +2845,8 @@ mod tests {
         );
         let table = schema.table(None, "docs").expect("table should exist");
         let options = Pg2SqliteOptions::default();
-        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
-        let facts = ResolvedSchemaFacts {
-            lowercased_columns: &lowercased_columns,
-            rls_table_names: &rls_table_names,
-        };
+        let lowercased_columns = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
         let prefixed_identifier = transform_expr(
             &Expr::Identifier(Ident::new("owner_id")),
@@ -2912,11 +2954,8 @@ mod tests {
         let options = Pg2SqliteOptions::default()
             .with_rls_audit_table_name("rls_audit")
             .with_strict_rls_validation();
-        let (lowercased_columns, rls_table_names) = resolved_sets(table, &schema);
-        let facts = ResolvedSchemaFacts {
-            lowercased_columns: &lowercased_columns,
-            rls_table_names: &rls_table_names,
-        };
+        let lowercased_columns = resolved_sets(table, &schema);
+        let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
         let select_policies =
             filter_policies(table, &schema, &[sqlparser::ast::CreatePolicyCommand::Select])?;

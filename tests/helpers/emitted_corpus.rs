@@ -26,6 +26,8 @@ CREATE TABLE t (
     blob BYTEA
 );
 CREATE TABLE u (id INT PRIMARY KEY, t_id INT, s TEXT);
+-- Every column defaultable, which is what `INSERT ... DEFAULT VALUES` needs.
+CREATE TABLE dv (id SERIAL PRIMARY KEY, note TEXT DEFAULT 'unset');
 ";
 
 /// Every capability switched on, so a construct is never rejected merely for
@@ -35,6 +37,7 @@ CREATE TABLE u (id INT PRIMARY KEY, t_id INT, s TEXT);
 /// exactly these, and `the_sweep_declares_every_registered_aggregate` holds
 /// the two lists together.
 #[must_use]
+#[allow(dead_code, reason = "consumed by the binaries that sweep, not by every includer")]
 pub fn sweep_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
@@ -62,6 +65,7 @@ pub fn sweep_options() -> Pg2SqliteOptions {
 /// holding a LIKE gets the case-sensitivity pragma prepended, and counting
 /// then drops the pragma and re-creates a fixture table instead.
 #[must_use]
+#[allow(dead_code, reason = "consumed by the binaries that sweep, not by every includer")]
 pub fn row_statements(setup: &[String], all: &[String]) -> Vec<String> {
     all.iter().filter(|statement| !setup.contains(statement)).cloned().collect()
 }
@@ -72,7 +76,7 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
         "dml",
         &[
             "INSERT INTO t (id) VALUES (1), (2), (3);",
-            "INSERT INTO t DEFAULT VALUES;",
+            "INSERT INTO dv DEFAULT VALUES;",
             "INSERT INTO t (id) VALUES (1) ON CONFLICT DO NOTHING;",
             "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET n = 1;",
             "INSERT INTO t (id) VALUES (1) RETURNING id;",
@@ -132,7 +136,7 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
             "SELECT rank() OVER (PARTITION BY n ORDER BY id) FROM t;",
             "SELECT sum(n) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM t;",
             "SELECT sum(n) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM t;",
-            "SELECT sum(n) OVER (GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t;",
+            "SELECT sum(n) OVER (ORDER BY n GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t;",
             "SELECT sum(n) OVER (ORDER BY n EXCLUDE CURRENT ROW) FROM t;",
             "SELECT sum(n) OVER w FROM t WINDOW w AS (ORDER BY n);",
             "SELECT lag(n, 1, 0) OVER (ORDER BY id) FROM t;",
@@ -180,7 +184,7 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
             "SELECT payload ?| ARRAY['a', 'b'] FROM t;",
             "SELECT payload ?& ARRAY['a', 'b'] FROM t;",
             "SELECT payload #- '{a}' FROM t;",
-            "SELECT n IS JSON, s IS JSON ARRAY FROM t;",
+            "SELECT s IS JSON, s IS JSON ARRAY FROM t;",
                 ],
     ),
     (
@@ -208,7 +212,7 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
             "SELECT substring(s FROM 1 FOR 2), substr(s, 1, 2) FROM t;",
             "SELECT position('a' IN s), strpos(s, 'a') FROM t;",
             "SELECT replace(s, 'a', 'b') FROM t;",
-            "SELECT abs(n), ceil(r), floor(r), round(r), round(r, 2), trunc(r) FROM t;",
+            "SELECT abs(n), ceil(r), floor(r), round(r), round(r::numeric, 2), trunc(r) FROM t;",
             "SELECT mod(n, 2), div(n, 2) FROM t;",
             "SELECT random();",
             "SELECT now(), current_date, current_time, current_timestamp, localtimestamp;",
@@ -224,7 +228,7 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
             "SELECT json_agg(s), jsonb_agg(s) FROM t;",
             "SELECT json_build_object('a', n), json_build_array(n) FROM t;",
             "SELECT jsonb_set(payload, '{a}', '1') FROM t;",
-            "SELECT json_extract_path(payload, 'a') FROM t;",
+            "SELECT json_extract_path(payload::json, 'a') FROM t;",
             "SELECT var_pop(r), var_samp(r), variance(r) FROM t;",
             "SELECT stddev(r), stddev_pop(r), stddev_samp(r) FROM t;",
             "SELECT covar_pop(r, r), covar_samp(r, r), corr(r, r) FROM t;",
@@ -818,7 +822,7 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 // The four clauses the regular index path drops. Each one
                 // still has to leave an index SQLite accepts.
                 "CREATE INDEX ix_include ON t (n) INCLUDE (s);",
-                "CREATE UNIQUE INDEX ix_hash ON t USING hash (n);",
+                "CREATE INDEX ix_hash ON t USING hash (n);",
                 "CREATE INDEX CONCURRENTLY ix_conc ON t (s);",
                 "CREATE INDEX ix_with ON t (n) WITH (fillfactor = 70);",
             ],

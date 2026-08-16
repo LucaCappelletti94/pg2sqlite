@@ -628,27 +628,39 @@ fn scale_insert_source_body(
     Ok(())
 }
 
-/// Redirect `INSERT INTO <view> ... RETURNING ...` to the backing table
-/// when the view is an RLS translation of a PG table. The INSTEAD OF
-/// view trigger does forward the INSERT, but the outer RETURNING reads
-/// from the view's NEW row and never sees the rowid SQLite assigned in
-/// the backing table. Pointing the INSERT at the backing table lets
-/// RETURNING surface the correct values; policy enforcement is
-/// preserved via the BEFORE INSERT guard trigger emitted by
-/// `rls::generate_insert_check_trigger_sql`.
+/// Redirect an INSERT against a policy-bearing RLS view when it carries a
+/// clause SQLite cannot handle on a view: a `RETURNING` clause or an
+/// `ON CONFLICT` upsert clause.
 ///
-/// Scoped narrowly: only INSERTs that (a) target an RLS-enabled view
-/// (looked up via [`rls::table_has_rls`]) and (b) carry a RETURNING
-/// clause are rewritten. Plain INSERTs continue through the existing
-/// INSTEAD OF view path so the behavioural change is opt-in via
-/// RETURNING. Defensive lookups: any failure to resolve the target
-/// table leaves the insert untouched.
+/// **RETURNING:** The INSTEAD OF INSERT trigger forwards the row to the
+/// backing table, but `RETURNING` reads from the view's NEW row and never
+/// sees the rowid the backing table assigned. Redirecting the INSERT at the
+/// backing table lets `RETURNING` surface the correct values.
+///
+/// **ON CONFLICT (DO NOTHING / DO UPDATE):** SQLite refuses these forms on a
+/// view entirely ("cannot UPSERT a view"). `INSERT OR IGNORE` and
+/// `INSERT OR REPLACE` use a different AST field and are NOT touched here.
+///
+/// In both cases the redirect is safe only in strict mode, because the
+/// backing-table BEFORE INSERT guard (`generate_insert_check_trigger_sql`)
+/// is emitted only then. Default mode logs rather than blocks, so
+/// redirecting there would write past the policy.
+///
+/// Non-RLS tables and unresolvable targets are left untouched.
 fn rewrite_rls_view_insert(
     insert: &mut Insert,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<(), crate::errors::Error> {
-    let Some(returning) = insert.returning.clone() else { return Ok(()) };
+    // INSERT OR IGNORE / OR REPLACE use insert.or, not insert.on; they are
+    // accepted by SQLite on a view and must not be redirected here.
+    let has_on_conflict = matches!(&insert.on, Some(sqlparser::ast::OnInsert::OnConflict(_)));
+    let returning = insert.returning.clone();
+
+    if returning.is_none() && !has_on_conflict {
+        return Ok(());
+    }
+
     let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
     let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
         return Ok(());
@@ -658,13 +670,12 @@ fn rewrite_rls_view_insert(
         return Ok(());
     };
 
-    // Symmetric gate with `generate_insert_check_trigger_sql` in rls.rs: the
-    // rewrite is safe only when the backing-table guard trigger is in place,
-    // which is strict mode. Monitor mode logs rather than blocks, so it emits
-    // no such guard and the insert has to stay on the view, whose row carries
-    // only what the caller wrote.
     if !options.is_strict_rls_validation() {
-        if let Some(column) = database_filled_column(&returning, table, schema, options)? {
+        // RETURNING: refuse when a database-filled column would come back NULL
+        // from the view row.
+        if let Some(items) = &returning
+            && let Some(column) = database_filled_column(items, table, schema, options)?
+        {
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
                 "RETURNING reads {column} back from a view over {}, and a view row holds only what \
                  the caller wrote, so a column the database fills in would come back NULL. Call \
@@ -673,12 +684,21 @@ fn rewrite_rls_view_insert(
                 last.value
             )));
         }
+        // ON CONFLICT: refuse, because no backing-table guard is emitted in
+        // default mode and a redirect would write past the policy.
+        if has_on_conflict {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                "ON CONFLICT against {}, a policy-bearing table, cannot be forwarded to its view \
+                 because SQLite does not support UPSERT on a view. Call \
+                 `with_strict_rls_validation()` to redirect the insert to the backing table.",
+                last.value
+            )));
+        }
         return Ok(());
     }
 
-    // Build the backing-table ObjectName: same schema prefix as the
-    // original, but the bare table name gets the configured RLS
-    // suffix (defaulting to "_rls").
+    // Strict mode: redirect to the backing table. The BEFORE INSERT guard on
+    // the backing table keeps WITH CHECK enforcement on this path.
     let suffix = options.get_rls_table_suffix();
     let backing_name = format!("{}{suffix}", last.value);
     let mut new_parts = table_name.0.clone();

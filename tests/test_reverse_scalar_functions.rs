@@ -77,6 +77,19 @@ fn hex_becomes_encode_hex() {
 }
 
 #[test]
+fn hex_encode_casts_argument_to_bytea() {
+    // encode() requires bytea as its first argument. The reverse translator
+    // adds a ::bytea cast so the output prepares on PostgreSQL.
+    let out = ok("SELECT hex(s) FROM t");
+    assert!(
+        out.to_ascii_lowercase().contains("::bytea"),
+        "expected ::bytea cast on encode argument in: {out}"
+    );
+    Parser::parse_sql(&PostgreSqlDialect {}, &out)
+        .expect("reverse output must parse as valid PostgreSQL");
+}
+
+#[test]
 fn unhex_becomes_decode_hex() {
     let out = ok("SELECT unhex(s) FROM t");
     assert!(out.contains("decode"), "expected decode in: {out}");
