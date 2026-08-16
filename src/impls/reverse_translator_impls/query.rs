@@ -158,7 +158,6 @@ fn restore_distinct_on(query: &Query) -> Option<Query> {
         ..query.clone()
     })
 }
-
 impl ReverseTranslator for Query {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;

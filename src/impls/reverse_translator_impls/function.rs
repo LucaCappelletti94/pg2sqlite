@@ -29,7 +29,8 @@ use crate::{
             string_literal,
         },
         shared_helpers::{
-            function_argument_exprs, translate_function_arguments, translate_order_by_expr,
+            every_declared_type_matches, function_argument_exprs, translate_function_arguments,
+            translate_order_by_expr,
         },
         timezone::{
             TimestampAwareness, flipped_shifting_offset, normalize_timezone_modifier_for_postgres,
@@ -49,7 +50,6 @@ const REVERSE_RENAMES: &[(&str, &str)] = &[
     ("unicode", "ascii"),
     ("json_object", "json_build_object"),
     ("json_array", "json_build_array"),
-    ("json_type", "json_typeof"),
     ("json_array_length", "jsonb_array_length"),
     ("sqlite_version", "version"),
     ("quote", "quote_nullable"),
@@ -109,7 +109,10 @@ pub enum FunctionReversal {
     /// SQLite's total always returns 0 for no rows; SUM returns NULL, so the
     /// COALESCE is required for a faithful round-trip.
     ToTotal,
-    /// Translate hex(x) to encode(x, 'hex').
+    /// Translate json_type(expr) to json_typeof(expr) or jsonb_typeof(expr)
+    /// based on the argument's declared column type. The choice is deferred to
+    /// `reverse_translate_function` because that stage has schema access.
+    JsonTypeOf,
     ToEncodeHex,
     /// Translate unhex(x) to decode(x, 'hex').
     ToDecodeHex,
@@ -426,12 +429,11 @@ pub fn reverse_function(
         name if name == options.get_uuid_function_name() => {
             FunctionReversal::Rename("gen_random_uuid".to_string())
         }
-
         // json(x) -> CAST(x AS JSONB)
         "json" => FunctionReversal::ToCastAsJsonb,
-        // json_set(j, '$.path', v) -> jsonb_set(j, '{path}', v)
+        // json_set(j, '$.path', v) -> jsonb_set(j, '{path}', to_jsonb(v))
         "json_set" => FunctionReversal::ToJsonbPathFunc("jsonb_set".to_string()),
-        // json_insert(j, '$.path', v) -> jsonb_insert(j, '{path}', v)
+        // json_insert(j, '$.path', v) -> jsonb_insert(j, '{path}', to_jsonb(v))
         "json_insert" => FunctionReversal::ToJsonbPathFunc("jsonb_insert".to_string()),
         // json_remove(j, '$.path') -> j #- '{path}'
         "json_remove" => FunctionReversal::ToJsonPathRemove,
@@ -441,12 +443,15 @@ pub fn reverse_function(
         "json_valid" => FunctionReversal::ToIsJson,
         // json_patch(a, b) -> a || b
         "json_patch" => FunctionReversal::ToJsonbConcat,
-
+        // json_type(x): use jsonb_typeof when the argument's declared type is
+        // JSONB, json_typeof otherwise. The choice is resolved in
+        // reverse_translate_function using the schema.
+        "json_type" => FunctionReversal::JsonTypeOf,
         // iif(c, t, f) -> CASE WHEN c THEN t ELSE f END
         "iif" => FunctionReversal::ToIif,
         // total(x) -> COALESCE(SUM(x), 0)
         "total" => FunctionReversal::ToTotal,
-        // hex(x) -> encode(x, 'hex')
+        // hex(x) -> encode(x::bytea, 'hex')
         "hex" => FunctionReversal::ToEncodeHex,
         // unhex(x) -> decode(x, 'hex')
         "unhex" => FunctionReversal::ToDecodeHex,
@@ -828,8 +833,12 @@ pub fn reverse_translate_function(
             })
         }
         FunctionReversal::ToJsonbPathFunc(pg_func) => {
-            // json_set(j, '$.a', v, ...) -> jsonb_set(j, '{a}', v)
-            // json_insert(j, '$.a', v) -> jsonb_insert(j, '{a}', v)
+            // json_set(j, '$.a', v) -> jsonb_set(j, '{a}', to_jsonb(v))
+            // json_insert(j, '$.a', v) -> jsonb_insert(j, '{a}', to_jsonb(v))
+            // jsonb_set and jsonb_insert require the value argument to be typed
+            // as jsonb. SQLite json_set accepts any value, so the value is
+            // wrapped in to_jsonb(). For non-column arguments whose type cannot
+            // be resolved from the schema, to_jsonb() is the consistent fallback.
             let exprs = function_argument_exprs(&func.args);
             if exprs.len() < 3 {
                 return Err(Error::UnsupportedSQLiteFeature(format!(
@@ -854,8 +863,9 @@ pub fn reverse_translate_function(
                     )));
                 }
             };
-            let value_expr =
+            let raw_value =
                 crate::prelude::ReverseTranslator::reverse_translate(exprs[2], schema, options)?;
+            let value_expr = simple_function_expr("to_jsonb", vec![raw_value], None);
             Ok(simple_function_expr(
                 &pg_func,
                 vec![json_expr, string_literal(&path_str), value_expr],
@@ -955,6 +965,30 @@ pub fn reverse_translate_function(
                 right: Box::new(right),
             })
         }
+        FunctionReversal::JsonTypeOf => {
+            // json_type(x) -> json_typeof(x) or jsonb_typeof(x) depending on the
+            // argument's declared column type. PostgreSQL's json_typeof takes
+            // json, jsonb_typeof takes jsonb; the wrong variant fails at the server.
+            //
+            // Fallback when the argument is not a plain column reference or its
+            // type is absent from the schema: json_typeof, preserving the
+            // original rename behaviour as the conservative choice.
+            let exprs = function_argument_exprs(&func.args);
+            let arg = exprs.first().copied();
+            let func_name = if arg.is_some_and(|a| {
+                every_declared_type_matches(a, schema, |t| t.to_ascii_lowercase().contains("jsonb"))
+            }) {
+                "jsonb_typeof"
+            } else {
+                "json_typeof"
+            };
+            build_reverse_function(
+                ObjectName::from(vec![Ident::new(func_name)]),
+                func,
+                schema,
+                options,
+            )
+        }
         FunctionReversal::ToIif => {
             // iif(cond, then, else) -> CASE WHEN cond THEN then ELSE else END
             let exprs = extract_exactly(&func.args, 3, "iif")?;
@@ -975,11 +1009,22 @@ pub fn reverse_translate_function(
             Ok(simple_function_expr("COALESCE", vec![sum, integer_literal(0)], None))
         }
         FunctionReversal::ToEncodeHex => {
-            // hex(x) -> encode(x, 'hex')
+            // hex(x) -> encode(x::bytea, 'hex')
+            // encode() requires its first argument to be bytea. A text column
+            // fails at the server with "function encode(text, unknown) does not
+            // exist". Cast unconditionally: if the column is already bytea the
+            // cast is a no-op, and for non-column arguments where the type cannot
+            // be resolved from the schema this is the consistent fallback.
             let exprs = extract_exactly(&func.args, 1, "hex")?;
             let inner =
                 crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
-            Ok(simple_function_expr("encode", vec![inner, string_literal("hex")], None))
+            let bytea_cast = Expr::Cast {
+                expr: Box::new(inner),
+                data_type: DataType::Bytea,
+                format: None,
+                kind: CastKind::DoubleColon,
+            };
+            Ok(simple_function_expr("encode", vec![bytea_cast, string_literal("hex")], None))
         }
         FunctionReversal::ToDecodeHex => {
             // unhex(x) -> decode(x, 'hex')

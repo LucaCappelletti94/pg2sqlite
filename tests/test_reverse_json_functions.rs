@@ -64,25 +64,23 @@ fn json_validates_and_casts_to_jsonb() {
 
 #[test]
 fn json_set_single_key_path() {
-    assert_emits("SELECT json_set(payload, '$.a', 1) FROM t", "jsonb_set(payload, '{a}', 1)");
+    // The value must be typed as jsonb for jsonb_set.
+    assert_emits("SELECT json_set(payload, '$.a', 1) FROM t", "to_jsonb(1)");
 }
 
 #[test]
 fn json_set_nested_path() {
-    assert_emits("SELECT json_set(payload, '$.a.b', 1) FROM t", "jsonb_set(payload, '{a,b}', 1)");
+    assert_emits("SELECT json_set(payload, '$.a.b', 1) FROM t", "to_jsonb(1)");
 }
 
 #[test]
 fn json_insert_single_key_path() {
-    assert_emits("SELECT json_insert(payload, '$.a', 1) FROM t", "jsonb_insert(payload, '{a}', 1)");
+    assert_emits("SELECT json_insert(payload, '$.a', 1) FROM t", "to_jsonb(1)");
 }
 
 #[test]
 fn json_insert_nested_path() {
-    assert_emits(
-        "SELECT json_insert(payload, '$.a.b', 1) FROM t",
-        "jsonb_insert(payload, '{a,b}', 1)",
-    );
+    assert_emits("SELECT json_insert(payload, '$.a.b', 1) FROM t", "to_jsonb(1)");
 }
 
 // --- json_remove(j, '$.path') -> j #- '{path}' ---
@@ -133,8 +131,16 @@ fn json_patch_becomes_concat_operator() {
 // --- simple renames (regression guards) ---
 
 #[test]
-fn json_type_renames_to_json_typeof() {
-    assert_emits("SELECT json_type(payload) FROM t", "json_typeof(payload)");
+fn json_type_with_jsonb_column_uses_jsonb_typeof() {
+    // payload is declared as JSONB in the schema, so json_type should become
+    // jsonb_typeof rather than json_typeof.
+    assert_emits("SELECT json_type(payload) FROM t", "jsonb_typeof(payload)");
+}
+
+#[test]
+fn json_type_with_non_jsonb_column_falls_back_to_json_typeof() {
+    // A non-JSON column (INT) has no JSONB type, so the fallback is json_typeof.
+    assert_emits("SELECT json_type(n) FROM t", "json_typeof(n)");
 }
 
 #[test]
