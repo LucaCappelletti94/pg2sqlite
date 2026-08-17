@@ -2300,6 +2300,22 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 );
             }
 
+            // Coming back, a call in the row-source position is a set-returning
+            // function, and the ones SQLite alone has answer rows PostgreSQL
+            // cannot: `json_each` differs in both its columns and what it
+            // accepts, and `json_tree` does not exist there. The expression
+            // classifier never sees this position, so the reason it carries is
+            // read here.
+            if !D::IS_FORWARD
+                && args.is_some()
+                && let Some(reason) =
+                    crate::impls::reverse_translator_impls::function::sqlite_only_reason(
+                        &crate::impls::session_variable::function_name_lower(name),
+                    )
+            {
+                return Err(Error::UnsupportedSQLiteFeature(reason));
+            }
+
             // SQLite accepts no column list on a table alias, the same
             // limitation that forces the derived shape in
             // translate_unnest_factor, so the rename happens in a projection

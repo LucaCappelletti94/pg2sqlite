@@ -14,7 +14,12 @@
 
 #![allow(clippy::too_many_lines)]
 
+use diesel::{
+    QueryableByName, RunQueryDsl, sql_query,
+    sql_types::{Array, Text},
+};
 use pg2sqlite::{
+    impls::sqlite_functions::shared_with_postgres,
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
     traits::TranslationOptions,
 };
@@ -120,6 +125,13 @@ fn build_schema() -> ParserDB {
 ///
 /// Format: (sqlite_input, source_file_hint)
 const ACCEPT_CASES: &[(&str, &str)] = &[
+    // --- the date and time parts, which cross as casts because PostgreSQL
+    // refuses `time(x)`, `time` being a type name there
+    // (test_reverse_unknown_functions.rs)
+    ("SELECT date(ts) FROM t", "date_and_time"),
+    ("SELECT time(ts) FROM t", "date_and_time"),
+    ("SELECT date() FROM t", "date_and_time"),
+    ("SELECT time() FROM t", "date_and_time"),
     // --- json functions (test_reverse_json_functions.rs,
     // test_reverse_output_is_valid_postgres.rs)
     // json_set and json_insert now wrap the value in to_jsonb(); json_type
@@ -526,6 +538,61 @@ fn reverse_output_runs_in_postgres() {
     );
 
     assert!(failures.is_empty(), "{} case(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
+}
+
+/// A name the server does not have, as the catalogue answers it.
+#[derive(QueryableByName, Debug)]
+struct AbsentName {
+    /// The name asked about.
+    #[diesel(sql_type = Text)]
+    name: String,
+}
+
+/// The reverse direction emits every name in this crate's shared inventory
+/// unchanged, so the server is asked whether it has them.
+///
+/// This is the half of the reverse catch-all that does not need judgement:
+/// existence is a fact the catalogue answers. Whether the two engines agree on
+/// what a name means is decided in `sqlite_functions.rs`, name by name, and is
+/// not what this checks.
+#[test]
+fn every_shared_name_exists_in_postgres() {
+    let mut connection = fresh_database();
+
+    // The five the catalogue cannot answer for, because PostgreSQL parses them
+    // as expressions rather than as functions. Evaluating them is the check.
+    const EXPRESSIONS: [&str; 5] =
+        ["coalesce", "nullif", "current_date", "current_time", "current_timestamp"];
+    apply(
+        &mut connection,
+        "SELECT coalesce(NULL::int, 1), nullif(1, 1), current_date, current_time, \
+         current_timestamp",
+    )
+    .expect("the expression-shaped names evaluate");
+
+    let asked: Vec<String> = shared_with_postgres()
+        .iter()
+        .filter(|name| !EXPRESSIONS.contains(name))
+        .map(|name| (*name).to_string())
+        .collect();
+
+    let absent: Vec<AbsentName> = sql_query(
+        "SELECT nm AS name FROM unnest($1::text[]) AS nm \
+         WHERE NOT EXISTS ( \
+             SELECT 1 FROM pg_proc p \
+             WHERE p.proname = nm AND p.pronamespace = 'pg_catalog'::regnamespace \
+         )",
+    )
+    .bind::<Array<Text>, _>(asked)
+    .load(&mut connection)
+    .expect("the catalogue answers");
+
+    assert!(
+        absent.is_empty(),
+        "the reverse direction would emit {} name(s) PostgreSQL does not have: {:?}",
+        absent.len(),
+        absent.iter().map(|row| row.name.as_str()).collect::<Vec<_>>()
+    );
 }
 
 /// What a session variable mapping reverses into is SQL the server takes.

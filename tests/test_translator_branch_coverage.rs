@@ -3,6 +3,7 @@
 use pg2sqlite::{
     errors::Error,
     prelude::{Pg2SqliteOptions, ReverseTranslator, Translator},
+    traits::TranslationOptions,
 };
 use sql_traits::structs::ParserDB;
 use sqlparser::{
@@ -253,7 +254,10 @@ fn reverse_statement_and_update_cover_additional_checker_variants() {
     let schema = schema_from_sql(
         "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT); CREATE TABLE teams(id INTEGER PRIMARY KEY, user_id INTEGER);",
     );
-    let options = Pg2SqliteOptions::default();
+    // `custom_fn` stands in for any host function here, so it is declared.
+    // An undeclared name is refused, which
+    // `tests/test_reverse_unknown_functions.rs` pins.
+    let options = Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]);
 
     let insert_stmt = parse_statement("INSERT INTO users(id, name) VALUES (1, 'a')");
     let reversed_insert = insert_stmt

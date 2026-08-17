@@ -1,6 +1,9 @@
 //! Additional reverse-statement edge coverage.
 
-use pg2sqlite::prelude::{Pg2SqliteOptions, ReverseTranslator};
+use pg2sqlite::{
+    prelude::{Pg2SqliteOptions, ReverseTranslator},
+    traits::TranslationOptions,
+};
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
@@ -78,12 +81,18 @@ fn reverse_statement_covers_table_function_and_query_setexpr_variants() {
     let schema = schema();
     let options = Pg2SqliteOptions::default();
 
+    // PostgreSQL inserts into a table or a view, never into a call, so this
+    // shape is refused rather than carried across as SQL the server cannot
+    // parse.
     let mut insert_with_table_fn = parse_insert("INSERT INTO users(id, name) VALUES (1, 'a')");
     insert_with_table_fn.table = TableObject::TableFunction(table_function("remote_users"));
-    let translated = Statement::Insert(insert_with_table_fn)
+    let error = Statement::Insert(insert_with_table_fn)
         .reverse_translate(&schema, &options)
-        .expect("table-function INSERT should reverse");
-    assert!(matches!(translated, Statement::Insert(_)));
+        .expect_err("a table-function INSERT has no PostgreSQL form");
+    assert!(
+        error.to_string().contains("table function is not supported"),
+        "the refusal names the shape, got: {error}"
+    );
 
     let mut base_query = parse_query("SELECT 1");
     for set_expr in [
@@ -117,7 +126,10 @@ fn reverse_statement_covers_table_function_and_query_setexpr_variants() {
 #[test]
 fn reverse_statement_covers_expression_and_limit_checker_variants() {
     let schema = schema();
-    let options = Pg2SqliteOptions::default();
+    // The subject is the expression walker, so the placeholder name is
+    // declared. An undeclared one is refused, which
+    // `tests/test_reverse_unknown_functions.rs` pins.
+    let options = Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]);
 
     let trim_expr = Expr::Trim {
         expr: Box::new(Expr::Identifier(Ident::new("name"))),

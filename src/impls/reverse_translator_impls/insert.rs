@@ -321,11 +321,16 @@ impl ReverseTranslator for Insert {
 
         let table = match &self.table {
             TableObject::TableName(_) | TableObject::TableQuery(_) => self.table.clone(),
+            // PostgreSQL inserts into a table or a view, never into a call, so
+            // carrying the call across would emit a statement it refuses to
+            // parse. Refused for the shape rather than for the callee, which is
+            // what the `OR REPLACE` path already did once it resolved the
+            // target.
             TableObject::TableFunction(func) => {
-                match super::function::reverse_translate_function(func, schema, options)? {
-                    Expr::Function(f) => TableObject::TableFunction(f),
-                    _ => self.table.clone(),
-                }
+                return Err(Error::UnsupportedSQLiteFeature(format!(
+                    "INSERT into a table function is not supported: PostgreSQL inserts into a \
+                     table or a view, and `{func}` is neither."
+                )));
             }
         };
 

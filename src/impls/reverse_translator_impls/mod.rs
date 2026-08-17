@@ -15,7 +15,7 @@ use alloc::{
 
 mod delete;
 mod expr;
-mod function;
+pub(crate) mod function;
 mod helpers;
 mod ident_quoting;
 mod insert;
