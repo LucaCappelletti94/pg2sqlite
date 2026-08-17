@@ -2737,7 +2737,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/earth-metabolome-initiative/sql-traits?branch=main#b6ec3290f82a5c4e13f13d25fe3e0b442facba44"
+source = "git+https://github.com/earth-metabolome-initiative/sql-traits?branch=main#f903bceb33771214031f9b39cd6aa26dbe2752fa"
 dependencies = [
  "geometric-traits",
  "sha2",
@@ -2834,6 +2834,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
+ "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
