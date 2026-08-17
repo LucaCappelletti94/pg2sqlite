@@ -2221,7 +2221,7 @@ mod tests {
         let readonly =
             translate_create_table_for_role(&readonly_table, &readonly_schema, &options).unwrap();
         let readonly = readonly.expect("readonly path should return statements");
-        assert!(!readonly.is_empty());
+        assert!(!readonly.is_empty(), "a read-only table emits at least one statement");
         assert!(matches!(readonly[0], Statement::CreateTable(_)));
 
         let writable_schema_sql = r#"

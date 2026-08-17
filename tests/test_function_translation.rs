@@ -178,7 +178,7 @@ fn test_now_semantic() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(results.len(), 1);
     // created_at should be a valid timestamp (not empty, not "NOW()")
-    assert!(!results[0].created_at.is_empty());
+    assert!(!results[0].created_at.is_empty(), "the default timestamp should be written");
     assert!(!results[0].created_at.contains("NOW"));
     // Should look like a datetime (contains digits and dashes/colons)
     assert!(

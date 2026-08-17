@@ -80,7 +80,7 @@ fn a_declared_function_passes_through() {
         .expect("parse")
         .translate(&options)
         .expect("a declared function is the caller's promise that it exists");
-    assert!(!translated.is_empty());
+    assert!(!translated.is_empty(), "the document should translate into at least one statement");
 }
 
 /// The json-returning variants keep PostgreSQL's quoting, so a string element

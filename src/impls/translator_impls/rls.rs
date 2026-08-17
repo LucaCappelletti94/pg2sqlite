@@ -2984,7 +2984,7 @@ mod tests {
             .with_strict_rls_validation();
         let statements = generate_rls_statements(table, &schema, &options)
             .expect("full RLS statements should build");
-        assert!(!statements.is_empty());
+        assert!(!statements.is_empty(), "a guarded table emits at least one statement");
         assert!(
             statements
                 .iter()
@@ -2993,12 +2993,12 @@ mod tests {
 
         let readonly = generate_readonly_rls_statements(table, &schema, &options)
             .expect("readonly RLS should build");
-        assert!(!readonly.is_empty());
+        assert!(!readonly.is_empty(), "a read-only table emits at least one statement");
         assert!(!readonly.iter().any(|stmt| stmt.to_string().contains("docs_insert_trigger")));
 
         let validation = generate_rls_validation_statements(table, &schema, &options, "rls_audit")
             .expect("validation statements should build");
-        assert!(!validation.is_empty());
+        assert!(!validation.is_empty(), "validation emits at least one statement");
         assert!(
             validation
                 .iter()

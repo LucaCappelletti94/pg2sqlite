@@ -1939,7 +1939,7 @@ mod tests {
         let translated =
             PlPgSqlTranslator::translate_insert_statement(&insert, &mut ctx, &schema, &options)
                 .unwrap();
-        assert!(!translated.is_empty());
+        assert!(!translated.is_empty(), "the body should translate into at least one statement");
     }
 
     #[test]
@@ -2160,7 +2160,10 @@ mod tests {
             &options,
         )
         .unwrap();
-        assert!(!translated_values.is_empty());
+        assert!(
+            !translated_values.is_empty(),
+            "the VALUES body should translate into at least one statement"
+        );
         assert!(ctx.get_uuid_first_use("v_id").is_some());
 
         let Statement::Insert(insert_select) =
@@ -2176,7 +2179,10 @@ mod tests {
             &options,
         )
         .unwrap();
-        assert!(!translated_select.is_empty());
+        assert!(
+            !translated_select.is_empty(),
+            "the SELECT body should translate into at least one statement"
+        );
 
         let mut table_fn_insert = insert_values.clone();
         let Expr::Function(func) = parse_expr("remote()") else {
@@ -2221,7 +2227,7 @@ mod tests {
             &options,
         )
         .expect("values insert should translate");
-        assert!(!translated.is_empty());
+        assert!(!translated.is_empty(), "the body should translate into at least one statement");
         assert!(
             ctx.get_uuid_first_use("v_id").is_some(),
             "schema-qualified uuid_generate_v4() should be tracked for last_insert_rowid pattern"
@@ -2408,7 +2414,7 @@ mod tests {
             &options,
         )
         .expect("function-style table object should still translate");
-        assert!(!translated.is_empty());
+        assert!(!translated.is_empty(), "the body should translate into at least one statement");
 
         let Statement::Insert(mut insert_table_source) =
             parse_statement("INSERT INTO users(id) VALUES (v_id)")
@@ -2600,7 +2606,7 @@ mod tests {
             &options,
         )
         .expect("alias/empty-compound projection should rewrite");
-        assert!(!transformed.is_empty());
+        assert!(!transformed.is_empty(), "the transform should answer at least one statement");
     }
 
     #[test]

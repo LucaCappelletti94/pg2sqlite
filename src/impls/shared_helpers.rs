@@ -3063,9 +3063,17 @@ mod tests {
         assert_eq!(cols, vec!["col".to_string()]);
 
         let none_args_func = Function { args: FunctionArguments::None, ..named_func.clone() };
-        assert!(extract_columns_from_function(&none_args_func).is_empty());
+        let no_args = extract_columns_from_function(&none_args_func);
+        assert!(
+            no_args.is_empty(),
+            "a call with no argument list names no column, got {no_args:?}"
+        );
 
-        assert!(extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new())).is_empty());
+        let empty_compound = extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new()));
+        assert!(
+            empty_compound.is_empty(),
+            "an empty compound names no column, got {empty_compound:?}"
+        );
         assert_eq!(
             extract_columns_from_expr(&Expr::Nested(Box::new(parse_expr("a + b")))),
             vec!["a".to_string(), "b".to_string()]

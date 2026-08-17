@@ -224,7 +224,11 @@ mod tests {
             .function_body("trg_only_new")
             .expect("function body extraction should succeed")
             .expect("function should exist");
-        assert!(body.statements.is_empty());
+        assert!(
+            body.statements.is_empty(),
+            "the trigger body holds no statement, got {:?}",
+            body.statements
+        );
     }
 
     #[test]

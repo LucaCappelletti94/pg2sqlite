@@ -36,7 +36,11 @@ fn default_values() {
     assert_eq!(options.get_uuid_function_name(), "uuid");
     assert_eq!(options.get_rls_table_suffix(), "_rls");
     assert!(options.get_session_user_role().is_none());
-    assert!(options.get_session_variables().is_empty());
+    assert!(
+        options.get_session_variables().is_empty(),
+        "a default options carries no pairing, got {:?}",
+        options.get_session_variables()
+    );
     assert!(options.get_rls_audit_table_name().is_none());
     assert!(!options.is_strict_rls_validation());
 }

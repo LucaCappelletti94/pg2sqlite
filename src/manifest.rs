@@ -143,7 +143,10 @@ mod tests {
 
     #[test]
     fn empty_schema_yields_empty_manifest() {
-        assert!(manifest("CREATE ROLE nobody;", &Pg2SqliteOptions::default()).is_empty());
+        assert!(
+            manifest("CREATE ROLE nobody;", &Pg2SqliteOptions::default()).is_empty(),
+            "a schema with no tables publishes no entries"
+        );
     }
 
     #[test]

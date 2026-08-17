@@ -2179,7 +2179,8 @@ mod tests {
 
     #[test]
     fn helper_functions_cover_none_args_passthrough_and_separator_builder() {
-        assert!(function_argument_exprs(&FunctionArguments::None).is_empty());
+        let no_arguments = function_argument_exprs(&FunctionArguments::None);
+        assert!(no_arguments.is_empty(), "a bare call carries no argument, got {no_arguments:?}");
 
         let concatenated = build_concat_ws_expression(
             &parse_expr("','"),
