@@ -28,6 +28,7 @@ use crate::{
             extract_exactly, function_arg_expr_or_err, integer_literal, simple_function_expr,
             string_literal,
         },
+        session_variable,
         shared_helpers::{
             every_declared_type_matches, function_argument_exprs, translate_function_arguments,
             translate_order_by_expr,
@@ -39,7 +40,7 @@ use crate::{
         translator_impls::expr::sqlite_json_path_to_pg_text_path,
     },
     prelude::Pg2SqliteOptions,
-    traits::TranslationOptions,
+    traits::{SessionVariableMapping, TranslationOptions},
 };
 
 /// Simple reverse renames: `(sqlite_name, pg_name)`.
@@ -126,6 +127,9 @@ pub enum FunctionReversal {
     /// Translate `strftime(fmt, x)` to `to_char(x, template)`, the string
     /// naming the PostgreSQL template.
     ToChar(String),
+    /// The function a session variable mapping pairs with a PostgreSQL
+    /// setting, which becomes the setting again.
+    ToSessionVariable(SessionVariableMapping),
     /// Reject the named SQLite-only construct with the reason string.
     Reject(String),
 }
@@ -419,6 +423,18 @@ pub fn reverse_function(
         "vec_f32" => FunctionReversal::ToVectorCast,
         // vec_f16(expr) -> expr::halfvec
         "vec_f16" => FunctionReversal::ToHalfvecCast,
+        // The caller's identity, which a mapping pairs with this name. Checked
+        // before the UUID options, and like them ahead of the catch-all,
+        // because a pairing is the caller stating what the name means here.
+        name if session_variable::mapping_for_function(name, options).is_some() => {
+            let mapping = session_variable::mapping_for_function(name, options)
+                .expect("the guard just found the mapping");
+            if session_variable::call_has_no_arguments(args) {
+                FunctionReversal::ToSessionVariable(mapping.clone())
+            } else {
+                FunctionReversal::Reject(session_variable::paired_arity_refusal(mapping))
+            }
+        }
         // The declared version 7 generator -> uuidv7(). Checked before the
         // random one, so a caller who pointed both options at one name gets
         // the reading that keeps the creation-time ordering.
@@ -1065,6 +1081,9 @@ pub fn reverse_translate_function(
                 syntax: ExtractSyntax::From,
                 expr: Box::new(inner),
             })
+        }
+        FunctionReversal::ToSessionVariable(mapping) => {
+            session_variable::reverse_expression(&mapping)
         }
         FunctionReversal::Reject(msg) => Err(Error::UnsupportedSQLiteFeature(msg)),
         FunctionReversal::PassThrough => {

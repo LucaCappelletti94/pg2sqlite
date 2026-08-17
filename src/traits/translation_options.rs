@@ -11,6 +11,15 @@ use alloc::{
     vec::Vec,
 };
 
+use sqlparser::{
+    ast::DataType,
+    dialect::PostgreSqlDialect,
+    parser::{Parser, ParserError},
+    tokenizer::Token,
+};
+
+use crate::errors::Error;
+
 /// Enum for defining the representation of UUIDs in `SQLite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -76,13 +85,20 @@ pub struct SessionVariableMapping {
     pub pg_pattern: SessionVariablePattern,
     /// The SQLite function name to use as replacement.
     pub sqlite_function: String,
+    /// The PostgreSQL type the setting holds, when the caller recorded one.
+    ///
+    /// PostgreSQL's `current_setting` answers text, so a predicate comparing it
+    /// against a `uuid` or an `integer` column casts it, and the cast is lost
+    /// going to SQLite because the replica's function needs none. Recording the
+    /// type here is what lets the cast be written again on the way back.
+    pub pg_type: Option<String>,
 }
 
 impl SessionVariableMapping {
     /// Creates a new session variable mapping.
     #[must_use]
     pub fn new(pg_pattern: SessionVariablePattern, sqlite_function: impl Into<String>) -> Self {
-        Self { pg_pattern, sqlite_function: sqlite_function.into() }
+        Self { pg_pattern, sqlite_function: sqlite_function.into(), pg_type: None }
     }
 
     /// Creates a mapping for `current_user`.
@@ -95,6 +111,71 @@ impl SessionVariableMapping {
     #[must_use]
     pub fn current_setting(name: impl Into<String>, sqlite_function: impl Into<String>) -> Self {
         Self::new(SessionVariablePattern::CurrentSetting { name: name.into() }, sqlite_function)
+    }
+
+    /// Records the PostgreSQL type the setting holds, spelled as PostgreSQL
+    /// spells it.
+    ///
+    /// # Example
+    /// ```
+    /// use pg2sqlite::prelude::*;
+    ///
+    /// let mapping =
+    ///     SessionVariableMapping::current_setting("app.user_id", "app_user_id").with_pg_type("uuid");
+    /// assert_eq!(mapping.pg_type.as_deref(), Some("uuid"));
+    /// ```
+    #[must_use]
+    pub fn with_pg_type(mut self, pg_type: impl Into<String>) -> Self {
+        self.pg_type = Some(pg_type.into());
+        self
+    }
+
+    /// The recorded type as a node, or `None` when the caller recorded none.
+    ///
+    /// A spelling that leaves input behind is refused rather than truncated,
+    /// because `parse_data_type` reads one type and stops: `uuid oops` would
+    /// otherwise become `uuid`, and `oops uuid` the custom type `oops`, which
+    /// PostgreSQL refuses only once the emitted SQL runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SessionVariableTypeUnreadable`] when the recorded
+    /// spelling does not parse as a PostgreSQL type, or parses and leaves input
+    /// behind.
+    ///
+    /// # Example
+    /// ```
+    /// use pg2sqlite::prelude::*;
+    /// use sqlparser::ast::{DataType, ExactNumberInfo};
+    ///
+    /// let mapping = SessionVariableMapping::current_setting("app.rate", "app_rate")
+    ///     .with_pg_type("numeric(10,2)");
+    /// assert_eq!(
+    ///     mapping.pg_type_node()?,
+    ///     Some(DataType::Numeric(ExactNumberInfo::PrecisionAndScale(10, 2)))
+    /// );
+    /// # Ok::<(), pg2sqlite::errors::Error>(())
+    /// ```
+    pub fn pg_type_node(&self) -> Result<Option<DataType>, Error> {
+        let Some(pg_type) = &self.pg_type else {
+            return Ok(None);
+        };
+        let unreadable = |source: Option<ParserError>| {
+            Error::SessionVariableTypeUnreadable {
+                pattern: self.pg_pattern.to_string(),
+                pg_type: pg_type.clone(),
+                source,
+            }
+        };
+        let mut parser = Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(pg_type)
+            .map_err(|source| unreadable(Some(source)))?;
+        let data_type = parser.parse_data_type().map_err(|source| unreadable(Some(source)))?;
+        if parser.peek_token().token == Token::EOF {
+            Ok(Some(data_type))
+        } else {
+            Err(unreadable(None))
+        }
     }
 }
 
@@ -220,9 +301,16 @@ pub trait TranslationOptions {
     /// Returns all configured session variable mappings.
     fn get_session_variables(&self) -> &[SessionVariableMapping];
 
-    /// Finds the SQLite function name for a given PostgreSQL session variable
-    /// pattern. Returns `None` if no mapping is configured.
-    fn find_session_variable_function(&self, pattern: &SessionVariablePattern) -> Option<&str>;
+    /// Finds the mapping for a given PostgreSQL session variable pattern.
+    /// Returns `None` if no mapping is configured.
+    ///
+    /// The last matching mapping wins, so a later call to
+    /// [`with_session_variable`](TranslationOptions::with_session_variable)
+    /// overrides an earlier one for the same pattern.
+    fn find_session_variable(
+        &self,
+        pattern: &SessionVariablePattern,
+    ) -> Option<&SessionVariableMapping>;
 
     #[must_use]
     /// Convenience method to set up a session user function that handles both
@@ -274,12 +362,17 @@ pub trait TranslationOptions {
     fn are_math_functions_available(&self) -> bool;
 
     #[must_use]
-    /// Declares host-registered functions the destination SQLite provides.
+    /// Declares functions the destination provides, whichever destination the
+    /// translation is heading for.
     ///
-    /// The translator refuses a function name it does not recognise, because
-    /// emitting one produces SQL that fails at run time with `no such
-    /// function`. A name declared here passes through instead. SQLite resolves
-    /// function names without regard to case, so the declaration does too.
+    /// Both directions refuse a function name they do not recognise, because
+    /// emitting one produces SQL that fails at run time: `no such function`
+    /// going to SQLite, `function name() does not exist` coming back to
+    /// PostgreSQL. A name declared here passes through instead, so declaring it
+    /// is a claim about wherever the emitted SQL is going to run, and a caller
+    /// who registered a name on the replica alone should not declare it while
+    /// reverse translating. Names are matched without regard to case, which is
+    /// how SQLite resolves them.
     ///
     /// # Example
     /// ```

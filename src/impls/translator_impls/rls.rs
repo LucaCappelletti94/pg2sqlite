@@ -40,12 +40,13 @@ use crate::{
     errors::Error,
     impls::{
         expr_helpers::{for_each_child_expr, map_expr_children},
-        function_helpers::{simple_function_expr, single_quoted_literal},
+        function_helpers::simple_function_expr,
         generated_sql::{parse_generated_sql, parse_single_generated_sql},
         object_name::{
             append_suffix, last_ident, prefixed_quoted_identifier, quote_identifier,
             sql_string_literal,
         },
+        session_variable,
         shared_helpers::{join_constraint_mut, join_constraint_ref},
         translator_impls::column::declared_default,
     },
@@ -534,15 +535,8 @@ fn push_pattern_unique(
 }
 
 fn collect_patterns_from_function(func: &Function, patterns: &mut Vec<SessionVariablePattern>) {
-    let func_name = function_name_lower(func);
-    if func_name == "current_user" {
-        push_pattern_unique(patterns, SessionVariablePattern::CurrentUser);
-    }
-    if let Some(setting_name) = extract_current_setting_name(func) {
-        push_pattern_unique(
-            patterns,
-            SessionVariablePattern::CurrentSetting { name: setting_name },
-        );
+    if let Some(pattern) = session_variable::pattern_of_function(func) {
+        push_pattern_unique(patterns, pattern);
     }
 
     if let FunctionArguments::List(arg_list) = &func.args {
@@ -728,32 +722,6 @@ fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVari
     }
 }
 
-fn function_name_lower(func: &Function) -> String {
-    func.name
-        .0
-        .last()
-        .and_then(|part| part.as_ident())
-        .map_or_else(String::new, |ident| ident.value.to_lowercase())
-}
-
-fn extract_current_setting_name(func: &Function) -> Option<String> {
-    if function_name_lower(func) != "current_setting" {
-        return None;
-    }
-    if let FunctionArguments::List(FunctionArgumentList { args, .. }) = &func.args {
-        return args.first().and_then(|arg| {
-            match arg {
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                | FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. } => {
-                    single_quoted_literal(expr).map(ToString::to_string)
-                }
-                _ => None,
-            }
-        });
-    }
-    None
-}
-
 /// Validates that all session variable patterns in an expression have mappings
 /// configured.
 ///
@@ -772,7 +740,7 @@ pub fn validate_session_variables(
     collect_session_variable_patterns(expr, &mut patterns);
 
     for pattern in patterns {
-        if options.find_session_variable_function(&pattern).is_none() {
+        if options.find_session_variable(&pattern).is_none() {
             return Err(Error::SessionVariableMappingNotFound {
                 pattern: match pattern {
                     SessionVariablePattern::CurrentUser => {
@@ -936,14 +904,11 @@ fn transform_expr_generic(
     let recurse = |e: &Expr| transform_expr_generic(e, options, table, schema, strategy);
 
     match expr {
-        // Handle current_setting('name')::type -> sqlite_func()
+        // A cast over the caller's identity is left standing here and resolved
+        // by the expression translator, which owns the mapping for every
+        // statement kind. Doing it twice was how the type check the mapping
+        // records came to apply to a query but not to a policy.
         Expr::Cast { expr: inner, data_type, format, kind } => {
-            if let Expr::Function(func) = inner.as_ref()
-                && let Some(transformed) = try_transform_session_function(func, options)
-            {
-                return transformed;
-            }
-
             Expr::Cast {
                 expr: Box::new(recurse(inner)),
                 data_type: data_type.clone(),
@@ -952,20 +917,7 @@ fn transform_expr_generic(
             }
         }
 
-        // Handle current_setting('name') without cast, and current_user as a function
         Expr::Function(func) => {
-            if let Some(transformed) = try_transform_session_function(func, options) {
-                return transformed;
-            }
-
-            let func_name = function_name_lower(func);
-            if func_name == "current_user"
-                && let Some(sqlite_func) =
-                    options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
-            {
-                return make_function_call(sqlite_func);
-            }
-
             let transformed_args = match &func.args {
                 FunctionArguments::List(arg_list) => {
                     FunctionArguments::List(FunctionArgumentList {
@@ -1087,16 +1039,12 @@ fn transform_expr_generic(
             })
         }
 
-        // Handle bare column identifiers
+        // Handle bare column identifiers. `current_user` is not one: the
+        // PostgreSQL dialect parses the keyword as a function, so an identifier
+        // spelled that way came from a quoted `"current_user"`, which names a
+        // column.
         Expr::Identifier(ident) => {
             let ident_lower = ident.value.to_lowercase();
-
-            if ident_lower == "current_user"
-                && let Some(sqlite_func) =
-                    options.find_session_variable_function(&SessionVariablePattern::CurrentUser)
-            {
-                return make_function_call(sqlite_func);
-            }
 
             if let Some(pfx) = strategy.prefix
                 && strategy.has_column(&ident_lower)
@@ -1537,21 +1485,6 @@ fn transform_outer_table_refs(
 
         other => map_expr_children(other, &recurse),
     }
-}
-
-fn try_transform_session_function(func: &Function, options: &Pg2SqliteOptions) -> Option<Expr> {
-    if let Some(setting_name) = extract_current_setting_name(func) {
-        let pattern = SessionVariablePattern::CurrentSetting { name: setting_name };
-        if let Some(sqlite_func) = options.find_session_variable_function(&pattern) {
-            return Some(make_function_call(sqlite_func));
-        }
-    }
-
-    None
-}
-
-fn make_function_call(func_name: &str) -> Expr {
-    simple_function_expr(func_name, vec![], None)
 }
 
 /// Computes the predicate the RLS view applies on the read path.
@@ -2472,17 +2405,17 @@ mod tests {
     };
 
     use super::{
-        ResolvedSchemaFacts, SubqueryTransformContext, extract_current_setting_name,
-        filter_policies, generate_delete_trigger_sql, generate_insert_trigger_sql,
-        generate_readonly_rls_statements, generate_rls_audit_table, generate_rls_statements,
-        generate_rls_validation_statements, generate_update_trigger_sql, rename_table_for_rls,
-        transform_expr, transform_join_operator_for_subquery, transform_query,
-        transform_table_factor_for_subquery, validate_session_variables, validate_table_policies,
+        ResolvedSchemaFacts, SubqueryTransformContext, filter_policies,
+        generate_delete_trigger_sql, generate_insert_trigger_sql, generate_readonly_rls_statements,
+        generate_rls_audit_table, generate_rls_statements, generate_rls_validation_statements,
+        generate_update_trigger_sql, rename_table_for_rls, transform_expr,
+        transform_join_operator_for_subquery, transform_query, transform_table_factor_for_subquery,
+        validate_session_variables, validate_table_policies,
     };
     use crate::{
-        impls::function_helpers::single_quoted_literal,
+        impls::{function_helpers::single_quoted_literal, session_variable},
         prelude::{Pg2SqliteOptions, TranslationOptions},
-        traits::translation_options::SessionVariableMapping,
+        traits::translation_options::{SessionVariableMapping, SessionVariablePattern},
     };
 
     fn parse_statements(sql: &str) -> Vec<Statement> {
@@ -2536,7 +2469,7 @@ mod tests {
             within_group: vec![],
             parameters: FunctionArguments::None,
         };
-        assert!(extract_current_setting_name(&not_setting).is_none());
+        assert!(session_variable::pattern_of_function(&not_setting).is_none());
 
         let invalid_arg = Function {
             name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("current_setting"))]),
@@ -2556,7 +2489,7 @@ mod tests {
             within_group: vec![],
             parameters: FunctionArguments::None,
         };
-        assert!(extract_current_setting_name(&invalid_arg).is_none());
+        assert!(session_variable::pattern_of_function(&invalid_arg).is_none());
 
         let named_expr = Function {
             args: FunctionArguments::List(FunctionArgumentList {
@@ -2572,7 +2505,10 @@ mod tests {
             }),
             ..invalid_arg
         };
-        assert_eq!(extract_current_setting_name(&named_expr).as_deref(), Some("app.user_id"));
+        assert_eq!(
+            session_variable::pattern_of_function(&named_expr),
+            Some(SessionVariablePattern::CurrentSetting { name: "app.user_id".to_string() })
+        );
 
         let current_setting_no_args = Function {
             name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("current_setting"))]),
@@ -2584,11 +2520,15 @@ mod tests {
             within_group: vec![],
             parameters: FunctionArguments::None,
         };
-        assert!(extract_current_setting_name(&current_setting_no_args).is_none());
+        assert!(session_variable::pattern_of_function(&current_setting_no_args).is_none());
     }
 
+    /// The transformer owns column references and table renames. The caller's
+    /// identity is not its business any more: the expression translator
+    /// substitutes it for every statement kind, so a policy and a query cannot
+    /// disagree about it.
     #[test]
-    fn transform_expr_covers_current_user_cast_and_rename_paths() {
+    fn transform_expr_covers_cast_and_rename_paths() {
         let schema = schema_from_sql(
             "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id INTEGER, title TEXT);",
         );
@@ -2599,8 +2539,8 @@ mod tests {
         let lowercased_columns = resolved_sets(table, &schema);
         let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
-        let transformed_current_user = transform_expr(
-            &Expr::Identifier(Ident::new("current_user")),
+        let keyword = transform_expr(
+            &parse_expr("current_user"),
             &options,
             table,
             &schema,
@@ -2608,7 +2548,25 @@ mod tests {
             None,
             facts,
         );
-        assert_eq!(transformed_current_user.to_string(), "sqlite_user()");
+        assert_eq!(
+            keyword.to_string(),
+            "current_user",
+            "the keyword is left for the translator, which is where the mapping now lives"
+        );
+
+        // PostgreSQL reads a quoted `"current_user"` as a column name, so the
+        // transformer must not mistake it for the keyword. It is not a column of
+        // this table, so it takes no prefix either.
+        let quoted = transform_expr(
+            &parse_expr("\"current_user\""),
+            &options,
+            table,
+            &schema,
+            Some("NEW"),
+            None,
+            facts,
+        );
+        assert_eq!(quoted.to_string(), "\"current_user\"");
 
         let transformed_cast = transform_expr(
             &parse_expr("owner_id::INT"),

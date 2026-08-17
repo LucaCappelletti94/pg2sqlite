@@ -4,17 +4,28 @@
 //! Covers:
 //! - Default values
 //! - Chained builder with all `with_*` methods
-//! - `find_session_variable_function` -> finds correct mapping
-//! - `find_session_variable_function` -> returns None for unknown pattern
+//! - `find_session_variable` -> finds correct mapping
+//! - `find_session_variable` -> returns None for unknown pattern
 //! - `with_session_user` convenience -> creates both current_user and
 //!   current_setting mappings
+//! - the type a mapping records, and what an unreadable spelling does
 
 use pg2sqlite::{
+    errors::Error,
     prelude::{
         Pg2SqliteOptions, SessionVariableMapping, SessionVariablePattern, UuidRepresentation,
     },
     traits::TranslationOptions,
 };
+use sqlparser::ast::{DataType, ExactNumberInfo};
+
+/// The paired SQLite function, which is what most of these tests assert.
+fn paired_function<'a>(
+    options: &'a Pg2SqliteOptions,
+    pattern: &SessionVariablePattern,
+) -> Option<&'a str> {
+    options.find_session_variable(pattern).map(|mapping| mapping.sqlite_function.as_str())
+}
 
 #[test]
 fn default_values() {
@@ -61,41 +72,43 @@ fn uuid_text_representation() {
 }
 
 #[test]
-fn find_session_variable_function_current_user() {
+fn find_session_variable_current_user() {
     let options = Pg2SqliteOptions::default()
         .with_session_variable(SessionVariableMapping::current_user("get_user"));
 
-    let result = options.find_session_variable_function(&SessionVariablePattern::CurrentUser);
+    let result = paired_function(&options, &SessionVariablePattern::CurrentUser);
     assert_eq!(result, Some("get_user"));
 }
 
 #[test]
-fn find_session_variable_function_current_setting() {
+fn find_session_variable_current_setting() {
     let options = Pg2SqliteOptions::default().with_session_variable(
         SessionVariableMapping::current_setting("app.user_id", "get_app_user"),
     );
 
-    let result = options.find_session_variable_function(&SessionVariablePattern::CurrentSetting {
-        name: "app.user_id".to_string(),
-    });
+    let result = paired_function(
+        &options,
+        &SessionVariablePattern::CurrentSetting { name: "app.user_id".to_string() },
+    );
     assert_eq!(result, Some("get_app_user"));
 }
 
 #[test]
-fn find_session_variable_function_returns_none_for_unknown() {
+fn find_session_variable_returns_none_for_unknown() {
     let options = Pg2SqliteOptions::default()
         .with_session_variable(SessionVariableMapping::current_user("get_user"));
 
-    let result = options.find_session_variable_function(&SessionVariablePattern::CurrentSetting {
-        name: "app.unknown".to_string(),
-    });
+    let result = paired_function(
+        &options,
+        &SessionVariablePattern::CurrentSetting { name: "app.unknown".to_string() },
+    );
     assert_eq!(result, None);
 }
 
 #[test]
-fn find_session_variable_function_empty_options() {
+fn find_session_variable_empty_options() {
     let options = Pg2SqliteOptions::default();
-    let result = options.find_session_variable_function(&SessionVariablePattern::CurrentUser);
+    let result = paired_function(&options, &SessionVariablePattern::CurrentUser);
     assert_eq!(result, None);
 }
 
@@ -107,15 +120,14 @@ fn with_session_user_creates_both_mappings() {
     assert_eq!(variables.len(), 2, "with_session_user should create 2 mappings");
 
     // Should have a CurrentUser mapping
-    let current_user_func =
-        options.find_session_variable_function(&SessionVariablePattern::CurrentUser);
+    let current_user_func = paired_function(&options, &SessionVariablePattern::CurrentUser);
     assert_eq!(current_user_func, Some("current_app_user"));
 
     // Should have a CurrentSetting mapping
-    let current_setting_func =
-        options.find_session_variable_function(&SessionVariablePattern::CurrentSetting {
-            name: "app.user_id".to_string(),
-        });
+    let current_setting_func = paired_function(
+        &options,
+        &SessionVariablePattern::CurrentSetting { name: "app.user_id".to_string() },
+    );
     assert_eq!(current_setting_func, Some("current_app_user"));
 }
 
@@ -168,20 +180,19 @@ fn multiple_session_variables() {
 
     assert_eq!(options.get_session_variables().len(), 3);
 
+    assert_eq!(paired_function(&options, &SessionVariablePattern::CurrentUser), Some("get_user"));
     assert_eq!(
-        options.find_session_variable_function(&SessionVariablePattern::CurrentUser),
-        Some("get_user")
-    );
-    assert_eq!(
-        options.find_session_variable_function(&SessionVariablePattern::CurrentSetting {
-            name: "app.tenant_id".to_string()
-        }),
+        paired_function(
+            &options,
+            &SessionVariablePattern::CurrentSetting { name: "app.tenant_id".to_string() }
+        ),
         Some("get_tenant")
     );
     assert_eq!(
-        options.find_session_variable_function(&SessionVariablePattern::CurrentSetting {
-            name: "app.department".to_string()
-        }),
+        paired_function(
+            &options,
+            &SessionVariablePattern::CurrentSetting { name: "app.department".to_string() }
+        ),
         Some("get_department")
     );
 }
@@ -193,8 +204,60 @@ fn duplicate_session_variable_mapping_last_wins() {
         .with_session_variable(SessionVariableMapping::current_user("new_user_func"));
 
     assert_eq!(
-        options.find_session_variable_function(&SessionVariablePattern::CurrentUser),
+        paired_function(&options, &SessionVariablePattern::CurrentUser),
         Some("new_user_func"),
         "latest mapping should override previous mapping for the same pattern"
+    );
+}
+
+#[test]
+fn a_mapping_records_no_type_by_default() {
+    let mapping = SessionVariableMapping::current_setting("app.user_id", "app_user_id");
+
+    assert!(mapping.pg_type.is_none());
+    assert_eq!(
+        mapping.pg_type_node().expect("no recorded type is not an error"),
+        None,
+        "a mapping without a recorded type asks for no cast"
+    );
+}
+
+#[test]
+fn a_recorded_type_reads_back_as_a_node() {
+    let uuid =
+        SessionVariableMapping::current_setting("app.user_id", "app_user_id").with_pg_type("uuid");
+    assert_eq!(uuid.pg_type_node().expect("uuid parses"), Some(DataType::Uuid));
+
+    let scaled = SessionVariableMapping::current_user("app_user").with_pg_type("NUMERIC(10, 2)");
+    assert_eq!(
+        scaled.pg_type_node().expect("a parameterised type parses"),
+        Some(DataType::Numeric(ExactNumberInfo::PrecisionAndScale(10, 2))),
+        "the precision and scale survive, so the cast the reverse writes is the recorded one"
+    );
+}
+
+#[test]
+fn a_recorded_type_that_is_not_one_refuses() {
+    let mapping =
+        SessionVariableMapping::current_setting("app.user_id", "app_user_id").with_pg_type("123");
+
+    let error = mapping.pg_type_node().expect_err("a number is not a type");
+    assert!(
+        matches!(&error, Error::SessionVariableTypeUnreadable { pattern, pg_type, source }
+            if pattern == "current_setting('app.user_id')" && pg_type == "123" && source.is_some()),
+        "the refusal names the pattern and the spelling, got: {error}"
+    );
+}
+
+#[test]
+fn a_recorded_type_with_input_left_over_refuses() {
+    let mapping = SessionVariableMapping::current_setting("app.user_id", "app_user_id")
+        .with_pg_type("uuid oops");
+
+    let error = mapping.pg_type_node().expect_err("a type followed by junk is not a type");
+    assert!(
+        matches!(&error, Error::SessionVariableTypeUnreadable { pg_type, source, .. }
+            if pg_type == "uuid oops" && source.is_none()),
+        "the leftover input is refused rather than truncated to `uuid`, got: {error}"
     );
 }

@@ -98,6 +98,40 @@ pub enum Error {
         /// The PostgreSQL pattern that was encountered.
         pattern: String,
     },
+    /// Error when the type recorded on a session variable mapping cannot be
+    /// read as a type.
+    #[error(
+        "The session variable mapping for '{pattern}' records the PostgreSQL type \
+         '{pg_type}', which does not parse as one. Record it as PostgreSQL spells it, such as \
+         `uuid` or `numeric(10,2)`."
+    )]
+    SessionVariableTypeUnreadable {
+        /// The PostgreSQL pattern the mapping matches.
+        pattern: String,
+        /// The type spelling the mapping carries.
+        pg_type: String,
+        /// The parser's own error, when the spelling failed to parse at all. A
+        /// spelling that parses and then leaves input behind, such as `uuid
+        /// oops`, has no underlying error, so it is `None`.
+        #[source]
+        source: Option<ParserError>,
+    },
+    /// Error when a statement casts a session variable to a type other than the
+    /// one its mapping records.
+    #[error(
+        "The session variable mapping for '{pattern}' records the PostgreSQL type \
+         '{recorded}', and this statement casts the setting to '{written}'. The cast is dropped \
+         going to SQLite and written again from the recorded type coming back, so the two have \
+         to agree: correct whichever is stale."
+    )]
+    SessionVariableTypeDisagrees {
+        /// The PostgreSQL pattern the mapping matches.
+        pattern: String,
+        /// The type the mapping records.
+        recorded: String,
+        /// The type the statement casts to.
+        written: String,
+    },
     /// Error when attempting to access an RLS backing table directly.
     #[error(
         "Direct access to RLS backing table '{table_name}' is not allowed. \

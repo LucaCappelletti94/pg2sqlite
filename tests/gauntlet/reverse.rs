@@ -14,7 +14,10 @@
 
 #![allow(clippy::too_many_lines)]
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::{
+    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
+    traits::TranslationOptions,
+};
 use postgres_harness::{apply, fresh_database};
 use sql_traits::structs::ParserDB;
 
@@ -96,6 +99,11 @@ CREATE TABLE readings (
     sensor TEXT    NOT NULL,
     ts_val INTEGER NOT NULL,
     value  INTEGER NOT NULL
+);
+CREATE TABLE callers (
+    id         INTEGER PRIMARY KEY,
+    owner      TEXT,
+    owner_uuid UUID
 );
 ";
 
@@ -516,6 +524,72 @@ fn reverse_output_runs_in_postgres() {
         "reverse gauntlet: {total} cases, {accepted} accepted, {refusal_count} known refusals, {} failures",
         failures.len()
     );
+
+    assert!(failures.is_empty(), "{} case(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
+}
+
+/// What a session variable mapping reverses into is SQL the server takes.
+///
+/// Each case carries its own options, since the pairing is what the case is
+/// about, so they cannot ride along in `reverse_output_runs_in_postgres`.
+#[test]
+fn a_reversed_session_variable_runs_in_postgres() {
+    let schema = build_schema();
+    let mut connection = fresh_database();
+    apply(&mut connection, SCHEMA_DDL).expect("schema applied to fresh database");
+
+    let untyped = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting("app.user_id", "app_user_id"),
+    );
+    let typed = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting("app.user_id", "app_user_id").with_pg_type("uuid"),
+    );
+    let role = Pg2SqliteOptions::default()
+        .with_session_variable(SessionVariableMapping::current_user("sqlite_user"));
+
+    let cases: [(&str, &Pg2SqliteOptions, &str); 4] = [
+        // The setting answers text, so a text column compares without a cast.
+        ("SELECT id FROM callers WHERE owner = app_user_id()", &untyped, "text column"),
+        // A uuid column does not: `uuid = text` is an error, which is why the
+        // mapping records the type and the cast is written back.
+        ("SELECT id FROM callers WHERE owner_uuid = app_user_id()", &typed, "uuid column"),
+        // The role keyword, which PostgreSQL refuses with parentheses.
+        ("SELECT id FROM callers WHERE owner = sqlite_user()", &role, "current_user"),
+        // Inside a subquery, which is the shape a membership filter takes.
+        (
+            "SELECT id FROM callers WHERE id IN (SELECT id FROM callers WHERE owner = \
+             app_user_id())",
+            &untyped,
+            "subquery",
+        ),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (index, (sqlite_input, options, description)) in cases.iter().enumerate() {
+        let postgres = match Pg2Sqlite::default().reverse_sql(sqlite_input, &schema, options) {
+            Ok(statements) => {
+                statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+            }
+            Err(error) => {
+                failures.push(format!("[{description}] the translator refused: {error}"));
+                continue;
+            }
+        };
+
+        let name = format!("session_{index}");
+        match apply(&mut connection, &format!("PREPARE {name} AS {postgres}")) {
+            Ok(()) => {
+                apply(&mut connection, &format!("DEALLOCATE {name}"))
+                    .expect("DEALLOCATE should not fail");
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "[{description}] PostgreSQL refused {sqlite_input:?}\n  translated: \
+                     {postgres}\n  error: {error}"
+                ));
+            }
+        }
+    }
 
     assert!(failures.is_empty(), "{} case(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
 }

@@ -33,6 +33,7 @@ use crate::{
         },
         interval::interval_date_modifiers,
         query_builder::{from_relation, plain_table_factor, single_expr_query},
+        session_variable,
         shared_helpers::{
             declared_numeric_precision, every_declared_type_matches, extract_columns_from_function,
             function_argument_exprs, is_integral_expression, numeric_scale, rescale_minor_units,
@@ -1775,6 +1776,15 @@ impl Translator for Expr {
             }
             Expr::Cast { expr, data_type, format, .. } => {
                 rebuild(|| {
+                    // A cast over the caller's identity, which the replica's
+                    // function answers without one. Checked before the vector
+                    // and numeric paths, since the pattern decides the shape
+                    // rather than the type written over it.
+                    if let Some(paired) =
+                        session_variable::translate_cast(expr, data_type, options)?
+                    {
+                        return Ok(paired);
+                    }
                     if crate::impls::translator_impls::vector::is_vector_data_type(data_type) {
                         return translate_vector_cast(expr, data_type, schema, options);
                     }
