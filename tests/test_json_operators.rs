@@ -5,22 +5,27 @@
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
+/// Both path operators used to be refused outright. They now become arrow
+/// chains; `tests/test_json_path_operators.rs` holds the value assertions and
+/// the sharp edges of the path literal.
 #[test]
-fn test_hash_arrow_returns_error() {
-    let result = Pg2Sqlite::default()
+fn test_hash_arrow_translates_to_an_arrow_chain() {
+    let translated = Pg2Sqlite::default()
         .sql("CREATE TABLE t (data TEXT); SELECT data #> '{a,b}' FROM t;")
-        .and_then(|t| t.translate(&Pg2SqliteOptions::default()));
-    assert!(result.is_err(), "#> operator must return Err");
-    let msg = format!("{}", result.unwrap_err());
-    assert!(msg.contains("#>"), "Error should mention the operator, got: {msg}");
+        .and_then(|t| t.translate_to_sql(&Pg2SqliteOptions::default()))
+        .expect("#> lowers onto the arrows");
+    let query = translated.last().expect("a statement");
+    assert_eq!(query, "SELECT data -> 'a' -> 'b' FROM t");
 }
 
 #[test]
-fn test_hash_arrow_arrow_returns_error() {
-    let result = Pg2Sqlite::default()
+fn test_hash_arrow_arrow_takes_text_on_the_last_hop() {
+    let translated = Pg2Sqlite::default()
         .sql("CREATE TABLE t (data TEXT); SELECT data #>> '{a,b}' FROM t;")
-        .and_then(|t| t.translate(&Pg2SqliteOptions::default()));
-    assert!(result.is_err(), "#>> operator must return Err");
+        .and_then(|t| t.translate_to_sql(&Pg2SqliteOptions::default()))
+        .expect("#>> lowers onto the arrows");
+    let query = translated.last().expect("a statement");
+    assert_eq!(query, "SELECT data -> 'a' ->> 'b' FROM t");
 }
 
 #[test]

@@ -293,11 +293,16 @@ fn array_positions_collects_every_match() {
 
 /// `array_remove(a, NULL)` drops NULL elements in PostgreSQL, which a plain
 /// `<>` filter would not, so the emitted predicate has to be null-safe.
+///
+/// The shape is `IS DISTINCT FROM` rather than the `NOT (value IS NULL)` this
+/// used to assert, because the helper that builds it stopped emitting the bare
+/// `IS` that `sqlparser` cannot read back. SQLite plans the two identically,
+/// measured: both answer `SEARCH t USING COVERING INDEX (a>?)`.
 #[test]
 fn array_remove_is_null_safe() {
     let out =
         translate_json("CREATE TABLE t (tags TEXT[]);\nSELECT array_remove(tags, NULL) FROM t;");
-    assert!(out.contains("NOT (value IS NULL)"), "got: {out}");
+    assert!(out.contains("value IS DISTINCT FROM NULL"), "got: {out}");
 
     assert_eq!(
         run_translated(

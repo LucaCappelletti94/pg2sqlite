@@ -33,7 +33,7 @@ use crate::{
         expr_helpers::case_when,
         function_helpers::{
             extract_exactly, integer_literal, integer_literal_value, number_literal,
-            simple_function_expr, string_literal,
+            simple_function_expr, single_quoted_literal, string_literal,
         },
         object_name::last_ident,
         session_variable,
@@ -42,7 +42,7 @@ use crate::{
             function_argument_exprs, numeric_scale, referenced_column_name, rescale_minor_units,
             translate_function_arguments, unanimous_declared,
         },
-        sqlite_functions::is_sqlite_builtin,
+        sqlite_functions::{is_gated_math, is_sqlite_builtin},
         temporal_arithmetic::{epoch_of_temporal_difference, subsecond_timestamp_from_epoch},
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -82,6 +82,15 @@ enum FunctionTranslation {
     ToIntegerDiv,
     /// Transform trunc(x) to CAST(x AS INTEGER), trunc(x, n) to round(x, n)
     ToTrunc,
+    /// Transform `encode(x, 'hex')` to `lower(hex(x))`.
+    ///
+    /// The fold is not decoration: PostgreSQL answers lowercase and SQLite's
+    /// `hex` answers uppercase, both measured, so the bare name would change
+    /// the result.
+    ToLowerHex,
+    /// Transform `decode(x, 'hex')` to `unhex(x)`, which needs no fold since
+    /// both engines read either case.
+    ToUnhex,
     /// Transform make_date/make_time/make_timestamp to a printf over the parts.
     /// `format` covers every argument except a trailing fractional-seconds
     /// one, which `fractional_seconds` marks and which is rendered separately.
@@ -679,12 +688,7 @@ fn translate_function(
              translates for a self-contained document, or write `FROM t, json_each(t.col) AS e` \
              for a column argument."
         )),
-        // encode/decode: PG bytea encoding functions
-        "encode" | "decode" => FunctionTranslation::Unsupported(
-            "encode/decode are PostgreSQL bytea encoding functions with no direct \
-             SQLite equivalent. Consider using hex()/unhex() for hexadecimal conversion."
-                .to_string(),
-        ),
+        "encode" | "decode" => classify_bytea_encoding(&original_name, args),
         // to_number: PG pattern-based number parsing
         "to_number" => FunctionTranslation::Unsupported(
             "to_number() with PostgreSQL format patterns is not supported in SQLite. \
@@ -692,8 +696,12 @@ fn translate_function(
                 .to_string(),
         ),
 
-        // String functions with no SQLite equivalent
-        "regexp_split_to_array" | "regexp_split_to_table" | "string_to_array" => {
+        // Names with no SQLite equivalent at all, string and numeric alike. The
+        // gated maths names are not here: theirs is a fact about the build,
+        // decided by the option below. Nor is `sign`, which SQLite answers with
+        // no flag at all, so the inventory passes it through.
+        "regexp_split_to_array" | "regexp_split_to_table" | "string_to_array" | "factorial"
+        | "gcd" | "lcm" | "setseed" | "width_bucket" => {
             FunctionTranslation::Unsupported(format!(
                 "{original_name}() is not available in standard SQLite."
             ))
@@ -709,7 +717,11 @@ fn translate_function(
         // option is declared, scalars pass through and power/cbrt get faithful
         // translations. When it is not declared, all are rejected with a clear
         // message pointing to the opt-in.
-        "log" | "ln" | "exp" | "sqrt" | "log10" | "pow" | "power" | "cbrt" => {
+        //
+        // `cbrt` is here for its translation rather than its name: SQLite has no
+        // cube root even with the build flag, so it is rewritten over `pow`.
+        "log" | "ln" | "exp" | "sqrt" | "log10" | "pow" | "power" | "cbrt" | "pi" | "degrees"
+        | "radians" => {
             if options.are_math_functions_available() {
                 match original_name.as_str() {
                     "power" => FunctionTranslation::Rename("pow".to_string()),
@@ -717,17 +729,9 @@ fn translate_function(
                     _ => FunctionTranslation::PassThrough,
                 }
             } else {
-                FunctionTranslation::Unsupported(format!(
-                    "{original_name}() is not available in standard SQLite. \
-                     Call with_math_functions_available() on Pg2SqliteOptions when \
-                     your SQLite build includes SQLITE_ENABLE_MATH_FUNCTIONS."
-                ))
+                FunctionTranslation::Unsupported(math_not_declared(&original_name))
             }
         }
-        "sign" | "factorial" | "gcd" | "lcm" | "pi" | "degrees" | "radians" | "setseed"
-        | "width_bucket" => FunctionTranslation::Unsupported(format!(
-            "{original_name}() is not available in standard SQLite."
-        )),
 
         // Date/time and JSON functions with no equivalent
         "make_timestamptz" | "make_interval" | "isfinite" | "json_strip_nulls"
@@ -864,13 +868,68 @@ pub(crate) fn uuid_v7_not_declared() -> String {
         .to_string()
 }
 
+/// The refusal a gated maths name carries when the caller has not declared the
+/// build, shared by the arm that translates some of them and the catch-all that
+/// passes the rest through.
+pub(crate) fn math_not_declared(name: &str) -> String {
+    format!(
+        "{name}() is not available in standard SQLite. Call \
+         with_math_functions_available() on Pg2SqliteOptions when your SQLite build includes \
+         SQLITE_ENABLE_MATH_FUNCTIONS."
+    )
+}
+
+/// Classifies `encode(x, encoding)` and `decode(x, encoding)`.
+///
+/// Only hexadecimal crosses. SQLite has `hex` and `unhex` and no name at all
+/// for base64 or PostgreSQL's `escape`, so those keep a refusal that names the
+/// encoding it could not carry.
+///
+/// The encoding must be a literal. PostgreSQL takes a computed one, measured,
+/// and reading hexadecimal into an expression this crate cannot evaluate would
+/// be a guess that is wrong whenever the value is anything else. The spelling
+/// is compared without regard to case because PostgreSQL accepts `'HEX'`, also
+/// measured.
+fn classify_bytea_encoding(name: &str, args: &FunctionArguments) -> FunctionTranslation {
+    let exprs = function_argument_exprs(args);
+    let [_, encoding] = exprs.as_slice() else {
+        return FunctionTranslation::Unsupported(format!(
+            "{name}() takes a value and an encoding, and this call has {} argument(s).",
+            exprs.len()
+        ));
+    };
+
+    let Some(encoding) = single_quoted_literal(encoding) else {
+        return FunctionTranslation::Unsupported(format!(
+            "{name}() needs its encoding as a literal. PostgreSQL accepts a computed one, and \
+             only hexadecimal has a SQLite counterpart, so reading this as hex would answer the \
+             wrong thing for any other value."
+        ));
+    };
+
+    if !encoding.eq_ignore_ascii_case("hex") {
+        return FunctionTranslation::Unsupported(format!(
+            "{name}(x, '{encoding}') has no SQLite counterpart: SQLite provides hex and unhex, \
+             and nothing for {encoding}."
+        ));
+    }
+
+    if name == "encode" { FunctionTranslation::ToLowerHex } else { FunctionTranslation::ToUnhex }
+}
+
 /// Classifies a name no earlier arm recognised.
 ///
 /// The default is a hard error. Emitting an unrecognised name produces SQL
 /// that fails at run time with `no such function`, long after translation
-/// reported success, so the three ways a name earns a passthrough are all
-/// evidence the destination has it: SQLite provides it, the SQLiteGIS catalog
+/// reported success, so the four ways a name earns a passthrough are all
+/// evidence the destination has it: SQLite provides it unconditionally, the
+/// caller declared the maths build and the name is in it, the SQLiteGIS catalog
 /// lists it and the caller enabled SQLiteGIS, or the caller declared it.
+///
+/// The maths clause is what makes the option mean what it says. Without it only
+/// the gated names with a translation arm of their own got through, so `sqrt`
+/// passed while `acos` was refused with the same message a name nobody had ever
+/// taught the crate receives.
 ///
 /// When SQLiteGIS is on, an `ST_`-shaped name is additionally checked for
 /// arity, since the catalog records which arities the extension implements.
@@ -880,10 +939,18 @@ fn classify_unrecognised_function(
     options: &Pg2SqliteOptions,
 ) -> FunctionTranslation {
     if is_sqlite_builtin(name)
+        || (options.are_math_functions_available() && is_gated_math(name))
         || options.declares_user_defined_function(name)
         || declares_function_by_option(name, options)
     {
         return FunctionTranslation::PassThrough;
+    }
+
+    // Reached only with the option off, since the clause above returns when it
+    // is on. The advice has to name the build rather than send the caller off to
+    // register a function SQLite would already have.
+    if is_gated_math(name) {
+        return FunctionTranslation::Unsupported(math_not_declared(name));
     }
 
     if options.is_sqlitegis_enabled() {
@@ -2121,6 +2188,16 @@ impl Translator for Function {
             FunctionTranslation::ToCbrt => {
                 let exprs = extract_exactly(&func.args, 1, "cbrt")?;
                 Ok(cube_root_closed_form(exprs[0].translate(schema, options)?))
+            }
+            FunctionTranslation::ToLowerHex => {
+                let exprs = extract_exactly(&func.args, 2, "encode")?;
+                let hex =
+                    simple_function_expr("hex", vec![exprs[0].translate(schema, options)?], None);
+                Ok(simple_function_expr("lower", vec![hex], None))
+            }
+            FunctionTranslation::ToUnhex => {
+                let exprs = extract_exactly(&func.args, 2, "decode")?;
+                Ok(simple_function_expr("unhex", vec![exprs[0].translate(schema, options)?], None))
             }
             FunctionTranslation::Array(kind) => {
                 array::translate_array_function(kind, &func.args, schema, options)

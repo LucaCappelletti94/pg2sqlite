@@ -1295,16 +1295,17 @@ pub(crate) fn case_when(condition: Expr, then_expr: Expr, else_expr: Option<Expr
     }
 }
 
-/// `<left> IS <right>`, SQLite's null-safe equality. PostgreSQL spells the
-/// same thing `IS NOT DISTINCT FROM`, which SQLite does not accept, and
-/// `BinaryOperator::Custom` is the only way to render the bare `IS`.
+/// `<left> IS NOT DISTINCT FROM <right>`, null-safe equality.
+///
+/// SQLite has taken this spelling since 3.39 and the floor is 3.46, so the bare
+/// `IS` this used to render through `BinaryOperator::Custom` buys nothing and
+/// costs the round trip: `a IS b` is valid SQLite that `sqlparser` refuses,
+/// taking only `IS [NOT] NULL|TRUE|FALSE|DISTINCT FROM` after `IS`, so the
+/// emitted script could not be read back by the reverse direction, which parses
+/// SQLite with that same dialect.
 #[must_use]
 pub(crate) fn null_safe_eq(left: Expr, right: Expr) -> Expr {
-    Expr::BinaryOp {
-        left: Box::new(left),
-        op: sqlparser::ast::BinaryOperator::Custom("IS".to_string()),
-        right: Box::new(right),
-    }
+    Expr::IsNotDistinctFrom(Box::new(left), Box::new(right))
 }
 
 /// `NOT (<expr>)`, parenthesized so the negation binds the whole predicate
@@ -1317,10 +1318,11 @@ pub(crate) fn not_predicate(expr: Expr) -> Expr {
     }
 }
 
-/// `NOT (<left> IS <right>)`, SQLite's null-safe inequality.
+/// `<left> IS DISTINCT FROM <right>`, null-safe inequality, native since the
+/// same version as its complement above.
 #[must_use]
 pub(crate) fn null_safe_neq(left: Expr, right: Expr) -> Expr {
-    not_predicate(null_safe_eq(left, right))
+    Expr::IsDistinctFrom(Box::new(left), Box::new(right))
 }
 
 #[cfg(all(test, feature = "std"))]

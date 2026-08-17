@@ -30,17 +30,16 @@ use testcontainers_modules::postgres::Postgres;
 
 /// Pinned rather than floating, so a new release cannot silently change what a
 /// test measured.
-pub const IMAGE_TAG: &str = "17-alpine";
+pub const IMAGE_TAG: &str = "18-alpine";
 
 /// What the fixtures assume a deployment has already provided.
 ///
-/// `uuidv7` arrived in PostgreSQL 18 and the fixtures predate it, the roles are
-/// named by `TO <role>` clauses in policies, and `current_app_user` is the
-/// function this project's own documentation tells a deployment to map
-/// `current_setting('app.user_id')` onto.
+/// The roles are named by `TO <role>` clauses in policies, and
+/// `current_app_user` is the function this project's own documentation tells a
+/// deployment to map `current_setting('app.user_id')` onto. `uuidv7` and
+/// `uuidv4` are not here: they are `pg_catalog` functions from PostgreSQL 18,
+/// which is the pin, so the server provides them.
 pub const PRELUDE: &str = "
-CREATE FUNCTION uuidv7() RETURNS uuid LANGUAGE sql VOLATILE AS $$ SELECT gen_random_uuid() $$;
-CREATE FUNCTION uuidv4() RETURNS uuid LANGUAGE sql VOLATILE AS $$ SELECT gen_random_uuid() $$;
 CREATE FUNCTION current_app_user() RETURNS uuid LANGUAGE sql STABLE
     AS $$ SELECT current_setting('app.user_id', true)::uuid $$;
 CREATE FUNCTION current_app_username() RETURNS text LANGUAGE sql STABLE
@@ -219,7 +218,7 @@ pub struct Fixture {
     pub skip: Option<&'static str>,
 }
 
-/// Every fixture in the tree. Measured against `postgres:17`, so the one
+/// Every fixture in the tree. Measured against `postgres:18`, so the one
 /// exclusion is a fact rather than a precaution.
 pub const FIXTURES: &[Fixture] = &[
     Fixture { name: "data_types_extended.sql", requires: &[], skip: None },

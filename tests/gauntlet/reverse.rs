@@ -19,7 +19,7 @@ use diesel::{
     sql_types::{Array, Text},
 };
 use pg2sqlite::{
-    impls::sqlite_functions::shared_with_postgres,
+    impls::sqlite_functions::{postgres_only, shared_with_postgres, sqlite_has},
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
     traits::TranslationOptions,
 };
@@ -540,43 +540,55 @@ fn reverse_output_runs_in_postgres() {
     assert!(failures.is_empty(), "{} case(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
 }
 
-/// A name the server does not have, as the catalogue answers it.
+/// One function name, as the catalogue answers it.
 #[derive(QueryableByName, Debug)]
-struct AbsentName {
-    /// The name asked about.
+struct CatalogueName {
+    /// The name the query selected.
     #[diesel(sql_type = Text)]
     name: String,
 }
 
-/// The reverse direction emits every name in this crate's shared inventory
-/// unchanged, so the server is asked whether it has them.
+/// The reverse direction emits every name in this crate's two PostgreSQL
+/// inventories unchanged, so the server is asked whether it has them.
 ///
 /// This is the half of the reverse catch-all that does not need judgement:
 /// existence is a fact the catalogue answers. Whether the two engines agree on
 /// what a name means is decided in `sqlite_functions.rs`, name by name, and is
 /// not what this checks.
 #[test]
-fn every_shared_name_exists_in_postgres() {
+fn every_name_the_reverse_direction_emits_exists_in_postgres() {
     let mut connection = fresh_database();
 
-    // The five the catalogue cannot answer for, because PostgreSQL parses them
-    // as expressions rather than as functions. Evaluating them is the check.
-    const EXPRESSIONS: [&str; 5] =
-        ["coalesce", "nullif", "current_date", "current_time", "current_timestamp"];
+    // The ten the catalogue cannot answer for, because PostgreSQL parses them
+    // as expressions or constructors rather than as functions. Evaluating them
+    // is the check.
+    const EXPRESSIONS: [&str; 10] = [
+        "coalesce",
+        "nullif",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "least",
+        "greatest",
+        "localtime",
+        "localtimestamp",
+        "row",
+    ];
     apply(
         &mut connection,
         "SELECT coalesce(NULL::int, 1), nullif(1, 1), current_date, current_time, \
-         current_timestamp",
+         current_timestamp, least(1, 2), greatest(1, 2), localtime, localtimestamp, row(1, 2)",
     )
     .expect("the expression-shaped names evaluate");
 
     let asked: Vec<String> = shared_with_postgres()
         .iter()
+        .chain(postgres_only())
         .filter(|name| !EXPRESSIONS.contains(name))
         .map(|name| (*name).to_string())
         .collect();
 
-    let absent: Vec<AbsentName> = sql_query(
+    let absent: Vec<CatalogueName> = sql_query(
         "SELECT nm AS name FROM unnest($1::text[]) AS nm \
          WHERE NOT EXISTS ( \
              SELECT 1 FROM pg_proc p \
@@ -592,6 +604,158 @@ fn every_shared_name_exists_in_postgres() {
         "the reverse direction would emit {} name(s) PostgreSQL does not have: {:?}",
         absent.len(),
         absent.iter().map(|row| row.name.as_str()).collect::<Vec<_>>()
+    );
+}
+
+/// The check whose absence let the omission happen: the corpus comes from the
+/// server, so a name this crate never heard of is still asked about.
+///
+/// Existence tests the inventories for wrong entries. It cannot test them for
+/// missing ones, which is the failure that shipped: a hand-kept list is
+/// complete only against a list of names somebody already thought of. Walking
+/// the catalogue instead makes the omission the thing that fails. It caught
+/// `jsonb_object_agg` on the first run, a name this crate's own
+/// `AGGREGATE_NAMES` carries, so the first bound drawn around the fix had the
+/// same hole as the bug.
+///
+/// Aggregates and window functions are the whole of `prokind` `a` and `w`,
+/// which makes them a corpus with no judgement in it. The scalar functions need
+/// a filter, which `every_scalar_the_forward_direction_knows_reverses` supplies
+/// below.
+#[test]
+fn every_aggregate_the_server_has_reverses() {
+    let mut connection = fresh_database();
+
+    // `prokind` and `regnamespace` are catalogue columns with no diesel schema,
+    // which is why this one statement is raw.
+    let aggregates: Vec<CatalogueName> = sql_query(
+        "SELECT DISTINCT proname AS name FROM pg_proc \
+         WHERE pronamespace = 'pg_catalog'::regnamespace AND prokind IN ('a', 'w') \
+         ORDER BY name",
+    )
+    .load(&mut connection)
+    .expect("the catalogue answers");
+
+    // A query that stopped selecting anything would make every assertion below
+    // vacuous, and PostgreSQL 17 answers 61.
+    assert!(
+        aggregates.len() >= 55,
+        "the catalogue should list every aggregate, got {}",
+        aggregates.len()
+    );
+
+    let schema = build_schema();
+    let options = Pg2SqliteOptions::default();
+    let refused: Vec<String> = aggregates
+        .iter()
+        .filter_map(|row| {
+            let sqlite = format!("SELECT {}(n) FROM t", row.name);
+            Pg2Sqlite::default()
+                .reverse_sql(&sqlite, &schema, &options)
+                .err()
+                .map(|error| format!("{}: {error}", row.name))
+        })
+        .collect();
+
+    assert!(
+        refused.is_empty(),
+        "PostgreSQL has {} aggregate(s) the reverse direction refuses:\n{}",
+        refused.len(),
+        refused.join("\n")
+    );
+}
+
+/// The same closure for the scalars, where the catalogue alone is no corpus:
+/// `pg_catalog` holds around 2650 of them, nearly all operator and type
+/// plumbing nobody writes in a query, and no column separates those from the
+/// ones a person types.
+///
+/// This crate's own forward behaviour is the filter. A name it was never taught
+/// earns the generic `is not a SQLite function` refusal going out, and anything
+/// else means it was taught the name, which is the crate claiming PostgreSQL
+/// has it. That claim is what the reverse direction then has to honour, so:
+///
+/// > if the forward direction knows a name PostgreSQL has, and SQLite does not
+/// > have it, the reverse direction must place it.
+///
+/// A name both engines have is excluded because whether it may cross is a
+/// judgement about meaning, recorded name by name in the reverse translator's
+/// `SQLITE_ONLY`, and not something a catalogue sweep may rule on. Names
+/// neither direction knows are simply skipped, which is right: this crate is
+/// allowed not to know `int4pl`.
+///
+/// The one textual dependency, the forward refusal's wording, is why the
+/// recognised count is asserted rather than left to speak for itself. If that
+/// message ever changes, this test says so instead of quietly passing
+/// everything.
+#[test]
+fn every_scalar_the_forward_direction_knows_reverses() {
+    /// Small on purpose: the sweep parses it once per name, and the shared
+    /// `SCHEMA_DDL` above is twenty tables of shapes no probe here needs.
+    const PROBE_DDL: &str = "CREATE TABLE t (id INT PRIMARY KEY, n INT, r REAL, s TEXT);";
+
+    let mut connection = fresh_database();
+
+    // `regnamespace` is a catalogue cast with no diesel schema, which is why
+    // this one statement is raw. The pattern drops the handful of names that
+    // are not plain identifiers and could not be written as a call anyway.
+    let names: Vec<CatalogueName> = sql_query(
+        "SELECT DISTINCT proname AS name FROM pg_proc \
+         WHERE pronamespace = 'pg_catalog'::regnamespace AND proname ~ '^[a-z_][a-z0-9_]*$' \
+         ORDER BY name",
+    )
+    .load(&mut connection)
+    .expect("the catalogue answers");
+    assert!(names.len() >= 2500, "the catalogue should be whole, got {}", names.len());
+
+    let schema = Pg2Sqlite::default()
+        .sql(PROBE_DDL)
+        .expect("the probe schema parses")
+        .build_schema()
+        .expect("the probe schema builds");
+    let options = Pg2SqliteOptions::default();
+
+    let mut known = 0usize;
+    let mut refused = Vec::new();
+
+    for row in &names {
+        let call = format!("SELECT {}(s) FROM t", row.name);
+        let outbound = Pg2Sqlite::default()
+            .sql(&format!("{PROBE_DDL}{call};"))
+            .and_then(|parsed| parsed.translate_to_sql(&options));
+        let forward_knows = match &outbound {
+            Ok(_) => true,
+            Err(error) => {
+                let message = error.to_string();
+                // A name PostgreSQL spells in a way SQLite's parser will not
+                // read says nothing about either direction.
+                if message.contains("Parser error") {
+                    continue;
+                }
+                !message.contains("is not a SQLite function")
+            }
+        };
+        if !forward_knows || sqlite_has(&row.name) {
+            continue;
+        }
+        known += 1;
+
+        if let Err(error) = Pg2Sqlite::default().reverse_sql(&call, &schema, &options) {
+            refused.push(format!("{}: {error}", row.name));
+        }
+    }
+
+    // PostgreSQL 17 leaves 235 names the forward direction knows, of which 214
+    // are absent from SQLite. A collapse here means the refusal's wording moved
+    // and the filter stopped filtering.
+    assert!(known >= 180, "the forward direction should know far more names, got {known}");
+
+    assert!(
+        refused.is_empty(),
+        "the forward direction knows {} name(s) PostgreSQL has that the reverse direction \
+         refuses:\n{}",
+        refused.len(),
+        refused.join("\n")
     );
 }
 
