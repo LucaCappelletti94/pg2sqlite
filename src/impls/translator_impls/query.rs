@@ -987,15 +987,44 @@ mod tests {
     };
 
     use super::{
-        GroupingRewriteKind, ensure_distinct_on_projection_is_rewriteable, expand_cube,
-        is_aggregate_expression, projection_aliases, rewrite_projection_for_grouping_set,
-        translate_distinct, translate_fetch, translate_limit_clause, translate_named_window,
-        translate_order_by, try_translate_distinct_on_query, try_translate_grouping_query,
+        AGGREGATE_NAMES, GroupingRewriteKind, ensure_distinct_on_projection_is_rewriteable,
+        expand_cube, is_aggregate_expression, projection_aliases,
+        rewrite_projection_for_grouping_set, translate_distinct, translate_fetch,
+        translate_limit_clause, translate_named_window, translate_order_by,
+        try_translate_distinct_on_query, try_translate_grouping_query,
     };
     use crate::prelude::{Pg2SqliteOptions, Translator};
 
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
+    }
+
+    /// This crate keeps its PostgreSQL names in more than one place, and the
+    /// reverse direction's inventories were built from the other one. That is
+    /// how `jsonb_object_agg` came to be a name this list carries and the
+    /// reverse direction refused, which is the same shape as the omission that
+    /// prompted the inventory in the first place.
+    ///
+    /// So every name here has to be one some direction can place: a SQLite name
+    /// an arm handles, or a name an inventory vouches for.
+    #[test]
+    fn every_aggregate_name_is_one_some_direction_places() {
+        // PostgreSQL 17 has `range_agg` and no `multirange_agg`, measured
+        // against its catalogue, so no inventory may claim it.
+        const ABSENT_FROM_POSTGRES: [&str; 1] = ["multirange_agg"];
+
+        for name in AGGREGATE_NAMES {
+            if ABSENT_FROM_POSTGRES.contains(name) {
+                continue;
+            }
+            assert!(
+                crate::impls::sqlite_functions::is_sqlite_builtin(name)
+                    || crate::impls::sqlite_functions::is_shared_with_postgres(name)
+                    || crate::impls::sqlite_functions::is_postgres_only(name),
+                "{name} is an aggregate this crate knows, so the reverse direction must place it \
+                 too"
+            );
+        }
     }
 
     fn parse_query(sql: &str) -> Query {

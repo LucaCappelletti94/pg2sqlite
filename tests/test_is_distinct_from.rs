@@ -15,25 +15,58 @@ diesel::table! {
     }
 }
 
-/// IS DISTINCT FROM is translated to NOT (x IS y) — compact and correct.
+/// The comparison is handed straight to SQLite, which has taken both spellings
+/// since 3.39 and is pinned at 3.46 here. It used to be lowered to `NOT (a IS
+/// b)`, valid SQLite that the crate's own parser cannot read back.
 #[test]
-fn test_is_distinct_from_translation_form() -> Result<(), Box<dyn std::error::Error>> {
+fn test_is_distinct_from_translation_form() {
     let sql = "SELECT a IS DISTINCT FROM b FROM pairs;";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parses")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translates");
     let out = translated[0].to_string();
 
-    // Must use NOT (x IS y), not CASE
-    assert!(out.contains("NOT"), "Should contain NOT, got: {out}");
-    assert!(out.contains(" IS "), "Should contain IS, got: {out}");
+    assert!(out.contains("IS DISTINCT FROM"), "the operator survives, got: {out}");
     assert!(!out.contains("CASE"), "Should NOT use CASE expression, got: {out}");
 
     // Execute the translated query against a connection that has the fixture table.
+    let conn = rusqlite::Connection::open_in_memory().expect("open");
+    conn.execute_batch("CREATE TABLE pairs (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")
+        .expect("fixture");
+    conn.execute_batch(&format!("{out};")).expect("SQLite takes it");
+}
+
+/// Whatever shape the comparison takes, the crate's own parser has to be able
+/// to read it back.
+///
+/// The lowering used to emit `a IS b`, which is valid SQLite and which
+/// `sqlparser` refuses: it takes only `IS [NOT] NULL|TRUE|FALSE|DISTINCT FROM`
+/// after `IS`. That made the emitted script unreadable to the reverse
+/// direction, which parses SQLite with the same dialect, so a translated
+/// database could not be read back. The same helper builds the array
+/// containment lowering, so that emitted `a IS b` too.
+#[test]
+fn the_emitted_comparison_reparses_under_the_sqlite_dialect() {
+    for postgres in
+        ["SELECT a IS DISTINCT FROM b FROM pairs;", "SELECT a IS NOT DISTINCT FROM b FROM pairs;"]
     {
-        let conn = rusqlite::Connection::open_in_memory()?;
-        conn.execute_batch("CREATE TABLE pairs (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")?;
-        conn.execute_batch(&format!("{out};"))?;
+        let translated = Pg2Sqlite::default()
+            .sql(postgres)
+            .expect("parses")
+            .translate_to_sql(&Pg2SqliteOptions::default())
+            .expect("translates");
+        let emitted = translated.last().expect("a statement");
+
+        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, emitted)
+            .unwrap_or_else(|error| panic!("`{emitted}` must parse as SQLite: {error}"));
+
+        let conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch("CREATE TABLE pairs (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")
+            .expect("fixture");
+        conn.execute_batch(&format!("{emitted};")).expect("SQLite must take it");
     }
-    Ok(())
 }
 
 /// IS DISTINCT FROM semantics: NULLs compare as distinct from any non-NULL.
@@ -182,8 +215,8 @@ fn test_is_distinct_from_semantic_integer() -> Result<(), Box<dyn std::error::Er
     let translated = translate(sql)?;
     let query = select_sql(&translated);
     assert!(
-        !query.to_uppercase().contains("IS DISTINCT FROM"),
-        "IS DISTINCT FROM should be rewritten, got: {query}"
+        query.to_uppercase().contains("IS DISTINCT FROM"),
+        "the operator is handed to SQLite unchanged, got: {query}"
     );
 
     let mut conn = SqliteConnection::establish(":memory:")?;
@@ -220,8 +253,8 @@ fn test_is_not_distinct_from_semantic_integer() -> Result<(), Box<dyn std::error
     let translated = translate(sql)?;
     let query = select_sql(&translated);
     assert!(
-        !query.to_uppercase().contains("IS NOT DISTINCT FROM"),
-        "IS NOT DISTINCT FROM should be rewritten, got: {query}"
+        query.to_uppercase().contains("IS NOT DISTINCT FROM"),
+        "the operator is handed to SQLite unchanged, got: {query}"
     );
 
     let mut conn = SqliteConnection::establish(":memory:")?;

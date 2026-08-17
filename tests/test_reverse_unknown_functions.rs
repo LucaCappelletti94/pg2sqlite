@@ -16,6 +16,7 @@ use pg2sqlite::{
     traits::TranslationOptions,
 };
 use sql_traits::structs::ParserDB;
+use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 fn schema() -> ParserDB {
     Pg2Sqlite::default()
@@ -177,4 +178,110 @@ fn a_geometry_name_passes_through_when_sqlitegis_is_declared() {
     let options = Pg2SqliteOptions::default().with_sqlitegis_enabled();
     let postgres = reverse_with(sqlite, &options).expect("the option says both sides have PostGIS");
     assert!(postgres.contains("ST_Distance"), "got: {postgres}");
+}
+
+/// The names PostgreSQL answers and SQLite does not.
+///
+/// The refusal that shipped told a caller `var_pop()` "is not a PostgreSQL
+/// function", which PostgreSQL's own catalogue contradicts, and the same
+/// message covered around 150 further names the forward direction already
+/// matches on. A name reaches here whenever the SQLite side carries the
+/// PostgreSQL spelling, which is what an extension-backed aggregate and a
+/// hand-written query both look like.
+#[test]
+fn a_postgres_only_name_passes_through() {
+    for sqlite in [
+        "SELECT var_pop(r) FROM t",
+        "SELECT var_samp(r) FROM t",
+        "SELECT stddev_pop(r) FROM t",
+        "SELECT stddev_samp(r) FROM t",
+        "SELECT variance(r) FROM t",
+        "SELECT stddev(r) FROM t",
+        "SELECT corr(r, r) FROM t",
+        "SELECT md5(s) FROM t",
+        "SELECT to_char(ts, 'YYYY') FROM t",
+        "SELECT split_part(s, ',', 1) FROM t",
+        "SELECT initcap(s) FROM t",
+        "SELECT least(n, 1) FROM t",
+        "SELECT date_trunc('day', ts) FROM t",
+        "SELECT regr_slope(r, r) FROM t",
+    ] {
+        let postgres =
+            reverse(sqlite).unwrap_or_else(|error| panic!("`{sqlite}` should reverse: {error}"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &postgres)
+            .unwrap_or_else(|error| panic!("`{postgres}` should parse as PostgreSQL: {error}"));
+    }
+}
+
+/// Every spelling took the same path through the refusal, so every spelling has
+/// to come back.
+#[test]
+fn every_spelling_of_a_postgres_only_aggregate_passes_through() {
+    for sqlite in [
+        "SELECT var_pop(r) OVER (PARTITION BY n) FROM t",
+        "SELECT var_pop(DISTINCT r) FROM t",
+        "SELECT var_pop(r) FILTER (WHERE n > 0) FROM t",
+        "SELECT n FROM t GROUP BY n HAVING stddev_pop(r) > 0",
+    ] {
+        let postgres =
+            reverse(sqlite).unwrap_or_else(|error| panic!("`{sqlite}` should reverse: {error}"));
+        Parser::parse_sql(&PostgreSqlDialect {}, &postgres)
+            .unwrap_or_else(|error| panic!("`{postgres}` should parse as PostgreSQL: {error}"));
+    }
+}
+
+/// The check the omission needed: a name one direction recognises cannot be
+/// unknown to the other by oversight.
+///
+/// Each half is what proves the other means something. The forward refusal
+/// calls the name a PostgreSQL statistical aggregate, so this crate does claim
+/// PostgreSQL has it, and the reverse translation then has to agree. A name
+/// that stopped being a statistical aggregate would fail the first assertion
+/// rather than quietly leave the second one testing nothing.
+#[test]
+fn what_the_forward_direction_calls_a_postgres_aggregate_reverses() {
+    for name in [
+        "var_pop",
+        "var_samp",
+        "variance",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "covar_pop",
+        "covar_samp",
+        "corr",
+    ] {
+        let arguments =
+            if ["covar_pop", "covar_samp", "corr"].contains(&name) { "r, r" } else { "r" };
+        let call = format!("{name}({arguments})");
+
+        let refusal = Pg2Sqlite::default()
+            .sql(&format!("CREATE TABLE t (r REAL); SELECT {call} FROM t;"))
+            .expect("the probe parses")
+            .translate_to_sql(&Pg2SqliteOptions::default())
+            .expect_err("SQLite has none of them")
+            .to_string();
+        assert!(
+            refusal.contains("statistical aggregate"),
+            "{name} should be one the forward direction knows, got: {refusal}"
+        );
+
+        let postgres = reverse(&format!("SELECT {call} FROM t"))
+            .unwrap_or_else(|error| panic!("the forward direction knows {name}: {error}"));
+        assert!(postgres.contains(name), "the name survives, got: {postgres}");
+    }
+}
+
+/// The message may not assert a fact this crate cannot check. It knows which
+/// names it was taught, not what the server was built with.
+#[test]
+fn the_generic_refusal_does_not_claim_postgres_lacks_the_name() {
+    let error =
+        reverse("SELECT levenshtein(s, 'x') FROM t").expect_err("nothing vouches for the name");
+
+    let message = error.to_string();
+    assert!(
+        !message.contains("is not a PostgreSQL function"),
+        "the crate cannot know what PostgreSQL has, got: {message}"
+    );
 }

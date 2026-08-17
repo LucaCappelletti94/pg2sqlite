@@ -78,9 +78,16 @@ fn power_unsupported() {
     expect_unsupported("SELECT power(2, 3)");
 }
 
+/// `sign` used to be refused here alongside the functions SQLite genuinely
+/// lacks. It does not lack this one: the maths-free bundled build answers
+/// `sign` and this crate's SQLite inventory lists it unconditionally, so the
+/// call now passes through. `tests/test_math_function_capability.rs` holds the
+/// positive form and executes it.
 #[test]
-fn sign_unsupported() {
-    expect_unsupported("SELECT sign(-5)");
+fn sign_is_supported_because_sqlite_has_it() {
+    let emitted = translate_sql("SELECT sign(-5)", &Pg2SqliteOptions::default())
+        .expect("SQLite answers sign with no build flag");
+    assert!(emitted.contains("sign(-5)"), "got: {emitted}");
 }
 
 #[test]

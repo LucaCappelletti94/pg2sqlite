@@ -718,11 +718,10 @@ fn extract_string_array_keys(expr: &Expr) -> Option<Vec<&str>> {
     elem.iter().map(single_quoted_literal).collect()
 }
 
-/// Translate PostgreSQL IS DISTINCT FROM / IS NOT DISTINCT FROM semantics
-/// using SQLite's native null-safe IS operator.
+/// The distinct comparisons, handed to SQLite unchanged.
 ///
-/// - `x IS DISTINCT FROM y`     → `NOT (x IS y)`  (null-safe inequality)
-/// - `x IS NOT DISTINCT FROM y` → `x IS y`         (null-safe equality)
+/// SQLite has taken both spellings since 3.39, under the 3.46 floor. They used
+/// to be lowered onto its bare `IS`, which `sqlparser` cannot read back.
 fn translate_distinct_comparison(
     left: &Expr,
     right: &Expr,
@@ -733,6 +732,180 @@ fn translate_distinct_comparison(
     let l = left.translate(schema, options)?;
     let r = right.translate(schema, options)?;
     Ok(if is_not_distinct { null_safe_eq(l, r) } else { null_safe_neq(l, r) })
+}
+
+/// One element of a PostgreSQL `text[]` path literal, after quoting is gone.
+enum JsonPathElement {
+    /// Integer-shaped, so PostgreSQL reads it by the runtime shape of the
+    /// value at that depth: an index when it is an array, a key otherwise.
+    /// `index` is the converted number and `verbatim` the element text, which
+    /// differ for a spelling like `01`.
+    Numeric { index: i64, verbatim: String },
+    /// A key and nothing else.
+    Key(String),
+    /// An unquoted `NULL`, which is a NULL element rather than a key.
+    Null,
+}
+
+/// Reads a PostgreSQL `text[]` literal like `{a, "b,c", 0}` into its elements.
+///
+/// The rules, measured against 18.4 rather than recalled: elements split on
+/// top-level commas, whitespace around an unquoted element is trimmed, a
+/// double-quoted element is taken verbatim with `\x` unescaping to `x`, and an
+/// unquoted `NULL` in any letter case is a NULL element. `None` for anything
+/// malformed, which PostgreSQL refuses as a literal too.
+fn parse_text_array_path(literal: &str) -> Option<Vec<JsonPathElement>> {
+    let inner = literal.trim().strip_prefix('{')?.strip_suffix('}')?;
+    if inner.trim().is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut elements = Vec::new();
+    let mut chars = inner.chars().peekable();
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        let element = if chars.peek() == Some(&'"') {
+            chars.next();
+            let mut text = String::new();
+            loop {
+                match chars.next()? {
+                    '"' => break,
+                    '\\' => text.push(chars.next()?),
+                    other => text.push(other),
+                }
+            }
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+            JsonPathElement::Key(text)
+        } else {
+            let mut text = String::new();
+            while chars.peek().is_some_and(|c| *c != ',') {
+                let c = chars.next()?;
+                // A quote or brace inside an unquoted element is not a text[]
+                // literal PostgreSQL would take either.
+                if matches!(c, '"' | '{' | '}' | '\\') {
+                    return None;
+                }
+                text.push(c);
+            }
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            if text.eq_ignore_ascii_case("null") {
+                JsonPathElement::Null
+            } else {
+                classify_path_text(text)
+            }
+        };
+        elements.push(element);
+
+        match chars.next() {
+            Some(',') => {}
+            None => return Some(elements),
+            Some(_) => return None,
+        }
+    }
+}
+
+/// Whether an element is integer-shaped, which decides the emitted form. A
+/// quoted `"0"` classifies the same way, because the quoting is literal syntax
+/// and PostgreSQL's path logic sees only the value.
+fn classify_path_text(text: &str) -> JsonPathElement {
+    match text.parse::<i64>() {
+        Ok(index) => JsonPathElement::Numeric { index, verbatim: text.to_string() },
+        Err(_) => JsonPathElement::Key(text.to_string()),
+    }
+}
+
+/// PostgreSQL's `#>` and `#>>`, read into SQLite's `->`/`->>` chains.
+///
+/// `x #> '{a,b}'` becomes `x -> 'a' -> 'b'`, and the text form takes `->>` on
+/// the last hop only. Both arrows are native SQLite since 3.38, under the
+/// floor, and this crate already passes chains of them through unchanged.
+///
+/// A numeric element is the one place a single arrow cannot be faithful.
+/// PostgreSQL decides by the runtime value: `'{"0":"x"}'::jsonb #> '{0}'`
+/// answers the key and `'[1,2]'::jsonb #> '{0}'` the index, both measured.
+/// SQLite's integer arrow indexes arrays only and its string arrow reads keys
+/// only, each answering NULL on the other shape, so
+/// `COALESCE(x -> 0, x -> '0')` reproduces the decision: whichever arm matches
+/// the shape answers, and the other is NULL. The arms cannot disagree, because
+/// an arrow on the wrong shape never answers at all.
+///
+/// The empty path is the document itself: the operand for `#>`, and its text
+/// for `#>>`, which `->> '$'` answers. A composite document's text differs in
+/// whitespace between the engines, the same divergence the plain `->>`
+/// passthrough already carries; a scalar's does not, measured.
+fn translate_json_path_operator(
+    left: &Expr,
+    right: &Expr,
+    text_form: bool,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, crate::errors::Error> {
+    let operator = if text_form { "#>>" } else { "#>" };
+    let Some(literal) = single_quoted_literal(right) else {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "`{operator}` needs its path as a literal. PostgreSQL accepts a computed one, and \
+             the path decides which keys are read, so it cannot be rewritten without its value."
+        )));
+    };
+    let Some(elements) = parse_text_array_path(literal) else {
+        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            "`{literal}` is not a path literal `{operator}` can read: PostgreSQL takes a text \
+             array like '{{a,b}}', with a double-quoted element for a key containing a comma, \
+             a brace or a quote."
+        )));
+    };
+
+    let mut value = left.translate(schema, options)?;
+    if elements.is_empty() {
+        // The document itself, and its text for the text form.
+        if text_form {
+            value = Expr::BinaryOp {
+                left: Box::new(value),
+                op: BinaryOperator::LongArrow,
+                right: Box::new(string_literal("$")),
+            };
+        }
+        return Ok(value);
+    }
+
+    let last = elements.len() - 1;
+    for (position, element) in elements.into_iter().enumerate() {
+        let op = if text_form && position == last {
+            BinaryOperator::LongArrow
+        } else {
+            BinaryOperator::Arrow
+        };
+        let hop = |value: Expr, key: Expr| {
+            Expr::BinaryOp { left: Box::new(value), op: op.clone(), right: Box::new(key) }
+        };
+        value = match element {
+            JsonPathElement::Key(key) => hop(value, string_literal(&key)),
+            JsonPathElement::Numeric { index, verbatim } => {
+                simple_function_expr(
+                    "COALESCE",
+                    vec![
+                        hop(value.clone(), integer_literal(index)),
+                        hop(value, string_literal(&verbatim)),
+                    ],
+                    None,
+                )
+            }
+            JsonPathElement::Null => {
+                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    "the path `{literal}` contains a NULL element, which PostgreSQL answers \
+                     NULL for; write the path without NULL."
+                )));
+            }
+        };
+    }
+    Ok(value)
 }
 
 /// Translate PostgreSQL OVERLAY(str PLACING repl FROM pos [FOR len]) to
@@ -1335,12 +1508,16 @@ fn translate_binary_op(
         ));
     }
 
-    // PostgreSQL JSON path operators (#> and #>>) have no SQLite equivalent.
+    // PostgreSQL's #> and #>> read a value at a path. SQLite has no path
+    // operator, but it has the arrows, so a literal path becomes a chain.
     if matches!(op, BinaryOperator::HashArrow | BinaryOperator::HashLongArrow) {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-            "PostgreSQL JSON path operator `{op}` has no SQLite equivalent; \
-             use `->` / `->>` for single-key access"
-        )));
+        return translate_json_path_operator(
+            left,
+            right,
+            *op == BinaryOperator::HashLongArrow,
+            schema,
+            options,
+        );
     }
 
     // pgvector distance operators -> sqlite-vec functions

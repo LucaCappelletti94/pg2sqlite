@@ -33,7 +33,7 @@ use crate::{
             every_declared_type_matches, function_argument_exprs, translate_function_arguments,
             translate_order_by_expr,
         },
-        sqlite_functions::is_shared_with_postgres,
+        sqlite_functions::{is_postgres_only, is_shared_with_postgres},
         timezone::{
             TimestampAwareness, flipped_shifting_offset, normalize_timezone_modifier_for_postgres,
             timestamp_awareness,
@@ -751,15 +751,19 @@ const SQLITE_ONLY: &[(&str, &str)] = &[
 ///
 /// The default is a refusal, for the reason the forward direction refuses an
 /// unrecognised name: emitting it produces SQL that fails at run time, long
-/// after translation reported success. Two things earn a passthrough, and both
-/// are evidence PostgreSQL has the name: this crate's own inventory says the
-/// two engines share it, or the caller declared it.
+/// after translation reported success. Three things earn a passthrough, and all
+/// are evidence PostgreSQL has the name: this crate's inventory says the two
+/// engines share it, its inventory says PostgreSQL has it while SQLite does
+/// not, or the caller declared it.
 fn classify_unreversed(
     name: &str,
     args: &FunctionArguments,
     options: &Pg2SqliteOptions,
 ) -> FunctionReversal {
-    if is_shared_with_postgres(name) || options.declares_user_defined_function(name) {
+    if is_shared_with_postgres(name)
+        || is_postgres_only(name)
+        || options.declares_user_defined_function(name)
+    {
         return FunctionReversal::PassThrough;
     }
 
@@ -779,9 +783,10 @@ fn classify_unreversed(
     }
 
     FunctionReversal::Reject(format!(
-        "{name}() is not a PostgreSQL function and has no reverse translation. Emitting it would \
-         produce SQL that fails with `function {name}() does not exist`. If PostgreSQL has it, \
-         declare it with with_user_defined_functions([\"{name}\"])."
+        "{name}() is not a name this crate knows PostgreSQL has, and no arm reverses it. Emitting \
+         it would produce SQL that fails with `function {name}() does not exist` unless the \
+         server answers it. If PostgreSQL has it, declare it with \
+         with_user_defined_functions([\"{name}\"])."
     ))
 }
 
@@ -804,6 +809,39 @@ fn positional_arity(args: &FunctionArguments) -> Option<i32> {
         FunctionArguments::None => Some(0),
         FunctionArguments::Subquery(_) => None,
     }
+}
+
+/// `value #> '{a,b}'`, PostgreSQL's reading of a SQLite JSON path.
+///
+/// Shared by `json_extract`, which is the extraction itself, and by the
+/// two-argument `json_type`, which asks for the type at a path that PostgreSQL
+/// takes outside the call. `caller` names the SQLite function in the refusals,
+/// so a path this crate cannot convert says which call it came from.
+fn json_path_extraction(
+    value: &Expr,
+    path: &Expr,
+    caller: &str,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, Error> {
+    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(literal), .. }) = path else {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "{caller} JSON path must be a string literal; non-literal paths cannot be converted \
+             at translation time"
+        )));
+    };
+    let text_path = sqlite_json_path_to_pg_text_path(literal).ok_or_else(|| {
+        Error::UnsupportedSQLiteFeature(format!(
+            "{caller} path must be a simple dotted literal like '$.a'; paths with array indices \
+             cannot be converted"
+        ))
+    })?;
+    let reversed = crate::prelude::ReverseTranslator::reverse_translate(value, schema, options)?;
+    Ok(Expr::BinaryOp {
+        left: Box::new(reversed),
+        op: BinaryOperator::HashArrow,
+        right: Box::new(string_literal(&text_path)),
+    })
 }
 
 /// Build a reverse-translated function: translate args, params, window, filter
@@ -1195,36 +1233,12 @@ pub fn reverse_translate_function(
         FunctionReversal::ToJsonPathExtract => {
             // json_extract(j, '$.a') -> j #> '{a}'
             let exprs = function_argument_exprs(&func.args);
-            if exprs.len() < 2 {
+            let [value, path] = exprs.as_slice() else {
                 return Err(Error::UnsupportedSQLiteFeature(
-                    "json_extract requires at least 2 arguments".to_string(),
+                    "json_extract requires exactly 2 arguments".to_string(),
                 ));
-            }
-            let json_expr =
-                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
-            let path_str = match exprs[1] {
-                Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
-                    sqlite_json_path_to_pg_text_path(s).ok_or_else(|| {
-                        Error::UnsupportedSQLiteFeature(
-                            "json_extract path must be a simple dotted literal like '$.a'; \
-                         paths with array indices cannot be converted"
-                                .to_string(),
-                        )
-                    })?
-                }
-                _ => {
-                    return Err(Error::UnsupportedSQLiteFeature(
-                        "json_extract JSON path must be a string literal; \
-                         non-literal paths cannot be converted at translation time"
-                            .to_string(),
-                    ));
-                }
             };
-            Ok(Expr::BinaryOp {
-                left: Box::new(json_expr),
-                op: BinaryOperator::HashArrow,
-                right: Box::new(string_literal(&path_str)),
-            })
+            json_path_extraction(value, path, "json_extract", schema, options)
         }
         FunctionReversal::ToIsJson => {
             // json_valid(x) -> x IS JSON
@@ -1268,6 +1282,17 @@ pub fn reverse_translate_function(
             } else {
                 "json_typeof"
             };
+
+            // json_type(x, '$.a') asks for the type at a path, and both
+            // PostgreSQL spellings take one argument, so the path becomes an
+            // extraction around the value. This is the shape the forward
+            // direction emits for the `?`, `?|` and `?&` existence operators, so
+            // without it a script this crate wrote could not be read back.
+            if let [value, path] = exprs.as_slice() {
+                let extracted = json_path_extraction(value, path, "json_type", schema, options)?;
+                return Ok(simple_function_expr(func_name, vec![extracted], None));
+            }
+
             build_reverse_function(
                 ObjectName::from(vec![Ident::new(func_name)]),
                 func,
@@ -1295,12 +1320,17 @@ pub fn reverse_translate_function(
             Ok(simple_function_expr("COALESCE", vec![sum, integer_literal(0)], None))
         }
         FunctionReversal::ToEncodeHex => {
-            // hex(x) -> encode(x::bytea, 'hex')
+            // hex(x) -> upper(encode(x::bytea, 'hex'))
+            //
             // encode() requires its first argument to be bytea. A text column
             // fails at the server with "function encode(text, unknown) does not
             // exist". Cast unconditionally: if the column is already bytea the
             // cast is a no-op, and for non-column arguments where the type cannot
             // be resolved from the schema this is the consistent fallback.
+            //
+            // The fold is what keeps the value: SQLite's hex answers uppercase
+            // and PostgreSQL's encode answers lowercase, both measured, so the
+            // bare call would quietly change the case of every digit.
             let exprs = extract_exactly(&func.args, 1, "hex")?;
             let inner =
                 crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
@@ -1310,7 +1340,9 @@ pub fn reverse_translate_function(
                 format: None,
                 kind: CastKind::DoubleColon,
             };
-            Ok(simple_function_expr("encode", vec![bytea_cast, string_literal("hex")], None))
+            let encoded =
+                simple_function_expr("encode", vec![bytea_cast, string_literal("hex")], None);
+            Ok(simple_function_expr("upper", vec![encoded], None))
         }
         FunctionReversal::ToDecodeHex => {
             // unhex(x) -> decode(x, 'hex')
@@ -1399,12 +1431,27 @@ mod tests {
         parser::Parser,
     };
 
-    use super::reverse_translate_function;
+    use super::{SQLITE_ONLY, reverse_translate_function};
     use crate::{
         impls::{function_helpers::function_arg_expr_or_err, timezone::is_fixed_utc_offset},
         prelude::Pg2SqliteOptions,
         traits::TranslationOptions,
     };
+
+    /// The passthrough is decided before the reasoned refusal, so a name in
+    /// both lists would slip past the reason it was written for. The two cannot
+    /// overlap while every PostgreSQL-only name is absent from SQLite and every
+    /// name here is a SQLite one, and this is what says so.
+    #[test]
+    fn no_sqlite_only_name_is_in_a_postgres_inventory() {
+        for (name, _) in SQLITE_ONLY {
+            assert!(
+                !crate::impls::sqlite_functions::is_postgres_only(name)
+                    && !crate::impls::sqlite_functions::is_shared_with_postgres(name),
+                "{name} carries a reason it cannot cross, so it must not also pass through"
+            );
+        }
+    }
 
     fn empty_schema() -> ParserDB {
         ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")

@@ -145,6 +145,38 @@ const SQLITE_AGGREGATES: &[&str] = &["avg", "count"];
 /// provides them wherever a vector column is usable at all.
 const TRANSLATOR_EMITTED: &[&str] = &["vec_f16", "vec_f32"];
 
+/// What SQLite ships only under `SQLITE_ENABLE_MATH_FUNCTIONS`, which is why
+/// none of them is in the inventory above.
+///
+/// The build flag is a fact about the destination, so only the caller can say
+/// whether it holds. `with_math_functions_available` is that claim, and every
+/// name here is emittable once it is made. All but `log2` are also PostgreSQL
+/// names, measured against its catalogue, which is why `SHARED_WITH_POSTGRES`
+/// carries them and `log2` sits in the reverse translator's `SQLITE_ONLY`
+/// instead.
+const SQLITE_MATH: &[&str] = &[
+    "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "ceil", "ceiling", "cos", "cosh",
+    "degrees", "exp", "floor", "ln", "log", "log10", "log2", "mod", "pi", "pow", "power",
+    "radians", "sin", "sinh", "sqrt", "tan", "tanh", "trunc",
+];
+
+/// Whether `name` is one SQLite answers only under
+/// `SQLITE_ENABLE_MATH_FUNCTIONS`.
+///
+/// `name` must already be lower-cased.
+#[must_use]
+pub(crate) fn is_gated_math(name: &str) -> bool {
+    SQLITE_MATH.binary_search(&name).is_ok()
+}
+
+/// Every name the maths build flag decides, exposed so a test can walk the same
+/// list the gate consults.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn gated_math() -> &'static [&'static str] {
+    SQLITE_MATH
+}
+
 /// Whether SQLite resolves `name` without an extension or an opt-in.
 ///
 /// `name` must already be lower-cased, which every caller does when it reads
@@ -154,6 +186,30 @@ pub(crate) fn is_sqlite_builtin(name: &str) -> bool {
     SQLITE_BUILTINS.binary_search(&name).is_ok()
         || SQLITE_AGGREGATES.binary_search(&name).is_ok()
         || TRANSLATOR_EMITTED.binary_search(&name).is_ok()
+}
+
+/// Whether SQLite resolves `name`, exposed so a test can ask this crate the
+/// question the sweep in `tests/gauntlet/reverse.rs` has to answer: a name both
+/// engines have is a judgement about meaning, decided name by name, and not
+/// something a catalogue sweep may rule on.
+///
+/// `name` must already be lower-cased.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn sqlite_has(name: &str) -> bool {
+    is_sqlite_builtin(name)
+}
+
+/// Every name SQLite answers, the unconditional inventory and the gated maths
+/// one together, exposed so a test can walk the corpus the reverse direction
+/// has to cope with rather than keep a copy of it.
+///
+/// `TRANSLATOR_EMITTED` is deliberately absent: those arrive with sqlite-vec
+/// rather than with SQLite, so they say nothing about what a plain destination
+/// answers.
+#[cfg(feature = "std")]
+pub fn sqlite_names() -> impl Iterator<Item = &'static str> {
+    SQLITE_BUILTINS.iter().chain(SQLITE_AGGREGATES).chain(SQLITE_MATH).copied()
 }
 
 /// SQLite names PostgreSQL answers the same way, which are therefore the only
@@ -259,20 +315,266 @@ pub fn shared_with_postgres() -> &'static [&'static str] {
     SHARED_WITH_POSTGRES
 }
 
+/// Names PostgreSQL answers and SQLite does not, which the reverse direction
+/// may therefore emit unchanged.
+///
+/// The requirement is one-sided. Reverse translation promises that PostgreSQL
+/// takes its output, so the only question a name raises is whether the server
+/// answers it. Whether SQLite could have produced the name is not something
+/// this direction can police, since it never checks that the input's tables or
+/// column types exist either, and a source database may carry any extension.
+/// Gating the passthrough on SQLite membership is what refused `var_pop` and
+/// around 150 further names PostgreSQL has.
+///
+/// Every entry is absent from SQLite, which is the invariant that keeps a
+/// meaning clash out: with no SQLite definition to disagree with, PostgreSQL's
+/// meaning is the only one the name can carry. A name both engines have, such
+/// as `format` or `jsonb_set`, is a judgement about meaning rather than
+/// existence and belongs above, or in the reverse translator's `SQLITE_ONLY`
+/// when the meanings differ.
+///
+/// The list is bounded by the names this crate already knows on the PostgreSQL
+/// side: what the forward direction matches on, plus what the reverse direction
+/// emits. `tests/gauntlet/reverse.rs` asks the running server about every
+/// entry, so nothing here rests on recall. Absent for that reason, measured
+/// against the pinned `postgres:18-alpine`: `uuid_generate_v4` needs the
+/// `uuid-ossp` extension, `multirange_agg` does not exist, and `truncate` names
+/// a statement rather than a function. `uuidv4` and `uuidv7` are present, since
+/// 18 introduced them and 18 is the pin.
+const POSTGRES_ONLY: &[&str] = &[
+    "abbrev",
+    "age",
+    "any_value",
+    "array_agg",
+    "array_append",
+    "array_cat",
+    "array_dims",
+    "array_fill",
+    "array_length",
+    "array_lower",
+    "array_ndims",
+    "array_position",
+    "array_positions",
+    "array_prepend",
+    "array_remove",
+    "array_replace",
+    "array_to_string",
+    "array_upper",
+    "ascii",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "bool_and",
+    "bool_or",
+    "broadcast",
+    "btrim",
+    "cardinality",
+    "cbrt",
+    "char_length",
+    "character_length",
+    "chr",
+    "clock_timestamp",
+    "col_description",
+    "convert",
+    "convert_from",
+    "convert_to",
+    "corr",
+    "covar_pop",
+    "covar_samp",
+    "current_database",
+    "current_schema",
+    "current_schemas",
+    "currval",
+    "date_part",
+    "date_trunc",
+    "decode",
+    "div",
+    "encode",
+    "every",
+    "factorial",
+    "family",
+    "gcd",
+    "gen_random_uuid",
+    "generate_series",
+    "greatest",
+    "has_column_privilege",
+    "has_database_privilege",
+    "has_function_privilege",
+    "has_schema_privilege",
+    "has_sequence_privilege",
+    "has_table_privilege",
+    "host",
+    "hostmask",
+    "initcap",
+    "isfinite",
+    "json_agg",
+    "json_agg_strict",
+    "json_array_elements",
+    "json_array_elements_text",
+    "json_build_array",
+    "json_build_object",
+    "json_each_text",
+    "json_extract_path",
+    "json_extract_path_text",
+    "json_object_agg",
+    "json_object_agg_strict",
+    "json_object_agg_unique",
+    "json_object_agg_unique_strict",
+    "json_object_keys",
+    "json_populate_record",
+    "json_strip_nulls",
+    "json_to_record",
+    "json_typeof",
+    "jsonb_agg",
+    "jsonb_agg_strict",
+    "jsonb_array_elements",
+    "jsonb_array_elements_text",
+    "jsonb_array_length",
+    "jsonb_build_array",
+    "jsonb_build_object",
+    "jsonb_each",
+    "jsonb_each_text",
+    "jsonb_extract_path",
+    "jsonb_extract_path_text",
+    "jsonb_object_agg",
+    "jsonb_object_agg_strict",
+    "jsonb_object_agg_unique",
+    "jsonb_object_agg_unique_strict",
+    "jsonb_object_keys",
+    "jsonb_populate_record",
+    "jsonb_strip_nulls",
+    "jsonb_to_record",
+    "jsonb_typeof",
+    "justify_days",
+    "justify_hours",
+    "justify_interval",
+    "lastval",
+    "lcm",
+    "least",
+    "left",
+    "localtime",
+    "localtimestamp",
+    "lpad",
+    "make_date",
+    "make_interval",
+    "make_time",
+    "make_timestamp",
+    "make_timestamptz",
+    "masklen",
+    "md5",
+    "mode",
+    "netmask",
+    "network",
+    "nextval",
+    "now",
+    "obj_description",
+    "percentile_cont",
+    "percentile_disc",
+    "pg_column_size",
+    "pg_database_size",
+    "pg_get_constraintdef",
+    "pg_get_expr",
+    "pg_get_indexdef",
+    "pg_get_viewdef",
+    "pg_relation_size",
+    "pg_table_size",
+    "pg_tablespace_size",
+    "pg_total_relation_size",
+    "pg_typeof",
+    "quote_ident",
+    "quote_literal",
+    "quote_nullable",
+    "range_agg",
+    "range_intersect_agg",
+    "regexp_match",
+    "regexp_matches",
+    "regexp_replace",
+    "regexp_split_to_array",
+    "regexp_split_to_table",
+    "regr_avgx",
+    "regr_avgy",
+    "regr_count",
+    "regr_intercept",
+    "regr_r2",
+    "regr_slope",
+    "regr_sxx",
+    "regr_sxy",
+    "regr_syy",
+    "repeat",
+    "reverse",
+    "right",
+    "row",
+    "row_to_json",
+    "rpad",
+    "set_masklen",
+    "setseed",
+    "setval",
+    "shobj_description",
+    "split_part",
+    "statement_timestamp",
+    "stddev",
+    "stddev_pop",
+    "stddev_samp",
+    "string_to_array",
+    "strpos",
+    "timeofday",
+    "to_char",
+    "to_date",
+    "to_json",
+    "to_jsonb",
+    "to_number",
+    "to_timestamp",
+    "transaction_timestamp",
+    "translate",
+    "ts_rank",
+    "ts_rank_cd",
+    "unnest",
+    "uuidv4",
+    "uuidv7",
+    "var_pop",
+    "var_samp",
+    "variance",
+    "version",
+    "width_bucket",
+    "xmlagg",
+];
+
+/// Whether PostgreSQL answers `name` while SQLite does not, so the reverse
+/// direction can emit it unchanged.
+///
+/// `name` must already be lower-cased.
+#[must_use]
+pub(crate) fn is_postgres_only(name: &str) -> bool {
+    POSTGRES_ONLY.binary_search(&name).is_ok()
+}
+
+/// Every name this crate claims PostgreSQL has and SQLite lacks, exposed for
+/// the same reason as [`shared_with_postgres`].
+#[cfg(feature = "std")]
+#[must_use]
+pub fn postgres_only() -> &'static [&'static str] {
+    POSTGRES_ONLY
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SHARED_WITH_POSTGRES, SQLITE_AGGREGATES, SQLITE_BUILTINS, TRANSLATOR_EMITTED,
-        is_sqlite_builtin,
+        POSTGRES_ONLY, SHARED_WITH_POSTGRES, SQLITE_AGGREGATES, SQLITE_BUILTINS, SQLITE_MATH,
+        TRANSLATOR_EMITTED, is_sqlite_builtin,
     };
 
     /// Binary search answers nonsense on an unsorted slice, and the failure
     /// would be a silently missing name rather than a panic.
     #[test]
     fn every_inventory_is_sorted_and_unique() {
-        for inventory in
-            [SQLITE_BUILTINS, SQLITE_AGGREGATES, TRANSLATOR_EMITTED, SHARED_WITH_POSTGRES]
-        {
+        for inventory in [
+            SQLITE_BUILTINS,
+            SQLITE_AGGREGATES,
+            TRANSLATOR_EMITTED,
+            SHARED_WITH_POSTGRES,
+            POSTGRES_ONLY,
+            SQLITE_MATH,
+        ] {
             let mut sorted = inventory.to_vec();
             sorted.sort_unstable();
             sorted.dedup();
@@ -280,18 +582,9 @@ mod tests {
         }
     }
 
-    /// What SQLite ships only under `SQLITE_ENABLE_MATH_FUNCTIONS`, which the
-    /// two assertions below read in opposite directions: absent from the
-    /// unconditional inventory, present in the shared one, since the build flag
-    /// is a fact about the replica rather than about PostgreSQL.
-    const SQLITE_MATH: &[&str] = &[
-        "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "ceil", "ceiling", "cos",
-        "cosh", "degrees", "exp", "floor", "ln", "log", "log10", "log2", "mod", "pi", "pow",
-        "power", "radians", "sin", "sinh", "sqrt", "tan", "tanh", "trunc",
-    ];
-
     /// A shared name SQLite does not have at all would be a claim about
-    /// nothing.
+    /// nothing. The gated names count, since the build flag says nothing about
+    /// what PostgreSQL has.
     #[test]
     fn every_shared_name_is_a_sqlite_name() {
         for name in SHARED_WITH_POSTGRES {
@@ -308,6 +601,33 @@ mod tests {
             assert!(
                 !is_sqlite_builtin(gated),
                 "{gated} needs SQLITE_ENABLE_MATH_FUNCTIONS and its own opt-in"
+            );
+        }
+    }
+
+    /// The invariant that keeps a meaning clash out of the PostgreSQL-only
+    /// inventory. A name SQLite also has cannot be listed here, because then
+    /// the two engines' readings of it would both be live and the passthrough
+    /// would pick one silently.
+    #[test]
+    fn every_postgres_only_name_is_absent_from_sqlite() {
+        for name in POSTGRES_ONLY {
+            assert!(
+                !is_sqlite_builtin(name) && !SQLITE_MATH.contains(name),
+                "{name} is a SQLite name, so whether the two engines agree on it is a judgement \
+                 that belongs in SHARED_WITH_POSTGRES or in the reverse translator's SQLITE_ONLY"
+            );
+        }
+    }
+
+    /// Two lists the reverse direction reads in one condition, so an overlap
+    /// would make one of them dead in that spot.
+    #[test]
+    fn the_two_postgres_inventories_are_disjoint() {
+        for name in POSTGRES_ONLY {
+            assert!(
+                SHARED_WITH_POSTGRES.binary_search(name).is_err(),
+                "{name} is in both PostgreSQL inventories"
             );
         }
     }

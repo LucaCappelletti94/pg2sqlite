@@ -9,7 +9,10 @@ mod helpers;
 
 use diesel::connection::SimpleConnection;
 use helpers::{establish_connection, translate_pg};
-use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::{
+    impls::sqlite_functions::gated_math,
+    prelude::{Pg2SqliteOptions, TranslationOptions},
+};
 
 fn opts_off() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -129,22 +132,96 @@ fn on_cbrt_roots_the_magnitude_and_restores_the_sign() {
 }
 
 /// Runs the emitted SQL against an in-memory SQLite with a fixture table.
-/// Math functions such as `sqrt`, `pow`, `ln`, `exp`, `log`, and `log10` are
-/// caller-registered and absent in the bundled SQLite; that specific error is
-/// accepted as proof that SQLite parsed the rest of the statement correctly.
+///
+/// The bundled build is 3.49.1 without `SQLITE_ENABLE_MATH_FUNCTIONS`, measured
+/// rather than assumed, so a gated name resolves to nothing there. That precise
+/// error is accepted as proof SQLite parsed the rest of the statement, and no
+/// other error is.
 fn sqlite_parses(sql: &str) {
     let mut conn = establish_connection();
     conn.batch_execute("CREATE TABLE t (v REAL, a REAL, b REAL, n REAL) STRICT;").unwrap();
-    const MATH_FNS: &[&str] = &["sqrt", "pow", "ln", "exp", "log", "log10"];
     match conn.batch_execute(sql) {
         Ok(()) => {}
         Err(e)
             if {
                 let m = e.to_string();
-                MATH_FNS.iter().any(|f| m.contains(&format!("no such function: {f}")))
+                gated_math().iter().any(|f| m.contains(&format!("no such function: {f}")))
             } => {}
         Err(e) => panic!("SQLite rejected emitted SQL: {e}\n{sql}"),
     }
+}
+
+/// A call shape that parses for `name`, since arity is not what these tests are
+/// about.
+fn call(name: &str) -> String {
+    match name {
+        "pi" => format!("{name}()"),
+        "atan2" | "log" | "mod" | "pow" | "power" | "trunc" => format!("{name}(a, b)"),
+        _ => format!("{name}(v)"),
+    }
+}
+
+/// The option says the destination carries SQLite's maths build, so every name
+/// that build answers may be emitted.
+///
+/// It used to admit only the names with a translation arm of their own, which
+/// left the whole trigonometry family refused while `sqrt` passed: `acos`,
+/// `acosh`, `asin`, `asinh`, `atan`, `atan2`, `atanh`, `ceiling`, `cos`,
+/// `cosh`, `degrees`, `log2`, `pi`, `radians`, `sin`, `sinh`, `tan` and `tanh`,
+/// all eighteen of them names both engines answer, `log2` excepted. The reverse
+/// direction accepts every one, so the refusal was the same omission as the
+/// aggregate one, pointing the other way.
+#[test]
+fn the_option_admits_every_name_the_maths_build_answers() {
+    for name in gated_math() {
+        let query = format!("SELECT {} FROM t;", call(name));
+        let emitted = translate_on(&query)
+            .unwrap_or_else(|error| panic!("{name} is in the maths build: {error}"));
+        sqlite_parses(&emitted);
+    }
+}
+
+/// The other half of the gate, which the widening must not undo: with no
+/// declaration, a gated name is never emitted. A few are not refused at all
+/// because they are lowered to something portable instead, `ceil` and `floor`
+/// into `CASE` over `CAST` and `mod` into the `%` operator, so the assertion is
+/// about what comes out rather than about failing.
+#[test]
+fn without_the_option_no_gated_name_is_emitted() {
+    for name in gated_math() {
+        let query = format!("SELECT {} FROM t;", call(name));
+        match translate_off(&query) {
+            Ok(emitted) => {
+                assert!(
+                    !emitted.to_lowercase().contains(&format!("{name}(")),
+                    "{name} was emitted without the maths declaration: {emitted}"
+                );
+            }
+            // The refusal has to point at the build, not send the caller off to
+            // register a function the build would already carry. Fourteen of
+            // these used to give that wrong advice, having no arm of their own.
+            // The flag rather than the option name, because `trunc` carries its
+            // own narrower message about a computed scale needing `pow`.
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("SQLITE_ENABLE_MATH_FUNCTIONS"),
+                    "the refusal for {name} should name the build, got: {message}"
+                );
+            }
+        }
+    }
+}
+
+/// `sign` is not one of the gated names, measured against the bundled build:
+/// it answers there with no maths flag, and this crate's own SQLite inventory
+/// lists it unconditionally. It was refused all the same, because an arm naming
+/// it sat in front of the passthrough the inventory would have given it.
+#[test]
+fn sign_needs_no_declaration_because_sqlite_always_has_it() {
+    let emitted = translate_off("SELECT sign(v) FROM t;").expect("SQLite answers sign unaided");
+    assert_eq!(emitted, "SELECT sign(v) FROM t");
+    sqlite_parses(&emitted);
 }
 
 // ---------- the statistical aggregates are outside this gate ----------

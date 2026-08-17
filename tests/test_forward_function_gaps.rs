@@ -58,20 +58,35 @@ fn test_unnest_unsupported() {
     assert!(err.contains("json_each"), "Error should suggest json_each() alternative, got: {err}");
 }
 
+/// Both used to be refused outright, advising `hex()`/`unhex()`, which is what
+/// the reverse direction had just rewritten away. Hexadecimal now crosses, and
+/// the case fold is the point: PostgreSQL answers lowercase where SQLite's
+/// `hex` answers uppercase. `tests/test_hex_encoding.rs` executes both halves
+/// and the round trip.
 #[test]
-fn test_encode_unsupported() {
+fn test_encode_hex_translates() {
     let sql = &format!("{TABLE} SELECT encode(val, 'hex') FROM t;");
-    let err = translate_err(sql);
-    assert!(err.contains("encode"), "Error should mention encode, got: {err}");
-    assert!(err.contains("hex()"), "Error should suggest hex()/unhex() alternative, got: {err}");
+    let output = translate(sql);
+    assert!(output.contains("lower(hex(val))"), "got: {output}");
 }
 
 #[test]
-fn test_decode_unsupported() {
+fn test_decode_hex_translates() {
     let sql = &format!("{TABLE} SELECT decode(val, 'hex') FROM t;");
-    let err = translate_err(sql);
-    assert!(err.contains("decode"), "Error should mention decode, got: {err}");
-    assert!(err.contains("unhex()"), "Error should suggest hex()/unhex() alternative, got: {err}");
+    let output = translate(sql);
+    assert!(output.contains("unhex(val)"), "got: {output}");
+}
+
+/// The encodings SQLite has no name for keep the refusal, which now says which
+/// one it could not carry.
+#[test]
+fn test_other_encodings_unsupported() {
+    for (call, encoding) in
+        [("encode(val, 'base64')", "base64"), ("decode(val, 'escape')", "escape")]
+    {
+        let err = translate_err(&format!("{TABLE} SELECT {call} FROM t;"));
+        assert!(err.contains(encoding), "Error should name {encoding}, got: {err}");
+    }
 }
 
 #[test]

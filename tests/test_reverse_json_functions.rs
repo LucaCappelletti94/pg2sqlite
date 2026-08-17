@@ -143,6 +143,27 @@ fn json_type_with_non_jsonb_column_falls_back_to_json_typeof() {
     assert_emits("SELECT json_type(n) FROM t", "json_typeof(n)");
 }
 
+/// The two-argument form asks for the type at a path, and PostgreSQL's
+/// `jsonb_typeof` takes one argument, so the path has to move out of the call.
+///
+/// The forward direction emits exactly this shape for the `?`, `?|` and `?&`
+/// existence operators, so a script it wrote could not be read back. Both
+/// engines answer NULL for an absent path, measured, which is what makes the
+/// `IS NOT NULL` those operators wrap it in mean the same thing on either side.
+#[test]
+fn json_type_at_a_path_moves_the_path_into_an_extraction() {
+    assert_emits("SELECT json_type(payload, '$.a') FROM t", "jsonb_typeof(payload #> '{a}')");
+}
+
+/// A path this crate cannot convert is refused rather than dropped, which would
+/// silently ask for the type of the whole document.
+#[test]
+fn json_type_at_an_unconvertible_path_is_refused() {
+    let error = rev("SELECT json_type(payload, '$.a[0]') FROM t")
+        .expect_err("an array index has no text-path form");
+    assert!(error.to_string().contains("path"), "got: {error}");
+}
+
 #[test]
 fn json_array_length_renames_to_jsonb_array_length() {
     assert_emits("SELECT json_array_length(payload) FROM t", "jsonb_array_length(payload)");
