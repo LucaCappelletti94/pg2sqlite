@@ -760,7 +760,10 @@ fn forward_function_translation_covers_named_filter_and_none_argument_paths() {
 #[test]
 fn reverse_function_translation_covers_argument_error_and_passthrough_shapes() {
     let schema = empty_schema();
-    let options = Pg2SqliteOptions::default();
+    // `custom_fn` is declared because the subject here is the passthrough
+    // plumbing. An undeclared name is refused, which
+    // `tests/test_reverse_unknown_functions.rs` pins.
+    let options = Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]);
 
     let instr_bad_arg = Expr::Function(Function {
         name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("instr"))]),

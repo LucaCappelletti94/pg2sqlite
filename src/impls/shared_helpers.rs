@@ -2300,6 +2300,22 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 );
             }
 
+            // Coming back, a call in the row-source position is a set-returning
+            // function, and the ones SQLite alone has answer rows PostgreSQL
+            // cannot: `json_each` differs in both its columns and what it
+            // accepts, and `json_tree` does not exist there. The expression
+            // classifier never sees this position, so the reason it carries is
+            // read here.
+            if !D::IS_FORWARD
+                && args.is_some()
+                && let Some(reason) =
+                    crate::impls::reverse_translator_impls::function::sqlite_only_reason(
+                        &crate::impls::session_variable::function_name_lower(name),
+                    )
+            {
+                return Err(Error::UnsupportedSQLiteFeature(reason));
+            }
+
             // SQLite accepts no column list on a table alias, the same
             // limitation that forces the derived shape in
             // translate_unnest_factor, so the rename happens in a projection
@@ -3047,9 +3063,17 @@ mod tests {
         assert_eq!(cols, vec!["col".to_string()]);
 
         let none_args_func = Function { args: FunctionArguments::None, ..named_func.clone() };
-        assert!(extract_columns_from_function(&none_args_func).is_empty());
+        let no_args = extract_columns_from_function(&none_args_func);
+        assert!(
+            no_args.is_empty(),
+            "a call with no argument list names no column, got {no_args:?}"
+        );
 
-        assert!(extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new())).is_empty());
+        let empty_compound = extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new()));
+        assert!(
+            empty_compound.is_empty(),
+            "an empty compound names no column, got {empty_compound:?}"
+        );
         assert_eq!(
             extract_columns_from_expr(&Expr::Nested(Box::new(parse_expr("a + b")))),
             vec!["a".to_string(), "b".to_string()]

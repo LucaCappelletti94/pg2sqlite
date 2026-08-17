@@ -36,6 +36,7 @@ use crate::{
             simple_function_expr, string_literal,
         },
         object_name::last_ident,
+        session_variable,
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, every_declared_type_matches,
             function_argument_exprs, numeric_scale, referenced_column_name, rescale_minor_units,
@@ -45,7 +46,7 @@ use crate::{
         temporal_arithmetic::{epoch_of_temporal_difference, subsecond_timestamp_from_epoch},
     },
     prelude::{Pg2SqliteOptions, Translator},
-    traits::TranslationOptions,
+    traits::{SessionVariablePattern, TranslationOptions},
 };
 
 /// Represents a function translation result.
@@ -140,6 +141,9 @@ enum FunctionTranslation {
     /// `cbrt(x)` translated to `pow(x, (1.0 / 3.0))` when math functions are
     /// available.
     ToCbrt,
+    /// A session variable pattern no mapping pairs, which refuses in the
+    /// mapping's own words rather than as an unknown function.
+    UnpairedSessionVariable(SessionVariablePattern),
 }
 
 /// Simple name-only renames: `(pg_name, sqlite_name)`.
@@ -360,6 +364,27 @@ fn translate_function(
         .last()
         .and_then(|part| part.as_ident())
         .map_or_else(|| name.to_string().to_lowercase(), |ident| ident.value.to_ascii_lowercase());
+
+    // The caller's identity, wherever it is named. A mapping says which
+    // function the replica answers it with, and it applies to a query exactly
+    // as it applies to a policy predicate.
+    if let Some(pattern) = session_variable::pattern_of(&original_name, args) {
+        return match options.find_session_variable(&pattern) {
+            Some(mapping) => {
+                FunctionTranslation::WithArgs {
+                    name: mapping.sqlite_function.clone(),
+                    args: Vec::new(),
+                }
+            }
+            // A declared name is evidence the destination registered this very
+            // function, which is a different claim from a mapping and is left
+            // to stand.
+            None if options.declares_user_defined_function(&original_name) => {
+                FunctionTranslation::PassThrough
+            }
+            None => FunctionTranslation::UnpairedSessionVariable(pattern),
+        };
+    }
 
     // Fast path: check static rename table first.
     if let Some(&(_, target)) =
@@ -2103,6 +2128,9 @@ impl Translator for Function {
             FunctionTranslation::Unsupported(msg) => {
                 Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
             }
+            FunctionTranslation::UnpairedSessionVariable(pattern) => {
+                Err(session_variable::unpaired(&pattern))
+            }
             FunctionTranslation::PassThrough => {
                 let translated_args =
                     translate_function_arguments::<Forward>(&func.args, schema, options)?;
@@ -2151,7 +2179,8 @@ mod tests {
 
     #[test]
     fn helper_functions_cover_none_args_passthrough_and_separator_builder() {
-        assert!(function_argument_exprs(&FunctionArguments::None).is_empty());
+        let no_arguments = function_argument_exprs(&FunctionArguments::None);
+        assert!(no_arguments.is_empty(), "a bare call carries no argument, got {no_arguments:?}");
 
         let concatenated = build_concat_ws_expression(
             &parse_expr("','"),

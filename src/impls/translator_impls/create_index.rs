@@ -516,7 +516,8 @@ mod tests {
         if let Expr::Function(func) = &mut idx.columns[0].column.expr {
             func.args = FunctionArguments::None;
         }
-        assert!(extract_columns_from_expr(&idx.columns[0].column.expr).is_empty());
+        let named = extract_columns_from_expr(&idx.columns[0].column.expr);
+        assert!(named.is_empty(), "the expression names no column, got {named:?}");
 
         let mut idx_non_tsvector =
             parse_create_index("CREATE INDEX idx_docs2 ON docs USING GIN (to_tsvector(title))");

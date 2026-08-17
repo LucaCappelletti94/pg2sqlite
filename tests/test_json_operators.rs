@@ -29,7 +29,7 @@ fn test_regular_arrow_still_passes_through() -> Result<(), Box<dyn std::error::E
     let translated = Pg2Sqlite::default()
         .sql("CREATE TABLE t (data TEXT); SELECT data->'key' FROM t;")
         .and_then(|t| t.translate(&Pg2SqliteOptions::default()))?;
-    assert!(!translated.is_empty());
+    assert!(!translated.is_empty(), "the document should translate into at least one statement");
     Ok(())
 }
 

@@ -387,7 +387,10 @@ mod tests {
 
         let statements =
             generate_vec0_statements(&create_table, &schema, &options).expect("should succeed");
-        assert!(statements.is_empty());
+        assert!(
+            statements.is_empty(),
+            "a dimensionless vector column emits no vec0 statement, got {statements:?}"
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@ fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
     let schema = translator.build_schema().unwrap();
     let options = Pg2SqliteOptions::default();
     let stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
-    assert!(!stmts.is_empty());
+    assert!(!stmts.is_empty(), "the document should reverse into at least one statement");
     stmts[0].to_string()
 }
 

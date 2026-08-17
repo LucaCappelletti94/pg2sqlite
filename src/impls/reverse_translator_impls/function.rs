@@ -15,8 +15,8 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, DateTimeField, Expr, ExtractSyntax, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments, Ident, ObjectName, ObjectNamePart, TrimWhereField, Value,
-    ValueWithSpan,
+    FunctionArgExpr, FunctionArguments, Ident, ObjectName, ObjectNamePart, TimezoneInfo,
+    TrimWhereField, Value, ValueWithSpan,
 };
 
 use super::helpers::{Reverse, reverse_translate_window_type};
@@ -28,18 +28,20 @@ use crate::{
             extract_exactly, function_arg_expr_or_err, integer_literal, simple_function_expr,
             string_literal,
         },
+        session_variable,
         shared_helpers::{
             every_declared_type_matches, function_argument_exprs, translate_function_arguments,
             translate_order_by_expr,
         },
+        sqlite_functions::is_shared_with_postgres,
         timezone::{
             TimestampAwareness, flipped_shifting_offset, normalize_timezone_modifier_for_postgres,
             timestamp_awareness,
         },
-        translator_impls::expr::sqlite_json_path_to_pg_text_path,
+        translator_impls::{expr::sqlite_json_path_to_pg_text_path, postgis},
     },
     prelude::Pg2SqliteOptions,
-    traits::TranslationOptions,
+    traits::{SessionVariableMapping, TranslationOptions},
 };
 
 /// Simple reverse renames: `(sqlite_name, pg_name)`.
@@ -126,8 +128,51 @@ pub enum FunctionReversal {
     /// Translate `strftime(fmt, x)` to `to_char(x, template)`, the string
     /// naming the PostgreSQL template.
     ToChar(String),
+    /// The function a session variable mapping pairs with a PostgreSQL
+    /// setting, which becomes the setting again.
+    ToSessionVariable(SessionVariableMapping),
+    /// Cast the single argument to the named type, which is how `date(x)` and
+    /// `time(x)` cross: PostgreSQL has both names, but `time` is a type name
+    /// there and will not take a bare call, and the cast says the same thing
+    /// without depending on name resolution at all.
+    ToCast(DataType),
+    /// Emit a bare keyword with no argument list, which is the only form
+    /// PostgreSQL takes for `current_date` and its relatives.
+    ToBareKeyword(&'static str),
     /// Reject the named SQLite-only construct with the reason string.
     Reject(String),
+}
+
+/// What `date(...)` and `time(...)` become, which their arity decides.
+///
+/// SQLite answers the current date or time for the argument-less spelling,
+/// measured on 3.51.1, so that becomes the keyword. One argument is the date or
+/// time part of a timestamp, which is what the cast says. A second argument is
+/// a modifier, `'+1 day'` or `'start of month'`, and PostgreSQL expresses those
+/// as interval arithmetic rather than as arguments, so they are refused.
+fn reverse_date_or_time(
+    args: &FunctionArguments,
+    data_type: DataType,
+    keyword: &'static str,
+    label: &str,
+) -> FunctionReversal {
+    match args {
+        FunctionArguments::List(list) if list.args.is_empty() => {
+            FunctionReversal::ToBareKeyword(keyword)
+        }
+        FunctionArguments::None => FunctionReversal::ToBareKeyword(keyword),
+        FunctionArguments::List(list) if list.args.len() == 1 => {
+            FunctionReversal::ToCast(data_type)
+        }
+        _ => {
+            FunctionReversal::Reject(format!(
+                "{label} with a modifier argument has no PostgreSQL form: PostgreSQL shifts a \
+                 timestamp with interval arithmetic, as `x + interval '1 day'`, or truncates it \
+                 with date_trunc, rather than taking modifiers. The single-argument \
+                 {label}(x) reverses, as x::{label}."
+            ))
+        }
+    }
 }
 
 /// Reverse a composite strftime format string back to a `date_trunc` field
@@ -349,6 +394,20 @@ pub fn reverse_function(
                 }
             })
         }
+        // date(x) -> x::date, time(x) -> x::time, and the argument-less
+        // spellings -> the keywords, which is what SQLite answers for them.
+        // PostgreSQL has a `date` function and a `time` one, but `time` is a
+        // type name there and refuses a bare call, so the cast is what crosses
+        // for both. A modifier argument has no counterpart at all.
+        "date" => reverse_date_or_time(args, DataType::Date, "current_date", "date"),
+        "time" => {
+            reverse_date_or_time(
+                args,
+                DataType::Time(None, TimezoneInfo::None),
+                "current_time",
+                "time",
+            )
+        }
         // strftime('%Y-01-01 00:00:00', expr) -> date_trunc('year', expr)
         // strftime('%Y', expr) -> EXTRACT(YEAR FROM expr)
         // strftime('%Y-%m-%d', expr) -> to_char(expr, 'YYYY-MM-DD')
@@ -419,6 +478,18 @@ pub fn reverse_function(
         "vec_f32" => FunctionReversal::ToVectorCast,
         // vec_f16(expr) -> expr::halfvec
         "vec_f16" => FunctionReversal::ToHalfvecCast,
+        // The caller's identity, which a mapping pairs with this name. Checked
+        // before the UUID options, and like them ahead of the catch-all,
+        // because a pairing is the caller stating what the name means here.
+        name if session_variable::mapping_for_function(name, options).is_some() => {
+            let mapping = session_variable::mapping_for_function(name, options)
+                .expect("the guard just found the mapping");
+            if session_variable::call_has_no_arguments(args) {
+                FunctionReversal::ToSessionVariable(mapping.clone())
+            } else {
+                FunctionReversal::Reject(session_variable::paired_arity_refusal(mapping))
+            }
+        }
         // The declared version 7 generator -> uuidv7(). Checked before the
         // random one, so a caller who pointed both options at one name gets
         // the reading that keeps the creation-time ordering.
@@ -516,7 +587,222 @@ pub fn reverse_function(
             )
         }
 
-        _ => FunctionReversal::PassThrough,
+        name => classify_unreversed(name, args, options),
+    }
+}
+
+/// SQLite names PostgreSQL cannot answer, each with what it would take instead.
+///
+/// Sorted, and searched rather than matched, because the list is data: it is
+/// the complement of [`is_shared_with_postgres`] over SQLite's own inventory,
+/// and both were measured against PostgreSQL 17's catalogue.
+const SQLITE_ONLY: &[(&str, &str)] = &[
+    (
+        "format",
+        "SQLite's format is printf, whose C-style specifiers PostgreSQL's format does not \
+     share: it templates with %s, %I and %L",
+    ),
+    (
+        "glob",
+        "glob is SQLite's case-sensitive shell-style match, which PostgreSQL has no function \
+     for: write LIKE or a regular expression",
+    ),
+    ("if", "if is not a PostgreSQL function: write CASE WHEN, or iif, which does reverse"),
+    (
+        "json_each",
+        "SQLite's json_each answers a row per element with key, value, type, atom, id, \
+     parent, fullkey and path, where PostgreSQL's answers key and value alone and refuses an array \
+     outright, so the two are not the same table. PostgreSQL splits the job: json_array_elements \
+     walks an array, json_each an object",
+    ),
+    (
+        "json_error_position",
+        "json_error_position reports where SQLite's parser gave up, and \
+     PostgreSQL has nothing that reports it",
+    ),
+    (
+        "json_pretty",
+        "json_pretty has no PostgreSQL equivalent taking the same argument: \
+     jsonb_pretty takes jsonb, so the value has to be cast first",
+    ),
+    (
+        "json_replace",
+        "json_replace updates only paths that already exist, and jsonb_set with \
+     create_if_missing false is the PostgreSQL shape, which takes a text[] path rather than a \
+     JSONPath string",
+    ),
+    (
+        "json_tree",
+        "SQLite's json_tree walks a document recursively, and PostgreSQL has no \
+     function that answers the same rows",
+    ),
+    (
+        "jsonb",
+        "SQLite's jsonb functions answer its own binary encoding, which is not \
+     PostgreSQL's: the json spellings are what reverse",
+    ),
+    (
+        "jsonb_array",
+        "SQLite's jsonb functions answer its own binary encoding, which is not \
+     PostgreSQL's: the json spellings are what reverse",
+    ),
+    (
+        "jsonb_extract",
+        "SQLite's jsonb functions answer its own binary encoding, which is not \
+     PostgreSQL's: the json spellings are what reverse",
+    ),
+    (
+        "jsonb_group_array",
+        "SQLite's jsonb functions answer its own binary encoding, which is not \
+     PostgreSQL's: the json spellings are what reverse",
+    ),
+    (
+        "jsonb_group_object",
+        "SQLite's jsonb functions answer its own binary encoding, which is not \
+     PostgreSQL's: the json spellings are what reverse",
+    ),
+    (
+        "jsonb_insert",
+        "SQLite's jsonb functions answer its own binary encoding, and PostgreSQL's \
+     jsonb_insert takes a text[] path rather than a JSONPath string: the json spellings are what \
+     reverse",
+    ),
+    (
+        "jsonb_object",
+        "SQLite's jsonb functions answer its own binary encoding, and PostgreSQL's \
+     jsonb_object builds from arrays rather than from key and value pairs: the json spellings are \
+     what reverse",
+    ),
+    (
+        "jsonb_patch",
+        "SQLite's jsonb functions answer its own binary encoding, which is not \
+     PostgreSQL's: the json spellings are what reverse",
+    ),
+    (
+        "jsonb_remove",
+        "SQLite's jsonb functions answer its own binary encoding, which is not \
+     PostgreSQL's: the json spellings are what reverse",
+    ),
+    (
+        "jsonb_replace",
+        "SQLite's jsonb functions answer its own binary encoding, which is not \
+     PostgreSQL's: the json spellings are what reverse",
+    ),
+    (
+        "jsonb_set",
+        "SQLite's jsonb functions answer its own binary encoding, and PostgreSQL's \
+     jsonb_set takes a text[] path rather than a JSONPath string: the json spellings are what \
+     reverse",
+    ),
+    (
+        "like",
+        "like is a reserved word in PostgreSQL, which refuses it as a bare call: write the \
+     LIKE operator",
+    ),
+    (
+        "likelihood",
+        "likelihood is a SQLite planner hint with no PostgreSQL equivalent, and it \
+     answers its first argument unchanged",
+    ),
+    (
+        "likely",
+        "likely is a SQLite planner hint with no PostgreSQL equivalent, and it answers its \
+     argument unchanged",
+    ),
+    (
+        "log2",
+        "log2 is the one SQLite math function PostgreSQL has no name for, measured against its \
+     catalogue: write log(2, x), or ln(x) / ln(2) for a double",
+    ),
+    (
+        "raise",
+        "raise is SQLite's trigger abort, which PostgreSQL spells as a PL/pgSQL RAISE \
+     statement rather than an expression",
+    ),
+    ("soundex", "soundex needs PostgreSQL's fuzzystrmatch extension, which may not be installed"),
+    (
+        "sqlite_source_id",
+        "sqlite_source_id names the SQLite build, and PostgreSQL has nothing \
+     that identifies it",
+    ),
+    (
+        "timediff",
+        "timediff answers SQLite's own duration text, where PostgreSQL subtracts \
+     timestamps into an interval",
+    ),
+    (
+        "total_changes",
+        "total_changes is connection-scoped SQLite state with no PostgreSQL \
+     equivalent",
+    ),
+    (
+        "unlikely",
+        "unlikely is a SQLite planner hint with no PostgreSQL equivalent, and it answers \
+     its argument unchanged",
+    ),
+    (
+        "zeroblob",
+        "zeroblob makes a blob of N zero bytes, which PostgreSQL writes as \
+     repeat('\\000', n)::bytea rather than as a function of its own",
+    ),
+];
+
+/// Classifies a name no arm recognised.
+///
+/// The default is a refusal, for the reason the forward direction refuses an
+/// unrecognised name: emitting it produces SQL that fails at run time, long
+/// after translation reported success. Two things earn a passthrough, and both
+/// are evidence PostgreSQL has the name: this crate's own inventory says the
+/// two engines share it, or the caller declared it.
+fn classify_unreversed(
+    name: &str,
+    args: &FunctionArguments,
+    options: &Pg2SqliteOptions,
+) -> FunctionReversal {
+    if is_shared_with_postgres(name) || options.declares_user_defined_function(name) {
+        return FunctionReversal::PassThrough;
+    }
+
+    // The geometry option says the deployment has the geometry catalogue, and
+    // these names are PostGIS's own, so it says as much about the server as
+    // about the replica. The arity is checked because the catalogue records
+    // which arities the extension implements.
+    if options.is_sqlitegis_enabled()
+        && let Some(arity) = positional_arity(args)
+        && postgis::is_sqlitegis_function(name, arity)
+    {
+        return FunctionReversal::PassThrough;
+    }
+
+    if let Some(reason) = sqlite_only_reason(name) {
+        return FunctionReversal::Reject(reason);
+    }
+
+    FunctionReversal::Reject(format!(
+        "{name}() is not a PostgreSQL function and has no reverse translation. Emitting it would \
+         produce SQL that fails with `function {name}() does not exist`. If PostgreSQL has it, \
+         declare it with with_user_defined_functions([\"{name}\"])."
+    ))
+}
+
+/// Why a SQLite-only name cannot cross, when it is one.
+///
+/// Shared with the row-source position, where `FROM json_each(x)` names the
+/// same function in a place the expression classifier never sees.
+pub(crate) fn sqlite_only_reason(name: &str) -> Option<String> {
+    SQLITE_ONLY
+        .binary_search_by_key(&name, |&(sqlite, _)| sqlite)
+        .ok()
+        .map(|index| format!("{}: {}", SQLITE_ONLY[index].0, SQLITE_ONLY[index].1))
+}
+
+/// The positional argument count, or `None` for a shape where arity says
+/// nothing.
+fn positional_arity(args: &FunctionArguments) -> Option<i32> {
+    match args {
+        FunctionArguments::List(list) => i32::try_from(list.args.len()).ok(),
+        FunctionArguments::None => Some(0),
+        FunctionArguments::Subquery(_) => None,
     }
 }
 
@@ -1066,6 +1352,33 @@ pub fn reverse_translate_function(
                 expr: Box::new(inner),
             })
         }
+        FunctionReversal::ToSessionVariable(mapping) => {
+            session_variable::reverse_expression(&mapping)
+        }
+        FunctionReversal::ToCast(data_type) => {
+            let name = session_variable::function_name_lower(&func.name);
+            let exprs = extract_exactly(&func.args, 1, &name)?;
+            let inner =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            Ok(Expr::Cast {
+                expr: Box::new(inner),
+                data_type,
+                format: None,
+                kind: CastKind::DoubleColon,
+            })
+        }
+        FunctionReversal::ToBareKeyword(keyword) => {
+            Ok(Expr::Function(Function {
+                name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(keyword))]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::None,
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            }))
+        }
         FunctionReversal::Reject(msg) => Err(Error::UnsupportedSQLiteFeature(msg)),
         FunctionReversal::PassThrough => {
             build_reverse_function(func.name.clone(), func, schema, options)
@@ -1090,6 +1403,7 @@ mod tests {
     use crate::{
         impls::{function_helpers::function_arg_expr_or_err, timezone::is_fixed_utc_offset},
         prelude::Pg2SqliteOptions,
+        traits::TranslationOptions,
     };
 
     fn empty_schema() -> ParserDB {
@@ -1216,7 +1530,9 @@ mod tests {
         };
 
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        // The subject here is the passthrough plumbing, so the name is declared:
+        // an undeclared one is refused, which `unknown_names_refuse` pins.
+        let options = Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]);
         let translated = reverse_translate_function(&func, &schema, &options)
             .expect("custom function should pass through with translated args");
         let Expr::Function(function) = translated else {
@@ -1342,7 +1658,7 @@ mod tests {
         };
 
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]);
         let translated = reverse_translate_function(&func, &schema, &options)
             .expect("custom function with subquery args should reverse-translate");
         let Expr::Function(function) = translated else {
