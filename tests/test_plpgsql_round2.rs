@@ -7,10 +7,10 @@
 mod helpers;
 use diesel::{RunQueryDsl, prelude::*};
 use helpers::establish_connection;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::prelude::Pg2SqliteOptions;
 
 fn translate(sql: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default().sql(sql)?.translate_to_sql(&Pg2SqliteOptions::default())
+    helpers::translate_pg(sql, &Pg2SqliteOptions::default())
 }
 
 fn apply_all(conn: &mut diesel::SqliteConnection, stmts: &[String]) {

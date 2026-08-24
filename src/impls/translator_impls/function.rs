@@ -42,7 +42,6 @@ use crate::{
             function_argument_exprs, numeric_scale, referenced_column_name, rescale_minor_units,
             translate_function_arguments, unanimous_declared,
         },
-        sqlite_functions::{is_gated_math, is_sqlite_builtin},
         temporal_arithmetic::{epoch_of_temporal_difference, subsecond_timestamp_from_epoch},
     },
     prelude::{Pg2SqliteOptions, Translator},
@@ -163,11 +162,17 @@ enum FunctionTranslation {
     /// two aggregates are indistinguishable in the emitted SQL without type
     /// information.
     ArrayAgg,
+    /// `ascii`, which answers 0 for the empty string where SQLite's `unicode`
+    /// answers NULL. Lowered onto the
+    /// [`ascii_code_point`](crate::impls::idioms::ascii_code_point) shape.
+    AsciiCodePoint,
 }
 
 /// Simple name-only renames: `(pg_name, sqlite_name)`.
 /// Checked before the main match for a compact fast path.
-const FORWARD_RENAMES: &[(&str, &str)] = &[
+///
+/// `pub(crate)` so the reverse direction's inversion pin can walk it.
+pub(crate) const FORWARD_RENAMES: &[(&str, &str)] = &[
     // greatest and least are NOT renames: SQLite's scalar MAX and MIN return
     // NULL when any argument is NULL. See `FunctionTranslation::Extremum`.
     // json_agg and jsonb_agg are NOT renames: a JSON column is TEXT in SQLite
@@ -200,7 +205,8 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     // json_each exists only as a table in FROM, so a scalar rename emits
     // `no such function` at run time. The whole family is refused in the main
     // match instead.
-    ("ascii", "unicode"),
+    // ascii is NOT a rename: unicode('') answers NULL where PostgreSQL
+    // answers 0. See `FunctionTranslation::AsciiCodePoint`.
 ];
 
 /// Builds a NULL-ignoring `MAX`/`MIN` over `arguments`.
@@ -522,12 +528,12 @@ fn translate_function(
         // localtimestamp -> datetime('now', 'localtime')
         "localtimestamp" => FunctionTranslation::WithArgs {
             name: "datetime".to_string(),
-            args: vec![string_literal("now"), string_literal("localtime")],
+            args: crate::impls::idioms::now_localtime_args(),
         },
         // localtime -> time('now', 'localtime')
         "localtime" => FunctionTranslation::WithArgs {
             name: "time".to_string(),
-            args: vec![string_literal("now"), string_literal("localtime")],
+            args: crate::impls::idioms::now_localtime_args(),
         },
         "mod" => FunctionTranslation::ToModulo,
         "div" => FunctionTranslation::ToIntegerDiv,
@@ -571,6 +577,9 @@ fn translate_function(
         // greatest / least ignore NULLs, MAX / MIN do not.
         "greatest" => FunctionTranslation::Extremum { greatest: true },
         "least" => FunctionTranslation::Extremum { greatest: false },
+        // ascii agrees with unicode everywhere but the empty string, where
+        // PostgreSQL answers 0 and unicode answers NULL.
+        "ascii" => FunctionTranslation::AsciiCodePoint,
         // to_json / to_jsonb: a conversion, not a reinterpretation.
         "to_json" | "to_jsonb" => FunctionTranslation::ToJson,
         // jsonb_set / jsonb_insert: path and value both need converting.
@@ -954,8 +963,9 @@ fn classify_unrecognised_function(
     args: &FunctionArguments,
     options: &Pg2SqliteOptions,
 ) -> FunctionTranslation {
-    if is_sqlite_builtin(name)
-        || (options.is_math_functions_available() && is_gated_math(name))
+    let class = crate::impls::sqlite_functions::classify(name);
+    if class.sqlite_builtin
+        || (options.is_math_functions_available() && class.gated_math)
         || options.declares_user_defined_function(name)
         || declares_function_by_option(name, options)
     {
@@ -965,7 +975,7 @@ fn classify_unrecognised_function(
     // Reached only with the option off, since the clause above returns when it
     // is on. The advice has to name the build rather than send the caller off to
     // register a function SQLite would already have.
-    if is_gated_math(name) {
+    if class.gated_math {
         return FunctionTranslation::Unsupported(math_not_declared(name));
     }
 
@@ -1755,28 +1765,7 @@ impl Translator for Function {
                 let translated_ts = ts_expr.translate(schema, options)?;
                 Ok(build_strftime_call(&mapped_format, translated_ts))
             }
-            FunctionTranslation::ToRandomFloat => {
-                // random() -> (CAST(random() AS REAL) + 9223372036854775808.0) /
-                // 18446744073709551616.0 This avoids ABS(-9223372036854775808)
-                // overflow in SQLite.
-                let random_call = simple_function_expr("random", vec![], None);
-                let random_as_real = Expr::Cast {
-                    expr: Box::new(random_call),
-                    data_type: DataType::Real,
-                    format: None,
-                    kind: CastKind::Cast,
-                };
-                let shifted = Expr::BinaryOp {
-                    left: Box::new(random_as_real),
-                    op: BinaryOperator::Plus,
-                    right: Box::new(number_literal("9223372036854775808.0")),
-                };
-                Ok(Expr::BinaryOp {
-                    left: Box::new(Expr::Nested(Box::new(shifted))),
-                    op: BinaryOperator::Divide,
-                    right: Box::new(number_literal("18446744073709551616.0")),
-                })
-            }
+            FunctionTranslation::ToRandomFloat => Ok(crate::impls::idioms::uniform_random_float()),
             FunctionTranslation::ToSubstrLeft => {
                 let exprs = extract_exactly(&func.args, 2, "left")?;
                 let s = exprs[0].translate(schema, options)?;
@@ -2156,7 +2145,7 @@ impl Translator for Function {
                 // PostgreSQL answers NULL over no rows where json_group_array
                 // answers an empty array. An aggregate over one row or more
                 // always has an element, so `[]` can only mean no rows.
-                Ok(simple_function_expr("NULLIF", vec![aggregate, string_literal("[]")], None))
+                Ok(crate::impls::idioms::nullif_empty_json_array(aggregate))
             }
             FunctionTranslation::JsonObjectAgg => {
                 // Translate the arguments (key and value) and build json_group_object.
@@ -2176,7 +2165,7 @@ impl Translator for Function {
                 // PostgreSQL returns NULL over no rows; json_group_object returns
                 // '{}'. An aggregate over one or more rows always has at least one
                 // key, so '{}' can only mean no rows.
-                Ok(simple_function_expr("NULLIF", vec![aggregate, string_literal("{}")], None))
+                Ok(crate::impls::idioms::nullif_empty_json_object(aggregate))
             }
             FunctionTranslation::ArrayAgg => {
                 // Same NULLIF wrapper as JsonAgg, but without the json() wrapping
@@ -2199,7 +2188,11 @@ impl Translator for Function {
                 // '[]'. The reverse translator restores json_agg from this shape
                 // (indistinguishable without type information, documented in the
                 // reverse arm comment).
-                Ok(simple_function_expr("NULLIF", vec![aggregate, string_literal("[]")], None))
+                Ok(crate::impls::idioms::nullif_empty_json_array(aggregate))
+            }
+            FunctionTranslation::AsciiCodePoint => {
+                let exprs = extract_exactly(&func.args, 1, "ascii")?;
+                Ok(crate::impls::idioms::ascii_code_point(exprs[0].translate(schema, options)?))
             }
             FunctionTranslation::ToCbrt => {
                 let exprs = extract_exactly(&func.args, 1, "cbrt")?;

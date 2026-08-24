@@ -706,8 +706,8 @@ pub(crate) fn translate_expr_recursive<D: TranslationDirection>(
 ) -> Result<Expr, Error> {
     crate::impls::expr_helpers::try_map_expr_children(
         expr,
-        &|e| D::translate_expr(e, schema, options),
-        &|q| D::translate_query(q, schema, options),
+        &mut |e| D::translate_expr(e, schema, options),
+        &mut |q| D::translate_query(q, schema, options),
     )
 }
 

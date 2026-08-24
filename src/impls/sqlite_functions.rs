@@ -160,13 +160,39 @@ const SQLITE_MATH: &[&str] = &[
     "radians", "sin", "sinh", "sqrt", "tan", "tanh", "trunc",
 ];
 
-/// Whether `name` is one SQLite answers only under
-/// `SQLITE_ENABLE_MATH_FUNCTIONS`.
+/// Every classification the inventories answer for one name, computed in one
+/// place so callers cannot mix lookups from different vintages of the lists.
 ///
-/// `name` must already be lower-cased.
+/// The classes overlap by design: a name SQLite has can also be one PostgreSQL
+/// shares, and the relations between the lists are pinned by the unit tests
+/// below, not by this struct.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NameClass {
+    /// SQLite resolves the name without an extension or an opt-in.
+    pub sqlite_builtin: bool,
+    /// SQLite answers the name only under `SQLITE_ENABLE_MATH_FUNCTIONS`.
+    pub gated_math: bool,
+    /// Both engines answer the name the same way, so the reverse direction
+    /// may emit it unchanged.
+    pub shared_with_postgres: bool,
+    /// PostgreSQL answers the name and SQLite does not.
+    pub postgres_only: bool,
+}
+
+/// Classify `name` against every inventory in this module.
+///
+/// `name` must already be lower-cased, which every caller does when it reads
+/// the identifier.
 #[must_use]
-pub(crate) fn is_gated_math(name: &str) -> bool {
-    SQLITE_MATH.binary_search(&name).is_ok()
+pub(crate) fn classify(name: &str) -> NameClass {
+    NameClass {
+        sqlite_builtin: SQLITE_BUILTINS.binary_search(&name).is_ok()
+            || SQLITE_AGGREGATES.binary_search(&name).is_ok()
+            || TRANSLATOR_EMITTED.binary_search(&name).is_ok(),
+        gated_math: SQLITE_MATH.binary_search(&name).is_ok(),
+        shared_with_postgres: SHARED_WITH_POSTGRES.binary_search(&name).is_ok(),
+        postgres_only: POSTGRES_ONLY.binary_search(&name).is_ok(),
+    }
 }
 
 /// Every name the maths build flag decides, exposed so a test can walk the same
@@ -175,17 +201,6 @@ pub(crate) fn is_gated_math(name: &str) -> bool {
 #[must_use]
 pub fn gated_math() -> &'static [&'static str] {
     SQLITE_MATH
-}
-
-/// Whether SQLite resolves `name` without an extension or an opt-in.
-///
-/// `name` must already be lower-cased, which every caller does when it reads
-/// the identifier.
-#[must_use]
-pub(crate) fn is_sqlite_builtin(name: &str) -> bool {
-    SQLITE_BUILTINS.binary_search(&name).is_ok()
-        || SQLITE_AGGREGATES.binary_search(&name).is_ok()
-        || TRANSLATOR_EMITTED.binary_search(&name).is_ok()
 }
 
 /// Whether SQLite resolves `name`, exposed so a test can ask this crate the
@@ -197,7 +212,7 @@ pub(crate) fn is_sqlite_builtin(name: &str) -> bool {
 #[cfg(feature = "std")]
 #[must_use]
 pub fn sqlite_has(name: &str) -> bool {
-    is_sqlite_builtin(name)
+    classify(name).sqlite_builtin
 }
 
 /// Every name SQLite answers, the unconditional inventory and the gated maths
@@ -295,15 +310,6 @@ const SHARED_WITH_POSTGRES: &[&str] = &[
     "trunc",
     "upper",
 ];
-
-/// Whether PostgreSQL answers `name` the way SQLite does, so the reverse
-/// direction can emit it unchanged.
-///
-/// `name` must already be lower-cased.
-#[must_use]
-pub(crate) fn is_shared_with_postgres(name: &str) -> bool {
-    SHARED_WITH_POSTGRES.binary_search(&name).is_ok()
-}
 
 /// Every name this crate claims both engines answer the same way, exposed so
 /// the claim can be put to a real PostgreSQL rather than trusted.
@@ -539,15 +545,6 @@ const POSTGRES_ONLY: &[&str] = &[
     "xmlagg",
 ];
 
-/// Whether PostgreSQL answers `name` while SQLite does not, so the reverse
-/// direction can emit it unchanged.
-///
-/// `name` must already be lower-cased.
-#[must_use]
-pub(crate) fn is_postgres_only(name: &str) -> bool {
-    POSTGRES_ONLY.binary_search(&name).is_ok()
-}
-
 /// Every name this crate claims PostgreSQL has and SQLite lacks, exposed for
 /// the same reason as [`shared_with_postgres`].
 #[cfg(feature = "std")]
@@ -560,7 +557,7 @@ pub fn postgres_only() -> &'static [&'static str] {
 mod tests {
     use super::{
         POSTGRES_ONLY, SHARED_WITH_POSTGRES, SQLITE_AGGREGATES, SQLITE_BUILTINS, SQLITE_MATH,
-        TRANSLATOR_EMITTED, is_sqlite_builtin,
+        TRANSLATOR_EMITTED, classify,
     };
 
     /// Binary search answers nonsense on an unsorted slice, and the failure
@@ -589,7 +586,7 @@ mod tests {
     fn every_shared_name_is_a_sqlite_name() {
         for name in SHARED_WITH_POSTGRES {
             assert!(
-                is_sqlite_builtin(name) || SQLITE_MATH.contains(name),
+                classify(name).sqlite_builtin || SQLITE_MATH.contains(name),
                 "{name} is claimed shared but is not a SQLite name"
             );
         }
@@ -599,7 +596,7 @@ mod tests {
     fn the_math_functions_are_not_admitted_here() {
         for gated in SQLITE_MATH.iter().chain(["cbrt"].iter()) {
             assert!(
-                !is_sqlite_builtin(gated),
+                !classify(gated).sqlite_builtin,
                 "{gated} needs SQLITE_ENABLE_MATH_FUNCTIONS and its own opt-in"
             );
         }
@@ -613,7 +610,7 @@ mod tests {
     fn every_postgres_only_name_is_absent_from_sqlite() {
         for name in POSTGRES_ONLY {
             assert!(
-                !is_sqlite_builtin(name) && !SQLITE_MATH.contains(name),
+                !classify(name).sqlite_builtin && !SQLITE_MATH.contains(name),
                 "{name} is a SQLite name, so whether the two engines agree on it is a judgement \
                  that belongs in SHARED_WITH_POSTGRES or in the reverse translator's SQLITE_ONLY"
             );

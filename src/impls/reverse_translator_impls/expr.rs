@@ -14,10 +14,7 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::{
-    ast::{
-        BinaryOperator, CastKind, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-        ObjectNamePart, Value, ValueWithSpan,
-    },
+    ast::{BinaryOperator, Expr, ObjectNamePart, Value, ValueWithSpan},
     tokenizer::Span,
 };
 
@@ -26,31 +23,12 @@ use crate::{
     errors::Error,
     impls::{
         function_helpers::{simple_function_expr, single_quoted_literal},
+        idioms::{ascii_code_point_argument, forward_lower_argument, is_uniform_random_float},
         shared_helpers::translate_expr_recursive,
         temporal_arithmetic::reverse_temporal_arithmetic,
-        translator_impls::expr::wrap_with_lower,
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
-
-/// The argument of the `lower()` call the forward direction wraps each side of
-/// an `ILIKE` in, or `None` for anything else.
-///
-/// Rebuilding the call through the emitter and comparing is what keeps the two
-/// directions in step: a `lower` carrying a window, a filter, a modifier, or a
-/// different spelling is not what the rewrite emits, so it is not restored.
-fn forward_lower_argument(expr: &Expr) -> Option<&Expr> {
-    let Expr::Function(function) = expr else {
-        return None;
-    };
-    let FunctionArguments::List(list) = &function.args else {
-        return None;
-    };
-    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))] = list.args.as_slice() else {
-        return None;
-    };
-    (wrap_with_lower(argument.clone()) == *expr).then_some(argument)
-}
 
 /// Convert a SQLite GLOB pattern to a PostgreSQL LIKE pattern.
 ///
@@ -146,51 +124,6 @@ fn is_backslash_escape(escape: &ValueWithSpan) -> bool {
     matches!(&escape.value, Value::SingleQuotedString(character) if character == "\\")
 }
 
-/// Return true when `expr` matches the exact shape emitted by the forward
-/// translator for PostgreSQL's `random()`:
-/// `(CAST(random() AS REAL) + 9223372036854775808.0) / 18446744073709551616.0`.
-fn is_forward_random_pattern(expr: &Expr) -> bool {
-    let Expr::BinaryOp { left, op: BinaryOperator::Divide, right } = expr else {
-        return false;
-    };
-    // Outer divisor must be the normalization constant.
-    let Expr::Value(ValueWithSpan { value: Value::Number(divisor, _), .. }) = right.as_ref() else {
-        return false;
-    };
-    if divisor != "18446744073709551616.0" {
-        return false;
-    }
-    // Left side must be a parenthesized addition.
-    let Expr::Nested(inner) = left.as_ref() else {
-        return false;
-    };
-    let Expr::BinaryOp { left: cast_expr, op: BinaryOperator::Plus, right: addend } =
-        inner.as_ref()
-    else {
-        return false;
-    };
-    // Addend must be the shift constant.
-    let Expr::Value(ValueWithSpan { value: Value::Number(shift, _), .. }) = addend.as_ref() else {
-        return false;
-    };
-    if shift != "9223372036854775808.0" {
-        return false;
-    }
-    // Cast must be CAST(random() AS REAL).
-    let Expr::Cast { expr: inner_expr, data_type: DataType::Real, kind: CastKind::Cast, .. } =
-        cast_expr.as_ref()
-    else {
-        return false;
-    };
-    // Inner expression must be random().
-    let Expr::Function(func) = inner_expr.as_ref() else {
-        return false;
-    };
-    let name = func.name.0.last().and_then(|p| p.as_ident()).map(|i| i.value.to_ascii_lowercase());
-    name.as_deref() == Some("random")
-        && matches!(&func.args, FunctionArguments::List(l) if l.args.is_empty())
-}
-
 impl ReverseTranslator for Expr {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -203,8 +136,19 @@ impl ReverseTranslator for Expr {
     ) -> Result<Self::PostgresEntry, Error> {
         // Intercept the forward-translated random() pattern before the recursive
         // descent would try to reverse-translate random() inside it (and reject it).
-        if is_forward_random_pattern(self) {
+        if is_uniform_random_float(self) {
             return Ok(simple_function_expr("random", vec![], None));
+        }
+
+        // The forward direction lowers ascii() onto a CASE over unicode(), so
+        // the exact shape restores to ascii() rather than reversing its
+        // pieces, which would answer NULL for the empty string.
+        if let Some(argument) = ascii_code_point_argument(self) {
+            return Ok(simple_function_expr(
+                "ascii",
+                vec![argument.reverse_translate(schema, options)?],
+                None,
+            ));
         }
 
         // Same, for the date arithmetic the forward direction lowers onto

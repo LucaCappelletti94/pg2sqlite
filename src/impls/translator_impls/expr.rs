@@ -31,6 +31,7 @@ use crate::{
             integer_literal, integer_literal_value, number_literal, simple_function_expr,
             single_quoted_literal, string_literal,
         },
+        idioms::wrap_with_lower,
         interval::{interval_date_modifiers, interval_date_modifiers_scaled},
         query_builder::{
             from_relation, plain_table_factor, single_expr_query, table_function_factor,
@@ -2416,14 +2417,6 @@ impl Translator for Expr {
             _ => translate_expr_recursive::<Forward>(self, schema, options)?,
         })
     }
-}
-
-/// Wraps `expr` in a SQLite `lower()` call: `lower(expr)`.
-///
-/// Used to implement ILIKE -> `lower(expr) LIKE lower(pattern)`. The reverse
-/// direction rebuilds this call to recognise its own output.
-pub(crate) fn wrap_with_lower(expr: Expr) -> Expr {
-    simple_function_expr("lower", vec![expr], None)
 }
 
 /// Lowers an `ILIKE` escape character with the operands.

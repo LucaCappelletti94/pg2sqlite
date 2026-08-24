@@ -133,3 +133,37 @@ fn pg_parses(sql: &str) {
     sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
         .unwrap_or_else(|e| panic!("reverse output must parse as PostgreSQL: {e}\n{sql}"));
 }
+
+/// PostgreSQL's `ascii('')` answers 0, measured on 18. The plain rename to
+/// `unicode` answers NULL for the same input, measured on SQLite 3.51, so the
+/// empty string needs its own treatment.
+#[test]
+fn ascii_of_the_empty_string_is_zero() {
+    let result = translate_sql("SELECT ascii('')", &default_opts()).unwrap();
+    // The SQL under test is translator output, a runtime string, so the raw
+    // query interface is the correct one.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let value: Option<i64> = conn.query_row(&result, [], |row| row.get(0)).unwrap();
+    assert_eq!(
+        value,
+        Some(0),
+        "PostgreSQL answers 0 for ascii(''), the translation must too: {result}"
+    );
+}
+
+/// The inputs the rename already gets right, pinned so the empty-string fix
+/// cannot trade them away: NULL propagates and a non-empty string answers its
+/// first code point, `ascii('ab')` being 97 on both engines.
+#[test]
+fn ascii_keeps_null_and_first_character_semantics() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for (pg_sql, expected) in [
+        ("SELECT ascii(NULL)", None),
+        ("SELECT ascii('a')", Some(97)),
+        ("SELECT ascii('ab')", Some(97)),
+    ] {
+        let result = translate_sql(pg_sql, &default_opts()).unwrap();
+        let value: Option<i64> = conn.query_row(&result, [], |row| row.get(0)).unwrap();
+        assert_eq!(value, expected, "{pg_sql} translated to: {result}");
+    }
+}

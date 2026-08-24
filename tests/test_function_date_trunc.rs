@@ -10,12 +10,7 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use run_translated_helper::run_translated_with;
 
 fn translate(sql: &str) -> Result<String, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-        .map_err(|e| e.to_string())
+    translate_sql(sql, &Pg2SqliteOptions::default())
 }
 
 /// Measured on PostgreSQL 16 over `2024-03-15 10:20:30.456`. Every unit

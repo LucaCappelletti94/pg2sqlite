@@ -16,7 +16,7 @@
 
 use diesel::{
     QueryableByName, RunQueryDsl, sql_query,
-    sql_types::{Array, Text},
+    sql_types::{Array, Integer, Nullable, Text},
 };
 use pg2sqlite::{
     internals::{postgres_only, shared_with_postgres, sqlite_has},
@@ -823,4 +823,39 @@ fn a_reversed_session_variable_runs_in_postgres() {
     }
 
     assert!(failures.is_empty(), "{} case(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
+}
+
+/// One nullable integer, for a reverse-translated SELECT whose value matters.
+#[derive(QueryableByName, Debug)]
+struct MaybeInteger {
+    /// The selected value.
+    #[diesel(sql_type = Nullable<Integer>)]
+    val: Option<i32>,
+}
+
+/// The reverse direction must not change an answer: SQLite's `unicode('')` is
+/// NULL (measured on 3.51), and PostgreSQL's `ascii('')` is 0 (measured on
+/// 18), so the plain rename flips NULL to 0 for the empty string.
+#[test]
+fn the_reverse_of_unicode_agrees_with_sqlite_on_the_empty_string() {
+    let schema = build_schema();
+    let options = Pg2SqliteOptions::default();
+    let pg_sql = Pg2Sqlite::default()
+        .reverse_sql("SELECT unicode('') AS val", &schema, &options)
+        .expect("unicode reverses")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let mut connection = fresh_database();
+    // The SQL under test is reverse-translator output, a runtime string the
+    // typed DSL cannot express.
+    let rows: Vec<MaybeInteger> =
+        sql_query(&pg_sql).load(&mut connection).expect("PostgreSQL runs the reverse output");
+    assert_eq!(rows.len(), 1, "one row expected: {pg_sql}");
+    assert_eq!(
+        rows[0].val, None,
+        "SQLite answers NULL for unicode(''), the reverse output must too: {pg_sql}"
+    );
 }

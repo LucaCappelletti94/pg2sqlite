@@ -440,6 +440,44 @@ fn collect_pk_column_names(
     Ok(table.primary_key_columns(schema)?.map(|c| c.column_name().to_string()).collect())
 }
 
+/// Builds the write-guard predicate context for one DML event.
+///
+/// Returns `(columns, using, check)` where `using` is `None` for INSERT
+/// because PostgreSQL's RLS model has no USING clause on that command.
+fn build_write_guard(
+    policies: &[&CreatePolicy],
+    kind: GuardKind,
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(Vec<TriggerColumn>, Option<PolicyPredicate>, PolicyPredicate), Error> {
+    let columns = trigger_columns(table, schema, options)?;
+    let subs = guard_substitutions(&columns, kind, options, table, schema)?;
+    let using = if kind == GuardKind::Update {
+        Some(combine_policy_predicates(
+            policies,
+            PolicyClause::Using,
+            Some("OLD"),
+            options,
+            table,
+            schema,
+            &[],
+        )?)
+    } else {
+        None
+    };
+    let check = combine_policy_predicates(
+        policies,
+        PolicyClause::Check,
+        Some("NEW"),
+        options,
+        table,
+        schema,
+        &subs,
+    )?;
+    Ok((columns, using, check))
+}
+
 /// Returns true if the table has RLS enabled.
 ///
 /// # Errors
@@ -1754,7 +1792,8 @@ fn generate_insert_trigger_sql(
     // Find INSERT policies
     let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert], options)?;
 
-    let columns = trigger_columns(table, schema, options)?;
+    let (columns, _, check) =
+        build_write_guard(&insert_policies, GuardKind::Insert, table, schema, options)?;
     let written: Vec<&TriggerColumn> =
         columns.iter().filter(|column| !column.is_generated()).collect();
     let column_list =
@@ -1764,16 +1803,6 @@ fn generate_insert_trigger_sql(
         .map(|column| Ok(column.forwarded_value().translate(schema, options)?.to_string()))
         .collect::<Result<Vec<_>, Error>>()?
         .join(", ");
-
-    let check = combine_policy_predicates(
-        &insert_policies,
-        PolicyClause::Check,
-        Some("NEW"),
-        options,
-        table,
-        schema,
-        &guard_substitutions(&columns, GuardKind::Insert, options, table, schema)?,
-    )?;
 
     let refuse_computed = refuse_computed_writes(&columns, table_name, GuardKind::Insert);
     let forward = format!(
@@ -1842,16 +1871,8 @@ fn generate_insert_check_trigger_sql(
         )));
     }
 
-    let columns = trigger_columns(table, schema, options)?;
-    let check = combine_policy_predicates(
-        &insert_policies,
-        PolicyClause::Check,
-        Some("NEW"),
-        options,
-        table,
-        schema,
-        &guard_substitutions(&columns, GuardKind::Insert, options, table, schema)?,
-    )?;
+    let (_, _, check) =
+        build_write_guard(&insert_policies, GuardKind::Insert, table, schema, options)?;
 
     let trigger = match check {
         // No permissive policy: nothing grants the write, always raise.
@@ -1904,27 +1925,9 @@ fn generate_update_check_trigger_sql(
         )));
     }
 
-    let columns = trigger_columns(table, schema, options)?;
-    // USING resolves against OLD: which existing rows are valid targets.
-    let using = combine_policy_predicates(
-        &update_policies,
-        PolicyClause::Using,
-        Some("OLD"),
-        options,
-        table,
-        schema,
-        &[],
-    )?;
-    // WITH CHECK resolves against NEW (USING is the fallback per PostgreSQL).
-    let check = combine_policy_predicates(
-        &update_policies,
-        PolicyClause::Check,
-        Some("NEW"),
-        options,
-        table,
-        schema,
-        &guard_substitutions(&columns, GuardKind::Update, options, table, schema)?,
-    )?;
+    let (_, using_opt, check) =
+        build_write_guard(&update_policies, GuardKind::Update, table, schema, options)?;
+    let using = using_opt.expect("update guard always has a USING predicate");
 
     let trigger = match (using, check) {
         // Any DenyAll: raise unconditionally.
@@ -1992,7 +1995,8 @@ fn generate_update_trigger_sql(
     // form that can store NULL when the caller asks for it. No default answers
     // for a NULL here, and none should: the row exists, so nothing is missing.
     // A computed column is the exception, assigned by nobody but SQLite.
-    let assigned = trigger_columns(table, schema, options)?;
+    let (assigned, using_opt, check) =
+        build_write_guard(&update_policies, GuardKind::Update, table, schema, options)?;
     let set_clause = assigned
         .iter()
         .filter(|column| !column.is_generated())
@@ -2007,30 +2011,7 @@ fn generate_update_trigger_sql(
     // Build PK WHERE clause
     let pk_where = build_row_identity_clause(&columns, &pk_columns);
 
-    // USING selects which existing rows may be updated, so it resolves against
-    // OLD. WITH CHECK constrains the row being written, so it resolves against
-    // NEW. See the SET clause above for why no COALESCE is involved.
-    let using = combine_policy_predicates(
-        &update_policies,
-        PolicyClause::Using,
-        Some("OLD"),
-        options,
-        table,
-        schema,
-        &[],
-    )?;
-    // A generated column is the one thing NEW cannot tell the check: the view
-    // still holds the value computed before this update, so the guard computes
-    // it again from the columns the row is about to carry.
-    let check = combine_policy_predicates(
-        &update_policies,
-        PolicyClause::Check,
-        Some("NEW"),
-        options,
-        table,
-        schema,
-        &guard_substitutions(&assigned, GuardKind::Update, options, table, schema)?,
-    )?;
+    let using = using_opt.expect("update guard always has a USING predicate");
 
     // USING selects which existing rows are updatable at all. A row that fails
     // it is skipped, not rejected: PostgreSQL leaves the statement affecting

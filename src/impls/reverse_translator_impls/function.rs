@@ -28,12 +28,16 @@ use crate::{
             extract_exactly, function_arg_expr_or_err, integer_literal, simple_function_expr,
             string_literal,
         },
+        idioms::{
+            extract_json_group_array_nullif, extract_json_group_object_nullif,
+            is_now_localtime_args,
+        },
         session_variable,
         shared_helpers::{
             every_declared_type_matches, function_argument_exprs, translate_function_arguments,
             translate_order_by_expr,
         },
-        sqlite_functions::{is_postgres_only, is_shared_with_postgres},
+        sqlite_functions::classify,
         timezone::{
             TimestampAwareness, flipped_shifting_offset, normalize_timezone_modifier_for_postgres,
             timestamp_awareness,
@@ -49,7 +53,6 @@ use crate::{
 const REVERSE_RENAMES: &[(&str, &str)] = &[
     ("json_group_array", "json_agg"),
     ("json_group_object", "json_object_agg"),
-    ("unicode", "ascii"),
     ("json_object", "json_build_object"),
     ("json_array", "json_build_array"),
     ("sqlite_version", "version"),
@@ -129,6 +132,10 @@ pub enum FunctionReversal {
     /// SQLite's one-argument spelling joins with a comma. PostgreSQL has no
     /// one-argument `string_agg`, so the comma is written out.
     ToStringAgg,
+    /// Translate `unicode(x)` to `NULLIF(ascii(x), 0)`: the two agree on
+    /// every input except the empty string, where `unicode` answers NULL and
+    /// PostgreSQL's `ascii` answers 0, and 0 arises for no other input.
+    ToAsciiNullif,
     /// Translate `strftime(fmt, x)` to `to_char(x, template)`, the string
     /// naming the PostgreSQL template.
     ToChar(String),
@@ -245,82 +252,8 @@ fn strftime_rejection(subject: &str) -> String {
          truncating formats ('%Y-01-01 00:00:00', '%Y-%m-01 00:00:00', '%Y-%m-%d 00:00:00', \
          '%Y-%m-%d %H:00:00', '%Y-%m-%d %H:%M:00', '%Y-%m-%d %H:%M:%S') become date_trunc, a \
          single field (%Y %m %d %H %M %S %f %s %V %G %u %w %j) becomes EXTRACT, and a format \
-         built from %Y %m %d %H %I %M %S with separators becomes to_char."
+         built from %Y %G %V %u %m %d %H %I %M %S with separators becomes to_char."
     )
-}
-
-/// True when `args` matches `('now', 'localtime')`, the exact shape the
-/// forward translator emits for `localtimestamp` and `localtime`.
-fn is_now_localtime_args(args: &FunctionArguments) -> bool {
-    let FunctionArguments::List(list) = args else { return false };
-    let [first, second] = list.args.as_slice() else { return false };
-    let is_now = matches!(
-        first,
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-            value: Value::SingleQuotedString(s), ..
-        }))) if s == "now"
-    );
-    let is_localtime = matches!(
-        second,
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-            value: Value::SingleQuotedString(s), ..
-        }))) if s == "localtime"
-    );
-    is_now && is_localtime
-}
-
-/// Returns the inner `Function` if `func` matches
-/// `NULLIF(json_group_array(...), '[]')`, the exact shape the forward
-/// translator emits for `json_agg`.
-fn extract_json_group_array_nullif(func: &Function) -> Option<&Function> {
-    let outer_name = func.name.0.last().and_then(|p| p.as_ident())?;
-    if !outer_name.value.eq_ignore_ascii_case("nullif") {
-        return None;
-    }
-    let FunctionArguments::List(list) = &func.args else { return None };
-    let [first, second] = list.args.as_slice() else { return None };
-    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Function(inner))) = first else {
-        return None;
-    };
-    let inner_name = inner.name.0.last().and_then(|p| p.as_ident())?;
-    if !inner_name.value.eq_ignore_ascii_case("json_group_array") {
-        return None;
-    }
-    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-        value: Value::SingleQuotedString(sentinel),
-        ..
-    }))) = second
-    else {
-        return None;
-    };
-    (sentinel == "[]").then_some(inner)
-}
-
-/// Returns the inner `Function` if `func` matches
-/// `NULLIF(json_group_object(...), '{}')`, the exact shape the forward
-/// translator emits for `json_object_agg`.
-fn extract_json_group_object_nullif(func: &Function) -> Option<&Function> {
-    let outer_name = func.name.0.last().and_then(|p| p.as_ident())?;
-    if !outer_name.value.eq_ignore_ascii_case("nullif") {
-        return None;
-    }
-    let FunctionArguments::List(list) = &func.args else { return None };
-    let [first, second] = list.args.as_slice() else { return None };
-    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Function(inner))) = first else {
-        return None;
-    };
-    let inner_name = inner.name.0.last().and_then(|p| p.as_ident())?;
-    if !inner_name.value.eq_ignore_ascii_case("json_group_object") {
-        return None;
-    }
-    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-        value: Value::SingleQuotedString(sentinel),
-        ..
-    }))) = second
-    else {
-        return None;
-    };
-    (sentinel == "{}").then_some(inner)
 }
 
 /// The PostgreSQL zone for a SQLite `datetime` timezone modifier.
@@ -505,6 +438,8 @@ pub fn reverse_function(
         "strftime" => reverse_strftime(args),
         // INSTR(str, substr) -> POSITION(substr IN str)
         "instr" => FunctionReversal::ToPosition,
+        // unicode(x) -> NULLIF(ascii(x), 0), NULL for the empty string.
+        "unicode" => FunctionReversal::ToAsciiNullif,
         // min(a, b, ...) -> LEAST(a, b, ...)
         // Keep aggregate MIN(x) unchanged (single-arg form).
         "min" => {
@@ -685,8 +620,9 @@ pub fn reverse_function(
 /// SQLite names PostgreSQL cannot answer, each with what it would take instead.
 ///
 /// Sorted, and searched rather than matched, because the list is data: it is
-/// the complement of [`is_shared_with_postgres`] over SQLite's own inventory,
-/// and both were measured against PostgreSQL 17's catalogue.
+/// the complement of [`SHARED_WITH_POSTGRES`](crate::impls::sqlite_functions)
+/// over SQLite's own inventory, and both were measured against PostgreSQL 17's
+/// catalogue.
 const SQLITE_ONLY: &[(&str, &str)] = &[
     (
         "format",
@@ -851,8 +787,9 @@ fn classify_unreversed(
     args: &FunctionArguments,
     options: &Pg2SqliteOptions,
 ) -> FunctionReversal {
-    if is_shared_with_postgres(name)
-        || is_postgres_only(name)
+    let class = classify(name);
+    if class.shared_with_postgres
+        || class.postgres_only
         || options.declares_user_defined_function(name)
     {
         return FunctionReversal::PassThrough;
@@ -1205,6 +1142,22 @@ pub fn reverse_translate_function(
         }
         FunctionReversal::ToChr => {
             build_reverse_function(ObjectName::from(vec![Ident::new("chr")]), func, schema, options)
+        }
+        FunctionReversal::ToAsciiNullif => {
+            if let FunctionArguments::List(list) = &func.args
+                && list.args.len() == 1
+            {
+                let argument = function_arg_expr_or_err(&list.args[0])?;
+                let reversed = crate::prelude::ReverseTranslator::reverse_translate(
+                    argument, schema, options,
+                )?;
+                return Ok(simple_function_expr(
+                    "NULLIF",
+                    vec![simple_function_expr("ascii", vec![reversed], None), integer_literal(0)],
+                    None,
+                ));
+            }
+            Err(Error::UnsupportedSQLiteFeature("unicode requires exactly 1 argument".to_string()))
         }
         FunctionReversal::ToTrimDirectional(field) => {
             // LTRIM/RTRIM(str, chars) or TRIM(str, chars)
@@ -1584,11 +1537,105 @@ mod tests {
     fn no_sqlite_only_name_is_in_a_postgres_inventory() {
         for (name, _) in SQLITE_ONLY {
             assert!(
-                !crate::impls::sqlite_functions::is_postgres_only(name)
-                    && !crate::impls::sqlite_functions::is_shared_with_postgres(name),
+                !{
+                    let class = crate::impls::sqlite_functions::classify(name);
+                    class.postgres_only || class.shared_with_postgres
+                },
                 "{name} carries a reason it cannot cross, so it must not also pass through"
             );
         }
+    }
+
+    /// Forward rename pairs whose inverse is deliberately absent from
+    /// `REVERSE_RENAMES`, each with the arm that answers for it instead.
+    ///
+    /// An entry here is a claim about the main match, so moving or deleting
+    /// the named arm must come back to this list.
+    const FORWARD_PAIRS_INVERTED_ELSEWHERE: &[(&str, &str)] = &[
+        // instr reverses through the main match as POSITION(sub IN str),
+        // an equivalent PostgreSQL spelling rather than strpos.
+        ("strpos", "the `instr` arm emits POSITION"),
+        // char(n) reverses through the main match as chr(n).
+        ("chr", "the `char` arm emits chr"),
+        // trim is a name both engines share, so the reverse direction passes
+        // it through (two-argument form) or never sees it (one-argument TRIM
+        // parses as Expr::Trim).
+        ("btrim", "the shared name trim needs no reverse rename"),
+        // json_array_length reverses type-sensitively: jsonb_array_length for
+        // a jsonb column, passthrough otherwise.
+        ("jsonb_array_length", "the `json_array_length` arm consults the schema"),
+    ];
+
+    /// Reverse rename pairs whose inverse is deliberately absent from
+    /// `FORWARD_RENAMES`, each naming the forward treatment that replaces it.
+    const REVERSE_PAIRS_INVERTED_ELSEWHERE: &[(&str, &str)] = &[
+        // json_agg forwards as the NULLIF(json_group_array(x), '[]') idiom,
+        // not a rename, so an empty set answers NULL like PostgreSQL.
+        ("json_group_array", "FunctionTranslation::JsonAgg"),
+        // json_object_agg forwards as the NULLIF(..., '{}') idiom.
+        ("json_group_object", "FunctionTranslation::JsonObjectAgg"),
+        // quote_nullable forwards through the Quote treatment, which differs
+        // from a rename on NULL and on numbers.
+        ("quote", "FunctionTranslation::Quote"),
+        // to_jsonb forwards as a conversion, not a reinterpretation.
+        ("json_quote", "FunctionTranslation::ToJson"),
+        // COALESCE is a name both engines share, so the forward direction
+        // passes it through.
+        ("ifnull", "the shared name COALESCE needs no forward rename"),
+    ];
+
+    /// Every plain rename must invert: for a forward `(pg, sqlite)` pair the
+    /// reverse table carries `(sqlite, pg)`, or the pair sits in
+    /// `FORWARD_PAIRS_INVERTED_ELSEWHERE` naming what answers instead, and the
+    /// mirror holds for reverse pairs. A rename deleted or added on one side
+    /// alone fails here instead of silently breaking one direction, which is
+    /// the drift class the `ascii`/`unicode` empty-string defect hid in.
+    #[test]
+    fn every_plain_rename_inverts_or_names_its_replacement() {
+        let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+
+        for (pg, sqlite) in crate::impls::translator_impls::function::FORWARD_RENAMES {
+            let inverted = super::REVERSE_RENAMES.iter().any(|(s, p)| eq(s, sqlite) && eq(p, pg));
+            let excepted = FORWARD_PAIRS_INVERTED_ELSEWHERE.iter().any(|(name, _)| eq(name, pg));
+            assert!(
+                inverted != excepted,
+                "FORWARD_RENAMES ({pg}, {sqlite}): needs exactly one of a REVERSE_RENAMES \
+                 inverse or an exception entry, found inverted={inverted} excepted={excepted}"
+            );
+        }
+
+        for (sqlite, pg) in super::REVERSE_RENAMES {
+            let inverted = crate::impls::translator_impls::function::FORWARD_RENAMES
+                .iter()
+                .any(|(p, s)| eq(p, pg) && eq(s, sqlite));
+            let excepted =
+                REVERSE_PAIRS_INVERTED_ELSEWHERE.iter().any(|(name, _)| eq(name, sqlite));
+            assert!(
+                inverted != excepted,
+                "REVERSE_RENAMES ({sqlite}, {pg}): needs exactly one of a FORWARD_RENAMES \
+                 inverse or an exception entry, found inverted={inverted} excepted={excepted}"
+            );
+        }
+    }
+
+    /// A duplicated key would make the first entry shadow the second, so the
+    /// linear scans stay honest only while every key is unique.
+    #[test]
+    fn rename_tables_carry_no_duplicate_keys() {
+        let mut forward: Vec<&str> = crate::impls::translator_impls::function::FORWARD_RENAMES
+            .iter()
+            .map(|(pg, _)| *pg)
+            .collect();
+        forward.sort_unstable();
+        let before = forward.len();
+        forward.dedup();
+        assert_eq!(before, forward.len(), "duplicate key in FORWARD_RENAMES");
+
+        let mut reverse: Vec<&str> = super::REVERSE_RENAMES.iter().map(|(s, _)| *s).collect();
+        reverse.sort_unstable();
+        let before = reverse.len();
+        reverse.dedup();
+        assert_eq!(before, reverse.len(), "duplicate key in REVERSE_RENAMES");
     }
 
     fn empty_schema() -> ParserDB {

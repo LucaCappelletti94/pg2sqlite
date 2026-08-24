@@ -200,7 +200,7 @@ impl<'a> Scope<'a> {
             // A subquery carries its own relations, and a correlated reference
             // back to the target resolves, so the walk stops at its boundary.
             _ => {
-                try_map_expr_children(expr, &|child| self.rewrite_expr(child), &|query| {
+                try_map_expr_children(expr, &mut |child| self.rewrite_expr(child), &mut |query| {
                     Ok(query.clone())
                 })
             }

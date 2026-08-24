@@ -141,3 +141,23 @@ fn a_truncating_format_is_not_claimed_by_to_char() {
     let sql = reverse("SELECT strftime('%Y-%m-%d %H:%M:%S', ts) FROM t");
     assert!(sql.contains("date_trunc('second', ts)"), "{sql}");
 }
+
+/// The ISO triple comes home as `to_char`. Measured on PostgreSQL 18 and
+/// SQLite 3.51: `to_char(date '2024-12-30', 'IYYY-IW-ID')` and
+/// `strftime('%G-%V-%u', '2024-12-30')` both answer `2025-01-1`, zero padding
+/// included, and `2027-01-01` answers `2026-53-5` on both.
+#[test]
+fn an_iso_year_week_day_format_comes_home_as_to_char() {
+    let sql = reverse("SELECT strftime('%G-%V-%u', ts) FROM t");
+    assert!(sql.contains("to_char(ts, 'IYYY-IW-ID')"), "{sql}");
+}
+
+/// A mix of ISO and calendar fields also comes home, because both engines
+/// compute each field independently. Measured: `strftime('%G-%m-%d',
+/// '2027-01-01')` and `to_char(date '2027-01-01', 'IYYY-MM-DD')` both answer
+/// `2026-01-01`.
+#[test]
+fn an_iso_calendar_mix_comes_home_as_to_char() {
+    let sql = reverse("SELECT strftime('%G-%m-%d', ts) FROM t");
+    assert!(sql.contains("to_char(ts, 'IYYY-MM-DD')"), "{sql}");
+}

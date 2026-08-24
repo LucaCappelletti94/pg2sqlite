@@ -22,8 +22,12 @@ pub enum Error {
     #[error("Parser error in '{0}': {1}")]
     ParserError(String, ParserError),
     /// Error that may occur during the construction of the schema.
+    ///
+    /// Boxed because the nested enum is 120 bytes, which would put this enum
+    /// at clippy's `result_large_err` threshold and copy that weight through
+    /// every `Result` in the crate.
     #[error("Schema error: {0}")]
-    SchemaError(#[from] sql_traits::errors::Error),
+    SchemaError(#[source] Box<sql_traits::errors::Error>),
     /// Error raised when a schema object cannot be resolved in the database it
     /// is queried against.
     ///
@@ -259,4 +263,11 @@ pub enum Error {
         /// The reserved trigger name that collides with an existing object.
         trigger_name: String,
     },
+}
+
+/// Boxes on the way in, so `?` still converts a schema error in one hop.
+impl From<sql_traits::errors::Error> for Error {
+    fn from(error: sql_traits::errors::Error) -> Self {
+        Self::SchemaError(Box::new(error))
+    }
 }

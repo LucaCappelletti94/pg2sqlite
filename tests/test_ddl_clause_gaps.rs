@@ -393,3 +393,37 @@ fn guarded_rename_of_declared_table_still_translates() {
             .expect("a guarded rename of a declared table is valid in both databases");
     sqlite_accepts(&stmts).expect("the emitted DDL must run");
 }
+
+/// `CHECK ... NO INHERIT` parses since the sqlparser pin moved to `183e083e`.
+/// The modifier only stops a constraint from reaching child tables, SQLite
+/// has no table inheritance, and `INHERITS` is refused outright, so the CHECK
+/// is kept, the modifier is dropped with a warning, and the emitted DDL runs.
+#[test]
+fn check_no_inherit_keeps_the_check_and_drops_the_modifier_with_a_warning() {
+    for sql in [
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT, CHECK (n > 0) NO INHERIT);",
+        "CREATE TABLE t (id INT PRIMARY KEY, n INT CHECK (n > 0) NO INHERIT);",
+    ] {
+        let (stmts, warnings) =
+            translate_with_warnings(sql).expect("NO INHERIT must not fail the translation");
+        assert!(
+            stmts[0].contains("CHECK") && !stmts[0].contains("NO INHERIT"),
+            "the CHECK must survive without the modifier: {}",
+            stmts[0]
+        );
+        assert!(
+            warnings.iter().any(|w| w.to_string().contains("NO INHERIT")),
+            "dropping NO INHERIT must be reported: {warnings:?}"
+        );
+        sqlite_accepts(&stmts).expect("the emitted DDL must run");
+
+        // The kept CHECK still enforces: an out-of-range row is refused.
+        let conn = Connection::open_in_memory().unwrap();
+        for stmt in &stmts {
+            conn.execute_batch(stmt).unwrap();
+        }
+        conn.execute_batch("INSERT INTO t VALUES (1, 5);").expect("a passing row lands");
+        let err = conn.execute_batch("INSERT INTO t VALUES (2, -1);");
+        assert!(err.is_err(), "the CHECK must still enforce after the modifier is dropped");
+    }
+}

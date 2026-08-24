@@ -293,6 +293,7 @@ pub(crate) fn translate_column_def(
                 name: None,
                 expr: Box::new(uuid_blob_length_check_expr(&column.name)),
                 enforced: None,
+                no_inherit: false,
             }),
         });
     }
@@ -307,6 +308,7 @@ pub(crate) fn translate_column_def(
                 name: None,
                 expr: Box::new(numeric_precision_bound_expr(&column.name, precision)),
                 enforced: None,
+                no_inherit: false,
             }),
         });
     }
@@ -320,6 +322,7 @@ pub(crate) fn translate_column_def(
                 name: None,
                 expr: Box::new(character_length_bound_expr(&column.name, length)),
                 enforced: None,
+                no_inherit: false,
             }),
         });
     }
