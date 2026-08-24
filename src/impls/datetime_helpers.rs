@@ -166,6 +166,14 @@ pub(crate) fn datetime_field_from_strftime_format(format: &str) -> Option<DateTi
 /// carrying a two-digit year has no lowering at all.
 const TO_CHAR_CODES: &[(&str, &str)] = &[
     ("YYYY", "%Y"),
+    // The ISO codes: IYYY is the ISO week-numbering year, IW the ISO week
+    // (Monday based, zero padded), ID the ISO day of week (1 is Monday).
+    // Measured against both engines at the year boundary: 2024-12-30 answers
+    // 2025-01-1 on each, and both compute every field independently, so an
+    // ISO and calendar mix agrees too.
+    ("IYYY", "%G"),
+    ("IW", "%V"),
+    ("ID", "%u"),
     ("HH24", "%H"),
     ("HH12", "%I"),
     ("MM", "%m"),
@@ -247,10 +255,10 @@ pub(crate) fn pg_to_char_format_to_strftime(pg_format: &str) -> Result<String, E
             return Err(unsupported_template(
                 pg_format,
                 &format!(
-                    "contains '{character}'. Supported codes: YYYY, MM, DD, HH24, HH12, HH, \
-                     MI, SS. Supported separators: - : . / , _ (space) T, and any text in \
-                     double quotes. For number formatting codes (9, 0, FM, L, ...) use \
-                     printf() or CAST."
+                    "contains '{character}'. Supported codes: YYYY, IYYY, IW, ID, MM, DD, \
+                     HH24, HH12, HH, MI, SS. Supported separators: - : . / , _ (space) T, and \
+                     any text in double quotes. For number formatting codes (9, 0, FM, L, ...) \
+                     use printf() or CAST."
                 ),
             ));
         }

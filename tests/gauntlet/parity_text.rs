@@ -317,3 +317,19 @@ fn boolean_cast_to_text_translates_correctly() {
         "CAST(TRUE AS TEXT) must agree after translation"
     );
 }
+
+/// `ascii('')` answers 0 on PostgreSQL, and the rename target `unicode('')`
+/// answers NULL on SQLite, so a plain rename is not enough.
+#[test]
+fn ascii_of_the_empty_string_agrees() {
+    let mut pg = pg_conn();
+    let mut sqlite = sqlite_conn();
+
+    let pg_sql = "SELECT CAST(ascii('') AS TEXT) AS val FROM text_parity WHERE id = 1";
+    let sqlite_sql = translate_select(pg_sql);
+    assert_eq!(
+        sqlite_rows(&mut sqlite, &sqlite_sql),
+        pg_rows(&mut pg, pg_sql),
+        "ascii('') must agree after translation"
+    );
+}

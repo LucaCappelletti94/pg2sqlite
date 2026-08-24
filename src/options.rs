@@ -17,7 +17,7 @@ use crate::traits::{
 };
 
 /// Struct to hold options for the translation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pg2SqliteOptions {
     /// Whether to drop check constraints containing unsupported functions.
     remove_unsupported_check_constraints: bool,

@@ -165,7 +165,12 @@ const CASES: &[Case] = &[
     // consumed block above.
     warned(FUNCTION),
     Case { setup: FUNCTION, sql: "DROP FUNCTION f()", outcome: Outcome::Warned },
-    warned("ALTER FUNCTION f() OWNER TO r"),
+    // Since sql-traits 57555a10 resolves the function OWNER TO names, an
+    // undeclared one refuses at build (pinned below), so the warn-drop needs
+    // the function declared first.
+    Case { setup: FUNCTION, sql: "ALTER FUNCTION f() OWNER TO r", outcome: Outcome::Warned },
+    // Rejected at build: ownership of a function nothing declared.
+    rejected("ALTER FUNCTION nope() OWNER TO r"),
     warned("CREATE EXTENSION IF NOT EXISTS pgcrypto"),
     warned("DROP EXTENSION pgcrypto"),
     warned("CREATE SEQUENCE seq START WITH 1"),

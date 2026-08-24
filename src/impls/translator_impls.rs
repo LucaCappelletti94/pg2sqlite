@@ -14,7 +14,7 @@ use alloc::{
 
 pub(crate) mod array;
 pub(crate) mod column;
-mod column_option;
+pub(crate) mod column_option;
 mod condition_injection;
 mod constraint_characteristic;
 pub(crate) mod create_index;
@@ -24,7 +24,7 @@ mod create_view;
 pub(crate) mod data_type;
 mod delete;
 pub(crate) mod expr;
-mod function;
+pub(crate) mod function;
 mod helpers;
 mod index_column;
 pub(crate) mod insert;

@@ -103,7 +103,7 @@ impl core::fmt::Display for TranslationWarning {
 /// statements plus any warnings collected during translation.
 ///
 /// [`Pg2Sqlite::translate_with_report`]: crate::pg2sqlite::Pg2Sqlite::translate_with_report
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslationReport {
     /// Translated SQLite statements. Equivalent to the `Vec<Statement>`
     /// returned by [`Pg2Sqlite::translate`].

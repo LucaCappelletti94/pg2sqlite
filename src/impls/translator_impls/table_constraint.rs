@@ -46,10 +46,14 @@ impl Translator for TableConstraint {
             Self::Check(check_constraint) => {
                 match check_constraint.expr.translate(schema, options) {
                     Ok(translated_expr) => {
+                        crate::impls::translator_impls::column_option::warn_no_inherit_dropped(
+                            check_constraint,
+                        );
                         Ok(vec![Self::Check(sqlparser::ast::CheckConstraint {
                             name: check_constraint.name.clone(),
                             expr: Box::new(translated_expr),
                             enforced: check_constraint.enforced,
+                            no_inherit: false,
                         })])
                     }
                     Err(_) if options.is_remove_unsupported_check_constraints_enabled() => {
@@ -204,6 +208,7 @@ fn match_full_guard(
             right: Box::new(Expr::Nested(Box::new(none_null))),
         }),
         enforced: None,
+        no_inherit: false,
     })))
 }
 

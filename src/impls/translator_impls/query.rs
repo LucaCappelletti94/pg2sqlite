@@ -1018,9 +1018,10 @@ mod tests {
                 continue;
             }
             assert!(
-                crate::impls::sqlite_functions::is_sqlite_builtin(name)
-                    || crate::impls::sqlite_functions::is_shared_with_postgres(name)
-                    || crate::impls::sqlite_functions::is_postgres_only(name),
+                {
+                    let class = crate::impls::sqlite_functions::classify(name);
+                    class.sqlite_builtin || class.shared_with_postgres || class.postgres_only
+                },
                 "{name} is an aggregate this crate knows, so the reverse direction must place it \
                  too"
             );

@@ -31,6 +31,11 @@ pub enum UuidRepresentation {
 }
 
 /// Enum for defining the representation of PostgreSQL arrays in `SQLite`.
+///
+/// `Json` is currently the only representation. The enum exists because the
+/// `Option<ArrayRepresentation>` in the options doubles as the enable switch:
+/// with none configured, every array construct is refused rather than
+/// silently downgraded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum ArrayRepresentation {

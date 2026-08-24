@@ -28,6 +28,23 @@ use crate::{
     traits::TranslationOptions,
 };
 
+/// Warn that a `CHECK ... NO INHERIT` loses its modifier.
+///
+/// Provably neutral: `NO INHERIT` only stops a constraint from reaching child
+/// tables, SQLite has no table inheritance, and `INHERITS` itself is refused,
+/// so no child exists for the constraint to be withheld from.
+pub(crate) fn warn_no_inherit_dropped(check: &sqlparser::ast::CheckConstraint) {
+    if check.no_inherit {
+        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+            construct: "CHECK ... NO INHERIT".to_string(),
+            reason: "NO INHERIT only stops a constraint from reaching child tables, and \
+                     SQLite has no table inheritance, so the modifier was dropped and the \
+                     CHECK itself is kept."
+                .to_string(),
+        });
+    }
+}
+
 impl Translator for ColumnOptionDef {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -61,6 +78,7 @@ impl Translator for ColumnOptionDef {
                 if options.is_remove_unsupported_check_constraints_enabled() {
                     Ok(None)
                 } else {
+                    warn_no_inherit_dropped(check);
                     let translated_expr = check.expr.translate(schema, options)?;
                     Ok(Some(ColumnOptionDef {
                         name: self.name.clone(),
@@ -68,6 +86,7 @@ impl Translator for ColumnOptionDef {
                             name: check.name.clone(),
                             expr: Box::new(translated_expr),
                             enforced: check.enforced,
+                            no_inherit: false,
                         }),
                     }))
                 }

@@ -538,6 +538,10 @@ impl Pg2Sqlite {
 
     /// Translates loaded PostgreSQL statements to SQLite.
     ///
+    /// Warnings about dropped or downgraded constructs are discarded on this
+    /// path. Use [`translate_with_report`](Self::translate_with_report) to
+    /// collect them alongside the statements.
+    ///
     /// # Errors
     ///
     /// Returns an error if translation fails.
@@ -656,6 +660,25 @@ impl Pg2Sqlite {
     ///     .unwrap();
     /// assert_eq!(manifest[0].logical, "users");
     /// assert_eq!(manifest[0].wrapper, WrapperKind::Plain);
+    /// ```
+    ///
+    /// A `NUMERIC(p, s)` column stores minor units, so reading it back gives
+    /// 1999 where PostgreSQL gave 19.99. The manifest publishes the scale and
+    /// the consumer applies it when presenting the value:
+    ///
+    /// ```
+    /// # use pg2sqlite::{pg2sqlite::Pg2Sqlite, options::Pg2SqliteOptions};
+    /// let manifest = Pg2Sqlite::default()
+    ///     .sql("CREATE TABLE prices (id INT PRIMARY KEY, amount NUMERIC(10, 2));")
+    ///     .unwrap()
+    ///     .translation_manifest(&Pg2SqliteOptions::default())
+    ///     .unwrap();
+    /// let amount = manifest[0].columns.iter().find(|c| c.name == "amount").unwrap();
+    /// assert_eq!(amount.minor_unit_scale, Some(2));
+    ///
+    /// let stored = 1999_i64;
+    /// let scale = 10_i64.pow(amount.minor_unit_scale.unwrap());
+    /// assert_eq!(format!("{}.{:02}", stored / scale, stored % scale), "19.99");
     /// ```
     pub fn translation_manifest(
         &self,

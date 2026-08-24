@@ -33,8 +33,9 @@ pub struct TableManifestEntry {
     pub physical: String,
     /// The wrapper generated around the physical table.
     pub wrapper: WrapperKind,
-    /// How each column is represented, for the columns whose representation a
-    /// consumer cannot infer from the emitted type alone.
+    /// How each column is physically represented, one entry per column, with
+    /// `minor_unit_scale` populated only where the representation cannot be
+    /// inferred from the emitted type alone.
     pub columns: Vec<ColumnManifestEntry>,
 }
 

@@ -450,3 +450,18 @@ fn datetime_expressions_agree() {
         unexpected.join("\n")
     );
 }
+
+/// The ISO `to_char` codes agree after translation. Row 1 (2024-12-30) is the
+/// boundary case: calendar year 2024 but ISO 2025-W01, day 1.
+#[test]
+fn to_char_iso_codes_agree() {
+    let mut pg = pg_setup();
+    let mut sqlite = sqlite_setup();
+
+    let expr = "to_char(d, 'IYYY-IW-ID')";
+    assert_eq!(
+        sqlite_eval(&mut sqlite, expr, ALL),
+        pg_eval(&mut pg, expr, ALL),
+        "ISO to_char codes must agree after translation"
+    );
+}
