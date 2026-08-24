@@ -25,7 +25,7 @@ thiserror = { version = "2.0", default-features = false }
 arbitrary = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 diesel = { version = "2.3.9", features = ["postgres", "sqlite"] }
 insta = "1.47.2"
 rosetta-uuid = { version = "0.1.2", features = ["diesel", "postgres", "sqlite"] }
