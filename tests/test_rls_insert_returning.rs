@@ -288,3 +288,195 @@ fn a_table_without_a_policy_still_returns_its_assigned_key() {
     let last = translated.last().expect("at least one statement").to_string();
     assert!(last.contains("INSERT INTO notes"), "the insert must be untouched: {last}");
 }
+
+// --- M1: strict-mode backing-table INSERT guard mis-combines policies --------
+
+mod m1_tests {
+    use diesel::{prelude::*, sqlite::SqliteConnection};
+    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+
+    fn strict_opts() -> Pg2SqliteOptions {
+        Pg2SqliteOptions::default()
+            .with_rls_audit_table_name("rls_violations")
+            .with_strict_rls_validation()
+    }
+
+    fn apply(schema: &str) -> SqliteConnection {
+        let stmts = Pg2Sqlite::default()
+            .sql(schema)
+            .expect("parse")
+            .translate(&strict_opts())
+            .expect("translate");
+        let mut conn = SqliteConnection::establish(":memory:").expect("open db");
+        for s in &stmts {
+            // CREATE TABLE / CREATE VIEW / CREATE TRIGGER: DDL the typed DSL
+            // cannot express.
+            diesel::sql_query(s.to_string()).execute(&mut conn).expect("apply DDL");
+        }
+        conn
+    }
+
+    // Schema: one permissive WITH CHECK plus one restrictive WITH CHECK.
+    // PostgreSQL ANDs the restrictive policy onto the OR of permissive ones.
+    const M1A: &str = "\
+CREATE TABLE m1docs (
+    id INTEGER PRIMARY KEY,
+    trusted BOOLEAN NOT NULL DEFAULT false,
+    body TEXT NOT NULL
+);
+ALTER TABLE m1docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY m1_sel ON m1docs FOR SELECT USING (true);
+CREATE POLICY m1_perm ON m1docs FOR INSERT WITH CHECK (body IS NOT NULL);
+CREATE POLICY m1_rest ON m1docs AS RESTRICTIVE FOR INSERT WITH CHECK (trusted = true);
+";
+
+    diesel::table! {
+        m1docs_rls (id) {
+            id -> Integer,
+            trusted -> Bool,
+            body -> Text,
+        }
+    }
+
+    #[derive(Insertable)]
+    #[diesel(table_name = m1docs_rls)]
+    struct M1aRow {
+        id: i32,
+        trusted: bool,
+        body: String,
+    }
+
+    /// In strict mode the backing-table BEFORE INSERT trigger enforces WITH
+    /// CHECK for the INSERT-RETURNING rewrite path. PostgreSQL ANDs
+    /// restrictive policies onto the OR of permissive ones. The trigger
+    /// currently joins all WITH CHECK expressions with OR, so the
+    /// permissive check (body IS NOT NULL) passes even when the restrictive
+    /// check (trusted = true) fails. This test inserts directly
+    /// into the backing table, which triggers the same BEFORE INSERT trigger
+    /// the rewrite path uses, and asserts the refusal PostgreSQL would
+    /// produce.
+    #[test]
+    fn strict_mode_restrictive_check_not_bypassed_by_permissive() {
+        let mut conn = apply(M1A);
+        // trusted = false: satisfies permissive (body IS NOT NULL) but violates
+        // restrictive (trusted = true). PostgreSQL refuses. The current trigger
+        // emits WHEN NOT ((body IS NOT NULL) OR (trusted = true)), so the OR
+        // makes the permissive check sufficient, and the insert lands.
+        let result = diesel::insert_into(m1docs_rls::table)
+            .values(M1aRow { id: 1, trusted: false, body: "hello".to_owned() })
+            .execute(&mut conn);
+        assert!(
+            result.is_err(),
+            "restrictive WITH CHECK must block the insert even when permissive passes"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("row-level security"), "refusal must name the RLS policy, got: {msg}");
+    }
+
+    // Schema: FOR ALL with USING only (no WITH CHECK). PostgreSQL forbids
+    // USING on FOR INSERT policies outright (only WITH CHECK expression
+    // allowed for INSERT, measured on postgres:18-alpine) and falls back to
+    // USING as the write check for FOR ALL policies. The view path's
+    // combine_policy_predicates already implements this fallback, but
+    // generate_insert_check_trigger_sql only reads check_expression,
+    // returning None for USING-only policies, so the RETURNING rewrite path
+    // gets no guard at all.
+    const M1B: &str = "\
+CREATE TABLE m1b (
+    id INTEGER PRIMARY KEY,
+    owner TEXT NOT NULL
+);
+ALTER TABLE m1b ENABLE ROW LEVEL SECURITY;
+CREATE POLICY m1b_all ON m1b FOR ALL USING (owner = 'alice');
+";
+
+    diesel::table! {
+        m1b_rls (id) {
+            id -> Integer,
+            owner -> Text,
+        }
+    }
+
+    #[derive(Insertable)]
+    #[diesel(table_name = m1b_rls)]
+    struct M1bRow {
+        id: i32,
+        owner: String,
+    }
+
+    /// A conforming insert must keep succeeding once the USING fallback guard
+    /// exists. Measured on postgres:18-alpine: FOR ALL USING with no WITH
+    /// CHECK admits a row satisfying USING.
+    #[test]
+    fn strict_mode_using_only_policy_allows_conforming_insert() {
+        let mut conn = apply(M1B);
+        diesel::insert_into(m1b_rls::table)
+            .values(M1bRow { id: 1, owner: "alice".to_owned() })
+            .execute(&mut conn)
+            .expect("a row satisfying USING must be admitted");
+    }
+
+    /// PostgreSQL enforces the FOR ALL policy's USING clause as the write
+    /// check when no WITH CHECK is declared. Measured on postgres:18-alpine:
+    /// inserting a row violating USING raises the row-level security error.
+    /// This currently passes, but by accident: no BEFORE INSERT guard exists,
+    /// and the strict monitor's read-visibility check happens to coincide
+    /// with USING when the FOR ALL policy is the only one. The pin keeps the
+    /// refusal in place once a real USING fallback guard exists.
+    #[test]
+    fn strict_mode_using_only_policy_blocks_violating_insert() {
+        let mut conn = apply(M1B);
+        let result = diesel::insert_into(m1b_rls::table)
+            .values(M1bRow { id: 2, owner: "bob".to_owned() })
+            .execute(&mut conn);
+        assert!(result.is_err(), "a row violating the USING fallback check must be refused");
+    }
+
+    // Schema: same USING-only FOR ALL policy, plus a wide-open SELECT policy.
+    // Read visibility and the write check now diverge, so the strict
+    // monitor's visibility check no longer masks the missing USING fallback
+    // in generate_insert_check_trigger_sql.
+    const M1C: &str = "\
+CREATE TABLE m1c (
+    id INTEGER PRIMARY KEY,
+    owner TEXT NOT NULL
+);
+ALTER TABLE m1c ENABLE ROW LEVEL SECURITY;
+CREATE POLICY m1c_sel ON m1c FOR SELECT USING (true);
+CREATE POLICY m1c_all ON m1c FOR ALL USING (owner = 'alice');
+";
+
+    diesel::table! {
+        m1c_rls (id) {
+            id -> Integer,
+            owner -> Text,
+        }
+    }
+
+    #[derive(Insertable)]
+    #[diesel(table_name = m1c_rls)]
+    struct M1cRow {
+        id: i32,
+        owner: String,
+    }
+
+    /// PostgreSQL refuses this insert: the FOR ALL policy's USING clause is
+    /// the write check regardless of what other SELECT policies make
+    /// readable. Measured today this passes, but only through a second bug:
+    /// the emitted view drops the FOR SELECT policy when a FOR ALL policy is
+    /// present (pinned in test_rls_multiple_policies.rs), so the strict
+    /// monitor's visibility check happens to refuse the row. Once the view
+    /// ORs the policies as PostgreSQL does, only a real USING fallback guard
+    /// in generate_insert_check_trigger_sql keeps this refusal alive.
+    #[test]
+    fn strict_mode_using_fallback_not_masked_by_read_visibility() {
+        let mut conn = apply(M1C);
+        let result = diesel::insert_into(m1c_rls::table)
+            .values(M1cRow { id: 1, owner: "bob".to_owned() })
+            .execute(&mut conn);
+        assert!(
+            result.is_err(),
+            "a row violating the FOR ALL USING write check must be refused even when readable"
+        );
+    }
+}

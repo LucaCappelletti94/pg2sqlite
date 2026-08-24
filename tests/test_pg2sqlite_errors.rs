@@ -115,7 +115,8 @@ fn statement_builder_is_chainable() {
     let translator = Pg2Sqlite::default().statement(stmt);
     let result = translator.translate(&Pg2SqliteOptions::default());
     assert!(result.is_ok());
-    assert!(!result.unwrap().is_empty());
+    let statements = result.unwrap();
+    assert_ne!(statements.len(), 0, "statement() translation must produce at least one statement");
 }
 
 #[test]

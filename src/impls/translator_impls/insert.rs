@@ -30,7 +30,8 @@ use crate::{
         translator_impls::{
             rls,
             uuid::{
-                is_blob_uuid_representation, maybe_wrap_text_uuid_literal, uuid_columns_of_table,
+                is_blob_uuid_representation, make_uuid_conversion_call,
+                maybe_wrap_text_uuid_literal, uuid_columns_of_table,
             },
             vector::{maybe_wrap_text_vector_literal, vector_columns_of_table},
         },
@@ -797,7 +798,21 @@ fn wrap_uuid_text_literals(
                     expr,
                     sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("__placeholder")),
                 );
-                *expr = maybe_wrap_text_uuid_literal(taken, options)?;
+                // Runtime placeholders (e.g. ?1 from $1) cannot be validated
+                // at translation time. Wrap them in the brace-stripping unhex
+                // call so braced and plain text binds both land as the 16-byte
+                // blob the STRICT column requires.
+                *expr = if matches!(
+                    &taken,
+                    sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan {
+                        value: sqlparser::ast::Value::Placeholder(_),
+                        ..
+                    })
+                ) {
+                    make_uuid_conversion_call(taken, options)
+                } else {
+                    maybe_wrap_text_uuid_literal(taken, options)?
+                };
             }
         }
     }

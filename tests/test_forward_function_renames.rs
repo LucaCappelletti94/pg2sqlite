@@ -104,14 +104,18 @@ fn reverse_quote_to_quote_nullable() {
     pg_parses(&result);
 }
 
+/// PostgreSQL has json_array_length natively for the json type, and the
+/// jsonb spelling rejects non-jsonb arguments, so a literal argument must
+/// pass through under the json name. Only a column declared jsonb picks the
+/// jsonb spelling.
 #[test]
-fn reverse_json_array_length_to_jsonb_array_length() {
+fn reverse_json_array_length_passes_through_for_non_jsonb_arguments() {
     let result =
         helpers::reverse_translate_sql("SELECT json_array_length('[1,2,3]') FROM t").unwrap();
     let lower = result.to_lowercase();
     assert!(
-        lower.contains("jsonb_array_length("),
-        "json_array_length should reverse to jsonb_array_length: {result}"
+        lower.contains("json_array_length(") && !lower.contains("jsonb_array_length("),
+        "a literal argument must keep the json spelling: {result}"
     );
     pg_parses(&result);
 }

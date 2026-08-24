@@ -130,3 +130,34 @@ fn the_emitted_shape_reverses_to_valid_postgresql() {
         .to_string();
     assert!(restored.contains("sign(x)") && restored.contains("abs(x)"), "{restored}");
 }
+
+// ── H1: ||/ operator form of cube root returns NULL for negative operands ────
+
+/// H1: the prefix operator ||/ emits pow(x, (1.0 / 3.0)), which returns NULL
+/// for every negative operand because C pow(negative, fraction) is NaN and
+/// SQLite surfaces NaN as NULL. PostgreSQL returns -2 for ||/ -8.
+/// The cbrt() function form uses the sign-preserving closed form; the operator
+/// arm does not, so the two forms disagree on negative inputs.
+#[test]
+fn the_operator_form_of_cube_root_of_negative_eight_is_negative_two() {
+    assert_eq!(evaluate::<Option<f64>>("SELECT ||/ -8;"), Some(-2.0));
+}
+
+/// Same defect at a different value to pin both the translation shape and the
+/// sign rule.
+#[test]
+fn the_operator_form_of_cube_root_of_negative_twenty_seven_is_negative_three() {
+    assert_eq!(evaluate::<Option<f64>>("SELECT ||/ -27;"), Some(-3.0));
+}
+
+/// Green companion: a positive operand already works through pow(x, 1/3).
+#[test]
+fn the_operator_form_of_cube_root_of_positive_eight_is_two() {
+    assert_eq!(evaluate::<Option<f64>>("SELECT ||/ 8;"), Some(2.0));
+}
+
+/// Green companion: NULL propagates through any form of the translation.
+#[test]
+fn the_operator_form_null_operand_stays_null() {
+    assert_eq!(evaluate::<Option<f64>>("SELECT ||/ NULL;"), None);
+}

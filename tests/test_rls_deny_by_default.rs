@@ -240,8 +240,16 @@ fn select_only_table_blocks_inserts_and_silently_ignores_other_writes() {
     let opts = rls_opts();
     let conn = open_with_session_user();
     conn.execute_batch(&translate(SCHEMA_SELECT_ONLY, &opts)).expect("apply schema");
+
+    // Seed via backing table simulating system-level data loading that runs
+    // with triggers disabled (authoritative-apply pattern). The BEFORE INSERT
+    // guard on a zero-policy table is unconditional; disable it for the seed.
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
+        .expect("disable triggers for seed");
     conn.execute("INSERT INTO documents_rls (id, owner_id, title) VALUES (1, 42, 'seed')", [])
         .expect("seed via backing table");
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, true)
+        .expect("re-enable triggers");
 
     let insert_err = conn
         .execute("INSERT INTO documents (id, owner_id, title) VALUES (2, 42, 't')", [])

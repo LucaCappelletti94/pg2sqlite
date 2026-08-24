@@ -23,6 +23,5 @@ mod scanner;
 mod translator;
 
 pub use context::PlPgSqlContext;
-pub use cte_builder::CteBuilder;
 pub use preprocessor::PlPgSqlPreprocessor;
 pub use translator::PlPgSqlTranslator;

@@ -103,11 +103,16 @@ fn prefix_square_root_rejects_when_math_unavailable() {
     assert!(msg.contains("|/") || msg.contains("math"), "error must name |/ or math: {msg}");
 }
 
+/// The sign is carried outside the power, because a negative base under a
+/// non-integer exponent is NaN. `tests/test_cube_root.rs` holds the numbers.
 #[test]
-fn prefix_cube_root_translates_to_pow_one_third() {
+fn prefix_cube_root_translates_to_the_signed_closed_form() {
     // ||/ x is PostgreSQL's prefix cube-root operator.
     let sql = tr("SELECT ||/ 27.0");
-    assert_eq!(sql, "SELECT pow(27.0, (1.0 / 3.0))", "unexpected emitted SQL: {sql}");
+    assert_eq!(
+        sql, "SELECT (sign(27.0) * pow(abs(27.0), (1.0 / 3.0)))",
+        "unexpected emitted SQL: {sql}"
+    );
 }
 
 #[test]

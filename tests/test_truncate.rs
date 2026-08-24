@@ -251,7 +251,17 @@ fn truncate_of_an_rls_table_empties_the_backing_table() -> Result<(), Box<dyn st
         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
         CREATE POLICY p ON docs FOR ALL USING (owner_id = 1);
     ";
-    let mut conn = apply_with(ddl, &options)?;
+    // The seed plays the system-load role, so triggers are applied after it,
+    // mirroring the triggers-disabled authoritative-load contract. The id=2 row
+    // deliberately fails the policy: TRUNCATE must remove rows the session user
+    // cannot write.
+    let statements = Pg2Sqlite::default().sql(ddl)?.translate(&options)?;
+    let mut conn = SqliteConnection::establish(":memory:")?;
+    let (triggers, base): (Vec<_>, Vec<_>) =
+        statements.iter().map(ToString::to_string).partition(|s| s.starts_with("CREATE TRIGGER"));
+    for statement in &base {
+        sql_query(statement.clone()).execute(&mut conn)?;
+    }
 
     diesel::insert_into(docs_rls::table)
         .values(vec![
@@ -259,6 +269,10 @@ fn truncate_of_an_rls_table_empties_the_backing_table() -> Result<(), Box<dyn st
             (docs_rls::id.eq(2), docs_rls::owner_id.eq(2)),
         ])
         .execute(&mut conn)?;
+
+    for statement in &triggers {
+        sql_query(statement.clone()).execute(&mut conn)?;
+    }
 
     let statements =
         Pg2Sqlite::default().sql(&format!("{ddl} TRUNCATE docs;"))?.translate(&options)?;

@@ -56,6 +56,12 @@ pub struct PlPgSqlContext {
     scoped_bindings: BTreeMap<String, VariableBinding>,
     condition_stack: Vec<String>,
     uuid_first_use: BTreeMap<String, UuidFirstUse>,
+    /// The event names (INSERT, UPDATE, DELETE) the emitted trigger fires on.
+    /// Empty when the context is not inside a trigger body.
+    pub trigger_events: Vec<String>,
+    /// The table the trigger fires on, or `None` when not inside a trigger
+    /// body.
+    pub trigger_table: Option<String>,
 }
 
 impl PlPgSqlContext {
@@ -192,6 +198,22 @@ impl PlPgSqlContext {
         for binding in defaults {
             self.persistent_bindings.entry(binding.name.clone()).or_insert(binding);
         }
+    }
+
+    /// Returns the event string for TG_OP constant-folding when there is
+    /// exactly one trigger event, otherwise `None`.
+    ///
+    /// A multi-event trigger cannot fold TG_OP to a single value.
+    #[must_use]
+    pub fn single_trigger_event(&self) -> Option<&str> {
+        if self.trigger_events.len() == 1 { Some(&self.trigger_events[0]) } else { None }
+    }
+
+    /// True when the context has more than one trigger event and TG_OP cannot
+    /// be resolved to a single value.
+    #[must_use]
+    pub fn has_multiple_trigger_events(&self) -> bool {
+        self.trigger_events.len() > 1
     }
 }
 

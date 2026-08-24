@@ -263,3 +263,36 @@ fn sqlite_accepts(sql: &str) {
         .execute_batch(sql)
         .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{sql}"));
 }
+
+// ── M3: json_extract_path treats each argument as one literal key ────────────
+
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
+
+/// M3: PostgreSQL treats each argument to json_extract_path as one literal
+/// key, so a key containing a dot names the whole key, not two nested levels.
+/// The current emission of '$.a.b' navigates two levels and returns NULL.
+/// The correct path is '$."a.b"', which navigates one quoted key.
+#[test]
+fn json_extract_path_treats_dot_key_as_one_literal_key() {
+    let rows = run_translated_helper::run_translated_with(
+        r#"SELECT json_extract_path('{"a.b": 1}', 'a.b')"#,
+        &default_opts(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("1".to_string())],
+        "dotted key must be treated as one literal key, not a two-level path"
+    );
+}
+
+/// Green companion: a key without JSONPath metacharacters works with the
+/// existing simple-identifier path $.a.
+#[test]
+fn json_extract_path_with_simple_key_returns_the_value() {
+    let rows = run_translated_helper::run_translated_with(
+        r#"SELECT json_extract_path('{"a": 42}', 'a')"#,
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("42".to_string())], "simple key extraction must return the value");
+}

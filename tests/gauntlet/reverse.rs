@@ -19,7 +19,7 @@ use diesel::{
     sql_types::{Array, Text},
 };
 use pg2sqlite::{
-    impls::sqlite_functions::{postgres_only, shared_with_postgres, sqlite_has},
+    internals::{postgres_only, shared_with_postgres, sqlite_has},
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
     traits::TranslationOptions,
 };

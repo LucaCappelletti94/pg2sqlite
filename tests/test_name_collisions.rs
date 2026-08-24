@@ -250,3 +250,50 @@ fn a_trigger_may_carry_a_tables_name() {
          CREATE TRIGGER touch BEFORE INSERT ON a FOR EACH ROW EXECUTE FUNCTION f();"
     ));
 }
+
+/// Before the fix, a collision with a vec0-generated artifact labelled the
+/// first holder as "a generated RLS trigger or view", wrong for a vec0 virtual
+/// table. After the fix the label names "vec0". R2-21.
+#[test]
+fn vec0_collision_names_vec0_artifact_not_rls() {
+    // items_embedding_vec is the vec0 virtual table the translator generates
+    // for items.embedding vector(3). A user-declared table with the same name
+    // collides in SQLite's flat object namespace.
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE items (id INT PRIMARY KEY, embedding vector(3));
+             CREATE TABLE items_embedding_vec (id INT PRIMARY KEY);",
+        )
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect_err("vec0 name collision must be refused")
+        .to_string();
+    assert!(
+        !error.contains("RLS"),
+        "vec0 collision must not mention RLS; the artifact is a vec0 table, got: {error}"
+    );
+    assert!(
+        error.contains("generated") || error.contains("vec0"),
+        "vec0 collision must name the generated artifact kind, got: {error}"
+    );
+}
+
+/// A vec0 trigger name collision must also label the trigger correctly.
+#[test]
+fn vec0_trigger_collision_names_generated_trigger_not_rls() {
+    // items_embedding_vec_ai is the after-insert trigger name the translator
+    // generates. A user trigger with the same name on another table collides.
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE items (id INT PRIMARY KEY, embedding vector(3));
+             CREATE TABLE other (id INT PRIMARY KEY);
+             CREATE FUNCTION f() RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;
+             CREATE TRIGGER items_embedding_vec_ai BEFORE INSERT ON other
+                 FOR EACH ROW EXECUTE FUNCTION f();",
+        )
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect_err("vec0 trigger collision must be refused")
+        .to_string();
+    assert!(!error.contains("RLS"), "vec0 trigger collision must not mention RLS, got: {error}");
+}

@@ -74,19 +74,6 @@ fn calls_uuid_v7(stmt: &Statement) -> bool {
 }
 
 impl PlPgSqlTranslator {
-    /// Translates a PL/pgSQL function body to `SQLite` statements.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if translation fails for any statement.
-    pub fn translate(
-        body: &BeginEndStatements,
-        schema: &ParserDB,
-        options: &Pg2SqliteOptions,
-    ) -> Result<Vec<Statement>, Error> {
-        Self::translate_with_context(body, PlPgSqlContext::new(), schema, options)
-    }
-
     /// Translates a PL/pgSQL function body using a pre-seeded context.
     ///
     /// # Errors
@@ -195,7 +182,12 @@ impl PlPgSqlTranslator {
                     options,
                 )
             }
-            Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("new") => Ok(Vec::new()),
+            Expr::Identifier(ident)
+                if ident.value.eq_ignore_ascii_case("new")
+                    || ident.value.eq_ignore_ascii_case("old") =>
+            {
+                Ok(Vec::new())
+            }
             other => {
                 Err(Error::UnsupportedSQLiteFeature(format!(
                     "RETURN {other} has no SQLite equivalent in a trigger body. A trigger can only \
@@ -257,20 +249,19 @@ impl PlPgSqlTranslator {
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, Error> {
         let mut result = Vec::new();
-
         let mut negated_conditions: Vec<String> = Vec::new();
+        let bindings: Vec<_> = context.bindings().cloned().collect();
 
-        let if_condition = if_stmt.if_block.condition.as_ref().map_or_else(
-            || "TRUE".to_string(),
-            |cond| {
-                cond.translate(schema, options).map_or_else(|_| cond.to_string(), |t| t.to_string())
-            },
-        );
+        let if_condition = Self::translate_plpgsql_condition(
+            if_stmt.if_block.condition.as_ref(),
+            context,
+            &bindings,
+            schema,
+            options,
+        )?;
 
         context.push_condition(if_condition.clone());
-
         context.clear_scoped_bindings();
-
         context.clear_uuid_first_use();
 
         for stmt in if_stmt.if_block.statements() {
@@ -279,17 +270,17 @@ impl PlPgSqlTranslator {
         }
 
         context.pop_condition();
-
         negated_conditions.push(format!("NOT ({if_condition})"));
 
         for elseif_block in &if_stmt.elseif_blocks {
-            let elseif_condition = elseif_block.condition.as_ref().map_or_else(
-                || "TRUE".to_string(),
-                |cond| {
-                    cond.translate(schema, options)
-                        .map_or_else(|_| cond.to_string(), |t| t.to_string())
-                },
-            );
+            let bindings: Vec<_> = context.bindings().cloned().collect();
+            let elseif_condition = Self::translate_plpgsql_condition(
+                elseif_block.condition.as_ref(),
+                context,
+                &bindings,
+                schema,
+                options,
+            )?;
 
             debug_assert!(
                 !negated_conditions.is_empty(),
@@ -308,13 +299,11 @@ impl PlPgSqlTranslator {
             }
 
             context.pop_condition();
-
             negated_conditions.push(format!("NOT ({elseif_condition})"));
         }
 
         if let Some(else_block) = &if_stmt.else_block {
             let else_condition = negated_conditions.join(" AND ");
-
             context.push_condition(else_condition);
             context.clear_scoped_bindings();
             context.clear_uuid_first_use();
@@ -328,6 +317,119 @@ impl PlPgSqlTranslator {
         }
 
         Ok(result)
+    }
+
+    /// Translates a single PL/pgSQL IF or ELSIF condition expression.
+    ///
+    /// Applies UUID renames and TG_OP constant-folding via `transform_expr`,
+    /// then folds trigger special variables, translates to SQLite, and
+    /// inline-substitutes any declared variable bindings so the resulting
+    /// string is safe to inject into a UPDATE/DELETE WHERE clause.
+    fn translate_plpgsql_condition(
+        cond: Option<&Expr>,
+        context: &mut PlPgSqlContext,
+        bindings: &[VariableBinding],
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<String, Error> {
+        let Some(cond) = cond else {
+            return Ok("TRUE".to_string());
+        };
+        let mut transformed = cond.clone();
+        Self::transform_expr(&mut transformed, context, options);
+        Self::fold_trigger_specials(&mut transformed, context)?;
+        let translated = transformed.translate(schema, options)?;
+        let s = translated.to_string();
+        if bindings.is_empty() {
+            return Ok(s);
+        }
+        // Inline-substitute declared variable bindings so the condition works
+        // as a SQLite WHERE clause guard on UPDATE/DELETE, which have no WITH scope.
+        Ok(Self::parse_expression(&s)
+            .map(|expr| Self::substitute_variables_inline(&expr, bindings).to_string())
+            .unwrap_or(s))
+    }
+
+    /// Constant-folds trigger special variables in `expr`.
+    ///
+    /// - `TG_OP` becomes the event string literal for a single-event trigger,
+    ///   or an error for a multi-event trigger.
+    /// - `TG_TABLE_NAME` becomes the table name literal.
+    /// - Any other `TG_*` name produces an error naming the variable.
+    fn fold_trigger_specials(expr: &mut Expr, context: &PlPgSqlContext) -> Result<(), Error> {
+        use crate::impls::expr_helpers::mutate_expr_children;
+
+        match expr {
+            Expr::Identifier(ident) => {
+                let upper = ident.value.to_uppercase();
+                match upper.as_str() {
+                    "TG_OP" => {
+                        if context.has_multiple_trigger_events() {
+                            return Err(Error::UnsupportedSQLiteFeature(
+                                "TG_OP is ambiguous in a multi-event trigger; split into one \
+                                 trigger function per event so TG_OP can be constant-folded"
+                                    .to_string(),
+                            ));
+                        }
+                        if let Some(event) = context.single_trigger_event() {
+                            *expr = Expr::Value(
+                                Value::SingleQuotedString(event.to_uppercase()).with_empty_span(),
+                            );
+                        }
+                    }
+                    "TG_TABLE_NAME" => {
+                        if let Some(table) = &context.trigger_table {
+                            *expr = Expr::Value(
+                                Value::SingleQuotedString(table.clone()).with_empty_span(),
+                            );
+                        }
+                    }
+                    other if other.starts_with("TG_") => {
+                        return Err(Error::UnsupportedSQLiteFeature(format!(
+                            "the trigger special variable {other} has no SQLite equivalent; \
+                             only TG_OP (single-event) and TG_TABLE_NAME are constant-folded"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            other => {
+                let mut first_err: Option<Error> = None;
+                mutate_expr_children(other, &mut |child| {
+                    if first_err.is_none()
+                        && let Err(e) = Self::fold_trigger_specials(child, context)
+                    {
+                        first_err = Some(e);
+                    }
+                });
+                if let Some(e) = first_err {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Substitutes declared variable bindings inline as scalar subqueries.
+    ///
+    /// Unlike `substitute_variables`, which creates CTE table references
+    /// (`v.val`) that require a WITH clause, this embeds the binding's
+    /// expression directly: `v_cnt` becomes `(SELECT count(*) FROM ...)`.
+    /// That form is valid in a SQLite UPDATE/DELETE WHERE clause without
+    /// any CTE setup.
+    fn substitute_variables_inline(expr: &Expr, bindings: &[VariableBinding]) -> Expr {
+        let recurse = |e: &Expr| Self::substitute_variables_inline(e, bindings);
+        match expr {
+            Expr::Identifier(ident) => {
+                if let Some(binding) = bindings.iter().find(|b| b.name == ident.value)
+                    && let Ok(inner) = Self::parse_expression(&binding.expression)
+                {
+                    return Expr::Nested(Box::new(inner));
+                }
+                expr.clone()
+            }
+            other => map_expr_children(other, &recurse),
+        }
     }
 
     /// SQLite does not support WITH clauses in trigger bodies; this wraps the

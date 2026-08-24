@@ -59,16 +59,6 @@ impl CteBuilder {
         }
     }
 
-    /// Creates a simple CTE from a name and expression.
-    #[must_use]
-    pub fn create_simple_cte(name: &str, expr: Expr) -> Cte {
-        let binding = VariableBinding {
-            name: name.to_string(),
-            expression: String::new(), // Not used in this path
-        };
-        Self::create_variable_cte(&binding, expr, vec![])
-    }
-
     /// Combines multiple CTEs into a WITH clause.
     #[must_use]
     pub fn combine_ctes(ctes: Vec<Cte>) -> Option<With> {
@@ -115,7 +105,8 @@ mod tests {
         assert_eq!(cte.alias.name.value, "v_id");
         assert_eq!(cte.alias.columns.len(), 1);
 
-        let simple = CteBuilder::create_simple_cte("v_simple", expr);
+        let second = VariableBinding { name: "v_simple".to_string(), expression: "1".to_string() };
+        let simple = CteBuilder::create_variable_cte(&second, expr, Vec::new());
         assert_eq!(simple.alias.name.value, "v_simple");
 
         let with_none = CteBuilder::combine_ctes(Vec::new());

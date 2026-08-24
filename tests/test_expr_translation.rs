@@ -1090,3 +1090,43 @@ fn test_at_time_zone_fixed_offset_semantic() -> Result<(), Box<dyn std::error::E
 
     Ok(())
 }
+
+/// EXTRACT refusal must list WEEK, ISODOW, ISOYEAR as supported fields.
+/// They are implemented but the old error text omitted them. R2-LOW.
+#[test]
+fn extract_unsupported_field_message_lists_week_isodow_isoyear() {
+    let err = Pg2Sqlite::default()
+        .sql("SELECT EXTRACT(TIMEZONE FROM TIMESTAMP '2024-01-01 12:00:00')")
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect_err("EXTRACT(TIMEZONE) must fail")
+        .to_string();
+    assert!(err.contains("WEEK"), "EXTRACT refusal must list WEEK, got: {err}");
+    assert!(err.contains("ISODOW"), "EXTRACT refusal must list ISODOW, got: {err}");
+    assert!(err.contains("ISOYEAR"), "EXTRACT refusal must list ISOYEAR, got: {err}");
+}
+
+/// to_char with MS code must name "MS" in the refusal, not just "M". R2-LOW.
+#[test]
+fn to_char_ms_code_names_ms_in_refusal() {
+    let err = Pg2Sqlite::default()
+        .sql("SELECT to_char(NOW(), 'HH24:MI:SS.MS')")
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect_err("to_char with MS must fail")
+        .to_string();
+    assert!(err.contains("MS"), "refusal must name 'MS', got: {err}");
+    assert!(!err.contains("contains 'M'"), "must name MS not just M, got: {err}");
+}
+
+/// to_char with US code must name "US" in the refusal. R2-LOW.
+#[test]
+fn to_char_us_code_names_us_in_refusal() {
+    let err = Pg2Sqlite::default()
+        .sql("SELECT to_char(NOW(), 'HH24:MI:SS.US')")
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect_err("to_char with US must fail")
+        .to_string();
+    assert!(err.contains("US"), "refusal must name 'US', got: {err}");
+}

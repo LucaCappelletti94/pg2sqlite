@@ -165,19 +165,33 @@ fn test_fts5_partial_index_generates_when_clause_in_triggers()
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
     let out = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
 
-    // All three triggers must carry a WHEN clause derived from the predicate.
+    // Four sync triggers carry the predicate: insert, delete, and the two
+    // halves of update (a row can cross the predicate boundary, so the
+    // delete half is guarded by the OLD row and the insert half by NEW).
     let trigger_count_with_when =
         out.lines().filter(|l| l.contains("CREATE TRIGGER") && l.contains("WHEN")).count();
     assert_eq!(
-        trigger_count_with_when, 3,
-        "All 3 FTS5 sync triggers must have a WHEN clause for partial index: {out}"
+        trigger_count_with_when, 4,
+        "all 4 FTS5 sync triggers must carry a WHEN clause for a partial index: {out}"
     );
 
-    // The predicate expression should appear inside the WHEN clause.
+    // Trigger WHEN clauses only resolve row columns through NEW. or OLD., a
+    // bare column name fails at runtime, so the predicate must be qualified.
     assert!(
-        out.contains("WHEN") && out.contains("published"),
-        "Expected 'WHEN published' in trigger output: {out}"
+        out.contains("WHEN NEW.published") && out.contains("WHEN OLD.published"),
+        "the WHEN predicates must qualify the column with NEW. and OLD.: {out}"
     );
+    assert!(
+        !out.lines().any(|l| l.contains("WHEN published")),
+        "no trigger may reference the predicate column unqualified: {out}"
+    );
+
+    // The backfill only indexes rows the partial index covers.
+    assert!(
+        out.lines().any(|l| l.contains("SELECT id, body FROM articles WHERE published")),
+        "the backfill must carry the partial predicate: {out}"
+    );
+
     // Execute all translated statements to verify the output is valid SQLite.
     {
         let conn = rusqlite::Connection::open_in_memory()?;

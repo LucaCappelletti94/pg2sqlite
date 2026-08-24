@@ -364,3 +364,86 @@ fn excluded_reference_in_do_update_stays_untouched() {
     ));
     assert_eq!(stored, OTHER_BYTES, "excluded.tag carries the wrapped inserted value");
 }
+
+/// Tests for the runtime bind-parameter UUID path (L10).
+///
+/// Isolated in a submodule to bring diesel into scope without clashing with
+/// the `rusqlite::Connection` imported at the file level.
+mod bind_param {
+    use diesel::{RunQueryDsl, prelude::*};
+    use pg2sqlite::prelude::Pg2Sqlite;
+
+    use super::{UUID_BYTES, blob_opts};
+
+    diesel::table! {
+        /// The `u` table created by the L10 schema.
+        u (pk) {
+            /// Integer primary key.
+            pk -> Integer,
+            /// UUID column stored as BLOB (nullable: no NOT NULL on the column).
+            id -> Nullable<Binary>,
+        }
+    }
+
+    /// [L10] PostgreSQL accepts brace-format UUIDs as bind parameters for UUID
+    /// columns. The translated INSERT for a uuid-blob column passes the bind
+    /// placeholder through unchanged, so binding a braced string fails because
+    /// the BLOB STRICT column rejects TEXT. After the fix the emitted INSERT
+    /// wraps the placeholder in a brace-stripping unhex call so that a bound
+    /// braced UUID is stored as the correct 16-byte binary.
+    #[test]
+    fn brace_format_uuid_bind_param_stores_correct_blob() {
+        let opts = blob_opts();
+        // The schema has a nullable UUID column and a parameterized INSERT.
+        let schema = "
+            CREATE TABLE u (pk INT PRIMARY KEY, id UUID);
+            INSERT INTO u (pk, id) VALUES (1, $1);
+        ";
+        let stmts =
+            Pg2Sqlite::default().sql(schema).expect("parse").translate(&opts).expect("translate");
+
+        let mut conn = diesel::sqlite::SqliteConnection::establish(":memory:").expect("open db");
+
+        // Apply CREATE TABLE. diesel::sql_query is used because the emitted DDL
+        // includes STRICT and CHECK clauses that the Diesel typed DSL cannot express.
+        diesel::sql_query(stmts[0].to_string()).execute(&mut conn).expect("create table");
+
+        // Find the translated INSERT which carries `?1` as the placeholder for id.
+        let insert_sql = stmts
+            .iter()
+            .find(|s| s.to_string().to_ascii_uppercase().trim_start().starts_with("INSERT"))
+            .expect("INSERT in translated output")
+            .to_string();
+
+        let braced = "{550e8400-e29b-41d4-a716-446655440000}";
+
+        // Execute the translator-emitted INSERT with a braced UUID bound to ?1.
+        // diesel::sql_query is used because we are testing the translator's exact
+        // output: the typed DSL would generate different SQL and would not exercise
+        // the placeholder-wrapping behavior this test pins.
+        let result = diesel::sql_query(&insert_sql)
+            .bind::<diesel::sql_types::Text, _>(braced)
+            .execute(&mut conn);
+
+        // PostgreSQL accepts the braced UUID and stores the 16-byte representation.
+        // Currently fails: the BLOB STRICT column rejects a TEXT bind value because
+        // the translator does not wrap the placeholder in an unhex call.
+        assert!(
+            result.is_ok(),
+            "INSERT with braced UUID bind must succeed; got: {}",
+            result.unwrap_err()
+        );
+
+        // The stored value must be the 16-byte binary form, not NULL and not text.
+        let stored: Option<Vec<u8>> = u::table
+            .select(u::id)
+            .filter(u::pk.eq(1i32))
+            .first(&mut conn)
+            .expect("read stored value");
+        assert_eq!(
+            stored,
+            Some(UUID_BYTES.to_vec()),
+            "stored blob must be the 16-byte UUID binary form"
+        );
+    }
+}

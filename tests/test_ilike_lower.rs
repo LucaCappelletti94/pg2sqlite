@@ -7,7 +7,10 @@
 //! `lower(expr) LIKE lower(pattern)`, which is pragma-independent.
 
 use diesel::{QueryableByName, RunQueryDsl, SqliteConnection, prelude::*};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::{
+    prelude::{Pg2Sqlite, Pg2SqliteOptions},
+    traits::TranslationOptions,
+};
 
 // ── 1. Output shape tests ────────────────────────────────────────────────────
 
@@ -178,4 +181,73 @@ fn an_escape_whose_lowering_grows_is_refused() {
         .expect_err("a length-changing fold cannot escape anything")
         .to_string();
     assert!(error.contains("escape"), "the refusal must name the construct: {error}");
+}
+
+// ── M7: ILIKE with non-ASCII pattern literal ─────────────────────────────────
+
+/// M7: SQLite lower() folds ASCII only. A literal pattern with non-ASCII
+/// letters such as 'CAFE\u{301}%' gets wrong case folding after the lower()
+/// rewrite, producing silent wrong answers. Per Decision 2, translation must
+/// refuse when no fold function option is configured.
+#[test]
+fn non_ascii_ilike_pattern_literal_is_refused() {
+    let result = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (name TEXT); SELECT * FROM t WHERE name ILIKE 'CAF\u{00c9}%'")
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default());
+    assert!(result.is_err(), "non-ASCII ILIKE pattern must refuse without a fold option");
+}
+
+/// Green companion: a pure-ASCII pattern translates, executes, and matches
+/// case-insensitively.
+#[test]
+fn pure_ascii_ilike_pattern_translates_and_executes() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
+         INSERT INTO t VALUES (1, 'cafe');
+         SELECT count(*) FROM t WHERE name ILIKE 'CAFE%';",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("1".to_string())], "ASCII ILIKE must match case-insensitively");
+}
+
+// ── M7: with a configured fold function ──────────────────────────────────────
+
+/// M7: with a configured fold function, 'café' ILIKE 'CAFÉ' returns true.
+///
+/// Rusqlite is used directly because diesel provides no API for registering a
+/// custom scalar UDF, which is what makes the fold function work at runtime.
+#[test]
+fn with_fold_function_ilike_matches_non_ascii_case_insensitively() {
+    use rusqlite::{Connection, functions::FunctionFlags};
+
+    const FOLD: &str = "unicode_fold";
+
+    let options = Pg2SqliteOptions::default().with_ilike_fold_function(FOLD);
+    let statements = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
+             INSERT INTO t VALUES (1, 'caf\u{00e9}');
+             SELECT count(*) FROM t WHERE name ILIKE 'CAF\u{00c9}';",
+        )
+        .expect("parse")
+        .translate_to_sql(&options)
+        .expect("translate");
+
+    let (probe, setup) = statements.split_last().expect("at least one statement");
+    let conn = Connection::open_in_memory().expect("in-memory SQLite");
+    // Register the fold UDF: str::to_lowercase gives full Unicode case folding.
+    conn.create_scalar_function(FOLD, 1, FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        let text: String = ctx.get(0)?;
+        Ok(text.to_lowercase())
+    })
+    .expect("register fold UDF");
+    for stmt in setup {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("setup failed: {e}\n{stmt}"));
+    }
+    let count: i64 = conn
+        .query_row(probe, [], |row| row.get(0))
+        .unwrap_or_else(|e| panic!("probe failed: {e}\n{probe}"));
+    assert_eq!(count, 1, "'caf\u{00e9}' ILIKE 'CAF\u{00c9}' must match with the fold UDF");
 }

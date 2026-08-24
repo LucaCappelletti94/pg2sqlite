@@ -260,3 +260,35 @@ fn a_setting_named_by_an_expression_refuses() {
         "the refusal names the function, got: {error}"
     );
 }
+
+/// M8: a strict mapping reverses to `current_setting(name)` with no second
+/// argument. The tolerant form (the default) adds `true` as the second arg.
+#[test]
+fn a_strict_mapping_reverses_to_one_argument_current_setting() {
+    const STRICT_SETTING: &str = "app.strict_user";
+    const STRICT_FN: &str = "strict_user_fn";
+
+    let translator = Pg2Sqlite::default().sql(PG_SCHEMA).expect("parse");
+    let schema = translator.build_schema().expect("schema");
+    let options = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting_strict(STRICT_SETTING, STRICT_FN),
+    );
+
+    let sqlite_sql = format!("SELECT {STRICT_FN}() FROM docs;");
+    let reversed = translator
+        .reverse_sql(&sqlite_sql, &schema, &options)
+        .expect("reverse translate")
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    assert!(
+        reversed.contains(&format!("current_setting('{STRICT_SETTING}')")),
+        "strict mapping must restore one-argument current_setting: {reversed}"
+    );
+    assert!(
+        !reversed.contains("true"),
+        "strict mapping must not include missing_ok argument: {reversed}"
+    );
+}

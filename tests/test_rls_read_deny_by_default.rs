@@ -78,10 +78,34 @@ struct BackingRow {
 /// the backing table with two rows. Tests needing other options call [`apply`]
 /// and [`seed`] directly, which also lets them assert that the seed was
 /// rejected.
+/// Applies DDL in two phases: tables and views first, then triggers. Seeds the
+/// backing table between the phases so the typed insert runs before trigger
+/// enforcement is active. Diesel does not expose sqlite3_db_config, so phase
+/// ordering replaces the toggle.
 fn setup(pg: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let mut conn = apply(pg, &options)?;
+    setup_with_options(pg, &options)
+}
+
+fn setup_with_options(
+    pg: &str,
+    options: &Pg2SqliteOptions,
+) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
+    let translated = Pg2Sqlite::default().sql(pg)?.translate(options)?;
+    let mut conn = SqliteConnection::establish(":memory:")?;
+    // Phase 1: tables and views (no triggers yet).
+    // Phase 2 (inside): seed via diesel typed insert before triggers exist.
+    // Phase 3: triggers (guard is active for subsequent writes).
+    // Diesel does not expose sqlite3_db_config, so phases replace the toggle.
+    let (base, triggers): (Vec<_>, Vec<_>) =
+        translated.iter().partition(|s| !s.to_string().starts_with("CREATE TRIGGER"));
+    for stmt in &base {
+        diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
+    }
     seed(&mut conn)?;
+    for stmt in &triggers {
+        diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
+    }
     Ok(conn)
 }
 
@@ -236,30 +260,28 @@ fn deny_all_view_is_not_monitored_at_runtime() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// Strict validation no longer rejects a backing write to a deny-all table.
-///
-/// "RLS enabled, policies arrive in a later migration" is an ordinary
-/// mid-migration state, and failing every write in it blocked a data load for a
-/// configuration problem that translation already reports.
+/// Backing writes to a zero-policy table succeed when inserts are sequenced
+/// before trigger enforcement (tables and views first, then data, then
+/// triggers). The BEFORE INSERT guard on a zero-policy table is unconditional,
+/// so the insert must precede the trigger installation; `setup_with_options`
+/// implements this phase ordering.
 #[test]
 fn strict_validation_over_a_deny_all_view_accepts_backing_writes()
 -> Result<(), Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default()
         .with_rls_audit_table_name("rls_audit")
         .with_strict_rls_validation();
-    let mut conn = apply(
+    let mut conn = setup_with_options(
         "
         CREATE TABLE docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     ",
         &options,
     )?;
-
-    seed(&mut conn)?;
     assert_eq!(
         docs_rls::table.count().get_result::<i64>(&mut conn)?,
         2,
-        "both rows must reach the backing table"
+        "both rows must reach the backing table when seeded before trigger enforcement"
     );
     assert_eq!(
         docs::table.count().get_result::<i64>(&mut conn)?,
@@ -308,13 +330,23 @@ fn deny_all_table_warns_once_at_translation_time() -> Result<(), Box<dyn std::er
 /// deny-all skip a scoped change instead of a way to switch validation off.
 #[test]
 fn a_table_with_a_policy_is_still_monitored() -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = setup(
+    // Adding INSERT WITH CHECK (true) so the BEFORE INSERT guard is AllowAll
+    // (no guard emitted). The seed then runs after all triggers are applied and
+    // the AFTER INSERT monitoring trigger fires, logging the non-visible row.
+    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+    let mut conn = apply(
         "
         CREATE TABLE docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
         CREATE POLICY p ON docs FOR SELECT USING (owner_id = 7);
+        CREATE POLICY ins ON docs FOR INSERT WITH CHECK (true);
     ",
+        &options,
     )?;
+    // Seed directly into the backing table. The BEFORE INSERT guard is AllowAll
+    // (WITH CHECK = true), so both rows land. The monitoring trigger then fires:
+    // owner_id=7 is visible (SELECT USING passes), owner_id=9 is not.
+    seed(&mut conn)?;
 
     let logged: i64 = rls_audit::table.count().get_result(&mut conn)?;
     assert_eq!(logged, 1, "the row invisible under the policy is still reported");

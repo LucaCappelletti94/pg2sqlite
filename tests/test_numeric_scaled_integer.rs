@@ -675,3 +675,46 @@ fn the_manifest_publishes_a_dec_scale() {
         .collect();
     assert_eq!(scaled, vec![("price", 2)], "only the DEC column carries a scale");
 }
+
+// ── M10: NUMERIC(p,0) DEFAULT with a fractional literal ──────────────────────
+
+/// M10: NUMERIC(10,0) DEFAULT 5.5 must round the default to 6 at translation
+/// time. PostgreSQL's rule is half-away from zero (5.5 rounds to 6). The
+/// current emission keeps DEFAULT 5.5, which SQLite STRICT rejects at the
+/// first defaulted INSERT with "cannot store REAL value in INTEGER column".
+#[test]
+fn scale_zero_fractional_default_rounds_to_integer() {
+    let result = run_translated_or_error(
+        "CREATE TABLE t (
+             id INT PRIMARY KEY,
+             n NUMERIC(10,0) DEFAULT 5.5
+         );
+         INSERT INTO t (id) VALUES (1);
+         SELECT n FROM t;",
+    );
+    assert!(
+        result.is_ok(),
+        "defaulted INSERT into a scale-0 NUMERIC column must succeed: {result:?}"
+    );
+    assert_eq!(result.unwrap(), vec![Some("6".to_string())], "5.5 rounds to 6 half-away from zero");
+}
+
+/// M10: the same rule on the negative side (half-away from zero means -5.5
+/// rounds to -6, not -5).
+#[test]
+fn scale_zero_negative_fractional_default_rounds_away_from_zero() {
+    let result = run_translated_or_error(
+        "CREATE TABLE t (
+             id INT PRIMARY KEY,
+             n NUMERIC(10,0) DEFAULT -5.5
+         );
+         INSERT INTO t (id) VALUES (1);
+         SELECT n FROM t;",
+    );
+    assert!(result.is_ok(), "defaulted INSERT with negative default must succeed: {result:?}");
+    assert_eq!(
+        result.unwrap(),
+        vec![Some("-6".to_string())],
+        "-5.5 rounds to -6 half-away from zero"
+    );
+}

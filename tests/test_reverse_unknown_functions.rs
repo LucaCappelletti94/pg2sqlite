@@ -72,7 +72,7 @@ fn a_shared_name_passes_through() {
     ] {
         let postgres =
             reverse(sqlite).unwrap_or_else(|error| panic!("`{sqlite}` should reverse: {error}"));
-        assert!(!postgres.is_empty());
+        assert_ne!(postgres.len(), 0, "`{sqlite}` should reverse to nonempty SQL");
     }
 }
 

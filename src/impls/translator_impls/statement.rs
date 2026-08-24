@@ -1949,8 +1949,9 @@ impl Translator for Statement {
             control_flow_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
-                    "SQLite's SQL has no procedural control flow outside a trigger body, so the \
-                     branch or the diagnostic this statement performs cannot be preserved.",
+                    "SQLite has no procedural control flow: WHILE loops, LOOP, FOR, and \
+                     procedural CASE have no SQL equivalent and cannot be emitted. Rewrite \
+                     as a set-based statement.",
                 ));
             }
             cursor_patterns!() => {

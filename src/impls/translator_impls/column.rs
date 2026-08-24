@@ -15,7 +15,7 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Ident, ObjectName,
-    TimezoneInfo, Value, ValueWithSpan,
+    TimezoneInfo, UnaryOperator, Value, ValueWithSpan,
 };
 
 use crate::{
@@ -132,7 +132,10 @@ pub(crate) fn declared_default(
 
 /// A declared default in the units the translated column stores.
 fn scaled_default(column: &ColumnDef, expr: &Expr) -> Result<Expr, Error> {
-    let Some(scale) = minor_unit_scale(&column.data_type) else { return Ok(expr.clone()) };
+    let Some(scale) = minor_unit_scale(&column.data_type) else {
+        // For NUMERIC(p,0), round fractional literal defaults at translation time.
+        return Ok(round_scale_zero_default(&column.data_type, expr));
+    };
     scaled_numeric_default(expr, scale)?.ok_or_else(|| {
         Error::UnsupportedSQLiteFeature(format!(
             "the DEFAULT on column '{}' does not land as one number at the column's scale. The \
@@ -142,6 +145,61 @@ fn scaled_default(column: &ColumnDef, expr: &Expr) -> Result<Expr, Error> {
             column.name
         ))
     })
+}
+
+/// Rounds a NUMERIC(p,0) column's DEFAULT to an integer when it is a fractional
+/// literal, applying PostgreSQL's half-away-from-zero rule. Non-NUMERIC types
+/// and non-literal defaults are returned unchanged.
+fn round_scale_zero_default(data_type: &DataType, expr: &Expr) -> Expr {
+    let Some(info) = exact_numeric_info(data_type) else { return expr.clone() };
+    let Ok((_, scale)) = numeric_precision_and_scale(info) else { return expr.clone() };
+    if scale != 0 {
+        return expr.clone();
+    }
+    let mut peeled = expr;
+    while let Expr::Nested(inner) = peeled {
+        peeled = inner;
+    }
+    round_literal_to_integer(peeled).unwrap_or_else(|| peeled.clone())
+}
+
+/// Rounds a plain or negated number literal to the nearest integer using
+/// PostgreSQL's half-away-from-zero rule. Returns `None` when `expr` is not a
+/// simple number literal that can be rounded.
+fn round_literal_to_integer(expr: &Expr) -> Option<Expr> {
+    let (negated, digits) = match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => (false, digits),
+        Expr::UnaryOp { op: UnaryOperator::Minus, expr: inner } => {
+            match inner.as_ref() {
+                Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
+                    (true, digits)
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    if digits.contains(['e', 'E']) {
+        return None;
+    }
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits.as_str(), ""));
+    // If the fractional part is entirely zeros the literal is already integral.
+    if fraction.chars().all(|c| c == '0') {
+        let result = format!("{}{whole}", if negated { "-" } else { "" });
+        return Some(Expr::Value(ValueWithSpan {
+            value: Value::Number(result, false),
+            span: sqlparser::tokenizer::Span::empty(),
+        }));
+    }
+    // Half-away-from-zero: round up when the first fractional digit is >= 5.
+    let round_up = fraction.chars().next().is_some_and(|c| c >= '5');
+    let whole_val: i64 = whole.parse().ok()?;
+    let rounded = if round_up { whole_val + 1 } else { whole_val };
+    let result = if negated { format!("-{rounded}") } else { rounded.to_string() };
+    Some(Expr::Value(ValueWithSpan {
+        value: Value::Number(result, false),
+        span: sqlparser::tokenizer::Span::empty(),
+    }))
 }
 
 /// Translates a column definition, reporting what its declared type loses.

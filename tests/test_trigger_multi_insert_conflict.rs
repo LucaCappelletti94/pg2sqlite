@@ -87,7 +87,7 @@ fn test_trigger_translation() -> Result<(), Box<dyn std::error::Error>> {
 
     let translated_migrations = Pg2Sqlite::default()
         .sql(sql)?
-        .translate(&Pg2SqliteOptions::default().remove_unsupported_check_constraints())?;
+        .translate(&Pg2SqliteOptions::default().with_remove_unsupported_check_constraints())?;
 
     let mut generated_sql = String::new();
     for translated_migration in &translated_migrations {

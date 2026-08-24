@@ -1,16 +1,17 @@
 //! Case folding stops at ASCII on the SQLite side, and the README says so.
 //!
 //! PostgreSQL folds by the database collation, which under a UTF-8 locale
-//! covers the whole of Unicode, so `ILIKE`, `lower` and `upper` answer
-//! differently once the text is not ASCII. Nothing in the translator can close
-//! that: SQLite's own `lower` leaves a non-ASCII code point alone, and only an
-//! ICU-enabled build changes it.
+//! covers the whole of Unicode, so `lower` and `upper` answer differently
+//! once the text is not ASCII. `ILIKE` no longer silently diverges: a pattern
+//! literal carrying a non-ASCII letter is refused unless
+//! `with_ilike_fold_function` names a Unicode-aware folding function, and
+//! only column-side non-ASCII data can still reach the ASCII-only `lower`.
 //!
-//! These tests pin the divergence rather than a fix, so they fail the day the
-//! answers converge, which is the day the README section has to be rewritten.
-//! Every PostgreSQL answer named below was read off PostgreSQL 17 under
-//! `en_US.utf8`, and under the `C` collation PostgreSQL answers what SQLite
-//! answers.
+//! The `lower`/`upper` tests pin the divergence rather than a fix, so they
+//! fail the day the answers converge, which is the day the README section
+//! has to be rewritten. Every PostgreSQL answer named below was read off
+//! PostgreSQL 17 under `en_US.utf8`, and under the `C` collation PostgreSQL
+//! answers what SQLite answers.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
@@ -35,13 +36,13 @@ fn evaluate<T: rusqlite::types::FromSql>(pg: &str) -> T {
         .unwrap_or_else(|error| panic!("emitted probe failed: {error}\n{probe}"))
 }
 
-/// The shape the README shows. Both halves are lowered and the escape is the
-/// one PostgreSQL applies by default.
+/// The shape the README shows, on an ASCII pattern. Both halves are lowered
+/// and the escape is the one PostgreSQL applies by default.
 #[test]
 fn ilike_lowers_both_sides_and_carries_the_default_escape() {
     assert_eq!(
-        translate("SELECT 'ÄBC' ILIKE 'äbc';"),
-        "SELECT lower('ÄBC') LIKE lower('äbc') ESCAPE '\\'"
+        translate("SELECT 'ABC' ILIKE 'abc';"),
+        "SELECT lower('ABC') LIKE lower('abc') ESCAPE '\\'"
     );
 }
 
@@ -50,12 +51,21 @@ fn an_ascii_ilike_matches_as_postgresql_does() {
     assert_eq!(evaluate::<i64>("SELECT 'ABC' ILIKE 'abc';"), 1);
 }
 
-/// PostgreSQL answers true. The translated form answers false, because
-/// `lower('ÄBC')` is `Äbc` in SQLite.
+/// PostgreSQL answers true where the old lower() translation answered false,
+/// so the translator refuses the pattern instead, naming the fold option.
 #[test]
-fn a_non_ascii_ilike_does_not_match_where_postgresql_does() {
-    assert_eq!(evaluate::<i64>("SELECT 'ÄBC' ILIKE 'äbc';"), 0);
-    assert_eq!(evaluate::<i64>("SELECT 'ΣΙΓΜΑ' ILIKE 'σιγμα';"), 0);
+fn a_non_ascii_ilike_pattern_is_refused_instead_of_mismatching() {
+    for pg in ["SELECT 'ÄBC' ILIKE 'äbc';", "SELECT 'ΣΙΓΜΑ' ILIKE 'σιγμα';"] {
+        let error = Pg2Sqlite::default()
+            .sql(pg)
+            .expect("parse")
+            .translate_to_sql(&Pg2SqliteOptions::default())
+            .expect_err("a non-ASCII pattern literal must refuse without a fold function");
+        assert!(
+            error.to_string().contains("with_ilike_fold_function"),
+            "the refusal must name the option: {error}"
+        );
+    }
 }
 
 /// PostgreSQL answers `äbc`, `ÄBC` and `σιγμα` for these three.
