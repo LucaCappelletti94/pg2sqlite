@@ -18,9 +18,9 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
-    ExactNumberInfo, Expr, Function, Ident, JsonKeyUniqueness, JsonPredicateType, ObjectName,
-    ObjectNamePart, Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor, UnaryOperator,
-    Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    ExactNumberInfo, Expr, Function, Ident, Interval, JsonKeyUniqueness, JsonPredicateType,
+    ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor,
+    UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use crate::{
@@ -28,11 +28,13 @@ use crate::{
         datetime_helpers::{DatePartKey, build_date_part_expr, datetime_field_key},
         expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq, rebuild},
         function_helpers::{
-            integer_literal, number_literal, simple_function_expr, single_quoted_literal,
-            string_literal,
+            integer_literal, integer_literal_value, number_literal, simple_function_expr,
+            single_quoted_literal, string_literal,
         },
-        interval::interval_date_modifiers,
-        query_builder::{from_relation, plain_table_factor, single_expr_query},
+        interval::{interval_date_modifiers, interval_date_modifiers_scaled},
+        query_builder::{
+            from_relation, plain_table_factor, single_expr_query, table_function_factor,
+        },
         session_variable,
         shared_helpers::{
             declared_numeric_precision, every_declared_type_matches, extract_columns_from_function,
@@ -51,6 +53,7 @@ use crate::{
                 translate_array_subscript, translate_quantified_over_array,
             },
             data_type::{MAX_NUMERIC_PRECISION, exact_numeric_info, numeric_precision_and_scale},
+            function::cube_root_closed_form,
             helpers::Forward,
         },
     },
@@ -215,7 +218,7 @@ fn translate_extract(
     let key = datetime_field_key(field).ok_or_else(|| {
         crate::errors::Error::UnsupportedSQLiteFeature(format!(
             "EXTRACT({field}) is not supported in SQLite. Supported fields: \
-             YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH."
+             YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH, WEEK, ISODOW, ISOYEAR."
         ))
     })?;
     // `extract(epoch from (a - b))` asks for the seconds in a difference
@@ -1447,6 +1450,61 @@ fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bo
     addressable(left) || addressable(right)
 }
 
+/// `a @> b` (a contains b): every element of b must be in a.
+///
+/// Implemented as `NOT EXISTS (SELECT 1 FROM json_each(b) WHERE value NOT IN
+/// (SELECT value FROM json_each(a)))`. An empty needle produces no rows so
+/// NOT EXISTS is true, matching PostgreSQL's `{1,2} @> {}` = true.
+/// Duplicates are ignored because IN membership is set-based.
+fn array_containment(haystack: Expr, needle: Expr) -> Expr {
+    let haystack_values = Box::new(single_expr_query(
+        Expr::Identifier(Ident::new("value")),
+        from_relation(table_function_factor("json_each", vec![haystack], None, false)),
+        None,
+    ));
+    let not_in_haystack = Expr::InSubquery {
+        expr: Box::new(Expr::Identifier(Ident::new("value"))),
+        subquery: haystack_values,
+        negated: true,
+    };
+    let inner = single_expr_query(
+        integer_literal(1),
+        from_relation(table_function_factor("json_each", vec![needle], None, false)),
+        Some(not_in_haystack),
+    );
+    Expr::Exists { subquery: Box::new(inner), negated: true }
+}
+
+/// Extract the `Interval` node from a bare or parenthesised interval
+/// expression.
+fn extract_interval_expr(expr: &Expr) -> Option<&Interval> {
+    match expr {
+        Expr::Interval(i) => Some(i),
+        Expr::Nested(inner) => {
+            match inner.as_ref() {
+                Expr::Interval(i) => Some(i),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Detect `scalar * INTERVAL` or `INTERVAL * scalar`. Returns (scalar_expr,
+/// interval) when the pattern matches; the caller decides whether the scalar is
+/// a constant.
+fn scalar_times_interval(expr: &Expr) -> Option<(&Expr, &Interval)> {
+    if let Expr::BinaryOp { left, op: BinaryOperator::Multiply, right } = expr {
+        if let Some(i) = extract_interval_expr(right) {
+            return Some((left, i));
+        }
+        if let Some(i) = extract_interval_expr(left) {
+            return Some((right, i));
+        }
+    }
+    None
+}
+
 /// Translate a binary operation expression.
 #[allow(clippy::too_many_lines)]
 fn translate_binary_op(
@@ -1582,7 +1640,7 @@ fn translate_binary_op(
     // ^ is exponentiation in PostgreSQL but bitwise XOR in SQLite, so passthrough
     // is wrong.
     if *op == BinaryOperator::PGExp {
-        if !options.are_math_functions_available() {
+        if !options.is_math_functions_available() {
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                 "^ (PostgreSQL exponentiation) requires SQLITE_ENABLE_MATH_FUNCTIONS. \
                  Enable with .with_math_functions_available() or use pow() explicitly."
@@ -1709,20 +1767,43 @@ fn translate_binary_op(
                     .to_string(),
             ));
         }
-        // jsonb containment: recursive partial-match has no faithful SQLite expression.
+        // Array containment (@> / <@). When both operands resolve to arrays under
+        // the JSON representation, rewrite via NOT EXISTS / json_each anti-join.
+        // For jsonb operands the refusal names jsonb so the message does not
+        // mislead array callers who forgot to set ArrayRepresentation::Json.
         BinaryOperator::AtArrow => {
+            if is_json_array_representation(options)
+                && (is_array_expression(left, schema) || is_array_expression(right, schema))
+            {
+                // a @> b: every element of b must be in a.
+                return Ok(array_containment(
+                    left.translate(schema, options)?,
+                    right.translate(schema, options)?,
+                ));
+            }
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                "@> (jsonb containment) is not supported in SQLite. PostgreSQL containment is \
-                 recursive partial-match; json_each cannot express it without a recursive CTE \
-                 per nesting level."
+                "@> (jsonb containment) is not supported in SQLite. PostgreSQL jsonb \
+                 containment is recursive partial-match; json_each cannot express it without \
+                 a recursive CTE per nesting level. For array columns use \
+                 ArrayRepresentation::Json."
                     .to_string(),
             ));
         }
         BinaryOperator::ArrowAt => {
+            if is_json_array_representation(options)
+                && (is_array_expression(left, schema) || is_array_expression(right, schema))
+            {
+                // a <@ b: every element of a is in b (same as b @> a).
+                return Ok(array_containment(
+                    right.translate(schema, options)?,
+                    left.translate(schema, options)?,
+                ));
+            }
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                "<@ (jsonb contained-by) is not supported in SQLite. PostgreSQL containment is \
-                 recursive partial-match; json_each cannot express it without a recursive CTE \
-                 per nesting level."
+                "<@ (jsonb contained-by) is not supported in SQLite. PostgreSQL jsonb \
+                 containment is recursive partial-match; json_each cannot express it without \
+                 a recursive CTE per nesting level. For array columns use \
+                 ArrayRepresentation::Json."
                     .to_string(),
             ));
         }
@@ -1858,30 +1939,71 @@ fn translate_binary_op(
 
     // PG INTERVAL arithmetic: `target + INTERVAL 'N unit'` becomes
     // `datetime(target, '+M months', 'floor', '+D days', '+S seconds')`, and
-    // `-` negates every count. Only the right-hand interval case is handled
-    // here. Standalone intervals (comparisons, projections) fall through to
-    // the Expr::Interval arm and stay unsupported.
+    // `-` negates every count.
+    //
+    // Three shapes beyond the basic right-hand-interval case:
+    // 1. INTERVAL + target: commute to target + INTERVAL.
+    // 2. n * INTERVAL or INTERVAL * n: fold the literal integer scalar.
+    // 3. Unrecognised interval notation (HH:MM:SS, ISO P-forms): emit a message
+    //    naming the verbose form instead of blaming INTERVAL wholesale.
     if matches!(op, BinaryOperator::Plus | BinaryOperator::Minus) {
-        let interval_rhs = match right {
-            Expr::Interval(i) => Some(i),
-            Expr::Nested(inner) => {
-                match inner.as_ref() {
-                    Expr::Interval(i) => Some(i),
-                    _ => None,
+        let negating = matches!(op, BinaryOperator::Minus);
+
+        // Case 1: INTERVAL on the left commutes (addition only).
+        if *op == BinaryOperator::Plus && extract_interval_expr(left).is_some() {
+            return translate_binary_op(right, op, left, schema, options);
+        }
+
+        // Case 2: n * INTERVAL or INTERVAL * n on the right.
+        if let Some((scalar, interval)) = scalar_times_interval(right) {
+            match integer_literal_value(scalar) {
+                Some(n) => {
+                    match interval_date_modifiers_scaled(interval, negating, n)? {
+                        Some(modifiers) => {
+                            let target = left.translate(schema, options)?;
+                            let mut args = vec![target];
+                            for modifier in modifiers {
+                                args.push(string_literal(&modifier));
+                            }
+                            return Ok(simple_function_expr("datetime", args, None));
+                        }
+                        None => {
+                            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                                "INTERVAL '{}' notation is not supported. Use the verbose form                                  with explicit count and unit pairs, for example                                  INTERVAL '1 hour 30 minutes'.",
+                                single_quoted_literal(interval.value.as_ref()).unwrap_or("...")
+                            )));
+                        }
+                    }
+                }
+                None => {
+                    // Runtime scalar: cannot be constant-folded into a modifier.
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        "INTERVAL scaled by a runtime expression cannot be folded at translation                          time. Compute the multiplier in application code and use a plain                          INTERVAL literal, for example INTERVAL '3 days'."
+                            .to_string(),
+                    ));
                 }
             }
-            _ => None,
-        };
-        if let Some(interval) = interval_rhs
-            && let Some(modifiers) =
-                interval_date_modifiers(interval, matches!(op, BinaryOperator::Minus))?
-        {
-            let target = left.translate(schema, options)?;
-            let mut args = vec![target];
-            for modifier in modifiers {
-                args.push(string_literal(&modifier));
+        }
+
+        // Case 3: bare INTERVAL on the right.
+        if let Some(interval) = extract_interval_expr(right) {
+            match interval_date_modifiers(interval, negating)? {
+                Some(modifiers) => {
+                    let target = left.translate(schema, options)?;
+                    let mut args = vec![target];
+                    for modifier in modifiers {
+                        args.push(string_literal(&modifier));
+                    }
+                    return Ok(simple_function_expr("datetime", args, None));
+                }
+                None => {
+                    // The notation was not decoded (HH:MM:SS, ISO P-form, 'ago').
+                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        "INTERVAL '{}' notation is not supported. Use the verbose form with                          explicit count and unit pairs, for example INTERVAL '1 hour 30 minutes'.",
+                        single_quoted_literal(interval.value.as_ref()).unwrap_or("...")
+                    )));
+                }
             }
-            return Ok(simple_function_expr("datetime", args, None));
         }
     }
 
@@ -2058,14 +2180,36 @@ impl Translator for Expr {
                 rebuild(|| -> Result<Expr, crate::errors::Error> {
                     let translated_expr = expr.translate(schema, options)?;
                     let translated_pattern = pattern.translate(schema, options)?;
+                    let escape = sqlite_like_escape(lowered_ilike_escape(escape_char.as_ref())?);
+                    if let Some(fold_fn) = options.get_ilike_fold_function() {
+                        // Use the caller-provided fold function instead of lower().
+                        let fold = |e| simple_function_expr(fold_fn, vec![e], None);
+                        return Ok(Expr::Like {
+                            negated: *negated,
+                            any: *any,
+                            expr: Box::new(fold(translated_expr)),
+                            pattern: Box::new(fold(translated_pattern)),
+                            escape_char: escape,
+                        });
+                    }
+                    // No fold function. Refuse a literal pattern with non-ASCII
+                    // alphabetic characters: SQLite lower() is ASCII-only and
+                    // would produce silent wrong results.
+                    if has_non_ascii_alpha_literal(pattern) {
+                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                            "ILIKE with a pattern containing non-ASCII alphabetic characters \
+                             cannot translate faithfully because SQLite lower() folds ASCII \
+                             only. Declare a Unicode-capable fold function via \
+                             .with_ilike_fold_function() to enable non-ASCII ILIKE."
+                                .to_string(),
+                        ));
+                    }
                     Ok(Expr::Like {
                         negated: *negated,
                         any: *any,
                         expr: Box::new(wrap_with_lower(translated_expr)),
                         pattern: Box::new(wrap_with_lower(translated_pattern)),
-                        escape_char: sqlite_like_escape(lowered_ilike_escape(
-                            escape_char.as_ref(),
-                        )?),
+                        escape_char: escape,
                     })
                 })?
             }
@@ -2228,7 +2372,7 @@ impl Translator for Expr {
                 rebuild(|| {
                     Ok(match op {
                         UnaryOperator::PGSquareRoot => {
-                            if !options.are_math_functions_available() {
+                            if !options.is_math_functions_available() {
                                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                                     "|/ (square root) requires SQLITE_ENABLE_MATH_FUNCTIONS. \
                              Enable with .with_math_functions_available()."
@@ -2242,7 +2386,7 @@ impl Translator for Expr {
                             )
                         }
                         UnaryOperator::PGCubeRoot => {
-                            if !options.are_math_functions_available() {
+                            if !options.is_math_functions_available() {
                                 return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                                     "||/ (cube root) requires SQLITE_ENABLE_MATH_FUNCTIONS. \
                              Enable with .with_math_functions_available()."
@@ -2250,12 +2394,7 @@ impl Translator for Expr {
                                 ));
                             }
                             let x = expr.translate(schema, options)?;
-                            let exponent = Expr::Nested(Box::new(Expr::BinaryOp {
-                                left: Box::new(number_literal("1.0")),
-                                op: BinaryOperator::Divide,
-                                right: Box::new(number_literal("3.0")),
-                            }));
-                            simple_function_expr("pow", vec![x, exponent], None)
+                            cube_root_closed_form(x)
                         }
                         UnaryOperator::PGAbs => {
                             simple_function_expr(
@@ -2321,6 +2460,21 @@ fn lowered_ilike_escape(
     }
 
     Ok(Some(ValueWithSpan { value: Value::SingleQuotedString(lowered), span: escape.span }))
+}
+
+/// True when `expr` is a string literal containing at least one character that
+/// is alphabetic but not ASCII. Used to gate the ILIKE refusal: SQLite
+/// `lower()` only folds ASCII, so a non-ASCII alphabetic pattern produces
+/// silent wrong answers.
+fn has_non_ascii_alpha_literal(expr: &Expr) -> bool {
+    let mut e = expr;
+    while let Expr::Nested(inner) = e {
+        e = inner.as_ref();
+    }
+    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) = e else {
+        return false;
+    };
+    s.chars().any(|c| c.is_alphabetic() && !c.is_ascii())
 }
 
 /// The escape character a translated `LIKE` carries.

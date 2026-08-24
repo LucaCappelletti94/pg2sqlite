@@ -164,7 +164,29 @@ struct Document {
 
 #[test]
 fn test_monitor_mode_logs_violations() -> Result<(), Box<dyn std::error::Error>> {
+    // Schema with a permissive INSERT (WITH CHECK = true) but a restrictive
+    // SELECT USING (owner_id = session_user). Alice can insert a bob-owned row
+    // through the view (WITH CHECK passes), but the row is not visible to alice
+    // through SELECT USING. The monitoring trigger must log 'select_not_visible'
+    // rather than 'rls_policy_violation', matching PostgreSQL semantics.
     let audit_table_name = "rls_violations";
+    const MONITOR_SCHEMA: &str = r#"
+CREATE TABLE documents (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL
+);
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY documents_select_policy ON documents
+    FOR SELECT
+    TO authenticated
+    USING (owner_id = current_setting('app.user_id')::uuid);
+CREATE POLICY documents_insert_policy ON documents
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (true);
+"#;
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_session_user_role("authenticated".to_string())
@@ -173,61 +195,51 @@ fn test_monitor_mode_logs_violations() -> Result<(), Box<dyn std::error::Error>>
             "current_app_user",
         ))
         .with_rls_audit_table_name(audit_table_name.to_string());
-    // Note: Monitor mode is the default
 
-    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?;
-
+    let translated = Pg2Sqlite::default().sql(MONITOR_SCHEMA)?.translate(&options)?;
     let mut conn = establish_connection();
-
-    // Execute all translated statements
     for stmt in &translated {
         diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
     }
 
-    // Set up session user
+    // Set session user to alice.
     let user_alice = Uuid::new_v4();
     helpers::set_session_user_id(&user_alice);
 
-    // Insert a document directly into the backing table (simulating backend sync)
-    // This bypasses the RLS view's INSTEAD OF trigger
+    // Insert a bob-owned document through the VIEW as alice.
+    // WITH CHECK(true) allows it; SELECT USING(owner_id = alice) hides it.
     let user_bob = Uuid::new_v4();
     let doc_id = Uuid::new_v4();
+    // Translator output for DML must be applied via sql_query; typed DSL
+    // cannot express the view-path insert through translated RLS triggers.
+    diesel::sql_query("INSERT INTO documents (id, owner_id, title, content) VALUES (?, ?, ?, ?)")
+        .bind::<diesel::sql_types::Binary, _>(doc_id.as_bytes())
+        .bind::<diesel::sql_types::Binary, _>(user_bob.as_bytes())
+        .bind::<diesel::sql_types::Text, _>("Bob's Secret")
+        .bind::<diesel::sql_types::Text, _>("Content")
+        .execute(&mut conn)?;
 
-    diesel::sql_query(
-        "INSERT INTO documents_rls (id, owner_id, title, content) VALUES (?, ?, ?, ?)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(doc_id.as_bytes())
-    .bind::<diesel::sql_types::Binary, _>(user_bob.as_bytes()) // Bob's doc, but Alice is session user
-    .bind::<diesel::sql_types::Text, _>("Bob's Secret")
-    .bind::<diesel::sql_types::Text, _>("Content")
-    .execute(&mut conn)?;
-
-    // Query the documents view as Alice - should NOT see Bob's document
+    // Alice cannot see bob's document through the view.
     let visible_docs: Vec<Document> = schema::documents::table.load::<Document>(&mut conn)?;
-
     assert_eq!(visible_docs.len(), 0, "Alice should not see Bob's document through the view");
 
-    // Check the audit table for violations
+    // The monitoring trigger must have logged the SELECT-visibility mismatch.
     #[derive(QueryableByName, Debug)]
     struct ViolationRecord {
-        #[allow(dead_code)]
-        #[diesel(sql_type = diesel::sql_types::Integer)]
-        id: i32,
         #[diesel(sql_type = diesel::sql_types::Text)]
         table_name: String,
         #[diesel(sql_type = diesel::sql_types::Text)]
         violation_type: String,
     }
-
-    let violations: Vec<ViolationRecord> = diesel::sql_query(format!(
-        "SELECT id, table_name, violation_type FROM {}",
-        audit_table_name
-    ))
-    .load(&mut conn)?;
-
-    assert_eq!(violations.len(), 1, "Should have logged exactly one violation");
+    let violations: Vec<ViolationRecord> =
+        diesel::sql_query(format!("SELECT table_name, violation_type FROM {audit_table_name}"))
+            .load(&mut conn)?;
+    assert_eq!(violations.len(), 1, "Should have logged exactly one audit row");
     assert_eq!(violations[0].table_name, "documents");
-    assert_eq!(violations[0].violation_type, "rls_policy_violation");
+    // The monitor now reports 'select_not_visible', not 'rls_policy_violation',
+    // because a write whose new row is not SELECT-visible is not a policy violation
+    // in the PostgreSQL sense.
+    assert_eq!(violations[0].violation_type, "select_not_visible");
 
     Ok(())
 }
@@ -300,6 +312,27 @@ fn test_strict_mode_blocks_violations() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 fn test_validation_views_exist() -> Result<(), Box<dyn std::error::Error>> {
+    // Use a schema where INSERT WITH CHECK (true) allows any insert but SELECT
+    // USING restricts visibility by owner. Alice inserts alice's doc (visible)
+    // and then inserts bob's doc through the view (not visible to alice).
+    // The violations view must show only bob's doc.
+    const VALIDATION_SCHEMA: &str = r#"
+CREATE TABLE documents (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL
+);
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY documents_select_policy ON documents
+    FOR SELECT
+    TO authenticated
+    USING (owner_id = current_setting('app.user_id')::uuid);
+CREATE POLICY documents_insert_policy ON documents
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (true);
+"#;
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_session_user_role("authenticated".to_string())
@@ -309,10 +342,9 @@ fn test_validation_views_exist() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .with_rls_audit_table_name("rls_audit".to_string());
 
-    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(VALIDATION_SCHEMA)?.translate(&options)?;
     let sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
-    // Should generate a validation view
     assert!(
         sql.contains("CREATE VIEW documents_rls_violations"),
         "Expected validation view creation, got:\n{}",
@@ -320,42 +352,36 @@ fn test_validation_views_exist() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut conn = establish_connection();
-
-    // Execute all translated statements
     for stmt in &translated {
         diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
     }
 
-    // Set up session user
     let user_alice = Uuid::new_v4();
+    let user_bob = Uuid::new_v4();
     helpers::set_session_user_id(&user_alice);
 
-    // Insert both valid and invalid documents directly to backing table
-    let user_bob = Uuid::new_v4();
+    // Alice inserts her own doc through the view (WITH CHECK=true, visible to
+    // alice).
     let alice_doc_id = Uuid::new_v4();
+    // View-path insert; typed DSL cannot express the INSTEAD OF trigger path.
+    diesel::sql_query("INSERT INTO documents (id, owner_id, title, content) VALUES (?, ?, ?, ?)")
+        .bind::<diesel::sql_types::Binary, _>(alice_doc_id.as_bytes())
+        .bind::<diesel::sql_types::Binary, _>(user_alice.as_bytes())
+        .bind::<diesel::sql_types::Text, _>("Alice's Doc")
+        .bind::<diesel::sql_types::Text, _>("Content")
+        .execute(&mut conn)?;
+
+    // Alice inserts a bob-owned doc through the view (WITH CHECK=true, not visible
+    // to alice).
     let bob_doc_id = Uuid::new_v4();
+    diesel::sql_query("INSERT INTO documents (id, owner_id, title, content) VALUES (?, ?, ?, ?)")
+        .bind::<diesel::sql_types::Binary, _>(bob_doc_id.as_bytes())
+        .bind::<diesel::sql_types::Binary, _>(user_bob.as_bytes())
+        .bind::<diesel::sql_types::Text, _>("Bob's Doc")
+        .bind::<diesel::sql_types::Text, _>("Content")
+        .execute(&mut conn)?;
 
-    // Alice's document (valid)
-    diesel::sql_query(
-        "INSERT INTO documents_rls (id, owner_id, title, content) VALUES (?, ?, ?, ?)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(alice_doc_id.as_bytes())
-    .bind::<diesel::sql_types::Binary, _>(user_alice.as_bytes())
-    .bind::<diesel::sql_types::Text, _>("Alice's Doc")
-    .bind::<diesel::sql_types::Text, _>("Content")
-    .execute(&mut conn)?;
-
-    // Bob's document (violation)
-    diesel::sql_query(
-        "INSERT INTO documents_rls (id, owner_id, title, content) VALUES (?, ?, ?, ?)",
-    )
-    .bind::<diesel::sql_types::Binary, _>(bob_doc_id.as_bytes())
-    .bind::<diesel::sql_types::Binary, _>(user_bob.as_bytes())
-    .bind::<diesel::sql_types::Text, _>("Bob's Doc")
-    .bind::<diesel::sql_types::Text, _>("Content")
-    .execute(&mut conn)?;
-
-    // Query the validation view - should only show Bob's document (violation)
+    // Violations view: rows in backing table not visible through SELECT USING.
     let violations: Vec<Document> =
         diesel::sql_query("SELECT * FROM documents_rls_violations").load::<Document>(&mut conn)?;
 

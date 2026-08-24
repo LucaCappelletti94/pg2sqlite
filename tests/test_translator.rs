@@ -70,7 +70,7 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
         Pg2Sqlite::from_git(repo_dir.path().to_str().expect("temp path should be valid UTF-8"))?
             .translate(
                 &Pg2SqliteOptions::default()
-                    .remove_unsupported_check_constraints()
+                    .with_remove_unsupported_check_constraints()
                     .with_uuid_representation(UuidRepresentation::Blob),
             )?;
 

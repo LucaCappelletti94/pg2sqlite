@@ -62,17 +62,15 @@ const TABLE: &str = "
         dept TEXT NOT NULL
     );
     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (true);
 ";
 
-/// Applies the translated DDL. The emitted SQL is the artifact under test so it
-/// is applied as generated text; all other statements use the typed DSL.
+/// Applies the translated DDL to a fresh in-memory SQLite. The emitted SQL is
+/// the artifact under test; all other statements use the typed DSL.
 fn apply(policies: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let pg = format!("{TABLE}{policies}");
-    // Required by the RLS translator. Strict validation stays off, so the
-    // monitor logs invisible rows rather than rejecting them.
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
     let translated = Pg2Sqlite::default().sql(&pg)?.translate(&options)?;
-
     let mut conn = SqliteConnection::establish(":memory:")?;
     for statement in &translated {
         diesel::sql_query(statement.to_string()).execute(&mut conn)?;

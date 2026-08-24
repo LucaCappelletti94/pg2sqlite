@@ -3,7 +3,7 @@
 
 use pg2sqlite::{
     errors::Error,
-    impls::translator_impls::rls::{
+    internals::{
         generate_readonly_rls_statements, generate_rls_statements,
         generate_rls_validation_statements, generate_rls_view_sql, resolve_trigger_table_name,
         table_has_rls,
@@ -738,8 +738,10 @@ fn forward_function_translation_covers_named_filter_and_none_argument_paths() {
     });
     let filtered = filtered_named.translate(&schema, &options).expect("FILTER should translate");
     let filtered_sql = filtered.to_string();
-    assert!(filtered_sql.contains("CASE WHEN"));
-    assert!(!filtered_sql.contains("FILTER"));
+    // FILTER is kept natively: SQLite has supported FILTER on aggregates
+    // since 3.30, and the CASE lowering put NULLs into json_group_array.
+    assert!(filtered_sql.contains("FILTER"), "native FILTER expected: {filtered_sql}");
+    assert!(!filtered_sql.contains("CASE WHEN"), "no CASE lowering expected: {filtered_sql}");
 
     let filtered_no_args = Expr::Function(Function {
         name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("count"))]),

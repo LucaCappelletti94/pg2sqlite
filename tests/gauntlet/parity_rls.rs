@@ -30,6 +30,36 @@ fn uc() -> Uuid {
     Uuid::from([0x03; 16])
 }
 
+/// Applies everything except triggers, returning the withheld trigger DDL.
+///
+/// Seeding the backing tables is the SQLite mirror of PostgreSQL superuser
+/// seeding, and authoritative loads run with triggers
+/// disabled. Diesel cannot reach sqlite3_db_config, so the toggle is
+/// replaced by applying triggers only after the seeds.
+fn apply_base_ddl(
+    conn: &mut SqliteConnection,
+    translated: &[sqlparser::ast::Statement],
+) -> Vec<String> {
+    let (triggers, base): (Vec<_>, Vec<_>) =
+        translated.iter().map(ToString::to_string).partition(|s| s.starts_with("CREATE TRIGGER"));
+    for stmt in &base {
+        // DDL migration: raw SQL is the correct form here.
+        diesel::sql_query(stmt.clone())
+            .execute(conn)
+            .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
+    }
+    triggers
+}
+
+/// Applies the withheld triggers once seeding is done.
+fn arm_triggers(conn: &mut SqliteConnection, triggers: &[String]) {
+    for stmt in triggers {
+        diesel::sql_query(stmt.clone())
+            .execute(conn)
+            .unwrap_or_else(|e| panic!("trigger DDL failed: {e}\n{stmt}"));
+    }
+}
+
 // ════════════════════════════════════════════════════════════════
 // rls_basic: documents owned by a single user, four-policy table.
 // ════════════════════════════════════════════════════════════════
@@ -237,20 +267,15 @@ fn rls_basic_engines_agree() {
         .expect("grant DML to app");
         BasicPgRunner { connection: conn, acting: ua(), current_role: String::new() }
     };
-    let mut sq = {
+    let (mut sq, basic_triggers) = {
         let translated = Pg2Sqlite::default()
             .sql(RLS_BASIC)
             .expect("parse rls_basic")
             .translate(&basic_options())
             .expect("translate rls_basic");
         let mut conn = establish_connection();
-        for stmt in &translated {
-            // DDL migration: raw SQL is the correct form here.
-            diesel::sql_query(stmt.to_string())
-                .execute(&mut conn)
-                .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
-        }
-        BasicSqliteRunner { connection: conn, acting: ua() }
+        let triggers = apply_base_ddl(&mut conn, &translated);
+        (BasicSqliteRunner { connection: conn, acting: ua() }, triggers)
     };
 
     // Set a session user before seeds so the _rls audit triggers can query the
@@ -262,6 +287,7 @@ fn rls_basic_engines_agree() {
     sq.seed(d1, ua(), "alice doc");
     pg.seed(d2, ub(), "bob doc");
     sq.seed(d2, ub(), "bob doc");
+    arm_triggers(&mut sq.connection, &basic_triggers);
 
     for step in basic_scenario() {
         let expected = pg.step(&step);
@@ -539,19 +565,15 @@ fn rls_multiple_policies_engines_agree() {
         .expect("grant DML to app");
         MultiPgRunner { connection: conn, acting: ua(), current_role: String::new() }
     };
-    let mut sq = {
+    let (mut sq, multi_triggers) = {
         let translated = Pg2Sqlite::default()
             .sql(RLS_MULTIPLE_POLICIES)
             .expect("parse rls_multiple_policies")
             .translate(&multi_options())
             .expect("translate rls_multiple_policies");
         let mut conn = establish_connection();
-        for stmt in &translated {
-            diesel::sql_query(stmt.to_string())
-                .execute(&mut conn)
-                .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
-        }
-        MultiSqliteRunner { connection: conn, acting: ua() }
+        let triggers = apply_base_ddl(&mut conn, &translated);
+        (MultiSqliteRunner { connection: conn, acting: ua() }, triggers)
     };
 
     // Set a session user before seeds so the _rls audit triggers can query the
@@ -566,6 +588,7 @@ fn rls_multiple_policies_engines_agree() {
     sq.seed(d2, ub(), true, None, "bob public");
     pg.seed(d3, uc(), false, Some("eng"), "carol eng");
     sq.seed(d3, uc(), false, Some("eng"), "carol eng");
+    arm_triggers(&mut sq.connection, &multi_triggers);
 
     for step in multi_scenario() {
         let expected = pg.step(&step);
@@ -844,19 +867,15 @@ fn rls_tenant_isolation_engines_agree() {
         .expect("grant DML to app");
         TenantPgRunner { connection: conn, acting: ua(), current_role: String::new() }
     };
-    let mut sq = {
+    let (mut sq, tenant_triggers) = {
         let translated = Pg2Sqlite::default()
             .sql(RLS_TENANT_ISOLATION)
             .expect("parse rls_tenant_isolation")
             .translate(&tenant_options())
             .expect("translate rls_tenant_isolation");
         let mut conn = establish_connection();
-        for stmt in &translated {
-            diesel::sql_query(stmt.to_string())
-                .execute(&mut conn)
-                .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
-        }
-        TenantSqliteRunner { connection: conn, acting: ua() }
+        let triggers = apply_base_ddl(&mut conn, &translated);
+        (TenantSqliteRunner { connection: conn, acting: ua() }, triggers)
     };
 
     // Set a session user before seeds so the _rls audit triggers can query the
@@ -876,6 +895,7 @@ fn rls_tenant_isolation_engines_agree() {
     sq.seed_project(p1, t1, "project alpha", ua());
     pg.seed_project(p2, t2, "project beta", uc());
     sq.seed_project(p2, t2, "project beta", uc());
+    arm_triggers(&mut sq.connection, &tenant_triggers);
 
     for step in tenant_scenario(t1, t2, p1) {
         let expected = pg.step(&step);

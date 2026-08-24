@@ -32,8 +32,8 @@ use sql_traits::{
 use sqlparser::ast::{
     ColumnOption, CreatePolicy, CreatePolicyCommand, CreatePolicyType, CreateTable, Expr, Function,
     FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments,
-    HavingBound, Ident, JoinConstraint, JoinOperator, ListAggOnOverflow, Statement, TableFactor,
-    Value, VisitMut, VisitorMut, WindowType,
+    HavingBound, Ident, JoinConstraint, JoinOperator, ListAggOnOverflow, Owner, Statement,
+    TableFactor, Value, VisitMut, VisitorMut, WindowType,
 };
 
 use crate::{
@@ -338,6 +338,14 @@ fn combine_policy_predicates(
     let mut permissive = Vec::new();
     let mut restrictive = Vec::new();
     let mut has_permissive = false;
+    // A literally-true permissive predicate makes the permissive OR true
+    // regardless of other permissive conditions. Track it separately so the
+    // conjunct-building step knows to skip the permissive side entirely when
+    // any one permissive policy grants all rows. Without this tracking, a
+    // FOR SELECT USING (true) alongside a FOR ALL USING (owner = 'alice')
+    // drops the true predicate but keeps the (owner = 'alice') conjunct,
+    // producing a view narrower than PostgreSQL's (which ORs them to true).
+    let mut permissive_always_true = false;
 
     for policy in policies {
         let is_restrictive = policy.policy_type() == CreatePolicyType::Restrictive;
@@ -372,13 +380,14 @@ fn combine_policy_predicates(
         // view or trigger guard, where it would fail at apply time (ILIKE) or
         // lie dormant until the first read (now, date_trunc).
         let transformed = transformed.translate(schema, options)?;
-        // A literally-true predicate constrains nothing, so it contributes no
-        // conjunct. `USING (true)` is the idiomatic public-access policy, and
-        // without this fold it emits dead SQL such as
-        // `WHERE ((true)) AND NOT ((true))`. Dropping a true permissive
-        // predicate leaves the permissive list empty, which the caller reads as
-        // "grants everything", so the meaning is preserved.
+        // A literally-true predicate constrains nothing. For a permissive
+        // policy this means the permissive OR is satisfied for every row, so
+        // we record that and skip adding any conjunct for it. For a restrictive
+        // policy a true predicate constrains nothing and can also be dropped.
         if is_true_literal(&transformed) {
+            if !is_restrictive {
+                permissive_always_true = true;
+            }
             continue;
         }
         if is_restrictive {
@@ -397,7 +406,10 @@ fn combine_policy_predicates(
     // restrictive conjunct follows. Adding it unconditionally would churn every
     // snapshot with semantically identical output.
     let mut conjuncts = Vec::new();
-    if !permissive.is_empty() {
+    // When any permissive policy is literally true, the OR of all permissive
+    // conditions is true. No permissive conjunct is needed and the collected
+    // non-true permissive predicates are vacuous (true OR anything = true).
+    if !permissive_always_true && !permissive.is_empty() {
         let joined = permissive.join(" OR ");
         if permissive.len() > 1 && !restrictive.is_empty() {
             conjuncts.push(format!("({joined})"));
@@ -493,15 +505,58 @@ fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> Strin
         .join(" AND ")
 }
 
+/// Returns the policies that apply to the given commands, filtered by the
+/// session user role when a non-PUBLIC `TO` clause is present.
+///
+/// A policy applies when its `TO` list is empty (PUBLIC), contains the literal
+/// `PUBLIC` role, or contains the configured session user role (exact name
+/// match; no membership graph is consulted). When a policy has a non-PUBLIC
+/// role restriction and no session user role is configured with
+/// `with_session_user_role`, translation is refused so the caller does not
+/// silently apply a policy to the wrong audience.
 fn filter_policies<'a>(
     table: &'a CreateTable,
     schema: &'a ParserDB,
     commands: &[CreatePolicyCommand],
-) -> Result<Vec<&'a CreatePolicy>, LookupError> {
+    options: &Pg2SqliteOptions,
+) -> Result<Vec<&'a CreatePolicy>, Error> {
+    let session_role = options.get_session_user_role();
     let mut policies = Vec::new();
     for policy in table.policies(schema)? {
         let command = policy.command();
-        if commands.contains(&command) || command == CreatePolicyCommand::All {
+        if !commands.contains(&command) && command != CreatePolicyCommand::All {
+            continue;
+        }
+        // Determine whether this policy applies given its TO clause.
+        let mut applies = false;
+        let mut has_non_public_role = false;
+        let roles: Vec<_> = policy.roles(schema).collect();
+        if roles.is_empty() {
+            // No TO clause means PUBLIC.
+            applies = true;
+        } else {
+            for owner in &roles {
+                if let Owner::Ident(ident) = owner {
+                    if ident.value.eq_ignore_ascii_case("PUBLIC") {
+                        applies = true;
+                    } else {
+                        has_non_public_role = true;
+                        if session_role.is_some_and(|role| ident.value == role) {
+                            applies = true;
+                        }
+                    }
+                }
+            }
+        }
+        if has_non_public_role && session_role.is_none() {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "policy '{}' on table '{}' is scoped to a specific role. \
+                 Call with_session_user_role to specify which role this translation targets.",
+                policy.name(),
+                table.table_name(),
+            )));
+        }
+        if applies {
             policies.push(policy);
         }
     }
@@ -1497,8 +1552,8 @@ fn rls_read_predicate(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<PolicyPredicate, Error> {
-    let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select])?;
-    reject_self_referential_read_policy(&select_policies, table, schema)?;
+    let select_policies = filter_policies(table, schema, &[CreatePolicyCommand::Select], options)?;
+    reject_self_referential_read_policy(&select_policies, table, schema, options)?;
 
     combine_policy_predicates(
         &select_policies,
@@ -1580,6 +1635,7 @@ fn reject_self_referential_read_policy(
     policies: &[&CreatePolicy],
     table: &CreateTable,
     schema: &ParserDB,
+    options: &Pg2SqliteOptions,
 ) -> Result<(), Error> {
     let guarded = table.table_name();
     for policy in policies {
@@ -1625,7 +1681,7 @@ fn reject_self_referential_read_policy(
                 continue;
             };
             let other_select =
-                filter_policies(other_table, schema, &[CreatePolicyCommand::Select])?;
+                filter_policies(other_table, schema, &[CreatePolicyCommand::Select], options)?;
             for other_policy in &other_select {
                 let Some(other_pred) = other_policy.using.as_ref() else { continue };
                 let mut back_refs: Vec<String> = Vec::new();
@@ -1696,7 +1752,7 @@ fn generate_insert_trigger_sql(
     let trigger_name = quote_identifier(&format!("{table_name}_insert_trigger"));
 
     // Find INSERT policies
-    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert])?;
+    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert], options)?;
 
     let columns = trigger_columns(table, schema, options)?;
     let written: Vec<&TriggerColumn> =
@@ -1741,7 +1797,7 @@ fn generate_insert_trigger_sql(
             PolicyPredicate::AllowAll => format!("BEGIN\n    {forward}\nEND"),
             PolicyPredicate::Expr(predicate) => {
                 format!(
-                    "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE NOT ({predicate});\n    {forward}\nEND"
+                    "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE ({predicate}) IS NOT TRUE;\n    {forward}\nEND"
                 )
             }
         }
@@ -1752,60 +1808,160 @@ fn generate_insert_trigger_sql(
     ))
 }
 
-/// Generates a BEFORE INSERT trigger on the **backing table** that fires
-/// `RAISE(ABORT, ...)` when the configured FOR INSERT policy's WITH CHECK
-/// expression is not satisfied. This is the second half of the
-/// `INSERT INTO <view> ... RETURNING ...` fix: the view-side INSTEAD OF
-/// trigger forwards the INSERT, but RETURNING reads from the view's
-/// NEW row and never sees the backing-table-assigned PK. The
-/// translator's INSERT-rewrite in `insert.rs` redirects RETURNING-bearing
-/// INSERTs straight to the backing table; this trigger preserves policy
-/// enforcement on that rewritten path.
+/// Generates a BEFORE INSERT trigger on the **backing table** that enforces
+/// INSERT policies. This covers two cases:
 ///
-/// Returns `None` when no FOR INSERT (or FOR ALL) policy is declared:
-/// the deny-by-default RAISE in the INSTEAD OF view trigger already
-/// covers that case for the view path, and no rewrite happens for the
-/// backing-table path (since the rewrite is gated on a real policy that
-/// can be checked).
+/// 1. Zero INSERT/ALL policies: PostgreSQL denies by default. An unconditional
+///    RAISE guard is emitted in both monitor and strict mode.
+///
+/// 2. Policies with a WITH CHECK (or USING fallback per PostgreSQL rules): the
+///    guard raises when the combined expression IS NOT TRUE, matching the
+///    view-side INSTEAD OF trigger. Also covers the RETURNING redirect path
+///    (`insert.rs` sends INSERT...RETURNING straight at the backing table).
+///
+/// Returns `None` when the combined check is AllowAll (no guard needed).
 fn generate_insert_check_trigger_sql(
     table: &CreateTable,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<String>, Error> {
     let ctx = RlsTriggerContext::new(table, options);
-    let _ = ctx.table_name; // suppress unused-variable warning; we only need
-    // `inner_table_name` and the rename tuple here.
+    let table_name = ctx.table_name;
     let inner_table_name = &ctx.inner_table_name;
-    let table_rename = Some(ctx.as_rename_tuple());
     let inner_table_name_quoted = quote_identifier(inner_table_name);
     let trigger_name = quote_identifier(&format!("{inner_table_name}_insert_check"));
 
-    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert])?;
-    let lowercased_columns: Vec<String> =
-        table.columns(schema)?.map(|c| c.column_name().to_lowercase()).collect();
-    let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
+    let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert], options)?;
 
-    let mut check_conditions = Vec::new();
-    for policy in &insert_policies {
-        if let Some(expr) = policy.check_expression(schema) {
-            let transformed =
-                transform_expr(expr, options, table, schema, Some("NEW"), table_rename, facts);
-            // Same rule as combine_policy_predicates: the forward translator
-            // owns the semantics of what the guard evaluates.
-            let transformed = transformed.translate(schema, options)?;
-            check_conditions.push(format!("({transformed})"));
+    if insert_policies.is_empty() {
+        // Deny-by-default: PostgreSQL errors on INSERT when no INSERT or ALL policy
+        // exists. Emit an unconditional guard so raw backing writes are also blocked.
+        return Ok(Some(format!(
+            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
+             BEGIN SELECT RAISE(ABORT, 'permission denied: no INSERT policy on {table_name}'); END"
+        )));
+    }
+
+    let columns = trigger_columns(table, schema, options)?;
+    let check = combine_policy_predicates(
+        &insert_policies,
+        PolicyClause::Check,
+        Some("NEW"),
+        options,
+        table,
+        schema,
+        &guard_substitutions(&columns, GuardKind::Insert, options, table, schema)?,
+    )?;
+
+    let trigger = match check {
+        // No permissive policy: nothing grants the write, always raise.
+        PolicyPredicate::DenyAll => {
+            Some(format!(
+                "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
+             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+            ))
         }
-    }
-    if check_conditions.is_empty() {
-        return Ok(None);
-    }
-    let check = check_conditions.join(" OR ");
+        // Every applicable check is literally true: no guard needed.
+        PolicyPredicate::AllowAll => None,
+        PolicyPredicate::Expr(predicate) => {
+            Some(format!(
+                "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
+             WHEN ({predicate}) IS NOT TRUE \
+             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+            ))
+        }
+    };
+    Ok(trigger)
+}
 
-    Ok(Some(format!(
-        "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
-         WHEN NOT ({check}) \
-         BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
-    )))
+/// Generates a BEFORE UPDATE trigger on the **backing table** that enforces
+/// UPDATE policies on the backing-table path (ON CONFLICT DO UPDATE redirect
+/// and any raw backing UPDATE).
+///
+/// The view-path INSTEAD OF UPDATE trigger already filters by USING before
+/// forwarding, and raises for WITH CHECK failures before the forwarding UPDATE
+/// runs. So this guard never raises on the view path; it fires only when a
+/// backing UPDATE is issued directly or via ON CONFLICT DO UPDATE.
+///
+/// Returns `None` when the combined predicate is AllowAll (no guard needed).
+fn generate_update_check_trigger_sql(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<String>, Error> {
+    let ctx = RlsTriggerContext::new(table, options);
+    let inner_table_name = &ctx.inner_table_name;
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
+    let trigger_name = quote_identifier(&format!("{inner_table_name}_update_check"));
+
+    let update_policies = filter_policies(table, schema, &[CreatePolicyCommand::Update], options)?;
+
+    if update_policies.is_empty() {
+        // No UPDATE policy: deny backing-table updates (view path already 0-rows).
+        return Ok(Some(format!(
+            "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
+             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+        )));
+    }
+
+    let columns = trigger_columns(table, schema, options)?;
+    // USING resolves against OLD: which existing rows are valid targets.
+    let using = combine_policy_predicates(
+        &update_policies,
+        PolicyClause::Using,
+        Some("OLD"),
+        options,
+        table,
+        schema,
+        &[],
+    )?;
+    // WITH CHECK resolves against NEW (USING is the fallback per PostgreSQL).
+    let check = combine_policy_predicates(
+        &update_policies,
+        PolicyClause::Check,
+        Some("NEW"),
+        options,
+        table,
+        schema,
+        &guard_substitutions(&columns, GuardKind::Update, options, table, schema)?,
+    )?;
+
+    let trigger = match (using, check) {
+        // Any DenyAll: raise unconditionally.
+        (PolicyPredicate::DenyAll, _) | (_, PolicyPredicate::DenyAll) => {
+            Some(format!(
+                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
+             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+            ))
+        }
+        // Both allow all: no guard needed.
+        (PolicyPredicate::AllowAll, PolicyPredicate::AllowAll) => None,
+        // USING allows all, CHECK has a predicate.
+        (PolicyPredicate::AllowAll, PolicyPredicate::Expr(check_pred)) => {
+            Some(format!(
+                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
+             WHEN ({check_pred}) IS NOT TRUE \
+             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+            ))
+        }
+        // CHECK allows all, USING has a predicate.
+        (PolicyPredicate::Expr(using_pred), PolicyPredicate::AllowAll) => {
+            Some(format!(
+                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
+             WHEN ({using_pred}) IS NOT TRUE \
+             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+            ))
+        }
+        // Both have predicates: raise when either fails.
+        (PolicyPredicate::Expr(using_pred), PolicyPredicate::Expr(check_pred)) => {
+            Some(format!(
+                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
+             WHEN ({using_pred}) IS NOT TRUE OR ({check_pred}) IS NOT TRUE \
+             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+            ))
+        }
+    };
+    Ok(trigger)
 }
 
 /// Generates INSTEAD OF UPDATE trigger SQL.
@@ -1822,7 +1978,7 @@ fn generate_update_trigger_sql(
     let trigger_name = quote_identifier(&format!("{table_name}_update_trigger"));
 
     // Find UPDATE policies
-    let update_policies = filter_policies(table, schema, &[CreatePolicyCommand::Update])?;
+    let update_policies = filter_policies(table, schema, &[CreatePolicyCommand::Update], options)?;
 
     // Get all column names for the SET clause
     let columns = collect_column_names(table, schema)?;
@@ -1918,9 +2074,12 @@ fn generate_update_trigger_sql(
         // Raise only for a row that IS updatable but whose new value violates
         // WITH CHECK. Without the USING conjunct, a row merely visible through
         // the view would abort the statement instead of being skipped.
+        // Raise only when the row IS updatable but its new value IS NOT TRUE for
+        // WITH CHECK. Using IS NOT TRUE catches both false and NULL, matching
+        // PostgreSQL's rule that the check must evaluate to exactly TRUE.
         let guard = match &using_predicate {
-            Some(predicate) => format!("({predicate}) AND NOT ({check_predicate})"),
-            None => format!("NOT ({check_predicate})"),
+            Some(predicate) => format!("({predicate}) AND ({check_predicate}) IS NOT TRUE"),
+            None => format!("({check_predicate}) IS NOT TRUE"),
         };
         format!(
             "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE {guard};\n    {forward}\nEND"
@@ -1951,7 +2110,7 @@ fn generate_delete_trigger_sql(
     let trigger_name = quote_identifier(&format!("{table_name}_delete_trigger"));
 
     // Find DELETE policies
-    let delete_policies = filter_policies(table, schema, &[CreatePolicyCommand::Delete])?;
+    let delete_policies = filter_policies(table, schema, &[CreatePolicyCommand::Delete], options)?;
 
     // Get all column names for the WHERE clause fallback
     let columns = collect_column_names(table, schema)?;
@@ -2038,26 +2197,10 @@ fn generate_rls_statements_with_mode(
         )?;
         statements.extend(insert_stmts);
 
-        // Generate BEFORE INSERT guard trigger on the backing table.
-        // Paired with the insert.rs rewrite that redirects
-        // RETURNING-bearing INSERTs straight to the backing table; this
-        // trigger keeps WITH CHECK enforcement on that path.
-        //
-        // Gated on `is_strict_rls_validation()`: the default monitor
-        // mode is designed to LOG violations via the AFTER INSERT
-        // audit trigger, not BLOCK them. Emitting a blocking BEFORE
-        // INSERT guard in monitor mode would break the audit-monitor
-        // contract (and existing test scenarios that exploit
-        // backing-table direct inserts to validate the audit log).
-        //
-        // Strict mode unlocks the RETURNING-through-view rewrite in
-        // `insert.rs` because the guard is what makes the rewrite
-        // policy-safe; the rewrite itself is symmetrically gated.
-        // Skipped when no INSERT policy declares a WITH CHECK
-        // expression.
-        if options.is_strict_rls_validation()
-            && let Some(check_sql) = generate_insert_check_trigger_sql(table, schema, options)?
-        {
+        // Backing-table BEFORE INSERT guard: emitted in both monitor and strict
+        // mode so raw backing writes (RETURNING redirect, ON CONFLICT redirect,
+        // direct insert) are also covered. Skipped when AllowAll (no guard needed).
+        if let Some(check_sql) = generate_insert_check_trigger_sql(table, schema, options)? {
             let check_stmts = parse_generated_sql(
                 &dialect,
                 &check_sql,
@@ -2066,7 +2209,20 @@ fn generate_rls_statements_with_mode(
             statements.extend(check_stmts);
         }
 
-        // Generate UPDATE trigger
+        // Backing-table BEFORE UPDATE guard: covers ON CONFLICT DO UPDATE and
+        // any direct backing UPDATE. The view-path INSTEAD OF UPDATE trigger
+        // already filters by USING before forwarding, so this guard never raises
+        // on the view path. Skipped when AllowAll (no guard needed).
+        if let Some(update_check_sql) = generate_update_check_trigger_sql(table, schema, options)? {
+            let update_check_stmts = parse_generated_sql(
+                &dialect,
+                &update_check_sql,
+                "Failed to parse generated RLS backing-table BEFORE UPDATE guard SQL",
+            )?;
+            statements.extend(update_check_stmts);
+        }
+
+        // Generate INSTEAD OF UPDATE trigger
         let update_sql = generate_update_trigger_sql(table, schema, options)?;
         let update_stmts = parse_generated_sql(
             &dialect,
@@ -2075,7 +2231,7 @@ fn generate_rls_statements_with_mode(
         )?;
         statements.extend(update_stmts);
 
-        // Generate DELETE trigger
+        // Generate INSTEAD OF DELETE trigger
         let delete_sql = generate_delete_trigger_sql(table, schema, options)?;
         let delete_stmts = parse_generated_sql(
             &dialect,
@@ -2149,8 +2305,6 @@ pub fn rename_table_for_rls(
     renamed
 }
 
-const RLS_VALIDATION_ERROR: &str = "RLS validation";
-
 /// Generates the SQL to create the RLS audit table.
 #[must_use]
 pub fn generate_audit_table_sql(audit_table_name: &str) -> String {
@@ -2220,6 +2374,8 @@ fn generate_monitoring_trigger_sql(
 ) -> String {
     let visibility_check = generate_row_visibility_check(table_name, pk_columns, "NEW");
     let row_identifier = build_row_identifier_expr(pk_columns, "NEW");
+    // strict_mode influences severity only; enforcement is the job of the
+    // BEFORE INSERT/UPDATE guards and the INSTEAD OF triggers, not this audit.
     let severity = if strict_mode { "error" } else { "warning" };
     let op_upper = operation.to_uppercase();
     let past_participle = if operation == "insert" { "inserted into" } else { "updated in" };
@@ -2227,38 +2383,24 @@ fn generate_monitoring_trigger_sql(
     let inner_table_name_quoted = quote_identifier(inner_table_name);
     let audit_table_name_quoted = quote_identifier(audit_table_name);
     let table_name_literal = sql_string_literal(table_name);
-    let policy_name_literal = sql_string_literal(&format!("{op_upper} policy"));
+    // The SELECT policy governs visibility; name it honestly.
+    let policy_name_literal = sql_string_literal("SELECT policy");
     let severity_literal = sql_string_literal(severity);
+    // Honest wording: the row is in the backing table but not readable through
+    // the view. PostgreSQL allows this for writes without RETURNING; this is
+    // not a policy violation in the PostgreSQL sense.
     let details_literal = sql_string_literal(&format!(
-        "Row {past_participle} backing table but not visible through RLS view"
+        "Row {past_participle} backing table but not readable through the RLS view; \
+         PostgreSQL allows this for writes without RETURNING"
     ));
-
-    let abort_clause = if strict_mode {
-        let message = format!(
-            "{RLS_VALIDATION_ERROR}: row violates row-level security policy for table '{table_name}'"
-        );
-        // Same qualifying predicate as the INSERT-into-audit above:
-        // only abort when the row is NOT visible through the view.
-        // The previous shape was an unconditional `SELECT RAISE`,
-        // which aborted every backing-table insert in strict mode
-        // (including compliant ones) - a real regression masked by
-        // tests that only exercised the violation case.
-        format!(
-            r"
-    SELECT RAISE(ABORT, {})
-    WHERE NOT ({visibility_check});",
-            sql_string_literal(&message)
-        )
-    } else {
-        String::new()
-    };
 
     format!(
         r"CREATE TRIGGER {trigger_name}
 AFTER {op_upper} ON {inner_table_name_quoted}
 FOR EACH ROW
 BEGIN
-    -- Check if {operation}d row is visible through RLS view
+    -- Log rows that are in the backing table but not readable through the RLS view.
+    -- PostgreSQL allows invisible writes when no RETURNING is used; this is audit only.
     INSERT INTO {audit_table_name_quoted} (
         table_name,
         violation_type,
@@ -2271,14 +2413,14 @@ BEGIN
     )
     SELECT
         {table_name_literal},
-        'rls_policy_violation',
+        'select_not_visible',
         {row_identifier},
         {policy_name_literal},
         datetime('now'),
         {severity_literal},
         {details_literal},
         NULL
-    WHERE NOT ({visibility_check});{abort_clause}
+    WHERE NOT ({visibility_check});
 END"
     )
 }
@@ -2915,8 +3057,12 @@ mod tests {
         let lowercased_columns = resolved_sets(table, &schema);
         let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
 
-        let select_policies =
-            filter_policies(table, &schema, &[sqlparser::ast::CreatePolicyCommand::Select])?;
+        let select_policies = filter_policies(
+            table,
+            &schema,
+            &[sqlparser::ast::CreatePolicyCommand::Select],
+            &options,
+        )?;
         assert_eq!(select_policies.len(), 1);
 
         let transformed_query = transform_query(

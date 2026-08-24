@@ -226,7 +226,7 @@ pub enum Error {
     #[error(
         "RLS audit table name must be configured via `with_rls_audit_table_name()` \
          when translating schemas with RLS policies. \
-         Example: .with_rls_audit_table_name(\"rls_violations\".to_string())"
+         Example: .with_rls_audit_table_name(\"rls_violations\")"
     )]
     RlsAuditTableNameRequired,
     /// Error when a migration file is not found among discovered migrations.

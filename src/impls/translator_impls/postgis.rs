@@ -301,6 +301,37 @@ pub(crate) fn geography_measure_name(
     .then_some(*routed)
 }
 
+/// Returns an error message when `ST_Buffer` is called on a `geography` column.
+///
+/// PostGIS `geography` buffers work in metres on the WGS84 ellipsoid. The
+/// SQLiteGIS passthrough is planar and reads the radius in degrees, so the
+/// result is wrong by a factor of ~111000 and in the wrong unit. Refusing here
+/// forces the caller to choose an appropriate spherical approach.
+///
+/// `None` means the call is not `ST_Buffer`, or its first argument does not
+/// resolve to a `geography` column, and the function keeps passing through.
+pub(crate) fn geography_buffer_refusal(
+    name: &str,
+    first_argument: Option<&Expr>,
+    schema: &ParserDB,
+) -> Option<String> {
+    if !name.eq_ignore_ascii_case("st_buffer") {
+        return None;
+    }
+    let operand = first_argument?;
+    every_declared_type_matches(operand, schema, |declared| {
+        declared.trim().eq_ignore_ascii_case("geography")
+    })
+    .then(|| {
+        "ST_Buffer over a geography column is not supported: PostGIS computes geography \
+         buffers in metres on the WGS84 ellipsoid, but the SQLiteGIS passthrough is planar \
+         and reads the radius in degrees, giving a result wrong by a factor of ~111000. \
+         Consider ST_DWithinSpheroid for proximity checks, or cast the column to geometry \
+         when a planar approximation is acceptable."
+            .to_string()
+    })
+}
+
 // When the input contains a `SELECT ... WHERE ST_*(col, expr) ...` over a
 // column whose table has a translated spatial index, the rewrite injects a
 // `WHERE <table>.rowid IN (SELECT id FROM <rtree> WHERE bbox-conditions)`

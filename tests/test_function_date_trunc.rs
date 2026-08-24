@@ -218,3 +218,47 @@ fn a_window_aggregate_over_partition_still_translates() {
         conn.prepare(&sql).expect("COUNT OVER must prepare in SQLite");
     }
 }
+
+// ── M9: date_trunc milliseconds support and refusal message accuracy
+// ──────────
+
+/// M9: 'milliseconds' is valid PostgreSQL and maps to strftime('%Y-%m-%d
+/// %H:%M:%f', ts), which keeps three fractional digits. The current catch-all
+/// refuses it with "is not a PostgreSQL granularity", which is false. An input
+/// whose sub-second value is already at millisecond precision must survive the
+/// truncation unchanged.
+#[test]
+fn milliseconds_granularity_translates_and_truncates_correctly() {
+    let result = translate(
+        "CREATE TABLE t (id INT PRIMARY KEY, ts TEXT);
+         SELECT date_trunc('milliseconds', ts) FROM t;",
+    );
+    assert!(
+        result.is_ok(),
+        "milliseconds is a valid PostgreSQL granularity and must translate: {result:?}"
+    );
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, ts TEXT);
+         INSERT INTO t VALUES (1, '2024-01-15 10:30:45.678');
+         SELECT date_trunc('milliseconds', ts) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("2024-01-15 10:30:45.678".to_string())],
+        "millisecond truncation of .678 must preserve all three digits"
+    );
+}
+
+/// M9: 'microseconds' is also valid PostgreSQL. Refusing it is correct because
+/// SQLite carries only millisecond precision, but the refusal message must not
+/// claim it is not a PostgreSQL granularity.
+#[test]
+fn microseconds_refusal_does_not_misrepresent_postgresql() {
+    let err = translate("CREATE TABLE t (ts TEXT); SELECT date_trunc('microseconds', ts) FROM t;")
+        .expect_err("microseconds is not yet supported and must fail");
+    assert!(
+        !err.contains("is not a PostgreSQL granularity"),
+        "refusal must not claim microseconds is not PostgreSQL: {err}"
+    );
+}

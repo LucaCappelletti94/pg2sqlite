@@ -123,10 +123,12 @@ pub(crate) fn mapping_for_function<'a>(
 
 /// The PostgreSQL expression the paired function stands for.
 ///
-/// `current_setting` is written with `missing_ok` set, because an unset setting
-/// then answers NULL rather than raising, which is what the replica's function
-/// does. The role keyword is written without an argument list, since
-/// PostgreSQL refuses `current_user()` as a syntax error.
+/// For a tolerant mapping (`missing_ok = true`, the default) the reverse emits
+/// `current_setting(name, true)`, which answers NULL when the setting is unset.
+/// For a strict mapping (`missing_ok = false`) the reverse emits
+/// `current_setting(name)` with no second argument, which raises when the
+/// setting is unset. The role keyword is written without an argument list,
+/// since PostgreSQL refuses `current_user()` as a syntax error.
 ///
 /// # Errors
 ///
@@ -135,17 +137,21 @@ pub(crate) fn mapping_for_function<'a>(
 pub(crate) fn reverse_expression(mapping: &SessionVariableMapping) -> Result<Expr, Error> {
     let pattern = match &mapping.pg_pattern {
         SessionVariablePattern::CurrentSetting { name } => {
-            simple_function_expr(
-                "current_setting",
-                vec![
-                    string_literal(name),
-                    Expr::Value(ValueWithSpan {
-                        value: Value::Boolean(true),
-                        span: sqlparser::tokenizer::Span::empty(),
-                    }),
-                ],
-                None,
-            )
+            if mapping.missing_ok {
+                simple_function_expr(
+                    "current_setting",
+                    vec![
+                        string_literal(name),
+                        Expr::Value(ValueWithSpan {
+                            value: Value::Boolean(true),
+                            span: sqlparser::tokenizer::Span::empty(),
+                        }),
+                    ],
+                    None,
+                )
+            } else {
+                simple_function_expr("current_setting", vec![string_literal(name)], None)
+            }
         }
         SessionVariablePattern::CurrentUser => {
             Expr::Function(Function {

@@ -177,3 +177,40 @@ fn shape_predicates_over_geography_are_left_alone() {
         assert_eq!(translate(&format!("SELECT {call} FROM g;")), format!("SELECT {call} FROM g"));
     }
 }
+
+// ---------- ST_Buffer unit-mismatch refusal (R2-19) ----------
+
+/// PostGIS `ST_Buffer` on a `geography` column computes in metres on the WGS84
+/// ellipsoid. The SQLiteGIS passthrough is planar and reads the radius in
+/// degrees, giving a result wrong by ~111000. The translator must refuse
+/// rather than silently emit a wrong buffer.
+///
+/// Measured state before fix: both geometry and geography ST_Buffer passed
+/// through without error. After the fix the geography case is refused.
+#[test]
+fn st_buffer_over_geography_is_refused() {
+    let err = Pg2Sqlite::default()
+        .sql(&format!("{SCHEMA}\nSELECT ST_Buffer(geog, 100) FROM g;"))
+        .expect("parse")
+        .translate_to_sql(&options())
+        .expect_err("ST_Buffer on geography must be refused")
+        .to_string();
+    // The message must name the unit problem.
+    assert!(
+        err.to_lowercase().contains("metre")
+            || err.to_lowercase().contains("meter")
+            || err.to_lowercase().contains("degree")
+            || err.to_lowercase().contains("unit"),
+        "refusal must name the unit mismatch (metres vs degrees), got: {err}"
+    );
+}
+
+/// `ST_Buffer` over a `geometry` column is planar in PostgreSQL too, so nothing
+/// about it changes. This guards against the refusal being applied too broadly.
+#[test]
+fn st_buffer_over_geometry_passes_through() {
+    assert_eq!(
+        translate("SELECT ST_Buffer(geom, 100) FROM g;"),
+        "SELECT ST_Buffer(geom, 100) FROM g"
+    );
+}

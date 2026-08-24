@@ -174,6 +174,13 @@ impl IntervalFields {
         self.micros = -self.micros;
     }
 
+    /// Multiply both counts by `factor`, returning `None` on overflow.
+    fn scale(&mut self, factor: i128) -> Option<()> {
+        self.months = self.months.checked_mul(factor)?;
+        self.micros = self.micros.checked_mul(factor)?;
+        Some(())
+    }
+
     /// The modifiers, in PostgreSQL's order of operations.
     fn modifiers(&self) -> Vec<String> {
         let days = self.micros / MICROS_PER_DAY;
@@ -287,6 +294,58 @@ pub(crate) fn interval_date_modifiers(
         }
     }
 
+    if negate {
+        fields.negate();
+    }
+    Ok(Some(fields.modifiers()))
+}
+
+/// The SQLite date modifiers for `interval * factor`, negated for subtraction.
+///
+/// The integer scalar from `n * INTERVAL 'x'` or `INTERVAL 'x' * n` is folded
+/// into the counts before the modifiers are rendered. This is needed because
+/// the modifier string format (`+3 days`) does not compose with post-rendering
+/// multiplication.
+///
+/// `Ok(None)` means the interval notation is not recognised (caller emits a
+/// notation-specific refusal). `Err` means decoded but overflows.
+pub(crate) fn interval_date_modifiers_scaled(
+    interval: &Interval,
+    negate: bool,
+    factor: i64,
+) -> Result<Option<Vec<String>>, Error> {
+    let Some(pairs) = unit_pairs(interval) else { return Ok(None) };
+
+    let mut fields = IntervalFields::default();
+    for (count, unit) in pairs {
+        let Some(parsed) = Decimal::parse(count) else {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "INTERVAL '{count} {unit}' cannot be translated: {count} is not a plain decimal \
+                 count. Write the interval as a sequence of count and unit pairs, such as \
+                 INTERVAL '1 month 2 days'."
+            )));
+        };
+        let Some(unit_s) = unit_scale(&unit) else {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "INTERVAL unit '{unit}' is not a PostgreSQL interval unit, so it has no SQLite \
+                 date modifier. The units are microsecond, millisecond, second, minute, hour, \
+                 day, week, month, year, decade, century and millennium, with their usual \
+                 abbreviations."
+            )));
+        };
+        if fields.add(&parsed, unit_s).is_none() {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "INTERVAL '{count} {unit}' is too large to translate: the count overflows the \
+                 months and microseconds PostgreSQL would hold it in."
+            )));
+        }
+    }
+
+    if fields.scale(i128::from(factor)).is_none() {
+        return Err(Error::UnsupportedSQLiteFeature(format!(
+            "INTERVAL scaled by {factor} overflows the months and microseconds it would hold."
+        )));
+    }
     if negate {
         fields.negate();
     }

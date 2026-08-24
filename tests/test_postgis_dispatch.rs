@@ -7,7 +7,7 @@
 
 use diesel::connection::SimpleConnection;
 use pg2sqlite::{
-    impls::translator_impls::postgis,
+    internals::postgis,
     prelude::{Pg2SqliteOptions, TranslationOptions},
 };
 

@@ -162,8 +162,8 @@ fn register_declared_object_name(statement: &Statement, options: &mut Pg2SqliteO
     }
 }
 
-#[derive(Debug, Clone, Default)]
 /// Struct to translate between a `PostgreSQL` entry and a `SQLite` entry.
+#[derive(Debug, Clone, Default)]
 pub struct Pg2Sqlite {
     /// The set of `PostgreSQL` statements to be translated.
     pg_statements: Vec<Statement>,
@@ -296,7 +296,6 @@ impl Pg2Sqlite {
             .collect()
     }
 
-    #[must_use]
     /// Adds a new SQL statement to the set of `PostgreSQL` statements to be
     /// translated.
     ///
@@ -310,6 +309,7 @@ impl Pg2Sqlite {
     /// let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().pop().unwrap();
     /// let translator = Pg2Sqlite::default().statement(statement);
     /// ```
+    #[must_use]
     pub fn statement(mut self, statement: Statement) -> Self {
         self.pg_statements.push(statement);
         self
@@ -374,9 +374,9 @@ impl Pg2Sqlite {
     /// Returns an error if any migration cannot be read, parsed, or if
     /// `stop_at` is not found.
     #[cfg(feature = "std")]
-    pub fn ups_until<P: AsRef<std::path::Path>>(
-        directory: P,
-        stop_at: P,
+    pub fn ups_until<D: AsRef<std::path::Path>, S: AsRef<std::path::Path>>(
+        directory: D,
+        stop_at: S,
     ) -> Result<Self, crate::errors::Error> {
         let up_sql_paths = Self::sorted_up_sql_paths(directory.as_ref())?;
         let stop_index = Self::find_stop_migration_index(&up_sql_paths, stop_at.as_ref())?;
@@ -468,7 +468,7 @@ impl Pg2Sqlite {
     }
 
     fn translate_internal(
-        self,
+        &self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
         use sql_traits::traits::DatabaseLike;
@@ -552,7 +552,7 @@ impl Pg2Sqlite {
     /// assert!(!sqlite_statements.is_empty());
     /// ```
     pub fn translate(
-        self,
+        &self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
         self.translate_internal(options)
@@ -567,9 +567,21 @@ impl Pg2Sqlite {
     ///
     /// * If parsing or translation fails.
     ///
+    /// # Example
+    ///
+    /// ```
+    /// # use pg2sqlite::prelude::*;
+    /// let report = Pg2Sqlite::default()
+    ///     .sql("CREATE TABLE t (a INT);")?
+    ///     .translate_with_report(&Pg2SqliteOptions::default())?;
+    /// assert_eq!(report.statements.len(), 1);
+    /// assert!(report.warnings.is_empty());
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
     /// [`TranslationReport`]: crate::warnings::TranslationReport
     pub fn translate_with_report(
-        self,
+        &self,
         options: &Pg2SqliteOptions,
     ) -> Result<crate::warnings::TranslationReport, crate::errors::Error> {
         let scope = crate::warnings::CollectorScope::install();
@@ -586,8 +598,19 @@ impl Pg2Sqlite {
     /// # Errors
     ///
     /// * If parsing or translation fails.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use pg2sqlite::prelude::*;
+    /// let sql = Pg2Sqlite::default()
+    ///     .sql("CREATE TABLE t (a INT);")?
+    ///     .translate_to_sql(&Pg2SqliteOptions::default())?;
+    /// assert_eq!(sql, ["CREATE TABLE t (a INTEGER) STRICT"]);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn translate_to_sql(
-        self,
+        &self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<String>, crate::errors::Error> {
         Ok(self.translate(options)?.into_iter().map(|s| s.to_string()).collect())

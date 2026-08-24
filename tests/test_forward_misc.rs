@@ -700,7 +700,7 @@ fn check_constraint_with_function_removed() {
             CHECK (char_length(code) > 0)
         );
     ";
-    let options = Pg2SqliteOptions::default().remove_unsupported_check_constraints();
+    let options = Pg2SqliteOptions::default().with_remove_unsupported_check_constraints();
     let output = Pg2Sqlite::default()
         .sql(sql)
         .unwrap()
@@ -808,9 +808,16 @@ fn delete_using_with_rls_table_join() {
         conn.execute_batch(&format!("{s};"))
             .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{s}"));
     }
+    // Seed each row with a matching session user so the BEFORE INSERT guard
+    // (WITH CHECK owner_id = current_app_user) passes. Mirrors the authoritative
+    // apply pattern where system inserts satisfy the configured policies.
+    session_user.store(1, std::sync::atomic::Ordering::Relaxed);
+    conn.execute_batch("INSERT INTO users_rls (id, owner_id) VALUES (5, 1);").unwrap();
+    session_user.store(2, std::sync::atomic::Ordering::Relaxed);
+    conn.execute_batch("INSERT INTO users_rls (id, owner_id) VALUES (6, 2);").unwrap();
+    // Restore session_user to 2 for the test scenario.
     conn.execute_batch(
-        "INSERT INTO users_rls (id, owner_id) VALUES (5, 1), (6, 2);
-         INSERT INTO orders (id, user_id, amount) VALUES (100, 5, 10), (200, 6, 20);",
+        "INSERT INTO orders (id, user_id, amount) VALUES (100, 5, 10), (200, 6, 20);",
     )
     .unwrap();
 

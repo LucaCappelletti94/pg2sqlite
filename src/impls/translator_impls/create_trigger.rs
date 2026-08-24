@@ -157,13 +157,34 @@ fn substitute_no_op_body_when_empty(
 
 fn generate_standard_trigger_body(
     exec_body: &sqlparser::ast::TriggerExecBody,
+    events: &[sqlparser::ast::TriggerEvent],
+    table_name: &sqlparser::ast::ObjectName,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Option<sqlparser::ast::BeginEndStatements>, crate::errors::Error> {
     let function_name = exec_body.func_desc.name.clone();
-    if let Some((mut body, context)) =
+    if let Some((mut body, mut context)) =
         schema.function_body_with_context(&function_name.to_string())?
     {
+        // Seed trigger-specific context so the body translator can constant-fold
+        // TG_OP and TG_TABLE_NAME references.
+        context.trigger_events = events
+            .iter()
+            .map(|e| {
+                match e {
+                    sqlparser::ast::TriggerEvent::Insert => "INSERT".to_string(),
+                    sqlparser::ast::TriggerEvent::Update(_) => "UPDATE".to_string(),
+                    sqlparser::ast::TriggerEvent::Delete => "DELETE".to_string(),
+                    sqlparser::ast::TriggerEvent::Truncate => "TRUNCATE".to_string(),
+                }
+            })
+            .collect();
+        context.trigger_table = table_name.0.last().and_then(|p| {
+            match p {
+                sqlparser::ast::ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
+                sqlparser::ast::ObjectNamePart::Function(_) => None,
+            }
+        });
         body.statements = super::plpgsql::PlPgSqlTranslator::translate_with_context(
             &body, context, schema, options,
         )?;
@@ -461,7 +482,13 @@ impl Translator for CreateTrigger {
                 schema,
                 options,
             )?
-        } else if let Some(body) = generate_standard_trigger_body(&exec_body, schema, options)? {
+        } else if let Some(body) = generate_standard_trigger_body(
+            &exec_body,
+            &events,
+            &redirected_table_name,
+            schema,
+            options,
+        )? {
             body
         } else {
             return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(

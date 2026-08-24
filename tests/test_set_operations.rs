@@ -190,3 +190,59 @@ fn test_union_deduplicates_in_sqlite() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(results.iter().map(|r| r.a).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
     Ok(())
 }
+
+/// [H5] SQLite has no multiset EXCEPT (EXCEPT ALL): its EXCEPT always
+/// deduplicates. PostgreSQL accepts the ALL quantifier but SQLite refuses
+/// it at parse time. A translation that succeeds but that SQLite then
+/// refuses breaks the central guarantee that a successful translation is
+/// always accepted by SQLite. The translator must refuse EXCEPT ALL.
+#[test]
+fn except_all_must_refuse_translation() {
+    let result = Pg2Sqlite::default()
+        .sql("SELECT 1 EXCEPT ALL SELECT 1")
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default());
+    match result {
+        Ok(stmts) => {
+            panic!(
+                "EXCEPT ALL must not translate successfully; got {} statement(s): {}",
+                stmts.len(),
+                stmts.first().map_or_else(String::new, |s| s.to_string())
+            )
+        }
+        Err(err) => {
+            let msg = err.to_string().to_lowercase();
+            assert!(
+                msg.contains("except") || msg.contains("all"),
+                "error must describe the unsupported operator; got: {err}"
+            );
+        }
+    }
+}
+
+/// [H5] SQLite has no multiset INTERSECT (INTERSECT ALL): its INTERSECT
+/// always deduplicates. Same central-guarantee violation as EXCEPT ALL.
+/// The translator must refuse INTERSECT ALL.
+#[test]
+fn intersect_all_must_refuse_translation() {
+    let result = Pg2Sqlite::default()
+        .sql("SELECT 1 INTERSECT ALL SELECT 1")
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default());
+    match result {
+        Ok(stmts) => {
+            panic!(
+                "INTERSECT ALL must not translate successfully; got {} statement(s): {}",
+                stmts.len(),
+                stmts.first().map_or_else(String::new, |s| s.to_string())
+            )
+        }
+        Err(err) => {
+            let msg = err.to_string().to_lowercase();
+            assert!(
+                msg.contains("intersect") || msg.contains("all"),
+                "error must describe the unsupported operator; got: {err}"
+            );
+        }
+    }
+}

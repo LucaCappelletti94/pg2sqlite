@@ -71,7 +71,7 @@ fn test_check_constraint_with_unsupported_function_causes_error() {
 #[test]
 fn test_check_constraint_removed_with_option() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (array_length(col)));";
-    let options = Pg2SqliteOptions::default().remove_unsupported_check_constraints();
+    let options = Pg2SqliteOptions::default().with_remove_unsupported_check_constraints();
 
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
@@ -131,7 +131,7 @@ fn test_nested_function_check_constraint_causes_error() {
 #[test]
 fn test_nested_function_check_constraint_removed_with_option() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (col IS NULL OR array_length(col) > 0));";
-    let options = Pg2SqliteOptions::default().remove_unsupported_check_constraints();
+    let options = Pg2SqliteOptions::default().with_remove_unsupported_check_constraints();
 
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
@@ -176,7 +176,7 @@ fn test_column_level_check_is_translated() {
 #[test]
 fn test_column_level_check_is_dropped_with_option() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, price INTEGER CHECK (price > 0));";
-    let options = Pg2SqliteOptions::default().remove_unsupported_check_constraints();
+    let options = Pg2SqliteOptions::default().with_remove_unsupported_check_constraints();
 
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");

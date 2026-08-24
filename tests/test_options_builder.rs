@@ -31,7 +31,7 @@ fn paired_function<'a>(
 fn default_values() {
     let options = Pg2SqliteOptions::default();
 
-    assert!(!options.should_remove_unsupported_check_constraints());
+    assert!(!options.is_remove_unsupported_check_constraints_enabled());
     assert!(options.get_uuid_representation().is_none());
     assert_eq!(options.get_uuid_function_name(), "uuid");
     assert_eq!(options.get_rls_table_suffix(), "_rls");
@@ -48,7 +48,7 @@ fn default_values() {
 #[test]
 fn all_builder_methods_chain() {
     let options = Pg2SqliteOptions::default()
-        .remove_unsupported_check_constraints()
+        .with_remove_unsupported_check_constraints()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_function_name("app_uuid".to_string())
         .with_uuid_v7_function_name("uuid7")
@@ -58,7 +58,7 @@ fn all_builder_methods_chain() {
         .with_rls_audit_table_name("rls_violations")
         .with_strict_rls_validation();
 
-    assert!(options.should_remove_unsupported_check_constraints());
+    assert!(options.is_remove_unsupported_check_constraints_enabled());
     assert_eq!(options.get_uuid_representation(), Some(UuidRepresentation::Blob));
     assert_eq!(options.get_uuid_function_name(), "app_uuid");
     assert_eq!(options.get_uuid_v7_function_name(), Some("uuid7"));

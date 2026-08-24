@@ -32,6 +32,15 @@ impl ReverseTranslator for Delete {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
+        // PostgreSQL DELETE has no ORDER BY or LIMIT clause. Refuse them so
+        // the emitted SQL does not fail at the server with a syntax error.
+        if !self.order_by.is_empty() || self.limit.is_some() {
+            return Err(Error::UnsupportedSQLiteFeature(
+                "PostgreSQL DELETE has no ORDER BY or LIMIT clause; these are SQLite extensions \
+                 with no PostgreSQL form"
+                    .to_string(),
+            ));
+        }
         let (selection, from, returning, order_by, limit) =
             translate_delete_core::<Reverse>(self, schema, options)?;
 

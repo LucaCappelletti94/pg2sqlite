@@ -165,11 +165,6 @@ fn json_type_at_an_unconvertible_path_is_refused() {
 }
 
 #[test]
-fn json_array_length_renames_to_jsonb_array_length() {
-    assert_emits("SELECT json_array_length(payload) FROM t", "jsonb_array_length(payload)");
-}
-
-#[test]
 fn json_group_array_renames_to_json_agg() {
     assert_emits("SELECT json_group_array(s) FROM t", "json_agg(s)");
 }
@@ -197,4 +192,42 @@ fn json_extract_with_array_index_path_is_rejected() {
 #[test]
 fn json_remove_with_array_index_path_is_rejected() {
     assert_rejected_with("SELECT json_remove(payload, '$[0]') FROM t", "simple dotted literal");
+}
+
+// H8: `json_array_length` must dispatch by column type. PostgreSQL has
+// `json_array_length(json)` and `jsonb_array_length(jsonb)` as distinct
+// overloads. The former REVERSE_RENAMES entry unconditionally renamed to
+// `jsonb_array_length`, which broke json-typed callers. The fix is
+// type-sensitive: JSONB-typed arguments use jsonb_array_length, all others
+// use json_array_length.
+
+/// When the argument is a JSONB column, json_array_length must emit
+/// jsonb_array_length so PostgreSQL finds the right overload.
+#[test]
+fn json_array_length_uses_jsonb_form_for_jsonb_column() {
+    // The test schema declares payload as JSONB.
+    let out = rev("SELECT json_array_length(payload) FROM t")
+        .expect("json_array_length must reverse successfully");
+    assert!(
+        out.contains("jsonb_array_length("),
+        "JSONB column must use jsonb_array_length, got: {out}"
+    );
+}
+
+/// When the argument is not a known JSONB column, json_array_length must
+/// stay as json_array_length, preserving the json overload for json-typed
+/// or unknown-typed callers.
+#[test]
+fn json_array_length_passes_through_for_non_jsonb_column() {
+    // s is declared TEXT, not JSONB, so the type check does not match.
+    let out = rev("SELECT json_array_length(s) FROM t")
+        .expect("json_array_length must reverse successfully for non-jsonb arg");
+    assert!(
+        out.contains("json_array_length("),
+        "non-JSONB arg must stay as json_array_length, got: {out}"
+    );
+    assert!(
+        !out.contains("jsonb_array_length"),
+        "non-JSONB arg must not become jsonb_array_length, got: {out}"
+    );
 }

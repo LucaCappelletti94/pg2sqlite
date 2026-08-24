@@ -31,6 +31,16 @@ fn apply(pg: &str) -> rusqlite::Connection {
     }
     conn
 }
+/// Seeds the backing table with triggers disabled, mirroring the
+/// authoritative-apply contract (system loads run with triggers off so the
+/// BEFORE INSERT guard does not block them).
+fn seed(conn: &rusqlite::Connection, sql: &str) {
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
+        .expect("disable triggers for seed");
+    conn.execute_batch(sql).expect("seed backing table");
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, true)
+        .expect("re-enable triggers");
+}
 
 /// Reads the ids the policy view admits, in order.
 fn visible_ids(conn: &rusqlite::Connection, view: &str) -> Vec<i64> {
@@ -49,10 +59,7 @@ fn an_ilike_policy_translates_and_filters() {
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
          CREATE POLICY p ON docs FOR SELECT USING (s ILIKE 'a%');",
     );
-    conn.execute_batch(
-        "INSERT INTO docs_rls (id, s) VALUES (1, 'Apple'), (2, 'banana'), (3, 'avocado');",
-    )
-    .expect("seed backing table");
+    seed(&conn, "INSERT INTO docs_rls (id, s) VALUES (1, 'Apple'), (2, 'banana'), (3, 'avocado');");
     assert_eq!(
         visible_ids(&conn, "docs"),
         vec![1, 3],
@@ -67,10 +74,10 @@ fn a_now_policy_translates_and_filters() {
          ALTER TABLE runs ENABLE ROW LEVEL SECURITY;
          CREATE POLICY p ON runs FOR SELECT USING (ts < now());",
     );
-    conn.execute_batch(
+    seed(
+        &conn,
         "INSERT INTO runs_rls (id, ts) VALUES (1, '2000-01-01 00:00:00'), (2, '9999-01-01 00:00:00');",
-    )
-    .expect("seed backing table");
+    );
     assert_eq!(visible_ids(&conn, "runs"), vec![1], "only the past row is before now()");
 }
 
@@ -82,11 +89,11 @@ fn a_date_trunc_policy_translates_and_filters() {
          CREATE POLICY p ON events FOR SELECT
              USING (date_trunc('day', ts) = '2024-03-15 00:00:00');",
     );
-    conn.execute_batch(
-        "INSERT INTO events_rls (id, ts) VALUES
-             (1, '2024-03-15 10:30:00'), (2, '2024-03-16 00:10:00');",
-    )
-    .expect("seed backing table");
+    seed(
+        &conn,
+        "INSERT INTO events_rls (id, ts) VALUES \
+         (1, '2024-03-15 10:30:00'), (2, '2024-03-16 00:10:00');",
+    );
     assert_eq!(
         visible_ids(&conn, "events"),
         vec![1],
@@ -101,8 +108,7 @@ fn a_position_policy_translates_and_filters() {
          ALTER TABLE tags ENABLE ROW LEVEL SECURITY;
          CREATE POLICY p ON tags FOR SELECT USING (position('x' in s) > 0);",
     );
-    conn.execute_batch("INSERT INTO tags_rls (id, s) VALUES (1, 'xy'), (2, 'ab');")
-        .expect("seed backing table");
+    seed(&conn, "INSERT INTO tags_rls (id, s) VALUES (1, 'xy'), (2, 'ab');");
     assert_eq!(visible_ids(&conn, "tags"), vec![1], "position() must become instr()");
 }
 

@@ -58,7 +58,7 @@ impl Translator for ColumnOptionDef {
             // Translate CHECK constraints to SQLite CHECK syntax.
             // When `remove_unsupported_check_constraints` is set, silently drop them instead.
             ColumnOption::Check(check) => {
-                if options.should_remove_unsupported_check_constraints() {
+                if options.is_remove_unsupported_check_constraints_enabled() {
                     Ok(None)
                 } else {
                     let translated_expr = check.expr.translate(schema, options)?;

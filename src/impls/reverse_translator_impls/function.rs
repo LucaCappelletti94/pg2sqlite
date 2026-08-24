@@ -52,7 +52,6 @@ const REVERSE_RENAMES: &[(&str, &str)] = &[
     ("unicode", "ascii"),
     ("json_object", "json_build_object"),
     ("json_array", "json_build_array"),
-    ("json_array_length", "jsonb_array_length"),
     ("sqlite_version", "version"),
     ("quote", "quote_nullable"),
     ("json_quote", "to_jsonb"),
@@ -115,6 +114,11 @@ pub enum FunctionReversal {
     /// based on the argument's declared column type. The choice is deferred to
     /// `reverse_translate_function` because that stage has schema access.
     JsonTypeOf,
+    /// Translate json_array_length(expr) to json_array_length(expr) or
+    /// jsonb_array_length(expr) based on the argument's declared column type.
+    /// PostgreSQL has json_array_length(json) and jsonb_array_length(jsonb)
+    /// as distinct overloads; SQLite's json_array_length takes any JSON value.
+    JsonArrayLength,
     ToEncodeHex,
     /// Translate unhex(x) to decode(x, 'hex').
     ToDecodeHex,
@@ -245,6 +249,80 @@ fn strftime_rejection(subject: &str) -> String {
     )
 }
 
+/// True when `args` matches `('now', 'localtime')`, the exact shape the
+/// forward translator emits for `localtimestamp` and `localtime`.
+fn is_now_localtime_args(args: &FunctionArguments) -> bool {
+    let FunctionArguments::List(list) = args else { return false };
+    let [first, second] = list.args.as_slice() else { return false };
+    let is_now = matches!(
+        first,
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(s), ..
+        }))) if s == "now"
+    );
+    let is_localtime = matches!(
+        second,
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(s), ..
+        }))) if s == "localtime"
+    );
+    is_now && is_localtime
+}
+
+/// Returns the inner `Function` if `func` matches
+/// `NULLIF(json_group_array(...), '[]')`, the exact shape the forward
+/// translator emits for `json_agg`.
+fn extract_json_group_array_nullif(func: &Function) -> Option<&Function> {
+    let outer_name = func.name.0.last().and_then(|p| p.as_ident())?;
+    if !outer_name.value.eq_ignore_ascii_case("nullif") {
+        return None;
+    }
+    let FunctionArguments::List(list) = &func.args else { return None };
+    let [first, second] = list.args.as_slice() else { return None };
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Function(inner))) = first else {
+        return None;
+    };
+    let inner_name = inner.name.0.last().and_then(|p| p.as_ident())?;
+    if !inner_name.value.eq_ignore_ascii_case("json_group_array") {
+        return None;
+    }
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+        value: Value::SingleQuotedString(sentinel),
+        ..
+    }))) = second
+    else {
+        return None;
+    };
+    (sentinel == "[]").then_some(inner)
+}
+
+/// Returns the inner `Function` if `func` matches
+/// `NULLIF(json_group_object(...), '{}')`, the exact shape the forward
+/// translator emits for `json_object_agg`.
+fn extract_json_group_object_nullif(func: &Function) -> Option<&Function> {
+    let outer_name = func.name.0.last().and_then(|p| p.as_ident())?;
+    if !outer_name.value.eq_ignore_ascii_case("nullif") {
+        return None;
+    }
+    let FunctionArguments::List(list) = &func.args else { return None };
+    let [first, second] = list.args.as_slice() else { return None };
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Function(inner))) = first else {
+        return None;
+    };
+    let inner_name = inner.name.0.last().and_then(|p| p.as_ident())?;
+    if !inner_name.value.eq_ignore_ascii_case("json_group_object") {
+        return None;
+    }
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+        value: Value::SingleQuotedString(sentinel),
+        ..
+    }))) = second
+    else {
+        return None;
+    };
+    (sentinel == "{}").then_some(inner)
+}
+
 /// The PostgreSQL zone for a SQLite `datetime` timezone modifier.
 ///
 /// The forward direction flips an aware operand's offset, because a bare
@@ -313,9 +391,11 @@ pub fn reverse_function(
     }
 
     match func_name.as_str() {
-        // group_concat(x) joins with a comma, and string_agg has no
-        // one-argument form, so the arity decides rather than the name.
         "group_concat" => FunctionReversal::ToStringAgg,
+        // json_array_length(json) exists in PostgreSQL, but jsonb_array_length(jsonb) is the
+        // overload for JSONB-typed arguments. The choice depends on the argument's declared
+        // column type and is resolved in reverse_translate_function where schema is available.
+        "json_array_length" => FunctionReversal::JsonArrayLength,
         // datetime('now') -> NOW(), datetime(x) -> x AT TIME ZONE 'UTC'
         "datetime" => {
             if let FunctionArguments::List(list) = args
@@ -332,6 +412,13 @@ pub fn reverse_function(
                 // the way out, since SQLite's own `utc` modifier shifts by the
                 // machine's offset and PostgreSQL's UTC shifts nothing.
                 return FunctionReversal::ToAtTimeZone("UTC".to_string());
+            }
+            // localtimestamp: datetime('now', 'localtime') -> LOCALTIMESTAMP.
+            // This must be checked before the generic 2-arg timezone path, which
+            // would map 'localtime' to AT TIME ZONE and then fail because 'now'
+            // is not a known timestamp expression.
+            if is_now_localtime_args(args) {
+                return FunctionReversal::ToBareKeyword("LOCALTIMESTAMP");
             }
             if let FunctionArguments::List(list) = args
                 && list.args.len() == 2
@@ -401,6 +488,10 @@ pub fn reverse_function(
         // for both. A modifier argument has no counterpart at all.
         "date" => reverse_date_or_time(args, DataType::Date, "current_date", "date"),
         "time" => {
+            // localtime: time('now', 'localtime') -> LOCALTIME.
+            if is_now_localtime_args(args) {
+                return FunctionReversal::ToBareKeyword("LOCALTIME");
+            }
             reverse_date_or_time(
                 args,
                 DataType::Time(None, TimezoneInfo::None),
@@ -913,6 +1004,32 @@ pub fn reverse_translate_function(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, Error> {
+    // Recognize NULLIF(json_group_array(x), '[]') and restore json_agg(x).
+    // The forward translator emits this shape for both json_agg and array_agg
+    // (after the R2-6 fix). The reverse cannot distinguish the two without type
+    // information and consistently restores json_agg, which is the documented
+    // drift. NULLIF with a json value breaks PostgreSQL because the json type
+    // has no equality operator.
+    if let Some(inner) = extract_json_group_array_nullif(func) {
+        return build_reverse_function(
+            ObjectName::from(vec![Ident::new("json_agg")]),
+            inner,
+            schema,
+            options,
+        );
+    }
+    // Recognize NULLIF(json_group_object(k, v), '{}') and restore
+    // json_object_agg(k, v). Same NULL-over-empty semantics; same NULLIF
+    // breakage on PostgreSQL.
+    if let Some(inner) = extract_json_group_object_nullif(func) {
+        return build_reverse_function(
+            ObjectName::from(vec![Ident::new("json_object_agg")]),
+            inner,
+            schema,
+            options,
+        );
+    }
+
     match reverse_function(&func.name, &func.args, options) {
         FunctionReversal::Rename(new_name) => {
             build_reverse_function(
@@ -1295,6 +1412,27 @@ pub fn reverse_translate_function(
 
             build_reverse_function(
                 ObjectName::from(vec![Ident::new(func_name)]),
+                func,
+                schema,
+                options,
+            )
+        }
+        FunctionReversal::JsonArrayLength => {
+            // json_array_length(json) vs jsonb_array_length(jsonb): PostgreSQL has both
+            // as distinct overloads. Use the argument's declared column type to pick.
+            // When the type is unknown or not jsonb, fall back to json_array_length,
+            // preserving the json behavior as the conservative default.
+            let exprs = function_argument_exprs(&func.args);
+            let arg = exprs.first().copied();
+            let target = if arg.is_some_and(|a| {
+                every_declared_type_matches(a, schema, |t| t.to_ascii_lowercase().contains("jsonb"))
+            }) {
+                "jsonb_array_length"
+            } else {
+                "json_array_length"
+            };
+            build_reverse_function(
+                ObjectName::from(vec![Ident::new(target)]),
                 func,
                 schema,
                 options,

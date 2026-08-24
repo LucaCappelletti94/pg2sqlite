@@ -353,14 +353,6 @@ fn array_replace_swaps_matching_elements() {
 }
 
 #[test]
-fn array_cat_and_array_prepend_are_rejected() {
-    for call in ["array_cat(tags, tags)", "array_prepend('z', tags)"] {
-        let err = reject_json(&format!("CREATE TABLE t (tags TEXT[]);\nSELECT {call} FROM t;"));
-        assert!(err.contains("json_concat"), "got: {err}");
-    }
-}
-
-#[test]
 fn dimension_functions_are_rejected() {
     for call in ["array_dims(tags)", "array_ndims(tags)"] {
         let err = reject_json(&format!("CREATE TABLE t (tags TEXT[]);\nSELECT {call} FROM t;"));
@@ -555,4 +547,126 @@ fn an_array_column_answers_its_declared_type() {
         let column = table.columns(&schema).expect("columns").next().expect("one column");
         assert_eq!(column.data_type(&schema), want, "for {ddl}");
     }
+}
+
+// ── R2-6: array_agg over empty set ──────────────────────────────────────────
+
+/// PostgreSQL: SELECT array_agg(x) FROM t WHERE false -> NULL.
+/// Current emission: json_group_array(x) without NULLIF guard -> '[]'.
+#[test]
+fn array_agg_over_empty_set_returns_null() {
+    let rows = run_translated(
+        "CREATE TABLE t (x INT);
+         SELECT array_agg(x) FROM t WHERE false;",
+    );
+    assert_eq!(rows, vec![None], "array_agg over empty set must be NULL, got: {rows:?}");
+}
+
+// ── R2-7: FILTER on array_agg must not collect NULLs ────────────────────────
+
+/// array_agg(x) FILTER (WHERE x > 0) over (1, -1) -> {1} in PostgreSQL.
+/// CASE WHEN lowering stuffs a NULL for -1 giving [1,null].
+#[test]
+fn array_agg_filter_does_not_collect_nulls() {
+    let rows = run_translated(
+        "CREATE TABLE t (x INT);
+         INSERT INTO t VALUES (1), (-1);
+         SELECT array_agg(x) FILTER (WHERE x > 0) FROM t;",
+    );
+    assert_eq!(rows, vec![Some("[1]".to_string())], "FILTER must exclude -1, got: {rows:?}");
+}
+
+// ── R2-10: NULL array in scalar functions ────────────────────────────────────
+
+/// array_remove(NULL, v) must be NULL (json_each over NULL yields no rows).
+#[test]
+fn array_remove_null_array_returns_null() {
+    let rows = run_translated(
+        "CREATE TABLE t (a TEXT[]);
+         INSERT INTO t VALUES (NULL);
+         SELECT array_remove(a, 'x') FROM t;",
+    );
+    assert_eq!(rows, vec![None], "array_remove(NULL, v) must be NULL, got: {rows:?}");
+}
+
+/// array_positions(NULL, v) must be NULL.
+#[test]
+fn array_positions_null_array_returns_null() {
+    let rows = run_translated(
+        "CREATE TABLE t (a INT[]);
+         INSERT INTO t VALUES (NULL);
+         SELECT array_positions(a, 1) FROM t;",
+    );
+    assert_eq!(rows, vec![None], "array_positions(NULL, v) must be NULL, got: {rows:?}");
+}
+
+/// array_replace(NULL, from, to) must be NULL.
+#[test]
+fn array_replace_null_array_returns_null() {
+    let rows = run_translated(
+        "CREATE TABLE t (a INT[]);
+         INSERT INTO t VALUES (NULL);
+         SELECT array_replace(a, 1, 2) FROM t;",
+    );
+    assert_eq!(rows, vec![None], "array_replace(NULL, v, w) must be NULL, got: {rows:?}");
+}
+
+// ── R2-11: array_append on a NULL array ─────────────────────────────────────
+
+/// array_append(NULL, v) must return {v} in PostgreSQL.
+/// json_insert(NULL, '$[#]', v) returns NULL instead.
+#[test]
+fn array_append_null_array_returns_singleton() {
+    let rows = run_translated(
+        "CREATE TABLE t (a INT[]);
+         INSERT INTO t VALUES (NULL);
+         SELECT array_append(a, 1) FROM t;",
+    );
+    assert_eq!(
+        rows,
+        vec![Some("[1]".to_string())],
+        "array_append(NULL, v) must be [v], got: {rows:?}",
+    );
+}
+
+// ── R2-17: array_cat and array_prepend ──────────────────────────────────────
+
+/// array_cat(ARRAY[1,2], ARRAY[3]) = {1,2,3} in PostgreSQL.
+/// Currently refused with a misleading "no json_concat" message.
+#[test]
+fn array_cat_translates_and_concatenates() {
+    let rows = run_translated("SELECT array_cat(ARRAY[1,2], ARRAY[3]);");
+    assert_eq!(
+        rows,
+        vec![Some("[1,2,3]".to_string())],
+        "array_cat([1,2], [3]) must be [1,2,3], got: {rows:?}",
+    );
+}
+
+/// array_prepend(0, ARRAY[1,2]) = {0,1,2} in PostgreSQL.
+/// Currently refused.
+#[test]
+fn array_prepend_translates_and_prepends() {
+    let rows = run_translated("SELECT array_prepend(0, ARRAY[1,2]);");
+    assert_eq!(
+        rows,
+        vec![Some("[0,1,2]".to_string())],
+        "array_prepend(0, [1,2]) must be [0,1,2], got: {rows:?}",
+    );
+}
+
+/// array_cat(NULL, x) = x in PostgreSQL (measured 2026-08-24 on
+/// postgres:18-alpine). array_cat(x, NULL) = x. array_cat(NULL, NULL) = NULL.
+#[test]
+fn array_cat_null_operand_returns_nonnull_side() {
+    let rows_left_null = run_translated(
+        "CREATE TABLE t (a INT[], b INT[]);
+         INSERT INTO t VALUES (NULL, '[3]');
+         SELECT array_cat(a, b) FROM t;",
+    );
+    assert_eq!(
+        rows_left_null,
+        vec![Some("[3]".to_string())],
+        "array_cat(NULL, x) must be x, got: {rows_left_null:?}",
+    );
 }

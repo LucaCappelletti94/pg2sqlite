@@ -17,8 +17,12 @@ use sql_traits::{
     traits::{ColumnLike, TableLike},
 };
 use sqlparser::{
-    ast::{CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement},
-    dialect::PostgreSqlDialect,
+    ast::{
+        CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement, VisitMut,
+        VisitorMut,
+    },
+    dialect::{PostgreSqlDialect, SQLiteDialect},
+    parser::Parser,
 };
 
 use crate::{
@@ -140,14 +144,56 @@ fn create_fts5_virtual_table(
     }
 }
 
+/// Qualify all bare identifier references in `predicate_sql` with `qualifier`
+/// (e.g. "NEW" or "OLD") so trigger WHEN clauses resolve columns through the
+/// correct row reference instead of failing with "no such column".
+///
+/// Parses the predicate with the SQLite dialect, applies the qualifier to each
+/// bare `Expr::Identifier` node, and serializes back. Returns the original
+/// string unchanged on parse failure.
+fn qualify_predicate(predicate_sql: &str, qualifier: &str) -> String {
+    use core::ops::ControlFlow;
+
+    struct QualifyIdents(Ident);
+
+    impl VisitorMut for QualifyIdents {
+        type Break = ();
+        fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+            if let Expr::Identifier(col) = expr {
+                let col = col.clone();
+                *expr = Expr::CompoundIdentifier(vec![self.0.clone(), col]);
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    let Ok(mut parsed_expr) =
+        Parser::new(&SQLiteDialect {}).try_with_sql(predicate_sql).and_then(|mut p| p.parse_expr())
+    else {
+        return predicate_sql.to_string();
+    };
+
+    let _: ControlFlow<()> =
+        VisitMut::visit(&mut parsed_expr, &mut QualifyIdents(Ident::new(qualifier)));
+
+    parsed_expr.to_string()
+}
+
 /// Generate FTS5 sync triggers for external content mode.
 ///
 /// The DELETE and UPDATE triggers use the FTS5 `'delete'` command (inserting
 /// the special string into the table's own name column) rather than a plain
 /// `DELETE`, which is required when the FTS5 table is in external content mode.
 ///
-/// When `predicate_sql` is `Some`, each trigger gets a `WHEN <predicate>`
-/// clause so that only rows matching the partial-index predicate are indexed.
+/// When `predicate_sql` is `None`, all three triggers are unconditional.
+///
+/// When `predicate_sql` is `Some`, the INSERT trigger guards with the
+/// NEW-qualified predicate and the DELETE trigger with the OLD-qualified one.
+/// The UPDATE trigger cannot use a single WHEN clause for both halves (the
+/// delete half needs OLD and the insert half needs NEW), so it is split into
+/// two triggers: `{base}_fts_au_delete` (WHEN OLD-qualified) and
+/// `{base}_fts_au_insert` (WHEN NEW-qualified). A row crossing the predicate
+/// boundary on UPDATE therefore enters or leaves the index correctly.
 fn create_fts5_triggers(
     trigger_table: &str,
     fts_table_base: &str,
@@ -167,33 +213,70 @@ fn create_fts5_triggers(
     let old_pk = prefixed_quoted_identifier("old", pk_column);
     let insert_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ai"));
     let delete_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ad"));
-    let update_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_au"));
 
-    let when_clause = predicate_sql.map(|p| format!(" WHEN {p}")).unwrap_or_default();
-
-    vec![
-        format!(
-            "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON \
-             {trigger_table_quoted}{when_clause} BEGIN \
-             INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
-             END"
-        ),
-        format!(
-            "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON \
-             {trigger_table_quoted}{when_clause} BEGIN \
-             INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
-             VALUES ('delete', {old_pk}, {old_values}); \
-             END"
-        ),
-        format!(
-            "CREATE TRIGGER {update_trigger_name} AFTER UPDATE ON \
-             {trigger_table_quoted}{when_clause} BEGIN \
-             INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
-             VALUES ('delete', {old_pk}, {old_values}); \
-             INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
-             END"
-        ),
-    ]
+    match predicate_sql {
+        None => {
+            let update_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_au"));
+            vec![
+                format!(
+                    "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON {trigger_table_quoted} BEGIN \
+                     INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
+                     END"
+                ),
+                format!(
+                    "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON {trigger_table_quoted} BEGIN \
+                     INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
+                     VALUES ('delete', {old_pk}, {old_values}); \
+                     END"
+                ),
+                format!(
+                    "CREATE TRIGGER {update_trigger_name} AFTER UPDATE ON {trigger_table_quoted} BEGIN \
+                     INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
+                     VALUES ('delete', {old_pk}, {old_values}); \
+                     INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
+                     END"
+                ),
+            ]
+        }
+        Some(pred) => {
+            let new_pred = qualify_predicate(pred, "NEW");
+            let old_pred = qualify_predicate(pred, "OLD");
+            // The UPDATE trigger cannot share a single WHEN because the delete
+            // half needs OLD-qualified columns and the insert half needs
+            // NEW-qualified ones. Two triggers with their respective WHEN
+            // clauses handle boundary crossings correctly.
+            let au_delete_name = quote_identifier(&format!("{fts_table_base}_fts_au_delete"));
+            let au_insert_name = quote_identifier(&format!("{fts_table_base}_fts_au_insert"));
+            vec![
+                format!(
+                    "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON \
+                     {trigger_table_quoted} WHEN {new_pred} BEGIN \
+                     INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
+                     END"
+                ),
+                format!(
+                    "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON \
+                     {trigger_table_quoted} WHEN {old_pred} BEGIN \
+                     INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
+                     VALUES ('delete', {old_pk}, {old_values}); \
+                     END"
+                ),
+                format!(
+                    "CREATE TRIGGER {au_delete_name} AFTER UPDATE ON \
+                     {trigger_table_quoted} WHEN {old_pred} BEGIN \
+                     INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
+                     VALUES ('delete', {old_pk}, {old_values}); \
+                     END"
+                ),
+                format!(
+                    "CREATE TRIGGER {au_insert_name} AFTER UPDATE ON \
+                     {trigger_table_quoted} WHEN {new_pred} BEGIN \
+                     INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
+                     END"
+                ),
+            ]
+        }
+    }
 }
 
 /// Generate all FTS5 statements (virtual table + sync triggers + backfill
@@ -262,10 +345,17 @@ fn create_fts5_statements(
         statements.extend(parsed);
     }
 
-    let backfill_sql = format!(
-        "INSERT INTO {fts_name_quoted}(rowid, {columns_list}) \
-         SELECT {pk_column_quoted}, {columns_list} FROM {trigger_table_quoted}"
-    );
+    let backfill_sql = if let Some(pred) = predicate_sql {
+        format!(
+            "INSERT INTO {fts_name_quoted}(rowid, {columns_list}) \
+             SELECT {pk_column_quoted}, {columns_list} FROM {trigger_table_quoted} WHERE {pred}"
+        )
+    } else {
+        format!(
+            "INSERT INTO {fts_name_quoted}(rowid, {columns_list}) \
+             SELECT {pk_column_quoted}, {columns_list} FROM {trigger_table_quoted}"
+        )
+    };
     let parsed_backfill = parse_generated_sql(
         &sqlparser::dialect::SQLiteDialect {},
         &backfill_sql,

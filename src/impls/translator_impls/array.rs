@@ -356,6 +356,10 @@ pub(crate) enum ArrayFunction {
     Remove,
     /// `array_replace(a, from, to)`.
     Replace,
+    /// `array_cat(a, b)`: concatenate two arrays.
+    Cat,
+    /// `array_prepend(v, a)`: prepend a scalar element to an array.
+    Prepend,
 }
 
 impl ArrayFunction {
@@ -372,6 +376,8 @@ impl ArrayFunction {
             "array_positions" => Self::Positions,
             "array_remove" => Self::Remove,
             "array_replace" => Self::Replace,
+            "array_cat" => Self::Cat,
+            "array_prepend" => Self::Prepend,
             _ => return None,
         })
     }
@@ -389,6 +395,8 @@ impl ArrayFunction {
             Self::Positions => "array_positions",
             Self::Remove => "array_remove",
             Self::Replace => "array_replace",
+            Self::Cat => "array_cat",
+            Self::Prepend => "array_prepend",
         }
     }
 }
@@ -427,6 +435,20 @@ pub(crate) fn translate_array_function(
         return Ok(array_replace(array, from, to));
     }
 
+    // array_cat takes two arrays; array_prepend takes (element, array).
+    if kind == ArrayFunction::Cat {
+        let [a, b] = translated_args(args, kind, schema, options)?;
+        return Ok(array_cat_expr(a, b));
+    }
+    if kind == ArrayFunction::Prepend {
+        let [element, array] = translated_args(args, kind, schema, options)?;
+        // Prepend element to array by concatenating a one-element array with
+        // the target array.  json_cat(json_array(v), a) is NULL when a is NULL,
+        // but that case returns [v] correctly because json_each(json_array(v))
+        // yields one row and json_each(NULL) yields zero rows.
+        return Ok(array_concat(json_array_call(vec![element]), array));
+    }
+
     let [array, second] = translated_args(args, kind, schema, options)?;
     match kind {
         ArrayFunction::Length | ArrayFunction::Lower | ArrayFunction::Upper => {
@@ -447,7 +469,9 @@ pub(crate) fn translate_array_function(
         ArrayFunction::Position => Ok(array_position(array, second)),
         ArrayFunction::Positions => Ok(array_positions(array, second)),
         ArrayFunction::Remove => Ok(array_remove(array, second)),
-        ArrayFunction::Replace => unreachable!("handled above"),
+        ArrayFunction::Replace | ArrayFunction::Cat | ArrayFunction::Prepend => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -498,11 +522,25 @@ fn array_to_string(array: Expr, separator: Expr) -> Expr {
     )
 }
 
-/// `array_append(a, v)`: `json_insert(a, '$[#]', v)`, where `#` is SQLite's
-/// one-past-the-end array index.
+/// `array_append(a, v)`: `COALESCE(json_insert(a, '$[#]', v), json_array(v))`.
+///
+/// `json_insert(NULL, '$[#]', v)` returns NULL in SQLite while PostgreSQL
+/// returns `{v}`, so the COALESCE provides the single-element array as
+/// fallback when the input is NULL.
 #[must_use]
 fn array_append(array: Expr, value: Expr) -> Expr {
-    simple_function_expr("json_insert", vec![array, string_literal("$[#]"), value], None)
+    simple_function_expr(
+        "COALESCE",
+        vec![
+            simple_function_expr(
+                "json_insert",
+                vec![array, string_literal("$[#]"), value.clone()],
+                None,
+            ),
+            json_array_call(vec![value]),
+        ],
+        None,
+    )
 }
 
 /// `array_position(a, v)`:
@@ -527,12 +565,14 @@ fn array_position(array: Expr, value: Expr) -> Expr {
 }
 
 /// `array_positions(a, v)`:
-/// `(SELECT json_group_array(key + 1 ORDER BY key) FROM json_each(a) WHERE
-/// value IS v)`, an empty JSON array when nothing matches. Null safe for the
-/// same reason as `array_position`.
+/// `CASE WHEN a IS NOT NULL THEN (SELECT json_group_array(key + 1 ORDER BY key)
+/// FROM json_each(a) WHERE value IS v) END`.
+///
+/// Without the guard, `json_each(NULL)` yields no rows and `json_group_array`
+/// answers `'[]'` where PostgreSQL answers NULL.
 #[must_use]
 fn array_positions(array: Expr, value: Expr) -> Expr {
-    scalar_subquery_over_json_each(
+    let inner = scalar_subquery_over_json_each(
         ordered_aggregate(
             "json_group_array",
             vec![Expr::BinaryOp {
@@ -541,27 +581,35 @@ fn array_positions(array: Expr, value: Expr) -> Expr {
                 right: Box::new(integer_literal(1)),
             }],
         ),
-        array,
+        array.clone(),
         Some(null_safe_eq(json_each_column(VALUE_COLUMN), value)),
-    )
+    );
+    case_when(Expr::IsNotNull(Box::new(array)), inner, None)
 }
 
 /// `array_remove(a, v)`:
-/// `(SELECT json_group_array(value ORDER BY key) FROM json_each(a) WHERE NOT
-/// (value IS v))`. The null-safe comparison keeps `array_remove(a, NULL)`
-/// working, which a plain `<>` would not.
+/// `CASE WHEN a IS NOT NULL THEN (SELECT json_group_array(value ORDER BY key)
+/// FROM json_each(a) WHERE NOT (value IS v)) END`.
+///
+/// Without the guard, `json_each(NULL)` yields no rows and `json_group_array`
+/// answers `'[]'` where PostgreSQL answers NULL. The null-safe comparison keeps
+/// `array_remove(a, NULL)` working.
 #[must_use]
 fn array_remove(array: Expr, value: Expr) -> Expr {
-    scalar_subquery_over_json_each(
+    let inner = scalar_subquery_over_json_each(
         ordered_aggregate("json_group_array", vec![json_each_column(VALUE_COLUMN)]),
-        array,
+        array.clone(),
         Some(null_safe_neq(json_each_column(VALUE_COLUMN), value)),
-    )
+    );
+    case_when(Expr::IsNotNull(Box::new(array)), inner, None)
 }
 
 /// `array_replace(a, from, to)`:
-/// `(SELECT json_group_array(CASE WHEN value IS from THEN to ELSE value END
-/// ORDER BY key) FROM json_each(a))`.
+/// `CASE WHEN a IS NOT NULL THEN (SELECT json_group_array(CASE WHEN value IS
+/// from THEN to ELSE value END ORDER BY key) FROM json_each(a)) END`.
+///
+/// Without the guard, `json_each(NULL)` yields no rows and `json_group_array`
+/// answers `'[]'` where PostgreSQL answers NULL.
 #[must_use]
 fn array_replace(array: Expr, from: Expr, to: Expr) -> Expr {
     let replaced = case_when(
@@ -569,10 +617,33 @@ fn array_replace(array: Expr, from: Expr, to: Expr) -> Expr {
         to,
         Some(json_each_column(VALUE_COLUMN)),
     );
-    scalar_subquery_over_json_each(
+    let inner = scalar_subquery_over_json_each(
         ordered_aggregate("json_group_array", vec![replaced]),
-        array,
+        array.clone(),
         None,
+    );
+    case_when(Expr::IsNotNull(Box::new(array)), inner, None)
+}
+
+/// `array_cat(a, b)`: route through `array_concat` with a both-NULL guard.
+///
+/// `array_concat(NULL, x)` = x and `array_concat(x, NULL)` = x because
+/// `json_each(NULL)` yields no rows. But `array_concat(NULL, NULL)` yields
+/// `'[]'` where PostgreSQL yields NULL, so both-NULL is caught explicitly.
+/// The operands are read twice (IS NULL check and inside the concat), which
+/// is acceptable since they are row-read expressions rather than volatile
+/// calls.
+#[must_use]
+fn array_cat_expr(a: Expr, b: Expr) -> Expr {
+    let concat = array_concat(a.clone(), b.clone());
+    case_when(
+        Expr::BinaryOp {
+            left: Box::new(Expr::IsNull(Box::new(a))),
+            op: BinaryOperator::And,
+            right: Box::new(Expr::IsNull(Box::new(b))),
+        },
+        Expr::Value(ValueWithSpan::from(Value::Null)),
+        Some(concat),
     )
 }
 

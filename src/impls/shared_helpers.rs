@@ -23,12 +23,12 @@ use sqlparser::ast::{
     FunctionArgumentClause, FunctionArgumentList, FunctionArguments, GroupByExpr, HavingBound,
     Ident, Join, JoinConstraint, JoinOperator, LimitClause, ListAggOnOverflow, Measure,
     NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr,
-    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, SetExpr, Setting, Statement,
-    SymbolDefinition, TableAlias, TableFactor, TableFunctionArgs, TableSample, TableSampleBucket,
-    TableSampleKind, TableSampleQuantity, TableVersion, TableWithJoins, UnaryOperator,
-    UpdateTableFromKind, Value, ValueWithSpan, Values, WindowFrame, WindowFrameBound, WindowSpec,
-    WindowType, With, WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause,
-    XmlTableColumn, XmlTableColumnOption, visit_expressions,
+    OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, SetExpr, SetOperator,
+    SetQuantifier, Setting, Statement, SymbolDefinition, TableAlias, TableFactor,
+    TableFunctionArgs, TableSample, TableSampleBucket, TableSampleKind, TableSampleQuantity,
+    TableVersion, TableWithJoins, UnaryOperator, UpdateTableFromKind, Value, ValueWithSpan, Values,
+    WindowFrame, WindowFrameBound, WindowSpec, WindowType, With, WithFill, XmlNamespaceDefinition,
+    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption, visit_expressions,
 };
 
 use crate::{
@@ -1159,6 +1159,14 @@ fn translate_pipe_operator<D: TranslationDirection>(
             }
         }
         PipeOperator::Intersect { set_quantifier, queries } => {
+            if D::IS_FORWARD && matches!(set_quantifier, SetQuantifier::All) {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "INTERSECT ALL is not supported in SQLite. \
+                     SQLite INTERSECT always deduplicates. \
+                     Use INTERSECT without ALL for the deduplicating form."
+                        .to_string(),
+                ));
+            }
             PipeOperator::Intersect {
                 set_quantifier: *set_quantifier,
                 queries: queries
@@ -1168,6 +1176,14 @@ fn translate_pipe_operator<D: TranslationDirection>(
             }
         }
         PipeOperator::Except { set_quantifier, queries } => {
+            if D::IS_FORWARD && matches!(set_quantifier, SetQuantifier::All) {
+                return Err(Error::UnsupportedSQLiteFeature(
+                    "EXCEPT ALL is not supported in SQLite. \
+                     SQLite EXCEPT always deduplicates. \
+                     Use EXCEPT without ALL for the deduplicating form."
+                        .to_string(),
+                ));
+            }
             PipeOperator::Except {
                 set_quantifier: *set_quantifier,
                 queries: queries
@@ -1882,6 +1898,15 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
             SetExpr::Query(Box::new(translate_query_shared::<D>(query, schema, options)?))
         }
         SetExpr::SetOperation { op, set_quantifier, left, right } => {
+            if D::IS_FORWARD
+                && matches!(set_quantifier, SetQuantifier::All)
+                && matches!(op, SetOperator::Except | SetOperator::Intersect)
+            {
+                return Err(Error::UnsupportedSQLiteFeature(format!(
+                    "{op} ALL is not supported in SQLite. SQLite {op} always deduplicates. \
+                     Use {op} without the ALL quantifier for the deduplicating form."
+                )));
+            }
             SetExpr::SetOperation {
                 op: *op,
                 set_quantifier: *set_quantifier,

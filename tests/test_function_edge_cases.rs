@@ -113,11 +113,14 @@ fn concat_ws_separator_plus_multiple_values() {
 
 #[test]
 fn filter_clause_on_count_star() {
+    // SQLite 3.25 added native FILTER support; 3.46 is our floor, so the
+    // translator keeps the FILTER clause rather than lowering to CASE WHEN.
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, x INT);
                SELECT COUNT(*) FILTER (WHERE x > 5) FROM t;";
     let output = translate(sql).unwrap();
-    assert!(output.contains("CASE WHEN"), "FILTER should become CASE WHEN, got: {output}");
-    assert!(!output.contains("FILTER"), "FILTER clause should be removed, got: {output}");
+    let lower = output.to_lowercase();
+    assert!(lower.contains("filter"), "FILTER clause must be kept natively, got: {output}");
+    assert!(!lower.contains("case when"), "CASE WHEN lowering must not happen, got: {output}");
     execute_all(sql);
 }
 
@@ -126,8 +129,9 @@ fn filter_clause_on_named_aggregate() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, x INT);
                SELECT SUM(x) FILTER (WHERE x > 0) FROM t;";
     let output = translate(sql).unwrap();
-    assert!(output.contains("CASE WHEN"), "FILTER should become CASE WHEN, got: {output}");
-    assert!(!output.contains("FILTER"), "FILTER clause should be removed, got: {output}");
+    let lower = output.to_lowercase();
+    assert!(lower.contains("filter"), "FILTER clause must be kept natively, got: {output}");
+    assert!(!lower.contains("case when"), "CASE WHEN lowering must not happen, got: {output}");
     execute_all(sql);
 }
 
@@ -222,8 +226,8 @@ fn filter_rewrite_count_with_filter() {
                SELECT COUNT(x) FILTER (WHERE y > 0) FROM t2;";
     let output = translate(sql).unwrap();
     let lower = output.to_lowercase();
-    assert!(lower.contains("case when"), "expected CASE WHEN from FILTER rewrite: {output}");
-    assert!(!lower.contains("filter"), "FILTER clause should be removed: {output}");
+    assert!(lower.contains("filter"), "FILTER clause must be kept natively: {output}");
+    assert!(!lower.contains("case when"), "CASE WHEN lowering must not happen: {output}");
     execute_all(sql);
 }
 
@@ -333,4 +337,77 @@ fn schema_qualified_now_becomes_datetime_now() {
         "schema-qualified NOW should be rewritten, got: {output}"
     );
     execute_all(sql);
+}
+
+// ── H2: json_object_agg / jsonb_object_agg over an empty set ────────────────
+
+#[path = "helpers/run_translated.rs"]
+mod run_translated_helper;
+
+/// H2: PostgreSQL returns NULL when json_object_agg finds no rows. The current
+/// emission of bare json_group_object(k, v) returns '{}' instead.
+#[test]
+fn json_object_agg_over_empty_set_returns_null() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE kv (k TEXT NOT NULL, v INT NOT NULL);
+         SELECT json_object_agg(k, v) FROM kv;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![None], "json_object_agg over empty set should be NULL, got: {rows:?}");
+}
+
+/// Same defect for the jsonb_ spelling.
+#[test]
+fn jsonb_object_agg_over_empty_set_returns_null() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE kv (k TEXT NOT NULL, v INT NOT NULL);
+         SELECT jsonb_object_agg(k, v) FROM kv;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![None], "jsonb_object_agg over empty set should be NULL, got: {rows:?}");
+}
+
+/// Green companion: a non-empty set returns a JSON object containing the key.
+#[test]
+fn json_object_agg_over_nonempty_set_returns_json_object() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE kv (k TEXT NOT NULL, v INT NOT NULL);
+         INSERT INTO kv VALUES ('answer', 42);
+         SELECT json_object_agg(k, v) FROM kv;",
+        &Pg2SqliteOptions::default(),
+    );
+    let text = rows.into_iter().next().flatten().expect("non-empty result must not be NULL");
+    assert!(text.contains("answer"), "result must contain the key: {text}");
+}
+
+/// Green companion for the jsonb_ spelling.
+#[test]
+fn jsonb_object_agg_over_nonempty_set_returns_json_object() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE kv (k TEXT NOT NULL, v INT NOT NULL);
+         INSERT INTO kv VALUES ('answer', 42);
+         SELECT jsonb_object_agg(k, v) FROM kv;",
+        &Pg2SqliteOptions::default(),
+    );
+    let text = rows.into_iter().next().flatten().expect("non-empty result must not be NULL");
+    assert!(text.contains("answer"), "result must contain the key: {text}");
+}
+
+// ── R2-7: FILTER on json_agg/json_object_agg must not collect NULLs ─────────
+
+/// json_agg(x) FILTER (WHERE x > 0) over (1, -1) must give [1], not [1,null].
+/// CASE WHEN lowering stuffs a NULL for the excluded row into json_group_array.
+#[test]
+fn json_agg_filter_does_not_collect_nulls() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE t (x INT);
+         INSERT INTO t VALUES (1), (-1);
+         SELECT json_agg(x) FILTER (WHERE x > 0) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("[1]".to_string())],
+        "json_agg FILTER must exclude -1, got: {rows:?}",
+    );
 }

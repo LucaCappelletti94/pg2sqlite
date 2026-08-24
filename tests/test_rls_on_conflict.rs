@@ -48,6 +48,7 @@ const SCHEMA: &str = "
     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
     CREATE POLICY items_select ON items FOR SELECT USING (owner = current_user);
     CREATE POLICY items_write ON items FOR INSERT WITH CHECK (owner = current_user);
+    CREATE POLICY items_update ON items FOR UPDATE USING (owner = current_user);
 ";
 
 const NO_POLICY_SCHEMA: &str = "

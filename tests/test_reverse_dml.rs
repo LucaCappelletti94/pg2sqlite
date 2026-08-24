@@ -209,17 +209,19 @@ fn reverse_delete_with_returning_alias() {
     assert!(pg.contains("deleted_id"), "Expected alias: {pg}");
 }
 
+/// PostgreSQL DELETE has no ORDER BY or LIMIT clause, so the reverse
+/// direction refuses instead of emitting SQL the server rejects.
 #[test]
-fn reverse_delete_order_by_and_limit_translate_expressions() {
-    let pg = reverse(
+fn reverse_delete_order_by_and_limit_is_refused() {
+    let err = reverse_err(
         SCHEMA,
         "DELETE FROM users WHERE id > 0 ORDER BY datetime('now') LIMIT datetime('now');",
     );
+    assert!(err.contains("DELETE"), "refusal must name the statement: {err}");
     assert!(
-        pg.contains("ORDER BY NOW()"),
-        "Expected ORDER BY expression reverse translation: {pg}"
+        err.contains("LIMIT") || err.contains("ORDER BY"),
+        "refusal must name the clause PostgreSQL lacks: {err}"
     );
-    assert!(pg.contains("LIMIT NOW()"), "Expected LIMIT expression reverse translation: {pg}");
 }
 
 #[test]
@@ -239,10 +241,14 @@ fn reverse_update_with_returning_alias() {
     assert!(pg.contains("updated_name"), "Expected alias: {pg}");
 }
 
+/// PostgreSQL UPDATE has no LIMIT clause, so the reverse direction refuses
+/// instead of emitting SQL the server rejects.
 #[test]
-fn reverse_update_limit_translate_expression() {
-    let pg = reverse(SCHEMA, "UPDATE users SET name = 'test' WHERE id > 0 LIMIT datetime('now');");
-    assert!(pg.contains("LIMIT NOW()"), "Expected LIMIT expression reverse translation: {pg}");
+fn reverse_update_limit_is_refused() {
+    let err =
+        reverse_err(SCHEMA, "UPDATE users SET name = 'test' WHERE id > 0 LIMIT datetime('now');");
+    assert!(err.contains("UPDATE"), "refusal must name the statement: {err}");
+    assert!(err.contains("LIMIT"), "refusal must name the clause PostgreSQL lacks: {err}");
 }
 
 #[test]

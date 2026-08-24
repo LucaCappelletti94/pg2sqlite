@@ -371,12 +371,18 @@ impl PlPgSqlPreprocessor {
 
         result = Self::transform_select_into(&result, context);
 
-        Ok(Self::transform_raise_statements(&result))
+        Self::transform_raise_statements(&result)
     }
 
     /// Rewrites RAISE statements; scans body text directly so RAISE inside
     /// IF/THEN blocks is transformed too.
-    fn transform_raise_statements(body: &str) -> String {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedSQLiteFeature`] when a RAISE EXCEPTION
+    /// USING clause is present but not in the single-item `MESSAGE =
+    /// '<literal>'` form that translates cleanly.
+    fn transform_raise_statements(body: &str) -> Result<String, Error> {
         let mut result = String::new();
         let mut search_from = 0;
         let upper_body = body.to_uppercase();
@@ -421,9 +427,13 @@ impl PlPgSqlPreprocessor {
 
             if is_exception {
                 let message_content = body[after_level..stmt_end].trim();
-                let msg = Self::extract_first_string_literal(message_content);
+                let msg = if let Some(lit) = Self::extract_using_message_literal(message_content)? {
+                    lit.to_string()
+                } else {
+                    Self::extract_first_string_literal(message_content).to_string()
+                };
                 result.push_str("SELECT RAISE(ABORT, ");
-                result.push_str(msg);
+                result.push_str(&msg);
                 result.push(')');
                 // Keep the semicolon
                 result.push(';');
@@ -434,7 +444,7 @@ impl PlPgSqlPreprocessor {
         }
 
         result.push_str(&body[search_from..]);
-        result
+        Ok(result)
     }
 
     /// Returns the byte offset of the first unquoted semicolon in `s`.
@@ -467,6 +477,51 @@ impl PlPgSqlPreprocessor {
             Some(p) => args[..p].trim(),
             None => args.trim(),
         }
+    }
+
+    /// Extracts the string literal from `USING MESSAGE = '<literal>'`.
+    ///
+    /// Returns `Ok(None)` when `content` does not begin with `USING`.
+    /// Returns `Ok(Some(literal))` for the single-item `MESSAGE = '<literal>'`
+    /// form. Returns [`Error::UnsupportedSQLiteFeature`] for any other USING
+    /// form (non-literal value, unrecognised item, or multiple items).
+    fn extract_using_message_literal(content: &str) -> Result<Option<&str>, Error> {
+        let trimmed = content.trim_start();
+        if !trimmed.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("USING")) {
+            return Ok(None);
+        }
+        // Content begins with USING: parse MESSAGE = '<literal>'.
+        let after_using = trimmed[5..].trim_start();
+        if !after_using.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("MESSAGE")) {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "RAISE EXCEPTION USING {trimmed} is not supported; \
+                 only USING MESSAGE = '<string literal>' translates to SQLite"
+            )));
+        }
+        let after_message = after_using[7..].trim_start();
+        let Some(rest) = after_message.strip_prefix('=') else {
+            return Err(Error::UnsupportedSQLiteFeature(
+                "RAISE EXCEPTION USING MESSAGE without = is not supported".to_string(),
+            ));
+        };
+        let rest = rest.trim_start();
+        if !rest.starts_with('\'') {
+            return Err(Error::UnsupportedSQLiteFeature(format!(
+                "RAISE EXCEPTION USING MESSAGE = {rest} is not supported; \
+                 only a string literal after MESSAGE = translates to SQLite"
+            )));
+        }
+        let literal = Self::extract_first_string_literal(rest);
+        // Reject multi-item USING (anything after the closing quote)
+        let remainder = rest[literal.len()..].trim_start();
+        if !remainder.is_empty() {
+            return Err(Error::UnsupportedSQLiteFeature(
+                "RAISE EXCEPTION USING with multiple items is not supported; \
+                 use a single USING MESSAGE = '<literal>'"
+                    .to_string(),
+            ));
+        }
+        Ok(Some(literal))
     }
 
     /// Rewrites PL/pgSQL's `ELSIF` to the `ELSEIF` SQLite accepts, in live
@@ -707,8 +762,9 @@ impl PlPgSqlPreprocessor {
                 _ => {
                     if paren_depth == 0
                         && idx >= start
-                        && stmt[idx..].len() >= keyword.len()
-                        && stmt[idx..idx + keyword.len()].eq_ignore_ascii_case(keyword)
+                        && bytes
+                            .get(idx..idx + keyword.len())
+                            .is_some_and(|b| b.eq_ignore_ascii_case(keyword.as_bytes()))
                         && !Self::is_word_byte(bytes.get(idx.wrapping_sub(1)).copied(), idx == 0)
                         && !Self::is_word_byte(bytes.get(idx + keyword.len()).copied(), false)
                     {

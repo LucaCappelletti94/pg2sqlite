@@ -2,9 +2,10 @@
 //!
 //! Window functions in PostgreSQL (ROW_NUMBER, RANK, LAG, LEAD, etc.) are
 //! supported in SQLite 3.25+ with identical syntax, so most translations
-//! are pass-through. Two clauses are the exception: FILTER, which SQLite has
-//! no syntax for, and the IGNORE NULLS / RESPECT NULLS null treatment, which
-//! neither engine accepts.
+//! are pass-through. FILTER (WHERE ...) is also pass-through: SQLite 3.25
+//! added native aggregate FILTER support and 3.46 is the floor.
+//! IGNORE NULLS / RESPECT NULLS null treatment is refused because neither
+//! engine accepts it.
 
 #![allow(dead_code)]
 
@@ -662,93 +663,99 @@ fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_filter_clause_to_case() -> Result<(), Box<dyn std::error::Error>> {
+fn test_filter_clause_to_case() {
+    // Stale-pin update: transform_filter_to_case was removed (R2-7). SQLite
+    // 3.25 added native FILTER (WHERE ...) support; 3.46 is our floor so the
+    // translator passes the clause through unchanged.
     let sql = "
         CREATE TABLE data (
             id SERIAL PRIMARY KEY,
             status TEXT NOT NULL,
             value INTEGER NOT NULL
         );
-        SELECT COUNT(*) FILTER (WHERE status = 'active') OVER () as active_count FROM data;
+        SELECT COUNT(*) FILTER (WHERE status = 'active') OVER () AS active_count FROM data;
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .expect("translation must succeed");
 
     let select_stmt = translated
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
+        .expect("should have a SELECT statement")
         .to_string();
 
-    // FILTER should be converted to CASE WHEN
-    assert!(
-        select_stmt.contains("CASE WHEN"),
-        "FILTER should be converted to CASE WHEN, got: {select_stmt}"
-    );
-    assert!(
-        !select_stmt.contains("FILTER"),
-        "FILTER keyword should not appear in output, got: {select_stmt}"
-    );
+    // Emission shape: native FILTER kept, no CASE WHEN lowering.
+    let lower = select_stmt.to_lowercase();
+    assert!(lower.contains("filter"), "FILTER must be kept natively: {select_stmt}");
+    assert!(!lower.contains("case when"), "CASE WHEN lowering must not happen: {select_stmt}");
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    // Value check: 3 rows, 2 active -> window reports active_count = 2 for every
+    // row.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    let ddl = translated
+        .iter()
+        .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+        .map(|s| format!("{s};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    conn.execute_batch(&ddl).unwrap();
+    conn.execute_batch(
+        "INSERT INTO data (status, value) VALUES ('active', 1), ('active', 2), ('inactive', 3);",
+    )
+    .unwrap();
+    let mut stmt = conn.prepare(&select_stmt).unwrap();
+    let counts: Vec<i64> =
+        stmt.query_map([], |row| row.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    assert_eq!(counts, vec![2, 2, 2], "window FILTER must count only active rows: {counts:?}");
 }
 
 #[test]
-fn test_filter_clause_aggregate_to_case() -> Result<(), Box<dyn std::error::Error>> {
+fn test_filter_clause_aggregate_to_case() {
+    // Stale-pin update (R2-7): FILTER is now native in the emitted SQL.
     let sql = "
         CREATE TABLE events (
             id SERIAL PRIMARY KEY,
             event_type TEXT NOT NULL
         );
-        SELECT COUNT(*) FILTER (WHERE event_type = 'click') as click_count FROM events;
+        SELECT COUNT(*) FILTER (WHERE event_type = 'click') AS click_count FROM events;
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
 
     let select_stmt = translated
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
+        .expect("should have SELECT")
         .to_string();
 
-    // FILTER should be converted to CASE WHEN
-    assert!(
-        select_stmt.contains("CASE WHEN"),
-        "FILTER should be converted to CASE WHEN, got: {select_stmt}"
-    );
+    // Emission shape: FILTER kept natively.
+    let lower = select_stmt.to_lowercase();
+    assert!(lower.contains("filter"), "FILTER must be kept natively: {select_stmt}");
+    assert!(!lower.contains("case when"), "no CASE WHEN lowering expected: {select_stmt}");
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    // Value check: 2 click events out of 3.
+    let conn = SqliteConn::open_in_memory().unwrap();
+    let ddl = translated
+        .iter()
+        .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
+        .map(|s| format!("{s};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    conn.execute_batch(&ddl).unwrap();
+    conn.execute_batch("INSERT INTO events (event_type) VALUES ('click'), ('click'), ('view');")
+        .unwrap();
+    let mut stmt = conn.prepare(&select_stmt).unwrap();
+    let click_count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
+    assert_eq!(click_count, 2, "FILTER must count only click events: {click_count}");
 }
 
-/// Semantic test: FILTER clause converted to CASE works correctly.
+/// Semantic test: FILTER clause passes through natively (SQLite 3.46 floor).
 #[test]
 fn test_filter_clause_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "

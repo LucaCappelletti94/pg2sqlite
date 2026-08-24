@@ -222,20 +222,16 @@ fn reverse_substring() {
 }
 
 #[test]
-fn reverse_collate_binary_passes_through() {
-    // BINARY is a SQLite collation that passes through the reverse translator
-    // unchanged (it is not the PostgreSQL equivalent, but the translator lets
-    // it through rather than refusing, and the semantic mismatch is separate).
+fn reverse_collate_binary_is_refused() {
+    // BINARY is a SQLite built-in collation with no PostgreSQL counterpart,
+    // so forwarding it would fail at the server with an unknown collation.
     let schema = empty_schema();
     let options = Pg2SqliteOptions::default();
-    let out = Pg2Sqlite::default()
+    let error = Pg2Sqlite::default()
         .reverse_sql("SELECT name COLLATE BINARY FROM users", &schema, &options)
-        .expect("COLLATE BINARY should pass through the reverse translator")
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-        .join("; ");
-    assert!(out.contains("COLLATE"), "expected COLLATE in: {out}");
+        .expect_err("COLLATE BINARY must be refused in the reverse direction");
+    let message = error.to_string();
+    assert!(message.contains("BINARY"), "the refusal must name the collation: {message}");
 }
 
 #[test]

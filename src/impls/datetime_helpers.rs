@@ -218,6 +218,21 @@ pub(crate) fn pg_to_char_format_to_strftime(pg_format: &str) -> Result<String, E
                  strftime answers NULL for '%y'. Use YYYY.",
             ));
         }
+        // MS (milliseconds) and US (microseconds) are sub-second codes.
+        // SQLite strftime has no sub-second specifier, so they are named
+        // explicitly rather than blamed on the first letter (M or U).
+        if rest.starts_with("MS") || rest.starts_with("US") {
+            let code = if rest.starts_with("MS") { "MS" } else { "US" };
+            return Err(unsupported_template(
+                pg_format,
+                &format!(
+                    "contains the fractional-seconds code \'{code}\'. SQLite strftime has no \
+                     sub-second specifier; the finest resolution is SS (whole seconds). \
+                     Three-digit milliseconds can be extracted with \
+                     printf(\'%.3f\', unixepoch(ts, \'subsec\') %% 1)."
+                ),
+            ));
+        }
 
         let character = rest.chars().next().unwrap_or_default();
         if character == 'T' && !bare_t_is_literal(rest) {

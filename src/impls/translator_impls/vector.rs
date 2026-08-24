@@ -271,8 +271,20 @@ pub fn generate_vec0_statements(
     let mut statements = Vec::new();
 
     for vec_col in &vector_cols {
-        // vec0 requires an explicit dimension count; skip columns without one.
+        // vec0 requires an explicit dimension count; a bare `vector` column
+        // without one is translated to BLOB but no vec0 table or triggers are
+        // emitted. Warn rather than skip silently so the caller knows the index
+        // story is incomplete.
         if vec_col.dimensions.is_none() {
+            crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+                construct: format!("vector column '{}'", vec_col.column_name),
+                reason: format!(
+                    "vec0 requires an explicit dimension count (e.g. vector(384)); \
+                     the column '{}' has no dimension, so no vec0 virtual table or sync \
+                     triggers are emitted and the vector index is not active.",
+                    vec_col.column_name
+                ),
+            });
             continue;
         }
         let vec_table_name = format!("{table_name}_{}_vec", vec_col.column_name);

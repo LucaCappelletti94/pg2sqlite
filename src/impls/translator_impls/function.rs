@@ -14,8 +14,8 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, CastKind, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart,
-    Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    FunctionArgExpr, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
+    helpers::attached_token::AttachedToken,
 };
 
 use super::{
@@ -141,6 +141,10 @@ enum FunctionTranslation {
     /// `json_group_array` would quote it, and answer NULL over no rows where it
     /// answers an empty array.
     JsonAgg,
+    /// `json_object_agg`/`jsonb_object_agg`, which return NULL over no rows
+    /// where `json_group_object` returns `'{}'`. Wrapped in
+    /// `NULLIF(json_group_object(k, v), '{}')`.
+    JsonObjectAgg,
     /// `greatest`/`least`, which ignore NULL arguments where SQLite's scalar
     /// `MAX`/`MIN` return NULL as soon as one argument is NULL.
     Extremum {
@@ -153,6 +157,12 @@ enum FunctionTranslation {
     /// A session variable pattern no mapping pairs, which refuses in the
     /// mapping's own words rather than as an unknown function.
     UnpairedSessionVariable(SessionVariablePattern),
+    /// `array_agg`, which answers NULL over no rows where `json_group_array`
+    /// answers `'[]'`. Wrapped in `NULLIF(json_group_array(...), '[]')`.
+    /// The reverse translator restores `json_agg` from this shape since the
+    /// two aggregates are indistinguishable in the emitted SQL without type
+    /// information.
+    ArrayAgg,
 }
 
 /// Simple name-only renames: `(pg_name, sqlite_name)`.
@@ -162,6 +172,9 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     // NULL when any argument is NULL. See `FunctionTranslation::Extremum`.
     // json_agg and jsonb_agg are NOT renames: a JSON column is TEXT in SQLite
     // and would be quoted rather than nested. See `FunctionTranslation::JsonAgg`.
+    // json_object_agg and jsonb_object_agg are NOT renames: bare json_group_object
+    // returns '{}' over an empty set while PostgreSQL returns NULL. See
+    // `FunctionTranslation::JsonObjectAgg`.
     // json_typeof and jsonb_typeof are NOT renames: json_type answers over a
     // different vocabulary. See `FunctionTranslation::JsonTypeof`.
     // quote_literal and quote_nullable are NOT renames: they differ on NULL,
@@ -174,8 +187,6 @@ const FORWARD_RENAMES: &[(&str, &str)] = &[
     // DISTINCT. See `FunctionTranslation::StringAgg`.
     ("strpos", "INSTR"),
     ("chr", "char"),
-    ("json_object_agg", "json_group_object"),
-    ("jsonb_object_agg", "json_group_object"),
     ("json_build_array", "json_array"),
     ("json_build_object", "json_object"),
     ("btrim", "trim"),
@@ -276,7 +287,7 @@ fn truncate_to_scale(
                 .ok_or_else(|| unfoldable_scale_error(places))?;
             number_literal(&literal_power_of_ten(digits))
         }
-        None if options.are_math_functions_available() => {
+        None if options.is_math_functions_available() => {
             simple_function_expr(
                 "pow",
                 vec![number_literal("10"), scale.translate(schema, options)?],
@@ -438,18 +449,26 @@ fn translate_function(
         "concat" => FunctionTranslation::ToConcatenation,
         "concat_ws" => FunctionTranslation::ToConcatenationWithSeparator,
         "date_trunc" => FunctionTranslation::DateTrunc,
-        // `array_agg` and `cardinality` need only a rename: `json_group_array`
-        // accumulates the same way, and `json_array_length` counts the same
-        // way, including reporting zero for an empty array.
-        "array_agg" | "cardinality" => {
+        // array_agg wraps json_group_array in NULLIF(..., '[]') so an empty
+        // set returns NULL (PostgreSQL) rather than the literal '[]'.
+        "array_agg" => {
             if array::is_json_array_representation(options) {
-                let target =
-                    if original_name == "array_agg" { "json_group_array" } else { "json_array_length" };
-                FunctionTranslation::Rename(target.to_string())
+                FunctionTranslation::ArrayAgg
             } else {
-                FunctionTranslation::Unsupported(array::representation_required_message(&format!(
-                    "{original_name}()"
-                )))
+                FunctionTranslation::Unsupported(array::representation_required_message(
+                    "array_agg()",
+                ))
+            }
+        }
+        // cardinality is a pure rename: json_array_length also returns 0 for an
+        // empty array, matching PostgreSQL cardinality.
+        "cardinality" => {
+            if array::is_json_array_representation(options) {
+                FunctionTranslation::Rename("json_array_length".to_string())
+            } else {
+                FunctionTranslation::Unsupported(array::representation_required_message(
+                    "cardinality()",
+                ))
             }
         }
         "bit_and" | "bit_or" => FunctionTranslation::Unsupported(format!(
@@ -546,6 +565,9 @@ fn translate_function(
         "json_typeof" | "jsonb_typeof" => FunctionTranslation::JsonTypeof,
         // json_agg / jsonb_agg: a JSON element needs parsing, not quoting.
         "json_agg" | "jsonb_agg" => FunctionTranslation::JsonAgg,
+        // json_object_agg / jsonb_object_agg: bare rename returns '{}' over no
+        // rows where PostgreSQL returns NULL. Wrapped in NULLIF(..., '{}').
+        "json_object_agg" | "jsonb_object_agg" => FunctionTranslation::JsonObjectAgg,
         // greatest / least ignore NULLs, MAX / MIN do not.
         "greatest" => FunctionTranslation::Extremum { greatest: true },
         "least" => FunctionTranslation::Extremum { greatest: false },
@@ -722,7 +744,7 @@ fn translate_function(
         // cube root even with the build flag, so it is rewritten over `pow`.
         "log" | "ln" | "exp" | "sqrt" | "log10" | "pow" | "power" | "cbrt" | "pi" | "degrees"
         | "radians" => {
-            if options.are_math_functions_available() {
+            if options.is_math_functions_available() {
                 match original_name.as_str() {
                     "power" => FunctionTranslation::Rename("pow".to_string()),
                     "cbrt" => FunctionTranslation::ToCbrt,
@@ -767,12 +789,6 @@ fn translate_function(
         // Array functions with no faithful json1 form. `json_each` hands a
         // nested element back as JSON text, so anything that inspects or
         // rebuilds dimensions cannot be answered correctly.
-        "array_cat" | "array_prepend" => FunctionTranslation::Unsupported(array::no_json_message(
-            &format!("{original_name}()"),
-            "Concatenating JSON arrays would have to re-encode every element and SQLite has no \
-             json_concat(). Build the combined array in the application, or insert elements one \
-             at a time with json_insert(a, '$[#]', v).",
-        )),
         "array_dims" | "array_ndims" => {
             FunctionTranslation::Unsupported(array::no_json_message(
                 &format!("{original_name}()"),
@@ -939,7 +955,7 @@ fn classify_unrecognised_function(
     options: &Pg2SqliteOptions,
 ) -> FunctionTranslation {
     if is_sqlite_builtin(name)
-        || (options.are_math_functions_available() && is_gated_math(name))
+        || (options.is_math_functions_available() && is_gated_math(name))
         || options.declares_user_defined_function(name)
         || declares_function_by_option(name, options)
     {
@@ -1348,7 +1364,7 @@ fn left_closed_form(s: Expr, n: Expr) -> Expr {
 /// Not bit-exact against PostgreSQL, whose `cbrt` is the correctly rounded C
 /// function where `pow` is not, so a value that is not a perfect cube agrees
 /// to about fifteen significant figures.
-fn cube_root_closed_form(x: Expr) -> Expr {
+pub(crate) fn cube_root_closed_form(x: Expr) -> Expr {
     let one_third = Expr::Nested(Box::new(Expr::BinaryOp {
         left: Box::new(number_literal("1.0")),
         op: BinaryOperator::Divide,
@@ -1482,78 +1498,6 @@ fn build_concat_ws_expression(separator: &Expr, values: Vec<Expr>) -> Option<Exp
     build_concatenation(pieces)
 }
 
-/// Wrap an aggregate function argument with CASE WHEN filter THEN value END.
-///
-/// This transforms `AGG(value) FILTER (WHERE condition)` to
-/// `AGG(CASE WHEN condition THEN value END)`.
-fn wrap_arg_with_case_filter(arg: &FunctionArg, filter: &Expr) -> FunctionArg {
-    match arg {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(case_when(
-                filter.clone(),
-                expr.clone(),
-                None,
-            )))
-        }
-        FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
-            // COUNT(*) FILTER (WHERE cond) -> SUM(CASE WHEN cond THEN 1 END)
-            // But we can't change the function name here, so we wrap it differently
-            // COUNT(*) FILTER -> COUNT(CASE WHEN cond THEN 1 END)
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(case_when(
-                filter.clone(),
-                integer_literal(1),
-                None,
-            )))
-        }
-        FunctionArg::Named { name, arg: FunctionArgExpr::Expr(expr), operator } => {
-            FunctionArg::Named {
-                name: name.clone(),
-                arg: FunctionArgExpr::Expr(case_when(filter.clone(), expr.clone(), None)),
-                operator: operator.clone(),
-            }
-        }
-        FunctionArg::ExprNamed { name, arg: FunctionArgExpr::Expr(expr), operator } => {
-            FunctionArg::ExprNamed {
-                name: name.clone(),
-                arg: FunctionArgExpr::Expr(case_when(filter.clone(), expr.clone(), None)),
-                operator: operator.clone(),
-            }
-        }
-        // Pass through other argument types unchanged
-        other => other.clone(),
-    }
-}
-
-/// Transform a function with FILTER clause to use CASE expression instead.
-fn transform_filter_to_case(func: &Function) -> Function {
-    let filter = match &func.filter {
-        Some(f) => f.as_ref(),
-        None => return func.clone(),
-    };
-
-    let new_args = match &func.args {
-        FunctionArguments::List(list) => {
-            FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: list.duplicate_treatment,
-                args: list.args.iter().map(|arg| wrap_arg_with_case_filter(arg, filter)).collect(),
-                clauses: list.clauses.clone(),
-            })
-        }
-        other => other.clone(),
-    };
-
-    Function {
-        name: func.name.clone(),
-        uses_odbc_syntax: func.uses_odbc_syntax,
-        parameters: func.parameters.clone(),
-        args: new_args,
-        filter: None, // Remove the FILTER clause
-        null_treatment: func.null_treatment,
-        over: func.over.clone(),
-        within_group: func.within_group.clone(),
-    }
-}
-
 impl Translator for Function {
     type Schema = ParserDB;
     type Options = Pg2SqliteOptions;
@@ -1565,9 +1509,12 @@ impl Translator for Function {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        // Transform FILTER clause to CASE expression
-        let func =
-            if self.filter.is_some() { transform_filter_to_case(self) } else { self.clone() };
+        // SQLite 3.25 added native FILTER (WHERE ...) for aggregates; our floor
+        // is 3.46, so CASE lowering is never needed. Translate the filter
+        // expression now so every arm can keep it natively.
+        let translated_filter =
+            self.filter.as_ref().map(|f| f.translate(schema, options).map(Box::new)).transpose()?;
+        let func = Function { filter: translated_filter, ..self.clone() };
 
         // WITHIN GROUP is ordered-set aggregate syntax (percentile_cont, mode, ...).
         // SQLite has no equivalent; reject early with a clear error.
@@ -1613,6 +1560,20 @@ impl Translator for Function {
                 args: translate_function_arguments::<Forward>(&func.args, schema, options)?,
                 ..func
             }));
+        }
+
+        // ST_Buffer on a geography column refuses: PostGIS buffers geography in
+        // metres on the WGS84 ellipsoid, but the SQLiteGIS passthrough is planar
+        // and reads the radius in degrees - wrong by ~111000. See postgis.rs.
+        if options.is_sqlitegis_enabled()
+            && let Some(fname) = last_ident(&func.name)
+            && let Some(msg) = postgis::geography_buffer_refusal(
+                &fname.value,
+                function_argument_exprs(&func.args).first().copied(),
+                schema,
+            )
+        {
+            return Err(crate::errors::Error::UnsupportedSQLiteFeature(msg));
         }
 
         match translate_function(&func.name, &func.args, options) {
@@ -1701,6 +1662,8 @@ impl Translator for Function {
                 // `YYYY-MM-DD HH:MM:SS`.
                 let format_str = match field_str.as_str() {
                     "second" | "seconds" => "%Y-%m-%d %H:%M:%S",
+                    // milliseconds: SQLite %f gives fractional seconds to three digits.
+                    "millisecond" | "milliseconds" => "%Y-%m-%d %H:%M:%f",
                     "minute" | "minutes" => "%Y-%m-%d %H:%M:00",
                     "hour" | "hours" => "%Y-%m-%d %H:00:00",
                     "day" | "days" => "%Y-%m-%d 00:00:00",
@@ -1724,9 +1687,9 @@ impl Translator for Function {
                     }
                     other => {
                         return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
-                            "date_trunc('{other}', ...) is not a PostgreSQL granularity. \
-                             Supported: second, minute, hour, day, week, month, quarter, year, \
-                             decade, century, millennium, and their plurals."
+                            "date_trunc('{other}', ...) is not supported by this translation. \
+                             Supported: millisecond, second, minute, hour, day, week, month, \
+                             quarter, year, decade, century, millennium, and their plurals."
                         )));
                     }
                 };
@@ -1905,18 +1868,28 @@ impl Translator for Function {
                 let json_expr = exprs[0].translate(schema, options)?;
                 let mut path = String::from("$");
                 for key_expr in &exprs[1..] {
-                    if let Expr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(key),
-                        ..
+                    let Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString(key), ..
                     }) = key_expr
-                    {
-                        path.push('.');
-                        path.push_str(key);
-                    } else {
+                    else {
                         return Err(crate::errors::Error::UnsupportedSQLiteFeature(
                             "json_extract_path requires string literal keys for SQLite translation"
                                 .to_string(),
                         ));
+                    };
+                    // Quote any key that is not a plain identifier: a dot, space,
+                    // or other metacharacter would otherwise be treated as a path
+                    // separator or special JSONPath syntax by SQLite's json_extract.
+                    let is_plain_identifier = !key.is_empty()
+                        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && !key.starts_with(|c: char| c.is_ascii_digit());
+                    if is_plain_identifier {
+                        path.push('.');
+                        path.push_str(key);
+                    } else {
+                        path.push_str(".\"");
+                        path.push_str(key);
+                        path.push('"');
                     }
                 }
                 Ok(simple_function_expr(
@@ -2088,7 +2061,7 @@ impl Translator for Function {
                     )?,
                     args,
                     over: translate_window_type(func.over.as_ref(), schema, options)?,
-                    filter: None,
+                    filter: func.filter.clone(),
                     ..func
                 }))
             }
@@ -2176,13 +2149,56 @@ impl Translator for Function {
                     )?,
                     args,
                     over: translate_window_type(func.over.as_ref(), schema, options)?,
-                    filter: None,
+                    filter: func.filter.clone(),
                     ..func
                 });
 
                 // PostgreSQL answers NULL over no rows where json_group_array
                 // answers an empty array. An aggregate over one row or more
                 // always has an element, so `[]` can only mean no rows.
+                Ok(simple_function_expr("NULLIF", vec![aggregate, string_literal("[]")], None))
+            }
+            FunctionTranslation::JsonObjectAgg => {
+                // Translate the arguments (key and value) and build json_group_object.
+                let args = translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                let aggregate = Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("json_group_object")]),
+                    parameters: translate_function_arguments::<Forward>(
+                        &func.parameters,
+                        schema,
+                        options,
+                    )?,
+                    args,
+                    over: translate_window_type(func.over.as_ref(), schema, options)?,
+                    filter: func.filter.clone(),
+                    ..func
+                });
+                // PostgreSQL returns NULL over no rows; json_group_object returns
+                // '{}'. An aggregate over one or more rows always has at least one
+                // key, so '{}' can only mean no rows.
+                Ok(simple_function_expr("NULLIF", vec![aggregate, string_literal("{}")], None))
+            }
+            FunctionTranslation::ArrayAgg => {
+                // Same NULLIF wrapper as JsonAgg, but without the json() wrapping
+                // since array_agg accumulates regular scalar values, not JSON
+                // documents. The filter is kept natively (3.46 floor).
+                let translated_args_list =
+                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                let translated_params =
+                    translate_function_arguments::<Forward>(&func.parameters, schema, options)?;
+                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+                let aggregate = Expr::Function(Function {
+                    name: ObjectName::from(vec![Ident::new("json_group_array")]),
+                    parameters: translated_params,
+                    args: translated_args_list,
+                    over: translated_over,
+                    filter: func.filter.clone(),
+                    ..func
+                });
+                // PostgreSQL returns NULL over no rows; json_group_array returns
+                // '[]'. The reverse translator restores json_agg from this shape
+                // (indistinguishable without type information, documented in the
+                // reverse arm comment).
                 Ok(simple_function_expr("NULLIF", vec![aggregate, string_literal("[]")], None))
             }
             FunctionTranslation::ToCbrt => {
@@ -2237,10 +2253,7 @@ mod tests {
         parser::Parser,
     };
 
-    use super::{
-        build_concat_ws_expression, transform_filter_to_case, wrap_arg_with_case_filter,
-        wrap_with_coalesce,
-    };
+    use super::{build_concat_ws_expression, wrap_with_coalesce};
     use crate::{
         impls::shared_helpers::function_argument_exprs,
         prelude::{Pg2SqliteOptions, Translator},
@@ -2270,30 +2283,6 @@ mod tests {
             sql.contains("||"),
             "expected concatenation operators in concat_ws expression: {sql}"
         );
-
-        let wildcard_named = FunctionArg::Named {
-            name: Ident::new("value"),
-            arg: FunctionArgExpr::Wildcard,
-            operator: FunctionArgOperator::RightArrow,
-        };
-        let wrapped = wrap_arg_with_case_filter(&wildcard_named, &parse_expr("1 = 1"));
-        assert_eq!(wrapped, wildcard_named);
-
-        let passthrough = Function {
-            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("sum"))]),
-            uses_odbc_syntax: false,
-            args: FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: None,
-                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(parse_expr("value")))],
-                clauses: vec![],
-            }),
-            filter: None,
-            null_treatment: None,
-            over: None,
-            within_group: vec![],
-            parameters: FunctionArguments::None,
-        };
-        assert_eq!(transform_filter_to_case(&passthrough), passthrough);
     }
 
     #[test]

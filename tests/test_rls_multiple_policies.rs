@@ -321,3 +321,83 @@ fn test_non_matching_sees_nothing() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// --- a FOR SELECT policy must OR with a FOR ALL policy on the read path ----
+
+mod select_plus_for_all {
+    use diesel::prelude::*;
+    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+
+    diesel::table! {
+        /// The RLS backing table the translator emits for `mix1`.
+        mix1_rls (id) {
+            id -> Integer,
+            owner -> Text,
+        }
+    }
+
+    diesel::table! {
+        /// The policy view the translator emits under the declared name.
+        mix1 (id) {
+            id -> Integer,
+            owner -> Text,
+        }
+    }
+
+    #[derive(Insertable)]
+    #[diesel(table_name = mix1_rls)]
+    struct Mix1Row {
+        id: i32,
+        owner: String,
+    }
+
+    const SCHEMA: &str = "\
+CREATE TABLE mix1 (
+    id INTEGER PRIMARY KEY,
+    owner TEXT NOT NULL
+);
+ALTER TABLE mix1 ENABLE ROW LEVEL SECURITY;
+CREATE POLICY mix1_sel ON mix1 FOR SELECT USING (true);
+CREATE POLICY mix1_all ON mix1 FOR ALL USING (owner = 'alice');
+";
+
+    /// PostgreSQL ORs permissive policies, and both policies here are
+    /// permissive and apply to SELECT, so every row is visible. The seed
+    /// plays the system-load role, so triggers are applied after it, which
+    /// mirrors the triggers-disabled authoritative-load contract.
+    #[test]
+    fn a_select_policy_and_a_for_all_policy_or_on_the_read_path() {
+        let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_violations");
+        let statements = Pg2Sqlite::default()
+            .sql(SCHEMA)
+            .expect("parse")
+            .translate(&options)
+            .expect("translate");
+        let mut connection = SqliteConnection::establish(":memory:").expect("open db");
+        let (triggers, base): (Vec<_>, Vec<_>) = statements
+            .iter()
+            .map(ToString::to_string)
+            .partition(|s| s.starts_with("CREATE TRIGGER"));
+        for statement in &base {
+            // Translated DDL (CREATE TABLE / VIEW), which the typed DSL
+            // cannot express.
+            diesel::sql_query(statement.clone()).execute(&mut connection).expect("apply DDL");
+        }
+        diesel::insert_into(mix1_rls::table)
+            .values(&[
+                Mix1Row { id: 1, owner: "alice".to_owned() },
+                Mix1Row { id: 2, owner: "bob".to_owned() },
+            ])
+            .execute(&mut connection)
+            .expect("seed the backing table");
+        for statement in &triggers {
+            diesel::sql_query(statement.clone()).execute(&mut connection).expect("apply triggers");
+        }
+        let visible: i64 =
+            mix1::table.count().get_result(&mut connection).expect("count through the policy view");
+        assert_eq!(
+            visible, 2,
+            "PostgreSQL ORs the permissive SELECT and FOR ALL policies, so both rows are visible"
+        );
+    }
+}

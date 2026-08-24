@@ -48,19 +48,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Semantic differences
 
-SQLite folds case for ASCII letters only, so `ILIKE`, `lower` and `upper` answer differently from PostgreSQL whenever the text is not ASCII. PostgreSQL folds by the database collation, which under a UTF-8 locale covers the whole of Unicode.
+SQLite folds case for ASCII letters only, so `lower` and `upper` answer differently from PostgreSQL whenever the text is not ASCII. PostgreSQL folds by the database collation, which under a UTF-8 locale covers the whole of Unicode. For `ILIKE` the translator refuses a pattern literal carrying a non-ASCII letter rather than emitting a comparison that silently answers false, and `with_ilike_fold_function` names a Unicode-aware folding function (an ICU build's `lower`, or one the application registers) that `ILIKE` then runs through instead of `lower`.
 
 ```sql
 SELECT 'ÄBC' ILIKE 'äbc';
 -- PostgreSQL under en_US.utf8: true
--- translated: SELECT lower('ÄBC') LIKE lower('äbc') ESCAPE '\'  -> 0
+-- translated without with_ilike_fold_function: refused
+-- translated with it: SELECT fold('ÄBC') LIKE fold('äbc') ESCAPE '\'
 
 SELECT lower('ÄBC');
 -- PostgreSQL under en_US.utf8: äbc
 -- SQLite: Äbc
 ```
 
-Two things make them agree. Building SQLite with `SQLITE_ENABLE_ICU` replaces `lower` and `upper` with Unicode-aware versions, which is what the translated `ILIKE` runs through. Giving the PostgreSQL column or database the `C` collation makes PostgreSQL fold ASCII only, which is what SQLite already does.
+For `lower` and `upper` two things make the engines agree. Building SQLite with `SQLITE_ENABLE_ICU` replaces them with Unicode-aware versions. Giving the PostgreSQL column or database the `C` collation makes PostgreSQL fold ASCII only, which is what SQLite already does. Non-ASCII text stored in a column still reaches an ASCII-only `lower` when `ILIKE` runs without the fold option, since only the pattern literal can be inspected at translation time.
 
 SQLite's date functions hold milliseconds where PostgreSQL holds microseconds, so a timestamp keeps three decimal places and loses the rest. `make_time` and `make_timestamp` are exact, because they format the argument they are given rather than going through those functions.
 
@@ -105,6 +106,8 @@ SELECT now();
 -- PostgreSQL: 2026-08-08 15:08:14.548696+00
 -- translated: SELECT datetime('now')  ->  2026-08-08 15:08:14
 ```
+
+Two row-level security shapes cannot be reproduced by the view-and-trigger emulation, and both only arise when a row is readable under a wider predicate than it is writable. PostgreSQL lets an `UPDATE` or `DELETE` with no `WHERE` clause reach rows the session user cannot read, because nothing in the statement reads existing values. The emulated write triggers only ever fire for rows the view exposes, so such a statement affects fewer rows than PostgreSQL would. In the same situation `RETURNING` on an `UPDATE` or `DELETE` through the view can name rows the write policy skipped: SQLite reports every row the trigger fired for, while PostgreSQL reports only the rows actually changed. When every readable row is also writable, neither divergence can occur.
 
 ## License
 

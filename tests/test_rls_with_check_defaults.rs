@@ -82,20 +82,29 @@ const TABLE: &str = "
 
 /// Applies the translated DDL, then seeds one visible row. The emitted SQL is
 /// the artifact under test so it is applied as generated text; all other
-/// statements use the typed DSL.
+/// statements use the typed DSL. Triggers are applied after the seed because
+/// the seed plays the system-load role, which runs with triggers disabled
+/// under the authoritative-load contract, and diesel cannot reach
+/// sqlite3_db_config.
 fn setup(policies: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let pg = format!("{TABLE}{policies}");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
     let translated = Pg2Sqlite::default().sql(&pg)?.translate(&options)?;
 
     let mut conn = SqliteConnection::establish(":memory:")?;
-    for statement in &translated {
-        diesel::sql_query(statement.to_string()).execute(&mut conn)?;
+    let (triggers, base): (Vec<_>, Vec<_>) =
+        translated.iter().map(ToString::to_string).partition(|s| s.starts_with("CREATE TRIGGER"));
+    for statement in &base {
+        diesel::sql_query(statement.clone()).execute(&mut conn)?;
     }
 
     diesel::insert_into(docs_rls::table)
         .values(BackingRow { id: 1, is_public: 1, body: "original".to_owned() })
         .execute(&mut conn)?;
+
+    for statement in &triggers {
+        diesel::sql_query(statement.clone()).execute(&mut conn)?;
+    }
 
     Ok(conn)
 }

@@ -80,6 +80,25 @@ pub enum TranslationWarning {
     },
 }
 
+impl core::fmt::Display for TranslationWarning {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::LossyDrop { construct, reason } => {
+                write!(f, "dropped {construct}: {reason}")
+            }
+            Self::RlsDeniesEveryRow { table } => {
+                write!(
+                    f,
+                    "row level security on {table} has no read policy, so its view denies every row"
+                )
+            }
+            Self::LossyDowngrade { construct, from, to, location, reason } => {
+                write!(f, "downgraded {construct} at {location} from {from} to {to}: {reason}")
+            }
+        }
+    }
+}
+
 /// Combined output of [`Pg2Sqlite::translate_with_report`]: the translated
 /// statements plus any warnings collected during translation.
 ///

@@ -101,6 +101,11 @@ pub struct Pg2SqliteOptions {
     /// Intentionally not exposed in the public builder API: it is derived from
     /// translation context, not user config.
     pub(crate) trigger_function_names: Vec<String>,
+    /// The name of the SQLite UDF to use for ILIKE case folding. When Some,
+    /// both sides of an ILIKE expression are wrapped in this function rather
+    /// than `lower()`. This enables Unicode-aware case folding for non-ASCII
+    /// patterns. Set via `with_ilike_fold_function`.
+    ilike_fold_function: Option<String>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -132,6 +137,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             declared_object_names: Vec::new(),
             trigger_function_names: Vec::new(),
             user_defined_functions: Vec::<String>::arbitrary(u)?,
+            ilike_fold_function: Option::<String>::arbitrary(u)?,
         })
     }
 }
@@ -159,6 +165,7 @@ impl Default for Pg2SqliteOptions {
             declared_object_names: Vec::new(),
             trigger_function_names: Vec::new(),
             user_defined_functions: Vec::new(),
+            ilike_fold_function: None,
         }
     }
 }
@@ -249,12 +256,12 @@ impl Pg2SqliteOptions {
 }
 
 impl TranslationOptions for Pg2SqliteOptions {
-    fn remove_unsupported_check_constraints(mut self) -> Self {
+    fn with_remove_unsupported_check_constraints(mut self) -> Self {
         self.remove_unsupported_check_constraints = true;
         self
     }
 
-    fn should_remove_unsupported_check_constraints(&self) -> bool {
+    fn is_remove_unsupported_check_constraints_enabled(&self) -> bool {
         self.remove_unsupported_check_constraints
     }
 
@@ -400,7 +407,7 @@ impl TranslationOptions for Pg2SqliteOptions {
         self
     }
 
-    fn are_math_functions_available(&self) -> bool {
+    fn is_math_functions_available(&self) -> bool {
         self.math_functions_available
     }
 
@@ -416,5 +423,14 @@ impl TranslationOptions for Pg2SqliteOptions {
     fn declares_user_defined_function(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
         self.user_defined_functions.contains(&name)
+    }
+
+    fn with_ilike_fold_function(mut self, name: impl Into<String>) -> Self {
+        self.ilike_fold_function = Some(name.into());
+        self
+    }
+
+    fn get_ilike_fold_function(&self) -> Option<&str> {
+        self.ilike_fold_function.as_deref()
     }
 }

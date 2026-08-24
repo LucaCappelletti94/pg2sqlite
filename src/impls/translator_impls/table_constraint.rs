@@ -52,7 +52,7 @@ impl Translator for TableConstraint {
                             enforced: check_constraint.enforced,
                         })])
                     }
-                    Err(_) if options.should_remove_unsupported_check_constraints() => {
+                    Err(_) if options.is_remove_unsupported_check_constraints_enabled() => {
                         Ok(Vec::new())
                     }
                     Err(e) => Err(e),

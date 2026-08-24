@@ -10,7 +10,7 @@ mod helpers;
 use diesel::connection::SimpleConnection;
 use helpers::{establish_connection, translate_pg};
 use pg2sqlite::{
-    impls::sqlite_functions::gated_math,
+    internals::gated_math,
     prelude::{Pg2SqliteOptions, TranslationOptions},
 };
 

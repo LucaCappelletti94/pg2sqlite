@@ -11,7 +11,7 @@ mod helpers;
 use diesel::{RunQueryDsl, sql_query};
 use helpers::sqlitegis::sqlitegis_connection;
 use pg2sqlite::{
-    impls::translator_impls::postgis,
+    internals::postgis,
     pg2sqlite::Pg2Sqlite,
     prelude::{Pg2SqliteOptions, TranslationOptions},
 };
