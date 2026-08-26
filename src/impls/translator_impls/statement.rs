@@ -72,7 +72,7 @@ use crate::{
             condition_injection::inject_condition_into_dml_statement,
             rls::{
                 generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
-                validate_table_policies,
+                validate_table_policies, write_guard_when,
             },
             vector::{generate_vec0_statements, has_vector_columns},
         },
@@ -501,14 +501,7 @@ fn build_create_table_statements(
 const READONLY_DENY_TRIGGERS: [(&str, &str); 3] =
     [("insert", "BEFORE INSERT"), ("update", "BEFORE UPDATE"), ("delete", "BEFORE DELETE")];
 
-/// Appends `RAISE(ABORT)` deny triggers so interactive writes to a read-only
-/// non-RLS table fail synchronously at the statement. Names are
-/// `<table><marker>_<verb>`, where the marker is
-/// [`TranslationOptions::get_readonly_deny_trigger_suffix`]. Errors on a name
-/// collision so a clashing schema fails loudly instead of emitting broken SQL.
-///
-/// Authoritative changeset applies must run with triggers disabled (see
-/// [`TranslationOptions::with_session_user_role`]).
+/// Appends deny triggers so ordinary writes to a read-only non-RLS table fail.
 fn append_readonly_deny_triggers(
     statements: &mut Vec<Statement>,
     options: &Pg2SqliteOptions,
@@ -524,6 +517,7 @@ fn append_readonly_deny_triggers(
     let table_name_quoted = quote_identifier(&table_ident);
     let deny_message =
         sql_string_literal(&format!("permission denied: {table_ident} is read-only for this role"));
+    let when = write_guard_when(None, options);
 
     let dialect = SQLiteDialect {};
     let mut triggers = Vec::with_capacity(READONLY_DENY_TRIGGERS.len());
@@ -532,7 +526,7 @@ fn append_readonly_deny_triggers(
         reject_reserved_name_collision(options, &table_ident, &trigger_name)?;
 
         let trigger_sql = format!(
-            "CREATE TRIGGER {} {event} ON {table_name_quoted} \
+            "CREATE TRIGGER {} {event} ON {table_name_quoted}{when} \
              BEGIN SELECT RAISE(ABORT, {deny_message}); END",
             quote_identifier(&trigger_name)
         );

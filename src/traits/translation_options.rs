@@ -427,6 +427,16 @@ pub trait TranslationOptions {
     /// [`with_user_defined_functions`](TranslationOptions::with_user_defined_functions).
     fn declares_user_defined_function(&self, name: &str) -> bool;
 
+    /// Names a caller-registered non-deterministic boolean function whose true
+    /// result skips generated write-authorization guards while false and NULL
+    /// enforce normally, with `INNOCUOUS` required when trusted schema is
+    /// disabled and function errors aborting the write.
+    #[must_use]
+    fn with_write_exemption_function(self, name: impl Into<String>) -> Self;
+
+    /// Returns the configured write-exemption function name.
+    fn get_write_exemption_function(&self) -> Option<&str>;
+
     /// Enables strict RLS validation: audit rows for writes that are not
     /// readable back through the view are logged with severity `error`
     /// instead of `warning`, and RETURNING-bearing inserts are redirected to

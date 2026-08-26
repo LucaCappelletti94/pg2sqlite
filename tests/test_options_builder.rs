@@ -43,6 +43,7 @@ fn default_values() {
     );
     assert!(options.get_rls_audit_table_name().is_none());
     assert!(!options.is_strict_rls_validation());
+    assert!(options.get_write_exemption_function().is_none());
 }
 
 #[test]
@@ -56,6 +57,7 @@ fn all_builder_methods_chain() {
         .with_session_user_role("app_user")
         .with_session_variable(SessionVariableMapping::current_user("get_current_user"))
         .with_rls_audit_table_name("rls_violations")
+        .with_write_exemption_function("write_is_exempt")
         .with_strict_rls_validation();
 
     assert!(options.is_remove_unsupported_check_constraints_enabled());
@@ -66,6 +68,7 @@ fn all_builder_methods_chain() {
     assert_eq!(options.get_session_user_role(), Some("app_user"));
     assert_eq!(options.get_session_variables().len(), 1);
     assert_eq!(options.get_rls_audit_table_name(), Some("rls_violations"));
+    assert_eq!(options.get_write_exemption_function(), Some("write_is_exempt"));
     assert!(options.is_strict_rls_validation());
 }
 

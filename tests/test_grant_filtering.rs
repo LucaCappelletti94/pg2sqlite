@@ -1,9 +1,7 @@
 //! Test for grant-based table filtering in SQLite generation.
 //!
-//! Tables should be handled differently based on grants to `app_user`:
-//! - No grants: Table should not be created in SQLite at all
-//! - SELECT only: Table + view created, no write triggers (read-only sync)
-//! - SELECT + write grants: Full RLS treatment with INSTEAD OF triggers
+//! Tables without grants are omitted, SELECT-only tables get a read-only view
+//! with exemptible backing guards, and writable tables get full RLS triggers.
 //!
 //! ```text
 //!                      ┌─────────────────────────────────────────────────────────────┐
@@ -64,6 +62,8 @@
 //!                      └─────────────────────────────────────────────────────────────┘
 //! ```
 
+use std::cell::Cell;
+
 mod helpers;
 
 use diesel::prelude::*;
@@ -73,6 +73,15 @@ use pg2sqlite::{
     traits::SessionVariableMapping,
 };
 use rosetta_uuid::Uuid;
+
+diesel::define_sql_function! {
+    /// Reports whether generated write guards are exempt.
+    fn write_is_exempt() -> diesel::sql_types::Bool;
+}
+
+thread_local! {
+    static WRITE_IS_EXEMPT: Cell<bool> = const { Cell::new(false) };
+}
 
 diesel::table! {
     /// Backing table for users with RLS (read-only for app_user).
@@ -217,6 +226,7 @@ fn translation_options() -> Pg2SqliteOptions {
         .with_session_user_role("app_user")
         .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_user("current_app_user"))
+        .with_write_exemption_function("write_is_exempt")
 }
 
 /// Helper to set up the database with all translated statements.
@@ -224,12 +234,25 @@ fn setup_database() -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let translated = Pg2Sqlite::default().sql(SQL_FIXTURE)?.translate(&translation_options())?;
 
     let mut conn = establish_connection();
+    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+        WRITE_IS_EXEMPT.with(Cell::get)
+    })?;
 
     for stmt in &translated {
         diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
     }
 
     Ok(conn)
+}
+
+fn insert_synced_user(
+    conn: &mut SqliteConnection,
+    user: &User,
+) -> Result<usize, diesel::result::Error> {
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(true));
+    let result = diesel::insert_into(users_rls::table).values(user).execute(conn);
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(false));
+    result
 }
 
 #[test]
@@ -287,10 +310,9 @@ fn test_grant_based_filtering_execution() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// A read-only table gets no INSTEAD OF write triggers at all, so a write fails
-/// on the view rather than being silently swallowed.
+/// A read-only view has no INSTEAD OF write triggers.
 #[test]
-fn test_readonly_table_no_write_triggers() -> Result<(), Box<dyn std::error::Error>> {
+fn test_readonly_view_has_no_write_triggers() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
 
     // Get all triggers
@@ -346,7 +368,7 @@ fn test_readonly_select_works() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
 
     let user = User::new(Uuid::new_v4(), "testuser", "test@example.com");
-    diesel::insert_into(users_rls::table).values(&user).execute(&mut conn)?;
+    insert_synced_user(&mut conn, &user)?;
 
     let count: i64 = users::table.count().get_result(&mut conn)?;
     assert_eq!(count, 1, "Should be able to SELECT from read-only users view");
@@ -378,7 +400,7 @@ fn test_readonly_update_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
 
     let user = User::new(Uuid::new_v4(), "testuser", "test@example.com");
-    diesel::insert_into(users_rls::table).values(&user).execute(&mut conn)?;
+    insert_synced_user(&mut conn, &user)?;
 
     // Attempt to update via the view - should fail
     let result = diesel::update(users::table.filter(users::id.eq(&user.id)))
@@ -395,7 +417,7 @@ fn test_readonly_delete_fails() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = setup_database()?;
 
     let user = User::new(Uuid::new_v4(), "testuser", "test@example.com");
-    diesel::insert_into(users_rls::table).values(&user).execute(&mut conn)?;
+    insert_synced_user(&mut conn, &user)?;
 
     // Attempt to delete via the view - should fail
     let result = diesel::delete(users::table.filter(users::id.eq(&user.id))).execute(&mut conn);
@@ -413,7 +435,7 @@ fn test_writable_insert_succeeds() -> Result<(), Box<dyn std::error::Error>> {
 
     let user_id = Uuid::new_v4();
     let user = User::new(user_id, "testuser", "test@example.com");
-    diesel::insert_into(users_rls::table).values(&user).execute(&mut conn)?;
+    insert_synced_user(&mut conn, &user)?;
 
     set_session_user_id(&user_id);
 
@@ -445,12 +467,8 @@ fn test_writable_insert_fails_wrong_user() -> Result<(), Box<dyn std::error::Err
     let user1_id = Uuid::new_v4();
     let user2_id = Uuid::new_v4();
 
-    diesel::insert_into(users_rls::table)
-        .values(&User::new(user1_id, "user1", "user1@example.com"))
-        .execute(&mut conn)?;
-    diesel::insert_into(users_rls::table)
-        .values(&User::new(user2_id, "user2", "user2@example.com"))
-        .execute(&mut conn)?;
+    insert_synced_user(&mut conn, &User::new(user1_id, "user1", "user1@example.com"))?;
+    insert_synced_user(&mut conn, &User::new(user2_id, "user2", "user2@example.com"))?;
 
     // Set session user to user1
     set_session_user_id(&user1_id);

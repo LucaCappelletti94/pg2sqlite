@@ -22,11 +22,22 @@
 //! from the monitoring triggers; both modes now log only, and enforcement stays
 //! in the INSTEAD OF and backing-guard triggers.
 
+use std::cell::Cell;
+
 mod helpers;
 
 use diesel::prelude::*;
 use helpers::{establish_connection, set_session_username};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions};
+
+diesel::define_sql_function! {
+    /// Reports whether the current backing write is exempt from RLS checks.
+    fn write_is_exempt() -> diesel::sql_types::Bool;
+}
+
+thread_local! {
+    static WRITE_IS_EXEMPT: Cell<bool> = const { Cell::new(false) };
+}
 
 // ---------------------------------------------------------------------------
 // Schema definitions used across all three findings
@@ -69,6 +80,66 @@ const INVISIBLE_INSERT_SCHEMA: &str = "
     CREATE POLICY events_sel ON events FOR SELECT USING (owner = current_user);
 ";
 
+const SHARED_READ_OWNER_WRITE_SCHEMA: &str = "
+    CREATE TABLE shared_items (
+        id INTEGER PRIMARY KEY,
+        owner TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT ''
+    );
+    ALTER TABLE shared_items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY shared_items_select ON shared_items FOR SELECT USING (true);
+    CREATE POLICY shared_items_insert ON shared_items
+        FOR INSERT WITH CHECK (owner = current_user);
+    CREATE POLICY shared_items_update ON shared_items
+        FOR UPDATE USING (owner = current_user) WITH CHECK (owner = current_user);
+";
+
+const NESTED_OWNERSHIP_SCHEMA: &str = "
+    CREATE TABLE item_access (
+        item_id INTEGER PRIMARY KEY,
+        reader TEXT NOT NULL,
+        writer TEXT NOT NULL
+    );
+    CREATE TABLE nested_items (
+        id INTEGER PRIMARY KEY,
+        owner TEXT NOT NULL
+    );
+    ALTER TABLE nested_items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY nested_items_select ON nested_items FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM item_access AS access
+            WHERE access.item_id = nested_items.id
+              AND access.reader = current_user
+        )
+    );
+    CREATE POLICY nested_items_insert ON nested_items FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM item_access AS access
+            WHERE access.item_id = nested_items.id
+              AND access.writer = current_user
+        )
+    );
+";
+
+const CASCADED_RLS_SCHEMA: &str = "
+    CREATE TABLE parent_items (
+        id INTEGER PRIMARY KEY,
+        owner TEXT NOT NULL
+    );
+    CREATE TABLE child_items (
+        id INTEGER PRIMARY KEY,
+        owner TEXT NOT NULL
+    );
+    ALTER TABLE parent_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE child_items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY parent_items_select ON parent_items FOR SELECT USING (true);
+    CREATE POLICY child_items_select ON child_items FOR SELECT USING (true);
+    CREATE POLICY parent_items_insert ON parent_items
+        FOR INSERT WITH CHECK (owner = current_user);
+    CREATE POLICY child_items_insert ON child_items
+        FOR INSERT WITH CHECK (owner = current_user);
+";
+
 // ---------------------------------------------------------------------------
 // Diesel table! schemas for typed reads/writes
 // ---------------------------------------------------------------------------
@@ -100,6 +171,56 @@ mod schema {
             id -> Integer,
             owner -> Text,
             msg -> Text,
+        }
+    }
+    diesel::table! {
+        shared_items_rls (id) {
+            id -> Integer,
+            owner -> Text,
+            body -> Text,
+        }
+    }
+    diesel::table! {
+        shared_items (id) {
+            id -> Integer,
+            owner -> Text,
+            body -> Text,
+        }
+    }
+    diesel::table! {
+        item_access (item_id) {
+            item_id -> Integer,
+            reader -> Text,
+            writer -> Text,
+        }
+    }
+    diesel::table! {
+        nested_items_rls (id) {
+            id -> Integer,
+            owner -> Text,
+        }
+    }
+    diesel::table! {
+        nested_items (id) {
+            id -> Integer,
+            owner -> Text,
+        }
+    }
+    diesel::table! {
+        parent_items_rls (id) {
+            id -> Integer,
+            owner -> Text,
+        }
+    }
+    diesel::table! {
+        child_items_rls (id) {
+            id -> Integer,
+            owner -> Text,
+        }
+    }
+    diesel::table! {
+        side_effects (id) {
+            id -> Integer,
         }
     }
 }
@@ -142,6 +263,24 @@ fn monitor_opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_rls_audit_table_name("rls_audit")
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"))
+}
+
+fn exemption_opts() -> Pg2SqliteOptions {
+    strict_opts().with_write_exemption_function("write_is_exempt")
+}
+
+fn set_write_exempt(exempt: bool) {
+    WRITE_IS_EXEMPT.with(|value| value.set(exempt));
+}
+
+fn apply_with_exemption(pg: &str) -> SqliteConnection {
+    set_write_exempt(false);
+    let conn = apply(pg, &exemption_opts());
+    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+        WRITE_IS_EXEMPT.with(Cell::get)
+    })
+    .expect("register write_is_exempt");
+    conn
 }
 
 /// Applies translated DDL to a fresh in-memory connection. The emitted SQL is
@@ -410,5 +549,243 @@ fn monitor_mode_invisible_insert_is_logged_not_refused() {
     assert_ne!(
         audit[0].violation_type, "rls_policy_violation",
         "log must not claim a policy violation"
+    );
+}
+
+#[test]
+fn zero_policy_backing_insert_honours_write_exemption() {
+    let options = Pg2SqliteOptions::default()
+        .with_rls_audit_table_name("rls_audit")
+        .with_write_exemption_function("write_is_exempt");
+    set_write_exempt(false);
+    let mut conn = apply(ZERO_POLICY_SCHEMA, &options);
+    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+        WRITE_IS_EXEMPT.with(Cell::get)
+    })
+    .expect("register write_is_exempt");
+
+    assert!(
+        diesel::insert_into(schema::posts_rls::table)
+            .values(schema::posts_rls::body.eq("blocked"))
+            .execute(&mut conn)
+            .is_err(),
+        "the default state must enforce the deny-all guard"
+    );
+
+    set_write_exempt(true);
+    diesel::insert_into(schema::posts_rls::table)
+        .values(schema::posts_rls::body.eq("restored"))
+        .execute(&mut conn)
+        .expect("the exemption must bypass the deny-all guard");
+}
+
+#[test]
+fn configured_but_unregistered_exemption_fails_closed() {
+    let mut conn = apply(SHARED_READ_OWNER_WRITE_SCHEMA, &exemption_opts());
+    set_session_username("alice");
+
+    let error = diesel::insert_into(schema::shared_items_rls::table)
+        .values((
+            schema::shared_items_rls::id.eq(1),
+            schema::shared_items_rls::owner.eq("bob"),
+            schema::shared_items_rls::body.eq("server"),
+        ))
+        .execute(&mut conn)
+        .expect_err("an unavailable exemption function must not allow the write");
+    assert!(
+        error.to_string().contains("write_is_exempt"),
+        "the missing function must be named: {error}"
+    );
+}
+
+#[test]
+fn exemption_covers_backing_and_view_insert() {
+    let mut conn = apply_with_exemption(SHARED_READ_OWNER_WRITE_SCHEMA);
+    set_session_username("alice");
+
+    assert!(
+        diesel::insert_into(schema::shared_items_rls::table)
+            .values((
+                schema::shared_items_rls::id.eq(1),
+                schema::shared_items_rls::owner.eq("bob"),
+                schema::shared_items_rls::body.eq("blocked"),
+            ))
+            .execute(&mut conn)
+            .is_err(),
+        "a normal backing write must remain guarded"
+    );
+
+    set_write_exempt(true);
+    diesel::insert_into(schema::shared_items_rls::table)
+        .values((
+            schema::shared_items_rls::id.eq(1),
+            schema::shared_items_rls::owner.eq("bob"),
+            schema::shared_items_rls::body.eq("server"),
+        ))
+        .execute(&mut conn)
+        .expect("an exempt backing write must land");
+    assert_eq!(
+        schema::shared_items::table
+            .select(schema::shared_items::id)
+            .load::<i32>(&mut conn)
+            .expect("read the policy view"),
+        vec![1],
+        "the SELECT policy still decides visibility"
+    );
+
+    run_dml(
+        &mut conn,
+        "INSERT INTO shared_items (id, owner, body) VALUES (2, 'bob', 'local')",
+        SHARED_READ_OWNER_WRITE_SCHEMA,
+        &exemption_opts(),
+    )
+    .expect("the exemption covers a view insert");
+    assert_eq!(
+        schema::shared_items::table
+            .select(schema::shared_items::id)
+            .order(schema::shared_items::id)
+            .load::<i32>(&mut conn)
+            .expect("read exempt view rows"),
+        vec![1, 2]
+    );
+}
+
+#[test]
+fn exemption_allows_backing_update_only_while_active() {
+    let mut conn = apply_with_exemption(GUARDED_SCHEMA);
+    set_session_username("alice");
+    diesel::insert_into(schema::items_rls::table)
+        .values(ItemRow { id: 1, owner: "bob".to_owned(), body: "old".to_owned() })
+        .execute(&mut conn)
+        .expect("seed bob row");
+
+    assert!(
+        diesel::update(schema::items_rls::table.filter(schema::items_rls::id.eq(1)))
+            .set(schema::items_rls::body.eq("blocked"))
+            .execute(&mut conn)
+            .is_err(),
+        "a normal backing update must remain guarded"
+    );
+
+    set_write_exempt(true);
+    diesel::update(schema::items_rls::table.filter(schema::items_rls::id.eq(1)))
+        .set(schema::items_rls::body.eq("server"))
+        .execute(&mut conn)
+        .expect("an exempt backing update must land");
+    assert_eq!(
+        schema::items_rls::table
+            .find(1)
+            .select(schema::items_rls::body)
+            .get_result::<String>(&mut conn)
+            .expect("read updated body"),
+        "server"
+    );
+}
+
+#[test]
+fn nested_ownership_policy_uses_exemption_only_at_the_backing_guard() {
+    let mut conn = apply_with_exemption(NESTED_OWNERSHIP_SCHEMA);
+    set_session_username("alice");
+    diesel::insert_into(schema::item_access::table)
+        .values((
+            schema::item_access::item_id.eq(1),
+            schema::item_access::reader.eq("alice"),
+            schema::item_access::writer.eq("bob"),
+        ))
+        .execute(&mut conn)
+        .expect("seed ownership");
+
+    assert!(
+        diesel::insert_into(schema::nested_items_rls::table)
+            .values(
+                (schema::nested_items_rls::id.eq(1), schema::nested_items_rls::owner.eq("bob"),)
+            )
+            .execute(&mut conn)
+            .is_err(),
+        "the nested write policy must reject a normal backing write"
+    );
+
+    set_write_exempt(true);
+    diesel::insert_into(schema::nested_items_rls::table)
+        .values((schema::nested_items_rls::id.eq(1), schema::nested_items_rls::owner.eq("bob")))
+        .execute(&mut conn)
+        .expect("the exempt backing write must land");
+    assert_eq!(
+        schema::nested_items::table
+            .select(schema::nested_items::id)
+            .load::<i32>(&mut conn)
+            .expect("read nested policy view"),
+        vec![1],
+        "the nested SELECT policy still evaluates as alice"
+    );
+}
+
+#[test]
+fn exempt_write_keeps_constraints_and_unrelated_triggers_active() {
+    let mut conn = apply_with_exemption(SHARED_READ_OWNER_WRITE_SCHEMA);
+    set_session_username("alice");
+    diesel::connection::SimpleConnection::batch_execute(
+        &mut conn,
+        "CREATE TABLE side_effects (id INTEGER PRIMARY KEY);
+         CREATE TRIGGER record_shared_item AFTER INSERT ON shared_items_rls
+         BEGIN INSERT INTO side_effects (id) VALUES (NEW.id); END;",
+    )
+    .expect("install unrelated trigger");
+    set_write_exempt(true);
+
+    diesel::insert_into(schema::shared_items_rls::table)
+        .values((
+            schema::shared_items_rls::id.eq(1),
+            schema::shared_items_rls::owner.eq("bob"),
+            schema::shared_items_rls::body.eq("server"),
+        ))
+        .execute(&mut conn)
+        .expect("the exempt write must land");
+    assert_eq!(
+        schema::side_effects::table
+            .select(schema::side_effects::id)
+            .load::<i32>(&mut conn)
+            .expect("read trigger side effect"),
+        vec![1],
+        "the unrelated trigger must still run"
+    );
+    assert!(
+        diesel::insert_into(schema::shared_items_rls::table)
+            .values((
+                schema::shared_items_rls::id.eq(1),
+                schema::shared_items_rls::owner.eq("bob"),
+                schema::shared_items_rls::body.eq("duplicate"),
+            ))
+            .execute(&mut conn)
+            .is_err(),
+        "the exemption must not bypass physical uniqueness"
+    );
+}
+
+#[test]
+fn nested_trigger_backing_write_inherits_exemption() {
+    let mut conn = apply_with_exemption(CASCADED_RLS_SCHEMA);
+    set_session_username("alice");
+    diesel::connection::SimpleConnection::batch_execute(
+        &mut conn,
+        "CREATE TRIGGER copy_parent_to_child AFTER INSERT ON parent_items_rls
+         BEGIN
+             INSERT INTO child_items_rls (id, owner) VALUES (NEW.id, NEW.owner);
+         END;",
+    )
+    .expect("install cascading trigger");
+    set_write_exempt(true);
+
+    diesel::insert_into(schema::parent_items_rls::table)
+        .values((schema::parent_items_rls::id.eq(1), schema::parent_items_rls::owner.eq("bob")))
+        .execute(&mut conn)
+        .expect("the exempt parent write must land");
+    assert_eq!(
+        schema::child_items_rls::table
+            .select(schema::child_items_rls::id)
+            .load::<i32>(&mut conn)
+            .expect("read cascaded child"),
+        vec![1],
+        "the nested backing write must inherit the exemption"
     );
 }

@@ -6,6 +6,8 @@
 
 #![allow(clippy::format_collect)]
 
+use std::cell::Cell;
+
 use diesel::{prelude::*, sql_query};
 use pg2sqlite::{
     options::Pg2SqliteOptions,
@@ -18,6 +20,14 @@ use rosetta_uuid::Uuid;
 mod helpers;
 use helpers::{Count, establish_connection, set_session_user_id};
 
+diesel::define_sql_function! {
+    /// Reports whether generated write guards are exempt.
+    fn write_is_exempt() -> diesel::sql_types::Bool;
+}
+
+thread_local! {
+    static WRITE_IS_EXEMPT: Cell<bool> = const { Cell::new(false) };
+}
 fn translation_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
@@ -132,7 +142,10 @@ fn test_fk_constraint_enforcement() -> Result<(), Box<dyn std::error::Error>> {
 fn test_fk_both_tables_rls() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
     let fixture_sql = include_str!("fixtures/rls_fk_both.sql");
-    let options = translation_options();
+    let options = translation_options().with_write_exemption_function("write_is_exempt");
+    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+        WRITE_IS_EXEMPT.with(Cell::get)
+    })?;
 
     // Translate and execute
     let translated = Pg2Sqlite::default().sql(fixture_sql)?.translate(&options)?;
@@ -178,6 +191,7 @@ fn test_fk_both_tables_rls() -> Result<(), Box<dyn std::error::Error>> {
         post_id_hex, user_id_hex
     ))
     .execute(&mut conn)?;
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(true));
 
     // Try to delete the user - should fail because post still references it
     let result = sql_query(format!("DELETE FROM users_rls WHERE id = x'{}'", user_id_hex))

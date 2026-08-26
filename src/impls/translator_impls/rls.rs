@@ -1810,24 +1810,23 @@ fn generate_insert_trigger_sql(
     );
 
     let trigger_body = if insert_policies.is_empty() {
-        // Deny-by-default: PostgreSQL RLS rejects an INSERT when no FOR
-        // INSERT (or FOR ALL) policy is declared. Mirror that by raising
-        // before the forwarding INSERT.
-        format!(
-            "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no INSERT policy on {table_name}');\nEND"
-        )
+        let message =
+            sql_string_literal(&format!("permission denied: no INSERT policy on {table_name}"));
+        let guard = write_guard_raise(&message, None, options);
+        format!("BEGIN\n    {guard}\n    {forward}\nEND")
     } else {
         match check {
-            // Policies exist but none is permissive, so nothing grants the
-            // write. Reject unconditionally.
             PolicyPredicate::DenyAll => {
-                format!("BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}');\nEND")
+                let message = sql_string_literal(RLS_VIOLATION_ERROR);
+                let guard = write_guard_raise(&message, None, options);
+                format!("BEGIN\n    {guard}\n    {forward}\nEND")
             }
             PolicyPredicate::AllowAll => format!("BEGIN\n    {forward}\nEND"),
             PolicyPredicate::Expr(predicate) => {
-                format!(
-                    "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE ({predicate}) IS NOT TRUE;\n    {forward}\nEND"
-                )
+                let message = sql_string_literal(RLS_VIOLATION_ERROR);
+                let violation = format!("({predicate}) IS NOT TRUE");
+                let guard = write_guard_raise(&message, Some(&violation), options);
+                format!("BEGIN\n    {guard}\n    {forward}\nEND")
             }
         }
     };
@@ -1837,18 +1836,47 @@ fn generate_insert_trigger_sql(
     ))
 }
 
-/// Generates a BEFORE INSERT trigger on the **backing table** that enforces
-/// INSERT policies. This covers two cases:
-///
-/// 1. Zero INSERT/ALL policies: PostgreSQL denies by default. An unconditional
-///    RAISE guard is emitted in both monitor and strict mode.
-///
-/// 2. Policies with a WITH CHECK (or USING fallback per PostgreSQL rules): the
-///    guard raises when the combined expression IS NOT TRUE, matching the
-///    view-side INSTEAD OF trigger. Also covers the RETURNING redirect path
-///    (`insert.rs` sends INSERT...RETURNING straight at the backing table).
-///
-/// Returns `None` when the combined check is AllowAll (no guard needed).
+fn write_exemption_call(options: &Pg2SqliteOptions) -> Option<String> {
+    options.get_write_exemption_function().map(|name| {
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        format!("{quoted}()")
+    })
+}
+
+/// Combines a policy violation with the configured fail-closed write exemption.
+pub(crate) fn write_guard_condition(
+    violation: Option<&str>,
+    options: &Pg2SqliteOptions,
+) -> Option<String> {
+    let enforcement = write_exemption_call(options).map(|call| format!("({call}) IS NOT TRUE"));
+    match (enforcement, violation) {
+        (None, None) => None,
+        (Some(enforcement), None) => Some(enforcement),
+        (None, Some(violation)) => Some(violation.to_owned()),
+        (Some(enforcement), Some(violation)) => Some(format!("{enforcement} AND ({violation})")),
+    }
+}
+
+/// Formats the write guard as a trigger `WHEN` clause.
+pub(crate) fn write_guard_when(violation: Option<&str>, options: &Pg2SqliteOptions) -> String {
+    write_guard_condition(violation, options)
+        .map_or_else(String::new, |condition| format!(" WHEN {condition}"))
+}
+
+fn policy_or_exemption(predicate: &str, options: &Pg2SqliteOptions) -> String {
+    write_exemption_call(options)
+        .map_or_else(|| predicate.to_owned(), |call| format!("({call}) IS TRUE OR ({predicate})"))
+}
+
+fn write_guard_raise(message: &str, violation: Option<&str>, options: &Pg2SqliteOptions) -> String {
+    write_guard_condition(violation, options).map_or_else(
+        || format!("SELECT RAISE(ABORT, {message});"),
+        |condition| format!("SELECT RAISE(ABORT, {message}) WHERE {condition};"),
+    )
+}
+
+/// Generates a BEFORE INSERT trigger on the backing table that enforces INSERT
+/// policies.
 fn generate_insert_check_trigger_sql(
     table: &CreateTable,
     schema: &ParserDB,
@@ -1863,10 +1891,9 @@ fn generate_insert_check_trigger_sql(
     let insert_policies = filter_policies(table, schema, &[CreatePolicyCommand::Insert], options)?;
 
     if insert_policies.is_empty() {
-        // Deny-by-default: PostgreSQL errors on INSERT when no INSERT or ALL policy
-        // exists. Emit an unconditional guard so raw backing writes are also blocked.
+        let when = write_guard_when(None, options);
         return Ok(Some(format!(
-            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
+            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW{when} \
              BEGIN SELECT RAISE(ABORT, 'permission denied: no INSERT policy on {table_name}'); END"
         )));
     }
@@ -1875,20 +1902,20 @@ fn generate_insert_check_trigger_sql(
         build_write_guard(&insert_policies, GuardKind::Insert, table, schema, options)?;
 
     let trigger = match check {
-        // No permissive policy: nothing grants the write, always raise.
         PolicyPredicate::DenyAll => {
+            let when = write_guard_when(None, options);
             Some(format!(
-                "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
-             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+                "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW{when} \
+                 BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
             ))
         }
-        // Every applicable check is literally true: no guard needed.
         PolicyPredicate::AllowAll => None,
         PolicyPredicate::Expr(predicate) => {
+            let violation = format!("({predicate}) IS NOT TRUE");
+            let when = write_guard_when(Some(&violation), options);
             Some(format!(
-                "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW \
-             WHEN ({predicate}) IS NOT TRUE \
-             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+                "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {inner_table_name_quoted} FOR EACH ROW{when} \
+                 BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
             ))
         }
     };
@@ -1918,9 +1945,9 @@ fn generate_update_check_trigger_sql(
     let update_policies = filter_policies(table, schema, &[CreatePolicyCommand::Update], options)?;
 
     if update_policies.is_empty() {
-        // No UPDATE policy: deny backing-table updates (view path already 0-rows).
+        let when = write_guard_when(None, options);
         return Ok(Some(format!(
-            "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
+            "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW{when} \
              BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
         )));
     }
@@ -1930,41 +1957,91 @@ fn generate_update_check_trigger_sql(
     let using = using_opt.expect("update guard always has a USING predicate");
 
     let trigger = match (using, check) {
-        // Any DenyAll: raise unconditionally.
         (PolicyPredicate::DenyAll, _) | (_, PolicyPredicate::DenyAll) => {
+            let when = write_guard_when(None, options);
             Some(format!(
-                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
-             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW{when} \
+                 BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
             ))
         }
-        // Both allow all: no guard needed.
         (PolicyPredicate::AllowAll, PolicyPredicate::AllowAll) => None,
-        // USING allows all, CHECK has a predicate.
         (PolicyPredicate::AllowAll, PolicyPredicate::Expr(check_pred)) => {
+            let violation = format!("({check_pred}) IS NOT TRUE");
+            let when = write_guard_when(Some(&violation), options);
             Some(format!(
-                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
-             WHEN ({check_pred}) IS NOT TRUE \
-             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW{when} \
+                 BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
             ))
         }
-        // CHECK allows all, USING has a predicate.
         (PolicyPredicate::Expr(using_pred), PolicyPredicate::AllowAll) => {
+            let violation = format!("({using_pred}) IS NOT TRUE");
+            let when = write_guard_when(Some(&violation), options);
             Some(format!(
-                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
-             WHEN ({using_pred}) IS NOT TRUE \
-             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW{when} \
+                 BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
             ))
         }
-        // Both have predicates: raise when either fails.
         (PolicyPredicate::Expr(using_pred), PolicyPredicate::Expr(check_pred)) => {
+            let violation = format!("({using_pred}) IS NOT TRUE OR ({check_pred}) IS NOT TRUE");
+            let when = write_guard_when(Some(&violation), options);
             Some(format!(
-                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW \
-             WHEN ({using_pred}) IS NOT TRUE OR ({check_pred}) IS NOT TRUE \
-             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+                "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {inner_table_name_quoted} FOR EACH ROW{when} \
+                 BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
             ))
         }
     };
     Ok(trigger)
+}
+
+fn generate_delete_check_trigger_sql(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<Option<String>, Error> {
+    if options.get_write_exemption_function().is_none() {
+        return Ok(None);
+    }
+    let ctx = RlsTriggerContext::new(table, options);
+    let inner_table_name = &ctx.inner_table_name;
+    let inner_table_name_quoted = quote_identifier(inner_table_name);
+    let trigger_name = quote_identifier(&format!("{inner_table_name}_delete_check"));
+    let delete_policies = filter_policies(table, schema, &[CreatePolicyCommand::Delete], options)?;
+
+    if delete_policies.is_empty() {
+        let when = write_guard_when(None, options);
+        return Ok(Some(format!(
+            "CREATE TRIGGER {trigger_name} BEFORE DELETE ON {inner_table_name_quoted} FOR EACH ROW{when} \
+             BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+        )));
+    }
+
+    let using = combine_policy_predicates(
+        &delete_policies,
+        PolicyClause::Using,
+        Some("OLD"),
+        options,
+        table,
+        schema,
+        &[],
+    )?;
+    Ok(match using {
+        PolicyPredicate::DenyAll => {
+            let when = write_guard_when(None, options);
+            Some(format!(
+                "CREATE TRIGGER {trigger_name} BEFORE DELETE ON {inner_table_name_quoted} FOR EACH ROW{when} \
+                 BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+            ))
+        }
+        PolicyPredicate::AllowAll => None,
+        PolicyPredicate::Expr(predicate) => {
+            let violation = format!("({predicate}) IS NOT TRUE");
+            let when = write_guard_when(Some(&violation), options);
+            Some(format!(
+                "CREATE TRIGGER {trigger_name} BEFORE DELETE ON {inner_table_name_quoted} FOR EACH ROW{when} \
+                 BEGIN SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}'); END"
+            ))
+        }
+    })
 }
 
 /// Generates INSTEAD OF UPDATE trigger SQL.
@@ -2021,54 +2098,49 @@ fn generate_update_trigger_sql(
         PolicyPredicate::Expr(predicate) => Some(predicate.clone()),
         PolicyPredicate::AllowAll | PolicyPredicate::DenyAll => None,
     };
-    let row_filter = match &using_predicate {
-        Some(predicate) => format!("({pk_where}) AND ({predicate})"),
-        None => pk_where.clone(),
+    let using_denies = update_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll);
+    let row_authorization = if using_denies {
+        write_exemption_call(options).map(|call| format!("({call}) IS TRUE"))
+    } else {
+        using_predicate.as_deref().map(|predicate| policy_or_exemption(predicate, options))
     };
+    let row_filter = row_authorization.as_ref().map_or_else(
+        || pk_where.clone(),
+        |authorization| format!("({pk_where}) AND ({authorization})"),
+    );
     let refuse_computed = refuse_computed_writes(&assigned, table_name, GuardKind::Update);
     let forward = format!(
         "{refuse_computed}UPDATE {inner_table_name_quoted} SET {set_clause} WHERE {row_filter};"
     );
 
-    // PostgreSQL distinguishes the two ways an UPDATE can be refused, and so must
-    // this. USING selects which rows the statement may target, so when nothing
-    // qualifies there is simply no row to update: PostgreSQL reports zero rows and
-    // succeeds. WITH CHECK judges the new value of a row that WAS targetable, and
-    // failing it is an error. Verified against PostgreSQL 16.
-    let using_denies = update_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll);
-
     let trigger_body = if using_denies {
         if options.is_strict_rls_write_deny() {
+            let message =
+                sql_string_literal(&format!("permission denied: no UPDATE policy on {table_name}"));
+            let guard = write_guard_raise(&message, None, options);
+            format!("BEGIN\n    {guard}\n    {forward}\nEND")
+        } else if let Some(call) = write_exemption_call(options) {
             format!(
-                "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no UPDATE policy on {table_name}');\nEND"
+                "BEGIN\n    SELECT RAISE(IGNORE) WHERE ({call}) IS NOT TRUE;\n    {forward}\nEND"
             )
         } else {
-            // No row is targetable, so the trigger forwards nothing. SQLite then
-            // reports zero rows changed, matching PostgreSQL exactly.
             "BEGIN\n    SELECT NULL;\nEND".to_owned()
         }
     } else if matches!(check, PolicyPredicate::DenyAll) {
-        // The row is targetable but no WITH CHECK can ever admit its new value,
-        // which PostgreSQL reports as a violation rather than a silent skip.
-        format!("BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}');\nEND")
+        let message = sql_string_literal(RLS_VIOLATION_ERROR);
+        let guard = write_guard_raise(&message, None, options);
+        format!("BEGIN\n    {guard}\n    {forward}\nEND")
     } else if let PolicyPredicate::Expr(check_predicate) = check {
-        // Raise only for a row that IS updatable but whose new value violates
-        // WITH CHECK. Without the USING conjunct, a row merely visible through
-        // the view would abort the statement instead of being skipped.
-        // Raise only when the row IS updatable but its new value IS NOT TRUE for
-        // WITH CHECK. Using IS NOT TRUE catches both false and NULL, matching
-        // PostgreSQL's rule that the check must evaluate to exactly TRUE.
-        let guard = match &using_predicate {
-            Some(predicate) => format!("({predicate}) AND ({check_predicate}) IS NOT TRUE"),
+        let violation = match &using_predicate {
+            Some(predicate) => {
+                format!("({predicate}) AND ({check_predicate}) IS NOT TRUE")
+            }
             None => format!("({check_predicate}) IS NOT TRUE"),
         };
-        format!(
-            "BEGIN\n    SELECT RAISE(ABORT, '{RLS_VIOLATION_ERROR}') WHERE {guard};\n    {forward}\nEND"
-        )
+        let message = sql_string_literal(RLS_VIOLATION_ERROR);
+        let guard = write_guard_raise(&message, Some(&violation), options);
+        format!("BEGIN\n    {guard}\n    {forward}\nEND")
     } else {
-        // AllowAll: every applicable WITH CHECK omitted its predicate, which is
-        // permissive-true, so the write needs no guard. DenyAll was already
-        // handled above.
         format!("BEGIN\n    {forward}\nEND")
     };
 
@@ -2115,29 +2187,71 @@ fn generate_delete_trigger_sql(
     )?;
 
     let using_denies = delete_policies.is_empty() || matches!(using, PolicyPredicate::DenyAll);
+    let row_authorization = if using_denies {
+        write_exemption_call(options).map(|call| format!("({call}) IS TRUE"))
+    } else {
+        match &using {
+            PolicyPredicate::Expr(predicate) => Some(policy_or_exemption(predicate, options)),
+            PolicyPredicate::AllowAll | PolicyPredicate::DenyAll => None,
+        }
+    };
+    let row_filter = row_authorization.as_ref().map_or_else(
+        || pk_where.clone(),
+        |authorization| format!("({pk_where}) AND ({authorization})"),
+    );
+    let forward = format!("DELETE FROM {inner_table_name_quoted} WHERE {row_filter};");
 
     let trigger_body = if using_denies {
-        // A DELETE is governed only by USING, and it has no WITH CHECK, so an
-        // unqualified row is always a silent no-op in PostgreSQL rather than an
-        // error. Verified against PostgreSQL 16: DELETE reports zero rows.
         if options.is_strict_rls_write_deny() {
+            let message =
+                sql_string_literal(&format!("permission denied: no DELETE policy on {table_name}"));
+            let guard = write_guard_raise(&message, None, options);
+            format!("BEGIN\n    {guard}\n    {forward}\nEND")
+        } else if let Some(call) = write_exemption_call(options) {
             format!(
-                "BEGIN\n    SELECT RAISE(ABORT, 'permission denied: no DELETE policy on {table_name}');\nEND"
+                "BEGIN\n    SELECT RAISE(IGNORE) WHERE ({call}) IS NOT TRUE;\n    {forward}\nEND"
             )
         } else {
             "BEGIN\n    SELECT NULL;\nEND".to_owned()
         }
     } else {
-        let row_filter = match &using {
-            PolicyPredicate::AllowAll | PolicyPredicate::DenyAll => pk_where.clone(),
-            PolicyPredicate::Expr(predicate) => format!("({pk_where}) AND ({predicate})"),
-        };
-        format!("BEGIN\n    DELETE FROM {inner_table_name_quoted} WHERE {row_filter};\nEND")
+        format!("BEGIN\n    {forward}\nEND")
     };
 
     Ok(format!(
         "CREATE TRIGGER {trigger_name} INSTEAD OF DELETE ON {table_name_quoted} FOR EACH ROW {trigger_body}"
     ))
+}
+
+fn generate_readonly_backing_guard_sql(
+    table: &CreateTable,
+    options: &Pg2SqliteOptions,
+) -> Vec<String> {
+    if options.get_write_exemption_function().is_none() {
+        return Vec::new();
+    }
+    let ctx = RlsTriggerContext::new(table, options);
+    let inner_table_name_quoted = quote_identifier(&ctx.inner_table_name);
+    let when = write_guard_when(None, options);
+    let message = sql_string_literal(&format!(
+        "permission denied: {} is read-only for this role",
+        ctx.table_name
+    ));
+    [
+        ("insert", "BEFORE INSERT"),
+        ("update", "BEFORE UPDATE"),
+        ("delete", "BEFORE DELETE"),
+    ]
+    .into_iter()
+    .map(|(verb, event)| {
+        let trigger_name =
+            quote_identifier(&format!("{}_{}_check", ctx.inner_table_name, verb));
+        format!(
+            "CREATE TRIGGER {trigger_name} {event} ON {inner_table_name_quoted} FOR EACH ROW{when} \
+             BEGIN SELECT RAISE(ABORT, {message}); END"
+        )
+    })
+    .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2203,6 +2317,15 @@ fn generate_rls_statements_with_mode(
             statements.extend(update_check_stmts);
         }
 
+        if let Some(delete_check_sql) = generate_delete_check_trigger_sql(table, schema, options)? {
+            let delete_check_stmts = parse_generated_sql(
+                &dialect,
+                &delete_check_sql,
+                "Failed to parse generated RLS backing-table BEFORE DELETE guard SQL",
+            )?;
+            statements.extend(delete_check_stmts);
+        }
+
         // Generate INSTEAD OF UPDATE trigger
         let update_sql = generate_update_trigger_sql(table, schema, options)?;
         let update_stmts = parse_generated_sql(
@@ -2220,6 +2343,15 @@ fn generate_rls_statements_with_mode(
             "Failed to parse generated RLS DELETE trigger SQL",
         )?;
         statements.extend(delete_stmts);
+    } else {
+        for guard_sql in generate_readonly_backing_guard_sql(table, options) {
+            let guard_stmts = parse_generated_sql(
+                &dialect,
+                &guard_sql,
+                "Failed to parse generated read-only RLS backing guard SQL",
+            )?;
+            statements.extend(guard_stmts);
+        }
     }
 
     // A deny-all view makes the monitor useless rather than strict: its check asks
@@ -2253,11 +2385,7 @@ pub fn generate_rls_statements(
     generate_rls_statements_with_mode(table, schema, options, RlsStatementMode::ReadWrite)
 }
 
-/// Generates SQLite statements for a read-only RLS view (no write triggers).
-///
-/// This is used for tables where the session user role only has SELECT
-/// permission. The backing table is created for sync purposes, but no INSTEAD
-/// OF triggers are generated since the user cannot write to this table.
+/// Generates a read-only RLS view and opt-in exemptible backing guards.
 ///
 /// # Errors
 ///

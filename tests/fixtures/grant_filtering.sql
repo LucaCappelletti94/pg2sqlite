@@ -1,8 +1,6 @@
 -- Test fixture for grant-based table filtering
--- Tables should be handled differently based on grants to `app_user`:
--- - No grants: Table should not be created in SQLite at all
--- - SELECT only: Table + view created, no write triggers (read-only sync)
--- - SELECT + write grants: Full RLS treatment with INSTEAD OF triggers
+-- Tables without grants are omitted, SELECT-only tables get a read-only view
+-- with exemptible backing guards, and writable tables get full RLS triggers.
 
 -- Create the application role
 CREATE ROLE app_user;
