@@ -654,7 +654,7 @@ mod tests {
         parser::Parser,
     };
 
-    use crate::prelude::{Pg2SqliteOptions, Translator};
+    use crate::prelude::{Pg2SqliteOptions, TranslationOptions, Translator};
 
     fn parse_statements(sql: &str) -> Vec<Statement> {
         Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
@@ -882,5 +882,38 @@ mod tests {
                 "`{spelling}` must be refused for its event, got: {err}"
             );
         }
+    }
+    #[test]
+    fn configured_exemption_routes_trigger_dml_targets_to_backing_tables() {
+        let schema = schema_with_trigger_function_and_rls_table();
+        let options = Pg2SqliteOptions::default().with_write_exemption_function("write_is_exempt");
+
+        for sql in [
+            "INSERT INTO docs(id) VALUES (1)",
+            "UPDATE docs SET id = 2 WHERE id = 1",
+            "DELETE FROM docs WHERE id = 1",
+        ] {
+            let mut statement = parse_statements(sql).remove(0);
+            super::route_trigger_statement_writes(&mut statement, &schema, &options)
+                .expect("route trigger write");
+            assert!(
+                statement.to_string().contains("docs_rls"),
+                "target must be the backing table: {statement}"
+            );
+        }
+
+        let mut select = parse_statements("SELECT id FROM docs").remove(0);
+        super::route_trigger_statement_writes(&mut select, &schema, &options)
+            .expect("leave reads alone");
+        assert_eq!(select.to_string(), "SELECT id FROM docs");
+
+        let mut default_insert = parse_statements("INSERT INTO docs(id) VALUES (1)").remove(0);
+        super::route_trigger_statement_writes(
+            &mut default_insert,
+            &schema,
+            &Pg2SqliteOptions::default(),
+        )
+        .expect("leave default translation alone");
+        assert_eq!(default_insert.to_string(), "INSERT INTO docs (id) VALUES (1)");
     }
 }

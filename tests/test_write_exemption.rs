@@ -103,6 +103,8 @@ CREATE POLICY restrictive_insert ON restrictive_items AS RESTRICTIVE
     FOR INSERT WITH CHECK (true);
 CREATE POLICY restrictive_update ON restrictive_items AS RESTRICTIVE
     FOR UPDATE USING (true) WITH CHECK (true);
+CREATE POLICY restrictive_delete ON restrictive_items AS RESTRICTIVE
+    FOR DELETE USING (true);
 ";
 
 const ONE_SIDED_UPDATE_SCHEMA: &str = "
@@ -601,6 +603,16 @@ fn restrictive_and_one_sided_update_guards_honour_exemption() {
         .set(schema::restrictive_items_rls::body.eq("updated"))
         .execute(&mut restrictive_connection)
         .expect("exempt restrictive-only update");
+    restrictive_exempt.store(false, Ordering::Relaxed);
+    assert!(
+        diesel::delete(schema::restrictive_items_rls::table.find(1))
+            .execute(&mut restrictive_connection)
+            .is_err()
+    );
+    restrictive_exempt.store(true, Ordering::Relaxed);
+    diesel::delete(schema::restrictive_items_rls::table.find(1))
+        .execute(&mut restrictive_connection)
+        .expect("exempt restrictive-only delete");
 
     let (mut one_sided_connection, one_sided_exempt) =
         apply_with_exemption(ONE_SIDED_UPDATE_SCHEMA, &options());
