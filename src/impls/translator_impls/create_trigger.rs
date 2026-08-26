@@ -18,9 +18,10 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         Assignment, AssignmentTarget, BinaryOperator, ConditionalStatements, CreateTrigger,
-        DropTrigger, Expr, Ident, ObjectName, ObjectNamePart, Statement, TableFactor,
-        TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerObject, TriggerObjectKind,
-        TriggerPeriod, Update, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+        DropTrigger, Expr, FromTable, Ident, ObjectName, ObjectNamePart, Query, SetExpr, Statement,
+        TableFactor, TableObject, TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerObject,
+        TriggerObjectKind, TriggerPeriod, Update, Value, ValueWithSpan,
+        helpers::attached_token::AttachedToken,
     },
     keywords::Keyword,
     tokenizer::{Span, Token, TokenWithSpan, Word},
@@ -155,6 +156,85 @@ fn substitute_no_op_body_when_empty(
     body
 }
 
+fn route_trigger_write_name(
+    name: &mut ObjectName,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), crate::errors::Error> {
+    if options.get_write_exemption_function().is_none() {
+        return Ok(());
+    }
+    let Some(ObjectNamePart::Identifier(last)) = name.0.last_mut() else {
+        return Ok(());
+    };
+    if super::rls::table_has_rls(&last.value, schema)? {
+        last.value.push_str(options.get_rls_table_suffix());
+    }
+    Ok(())
+}
+
+fn route_trigger_table_factor(
+    factor: &mut TableFactor,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), crate::errors::Error> {
+    if let TableFactor::Table { name, .. } = factor {
+        route_trigger_write_name(name, schema, options)?;
+    }
+    Ok(())
+}
+
+fn route_trigger_query_writes(
+    query: &mut Query,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), crate::errors::Error> {
+    if let Some(with) = &mut query.with {
+        for cte in &mut with.cte_tables {
+            route_trigger_query_writes(&mut cte.query, schema, options)?;
+        }
+    }
+    match query.body.as_mut() {
+        SetExpr::Query(query) => route_trigger_query_writes(query, schema, options)?,
+        SetExpr::Insert(statement) | SetExpr::Update(statement) | SetExpr::Delete(statement) => {
+            route_trigger_statement_writes(statement, schema, options)?;
+        }
+        SetExpr::Select(_)
+        | SetExpr::SetOperation { .. }
+        | SetExpr::Values(_)
+        | SetExpr::Merge(_)
+        | SetExpr::Table(_) => {}
+    }
+    Ok(())
+}
+
+fn route_trigger_statement_writes(
+    statement: &mut Statement,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+) -> Result<(), crate::errors::Error> {
+    match statement {
+        Statement::Insert(insert) => {
+            if let TableObject::TableName(name) = &mut insert.table {
+                route_trigger_write_name(name, schema, options)?;
+            }
+        }
+        Statement::Update(update) => {
+            route_trigger_table_factor(&mut update.table.relation, schema, options)?;
+        }
+        Statement::Delete(delete) => {
+            let (FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables)) =
+                &mut delete.from;
+            if let Some(target) = tables.first_mut() {
+                route_trigger_table_factor(&mut target.relation, schema, options)?;
+            }
+        }
+        Statement::Query(query) => route_trigger_query_writes(query, schema, options)?,
+        _ => {}
+    }
+    Ok(())
+}
+
 fn generate_standard_trigger_body(
     exec_body: &sqlparser::ast::TriggerExecBody,
     events: &[sqlparser::ast::TriggerEvent],
@@ -185,9 +265,13 @@ fn generate_standard_trigger_body(
                 sqlparser::ast::ObjectNamePart::Function(_) => None,
             }
         });
-        body.statements = super::plpgsql::PlPgSqlTranslator::translate_with_context(
+        let mut translated = super::plpgsql::PlPgSqlTranslator::translate_with_context(
             &body, context, schema, options,
         )?;
+        for statement in &mut translated {
+            route_trigger_statement_writes(statement, schema, options)?;
+        }
+        body.statements = translated;
         Ok(Some(body))
     } else {
         Ok(None)
@@ -570,7 +654,7 @@ mod tests {
         parser::Parser,
     };
 
-    use crate::prelude::{Pg2SqliteOptions, Translator};
+    use crate::prelude::{Pg2SqliteOptions, TranslationOptions, Translator};
 
     fn parse_statements(sql: &str) -> Vec<Statement> {
         Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
@@ -798,5 +882,38 @@ mod tests {
                 "`{spelling}` must be refused for its event, got: {err}"
             );
         }
+    }
+    #[test]
+    fn configured_exemption_routes_trigger_dml_targets_to_backing_tables() {
+        let schema = schema_with_trigger_function_and_rls_table();
+        let options = Pg2SqliteOptions::default().with_write_exemption_function("write_is_exempt");
+
+        for sql in [
+            "INSERT INTO docs(id) VALUES (1)",
+            "UPDATE docs SET id = 2 WHERE id = 1",
+            "DELETE FROM docs WHERE id = 1",
+        ] {
+            let mut statement = parse_statements(sql).remove(0);
+            super::route_trigger_statement_writes(&mut statement, &schema, &options)
+                .expect("route trigger write");
+            assert!(
+                statement.to_string().contains("docs_rls"),
+                "target must be the backing table: {statement}"
+            );
+        }
+
+        let mut select = parse_statements("SELECT id FROM docs").remove(0);
+        super::route_trigger_statement_writes(&mut select, &schema, &options)
+            .expect("leave reads alone");
+        assert_eq!(select.to_string(), "SELECT id FROM docs");
+
+        let mut default_insert = parse_statements("INSERT INTO docs(id) VALUES (1)").remove(0);
+        super::route_trigger_statement_writes(
+            &mut default_insert,
+            &schema,
+            &Pg2SqliteOptions::default(),
+        )
+        .expect("leave default translation alone");
+        assert_eq!(default_insert.to_string(), "INSERT INTO docs (id) VALUES (1)");
     }
 }

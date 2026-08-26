@@ -54,6 +54,8 @@ pub struct Pg2SqliteOptions {
     session_variables: Vec<SessionVariableMapping>,
     /// The name of the audit table for RLS validation monitoring.
     rls_audit_table_name: Option<String>,
+    /// The caller-registered function that exempts generated write guards.
+    write_exemption_function: Option<String>,
     /// Whether to enable strict RLS validation (abort on violations).
     strict_rls_validation: bool,
     /// Whether a write denied by a policy `USING` clause raises instead of
@@ -128,6 +130,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             session_user_role: Option::<String>::arbitrary(u)?,
             session_variables: Vec::<SessionVariableMapping>::arbitrary(u)?,
             rls_audit_table_name: Option::<String>::arbitrary(u)?,
+            write_exemption_function: Option::<String>::arbitrary(u)?,
             strict_rls_validation: bool::arbitrary(u)?,
             strict_rls_write_deny: bool::arbitrary(u)?,
             sqlitegis_enabled: bool::arbitrary(u)?,
@@ -156,6 +159,7 @@ impl Default for Pg2SqliteOptions {
             session_user_role: None,
             session_variables: Vec::new(),
             rls_audit_table_name: None,
+            write_exemption_function: None,
             strict_rls_validation: false,
             strict_rls_write_deny: false,
             sqlitegis_enabled: false,
@@ -373,6 +377,15 @@ impl TranslationOptions for Pg2SqliteOptions {
 
     fn get_rls_audit_table_name(&self) -> Option<&str> {
         self.rls_audit_table_name.as_deref()
+    }
+
+    fn with_write_exemption_function(mut self, name: impl Into<String>) -> Self {
+        self.write_exemption_function = Some(name.into());
+        self
+    }
+
+    fn get_write_exemption_function(&self) -> Option<&str> {
+        self.write_exemption_function.as_deref()
     }
 
     fn with_strict_rls_validation(mut self) -> Self {
