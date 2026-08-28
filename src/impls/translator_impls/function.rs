@@ -44,8 +44,8 @@ use crate::{
         },
         temporal_arithmetic::{epoch_of_temporal_difference, subsecond_timestamp_from_epoch},
     },
-    prelude::{Pg2SqliteOptions, Translator},
-    traits::{SessionVariablePattern, TranslationOptions},
+    prelude::Pg2SqliteOptions,
+    traits::{SessionVariablePattern, translator::TranslatorWithContext},
 };
 
 /// Represents a function translation result.
@@ -224,7 +224,7 @@ fn null_ignoring_extremum(
     label: &str,
 ) -> Result<Expr, crate::errors::Error> {
     let Some((first, rest)) = arguments.split_first() else {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "{label} needs at least one argument"
         )));
     };
@@ -254,7 +254,7 @@ fn null_ignoring_extremum(
 /// function` long after translation reported success.
 fn reject_over_on_scalar(func: &Function) -> Result<(), crate::errors::Error> {
     if func.over.is_some() {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "{}() cannot take an OVER clause: PostgreSQL accepts OVER only on a window or \
              aggregate function, and SQLite refuses the translated call the same way. Remove \
              the OVER clause.",
@@ -280,7 +280,8 @@ fn truncate_to_scale(
     x: Expr,
     scale: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     // A literal scale outside the foldable range is refused rather than sent
     // down the computed path: `pow(10, 400)` is infinity, which reaches the
@@ -296,17 +297,15 @@ fn truncate_to_scale(
         None if options.is_math_functions_available() => {
             simple_function_expr(
                 "pow",
-                vec![number_literal("10"), scale.translate(schema, options)?],
+                vec![number_literal("10"), scale.translate_with_warnings(schema, options, emit)?],
                 None,
             )
         }
         None => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                "trunc(x, n) with a computed scale needs pow(), which is a math function that \
-                 ships only under SQLITE_ENABLE_MATH_FUNCTIONS. Declare that build, or write the \
-                 scale as a literal."
-                    .to_string(),
-            ));
+            return Err(crate::errors::Error::forward_refusal("trunc(x, n) with a computed scale needs pow(), which is a math function that \
+                         ships only under SQLITE_ENABLE_MATH_FUNCTIONS. Declare that build, or write the \
+                         scale as a literal."
+                .to_string()));
         }
     };
 
@@ -368,7 +367,7 @@ fn literal_power_of_ten(digits: i32) -> String {
 
 /// Refuses a literal scale the fold cannot serve.
 fn unfoldable_scale_error(places: i64) -> crate::errors::Error {
-    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    crate::errors::Error::forward_refusal(format!(
         "trunc(x, {places}) cannot be translated. The translation multiplies by 10^{places}, \
          cuts to a whole number and divides back, which holds only for {} to {} places: above \
          that the cut saturates at the largest 64-bit integer and answers a fraction of the \
@@ -383,7 +382,7 @@ fn unfoldable_scale_error(places: i64) -> crate::errors::Error {
 fn translate_function(
     name: &ObjectName,
     args: &FunctionArguments,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> FunctionTranslation {
     let original_name = name
         .0
@@ -425,417 +424,417 @@ fn translate_function(
     }
 
     match original_name.as_str() {
-        // bool_and / bool_or / every
-        "bool_and" | "every" => FunctionTranslation::Unsupported(
-            "bool_and/every is not supported in SQLite. \
-             Rewrite as: MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1"
-                .to_string(),
-        ),
-        "bool_or" => FunctionTranslation::Unsupported(
-            "bool_or is not supported in SQLite. \
-             Rewrite as: MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1"
-                .to_string(),
-        ),
-        "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => {
-            FunctionTranslation::Rename(options.get_uuid_function_name().to_string())
+    // bool_and / bool_or / every
+    "bool_and" | "every" => FunctionTranslation::Unsupported(
+        "bool_and/every is not supported in SQLite. \
+         Rewrite as: MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1"
+            .to_string(),
+    ),
+    "bool_or" => FunctionTranslation::Unsupported(
+        "bool_or is not supported in SQLite. \
+         Rewrite as: MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1"
+            .to_string(),
+    ),
+    "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => {
+        FunctionTranslation::Rename(options.get_uuid_function_name().to_string())
+    }
+    "uuidv7" => uuid_v7_translation(options),
+    // NOW() -> datetime('now')
+    "now" => FunctionTranslation::WithArgs {
+        name: "datetime".to_string(),
+        args: vec![string_literal("now")],
+    },
+    "ts_rank" | "ts_rank_cd" => FunctionTranslation::Unsupported(
+        "ts_rank/ts_rank_cd are not directly translatable to SQLite. \
+         FTS5 provides bm25() for ranking, but it requires a different query structure. \
+         Consider querying the FTS5 table directly: \
+         SELECT *, bm25(table_fts) AS rank FROM table_fts WHERE table_fts MATCH 'query' ORDER BY rank"
+            .to_string(),
+    ),
+    "concat" => FunctionTranslation::ToConcatenation,
+    "concat_ws" => FunctionTranslation::ToConcatenationWithSeparator,
+    "date_trunc" => FunctionTranslation::DateTrunc,
+    // array_agg wraps json_group_array in NULLIF(..., '[]') so an empty
+    // set returns NULL (PostgreSQL) rather than the literal '[]'.
+    "array_agg" => {
+        if array::is_json_array_representation(options) {
+            FunctionTranslation::ArrayAgg
+        } else {
+            FunctionTranslation::Unsupported(array::representation_required_message(
+                "array_agg()",
+            ))
         }
-        "uuidv7" => uuid_v7_translation(options),
-        // NOW() -> datetime('now')
-        "now" => FunctionTranslation::WithArgs {
+    }
+    // cardinality is a pure rename: json_array_length also returns 0 for an
+    // empty array, matching PostgreSQL cardinality.
+    "cardinality" => {
+        if array::is_json_array_representation(options) {
+            FunctionTranslation::Rename("json_array_length".to_string())
+        } else {
+            FunctionTranslation::Unsupported(array::representation_required_message(
+                "cardinality()",
+            ))
+        }
+    }
+    "bit_and" | "bit_or" => FunctionTranslation::Unsupported(format!(
+        "{original_name} is not supported as an aggregate in SQLite. \
+         Consider loading a custom extension or rewriting with bitwise expressions."
+    )),
+    "var_pop" | "var_samp" | "variance" | "stddev" | "stddev_pop" | "stddev_samp"
+    | "covar_pop" | "covar_samp" | "corr" => {
+        classify_statistical_aggregate(&original_name, options)
+    }
+    "regr_slope" | "regr_intercept" | "regr_r2" | "regr_avgx" | "regr_avgy"
+    | "regr_sxx" | "regr_syy" | "regr_sxy" | "regr_count" => {
+        FunctionTranslation::Unsupported(
+            "regr_* regression aggregate functions are not supported in SQLite. \
+             Consider loading a custom extension or computing regression manually."
+                .to_string(),
+        )
+    }
+    "xmlagg" => FunctionTranslation::Unsupported(
+        "xmlagg is not supported in SQLite, which has no native XML type.".to_string(),
+    ),
+    "range_agg" | "multirange_agg" => FunctionTranslation::Unsupported(format!(
+        "{original_name} is not supported in SQLite, which has no range types."
+    )),
+    "percentile_cont" | "percentile_disc" => FunctionTranslation::Unsupported(
+        "percentile_cont/percentile_disc are not supported in SQLite. \
+         They use WITHIN GROUP (ORDER BY ...) syntax which has no SQLite equivalent."
+            .to_string(),
+    ),
+    "mode" => FunctionTranslation::Unsupported(
+        "mode() WITHIN GROUP (ORDER BY ...) is not supported in SQLite. \
+         There is no built-in equivalent; consider computing the mode manually."
+            .to_string(),
+    ),
+    "split_part" => FunctionTranslation::Unsupported(
+        "split_part is not supported in SQLite. \
+         Consider using INSTR() and SUBSTR() to manually split strings, \
+         or restructure the query to avoid string splitting."
+            .to_string(),
+    ),
+    "regexp_replace" => FunctionTranslation::Unsupported(
+        "regexp_replace is not supported in SQLite without a PCRE extension. \
+         For literal string replacement, use REPLACE(string, pattern, replacement). \
+         For regex support, load the SQLite REGEXP extension."
+            .to_string(),
+    ),
+    "to_char" => FunctionTranslation::ToChar,
+    // json_build_array(v, ...) -> json_array(v, ...) (handle remaining jsonb_build_*)
+    "jsonb_build_array" => FunctionTranslation::Rename("json_array".to_string()),
+    "jsonb_build_object" => FunctionTranslation::Rename("json_object".to_string()),
+    // localtimestamp -> datetime('now', 'localtime')
+    "localtimestamp" => FunctionTranslation::WithArgs {
+        name: "datetime".to_string(),
+        args: crate::impls::idioms::now_localtime_args(),
+    },
+    // localtime -> time('now', 'localtime')
+    "localtime" => FunctionTranslation::WithArgs {
+        name: "time".to_string(),
+        args: crate::impls::idioms::now_localtime_args(),
+    },
+    "mod" => FunctionTranslation::ToModulo,
+    "div" => FunctionTranslation::ToIntegerDiv,
+    "trunc" | "truncate" => FunctionTranslation::ToTrunc,
+    "make_date" => FunctionTranslation::ToMakePrintf {
+        format: "%04d-%02d-%02d",
+        arg_count: 3,
+        func_label: "make_date",
+        fractional_seconds: false,
+    },
+    "make_time" => FunctionTranslation::ToMakePrintf {
+        format: "%02d:%02d:",
+        arg_count: 3,
+        func_label: "make_time",
+        fractional_seconds: true,
+    },
+    "make_timestamp" => FunctionTranslation::ToMakePrintf {
+        format: "%04d-%02d-%02d %02d:%02d:",
+        arg_count: 6,
+        func_label: "make_timestamp",
+        fractional_seconds: true,
+    },
+    // round over a NUMERIC needs the column's scale, so it is decided at
+    // emission where the schema is in hand.
+    "round" => FunctionTranslation::NumericRound,
+    // string_agg: SQLite takes no separator argument beside DISTINCT.
+    "string_agg" => FunctionTranslation::StringAgg,
+    // char_length / character_length: text only in PostgreSQL.
+    "char_length" => FunctionTranslation::CharLength { label: "char_length" },
+    "character_length" => FunctionTranslation::CharLength { label: "character_length" },
+    // quote_literal / quote_nullable: they differ only on NULL.
+    "quote_literal" => FunctionTranslation::Quote { nullable: false },
+    "quote_nullable" => FunctionTranslation::Quote { nullable: true },
+    // json_typeof / jsonb_typeof: json_type names the types differently.
+    "json_typeof" | "jsonb_typeof" => FunctionTranslation::JsonTypeof,
+    // json_agg / jsonb_agg: a JSON element needs parsing, not quoting.
+    "json_agg" | "jsonb_agg" => FunctionTranslation::JsonAgg,
+    // json_object_agg / jsonb_object_agg: bare rename returns '{}' over no
+    // rows where PostgreSQL returns NULL. Wrapped in NULLIF(..., '{}').
+    "json_object_agg" | "jsonb_object_agg" => FunctionTranslation::JsonObjectAgg,
+    // greatest / least ignore NULLs, MAX / MIN do not.
+    "greatest" => FunctionTranslation::Extremum { greatest: true },
+    "least" => FunctionTranslation::Extremum { greatest: false },
+    // ascii agrees with unicode everywhere but the empty string, where
+    // PostgreSQL answers 0 and unicode answers NULL.
+    "ascii" => FunctionTranslation::AsciiCodePoint,
+    // to_json / to_jsonb: a conversion, not a reinterpretation.
+    "to_json" | "to_jsonb" => FunctionTranslation::ToJson,
+    // jsonb_set / jsonb_insert: path and value both need converting.
+    "jsonb_set" => FunctionTranslation::JsonSet { insert: false },
+    "jsonb_insert" => FunctionTranslation::JsonSet { insert: true },
+    // json_extract_path* -> json_extract(j, '$.k1.k2...')
+    "json_extract_path" | "json_extract_path_text" | "jsonb_extract_path"
+    | "jsonb_extract_path_text" => FunctionTranslation::ToJsonExtractPath,
+    // date_part('field', expr) -> CAST(strftime(format, expr) AS type)
+    "date_part" => FunctionTranslation::DatePart,
+    // lpad / rpad: not in standard SQLite
+    "lpad" | "rpad" => FunctionTranslation::Unsupported(
+        "lpad/rpad are not available in standard SQLite. \
+         Consider using the printf() function or application-side string formatting."
+            .to_string(),
+    ),
+    // initcap: not in standard SQLite
+    "initcap" => FunctionTranslation::Unsupported(
+        "initcap is not available in standard SQLite. \
+         Consider using application-level capitalization or the ICU extension."
+            .to_string(),
+    ),
+    // nextval: PostgreSQL sequence function, not available in SQLite
+    "nextval" => FunctionTranslation::Unsupported(
+        "nextval() is a PostgreSQL sequence function and is not available in SQLite. \
+         Use INTEGER PRIMARY KEY (ROWID alias) or a trigger-based sequence instead."
+            .to_string(),
+    ),
+    // generate_series: not in standard SQLite (available via an extension or recursive CTE)
+    "generate_series" => {
+        FunctionTranslation::Unsupported(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
+    }
+    // random(): PG returns [0.0, 1.0) float; SQLite returns signed 64-bit int.
+    // Map to (CAST(random() AS REAL) + 2^63) / 2^64 → [0.0, 1.0) without ABS overflow.
+    "random" => FunctionTranslation::ToRandomFloat,
+    // left(s, n) -> substr(s, 1, n)
+    "left" => FunctionTranslation::ToSubstrLeft,
+    // right(s, n) -> substr(s, -n)
+    "right" => FunctionTranslation::ToSubstrRight,
+    // to_timestamp(epoch) -> datetime(val, 'unixepoch') (single-arg form)
+    // to_timestamp(text, format) -> Unsupported (two-arg form)
+    "to_timestamp" => {
+        match args {
+            FunctionArguments::List(list) if list.args.len() == 1 => {
+                FunctionTranslation::ToTimestampEpoch
+            }
+            _ => FunctionTranslation::Unsupported(
+                "to_timestamp with format string is not supported in SQLite. \
+                 Only the single-argument epoch form (to_timestamp(epoch_seconds)) \
+                 can be translated."
+                    .to_string(),
+            ),
+        }
+    }
+    // transaction_timestamp / statement_timestamp / clock_timestamp → datetime('now')
+    "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
+        FunctionTranslation::WithArgs {
             name: "datetime".to_string(),
             args: vec![string_literal("now")],
-        },
-        "ts_rank" | "ts_rank_cd" => FunctionTranslation::Unsupported(
-            "ts_rank/ts_rank_cd are not directly translatable to SQLite. \
-             FTS5 provides bm25() for ranking, but it requires a different query structure. \
-             Consider querying the FTS5 table directly: \
-             SELECT *, bm25(table_fts) AS rank FROM table_fts WHERE table_fts MATCH 'query' ORDER BY rank"
-                .to_string(),
-        ),
-        "concat" => FunctionTranslation::ToConcatenation,
-        "concat_ws" => FunctionTranslation::ToConcatenationWithSeparator,
-        "date_trunc" => FunctionTranslation::DateTrunc,
-        // array_agg wraps json_group_array in NULLIF(..., '[]') so an empty
-        // set returns NULL (PostgreSQL) rather than the literal '[]'.
-        "array_agg" => {
-            if array::is_json_array_representation(options) {
-                FunctionTranslation::ArrayAgg
-            } else {
-                FunctionTranslation::Unsupported(array::representation_required_message(
-                    "array_agg()",
-                ))
-            }
         }
-        // cardinality is a pure rename: json_array_length also returns 0 for an
-        // empty array, matching PostgreSQL cardinality.
-        "cardinality" => {
-            if array::is_json_array_representation(options) {
-                FunctionTranslation::Rename("json_array_length".to_string())
-            } else {
-                FunctionTranslation::Unsupported(array::representation_required_message(
-                    "cardinality()",
-                ))
-            }
-        }
-        "bit_and" | "bit_or" => FunctionTranslation::Unsupported(format!(
-            "{original_name} is not supported as an aggregate in SQLite. \
-             Consider loading a custom extension or rewriting with bitwise expressions."
-        )),
-        "var_pop" | "var_samp" | "variance" | "stddev" | "stddev_pop" | "stddev_samp"
-        | "covar_pop" | "covar_samp" | "corr" => {
-            classify_statistical_aggregate(&original_name, options)
-        }
-        "regr_slope" | "regr_intercept" | "regr_r2" | "regr_avgx" | "regr_avgy"
-        | "regr_sxx" | "regr_syy" | "regr_sxy" | "regr_count" => {
-            FunctionTranslation::Unsupported(
-                "regr_* regression aggregate functions are not supported in SQLite. \
-                 Consider loading a custom extension or computing regression manually."
-                    .to_string(),
-            )
-        }
-        "xmlagg" => FunctionTranslation::Unsupported(
-            "xmlagg is not supported in SQLite, which has no native XML type.".to_string(),
-        ),
-        "range_agg" | "multirange_agg" => FunctionTranslation::Unsupported(format!(
-            "{original_name} is not supported in SQLite, which has no range types."
-        )),
-        "percentile_cont" | "percentile_disc" => FunctionTranslation::Unsupported(
-            "percentile_cont/percentile_disc are not supported in SQLite. \
-             They use WITHIN GROUP (ORDER BY ...) syntax which has no SQLite equivalent."
-                .to_string(),
-        ),
-        "mode" => FunctionTranslation::Unsupported(
-            "mode() WITHIN GROUP (ORDER BY ...) is not supported in SQLite. \
-             There is no built-in equivalent; consider computing the mode manually."
-                .to_string(),
-        ),
-        "split_part" => FunctionTranslation::Unsupported(
-            "split_part is not supported in SQLite. \
-             Consider using INSTR() and SUBSTR() to manually split strings, \
-             or restructure the query to avoid string splitting."
-                .to_string(),
-        ),
-        "regexp_replace" => FunctionTranslation::Unsupported(
-            "regexp_replace is not supported in SQLite without a PCRE extension. \
-             For literal string replacement, use REPLACE(string, pattern, replacement). \
-             For regex support, load the SQLite REGEXP extension."
-                .to_string(),
-        ),
-        "to_char" => FunctionTranslation::ToChar,
-        // json_build_array(v, ...) -> json_array(v, ...) (handle remaining jsonb_build_*)
-        "jsonb_build_array" => FunctionTranslation::Rename("json_array".to_string()),
-        "jsonb_build_object" => FunctionTranslation::Rename("json_object".to_string()),
-        // localtimestamp -> datetime('now', 'localtime')
-        "localtimestamp" => FunctionTranslation::WithArgs {
-            name: "datetime".to_string(),
-            args: crate::impls::idioms::now_localtime_args(),
-        },
-        // localtime -> time('now', 'localtime')
-        "localtime" => FunctionTranslation::WithArgs {
-            name: "time".to_string(),
-            args: crate::impls::idioms::now_localtime_args(),
-        },
-        "mod" => FunctionTranslation::ToModulo,
-        "div" => FunctionTranslation::ToIntegerDiv,
-        "trunc" | "truncate" => FunctionTranslation::ToTrunc,
-        "make_date" => FunctionTranslation::ToMakePrintf {
-            format: "%04d-%02d-%02d",
-            arg_count: 3,
-            func_label: "make_date",
-            fractional_seconds: false,
-        },
-        "make_time" => FunctionTranslation::ToMakePrintf {
-            format: "%02d:%02d:",
-            arg_count: 3,
-            func_label: "make_time",
-            fractional_seconds: true,
-        },
-        "make_timestamp" => FunctionTranslation::ToMakePrintf {
-            format: "%04d-%02d-%02d %02d:%02d:",
-            arg_count: 6,
-            func_label: "make_timestamp",
-            fractional_seconds: true,
-        },
-        // round over a NUMERIC needs the column's scale, so it is decided at
-        // emission where the schema is in hand.
-        "round" => FunctionTranslation::NumericRound,
-        // string_agg: SQLite takes no separator argument beside DISTINCT.
-        "string_agg" => FunctionTranslation::StringAgg,
-        // char_length / character_length: text only in PostgreSQL.
-        "char_length" => FunctionTranslation::CharLength { label: "char_length" },
-        "character_length" => FunctionTranslation::CharLength { label: "character_length" },
-        // quote_literal / quote_nullable: they differ only on NULL.
-        "quote_literal" => FunctionTranslation::Quote { nullable: false },
-        "quote_nullable" => FunctionTranslation::Quote { nullable: true },
-        // json_typeof / jsonb_typeof: json_type names the types differently.
-        "json_typeof" | "jsonb_typeof" => FunctionTranslation::JsonTypeof,
-        // json_agg / jsonb_agg: a JSON element needs parsing, not quoting.
-        "json_agg" | "jsonb_agg" => FunctionTranslation::JsonAgg,
-        // json_object_agg / jsonb_object_agg: bare rename returns '{}' over no
-        // rows where PostgreSQL returns NULL. Wrapped in NULLIF(..., '{}').
-        "json_object_agg" | "jsonb_object_agg" => FunctionTranslation::JsonObjectAgg,
-        // greatest / least ignore NULLs, MAX / MIN do not.
-        "greatest" => FunctionTranslation::Extremum { greatest: true },
-        "least" => FunctionTranslation::Extremum { greatest: false },
-        // ascii agrees with unicode everywhere but the empty string, where
-        // PostgreSQL answers 0 and unicode answers NULL.
-        "ascii" => FunctionTranslation::AsciiCodePoint,
-        // to_json / to_jsonb: a conversion, not a reinterpretation.
-        "to_json" | "to_jsonb" => FunctionTranslation::ToJson,
-        // jsonb_set / jsonb_insert: path and value both need converting.
-        "jsonb_set" => FunctionTranslation::JsonSet { insert: false },
-        "jsonb_insert" => FunctionTranslation::JsonSet { insert: true },
-        // json_extract_path* -> json_extract(j, '$.k1.k2...')
-        "json_extract_path" | "json_extract_path_text" | "jsonb_extract_path"
-        | "jsonb_extract_path_text" => FunctionTranslation::ToJsonExtractPath,
-        // date_part('field', expr) -> CAST(strftime(format, expr) AS type)
-        "date_part" => FunctionTranslation::DatePart,
-        // lpad / rpad: not in standard SQLite
-        "lpad" | "rpad" => FunctionTranslation::Unsupported(
-            "lpad/rpad are not available in standard SQLite. \
-             Consider using the printf() function or application-side string formatting."
-                .to_string(),
-        ),
-        // initcap: not in standard SQLite
-        "initcap" => FunctionTranslation::Unsupported(
-            "initcap is not available in standard SQLite. \
-             Consider using application-level capitalization or the ICU extension."
-                .to_string(),
-        ),
-        // nextval: PostgreSQL sequence function, not available in SQLite
-        "nextval" => FunctionTranslation::Unsupported(
-            "nextval() is a PostgreSQL sequence function and is not available in SQLite. \
-             Use INTEGER PRIMARY KEY (ROWID alias) or a trigger-based sequence instead."
-                .to_string(),
-        ),
-        // generate_series: not in standard SQLite (available via an extension or recursive CTE)
-        "generate_series" => {
-            FunctionTranslation::Unsupported(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
-        }
-        // random(): PG returns [0.0, 1.0) float; SQLite returns signed 64-bit int.
-        // Map to (CAST(random() AS REAL) + 2^63) / 2^64 → [0.0, 1.0) without ABS overflow.
-        "random" => FunctionTranslation::ToRandomFloat,
-        // left(s, n) -> substr(s, 1, n)
-        "left" => FunctionTranslation::ToSubstrLeft,
-        // right(s, n) -> substr(s, -n)
-        "right" => FunctionTranslation::ToSubstrRight,
-        // to_timestamp(epoch) -> datetime(val, 'unixepoch') (single-arg form)
-        // to_timestamp(text, format) -> Unsupported (two-arg form)
-        "to_timestamp" => {
-            match args {
-                FunctionArguments::List(list) if list.args.len() == 1 => {
-                    FunctionTranslation::ToTimestampEpoch
-                }
-                _ => FunctionTranslation::Unsupported(
-                    "to_timestamp with format string is not supported in SQLite. \
-                     Only the single-argument epoch form (to_timestamp(epoch_seconds)) \
-                     can be translated."
-                        .to_string(),
-                ),
-            }
-        }
-        // transaction_timestamp / statement_timestamp / clock_timestamp → datetime('now')
-        "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
-            FunctionTranslation::WithArgs {
-                name: "datetime".to_string(),
-                args: vec![string_literal("now")],
-            }
-        }
-        // Sequence functions: no SQLite equivalent
-        "currval" | "lastval" | "setval" => FunctionTranslation::Unsupported(
-            "currval/lastval/setval are PostgreSQL sequence functions and are not available \
-             in SQLite. Use INTEGER PRIMARY KEY (ROWID alias) or application-level sequences."
-                .to_string(),
-        ),
-        // reverse: not in standard SQLite; passing through would cause a runtime
-        // crash on "no such function: reverse".
-        "reverse" => FunctionTranslation::Unsupported(
-            "reverse is not available in standard SQLite. \
-             Consider using application-level string reversal or a custom extension."
-                .to_string(),
-        ),
-        // repeat: no simple SQLite equivalent
-        "repeat" => FunctionTranslation::Unsupported(
-            "repeat is not available in standard SQLite. \
-             Consider using application-level string repetition or a recursive CTE."
-                .to_string(),
-        ),
-        // translate: character-level replacement, no SQLite equivalent
-        "translate" => FunctionTranslation::Unsupported(
-            "translate (character-level replacement) is not available in SQLite. \
-             Consider using nested REPLACE() calls or application-level processing."
-                .to_string(),
-        ),
-        // md5: no hash function in core SQLite
-        "md5" => FunctionTranslation::Unsupported(
-            "md5 is not available in standard SQLite. \
-             Consider loading a custom extension for hashing."
-                .to_string(),
-        ),
-        // to_date: format-based date parsing not available in SQLite
-        "to_date" => FunctionTranslation::Unsupported(
-            "to_date is not supported in SQLite. \
-             Date strings must be in ISO 8601 format (YYYY-MM-DD) for SQLite date functions."
-                .to_string(),
-        ),
-        // age: returns interval type, no SQLite equivalent
-        "age" => FunctionTranslation::Unsupported(
-            "age is not supported in SQLite, which has no interval type. \
-             Consider using julianday() subtraction for day-level differences."
-                .to_string(),
-        ),
-        // regexp_match / regexp_matches: no built-in regex in SQLite
-        "regexp_match" | "regexp_matches" => FunctionTranslation::Unsupported(
-            "regexp_match/regexp_matches are not supported in SQLite without a REGEXP extension. \
-             For basic pattern matching use LIKE or GLOB."
-                .to_string(),
-        ),
-        // format: PG format specifiers incompatible with SQLite printf
-        "format" => FunctionTranslation::Unsupported(
-            "format() with PostgreSQL format specifiers (%I, %L, %s) is not supported in SQLite. \
-             For simple string formatting use printf() with standard C-style specifiers."
-                .to_string(),
-        ),
-        // PG-specific system/introspection functions - no SQLite equivalent
-        "current_database" | "current_schema" | "pg_typeof" => FunctionTranslation::Unsupported(
-            "current_database/current_schema/pg_typeof are PostgreSQL system functions \
-             with no SQLite equivalent."
-                .to_string(),
-        ),
-        // unnest: a set-returning function, valid only in a FROM clause, where
-        // `shared_helpers` rewrites it to `json_each`.
-        "unnest" => FunctionTranslation::Unsupported(
-            "unnest() is only translatable in a FROM clause, where it becomes json_each(). \
-             In a SELECT list it returns a set, which SQLite cannot express as a scalar."
-                .to_string(),
-        ),
-        // The JSON set-returning family, valid only in a FROM clause, where
-        // `array::translate_set_returning_factor` maps it over `json_each`.
-        // The arm also catches `json_each` itself, which would otherwise pass
-        // through as a SQLite builtin and fail identically at run time.
-        srf if array::is_json_set_returning(srf) => FunctionTranslation::Unsupported(format!(
-            "{srf}() returns a set of rows, which a SELECT list cannot hold, and SQLite provides \
-             json_each only as a table. Move the call into the FROM clause, which this crate \
-             translates for a self-contained document, or write `FROM t, json_each(t.col) AS e` \
-             for a column argument."
-        )),
-        "encode" | "decode" => classify_bytea_encoding(&original_name, args),
-        // to_number: PG pattern-based number parsing
-        "to_number" => FunctionTranslation::Unsupported(
-            "to_number() with PostgreSQL format patterns is not supported in SQLite. \
-             Use CAST(expr AS REAL) or CAST(expr AS INTEGER) for simple conversions."
-                .to_string(),
-        ),
-
-        // Names with no SQLite equivalent at all, string and numeric alike. The
-        // gated maths names are not here: theirs is a fact about the build,
-        // decided by the option below. Nor is `sign`, which SQLite answers with
-        // no flag at all, so the inventory passes it through.
-        "regexp_split_to_array" | "regexp_split_to_table" | "string_to_array" | "factorial"
-        | "gcd" | "lcm" | "setseed" | "width_bucket" => {
-            FunctionTranslation::Unsupported(format!(
-                "{original_name}() is not available in standard SQLite."
-            ))
-        }
-        "quote_ident" => FunctionTranslation::Unsupported(
-            "quote_ident() is not available in SQLite. Use application-level quoting.".to_string(),
-        ),
-        "convert" | "convert_from" | "convert_to" => FunctionTranslation::Unsupported(format!(
-            "{original_name}() character encoding conversion is not available in SQLite."
-        )),
-
-        // Math functions that require SQLITE_ENABLE_MATH_FUNCTIONS. When the
-        // option is declared, scalars pass through and power/cbrt get faithful
-        // translations. When it is not declared, all are rejected with a clear
-        // message pointing to the opt-in.
-        //
-        // `cbrt` is here for its translation rather than its name: SQLite has no
-        // cube root even with the build flag, so it is rewritten over `pow`.
-        "log" | "ln" | "exp" | "sqrt" | "log10" | "pow" | "power" | "cbrt" | "pi" | "degrees"
-        | "radians" => {
-            if options.is_math_functions_available() {
-                match original_name.as_str() {
-                    "power" => FunctionTranslation::Rename("pow".to_string()),
-                    "cbrt" => FunctionTranslation::ToCbrt,
-                    _ => FunctionTranslation::PassThrough,
-                }
-            } else {
-                FunctionTranslation::Unsupported(math_not_declared(&original_name))
-            }
-        }
-
-        // Date/time and JSON functions with no equivalent
-        "make_timestamptz" | "make_interval" | "isfinite" | "json_strip_nulls"
-        | "jsonb_strip_nulls" => FunctionTranslation::Unsupported(format!(
-            "{original_name}() is not available in SQLite."
-        )),
-        "justify_days" | "justify_hours" | "justify_interval" => {
-            FunctionTranslation::Unsupported(format!(
-                "{original_name}() is not available in SQLite (no interval type)."
-            ))
-        }
-        "timeofday" => FunctionTranslation::Unsupported(
-            "timeofday() is not available in SQLite. Use datetime('now') instead.".to_string(),
-        ),
-        "json_populate_record" | "jsonb_populate_record" => {
-            FunctionTranslation::Unsupported(format!(
-                "{original_name}() is not available in SQLite (no record types)."
-            ))
-        }
-        "json_to_record" | "jsonb_to_record" | "row_to_json" => {
-            FunctionTranslation::Unsupported(format!(
-                "{original_name}() is not available in SQLite (no record/row types)."
-            ))
-        }
-        // ROW(a, b) is a row-value constructor. SQLite has no row type.
-        // Tuple comparison (a, b) = (c, d) is supported via Expr::Tuple and already works.
-        "row" => FunctionTranslation::Unsupported(
-            "ROW(a, b) as a standalone value is not supported in SQLite (no row type). \
-             For tuple comparison, use (a, b) = (c, d) instead."
-                .to_string(),
-        ),
-
-        // Array functions with no faithful json1 form. `json_each` hands a
-        // nested element back as JSON text, so anything that inspects or
-        // rebuilds dimensions cannot be answered correctly.
-        "array_dims" | "array_ndims" => {
-            FunctionTranslation::Unsupported(array::no_json_message(
-                &format!("{original_name}()"),
-                "A JSON array carries no dimension metadata; only one-dimensional arrays are \
-                 represented.",
-            ))
-        }
-        "array_fill" => FunctionTranslation::Unsupported(array::no_json_message(
-            "array_fill()",
-            "Filling an array needs a row generator, and SQLite has no generate_series() in the \
-             core build. Build the array in the application.",
-        )),
-
-        // Network functions
-        "host" | "abbrev" | "broadcast" | "family" | "hostmask" | "masklen" | "netmask"
-        | "network" | "set_masklen" => FunctionTranslation::Unsupported(format!(
-            "{original_name}() is not available in SQLite (no network address types)."
-        )),
-
-        // System catalog functions
-        "current_schemas" | "has_table_privilege" | "has_schema_privilege"
-        | "has_column_privilege" | "has_database_privilege" | "has_function_privilege"
-        | "has_sequence_privilege" => FunctionTranslation::Unsupported(format!(
-            "{original_name}() is a PostgreSQL catalog function not available in SQLite."
-        )),
-        "obj_description" | "col_description" | "shobj_description" | "pg_get_expr"
-        | "pg_get_constraintdef" | "pg_get_indexdef" | "pg_get_viewdef" => {
-            FunctionTranslation::Unsupported(format!(
-                "{original_name}() is a PostgreSQL catalog function not available in SQLite."
-            ))
-        }
-        "pg_table_size" | "pg_total_relation_size" | "pg_relation_size" | "pg_column_size"
-        | "pg_database_size" | "pg_tablespace_size" => FunctionTranslation::Unsupported(format!(
-            "{original_name}() is a PostgreSQL size function not available in SQLite."
-        )),
-
-        _ => classify_unrecognised_function(&original_name, args, options),
     }
+    // Sequence functions: no SQLite equivalent
+    "currval" | "lastval" | "setval" => FunctionTranslation::Unsupported(
+        "currval/lastval/setval are PostgreSQL sequence functions and are not available \
+         in SQLite. Use INTEGER PRIMARY KEY (ROWID alias) or application-level sequences."
+            .to_string(),
+    ),
+    // reverse: not in standard SQLite; passing through would cause a runtime
+    // crash on "no such function: reverse".
+    "reverse" => FunctionTranslation::Unsupported(
+        "reverse is not available in standard SQLite. \
+         Consider using application-level string reversal or a custom extension."
+            .to_string(),
+    ),
+    // repeat: no simple SQLite equivalent
+    "repeat" => FunctionTranslation::Unsupported(
+        "repeat is not available in standard SQLite. \
+         Consider using application-level string repetition or a recursive CTE."
+            .to_string(),
+    ),
+    // translate: character-level replacement, no SQLite equivalent
+    "translate" => FunctionTranslation::Unsupported(
+        "translate (character-level replacement) is not available in SQLite. \
+         Consider using nested REPLACE() calls or application-level processing."
+            .to_string(),
+    ),
+    // md5: no hash function in core SQLite
+    "md5" => FunctionTranslation::Unsupported(
+        "md5 is not available in standard SQLite. \
+         Consider loading a custom extension for hashing."
+            .to_string(),
+    ),
+    // to_date: format-based date parsing not available in SQLite
+    "to_date" => FunctionTranslation::Unsupported(
+        "to_date is not supported in SQLite. \
+         Date strings must be in ISO 8601 format (YYYY-MM-DD) for SQLite date functions."
+            .to_string(),
+    ),
+    // age: returns interval type, no SQLite equivalent
+    "age" => FunctionTranslation::Unsupported(
+        "age is not supported in SQLite, which has no interval type. \
+         Consider using julianday() subtraction for day-level differences."
+            .to_string(),
+    ),
+    // regexp_match / regexp_matches: no built-in regex in SQLite
+    "regexp_match" | "regexp_matches" => FunctionTranslation::Unsupported(
+        "regexp_match/regexp_matches are not supported in SQLite without a REGEXP extension. \
+         For basic pattern matching use LIKE or GLOB."
+            .to_string(),
+    ),
+    // format: PG format specifiers incompatible with SQLite printf
+    "format" => FunctionTranslation::Unsupported(
+        "format() with PostgreSQL format specifiers (%I, %L, %s) is not supported in SQLite. \
+         For simple string formatting use printf() with standard C-style specifiers."
+            .to_string(),
+    ),
+    // PG-specific system/introspection functions - no SQLite equivalent
+    "current_database" | "current_schema" | "pg_typeof" => FunctionTranslation::Unsupported(
+        "current_database/current_schema/pg_typeof are PostgreSQL system functions \
+         with no SQLite equivalent."
+            .to_string(),
+    ),
+    // unnest: a set-returning function, valid only in a FROM clause, where
+    // `shared_helpers` rewrites it to `json_each`.
+    "unnest" => FunctionTranslation::Unsupported(
+        "unnest() is only translatable in a FROM clause, where it becomes json_each(). \
+         In a SELECT list it returns a set, which SQLite cannot express as a scalar."
+            .to_string(),
+    ),
+    // The JSON set-returning family, valid only in a FROM clause, where
+    // `array::translate_set_returning_factor` maps it over `json_each`.
+    // The arm also catches `json_each` itself, which would otherwise pass
+    // through as a SQLite builtin and fail identically at run time.
+    srf if array::is_json_set_returning(srf) => FunctionTranslation::Unsupported(format!(
+        "{srf}() returns a set of rows, which a SELECT list cannot hold, and SQLite provides \
+         json_each only as a table. Move the call into the FROM clause, which this crate \
+         translates for a self-contained document, or write `FROM t, json_each(t.col) AS e` \
+         for a column argument."
+    )),
+    "encode" | "decode" => classify_bytea_encoding(&original_name, args),
+    // to_number: PG pattern-based number parsing
+    "to_number" => FunctionTranslation::Unsupported(
+        "to_number() with PostgreSQL format patterns is not supported in SQLite. \
+         Use CAST(expr AS REAL) or CAST(expr AS INTEGER) for simple conversions."
+            .to_string(),
+    ),
+
+    // Names with no SQLite equivalent at all, string and numeric alike. The
+    // gated maths names are not here: theirs is a fact about the build,
+    // decided by the option below. Nor is `sign`, which SQLite answers with
+    // no flag at all, so the inventory passes it through.
+    "regexp_split_to_array" | "regexp_split_to_table" | "string_to_array" | "factorial"
+    | "gcd" | "lcm" | "setseed" | "width_bucket" => {
+        FunctionTranslation::Unsupported(format!(
+            "{original_name}() is not available in standard SQLite."
+        ))
+    }
+    "quote_ident" => FunctionTranslation::Unsupported(
+        "quote_ident() is not available in SQLite. Use application-level quoting.".to_string(),
+    ),
+    "convert" | "convert_from" | "convert_to" => FunctionTranslation::Unsupported(format!(
+        "{original_name}() character encoding conversion is not available in SQLite."
+    )),
+
+    // Math functions that require SQLITE_ENABLE_MATH_FUNCTIONS. When the
+    // option is declared, scalars pass through and power/cbrt get faithful
+    // translations. When it is not declared, all are rejected with a clear
+    // message pointing to the opt-in.
+    //
+    // `cbrt` is here for its translation rather than its name: SQLite has no
+    // cube root even with the build flag, so it is rewritten over `pow`.
+    "log" | "ln" | "exp" | "sqrt" | "log10" | "pow" | "power" | "cbrt" | "pi" | "degrees"
+    | "radians" => {
+        if options.is_math_functions_available() {
+            match original_name.as_str() {
+                "power" => FunctionTranslation::Rename("pow".to_string()),
+                "cbrt" => FunctionTranslation::ToCbrt,
+                _ => FunctionTranslation::PassThrough,
+            }
+        } else {
+            FunctionTranslation::Unsupported(math_not_declared(&original_name))
+        }
+    }
+
+    // Date/time and JSON functions with no equivalent
+    "make_timestamptz" | "make_interval" | "isfinite" | "json_strip_nulls"
+    | "jsonb_strip_nulls" => FunctionTranslation::Unsupported(format!(
+        "{original_name}() is not available in SQLite."
+    )),
+    "justify_days" | "justify_hours" | "justify_interval" => {
+        FunctionTranslation::Unsupported(format!(
+            "{original_name}() is not available in SQLite (no interval type)."
+        ))
+    }
+    "timeofday" => FunctionTranslation::Unsupported(
+        "timeofday() is not available in SQLite. Use datetime('now') instead.".to_string(),
+    ),
+    "json_populate_record" | "jsonb_populate_record" => {
+        FunctionTranslation::Unsupported(format!(
+            "{original_name}() is not available in SQLite (no record types)."
+        ))
+    }
+    "json_to_record" | "jsonb_to_record" | "row_to_json" => {
+        FunctionTranslation::Unsupported(format!(
+            "{original_name}() is not available in SQLite (no record/row types)."
+        ))
+    }
+    // ROW(a, b) is a row-value constructor. SQLite has no row type.
+    // Tuple comparison (a, b) = (c, d) is supported via Expr::Tuple and already works.
+    "row" => FunctionTranslation::Unsupported(
+        "ROW(a, b) as a standalone value is not supported in SQLite (no row type). \
+         For tuple comparison, use (a, b) = (c, d) instead."
+            .to_string(),
+    ),
+
+    // Array functions with no faithful json1 form. `json_each` hands a
+    // nested element back as JSON text, so anything that inspects or
+    // rebuilds dimensions cannot be answered correctly.
+    "array_dims" | "array_ndims" => {
+        FunctionTranslation::Unsupported(array::no_json_message(
+            &format!("{original_name}()"),
+            "A JSON array carries no dimension metadata; only one-dimensional arrays are \
+             represented.",
+        ))
+    }
+    "array_fill" => FunctionTranslation::Unsupported(array::no_json_message(
+        "array_fill()",
+        "Filling an array needs a row generator, and SQLite has no generate_series() in the \
+         core build. Build the array in the application.",
+    )),
+
+    // Network functions
+    "host" | "abbrev" | "broadcast" | "family" | "hostmask" | "masklen" | "netmask"
+    | "network" | "set_masklen" => FunctionTranslation::Unsupported(format!(
+        "{original_name}() is not available in SQLite (no network address types)."
+    )),
+
+    // System catalog functions
+    "current_schemas" | "has_table_privilege" | "has_schema_privilege"
+    | "has_column_privilege" | "has_database_privilege" | "has_function_privilege"
+    | "has_sequence_privilege" => FunctionTranslation::Unsupported(format!(
+        "{original_name}() is a PostgreSQL catalog function not available in SQLite."
+    )),
+    "obj_description" | "col_description" | "shobj_description" | "pg_get_expr"
+    | "pg_get_constraintdef" | "pg_get_indexdef" | "pg_get_viewdef" => {
+        FunctionTranslation::Unsupported(format!(
+            "{original_name}() is a PostgreSQL catalog function not available in SQLite."
+        ))
+    }
+    "pg_table_size" | "pg_total_relation_size" | "pg_relation_size" | "pg_column_size"
+    | "pg_database_size" | "pg_tablespace_size" => FunctionTranslation::Unsupported(format!(
+        "{original_name}() is a PostgreSQL size function not available in SQLite."
+    )),
+
+    _ => classify_unrecognised_function(&original_name, args, options),
+}
 }
 
 /// Classifies one of PostgreSQL's nine statistical aggregates.
@@ -961,7 +960,7 @@ fn classify_bytea_encoding(name: &str, args: &FunctionArguments) -> FunctionTran
 fn classify_unrecognised_function(
     name: &str,
     args: &FunctionArguments,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> FunctionTranslation {
     let class = crate::impls::sqlite_functions::classify(name);
     if class.sqlite_builtin
@@ -988,23 +987,23 @@ fn classify_unrecognised_function(
             if !known_arities.is_empty() {
                 return FunctionTranslation::Unsupported(format!(
                     "{name}/{arity} is not in the SQLiteGIS catalog; SQLiteGIS implements arities \
-                     {known_arities:?} for this name."
+                 {known_arities:?} for this name."
                 ));
             }
         }
         if postgis::is_postgis_shaped_name(name) {
             return FunctionTranslation::Unsupported(format!(
                 "{name}() looks like a PostGIS function but is not implemented by the SQLiteGIS \
-                 extension, see https://github.com/LucaCappelletti94/sqlitegis for the supported \
-                 list."
+             extension, see https://github.com/LucaCappelletti94/sqlitegis for the supported \
+             list."
             ));
         }
     }
 
     FunctionTranslation::Unsupported(format!(
         "{name}() is not a SQLite function and has no translation. Emitting it would produce SQL \
-         that fails with `no such function`. If the destination registers it, declare it with \
-         with_user_defined_functions([\"{name}\"])."
+     that fails with `no such function`. If the destination registers it, declare it with \
+     with_user_defined_functions([\"{name}\"])."
     ))
 }
 
@@ -1169,7 +1168,7 @@ fn json_set_target_function(
         None => None,
         Some(Expr::Value(ValueWithSpan { value: Value::Boolean(flag), .. })) => Some(*flag),
         Some(other) => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "{label} needs its fourth argument to be a literal true or false to choose the \
                  matching SQLite function, and {other} is decided at run time."
             )));
@@ -1180,9 +1179,9 @@ fn json_set_target_function(
         (false, None | Some(true)) => Ok("json_set"),
         (false, Some(false)) => Ok("json_replace"),
         (true, None | Some(false)) => Ok("json_insert"),
-        (true, Some(true)) => Err(crate::errors::Error::UnsupportedSQLiteFeature(
+        (true, Some(true)) => Err(crate::errors::Error::forward_refusal(
             "jsonb_insert with insert_after cannot be translated: it places the value after an \
-                 array element, and SQLite's json_insert only fills a path that is absent."
+             array element, and SQLite's json_insert only fills a path that is absent."
                 .to_string(),
         )),
     }
@@ -1231,7 +1230,7 @@ fn json_path_from_text_array(path: &Expr, label: &str) -> Result<String, crate::
     let mut json_path = String::from("$");
     for element in &elements {
         if element.parse::<i64>().is_ok() {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "{label} cannot translate the path element {element}, because PostgreSQL decides \
                  at run time whether it indexes an array or names an object key, and JSONPath has \
                  to choose one. Use json_set with an explicit $.a[0] path against the SQLite \
@@ -1258,7 +1257,7 @@ fn json_path_from_text_array(path: &Expr, label: &str) -> Result<String, crate::
 }
 
 fn json_path_not_literal(label: &str, path: &Expr) -> crate::errors::Error {
-    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    crate::errors::Error::forward_refusal(format!(
         "{label} needs a literal text[] path such as '{{a,b}}' or ARRAY['a','b'] so it can be \
          converted to the JSONPath SQLite takes, and {path} cannot be converted at translation \
          time."
@@ -1508,28 +1507,29 @@ fn build_concat_ws_expression(separator: &Expr, values: Vec<Expr>) -> Option<Exp
     build_concatenation(pieces)
 }
 
-impl Translator for Function {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Expr;
-
+crate::traits::translator::impl_contextual_translator!(Function => Expr);
+impl crate::traits::translator::TranslatorWithContext for Function {
     #[allow(clippy::too_many_lines)]
-    fn translate(
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         // SQLite 3.25 added native FILTER (WHERE ...) for aggregates; our floor
         // is 3.46, so CASE lowering is never needed. Translate the filter
         // expression now so every arm can keep it natively.
-        let translated_filter =
-            self.filter.as_ref().map(|f| f.translate(schema, options).map(Box::new)).transpose()?;
+        let translated_filter = self
+            .filter
+            .as_ref()
+            .map(|f| f.translate_with_warnings(schema, options, emit).map(Box::new))
+            .transpose()?;
         let func = Function { filter: translated_filter, ..self.clone() };
 
         // WITHIN GROUP is ordered-set aggregate syntax (percentile_cont, mode, ...).
         // SQLite has no equivalent; reject early with a clear error.
         if !func.within_group.is_empty() {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "{} with WITHIN GROUP (ORDER BY ...) is not supported in SQLite. \
                  Ordered-set aggregates have no SQLite equivalent.",
                 func.name
@@ -1545,7 +1545,7 @@ impl Translator for Function {
         // `nth_value`) and would ride out through the builtin passthrough
         // below, which rebuilds with `..func`.
         if let Some(null_treatment) = func.null_treatment {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "{} with {null_treatment} is not supported in SQLite, which has no null treatment \
                  for window functions. PostgreSQL does not accept it either, so the input is not \
                  valid on the source side.",
@@ -1567,7 +1567,7 @@ impl Translator for Function {
         {
             return Ok(Expr::Function(Function {
                 name: ObjectName::from(vec![Ident::new(routed)]),
-                args: translate_function_arguments::<Forward>(&func.args, schema, options)?,
+                args: translate_function_arguments::<Forward>(&func.args, schema, options, emit)?,
                 ..func
             }));
         }
@@ -1583,16 +1583,21 @@ impl Translator for Function {
                 schema,
             )
         {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(msg));
+            return Err(crate::errors::Error::forward_refusal(msg));
         }
 
         match translate_function(&func.name, &func.args, options) {
             FunctionTranslation::Rename(new_name) => {
                 let translated_args =
-                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
-                let translated_params =
-                    translate_function_arguments::<Forward>(&func.parameters, schema, options)?;
-                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+                    translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
+                let translated_params = translate_function_arguments::<Forward>(
+                    &func.parameters,
+                    schema,
+                    options,
+                    emit,
+                )?;
+                let translated_over =
+                    translate_window_type(func.over.as_ref(), schema, options, emit)?;
                 Ok(Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new(new_name)]),
                     parameters: translated_params,
@@ -1611,13 +1616,13 @@ impl Translator for Function {
                 // PostgreSQL's CONCAT ignores NULLs; SQLite's || propagates them.
                 let exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
-                    .map(|e| e.translate(schema, options))
+                    .map(|e| e.translate_with_warnings(schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?
                     .into_iter()
                     .map(wrap_with_coalesce)
                     .collect();
                 build_concatenation(exprs).ok_or_else(|| {
-                    crate::errors::Error::UnsupportedSQLiteFeature(
+                    crate::errors::Error::forward_refusal(
                         "CONCAT requires at least one argument".to_string(),
                     )
                 })
@@ -1627,17 +1632,17 @@ impl Translator for Function {
                 // separator between non-NULL values.
                 let mut exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
-                    .map(|e| e.translate(schema, options))
+                    .map(|e| e.translate_with_warnings(schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?;
                 if exprs.len() < 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    return Err(crate::errors::Error::forward_refusal(
                         "CONCAT_WS requires at least two arguments (separator and one value)"
                             .to_string(),
                     ));
                 }
                 let separator = exprs.remove(0);
                 build_concat_ws_expression(&separator, exprs).ok_or_else(|| {
-                    crate::errors::Error::UnsupportedSQLiteFeature(
+                    crate::errors::Error::forward_refusal(
                         "CONCAT_WS requires at least one value argument".to_string(),
                     )
                 })
@@ -1654,15 +1659,15 @@ impl Translator for Function {
                         s.to_lowercase()
                     }
                     _ => {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        return Err(crate::errors::Error::forward_refusal(
                             "date_trunc: the field argument must be a string literal \
-                             (e.g., date_trunc('day', timestamp))"
+                                         (e.g., date_trunc('day', timestamp))"
                                 .to_string(),
                         ));
                     }
                 };
 
-                let translated_ts = ts_expr.translate(schema, options)?;
+                let translated_ts = ts_expr.translate_with_warnings(schema, options, emit)?;
 
                 // The finer units are a format string that zeros the
                 // sub-granularity components rather than dropping them:
@@ -1696,10 +1701,10 @@ impl Translator for Function {
                         return Ok(build_date_trunc_year_span_call(translated_ts, 1000, 1));
                     }
                     other => {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        return Err(crate::errors::Error::forward_refusal(format!(
                             "date_trunc('{other}', ...) is not supported by this translation. \
-                             Supported: millisecond, second, minute, hour, day, week, month, \
-                             quarter, year, decade, century, millennium, and their plurals."
+                                         Supported: millisecond, second, minute, hour, day, week, month, \
+                                         quarter, year, decade, century, millennium, and their plurals."
                         )));
                     }
                 };
@@ -1718,29 +1723,33 @@ impl Translator for Function {
                         s.to_lowercase()
                     }
                     _ => {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        return Err(crate::errors::Error::forward_refusal(
                             "date_part: the field argument must be a string literal \
-                             (e.g., date_part('year', timestamp))"
+                                         (e.g., date_part('year', timestamp))"
                                 .to_string(),
                         ));
                     }
                 };
 
                 let key = parse_date_part_key(&field_str).ok_or_else(|| {
-                    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    crate::errors::Error::forward_refusal(format!(
                         "date_part('{field_str}', ...) is not supported in SQLite. \
-                         Supported fields: year, month, day, hour, minute, second, \
-                         week, dow, doy, epoch."
+                                 Supported fields: year, month, day, hour, minute, second, \
+                                 week, dow, doy, epoch."
                     ))
                 })?;
                 // The same composite `extract(epoch from (a - b))` takes,
                 // spelled as a function.
                 if key == DatePartKey::Epoch
-                    && let Some(result) = epoch_of_temporal_difference(&ts_expr, schema, options)
+                    && let Some(result) =
+                        epoch_of_temporal_difference(&ts_expr, schema, options, emit)
                 {
                     return result;
                 }
-                Ok(build_date_part_expr(key, ts_expr.translate(schema, options)?))
+                Ok(build_date_part_expr(
+                    key,
+                    ts_expr.translate_with_warnings(schema, options, emit)?,
+                ))
             }
             FunctionTranslation::ToChar => {
                 reject_over_on_scalar(&func)?;
@@ -1753,40 +1762,40 @@ impl Translator for Function {
                         s.clone()
                     }
                     _ => {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                            "to_char: format argument must be a string literal known at \
-                             translation time (e.g., to_char(col, 'YYYY-MM-DD')). Dynamic \
-                             formats cannot be translated."
-                                .to_string(),
-                        ));
+                        return Err(crate::errors::Error::forward_refusal("to_char: format argument must be a string literal known at \
+                                         translation time (e.g., to_char(col, 'YYYY-MM-DD')). Dynamic \
+                                         formats cannot be translated."
+                            .to_string()));
                     }
                 };
                 let mapped_format = pg_to_char_format_to_strftime(&format_str)?;
-                let translated_ts = ts_expr.translate(schema, options)?;
+                let translated_ts = ts_expr.translate_with_warnings(schema, options, emit)?;
                 Ok(build_strftime_call(&mapped_format, translated_ts))
             }
             FunctionTranslation::ToRandomFloat => Ok(crate::impls::idioms::uniform_random_float()),
             FunctionTranslation::ToSubstrLeft => {
                 let exprs = extract_exactly(&func.args, 2, "left")?;
-                let s = exprs[0].translate(schema, options)?;
-                let n = exprs[1].translate(schema, options)?;
+                let s = exprs[0].translate_with_warnings(schema, options, emit)?;
+                let n = exprs[1].translate_with_warnings(schema, options, emit)?;
                 Ok(left_closed_form(s, n))
             }
             FunctionTranslation::ToSubstrRight => {
                 let exprs = extract_exactly(&func.args, 2, "right")?;
-                let s = exprs[0].translate(schema, options)?;
-                let n = exprs[1].translate(schema, options)?;
+                let s = exprs[0].translate_with_warnings(schema, options, emit)?;
+                let n = exprs[1].translate_with_warnings(schema, options, emit)?;
                 Ok(right_closed_form(s, n))
             }
             FunctionTranslation::ToTimestampEpoch => {
                 let exprs = extract_exactly(&func.args, 1, "to_timestamp")?;
-                Ok(subsecond_timestamp_from_epoch(exprs[0].translate(schema, options)?))
+                Ok(subsecond_timestamp_from_epoch(
+                    exprs[0].translate_with_warnings(schema, options, emit)?,
+                ))
             }
             FunctionTranslation::ToModulo => {
                 // mod(a, b) → (a % b)
                 let exprs = extract_exactly(&func.args, 2, "mod")?;
-                let left = exprs[0].translate(schema, options)?;
-                let right = exprs[1].translate(schema, options)?;
+                let left = exprs[0].translate_with_warnings(schema, options, emit)?;
+                let right = exprs[1].translate_with_warnings(schema, options, emit)?;
                 Ok(Expr::Nested(Box::new(Expr::BinaryOp {
                     left: Box::new(left),
                     op: BinaryOperator::Modulo,
@@ -1796,8 +1805,8 @@ impl Translator for Function {
             FunctionTranslation::ToIntegerDiv => {
                 // div(a, b) → CAST(a / b AS INTEGER)
                 let exprs = extract_exactly(&func.args, 2, "div")?;
-                let left = exprs[0].translate(schema, options)?;
-                let right = exprs[1].translate(schema, options)?;
+                let left = exprs[0].translate_with_warnings(schema, options, emit)?;
+                let right = exprs[1].translate_with_warnings(schema, options, emit)?;
                 Ok(Expr::Cast {
                     expr: Box::new(Expr::BinaryOp {
                         left: Box::new(left),
@@ -1814,7 +1823,7 @@ impl Translator for Function {
                 match exprs.len() {
                     // trunc(x) → CAST(x AS INTEGER)
                     1 => {
-                        let expr = exprs[0].translate(schema, options)?;
+                        let expr = exprs[0].translate_with_warnings(schema, options, emit)?;
                         Ok(Expr::Cast {
                             expr: Box::new(expr),
                             data_type: DataType::Integer(None),
@@ -1823,11 +1832,11 @@ impl Translator for Function {
                         })
                     }
                     2 => {
-                        let x = exprs[0].translate(schema, options)?;
-                        truncate_to_scale(x, exprs[1], schema, options)
+                        let x = exprs[0].translate_with_warnings(schema, options, emit)?;
+                        truncate_to_scale(x, exprs[1], schema, options, emit)
                     }
                     _ => {
-                        Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        Err(crate::errors::Error::forward_refusal(
                             "trunc() requires 1 or 2 arguments".to_string(),
                         ))
                     }
@@ -1842,7 +1851,7 @@ impl Translator for Function {
                 let exprs = extract_exactly(&func.args, arg_count, func_label)?;
                 let translated = exprs
                     .iter()
-                    .map(|e| e.translate(schema, options))
+                    .map(|e| e.translate_with_warnings(schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(make_closed_form(format, &translated, fractional_seconds))
             }
@@ -1850,18 +1859,18 @@ impl Translator for Function {
                 // json_extract_path(j, 'k1', 'k2') → json_extract(j, '$.k1.k2')
                 let exprs = function_argument_exprs(&func.args);
                 if exprs.len() < 2 {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    return Err(crate::errors::Error::forward_refusal(
                         "json_extract_path requires at least 2 arguments".to_string(),
                     ));
                 }
-                let json_expr = exprs[0].translate(schema, options)?;
+                let json_expr = exprs[0].translate_with_warnings(schema, options, emit)?;
                 let mut path = String::from("$");
                 for key_expr in &exprs[1..] {
                     let Expr::Value(ValueWithSpan {
                         value: Value::SingleQuotedString(key), ..
                     }) = key_expr
                     else {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        return Err(crate::errors::Error::forward_refusal(
                             "json_extract_path requires string literal keys for SQLite translation"
                                 .to_string(),
                         ));
@@ -1891,9 +1900,9 @@ impl Translator for Function {
                 let exprs = function_argument_exprs(&func.args);
                 let label = if insert { "jsonb_insert" } else { "jsonb_set" };
                 let ([target, path, value] | [target, path, value, _]) = exprs.as_slice() else {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    return Err(crate::errors::Error::forward_refusal(format!(
                         "{label} takes a document, a path, a value, and optionally a flag, so {} \
-                         arguments cannot be translated.",
+                                 arguments cannot be translated.",
                         exprs.len()
                     )));
                 };
@@ -1902,12 +1911,15 @@ impl Translator for Function {
                 // The value is `jsonb` in PostgreSQL, so `'2'` means the number
                 // 2. SQLite reads a bare text argument as a string, which would
                 // store `"2"`, so it is wrapped rather than passed along.
-                let value =
-                    simple_function_expr("json", vec![value.translate(schema, options)?], None);
+                let value = simple_function_expr(
+                    "json",
+                    vec![value.translate_with_warnings(schema, options, emit)?],
+                    None,
+                );
                 Ok(simple_function_expr(
                     sqlite_name,
                     vec![
-                        target.translate(schema, options)?,
+                        target.translate_with_warnings(schema, options, emit)?,
                         string_literal(&json_path_from_text_array(path, label)?),
                         value,
                     ],
@@ -1917,7 +1929,7 @@ impl Translator for Function {
             FunctionTranslation::ToJson => {
                 let exprs = extract_exactly(&func.args, 1, "to_json")?;
                 let argument = exprs[0];
-                let translated = argument.translate(schema, options)?;
+                let translated = argument.translate_with_warnings(schema, options, emit)?;
 
                 // An argument that is already JSON needs reading, not
                 // converting: quoting it would turn the document into a
@@ -1937,12 +1949,12 @@ impl Translator for Function {
                         }
                         Some(false) => {}
                         None => {
-                            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                            return Err(crate::errors::Error::forward_refusal(format!(
                                 "to_json({argument}) names a column the translation schema cannot \
-                                 resolve to one declared type, and a json, jsonb, or array column \
-                                 must be read as a document where any other is quoted into a \
-                                 string. Include the column's table in the translation batch, or \
-                                 qualify the reference so the type is unambiguous."
+                                                 resolve to one declared type, and a json, jsonb, or array column \
+                                                 must be read as a document where any other is quoted into a \
+                                                 string. Include the column's table in the translation batch, or \
+                                                 qualify the reference so the type is unambiguous."
                             )));
                         }
                     }
@@ -1965,7 +1977,7 @@ impl Translator for Function {
                 let exprs = function_argument_exprs(&func.args);
                 let arguments = exprs
                     .iter()
-                    .map(|expr| expr.translate(schema, options))
+                    .map(|expr| expr.translate_with_warnings(schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?;
                 null_ignoring_extremum(
                     &arguments,
@@ -1983,36 +1995,39 @@ impl Translator for Function {
                         "round",
                         exprs
                             .iter()
-                            .map(|arg| arg.translate(schema, options))
+                            .map(|arg| arg.translate_with_warnings(schema, options, emit))
                             .collect::<Result<Vec<_>, _>>()?,
-                        translate_window_type(func.over.as_ref(), schema, options)?,
+                        translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     ));
                 };
                 let Some(scale) = numeric_scale(value, schema) else {
                     return Ok(simple_function_expr(
                         "round",
-                        vec![value.translate(schema, options)?, places.translate(schema, options)?],
-                        translate_window_type(func.over.as_ref(), schema, options)?,
+                        vec![
+                            value.translate_with_warnings(schema, options, emit)?,
+                            places.translate_with_warnings(schema, options, emit)?,
+                        ],
+                        translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     ));
                 };
                 let Some(target) =
                     integer_literal_value(places).and_then(|n| u32::try_from(n).ok())
                 else {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    return Err(crate::errors::Error::forward_refusal(format!(
                         "round({value}, {places}) over a NUMERIC needs the number of places as a \
-                         literal, since the value is held as minor units and the rounding is \
-                         integer arithmetic decided at translation time."
+                                 literal, since the value is held as minor units and the rounding is \
+                                 integer arithmetic decided at translation time."
                     )));
                 };
                 // Down to the requested places and back, so the result keeps
                 // the column's scale exactly as PostgreSQL keeps the numeric's.
-                let translated = value.translate(schema, options)?;
+                let translated = value.translate_with_warnings(schema, options, emit)?;
                 let rounded = rescale_minor_units(translated, scale, target.min(scale));
                 Ok(rescale_minor_units(rounded, target.min(scale), scale))
             }
             FunctionTranslation::StringAgg => {
                 let mut args =
-                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                    translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
                 if let FunctionArguments::List(list) = &mut args
                     && list.duplicate_treatment == Some(DuplicateTreatment::Distinct)
                     && list.args.len() == 2
@@ -2030,13 +2045,11 @@ impl Translator for Function {
                         )))) if separator == ","
                     );
                     if !comma_separated {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                            "string_agg(DISTINCT x, sep) has no SQLite form unless the separator \
-                             is a comma: group_concat takes no separator argument beside \
-                             DISTINCT, and it joins with a comma. Drop the DISTINCT and \
-                             de-duplicate in a subquery, or use a comma."
-                                .to_string(),
-                        ));
+                        return Err(crate::errors::Error::forward_refusal("string_agg(DISTINCT x, sep) has no SQLite form unless the separator \
+                                         is a comma: group_concat takes no separator argument beside \
+                                         DISTINCT, and it joins with a comma. Drop the DISTINCT and \
+                                         de-duplicate in a subquery, or use a comma."
+                            .to_string()));
                     }
                     list.args.truncate(1);
                 }
@@ -2047,9 +2060,10 @@ impl Translator for Function {
                         &func.parameters,
                         schema,
                         options,
+                        emit,
                     )?,
                     args,
-                    over: translate_window_type(func.over.as_ref(), schema, options)?,
+                    over: translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     filter: func.filter.clone(),
                     ..func
                 }))
@@ -2063,17 +2077,17 @@ impl Translator for Function {
                 // column anyway and counts a blob's bytes, so a UUID stored as
                 // one answered 16 for a query PostgreSQL never runs.
                 if resolves_to_non_textual_column(argument, schema) {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    return Err(crate::errors::Error::forward_refusal(format!(
                         "{label}({argument}) has no PostgreSQL meaning: {label} is defined over \
-                         text, and this column is not. PostgreSQL answers `function {label}(...) \
-                         does not exist`. Use length() for a binary column, or cast the operand \
-                         to text."
+                                 text, and this column is not. PostgreSQL answers `function {label}(...) \
+                                 does not exist`. Use length() for a binary column, or cast the operand \
+                                 to text."
                     )));
                 }
                 Ok(simple_function_expr(
                     "length",
-                    vec![argument.translate(schema, options)?],
-                    translate_window_type(func.over.as_ref(), schema, options)?,
+                    vec![argument.translate_with_warnings(schema, options, emit)?],
+                    translate_window_type(func.over.as_ref(), schema, options, emit)?,
                 ))
             }
             FunctionTranslation::Quote { nullable } => {
@@ -2086,7 +2100,7 @@ impl Translator for Function {
                 let quoted = simple_function_expr(
                     "quote",
                     vec![Expr::Cast {
-                        expr: Box::new(exprs[0].translate(schema, options)?),
+                        expr: Box::new(exprs[0].translate_with_warnings(schema, options, emit)?),
                         data_type: DataType::Text,
                         format: None,
                         kind: CastKind::Cast,
@@ -2105,17 +2119,17 @@ impl Translator for Function {
             }
             FunctionTranslation::JsonTypeof => {
                 let exprs = extract_exactly(&func.args, 1, "json_typeof")?;
-                let document = exprs[0].translate(schema, options)?;
+                let document = exprs[0].translate_with_warnings(schema, options, emit)?;
                 Ok(postgres_json_type_name(simple_function_expr("json_type", vec![document], None)))
             }
             FunctionTranslation::JsonAgg => {
                 let exprs = function_argument_exprs(&func.args);
                 let [argument] = exprs.as_slice() else {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    return Err(crate::errors::Error::forward_refusal(
                         "json_agg takes exactly one argument".to_string(),
                     ));
                 };
-                let element = argument.translate(schema, options)?;
+                let element = argument.translate_with_warnings(schema, options, emit)?;
                 // A JSON column is TEXT here, so json_group_array would quote
                 // the document into a string. Reading it back with json() is
                 // only safe for a column declared JSON: json('hello') is
@@ -2127,7 +2141,7 @@ impl Translator for Function {
                 };
 
                 let mut args =
-                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                    translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
                 replace_first_argument(&mut args, element);
                 let aggregate = Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new("json_group_array")]),
@@ -2135,9 +2149,10 @@ impl Translator for Function {
                         &func.parameters,
                         schema,
                         options,
+                        emit,
                     )?,
                     args,
-                    over: translate_window_type(func.over.as_ref(), schema, options)?,
+                    over: translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     filter: func.filter.clone(),
                     ..func
                 });
@@ -2149,16 +2164,18 @@ impl Translator for Function {
             }
             FunctionTranslation::JsonObjectAgg => {
                 // Translate the arguments (key and value) and build json_group_object.
-                let args = translate_function_arguments::<Forward>(&func.args, schema, options)?;
+                let args =
+                    translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
                 let aggregate = Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new("json_group_object")]),
                     parameters: translate_function_arguments::<Forward>(
                         &func.parameters,
                         schema,
                         options,
+                        emit,
                     )?,
                     args,
-                    over: translate_window_type(func.over.as_ref(), schema, options)?,
+                    over: translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     filter: func.filter.clone(),
                     ..func
                 });
@@ -2172,10 +2189,15 @@ impl Translator for Function {
                 // since array_agg accumulates regular scalar values, not JSON
                 // documents. The filter is kept natively (3.46 floor).
                 let translated_args_list =
-                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
-                let translated_params =
-                    translate_function_arguments::<Forward>(&func.parameters, schema, options)?;
-                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+                    translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
+                let translated_params = translate_function_arguments::<Forward>(
+                    &func.parameters,
+                    schema,
+                    options,
+                    emit,
+                )?;
+                let translated_over =
+                    translate_window_type(func.over.as_ref(), schema, options, emit)?;
                 let aggregate = Expr::Function(Function {
                     name: ObjectName::from(vec![Ident::new("json_group_array")]),
                     parameters: translated_params,
@@ -2192,37 +2214,51 @@ impl Translator for Function {
             }
             FunctionTranslation::AsciiCodePoint => {
                 let exprs = extract_exactly(&func.args, 1, "ascii")?;
-                Ok(crate::impls::idioms::ascii_code_point(exprs[0].translate(schema, options)?))
+                Ok(crate::impls::idioms::ascii_code_point(
+                    exprs[0].translate_with_warnings(schema, options, emit)?,
+                ))
             }
             FunctionTranslation::ToCbrt => {
                 let exprs = extract_exactly(&func.args, 1, "cbrt")?;
-                Ok(cube_root_closed_form(exprs[0].translate(schema, options)?))
+                Ok(cube_root_closed_form(exprs[0].translate_with_warnings(schema, options, emit)?))
             }
             FunctionTranslation::ToLowerHex => {
                 let exprs = extract_exactly(&func.args, 2, "encode")?;
-                let hex =
-                    simple_function_expr("hex", vec![exprs[0].translate(schema, options)?], None);
+                let hex = simple_function_expr(
+                    "hex",
+                    vec![exprs[0].translate_with_warnings(schema, options, emit)?],
+                    None,
+                );
                 Ok(simple_function_expr("lower", vec![hex], None))
             }
             FunctionTranslation::ToUnhex => {
                 let exprs = extract_exactly(&func.args, 2, "decode")?;
-                Ok(simple_function_expr("unhex", vec![exprs[0].translate(schema, options)?], None))
+                Ok(simple_function_expr(
+                    "unhex",
+                    vec![exprs[0].translate_with_warnings(schema, options, emit)?],
+                    None,
+                ))
             }
             FunctionTranslation::Array(kind) => {
-                array::translate_array_function(kind, &func.args, schema, options)
+                array::translate_array_function(kind, &func.args, schema, options, emit)
             }
             FunctionTranslation::Unsupported(msg) => {
-                Err(crate::errors::Error::UnsupportedSQLiteFeature(msg))
+                Err(crate::errors::Error::forward_refusal(msg))
             }
             FunctionTranslation::UnpairedSessionVariable(pattern) => {
                 Err(session_variable::unpaired(&pattern))
             }
             FunctionTranslation::PassThrough => {
                 let translated_args =
-                    translate_function_arguments::<Forward>(&func.args, schema, options)?;
-                let translated_params =
-                    translate_function_arguments::<Forward>(&func.parameters, schema, options)?;
-                let translated_over = translate_window_type(func.over.as_ref(), schema, options)?;
+                    translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
+                let translated_params = translate_function_arguments::<Forward>(
+                    &func.parameters,
+                    schema,
+                    options,
+                    emit,
+                )?;
+                let translated_over =
+                    translate_window_type(func.over.as_ref(), schema, options, emit)?;
                 Ok(Expr::Function(Function {
                     parameters: translated_params,
                     args: translated_args,

@@ -20,6 +20,6 @@ pub mod schema;
 pub use schema::Schema;
 pub mod translation_options;
 pub use translation_options::{
-    ArrayRepresentation, SessionVariableMapping, SessionVariablePattern, TranslationOptions,
-    UuidRepresentation, UuidVersion,
+    ArrayRepresentation, SessionVariableMapping, SessionVariablePattern, UuidRepresentation,
+    UuidVersion,
 };

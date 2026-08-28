@@ -60,7 +60,7 @@ fn unique_constraint_columns_translated() {
 #[test]
 fn pk_with_deferrable_characteristics_errors() {
     // PrimaryKey with DEFERRABLE should translate characteristics
-    // (characteristics translator returns UnsupportedSQLiteFeature error)
+    // The characteristics translator returns a typed refusal.
     let options = default_options();
     let result = translate_sql(
         r#"

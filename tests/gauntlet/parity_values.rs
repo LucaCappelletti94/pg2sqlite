@@ -34,9 +34,7 @@ mod stat_agg;
 use std::fmt::Write;
 
 use diesel::{dsl, pg::PgConnection, prelude::*, sqlite::SqliteConnection};
-use pg2sqlite::prelude::{
-    ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions, TranslationOptions, UuidRepresentation,
-};
+use pg2sqlite::prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 use rusqlite::Connection as RusqliteConn;
 use stat_agg::{STATISTICAL_AGGREGATES, register_statistical_aggregates};
 

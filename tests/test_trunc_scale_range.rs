@@ -119,11 +119,7 @@ fn an_out_of_range_scale_does_not_fall_through_to_pow() {
     let error = Pg2Sqlite::default()
         .sql(&format!("{FIXTURE}\nSELECT trunc(12345.6, 400) FROM t;"))
         .expect("parse")
-        .translate_to_sql(
-            &<Pg2SqliteOptions as pg2sqlite::prelude::TranslationOptions>::with_math_functions_available(
-                Pg2SqliteOptions::default(),
-            ),
-        )
+        .translate_to_sql(&Pg2SqliteOptions::default().with_math_functions_available())
         .expect_err("an out-of-range literal scale is refused whatever is available")
         .to_string();
     assert!(error.contains("400"), "{error}");

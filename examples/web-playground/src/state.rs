@@ -5,10 +5,7 @@
 //! a checkbox in the Advanced options, and vice versa.
 
 use dioxus::prelude::*;
-use pg2sqlite::prelude::{
-    ArrayRepresentation, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions,
-    UuidRepresentation,
-};
+use pg2sqlite::prelude::{ ArrayRepresentation, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation, };
 
 use crate::{runner::QueryOutcome, samples::SAMPLES};
 

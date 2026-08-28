@@ -11,16 +11,104 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::fmt;
 
 use sqlparser::parser::ParserError;
+
+/// Direction of a refused translation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationDirection {
+    /// PostgreSQL input targeting SQLite.
+    PostgreSqlToSqlite,
+    /// SQLite input targeting PostgreSQL.
+    SqliteToPostgreSql,
+}
+
+/// Stable reason category for a refused translation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalCategory {
+    /// The source construct is outside the accepted source language.
+    UnsupportedSourceSyntax,
+    /// The target cannot preserve the source construct's meaning.
+    UnrepresentableSemantics,
+}
+
+/// A translation refusal with matchable direction and reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslationRefusal {
+    direction: TranslationDirection,
+    category: RefusalCategory,
+    detail: String,
+}
+
+impl TranslationRefusal {
+    pub(crate) fn new(
+        direction: TranslationDirection,
+        category: RefusalCategory,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self { direction, category, detail: detail.into() }
+    }
+
+    /// Returns the refused translation direction.
+    #[must_use]
+    pub const fn direction(&self) -> TranslationDirection {
+        self.direction
+    }
+
+    /// Returns the stable refusal category.
+    #[must_use]
+    pub const fn category(&self) -> RefusalCategory {
+        self.category
+    }
+
+    /// Returns the detailed refusal message.
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl fmt::Display for TranslationRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let target = match self.direction {
+            TranslationDirection::PostgreSqlToSqlite => "SQLite",
+            TranslationDirection::SqliteToPostgreSql => "PostgreSQL",
+        };
+        write!(formatter, "Unsupported {target} feature: {}", self.detail)
+    }
+}
+
+impl core::error::Error for TranslationRefusal {}
+
+/// A SQL parse error whose parser implementation remains private.
+#[derive(Debug, thiserror::Error)]
+#[error("Parser error in '{input}': {source}")]
+pub struct SqlParseError {
+    input: String,
+    #[source]
+    source: ParserError,
+}
+
+impl SqlParseError {
+    pub(crate) fn new(input: impl Into<String>, source: ParserError) -> Self {
+        Self { input: input.into(), source }
+    }
+
+    /// Returns the SQL text that failed to parse.
+    #[must_use]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 /// Error enumeration that may occur during the translation between `PostgreSQL`
 /// and `SQLite`.
 pub enum Error {
-    /// Error that may occur during the parsing of a SQL statement.
-    #[error("Parser error in '{0}': {1}")]
-    ParserError(String, ParserError),
+    /// SQL input could not be parsed.
+    #[error(transparent)]
+    SqlParse(#[from] SqlParseError),
     /// Error that may occur during the construction of the schema.
     ///
     /// Boxed because the nested enum is 120 bytes, which would put this enum
@@ -48,37 +136,12 @@ pub enum Error {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     /// Error that may occur during git operations.
+    #[cfg(feature = "git")]
     #[error("Git error: {0}")]
     GitError(String),
-    /// SQL this crate generated could not be read back.
-    ///
-    /// Not a defect in the input. The statement was synthesised by the
-    /// translator, so reaching this means the generator emitted something it
-    /// cannot itself parse, and the translation that depends on it cannot be
-    /// trusted. Reported rather than panicked because a library must not abort
-    /// its caller's process over its own bug.
-    #[error(
-        "Internal pg2sqlite fault while {context}: {reason}. \
-         This is a bug in pg2sqlite rather than in the input. Generated SQL: {sql}"
-    )]
-    InternalGeneratedSql {
-        /// What the translator was generating, such as `RLS view`.
-        context: String,
-        /// Why the generated SQL could not be read back.
-        reason: String,
-        /// The SQL the translator produced.
-        sql: String,
-        /// The parser's own error, when the failure was a parse failure. A
-        /// statement-count mismatch has no underlying error, so it is `None`.
-        #[source]
-        source: Option<ParserError>,
-    },
-    /// Error when a feature is not supported in `PostgreSQL`.
-    #[error("Unknown PostgreSQL feature: {0}")]
-    UnknownPostgresFeature(String),
-    /// Error when a feature is not supported in `SQLite`.
-    #[error("Unsupported SQLite feature: {0}")]
-    UnsupportedSQLiteFeature(String),
+    /// Translation cannot preserve the source construct.
+    #[error(transparent)]
+    TranslationRefusal(#[from] TranslationRefusal),
     /// Error when reverse RLS scanning encounters an expression variant that is
     /// not explicitly handled.
     #[error(
@@ -118,7 +181,7 @@ pub enum Error {
         /// spelling that parses and then leaves input behind, such as `uuid
         /// oops`, has no underlying error, so it is `None`.
         #[source]
-        source: Option<ParserError>,
+        source: Option<SqlParseError>,
     },
     /// Error when a statement casts a session variable to a type other than the
     /// one its mapping records.
@@ -264,10 +327,120 @@ pub enum Error {
         trigger_name: String,
     },
 }
+impl Error {
+    pub(crate) fn unsupported_source_syntax(detail: impl Into<String>) -> Self {
+        TranslationRefusal::new(
+            TranslationDirection::PostgreSqlToSqlite,
+            RefusalCategory::UnsupportedSourceSyntax,
+            detail,
+        )
+        .into()
+    }
+    pub(crate) fn reverse_unsupported_source_syntax(detail: impl Into<String>) -> Self {
+        TranslationRefusal::new(
+            TranslationDirection::SqliteToPostgreSql,
+            RefusalCategory::UnsupportedSourceSyntax,
+            detail,
+        )
+        .into()
+    }
+
+    pub(crate) fn forward_refusal(detail: impl Into<String>) -> Self {
+        TranslationRefusal::new(
+            TranslationDirection::PostgreSqlToSqlite,
+            RefusalCategory::UnrepresentableSemantics,
+            detail,
+        )
+        .into()
+    }
+
+    pub(crate) fn reverse_refusal(detail: impl Into<String>) -> Self {
+        TranslationRefusal::new(
+            TranslationDirection::SqliteToPostgreSql,
+            RefusalCategory::UnrepresentableSemantics,
+            detail,
+        )
+        .into()
+    }
+}
 
 /// Boxes on the way in, so `?` still converts a schema error in one hop.
 impl From<sql_traits::errors::Error> for Error {
     fn from(error: sql_traits::errors::Error) -> Self {
         Self::SchemaError(Box::new(error))
+    }
+}
+
+/// Routes the extracted PL/pgSQL errors onto the two refusal categories this
+/// crate already uses.
+///
+/// Semantics SQLite cannot represent become `UnrepresentableSemantics`, and
+/// input it cannot read becomes `UnsupportedSourceSyntax`. The wording is kept
+/// as it was before the extraction, because tests and users match on it.
+impl From<sqlparser_plpgsql::Error> for Error {
+    fn from(error: sqlparser_plpgsql::Error) -> Self {
+        use sqlparser_plpgsql::Error as Extracted;
+        match error {
+            Extracted::ExceptionHandler { name } => {
+                Self::forward_refusal(format!(
+                    "trigger function '{name}' uses exception handling, which SQLite has no \
+                 equivalent for: a trigger body can abort the statement with RAISE(ABORT) but \
+                 cannot catch anything. Move the handling into the application, or drop the \
+                 handler and let the error surface."
+                ))
+            }
+            // NEW names the row the trigger writes, so it gets the message
+            // about emulation by UPDATE. Every other qualifier is a plpgsql
+            // record local, which SQLite has nothing to hold.
+            Extracted::QualifiedAssignment { qualifier, name }
+                if qualifier.eq_ignore_ascii_case("new") =>
+            {
+                Self::forward_refusal(format!(
+                    "assigning to `{qualifier}.{name}` has no SQLite equivalent here, since a \
+                     SQLite trigger cannot change the row it fired for. It is emulated with an \
+                     UPDATE over the written row, which needs the whole trigger function body to \
+                     be a run of assignments to columns the table declares, closed by RETURN NEW."
+                ))
+            }
+            Extracted::QualifiedAssignment { qualifier, name } => {
+                Self::forward_refusal(format!(
+                    "assigning to `{qualifier}.{name}` has no SQLite equivalent, since a SQLite \
+                 trigger body has no plpgsql record variable to hold the change. Compute the \
+                 value in the statement that reads it."
+                ))
+            }
+            Extracted::UnsupportedRaiseUsing { clause } => {
+                Self::forward_refusal(format!(
+                    "RAISE EXCEPTION USING {clause} is not supported; only USING MESSAGE = \
+                 '<string literal>' translates to SQLite"
+                ))
+            }
+            Extracted::Tokenization { name, body, source } => {
+                Self::unsupported_source_syntax(format!(
+                    "Failed to tokenize trigger function '{name}' body: {source}. Body: {body}"
+                ))
+            }
+            Extracted::MissingBeginBlock { name, body } => {
+                Self::unsupported_source_syntax(format!(
+                    "Trigger function '{name}' body must contain BEGIN...END block. Body: {body}"
+                ))
+            }
+            Extracted::MissingEndBlock { name, body } => {
+                Self::unsupported_source_syntax(format!(
+                    "Trigger function '{name}' body must end with END. Body: {body}"
+                ))
+            }
+            Extracted::UnterminatedDollarQuote { name } => {
+                Self::unsupported_source_syntax(format!(
+                    "Trigger function '{name}' body has an unterminated dollar-quoted string"
+                ))
+            }
+            Extracted::ParseStatements { name, body, source } => {
+                Self::unsupported_source_syntax(format!(
+                    "Failed to parse trigger function '{name}' body statements: {source}. Body: \
+                     {body}"
+                ))
+            }
+        }
     }
 }

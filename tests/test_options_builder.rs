@@ -15,7 +15,6 @@ use pg2sqlite::{
     prelude::{
         Pg2SqliteOptions, SessionVariableMapping, SessionVariablePattern, UuidRepresentation,
     },
-    traits::TranslationOptions,
 };
 use sqlparser::ast::{DataType, ExactNumberInfo};
 

@@ -14,14 +14,14 @@ use core::ops::ControlFlow;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
-#[cfg(feature = "std")]
+#[cfg(feature = "git")]
 use git2::Repository;
 use sql_traits::structs::{AccessResolution, ParseOptions, ParserDB};
 use sqlparser::ast::{
     AlterTableOperation, CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart,
     RenameTableNameKind, Statement, Value, ValueWithSpan, visit_expressions,
 };
-#[cfg(feature = "std")]
+#[cfg(feature = "git")]
 use tempfile::TempDir;
 
 use crate::{
@@ -34,15 +34,15 @@ use crate::{
             rls::generate_rls_audit_table,
         },
     },
-    options::Pg2SqliteOptions,
-    prelude::{ReverseTranslator, Translator},
-    traits::TranslationOptions,
+    options::{Pg2SqliteOptions, TranslationContext},
+    prelude::ReverseTranslator,
+    traits::translator::TranslatorWithContext,
 };
 
 /// Registers a GIN / GiST FTS index so the `@@ to_tsquery` rewrite can gate on
 /// a declared index. Without the catalog the rewrite referenced an undeclared
 /// `<table>_fts` virtual table, causing a runtime error.
-fn register_fts_index(create_index: &CreateIndex, options: &mut Pg2SqliteOptions) {
+fn register_fts_index(create_index: &CreateIndex, context: &mut TranslationContext<'_>) {
     if !matches!(
         create_index.using,
         Some(sqlparser::ast::IndexType::GIN | sqlparser::ast::IndexType::GiST)
@@ -54,7 +54,7 @@ fn register_fts_index(create_index: &CreateIndex, options: &mut Pg2SqliteOptions
     };
     let table_name = last_ident_value_or_display(&create_index.table_name);
     for col in columns {
-        options.add_fts_index(&table_name, &col);
+        context.add_fts_index(&table_name, &col);
     }
 }
 
@@ -66,7 +66,7 @@ fn register_fts_index(create_index: &CreateIndex, options: &mut Pg2SqliteOptions
 fn register_spatial_index(
     create_index: &CreateIndex,
     schema: &ParserDB,
-    options: &mut Pg2SqliteOptions,
+    context: &mut TranslationContext<'_>,
 ) {
     if !matches!(create_index.using, Some(IndexType::GiST)) {
         return;
@@ -77,7 +77,7 @@ fn register_spatial_index(
     };
     let table_name = last_ident_value_or_display(&create_index.table_name);
     for col in spatial_columns {
-        options.add_spatial_index(&table_name, &col);
+        context.add_spatial_index(&table_name, &col);
     }
 }
 
@@ -94,19 +94,19 @@ fn register_spatial_index(
 fn populate_prewalk_catalogs(
     statements: &[Statement],
     schema: &ParserDB,
-    options: &mut Pg2SqliteOptions,
+    context: &mut TranslationContext<'_>,
 ) {
-    let spatial_enabled = options.is_sqlitegis_enabled();
+    let spatial_enabled = context.is_sqlitegis_enabled();
     for statement in statements {
-        register_declared_object_name(statement, options);
+        register_declared_object_name(statement, context);
 
         let Statement::CreateIndex(create_index) = statement else {
             continue;
         };
         if spatial_enabled {
-            register_spatial_index(create_index, schema, options);
+            register_spatial_index(create_index, schema, context);
         }
-        register_fts_index(create_index, options);
+        register_fts_index(create_index, context);
     }
 }
 
@@ -143,7 +143,7 @@ fn statement_contains_like(statement: &Statement) -> bool {
 /// because [`Pg2Sqlite::schema_statements_for_translation`] keeps triggers out
 /// of the translation schema, and that exclusion is load-bearing, so this
 /// catalog cannot be replaced by reading names back off the schema.
-fn register_declared_object_name(statement: &Statement, options: &mut Pg2SqliteOptions) {
+fn register_declared_object_name(statement: &Statement, context: &mut TranslationContext<'_>) {
     let name = match statement {
         Statement::CreateTable(create_table) => Some(&create_table.name),
         Statement::CreateView(create_view) => Some(&create_view.name),
@@ -152,13 +152,13 @@ fn register_declared_object_name(statement: &Statement, options: &mut Pg2SqliteO
         _ => None,
     };
     if let Some(name) = name {
-        options.add_declared_object_name(last_ident_value_or_display(name));
+        context.add_declared_object_name(last_ident_value_or_display(name));
     }
 
     if let Statement::CreateTrigger(create_trigger) = statement
         && let Some(exec_body) = &create_trigger.exec_body
     {
-        options.add_trigger_function_name(last_ident_value_or_display(&exec_body.func_desc.name));
+        context.add_trigger_function_name(last_ident_value_or_display(&exec_body.func_desc.name));
     }
 }
 
@@ -169,11 +169,14 @@ pub struct Pg2Sqlite {
     pg_statements: Vec<Statement>,
 }
 
-impl Pg2Sqlite {
-    fn normalize_statements(statements: &[Statement]) -> Vec<Statement> {
-        statements.to_vec()
-    }
+struct PreparedTranslation {
+    schema: ParserDB,
+    options: Pg2SqliteOptions,
+    statements: Vec<Statement>,
+    warnings: Vec<crate::warnings::TranslationWarning>,
+}
 
+impl Pg2Sqlite {
     /// Refuses a table that is both renamed and placed under row level
     /// security.
     ///
@@ -227,7 +230,7 @@ impl Pg2Sqlite {
             else {
                 continue;
             };
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "table `{name}` is both renamed (`{old_name}` to `{new_name}`) and placed under \
                  row level security in the same translation unit. Row level security is realised \
                  as a backing table, two views, and five triggers named after the table, and a \
@@ -330,7 +333,12 @@ impl Pg2Sqlite {
     pub fn sql(mut self, sql: &str) -> Result<Self, crate::errors::Error> {
         let stmt =
             sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
-                .map_err(|e| crate::errors::Error::ParserError(sql.to_owned(), e))?;
+                .map_err(|source| {
+                    crate::errors::Error::from(crate::errors::SqlParseError::new(
+                        sql.to_owned(),
+                        source,
+                    ))
+                })?;
         for statement in stmt {
             self = self.statement(statement);
         }
@@ -453,13 +461,13 @@ impl Pg2Sqlite {
 
     /// Clones the git repository at `url` and loads its migrations.
     ///
-    /// Only available with the `std` feature.
+    /// Only available with the `git` feature.
     ///
     /// # Errors
     ///
     /// Returns an error if the repository cannot be cloned or migrations cannot
     /// be read.
-    #[cfg(feature = "std")]
+    #[cfg(feature = "git")]
     pub fn from_git(url: &str) -> Result<Self, crate::errors::Error> {
         let temp_dir = TempDir::new()?;
         Repository::clone(url, temp_dir.path())
@@ -467,26 +475,30 @@ impl Pg2Sqlite {
         Self::ups(temp_dir.path())
     }
 
-    fn translate_internal(
+    fn prepare_translation(
         &self,
         options: &Pg2SqliteOptions,
-    ) -> Result<Vec<Statement>, crate::errors::Error> {
+    ) -> Result<PreparedTranslation, crate::errors::Error> {
         use sql_traits::traits::DatabaseLike;
 
-        let normalized_statements = Self::normalize_statements(&self.pg_statements);
-        Self::reject_rename_of_secured_table(&normalized_statements)?;
+        let statements = &self.pg_statements;
+        Self::reject_rename_of_secured_table(statements)?;
 
-        let schema_statements = Self::schema_statements_for_translation(&normalized_statements);
+        let schema_statements = Self::schema_statements_for_translation(statements);
         let schema = Self::build_translation_schema(schema_statements)?;
 
-        let mut options = options.clone();
-        populate_prewalk_catalogs(&normalized_statements, &schema, &mut options);
-        let options = options;
+        let options = options.clone();
+        let mut context = TranslationContext::new(&options);
+        populate_prewalk_catalogs(statements, &schema, &mut context);
 
-        let translated = normalized_statements
-            .iter()
-            .map(|statement| statement.translate(&schema, &options))
-            .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?;
+        let mut warnings = Vec::new();
+        let translated = {
+            let mut emit = |warning| warnings.push(warning);
+            statements
+                .iter()
+                .map(|statement| statement.translate_with_warnings(&schema, &context, &mut emit))
+                .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?
+        };
 
         // If any table has RLS enabled and audit table name is configured,
         // prepend the audit table creation statement
@@ -494,8 +506,7 @@ impl Pg2Sqlite {
             .has_rls_tables()?
             .then(|| options.get_rls_audit_table_name())
             .flatten()
-            .map(generate_rls_audit_table)
-            .transpose()?;
+            .map(generate_rls_audit_table);
 
         // Every name the script defines has to be free when it defines it:
         // PostgreSQL has a namespace per schema and names a trigger within its
@@ -504,7 +515,7 @@ impl Pg2Sqlite {
             audit_table
                 .iter()
                 .map(|statement| (Source::Generated("the row-security audit table"), statement))
-                .chain(sourced(&normalized_statements, &translated)),
+                .chain(sourced(statements, &translated)),
         )?;
 
         let mut result: Vec<Statement> = translated.into_iter().flatten().collect();
@@ -533,7 +544,7 @@ impl Pg2Sqlite {
             result.insert(0, case_sensitive_like_pragma());
         }
 
-        Ok(result)
+        Ok(PreparedTranslation { schema, options, statements: result, warnings })
     }
 
     /// Translates loaded PostgreSQL statements to SQLite.
@@ -559,7 +570,7 @@ impl Pg2Sqlite {
         &self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
-        self.translate_internal(options)
+        Ok(self.prepare_translation(options)?.statements)
     }
 
     /// Translates the loaded PostgreSQL statements to SQLite and returns
@@ -588,9 +599,7 @@ impl Pg2Sqlite {
         &self,
         options: &Pg2SqliteOptions,
     ) -> Result<crate::warnings::TranslationReport, crate::errors::Error> {
-        let scope = crate::warnings::CollectorScope::install();
-        let statements = self.translate_internal(options)?;
-        let warnings = scope.take();
+        let PreparedTranslation { statements, warnings, .. } = self.prepare_translation(options)?;
         Ok(crate::warnings::TranslationReport { statements, warnings })
     }
 
@@ -636,8 +645,7 @@ impl Pg2Sqlite {
     /// let schema = translator.build_schema().unwrap();
     /// ```
     pub fn build_schema(&self) -> Result<ParserDB, crate::errors::Error> {
-        let normalized_statements = Self::normalize_statements(&self.pg_statements);
-        Self::build_translation_schema(normalized_statements)
+        Self::build_translation_schema(self.pg_statements.clone())
     }
 
     /// Logical-to-physical table map produced under `options`,
@@ -652,11 +660,13 @@ impl Pg2Sqlite {
     /// # Example
     ///
     /// ```
-    /// # use pg2sqlite::{pg2sqlite::Pg2Sqlite, options::Pg2SqliteOptions, manifest::WrapperKind};
+    /// # use pg2sqlite::{pg2sqlite::Pg2Sqlite, options::Pg2SqliteOptions, manifest::WrapperKind, traits::UuidRepresentation};
+    /// let options =
+    ///     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Text);
     /// let manifest = Pg2Sqlite::default()
     ///     .sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")
     ///     .unwrap()
-    ///     .translation_manifest(&Pg2SqliteOptions::default())
+    ///     .translation_manifest(&options)
     ///     .unwrap();
     /// assert_eq!(manifest[0].logical, "users");
     /// assert_eq!(manifest[0].wrapper, WrapperKind::Plain);
@@ -691,25 +701,27 @@ impl Pg2Sqlite {
             manifest::{ColumnManifestEntry, TableManifestEntry, WrapperKind},
         };
 
-        let schema = self.build_schema()?;
+        let prepared = self.prepare_translation(options)?;
+        let schema = &prepared.schema;
+        let options = &prepared.options;
 
         let role = options.get_session_user_role().and_then(|name| schema.role(name));
 
         let mut entries = Vec::new();
         for table in schema.tables() {
             if let Some(role) = role
-                && !table.can_select(role, &schema)?
+                && !table.can_select(role, schema)?
             {
                 continue;
             }
 
             let logical = table.table_name().to_string();
-            let physical = resolve_trigger_table_name(&logical, table, &schema, options)?;
+            let physical = resolve_trigger_table_name(&logical, table, schema, options)?;
             let readonly = match role {
-                Some(role) => !table.can_write(role, &schema)?,
+                Some(role) => !table.can_write(role, schema)?,
                 None => false,
             };
-            let wrapper = if table.has_row_level_security(&schema)? {
+            let wrapper = if table.has_row_level_security(schema)? {
                 WrapperKind::RlsView
             } else if readonly {
                 WrapperKind::ReadOnly
@@ -721,22 +733,21 @@ impl Pg2Sqlite {
             // the emitted type, so every other column reports None rather than
             // being omitted, which keeps the list a faithful column order.
             let columns = table
-                .columns(&schema)?
+                .columns(schema)?
                 .map(|column| {
                     let minor_unit_scale =
                         crate::impls::translator_impls::data_type::exact_numeric_info(
                             &column.attribute().data_type,
                         )
-                        .and_then(|info| {
-                            crate::impls::translator_impls::data_type::numeric_precision_and_scale(
-                                info,
-                            )
-                            .ok()
-                            .map(|(_, scale)| scale)
-                        });
-                    ColumnManifestEntry { name: column.column_name().to_string(), minor_unit_scale }
+                        .map(crate::impls::translator_impls::data_type::numeric_precision_and_scale)
+                        .transpose()?
+                        .map(|(_, scale)| scale);
+                    Ok(ColumnManifestEntry {
+                        name: column.column_name().to_string(),
+                        minor_unit_scale,
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, crate::errors::Error>>()?;
 
             entries.push(TableManifestEntry { logical, physical, wrapper, columns });
         }
@@ -837,7 +848,7 @@ impl Pg2Sqlite {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::errors::Error::ParserError`] if parsing fails,
+    /// Returns [`crate::errors::Error::SqlParse`] if parsing fails,
     /// [`crate::errors::Error::UnsupportedReverseStatement`] for non-DML
     /// statements, or [`crate::errors::Error::RlsTableDetected`] for RLS
     /// backing table references.
@@ -869,7 +880,12 @@ impl Pg2Sqlite {
     ) -> Result<Vec<Statement>, crate::errors::Error> {
         let stmts =
             sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, sqlite_sql)
-                .map_err(|e| crate::errors::Error::ParserError(sqlite_sql.to_owned(), e))?;
+                .map_err(|source| {
+                    crate::errors::Error::from(crate::errors::SqlParseError::new(
+                        sqlite_sql.to_owned(),
+                        source,
+                    ))
+                })?;
 
         stmts.iter().map(|stmt| self.reverse_translate(stmt, schema, options)).collect()
     }

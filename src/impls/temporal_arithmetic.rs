@@ -29,7 +29,7 @@ use super::{
 use crate::{
     errors::Error,
     prelude::{Pg2SqliteOptions, ReverseTranslator},
-    traits::Translator,
+    traits::translator::TranslatorWithContext,
 };
 
 /// The temporal type of an operand, as far as it resolves without
@@ -148,7 +148,8 @@ pub(crate) fn translate_temporal_binary_op(
     op: &BinaryOperator,
     right: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Option<Result<Expr, Error>> {
     if !matches!(op, BinaryOperator::Plus | BinaryOperator::Minus) {
         return None;
@@ -163,7 +164,7 @@ pub(crate) fn translate_temporal_binary_op(
     if left_kind.is_none() && right_kind.is_none() {
         return None;
     }
-    Some(rewrite(left, op, right, (left_kind, right_kind), schema, options))
+    Some(rewrite(left, op, right, (left_kind, right_kind), schema, options, emit))
 }
 
 fn rewrite(
@@ -172,41 +173,49 @@ fn rewrite(
     right: &Expr,
     kinds: (Option<TemporalKind>, Option<TemporalKind>),
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, Error> {
     let subtracting = matches!(op, BinaryOperator::Minus);
     match kinds {
         (Some(TemporalKind::Date), Some(TemporalKind::Date)) if subtracting => {
-            Ok(day_difference(left.translate(schema, options)?, right.translate(schema, options)?))
+            Ok(day_difference(
+                left.translate_with_warnings(schema, options, emit)?,
+                right.translate_with_warnings(schema, options, emit)?,
+            ))
         }
         (Some(TemporalKind::Date), None) if is_integral_expression(right, schema) => {
-            Ok(shift_date(left.translate(schema, options)?, op, right.translate(schema, options)?))
+            Ok(shift_date(
+                left.translate_with_warnings(schema, options, emit)?,
+                op,
+                right.translate_with_warnings(schema, options, emit)?,
+            ))
         }
         (None, Some(TemporalKind::Date))
             if !subtracting && is_integral_expression(left, schema) =>
         {
             Ok(shift_date(
-                right.translate(schema, options)?,
+                right.translate_with_warnings(schema, options, emit)?,
                 &BinaryOperator::Plus,
-                left.translate(schema, options)?,
+                left.translate_with_warnings(schema, options, emit)?,
             ))
         }
         (Some(_), Some(_)) if subtracting => {
-            Err(Error::UnsupportedSQLiteFeature(format!(
+            Err(Error::forward_refusal(format!(
                 "`{left} - {right}` yields an interval in PostgreSQL, and SQLite has no interval \
              type, so the difference has no value to hold. Wrap it in extract(epoch from ...) \
              for the difference in seconds, or subtract two dates for whole days."
             )))
         }
         (Some(_), Some(_)) => {
-            Err(Error::UnsupportedSQLiteFeature(format!(
+            Err(Error::forward_refusal(format!(
                 "`{left} + {right}` pairs a date with a time of day, which PostgreSQL answers as a \
              timestamp, and SQLite has no operator that combines the two. Store one timestamp \
              column, or select the date and the time separately."
             )))
         }
         _ => {
-            Err(Error::UnsupportedSQLiteFeature(format!(
+            Err(Error::forward_refusal(format!(
                 "`{left} {op} {right}` is date or time arithmetic over an operand this translation \
              cannot resolve. SQLite shifts a date only by a whole number of days and a timestamp \
              only by an INTERVAL, and neither is established here. Cast the operand to say which \
@@ -262,7 +271,8 @@ fn shift_date(date: Expr, op: &BinaryOperator, days: Expr) -> Expr {
 pub(crate) fn epoch_of_temporal_difference(
     expr: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Option<Result<Expr, Error>> {
     let mut operand = expr;
     while let Expr::Nested(inner) = operand {
@@ -276,23 +286,28 @@ pub(crate) fn epoch_of_temporal_difference(
     if left_kind == TemporalKind::Date && right_kind == TemporalKind::Date {
         return None;
     }
-    Some(subsec_epoch_difference(left, right, schema, options))
+    Some(subsec_epoch_difference(left, right, schema, options, emit))
 }
 
 fn subsec_epoch_difference(
     left: &Expr,
     right: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, Error> {
     // `'subsec'` is what makes `unixepoch` answer a float rather than whole
     // seconds, so it carries the fraction AND keeps the difference out of
     // integer division. Dropping it would make `extract(epoch from (a - b)) /
     // 60` divide as integers where PostgreSQL divides a numeric.
     Ok(Expr::Nested(Box::new(Expr::BinaryOp {
-        left: Box::new(build_subsecond_unixepoch_call(left.translate(schema, options)?)),
+        left: Box::new(build_subsecond_unixepoch_call(
+            left.translate_with_warnings(schema, options, emit)?,
+        )),
         op: BinaryOperator::Minus,
-        right: Box::new(build_subsecond_unixepoch_call(right.translate(schema, options)?)),
+        right: Box::new(build_subsecond_unixepoch_call(
+            right.translate_with_warnings(schema, options, emit)?,
+        )),
     })))
 }
 

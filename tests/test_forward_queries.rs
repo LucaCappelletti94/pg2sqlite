@@ -8,7 +8,7 @@ mod translate_helpers;
 use diesel::{RunQueryDsl, SqliteConnection, prelude::*};
 use helpers::translate_statements;
 use pg2sqlite::{
-    errors::Error,
+    errors::{Error, RefusalCategory},
     options::Pg2SqliteOptions,
     prelude::{Pg2Sqlite, Translator},
 };
@@ -402,7 +402,9 @@ fn order_by_expr_translation_rejects_with_fill_clause() {
         order_by_expr.translate(&schema, &options).expect_err("WITH FILL should not be supported");
     assert!(matches!(
         error,
-        Error::UnknownPostgresFeature(message) if message == "WITH FILL in ORDER BY"
+        Error::TranslationRefusal(refusal)
+            if refusal.category() == RefusalCategory::UnsupportedSourceSyntax
+                && refusal.detail() == "WITH FILL in ORDER BY"
     ));
 }
 

@@ -28,7 +28,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::{establish_connection, set_session_username};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 
 diesel::define_sql_function! {
     /// Reports whether the current backing write is exempt from RLS checks.
@@ -138,6 +138,25 @@ const CASCADED_RLS_SCHEMA: &str = "
         FOR INSERT WITH CHECK (owner = current_user);
     CREATE POLICY child_items_insert ON child_items
         FOR INSERT WITH CHECK (owner = current_user);
+    CREATE FUNCTION copy_parent_to_child() RETURNS TRIGGER AS $$
+    BEGIN
+        INSERT INTO child_items (id, owner) VALUES (NEW.id, NEW.owner);
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    CREATE TRIGGER copy_parent_to_child
+        AFTER INSERT ON parent_items
+        FOR EACH ROW EXECUTE FUNCTION copy_parent_to_child();
+";
+
+const POLICY_FUNCTION_SCHEMA: &str = "
+    CREATE TABLE policy_items (
+        id INTEGER PRIMARY KEY,
+        body TEXT NOT NULL
+    );
+    ALTER TABLE policy_items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY policy_items_select ON policy_items FOR SELECT USING (true);
+    CREATE POLICY policy_items_insert ON policy_items FOR INSERT WITH CHECK (policy_probe());
 ";
 
 // ---------------------------------------------------------------------------
@@ -168,6 +187,13 @@ mod schema {
     }
     diesel::table! {
         events_rls (id) {
+            id -> Integer,
+            owner -> Text,
+            msg -> Text,
+        }
+    }
+    diesel::table! {
+        events (id) {
             id -> Integer,
             owner -> Text,
             msg -> Text,
@@ -221,6 +247,20 @@ mod schema {
     diesel::table! {
         side_effects (id) {
             id -> Integer,
+        }
+    }
+    diesel::table! {
+        branch_items_rls (id) {
+            id -> Integer,
+            owner -> Text,
+            body -> Text,
+        }
+    }
+    diesel::table! {
+        branch_items (id) {
+            id -> Integer,
+            owner -> Text,
+            body -> Text,
         }
     }
 }
@@ -296,6 +336,86 @@ fn apply(pg: &str, opts: &Pg2SqliteOptions) -> SqliteConnection {
             .unwrap_or_else(|e| panic!("emitted DDL failed: {e}\n{statement}"));
     }
     conn
+}
+
+fn branch_schema(policies: &str) -> String {
+    format!(
+        "CREATE TABLE branch_items (
+             id INTEGER PRIMARY KEY,
+             owner TEXT NOT NULL,
+             body TEXT NOT NULL
+         );
+         ALTER TABLE branch_items ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY branch_select ON branch_items FOR SELECT USING (true);
+         {policies}"
+    )
+}
+
+struct UpdateGuardCase {
+    name: &'static str,
+    policies: &'static str,
+    seed_owner: &'static str,
+    update_owner: &'static str,
+}
+
+fn assert_update_guard_case(case: &UpdateGuardCase) {
+    let mut conn = apply_with_exemption(&branch_schema(case.policies));
+    set_write_exempt(true);
+    diesel::insert_into(schema::branch_items_rls::table)
+        .values((
+            schema::branch_items_rls::id.eq(1),
+            schema::branch_items_rls::owner.eq(case.seed_owner),
+            schema::branch_items_rls::body.eq("original"),
+        ))
+        .execute(&mut conn)
+        .unwrap_or_else(|error| panic!("{} seed failed: {error}", case.name));
+
+    set_write_exempt(false);
+    let _ = diesel::update(schema::branch_items::table.find(1))
+        .set((
+            schema::branch_items::owner.eq(case.update_owner),
+            schema::branch_items::body.eq("blocked"),
+        ))
+        .execute(&mut conn);
+    let stored = schema::branch_items_rls::table
+        .find(1)
+        .select((schema::branch_items_rls::owner, schema::branch_items_rls::body))
+        .first::<(String, String)>(&mut conn)
+        .unwrap();
+    assert_eq!(stored, (case.seed_owner.to_owned(), "original".to_owned()), "{}", case.name);
+
+    set_write_exempt(true);
+    diesel::update(schema::branch_items::table.find(1))
+        .set((
+            schema::branch_items::owner.eq(case.update_owner),
+            schema::branch_items::body.eq("restored"),
+        ))
+        .execute(&mut conn)
+        .unwrap_or_else(|error| panic!("{} exempt update failed: {error}", case.name));
+    let stored = schema::branch_items_rls::table
+        .find(1)
+        .select((schema::branch_items_rls::owner, schema::branch_items_rls::body))
+        .first::<(String, String)>(&mut conn)
+        .unwrap();
+    assert_eq!(stored, (case.update_owner.to_owned(), "restored".to_owned()), "{}", case.name);
+    set_write_exempt(false);
+}
+
+fn rendered_translation(pg: &str, opts: &Pg2SqliteOptions) -> Vec<String> {
+    Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate(opts)
+        .expect("translate")
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn apply_rendered(conn: &rusqlite::Connection, statements: &[String]) {
+    for statement in statements {
+        conn.execute_batch(statement).expect("apply translated statement");
+    }
 }
 
 /// Translates `pg_dml` in the context of `schema` and returns the tail
@@ -599,6 +719,196 @@ fn configured_but_unregistered_exemption_fails_closed() {
 }
 
 #[test]
+fn innocuous_nondeterministic_exemption_works_with_trusted_schema_off() {
+    use rusqlite::{Connection, functions::FunctionFlags};
+
+    let translated = rendered_translation(ZERO_POLICY_SCHEMA, &exemption_opts());
+    let conn = Connection::open_in_memory().expect("open");
+    conn.create_scalar_function(
+        "write_is_exempt",
+        0,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(true),
+    )
+    .expect("register innocuous write exemption");
+    conn.execute_batch("PRAGMA trusted_schema = OFF;").expect("disable trusted schema");
+    apply_rendered(&conn, &translated);
+
+    conn.execute("INSERT INTO posts_rls (body) VALUES ('restored')", [])
+        .expect("hardened SQLite accepts the exemption function in a trigger");
+    let count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM posts_rls", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn null_and_error_exemption_results_abort_writes() {
+    use rusqlite::{Connection, Error, functions::FunctionFlags};
+
+    let translated = rendered_translation(ZERO_POLICY_SCHEMA, &exemption_opts());
+    let null_conn = Connection::open_in_memory().expect("open");
+    null_conn
+        .create_scalar_function("write_is_exempt", 0, FunctionFlags::SQLITE_UTF8, |_| {
+            Ok(None::<bool>)
+        })
+        .expect("register nullable exemption");
+    apply_rendered(&null_conn, &translated);
+    assert!(null_conn.execute("INSERT INTO posts_rls (body) VALUES ('blocked')", []).is_err());
+
+    let error_conn = Connection::open_in_memory().expect("open");
+    error_conn
+        .create_scalar_function(
+            "write_is_exempt",
+            0,
+            FunctionFlags::SQLITE_UTF8,
+            |_| -> rusqlite::Result<bool> {
+                Err(Error::UserFunctionError(Box::new(std::io::Error::other("exemption failed"))))
+            },
+        )
+        .expect("register failing exemption");
+    apply_rendered(&error_conn, &translated);
+    assert!(error_conn.execute("INSERT INTO posts_rls (body) VALUES ('blocked')", []).is_err());
+}
+
+#[test]
+fn exemption_short_circuits_policy_calls_but_not_function_resolution() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use rusqlite::{Connection, functions::FunctionFlags};
+
+    let opts = exemption_opts().with_user_defined_functions(["policy_probe"]);
+    let translated = rendered_translation(POLICY_FUNCTION_SCHEMA, &opts);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let conn = Connection::open_in_memory().expect("open");
+    conn.create_scalar_function("write_is_exempt", 0, FunctionFlags::SQLITE_UTF8, |_| Ok(true))
+        .expect("register exemption");
+    let function_calls = Arc::clone(&calls);
+    conn.create_scalar_function("policy_probe", 0, FunctionFlags::SQLITE_UTF8, move |_| {
+        function_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(false)
+    })
+    .expect("register policy function");
+    apply_rendered(&conn, &translated);
+    conn.execute("INSERT INTO policy_items (id, body) VALUES (1, 'restored')", [])
+        .expect("exemption bypasses the policy");
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    let missing_conn = Connection::open_in_memory().expect("open");
+    missing_conn
+        .create_scalar_function("write_is_exempt", 0, FunctionFlags::SQLITE_UTF8, |_| Ok(true))
+        .expect("register exemption");
+    apply_rendered(&missing_conn, &translated);
+    let error = missing_conn
+        .execute("INSERT INTO policy_items (id, body) VALUES (1, 'blocked')", [])
+        .expect_err("SQLite must resolve every trigger function");
+    assert!(error.to_string().contains("policy_probe"));
+}
+
+#[test]
+fn keyword_shaped_exemption_function_name_is_quoted() {
+    use rusqlite::{Connection, functions::FunctionFlags};
+
+    let opts = strict_opts().with_write_exemption_function("select");
+    let translated = rendered_translation(ZERO_POLICY_SCHEMA, &opts);
+    let conn = Connection::open_in_memory().expect("open");
+    conn.create_scalar_function("select", 0, FunctionFlags::SQLITE_UTF8, |_| Ok(true))
+        .expect("register keyword-shaped exemption");
+    apply_rendered(&conn, &translated);
+    conn.execute("INSERT INTO posts_rls (body) VALUES ('restored')", [])
+        .expect("quoted exemption function remains callable");
+}
+
+#[test]
+fn hidden_exempt_row_still_reaches_monitoring() {
+    let opts = exemption_opts();
+    let mut conn = apply_with_exemption(INVISIBLE_INSERT_SCHEMA);
+    set_session_username("alice");
+    set_write_exempt(true);
+    run_dml(
+        &mut conn,
+        "INSERT INTO events (id, owner, msg) VALUES (1, 'bob', 'restored')",
+        INVISIBLE_INSERT_SCHEMA,
+        &opts,
+    )
+    .expect("exempt hidden insert");
+    set_write_exempt(false);
+
+    let audit = diesel::sql_query("SELECT violation_type, details FROM rls_audit")
+        .load::<AuditLog>(&mut conn)
+        .expect("audit rows");
+    assert_eq!(audit.len(), 1);
+    assert_eq!(schema::events::table.count().get_result::<i64>(&mut conn).unwrap(), 0);
+}
+
+#[test]
+fn remaining_write_guard_branches_honor_exemption() {
+    let insert_schema = branch_schema(
+        "CREATE POLICY branch_insert ON branch_items
+             AS RESTRICTIVE FOR INSERT WITH CHECK (true);",
+    );
+    let mut conn = apply_with_exemption(&insert_schema);
+    assert!(
+        diesel::insert_into(schema::branch_items::table)
+            .values((
+                schema::branch_items::id.eq(1),
+                schema::branch_items::owner.eq("alice"),
+                schema::branch_items::body.eq("blocked"),
+            ))
+            .execute(&mut conn)
+            .is_err()
+    );
+    set_write_exempt(true);
+    diesel::insert_into(schema::branch_items::table)
+        .values((
+            schema::branch_items::id.eq(1),
+            schema::branch_items::owner.eq("alice"),
+            schema::branch_items::body.eq("restored"),
+        ))
+        .execute(&mut conn)
+        .expect("exempt restrictive-only insert");
+    set_write_exempt(false);
+
+    for case in [
+        UpdateGuardCase {
+            name: "restrictive-only update",
+            policies: "CREATE POLICY branch_insert ON branch_items FOR INSERT WITH CHECK (true);
+                       CREATE POLICY branch_update ON branch_items
+                           AS RESTRICTIVE FOR UPDATE USING (true) WITH CHECK (true);",
+            seed_owner: "alice",
+            update_owner: "alice",
+        },
+        UpdateGuardCase {
+            name: "update without an applicable policy",
+            policies: "CREATE POLICY branch_insert ON branch_items
+                           FOR INSERT WITH CHECK (true);",
+            seed_owner: "alice",
+            update_owner: "alice",
+        },
+        UpdateGuardCase {
+            name: "allow-all using and expression check",
+            policies: "CREATE POLICY branch_insert ON branch_items FOR INSERT WITH CHECK (true);
+                       CREATE POLICY branch_update ON branch_items
+                           FOR UPDATE USING (true) WITH CHECK (owner = 'alice');",
+            seed_owner: "alice",
+            update_owner: "bob",
+        },
+        UpdateGuardCase {
+            name: "expression using and allow-all check",
+            policies: "CREATE POLICY branch_insert ON branch_items FOR INSERT WITH CHECK (true);
+                       CREATE POLICY branch_update ON branch_items
+                           FOR UPDATE USING (owner = 'alice') WITH CHECK (true);",
+            seed_owner: "bob",
+            update_owner: "bob",
+        },
+    ] {
+        assert_update_guard_case(&case);
+    }
+}
+
+#[test]
 fn exemption_covers_backing_and_view_insert() {
     let mut conn = apply_with_exemption(SHARED_READ_OWNER_WRITE_SCHEMA);
     set_session_username("alice");
@@ -763,17 +1073,9 @@ fn exempt_write_keeps_constraints_and_unrelated_triggers_active() {
 }
 
 #[test]
-fn nested_trigger_backing_write_inherits_exemption() {
+fn translated_trigger_view_write_inherits_exemption() {
     let mut conn = apply_with_exemption(CASCADED_RLS_SCHEMA);
     set_session_username("alice");
-    diesel::connection::SimpleConnection::batch_execute(
-        &mut conn,
-        "CREATE TRIGGER copy_parent_to_child AFTER INSERT ON parent_items_rls
-         BEGIN
-             INSERT INTO child_items_rls (id, owner) VALUES (NEW.id, NEW.owner);
-         END;",
-    )
-    .expect("install cascading trigger");
     set_write_exempt(true);
 
     diesel::insert_into(schema::parent_items_rls::table)

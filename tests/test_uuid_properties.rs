@@ -8,7 +8,7 @@ use diesel::{
     sql_types::{Blob, Text},
     sqlite::SqliteConnection,
 };
-use pg2sqlite::{prelude::*, traits::TranslationOptions};
+use pg2sqlite::prelude::*;
 use rosetta_uuid::Uuid;
 
 // Schema definitions for test tables

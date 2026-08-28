@@ -195,45 +195,12 @@ pub(crate) fn classify(name: &str) -> NameClass {
     }
 }
 
-/// Every name the maths build flag decides, exposed so a test can walk the same
-/// list the gate consults.
-#[cfg(feature = "std")]
-#[must_use]
-pub fn gated_math() -> &'static [&'static str] {
-    SQLITE_MATH
-}
-
-/// Whether SQLite resolves `name`, exposed so a test can ask this crate the
-/// question the sweep in `tests/gauntlet/reverse.rs` has to answer: a name both
-/// engines have is a judgement about meaning, decided name by name, and not
-/// something a catalogue sweep may rule on.
-///
-/// `name` must already be lower-cased.
-#[cfg(feature = "std")]
-#[must_use]
-pub fn sqlite_has(name: &str) -> bool {
-    classify(name).sqlite_builtin
-}
-
-/// Every name SQLite answers, the unconditional inventory and the gated maths
-/// one together, exposed so a test can walk the corpus the reverse direction
-/// has to cope with rather than keep a copy of it.
-///
-/// `TRANSLATOR_EMITTED` is deliberately absent: those arrive with sqlite-vec
-/// rather than with SQLite, so they say nothing about what a plain destination
-/// answers.
-#[cfg(feature = "std")]
-pub fn sqlite_names() -> impl Iterator<Item = &'static str> {
-    SQLITE_BUILTINS.iter().chain(SQLITE_AGGREGATES).chain(SQLITE_MATH).copied()
-}
-
 /// SQLite names PostgreSQL answers the same way, which are therefore the only
 /// ones the reverse direction may emit unchanged.
 ///
 /// Existence was measured against PostgreSQL 17's own `pg_catalog` rather than
-/// recalled, and `tests/gauntlet/reverse.rs` re-measures it against the running
-/// server so a name cannot be added here on faith. Two groups the catalogue
-/// query alone would have missed are in the list all the same: `coalesce` and
+/// recalled. Two groups the catalogue query alone would have missed are in the
+/// list all the same: `coalesce` and
 /// `nullif`, which PostgreSQL parses as expressions rather than functions, and
 /// the three `current_*` keywords, which both engines take bare.
 ///
@@ -311,16 +278,6 @@ const SHARED_WITH_POSTGRES: &[&str] = &[
     "upper",
 ];
 
-/// Every name this crate claims both engines answer the same way, exposed so
-/// the claim can be put to a real PostgreSQL rather than trusted.
-///
-/// `tests/gauntlet/reverse.rs` reads it and asks the server's own catalogue.
-#[cfg(feature = "std")]
-#[must_use]
-pub fn shared_with_postgres() -> &'static [&'static str] {
-    SHARED_WITH_POSTGRES
-}
-
 /// Names PostgreSQL answers and SQLite does not, which the reverse direction
 /// may therefore emit unchanged.
 ///
@@ -341,9 +298,8 @@ pub fn shared_with_postgres() -> &'static [&'static str] {
 ///
 /// The list is bounded by the names this crate already knows on the PostgreSQL
 /// side: what the forward direction matches on, plus what the reverse direction
-/// emits. `tests/gauntlet/reverse.rs` asks the running server about every
-/// entry, so nothing here rests on recall. Absent for that reason, measured
-/// against the pinned `postgres:18-alpine`: `uuid_generate_v4` needs the
+/// emits. Absent for that reason, measured against the pinned
+/// `postgres:18-alpine`: `uuid_generate_v4` needs the
 /// `uuid-ossp` extension, `multirange_agg` does not exist, and `truncate` names
 /// a statement rather than a function. `uuidv4` and `uuidv7` are present, since
 /// 18 introduced them and 18 is the pin.
@@ -545,20 +501,15 @@ const POSTGRES_ONLY: &[&str] = &[
     "xmlagg",
 ];
 
-/// Every name this crate claims PostgreSQL has and SQLite lacks, exposed for
-/// the same reason as [`shared_with_postgres`].
-#[cfg(feature = "std")]
-#[must_use]
-pub fn postgres_only() -> &'static [&'static str] {
-    POSTGRES_ONLY
-}
-
 #[cfg(test)]
 mod tests {
+    use sql_traits::structs::ParserDB;
+
     use super::{
         POSTGRES_ONLY, SHARED_WITH_POSTGRES, SQLITE_AGGREGATES, SQLITE_BUILTINS, SQLITE_MATH,
         TRANSLATOR_EMITTED, classify,
     };
+    use crate::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite};
 
     /// Binary search answers nonsense on an unsorted slice, and the failure
     /// would be a silently missing name rather than a panic.
@@ -626,6 +577,135 @@ mod tests {
                 SHARED_WITH_POSTGRES.binary_search(name).is_err(),
                 "{name} is in both PostgreSQL inventories"
             );
+        }
+    }
+    const DDL: &str = "CREATE TABLE t (id INT PRIMARY KEY, s TEXT, n INT, r REAL, bin BYTEA, \
+                       ts TIMESTAMP, payload JSONB);";
+
+    fn options() -> Pg2SqliteOptions {
+        Pg2SqliteOptions::default().with_math_functions_available()
+    }
+
+    fn schema() -> ParserDB {
+        Pg2Sqlite::default()
+            .sql(DDL)
+            .expect("fixture parses")
+            .build_schema()
+            .expect("fixture builds a schema")
+    }
+
+    fn reverse(sqlite: &str) -> Result<String, crate::errors::Error> {
+        let statements = Pg2Sqlite::default().reverse_sql(sqlite, &schema(), &options())?;
+        Ok(statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+    }
+
+    fn forward(postgres: &str) -> Result<String, crate::errors::Error> {
+        let statements =
+            Pg2Sqlite::default().sql(&format!("{DDL}{postgres};"))?.translate_to_sql(&options())?;
+        Ok(statements.last().cloned().unwrap_or_default())
+    }
+
+    fn reversible_call(name: &str) -> Option<(String, String)> {
+        const ARGUMENTS: [&str; 4] = ["s", "s, s", "s, s, s", ""];
+        ARGUMENTS.iter().find_map(|arguments| {
+            let sqlite = format!("SELECT {name}({arguments}) FROM t");
+            reverse(&sqlite).ok().map(|postgres| (sqlite, postgres))
+        })
+    }
+
+    #[test]
+    fn what_the_reverse_direction_emits_translates_back() {
+        let mut placed = 0usize;
+        let mut broken = Vec::new();
+        for name in SQLITE_BUILTINS.iter().chain(SQLITE_AGGREGATES).chain(SQLITE_MATH) {
+            let Some((sqlite, postgres)) = reversible_call(name) else {
+                continue;
+            };
+            placed += 1;
+            if let Err(error) = forward(postgres.trim_end_matches(';')) {
+                let message = error.to_string();
+                if message.contains("argument") && !message.contains("is not a SQLite function") {
+                    continue;
+                }
+                broken.push(format!("{sqlite}\n    -> {postgres}\n    !! {message}"));
+            }
+        }
+        assert!(placed >= 70, "the reverse direction should place most SQLite names, got {placed}");
+        assert!(
+            broken.is_empty(),
+            "the reverse direction emits {} thing(s) the forward direction refuses:\n{}",
+            broken.len(),
+            broken.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_sqlite_name_is_placed_or_refused_with_a_reason() {
+        let mut unexplained = Vec::new();
+        for name in SQLITE_BUILTINS.iter().chain(SQLITE_AGGREGATES).chain(SQLITE_MATH) {
+            if reversible_call(name).is_some() {
+                continue;
+            }
+            let error = reverse(&format!("SELECT {name}(s) FROM t"))
+                .expect_err("the inventory call was not reversible");
+            let message = error.to_string();
+            if message.contains("is not a name this crate knows PostgreSQL has") {
+                unexplained.push(format!("{name}: {message}"));
+            }
+        }
+        assert!(
+            unexplained.is_empty(),
+            "{} SQLite name(s) are refused going back with no reason given:\n{}",
+            unexplained.len(),
+            unexplained.join("\n")
+        );
+    }
+
+    fn math_call(name: &str) -> String {
+        match name {
+            "pi" => format!("{name}()"),
+            "atan2" | "log" | "mod" | "pow" | "power" | "trunc" => format!("{name}(a, b)"),
+            _ => format!("{name}(v)"),
+        }
+    }
+
+    fn translate_math(name: &str, enabled: bool) -> Result<String, crate::errors::Error> {
+        let query =
+            format!("CREATE TABLE t (v REAL, a REAL, b REAL); SELECT {} FROM t;", math_call(name));
+        let options = if enabled {
+            Pg2SqliteOptions::default().with_math_functions_available()
+        } else {
+            Pg2SqliteOptions::default()
+        };
+        Ok(Pg2Sqlite::default().sql(&query)?.translate_to_sql(&options)?.join("\n"))
+    }
+
+    #[test]
+    fn the_option_admits_every_name_the_maths_build_answers() {
+        for name in SQLITE_MATH {
+            translate_math(name, true)
+                .unwrap_or_else(|error| panic!("{name} is in the maths build: {error}"));
+        }
+    }
+
+    #[test]
+    fn without_the_option_no_gated_name_is_emitted() {
+        for name in SQLITE_MATH {
+            match translate_math(name, false) {
+                Ok(emitted) => {
+                    assert!(
+                        !emitted.to_lowercase().contains(&format!("{name}(")),
+                        "{name} was emitted without the maths declaration: {emitted}"
+                    );
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    assert!(
+                        message.contains("SQLITE_ENABLE_MATH_FUNCTIONS"),
+                        "the refusal for {name} should name the build, got: {message}"
+                    );
+                }
+            }
         }
     }
 }

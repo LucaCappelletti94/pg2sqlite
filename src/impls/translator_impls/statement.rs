@@ -7,10 +7,9 @@
 //! and there is no fifth. A silently empty result is a defect.
 //!
 //! 1. **Emitted.** One or more SQLite statements.
-//! 2. **Hard error.** `Err(Error::UnsupportedSQLiteFeature)`. This is the
-//!    DEFAULT. Use it when the construct carries meaning that cannot be
-//!    preserved, when dropping it could change results, and for anything
-//!    unrecognised.
+//! 2. **Hard error.** `Err(Error::TranslationRefusal)`. This is the DEFAULT.
+//!    Use it when the construct carries meaning that cannot be preserved, when
+//!    dropping it could change results, and for anything unrecognised.
 //! 3. **Warn and drop.** `drop_with_warning`, permitted ONLY when the drop
 //!    provably cannot affect a query result. If that cannot be stated in one
 //!    sentence, it is not this outcome.
@@ -43,27 +42,25 @@ use sql_traits::{
     structs::ParserDB,
     traits::{DatabaseLike, TableLike},
 };
-use sqlparser::{
-    ast::{
-        AlterTable, AlterTableOperation, AlterTableType, BeginTransactionKind, BinaryOperator,
-        CascadeOption, ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction,
-        CreateTableOptions, CreateView, Delete, DescribeAlias, DiscardObject, ExceptionWhen, Expr,
-        FromTable, Ident, Merge, ObjectName, ObjectType, Query, RenameTable, RenameTableNameKind,
-        Set, SqlOption, Statement, TableFactor, TableWithJoins, TransactionAccessMode,
-        TransactionMode, TransactionModifier, Truncate, TruncateIdentityOption, UnaryOperator,
-        VacuumStatement, ViewColumnDef, helpers::attached_token::AttachedToken,
-    },
-    dialect::SQLiteDialect,
+use sqlparser::ast::{
+    AlterTable, AlterTableOperation, AlterTableType, BeginTransactionKind, BinaryOperator,
+    CascadeOption, ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction,
+    CreateTableOptions, CreateView, Delete, DescribeAlias, DiscardObject, ExceptionWhen, Expr,
+    FromTable, Ident, Merge, ObjectName, ObjectNamePart, ObjectType, Query, RenameTable,
+    RenameTableNameKind, Set, SqlOption, Statement, TableFactor, TableWithJoins,
+    TransactionAccessMode, TransactionMode, TransactionModifier, TriggerEvent, TriggerPeriod,
+    Truncate, TruncateIdentityOption, UnaryOperator, VacuumStatement, ViewColumnDef,
+    helpers::attached_token::AttachedToken,
 };
 
 use crate::{
     errors::Error,
     impls::{
-        generated_sql::parse_generated_sql,
+        ast_builder,
         object_name::{
             append_suffix, last_ident, last_ident_value_or_display,
-            normalize_schema_qualified_object_name_for_sqlite, quote_identifier,
-            sql_string_literal, sqlite_unqualified_object_name, table_has_implicit_public_rls,
+            normalize_schema_qualified_object_name_for_sqlite, quoted_ident,
+            sqlite_unqualified_object_name, table_has_implicit_public_rls,
             table_with_implicit_public_lookup,
         },
         placeholder::rewrite_placeholders_for_sqlite,
@@ -71,14 +68,15 @@ use crate::{
             column::translate_column_def,
             condition_injection::inject_condition_into_dml_statement,
             rls::{
-                generate_readonly_rls_statements, generate_rls_statements, rename_table_for_rls,
-                validate_table_policies, write_guard_when,
+                generate_readonly_rls_statements_with_context,
+                generate_rls_statements_with_context, rename_table_for_rls,
+                validate_table_policies, write_guard_condition_expr,
             },
             vector::{generate_vec0_statements, has_vector_columns},
         },
     },
-    prelude::{Pg2SqliteOptions, Translator},
-    traits::TranslationOptions,
+    prelude::Pg2SqliteOptions,
+    traits::translator::TranslatorWithContext,
 };
 
 fn inject_condition(stmt: &mut Statement, condition: Expr) -> Result<(), crate::errors::Error> {
@@ -102,10 +100,11 @@ fn append_guarded_statements(
     branch_statements: &[Statement],
     guard: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<(), Error> {
     for stmt in branch_statements {
-        let mut translated_stmts = stmt.translate(schema, options)?;
+        let mut translated_stmts = stmt.translate_with_warnings(schema, options, emit)?;
         for translated_stmt in &mut translated_stmts {
             inject_condition(translated_stmt, guard.clone())?;
             output.push(translated_stmt.clone());
@@ -118,9 +117,12 @@ fn append_translated_create_trigger_statements(
     statements: &mut Vec<Statement>,
     create_trigger: &sqlparser::ast::CreateTrigger,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<(), Error> {
-    for (maybe_drop_trigger, translated_trigger) in create_trigger.translate(schema, options)? {
+    for (maybe_drop_trigger, translated_trigger) in
+        create_trigger.translate_with_warnings(schema, options, emit)?
+    {
         if let Some(drop_trigger) = maybe_drop_trigger {
             statements.push(drop_trigger.into());
         }
@@ -254,8 +256,12 @@ const REASON_HOST_REGISTERED: &str = "SQLite has no SQL form for this object. Wh
 /// Drops a statement with a `LossyDrop` warning. Outcome 3 of the reporting
 /// policy in this module's documentation, so `construct` names the statement
 /// and `reason` states why the drop cannot change a result.
-fn drop_with_warning(construct: &'static str, reason: &'static str) -> Vec<Statement> {
-    crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+fn drop_with_warning(
+    construct: &'static str,
+    reason: &'static str,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Vec<Statement> {
+    emit(crate::warnings::TranslationWarning::LossyDrop {
         construct: construct.to_string(),
         reason: reason.to_string(),
     });
@@ -265,7 +271,7 @@ fn drop_with_warning(construct: &'static str, reason: &'static str) -> Vec<State
 /// Refuses `statement`, outcome 2 of the reporting policy. Renders the
 /// statement so the message names what was refused rather than only its kind.
 fn reject_unsupported_statement(statement: &Statement, reason: &str) -> Error {
-    Error::UnsupportedSQLiteFeature(format!("{statement} has no SQLite equivalent. {reason}"))
+    Error::forward_refusal(format!("{statement} has no SQLite equivalent. {reason}"))
 }
 
 /// Emits a view definition, preceded by `DROP VIEW IF EXISTS` when it replaces
@@ -276,7 +282,8 @@ fn reject_unsupported_statement(statement: &Statement, reason: &str) -> Error {
 fn translate_view_definition(
     create_view: &CreateView,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     let mut statements: Vec<Statement> = Vec::new();
     if create_view.or_replace {
@@ -291,7 +298,7 @@ fn translate_view_definition(
             table: None,
         });
     }
-    statements.push(create_view.translate(schema, options)?.into());
+    statements.push(create_view.translate_with_warnings(schema, options, emit)?.into());
     Ok(statements)
 }
 
@@ -413,9 +420,12 @@ fn drop_label(object_type: ObjectType) -> &'static str {
 fn translate_create_table(
     create_table: &sqlparser::ast::CreateTable,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
-    if let Some(role_filtered) = translate_create_table_for_role(create_table, schema, options)? {
+    if let Some(role_filtered) =
+        translate_create_table_for_role(create_table, schema, options, emit)?
+    {
         return Ok(role_filtered);
     }
 
@@ -431,17 +441,24 @@ fn translate_create_table(
         .unwrap_or(create_table);
     if table.has_row_level_security(schema)? {
         validate_table_policies(table, schema, options)?;
-        let rls_statements = generate_rls_statements(table, schema, options)?;
-        return build_create_table_statements(create_table, schema, options, Some(rls_statements));
+        let rls_statements = generate_rls_statements_with_context(table, schema, options, emit)?;
+        return build_create_table_statements(
+            create_table,
+            schema,
+            options,
+            Some(rls_statements),
+            emit,
+        );
     }
 
-    build_create_table_statements(create_table, schema, options, None)
+    build_create_table_statements(create_table, schema, options, None, emit)
 }
 
 fn translate_create_table_for_role(
     create_table: &sqlparser::ast::CreateTable,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<Vec<Statement>>, Error> {
     let Some(role) = resolve_session_role(schema, options) else {
         return Ok(None);
@@ -458,17 +475,23 @@ fn translate_create_table_for_role(
     if table.has_row_level_security(schema)? {
         validate_table_policies(table, schema, options)?;
         let rls_statements = if is_readonly {
-            generate_readonly_rls_statements(table, schema, options)?
+            generate_readonly_rls_statements_with_context(table, schema, options, emit)?
         } else {
-            generate_rls_statements(table, schema, options)?
+            generate_rls_statements_with_context(table, schema, options, emit)?
         };
-        let statements =
-            build_create_table_statements(create_table, schema, options, Some(rls_statements))?;
+        let statements = build_create_table_statements(
+            create_table,
+            schema,
+            options,
+            Some(rls_statements),
+            emit,
+        )?;
         return Ok(Some(statements));
     }
 
     if is_readonly {
-        let mut statements = build_create_table_statements(create_table, schema, options, None)?;
+        let mut statements =
+            build_create_table_statements(create_table, schema, options, None, emit)?;
         append_readonly_deny_triggers(&mut statements, options)?;
         return Ok(Some(statements));
     }
@@ -479,32 +502,30 @@ fn translate_create_table_for_role(
 fn build_create_table_statements(
     create_table: &sqlparser::ast::CreateTable,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
     rls_statements: Option<Vec<Statement>>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     let mut statements = if let Some(rls_statements) = rls_statements {
-        let translated_table = create_table.translate(schema, options)?;
+        let translated_table = create_table.translate_with_warnings(schema, options, emit)?;
         let inner_table = rename_table_for_rls(&translated_table, options, schema);
         let mut statements = vec![Statement::CreateTable(inner_table)];
         statements.extend(rls_statements);
         statements
     } else {
-        vec![Statement::CreateTable(create_table.translate(schema, options)?)]
+        vec![Statement::CreateTable(create_table.translate_with_warnings(schema, options, emit)?)]
     };
 
-    append_vec0_statements_if_needed(&mut statements, create_table, schema, options)?;
+    append_vec0_statements_if_needed(&mut statements, create_table, schema, options, emit)?;
     Ok(statements)
 }
 
-/// Trigger event per read-only deny trigger, keyed by the verb appended after
-/// the configured reserved marker.
-const READONLY_DENY_TRIGGERS: [(&str, &str); 3] =
-    [("insert", "BEFORE INSERT"), ("update", "BEFORE UPDATE"), ("delete", "BEFORE DELETE")];
+const READONLY_DENY_TRIGGER_VERBS: [&str; 3] = ["insert", "update", "delete"];
 
 /// Appends deny triggers so ordinary writes to a read-only non-RLS table fail.
 fn append_readonly_deny_triggers(
     statements: &mut Vec<Statement>,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), Error> {
     let Some(Statement::CreateTable(create_table)) = statements.first() else {
         return Ok(());
@@ -514,27 +535,29 @@ fn append_readonly_deny_triggers(
         .map_or_else(|| sqlite_name.to_string(), |ident| ident.value.clone());
 
     let marker = options.get_readonly_deny_trigger_suffix();
-    let table_name_quoted = quote_identifier(&table_ident);
-    let deny_message =
-        sql_string_literal(&format!("permission denied: {table_ident} is read-only for this role"));
-    let when = write_guard_when(None, options);
+    let name = |value: &str| ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(value))]);
+    let message = format!("permission denied: {table_ident} is read-only for this role");
+    let condition = write_guard_condition_expr(None, options);
 
-    let dialect = SQLiteDialect {};
-    let mut triggers = Vec::with_capacity(READONLY_DENY_TRIGGERS.len());
-    for (verb, event) in READONLY_DENY_TRIGGERS {
+    let mut triggers = Vec::with_capacity(READONLY_DENY_TRIGGER_VERBS.len());
+    for verb in READONLY_DENY_TRIGGER_VERBS {
         let trigger_name = format!("{table_ident}{marker}_{verb}");
         reject_reserved_name_collision(options, &table_ident, &trigger_name)?;
-
-        let trigger_sql = format!(
-            "CREATE TRIGGER {} {event} ON {table_name_quoted}{when} \
-             BEGIN SELECT RAISE(ABORT, {deny_message}); END",
-            quote_identifier(&trigger_name)
-        );
-        triggers.extend(parse_generated_sql(
-            &dialect,
-            &trigger_sql,
-            "Failed to parse generated read-only deny trigger SQL",
-        )?);
+        let event = match verb {
+            "insert" => TriggerEvent::Insert,
+            "update" => TriggerEvent::Update(Vec::new()),
+            "delete" => TriggerEvent::Delete,
+            _ => unreachable!("the read-only trigger verb list is closed"),
+        };
+        triggers.push(ast_builder::trigger(
+            name(&trigger_name),
+            name(&table_ident),
+            TriggerPeriod::Before,
+            event,
+            false,
+            condition.clone(),
+            vec![ast_builder::raise_statement("ABORT", Some(&message), None)],
+        ));
     }
 
     statements.extend(triggers);
@@ -547,7 +570,7 @@ fn append_readonly_deny_triggers(
 /// (see `populate_declared_object_names`) because the translation schema omits
 /// index and trigger definitions.
 fn reject_reserved_name_collision(
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
     table_name: &str,
     trigger_name: &str,
 ) -> Result<(), Error> {
@@ -564,10 +587,11 @@ fn append_vec0_statements_if_needed(
     statements: &mut Vec<Statement>,
     create_table: &sqlparser::ast::CreateTable,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<(), Error> {
     if has_vector_columns(create_table) {
-        statements.extend(generate_vec0_statements(create_table, schema, options)?);
+        statements.extend(generate_vec0_statements(create_table, schema, options, emit)?);
     }
     Ok(())
 }
@@ -588,7 +612,7 @@ fn resolve_session_role<'a>(
 fn role_access_for_object_name(
     table_name: &sqlparser::ast::ObjectName,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<RoleTableAccess, Error> {
     let Some(role) = resolve_session_role(schema, options) else {
         return Ok(RoleTableAccess::Allow);
@@ -612,7 +636,8 @@ fn role_access_for_object_name(
 fn translate_alter_table(
     alter_table: &AlterTable,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     // An RLS table is translated as a view over a suffixed backing table, and
     // a view cannot be altered, so the statement lands on the backing table
@@ -634,7 +659,7 @@ fn translate_alter_table(
     let mut statements = Vec::with_capacity(alter_table.operations.len());
     for operation in &alter_table.operations {
         let Some(translated) =
-            translate_alter_table_operation(operation, alter_table, schema, options)?
+            translate_alter_table_operation(operation, alter_table, schema, options, emit)?
         else {
             continue;
         };
@@ -702,7 +727,7 @@ fn reject_untranslatable_alter_table_clauses(
     };
 
     if let Some(clause) = foreign {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "ALTER TABLE {} carries {clause}. PostgreSQL rejects that spelling, so a file \
              containing it is not the input this crate translates. Remove the clause.",
             alter_table.name
@@ -710,7 +735,7 @@ fn reject_untranslatable_alter_table_clauses(
     }
 
     if table_with_implicit_public_lookup(schema, &alter_table.name)?.is_none() {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "ALTER TABLE {} names a table the translation schema does not declare. The schema \
              is built from the statements in the batch rather than from a live database, so an \
              absent table almost always means its CREATE TABLE was left out. Include the \
@@ -742,7 +767,8 @@ fn translate_alter_table_operation(
     operation: &AlterTableOperation,
     alter_table: &AlterTable,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<AlterTableOperation>, Error> {
     match operation {
         AlterTableOperation::RenameTable { table_name } => {
@@ -773,6 +799,7 @@ fn translate_alter_table_operation(
                     &[],
                     schema,
                     options,
+                    emit,
                 )?,
                 column_position: column_position.clone(),
             }))
@@ -784,11 +811,11 @@ fn translate_alter_table_operation(
         | AlterTableOperation::ForceRowLevelSecurity
         | AlterTableOperation::NoForceRowLevelSecurity => Ok(None),
         other => {
-            Err(Error::UnsupportedSQLiteFeature(format!(
+            Err(Error::forward_refusal(format!(
                 "ALTER TABLE {} {other} has no SQLite equivalent. SQLite can only rename a table or \
-             column, add a column, and drop a column, so this operation cannot be applied to an \
-             existing table without rebuilding it. Express the intent in the table's CREATE TABLE \
-             definition instead.",
+                     column, add a column, and drop a column, so this operation cannot be applied to an \
+                     existing table without rebuilding it. Express the intent in the table's CREATE TABLE \
+                     definition instead.",
                 alter_table.name
             )))
         }
@@ -809,7 +836,7 @@ fn reject_unsupported_added_column(column_def: &ColumnDef, table_name: &str) -> 
             ColumnOption::Unique(_) => "UNIQUE",
             _ => continue,
         };
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "ALTER TABLE {table_name} ADD COLUMN {} cannot carry a {constraint} constraint: \
              SQLite rejects it because enforcing the constraint would require rewriting the \
              table. Declare the column without it, then add a separate unique index.",
@@ -832,7 +859,7 @@ fn reject_untranslatable_rename_target(
     alter_table: &AlterTable,
 ) -> Result<(), Error> {
     let RenameTableNameKind::To(target) = table_name else {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "ALTER TABLE {} RENAME AS is MySQL syntax, which PostgreSQL rejects and SQLite rejects \
              with `near \"AS\": syntax error`. Write RENAME TO instead.",
             alter_table.name
@@ -840,7 +867,7 @@ fn reject_untranslatable_rename_target(
     };
 
     if target.0.len() > 1 {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "ALTER TABLE {} RENAME TO {target} cannot name a schema for the new table. PostgreSQL \
              rejects a qualified target, since a rename never moves a table between schemas, and \
              SQLite rejects it too. Name the new table alone.",
@@ -864,7 +891,7 @@ fn reject_rename_table(renames: &[RenameTable]) -> Error {
         .collect::<Vec<_>>()
         .join("; ");
 
-    Error::UnsupportedSQLiteFeature(format!(
+    Error::forward_refusal(format!(
         "RENAME TABLE is MySQL syntax, which PostgreSQL rejects, and SQLite has no RENAME \
          statement at all. Write it as PostgreSQL would: {rewritten}."
     ))
@@ -888,15 +915,16 @@ fn reject_rename_table(renames: &[RenameTable]) -> Error {
 fn translate_truncate(
     truncate: &Truncate,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     reject_untranslatable_truncate_options(truncate)?;
 
     if matches!(truncate.identity, Some(TruncateIdentityOption::Continue)) {
-        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+        emit(crate::warnings::TranslationWarning::LossyDrop {
             construct: "TRUNCATE ... CONTINUE IDENTITY".to_string(),
             reason: "SQLite keeps no sequence counter for a rowid alias, so the identifiers \
-                     restart rather than continuing. The rows are still deleted."
+                 restart rather than continuing. The rows are still deleted."
                 .to_string(),
         });
     }
@@ -955,7 +983,7 @@ fn translate_truncate(
             // so there is nothing else for that pass to translate.
             statements.push(Statement::Delete(delete));
         } else {
-            statements.push(delete.translate(schema, options)?);
+            statements.push(delete.translate_with_warnings(schema, options, emit)?);
         }
     }
 
@@ -994,7 +1022,7 @@ fn reject_untranslatable_truncate_options(truncate: &Truncate) -> Result<(), Err
 
     match unsupported {
         Some((option, reason)) => {
-            Err(Error::UnsupportedSQLiteFeature(format!(
+            Err(Error::forward_refusal(format!(
                 "TRUNCATE {names} ... {option} cannot be translated to SQLite because {reason}"
             )))
         }
@@ -1032,7 +1060,7 @@ fn reject_copy(source: &CopySource, to: bool, target: &CopyTarget) -> Error {
          with INSERT statements instead."
     };
 
-    Error::UnsupportedSQLiteFeature(format!("{subject} cannot be translated. {advice}"))
+    Error::forward_refusal(format!("{subject} cannot be translated. {advice}"))
 }
 
 /// Rejects `MERGE`, which has no SQLite form.
@@ -1052,7 +1080,7 @@ fn reject_copy(source: &CopySource, to: bool, target: &CopyTarget) -> Error {
 /// set, which the translation schema filters out, so the check is not even
 /// possible today.
 fn reject_merge(merge: &Merge) -> Error {
-    Error::UnsupportedSQLiteFeature(format!(
+    Error::forward_refusal(format!(
         "MERGE INTO {} cannot be translated. SQLite has no MERGE statement, and \
          INSERT ... ON CONFLICT DO UPDATE is not equivalent: its conflict target must be a \
          PRIMARY KEY or UNIQUE constraint rather than an arbitrary join condition, and it applies \
@@ -1083,7 +1111,7 @@ fn reject_prepared_statement(keyword: &str, name: Option<&str>) -> Error {
         None => keyword.to_owned(),
     };
 
-    Error::UnsupportedSQLiteFeature(format!(
+    Error::forward_refusal(format!(
         "{subject} cannot be translated. SQLite has no server-side prepared statements: preparing \
          is a C API call rather than a SQL statement, so there is no name to prepare, execute, or \
          deallocate. Inline the statement body at each use site, and let your SQLite driver \
@@ -1104,23 +1132,22 @@ fn translate_explain(
     analyze: bool,
     statement: &Statement,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     if analyze {
-        return Err(Error::UnsupportedSQLiteFeature(
-            "EXPLAIN ANALYZE cannot be translated. PostgreSQL runs the statement and reports real \
-             timings, while SQLite's EXPLAIN QUERY PLAN only describes the plan and never executes, \
-             so any write the statement performs would be lost. Run the statement itself, or use a \
-             plain EXPLAIN for the plan."
-                .to_owned(),
-        ));
+        return Err(Error::forward_refusal("EXPLAIN ANALYZE cannot be translated. PostgreSQL runs the statement and reports real \
+                 timings, while SQLite's EXPLAIN QUERY PLAN only describes the plan and never executes, \
+                 so any write the statement performs would be lost. Run the statement itself, or use a \
+                 plain EXPLAIN for the plan."
+            .to_owned()));
     }
 
-    let mut translated = statement.translate(schema, options)?;
+    let mut translated = statement.translate_with_warnings(schema, options, emit)?;
     if translated.len() != 1 {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "EXPLAIN cannot be translated because its statement expands to {} SQLite statements, \
-             and a plan can only describe one. Explain the individual statements instead.",
+         and a plan can only describe one. Explain the individual statements instead.",
             translated.len()
         )));
     }
@@ -1174,6 +1201,7 @@ fn translate_start_transaction(
     modifier: Option<TransactionModifier>,
     statements: &[Statement],
     exception: Option<&[ExceptionWhen]>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     if !statements.is_empty() || exception.is_some() {
         return Err(reject_unsupported_statement(
@@ -1203,7 +1231,7 @@ fn translate_start_transaction(
     };
 
     if !modes.is_empty() {
-        drop_with_warning("BEGIN", REASON_TRANSACTION_CHARACTERISTICS);
+        drop_with_warning("BEGIN", REASON_TRANSACTION_CHARACTERISTICS, emit);
     }
 
     Ok(vec![Statement::StartTransaction {
@@ -1266,7 +1294,10 @@ fn translate_rollback(chain: bool, savepoint: Option<&Ident>) -> Vec<Statement> 
 /// Rebuilding one table is not expressible, and vacuuming the whole database
 /// achieves what the statement asked for on a larger scope, so this is a warned
 /// drop rather than an error.
-fn translate_vacuum(vacuum: &VacuumStatement) -> Vec<Statement> {
+fn translate_vacuum(
+    vacuum: &VacuumStatement,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Vec<Statement> {
     let bare = VacuumStatement {
         full: false,
         sort_only: false,
@@ -1279,7 +1310,7 @@ fn translate_vacuum(vacuum: &VacuumStatement) -> Vec<Statement> {
     };
 
     if *vacuum != bare {
-        drop_with_warning("VACUUM", REASON_VACUUM_OPTIONS);
+        drop_with_warning("VACUUM", REASON_VACUUM_OPTIONS, emit);
     }
 
     vec![Statement::Vacuum(bare)]
@@ -1509,7 +1540,11 @@ fn is_enabled(values: &[Expr]) -> bool {
 /// otherwise. Turning the parameter off therefore means the input was already
 /// parsed under the wrong rule before reaching this translator, and reporting
 /// it is the only thing left that helps.
-fn translate_set(statement: &Statement, set: &Set) -> Result<Vec<Statement>, Error> {
+fn translate_set(
+    statement: &Statement,
+    set: &Set,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Vec<Statement>, Error> {
     if let Set::SingleAssignment { variable, values, .. } = set
         && let Some(setting) = last_ident(variable)
     {
@@ -1523,7 +1558,7 @@ fn translate_set(statement: &Statement, set: &Set) -> Result<Vec<Statement>, Err
             ));
         }
         if is_result_neutral_setting(name) {
-            return Ok(drop_with_warning("SET", REASON_SET_NEUTRAL));
+            return Ok(drop_with_warning("SET", REASON_SET_NEUTRAL, emit));
         }
     }
 
@@ -1551,12 +1586,13 @@ fn translate_set(statement: &Statement, set: &Set) -> Result<Vec<Statement>, Err
 /// translation schema.
 fn translate_create_function(
     create_function: &CreateFunction,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Vec<Statement> {
     if options.has_trigger_function_name(&last_ident_value_or_display(&create_function.name)) {
         return Vec::new();
     }
-    drop_with_warning("CREATE FUNCTION", REASON_FUNCTION)
+    drop_with_warning("CREATE FUNCTION", REASON_FUNCTION, emit)
 }
 
 /// `DISCARD PLANS` and `DISCARD SEQUENCES` throw away server caches SQLite does
@@ -1566,10 +1602,11 @@ fn translate_create_function(
 fn translate_discard(
     statement: &Statement,
     object_type: DiscardObject,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     match object_type {
         DiscardObject::PLANS | DiscardObject::SEQUENCES => {
-            Ok(drop_with_warning("DISCARD", REASON_HINT))
+            Ok(drop_with_warning("DISCARD", REASON_HINT, emit))
         }
         DiscardObject::ALL | DiscardObject::TEMP => {
             Err(reject_unsupported_statement(
@@ -1582,24 +1619,24 @@ fn translate_discard(
     }
 }
 
-impl Translator for Statement {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Vec<Statement>;
-
+crate::traits::translator::impl_contextual_translator!(Statement => Vec<Statement>);
+impl crate::traits::translator::TranslatorWithContext for Statement {
     #[allow(clippy::too_many_lines)]
-    fn translate(
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         let mut translated: Vec<Statement> = match self {
             Self::CreateTable(create_table) => {
-                translate_create_table(create_table, schema, options)?
+                translate_create_table(create_table, schema, options, emit)?
             }
             Self::CreateIndex(create_index) => {
                 match role_access_for_object_name(&create_index.table_name, schema, options)? {
-                    RoleTableAccess::Allow => create_index.translate(schema, options)?,
+                    RoleTableAccess::Allow => {
+                        create_index.translate_with_warnings(schema, options, emit)?
+                    }
                     RoleTableAccess::Deny => Vec::new(),
                 }
             }
@@ -1617,12 +1654,15 @@ impl Translator for Statement {
                     create_trigger,
                     schema,
                     options,
+                    emit,
                 )?;
                 statements
             }
-            Self::Insert(insert) => vec![insert.translate(schema, options)?.into()],
+            Self::Insert(insert) => {
+                vec![insert.translate_with_warnings(schema, options, emit)?.into()]
+            }
             Self::CreateView(create_view) => {
-                translate_view_definition(create_view, schema, options)?
+                translate_view_definition(create_view, schema, options, emit)?
             }
             // `ALTER VIEW v AS ...` redefines a view, which is what
             // `CREATE OR REPLACE VIEW` does, so it takes the same path. Every
@@ -1634,12 +1674,17 @@ impl Translator for Statement {
                     &alter_view_as_create_view(name, columns, query, with_options),
                     schema,
                     options,
+                    emit,
                 )?
             }
-            Self::Update(update) => vec![Statement::Update(update.translate(schema, options)?)],
-            Self::Delete(delete) => vec![delete.translate(schema, options)?],
+            Self::Update(update) => {
+                vec![Statement::Update(update.translate_with_warnings(schema, options, emit)?)]
+            }
+            Self::Delete(delete) => vec![delete.translate_with_warnings(schema, options, emit)?],
             Self::Query(query) => {
-                vec![Statement::Query(Box::new(query.translate(schema, options)?))]
+                vec![Statement::Query(Box::new(
+                    query.translate_with_warnings(schema, options, emit)?,
+                ))]
             }
             Self::If(if_stmt) => {
                 let Some(if_condition) = &if_stmt.if_block.condition else {
@@ -1648,11 +1693,12 @@ impl Translator for Statement {
                     return Err(reject_unsupported_statement(
                         self,
                         "The IF block carries no condition, so its branches cannot be turned into \
-                         guarded statements.",
+             guarded statements.",
                     ));
                 };
 
-                let translated_if_condition = if_condition.translate(schema, options)?;
+                let translated_if_condition =
+                    if_condition.translate_with_warnings(schema, options, emit)?;
                 let mut statements = Vec::new();
                 append_guarded_statements(
                     &mut statements,
@@ -1660,6 +1706,7 @@ impl Translator for Statement {
                     &translated_if_condition,
                     schema,
                     options,
+                    emit,
                 )?;
 
                 let mut prior_conditions = vec![translated_if_condition];
@@ -1669,7 +1716,7 @@ impl Translator for Statement {
                         continue;
                     };
                     let translated_elseif_condition =
-                        elseif_condition.translate(schema, options)?;
+                        elseif_condition.translate_with_warnings(schema, options, emit)?;
                     let guard = if let Some(prior_any) = or_chain(&prior_conditions) {
                         Expr::BinaryOp {
                             left: Box::new(negate(prior_any)),
@@ -1686,6 +1733,7 @@ impl Translator for Statement {
                         &guard,
                         schema,
                         options,
+                        emit,
                     )?;
                     prior_conditions.push(translated_elseif_condition);
                 }
@@ -1699,6 +1747,7 @@ impl Translator for Statement {
                         &negate(prior_any),
                         schema,
                         options,
+                        emit,
                     )?;
                 }
 
@@ -1723,13 +1772,14 @@ impl Translator for Statement {
                     *modifier,
                     statements,
                     exception.as_deref(),
+                    emit,
                 )?
             }
             Self::Commit { chain, end, modifier } => {
                 translate_commit(self, *chain, *end, *modifier)?
             }
             Self::Rollback { chain, savepoint } => translate_rollback(*chain, savepoint.as_ref()),
-            Self::Vacuum(vacuum) => translate_vacuum(vacuum),
+            Self::Vacuum(vacuum) => translate_vacuum(vacuum, emit),
             // DROP TABLE/VIEW/INDEX - translate to SQLite (strip CASCADE/RESTRICT)
             Self::Drop { object_type, if_exists, names, cascade, .. } => {
                 match object_type {
@@ -1761,15 +1811,15 @@ impl Translator for Statement {
                         return Err(reject_unsupported_statement(
                             self,
                             "A cascading DROP SCHEMA deletes every table in the schema, and the \
-                             translated tables carry no schema, so which tables it means cannot be \
-                             determined. Drop the tables by name instead.",
+                 translated tables carry no schema, so which tables it means cannot be \
+                 determined. Drop the tables by name instead.",
                         ));
                     }
                     ObjectType::Database | ObjectType::MaterializedView => {
                         return Err(reject_unsupported_statement(
                             self,
                             "SQLite has neither, and the matching CREATE is refused, so nothing of \
-                             the kind can exist in the output.",
+                 the kind can exist in the output.",
                         ));
                     }
                     ObjectType::Schema
@@ -1781,7 +1831,11 @@ impl Translator for Statement {
                     | ObjectType::Stage
                     | ObjectType::Stream
                     | ObjectType::Warehouse => {
-                        drop_with_warning(drop_label(*object_type), REASON_DROP_OF_ABSENT_OBJECT)
+                        drop_with_warning(
+                            drop_label(*object_type),
+                            REASON_DROP_OF_ABSENT_OBJECT,
+                            emit,
+                        )
                     }
                 }
             }
@@ -1799,83 +1853,123 @@ impl Translator for Statement {
             }
             // Outcome 3, warn and drop. Grouped by the reason each drop cannot
             // change a result.
-            Self::LISTEN { .. } => drop_with_warning("LISTEN", REASON_PUB_SUB),
-            Self::UNLISTEN { .. } => drop_with_warning("UNLISTEN", REASON_PUB_SUB),
-            Self::NOTIFY { .. } => drop_with_warning("NOTIFY", REASON_PUB_SUB),
-            Self::CreateRole(_) => drop_with_warning("CREATE ROLE", REASON_ACCESS_CONTROL),
-            Self::CreateUser(_) => drop_with_warning("CREATE USER", REASON_ACCESS_CONTROL),
-            Self::AlterRole { .. } => drop_with_warning("ALTER ROLE", REASON_ACCESS_CONTROL),
-            Self::AlterUser(_) => drop_with_warning("ALTER USER", REASON_ACCESS_CONTROL),
-            Self::Grant(_) => drop_with_warning("GRANT", REASON_ACCESS_CONTROL),
-            Self::Revoke(_) => drop_with_warning("REVOKE", REASON_ACCESS_CONTROL),
-            Self::Deny { .. } => drop_with_warning("DENY", REASON_ACCESS_CONTROL),
-            Self::CreateType { .. } => drop_with_warning("CREATE TYPE", REASON_TYPE_DEFINITION),
-            Self::AlterType(_) => drop_with_warning("ALTER TYPE", REASON_TYPE_DEFINITION),
-            Self::CreateDomain(_) => drop_with_warning("CREATE DOMAIN", REASON_TYPE_DEFINITION),
-            Self::DropDomain { .. } => drop_with_warning("DROP DOMAIN", REASON_TYPE_DEFINITION),
+            Self::LISTEN { .. } => drop_with_warning("LISTEN", REASON_PUB_SUB, emit),
+            Self::UNLISTEN { .. } => drop_with_warning("UNLISTEN", REASON_PUB_SUB, emit),
+            Self::NOTIFY { .. } => drop_with_warning("NOTIFY", REASON_PUB_SUB, emit),
+            Self::CreateRole(_) => drop_with_warning("CREATE ROLE", REASON_ACCESS_CONTROL, emit),
+            Self::CreateUser(_) => drop_with_warning("CREATE USER", REASON_ACCESS_CONTROL, emit),
+            Self::AlterRole { .. } => drop_with_warning("ALTER ROLE", REASON_ACCESS_CONTROL, emit),
+            Self::AlterUser(_) => drop_with_warning("ALTER USER", REASON_ACCESS_CONTROL, emit),
+            Self::Grant(_) => drop_with_warning("GRANT", REASON_ACCESS_CONTROL, emit),
+            Self::Revoke(_) => drop_with_warning("REVOKE", REASON_ACCESS_CONTROL, emit),
+            Self::Deny { .. } => drop_with_warning("DENY", REASON_ACCESS_CONTROL, emit),
+            Self::CreateType { .. } => {
+                drop_with_warning("CREATE TYPE", REASON_TYPE_DEFINITION, emit)
+            }
+            Self::AlterType(_) => drop_with_warning("ALTER TYPE", REASON_TYPE_DEFINITION, emit),
+            Self::CreateDomain(_) => {
+                drop_with_warning("CREATE DOMAIN", REASON_TYPE_DEFINITION, emit)
+            }
+            Self::DropDomain { .. } => {
+                drop_with_warning("DROP DOMAIN", REASON_TYPE_DEFINITION, emit)
+            }
             Self::CreateCollation(_) => {
-                drop_with_warning("CREATE COLLATION", REASON_HOST_REGISTERED)
+                drop_with_warning("CREATE COLLATION", REASON_HOST_REGISTERED, emit)
             }
-            Self::AlterCollation(_) => drop_with_warning("ALTER COLLATION", REASON_HOST_REGISTERED),
+            Self::AlterCollation(_) => {
+                drop_with_warning("ALTER COLLATION", REASON_HOST_REGISTERED, emit)
+            }
             Self::CreateFunction(create_function) => {
-                translate_create_function(create_function, options)
+                translate_create_function(create_function, options, emit)
             }
-            Self::DropFunction { .. } => drop_with_warning("DROP FUNCTION", REASON_FUNCTION),
-            Self::AlterFunction(_) => drop_with_warning("ALTER FUNCTION", REASON_ACCESS_CONTROL),
-            Self::CreateServer(_) => drop_with_warning("CREATE SERVER", REASON_FOREIGN_DATA),
-            Self::CreateConnector(_) => drop_with_warning("CREATE CONNECTOR", REASON_FOREIGN_DATA),
+            Self::DropFunction { .. } => drop_with_warning("DROP FUNCTION", REASON_FUNCTION, emit),
+            Self::AlterFunction(_) => {
+                drop_with_warning("ALTER FUNCTION", REASON_ACCESS_CONTROL, emit)
+            }
+            Self::CreateServer(_) => drop_with_warning("CREATE SERVER", REASON_FOREIGN_DATA, emit),
+            Self::CreateConnector(_) => {
+                drop_with_warning("CREATE CONNECTOR", REASON_FOREIGN_DATA, emit)
+            }
             Self::AlterConnector { .. } => {
-                drop_with_warning("ALTER CONNECTOR", REASON_FOREIGN_DATA)
+                drop_with_warning("ALTER CONNECTOR", REASON_FOREIGN_DATA, emit)
             }
-            Self::DropConnector { .. } => drop_with_warning("DROP CONNECTOR", REASON_FOREIGN_DATA),
-            Self::CreateSecret { .. } => drop_with_warning("CREATE SECRET", REASON_FOREIGN_DATA),
-            Self::DropSecret { .. } => drop_with_warning("DROP SECRET", REASON_FOREIGN_DATA),
-            Self::CreateExtension(_) => drop_with_warning("CREATE EXTENSION", REASON_EXTENSION),
-            Self::DropExtension { .. } => drop_with_warning("DROP EXTENSION", REASON_EXTENSION),
-            Self::CreateSequence { .. } => drop_with_warning("CREATE SEQUENCE", REASON_SEQUENCE),
-            Self::Comment { .. } => drop_with_warning("COMMENT", REASON_INTROSPECTION),
-            Self::ExplainTable { .. } => drop_with_warning("DESCRIBE", REASON_INTROSPECTION),
-            Self::ShowVariable { .. } => drop_with_warning("SHOW", REASON_INTROSPECTION),
-            Self::ShowVariables { .. } => drop_with_warning("SHOW VARIABLES", REASON_INTROSPECTION),
-            Self::ShowStatus { .. } => drop_with_warning("SHOW STATUS", REASON_INTROSPECTION),
-            Self::ShowTables { .. } => drop_with_warning("SHOW TABLES", REASON_INTROSPECTION),
-            Self::ShowViews { .. } => drop_with_warning("SHOW VIEWS", REASON_INTROSPECTION),
-            Self::ShowColumns { .. } => drop_with_warning("SHOW COLUMNS", REASON_INTROSPECTION),
-            Self::ShowCreate { .. } => drop_with_warning("SHOW CREATE", REASON_INTROSPECTION),
-            Self::ShowSchemas { .. } => drop_with_warning("SHOW SCHEMAS", REASON_INTROSPECTION),
-            Self::ShowDatabases { .. } => drop_with_warning("SHOW DATABASES", REASON_INTROSPECTION),
-            Self::ShowCatalogs { .. } => drop_with_warning("SHOW CATALOGS", REASON_INTROSPECTION),
-            Self::ShowCharset { .. } => drop_with_warning("SHOW CHARSET", REASON_INTROSPECTION),
-            Self::ShowCollation { .. } => drop_with_warning("SHOW COLLATION", REASON_INTROSPECTION),
-            Self::ShowFunctions { .. } => drop_with_warning("SHOW FUNCTIONS", REASON_INTROSPECTION),
-            Self::ShowObjects(_) => drop_with_warning("SHOW OBJECTS", REASON_INTROSPECTION),
+            Self::DropConnector { .. } => {
+                drop_with_warning("DROP CONNECTOR", REASON_FOREIGN_DATA, emit)
+            }
+            Self::CreateSecret { .. } => {
+                drop_with_warning("CREATE SECRET", REASON_FOREIGN_DATA, emit)
+            }
+            Self::DropSecret { .. } => drop_with_warning("DROP SECRET", REASON_FOREIGN_DATA, emit),
+            Self::CreateExtension(_) => {
+                drop_with_warning("CREATE EXTENSION", REASON_EXTENSION, emit)
+            }
+            Self::DropExtension { .. } => {
+                drop_with_warning("DROP EXTENSION", REASON_EXTENSION, emit)
+            }
+            Self::CreateSequence { .. } => {
+                drop_with_warning("CREATE SEQUENCE", REASON_SEQUENCE, emit)
+            }
+            Self::Comment { .. } => drop_with_warning("COMMENT", REASON_INTROSPECTION, emit),
+            Self::ExplainTable { .. } => drop_with_warning("DESCRIBE", REASON_INTROSPECTION, emit),
+            Self::ShowVariable { .. } => drop_with_warning("SHOW", REASON_INTROSPECTION, emit),
+            Self::ShowVariables { .. } => {
+                drop_with_warning("SHOW VARIABLES", REASON_INTROSPECTION, emit)
+            }
+            Self::ShowStatus { .. } => drop_with_warning("SHOW STATUS", REASON_INTROSPECTION, emit),
+            Self::ShowTables { .. } => drop_with_warning("SHOW TABLES", REASON_INTROSPECTION, emit),
+            Self::ShowViews { .. } => drop_with_warning("SHOW VIEWS", REASON_INTROSPECTION, emit),
+            Self::ShowColumns { .. } => {
+                drop_with_warning("SHOW COLUMNS", REASON_INTROSPECTION, emit)
+            }
+            Self::ShowCreate { .. } => drop_with_warning("SHOW CREATE", REASON_INTROSPECTION, emit),
+            Self::ShowSchemas { .. } => {
+                drop_with_warning("SHOW SCHEMAS", REASON_INTROSPECTION, emit)
+            }
+            Self::ShowDatabases { .. } => {
+                drop_with_warning("SHOW DATABASES", REASON_INTROSPECTION, emit)
+            }
+            Self::ShowCatalogs { .. } => {
+                drop_with_warning("SHOW CATALOGS", REASON_INTROSPECTION, emit)
+            }
+            Self::ShowCharset { .. } => {
+                drop_with_warning("SHOW CHARSET", REASON_INTROSPECTION, emit)
+            }
+            Self::ShowCollation { .. } => {
+                drop_with_warning("SHOW COLLATION", REASON_INTROSPECTION, emit)
+            }
+            Self::ShowFunctions { .. } => {
+                drop_with_warning("SHOW FUNCTIONS", REASON_INTROSPECTION, emit)
+            }
+            Self::ShowObjects(_) => drop_with_warning("SHOW OBJECTS", REASON_INTROSPECTION, emit),
             Self::ShowProcessList { .. } => {
-                drop_with_warning("SHOW PROCESSLIST", REASON_INTROSPECTION)
+                drop_with_warning("SHOW PROCESSLIST", REASON_INTROSPECTION, emit)
             }
-            Self::Kill { .. } => drop_with_warning("KILL", REASON_ADMINISTRATION),
-            Self::WaitFor(_) => drop_with_warning("WAITFOR", REASON_WAIT),
-            Self::Msck(_) => drop_with_warning("MSCK", REASON_ADMINISTRATION),
-            Self::Flush { .. } => drop_with_warning("FLUSH", REASON_ADMINISTRATION),
-            Self::Install { .. } => drop_with_warning("INSTALL", REASON_ADMINISTRATION),
-            Self::Load { .. } => drop_with_warning("LOAD", REASON_ADMINISTRATION),
+            Self::Kill { .. } => drop_with_warning("KILL", REASON_ADMINISTRATION, emit),
+            Self::WaitFor(_) => drop_with_warning("WAITFOR", REASON_WAIT, emit),
+            Self::Msck(_) => drop_with_warning("MSCK", REASON_ADMINISTRATION, emit),
+            Self::Flush { .. } => drop_with_warning("FLUSH", REASON_ADMINISTRATION, emit),
+            Self::Install { .. } => drop_with_warning("INSTALL", REASON_ADMINISTRATION, emit),
+            Self::Load { .. } => drop_with_warning("LOAD", REASON_ADMINISTRATION, emit),
             Self::CreateWarehouse(_) => {
-                drop_with_warning("CREATE WAREHOUSE", REASON_ADMINISTRATION)
+                drop_with_warning("CREATE WAREHOUSE", REASON_ADMINISTRATION, emit)
             }
-            Self::CreateStage { .. } => drop_with_warning("CREATE STAGE", REASON_ADMINISTRATION),
+            Self::CreateStage { .. } => {
+                drop_with_warning("CREATE STAGE", REASON_ADMINISTRATION, emit)
+            }
             Self::CreateFileFormat { .. } => {
-                drop_with_warning("CREATE FILE FORMAT", REASON_ADMINISTRATION)
+                drop_with_warning("CREATE FILE FORMAT", REASON_ADMINISTRATION, emit)
             }
-            Self::Cache { .. } => drop_with_warning("CACHE TABLE", REASON_HINT),
-            Self::UNCache { .. } => drop_with_warning("UNCACHE TABLE", REASON_HINT),
-            Self::OptimizeTable { .. } => drop_with_warning("OPTIMIZE TABLE", REASON_HINT),
-            Self::Lock { .. } => drop_with_warning("LOCK", REASON_HINT),
-            Self::LockTables { .. } => drop_with_warning("LOCK TABLES", REASON_HINT),
-            Self::UnlockTables => drop_with_warning("UNLOCK TABLES", REASON_HINT),
+            Self::Cache { .. } => drop_with_warning("CACHE TABLE", REASON_HINT, emit),
+            Self::UNCache { .. } => drop_with_warning("UNCACHE TABLE", REASON_HINT, emit),
+            Self::OptimizeTable { .. } => drop_with_warning("OPTIMIZE TABLE", REASON_HINT, emit),
+            Self::Lock { .. } => drop_with_warning("LOCK", REASON_HINT, emit),
+            Self::LockTables { .. } => drop_with_warning("LOCK TABLES", REASON_HINT, emit),
+            Self::UnlockTables => drop_with_warning("UNLOCK TABLES", REASON_HINT, emit),
             Statement::AlterTable(alter_table) => {
-                translate_alter_table(alter_table, schema, options)?
+                translate_alter_table(alter_table, schema, options, emit)?
             }
             Statement::RenameTable(renames) => return Err(reject_rename_table(renames)),
-            Statement::Truncate(truncate) => translate_truncate(truncate, schema, options)?,
+            Statement::Truncate(truncate) => translate_truncate(truncate, schema, options, emit)?,
             Statement::Copy { source, to, target, .. } => {
                 return Err(reject_copy(source, *to, target));
             }
@@ -1916,7 +2010,7 @@ impl Translator for Statement {
                 }]
             }
             Statement::Explain { analyze, statement, .. } => {
-                translate_explain(*analyze, statement, schema, options)?
+                translate_explain(*analyze, statement, schema, options, emit)?
             }
             // Outcome 4, consumed by the translation schema. Each of these is
             // realised elsewhere, so emitting nothing is the complete
@@ -1937,65 +2031,65 @@ impl Translator for Statement {
                 return Err(reject_unsupported_statement(
                     self,
                     "SQLite has no statement that moves data between the database and a file or \
-                     stage, so the rows the statement carries would be lost.",
+         stage, so the rows the statement carries would be lost.",
                 ));
             }
             control_flow_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
                     "SQLite has no procedural control flow: WHILE loops, LOOP, FOR, and \
-                     procedural CASE have no SQL equivalent and cannot be emitted. Rewrite \
-                     as a set-based statement.",
+         procedural CASE have no SQL equivalent and cannot be emitted. Rewrite \
+         as a set-based statement.",
                 ));
             }
             cursor_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
                     "SQLite has no server-side cursors: iteration happens in the host through \
-                     sqlite3_step, which has no SQL spelling, so the work the cursor performs \
-                     cannot be emitted. Rewrite the loop as a set-based statement.",
+         sqlite3_step, which has no SQL spelling, so the work the cursor performs \
+         cannot be emitted. Rewrite the loop as a set-based statement.",
                 ));
             }
             procedural_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
                     "SQLite has no stored procedures, so the body would be lost and a call to it \
-                     would perform nothing. Inline the statements at each call site.",
+         would perform nothing. Inline the statements at each call site.",
                 ));
             }
             session_state_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
                     "The statement changes session state that decides how later statements resolve \
-                     names or behave, and SQLite has no equivalent, so dropping it could change \
-                     what those statements do.",
+         names or behave, and SQLite has no equivalent, so dropping it could change \
+         what those statements do.",
                 ));
             }
             extensibility_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
                     "SQLite cannot define an operator, an operator class or family, or a text \
-                     search configuration, and an unrecognised operator is emitted unchanged, so \
-                     dropping this definition would leave the emitted SQL to fail at run time.",
+         search configuration, and an unrecognised operator is emitted unchanged, so \
+         dropping this definition would leave the emitted SQL to fail at run time.",
                 ));
             }
             alter_in_place_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
                     "SQLite cannot rename an index in place: it has to be dropped and recreated, \
-                     which needs its current definition. Write the DROP and the CREATE out \
-                     instead.",
+         which needs its current definition. Write the DROP and the CREATE out \
+         instead.",
                 ));
             }
             database_level_patterns!() => {
                 return Err(reject_unsupported_statement(
                     self,
                     "A SQLite database is a file rather than an object inside a server, so it is \
-                     created by opening it and joined to a session with ATTACH.",
+         created by opening it and joined to a session with ATTACH.",
                 ));
             }
-            Self::Set(set) => translate_set(self, set)?,
-            Self::Discard { object_type } => translate_discard(self, *object_type)?,
+            Self::Set(set) => translate_set(self, set, emit)?,
+            Self::Discard { object_type } => translate_discard(self, *object_type, emit)?,
         };
 
         // PostgreSQL numbered parameters (`$N`) become SQLite `?N` placeholders,
@@ -2030,10 +2124,7 @@ mod tests {
         RESULT_NEUTRAL_SETTINGS, inject_condition, is_result_neutral_setting,
         translate_create_table_for_role,
     };
-    use crate::{
-        prelude::{Pg2SqliteOptions, Translator},
-        traits::TranslationOptions,
-    };
+    use crate::prelude::{Pg2SqliteOptions, Translator};
 
     /// `is_result_neutral_setting` binary searches the table, so an unsorted or
     /// duplicated entry would make a lookup miss silently.
@@ -2145,7 +2236,7 @@ mod tests {
         .unwrap();
 
         let schema = ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let translated = if_stmt.translate(&schema, &options).expect("IF/ELSE should translate");
         assert_eq!(translated.len(), 2, "expected two statements for IF/ELSE");
 
@@ -2170,7 +2261,7 @@ mod tests {
         .unwrap();
 
         let schema = ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let translated =
             if_stmt.translate(&schema, &options).expect("IF/ELSIF/ELSE should translate");
         assert_eq!(translated.len(), 3, "expected one statement per branch");
@@ -2194,10 +2285,13 @@ mod tests {
             "test".to_string(),
         )
         .expect("schema should build");
-        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_session_user_role("app_user"),
+        );
         let missing_table = parse_create_table("CREATE TABLE docs(id INTEGER PRIMARY KEY)");
         let missing =
-            translate_create_table_for_role(&missing_table, &missing_schema, &options).unwrap();
+            translate_create_table_for_role(&missing_table, &missing_schema, &options, &mut |_| {})
+                .unwrap();
         assert!(missing.is_none());
 
         let readonly_schema_sql = r#"
@@ -2213,8 +2307,13 @@ mod tests {
         .expect("schema should build");
         let readonly_table =
             parse_create_table("CREATE TABLE readonly_docs(id INTEGER PRIMARY KEY)");
-        let readonly =
-            translate_create_table_for_role(&readonly_table, &readonly_schema, &options).unwrap();
+        let readonly = translate_create_table_for_role(
+            &readonly_table,
+            &readonly_schema,
+            &options,
+            &mut |_| {},
+        )
+        .unwrap();
         let readonly = readonly.expect("readonly path should return statements");
         assert!(!readonly.is_empty(), "a read-only table emits at least one statement");
         assert!(matches!(readonly[0], Statement::CreateTable(_)));
@@ -2232,8 +2331,13 @@ mod tests {
         .expect("schema should build");
         let writable_table =
             parse_create_table("CREATE TABLE writable_docs(id INTEGER PRIMARY KEY)");
-        let writable =
-            translate_create_table_for_role(&writable_table, &writable_schema, &options).unwrap();
+        let writable = translate_create_table_for_role(
+            &writable_table,
+            &writable_schema,
+            &options,
+            &mut |_| {},
+        )
+        .unwrap();
         assert!(writable.is_none());
     }
 
@@ -2253,7 +2357,9 @@ mod tests {
         )
         .expect("schema should build");
 
-        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_session_user_role("app_user"),
+        );
         let index_stmt = Parser::parse_sql(
             &PostgreSqlDialect {},
             "CREATE INDEX private_docs_title_idx ON private_docs(title);",
@@ -2290,7 +2396,9 @@ mod tests {
         )
         .expect("schema should build");
 
-        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_session_user_role("app_user"),
+        );
         let trigger_stmt = Parser::parse_sql(
             &PostgreSqlDialect {},
             "CREATE TRIGGER private_docs_ai AFTER INSERT ON private_docs FOR EACH ROW EXECUTE FUNCTION private_docs_trigger_fn();",
@@ -2363,7 +2471,9 @@ mod tests {
         )
         .expect("schema should build");
 
-        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_session_user_role("app_user"),
+        );
         let index_stmt = Parser::parse_sql(
             &PostgreSqlDialect {},
             "CREATE INDEX missing_docs_title_idx ON missing_docs(title);",
@@ -2387,7 +2497,9 @@ mod tests {
         )
         .expect("schema should build");
 
-        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_session_user_role("app_user"),
+        );
         let trigger_stmt = Parser::parse_sql(
             &PostgreSqlDialect {},
             "CREATE TRIGGER missing_docs_ai AFTER INSERT ON missing_docs FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn();",
@@ -2426,7 +2538,9 @@ mod tests {
         )
         .expect("schema should build");
 
-        let options = Pg2SqliteOptions::default().with_session_user_role("missing_role");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_session_user_role("missing_role"),
+        );
 
         let index_stmt =
             Parser::parse_sql(&PostgreSqlDialect {}, "CREATE INDEX docs_title_idx ON docs(title);")
@@ -2470,7 +2584,9 @@ mod tests {
         )
         .expect("schema should build");
 
-        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_session_user_role("app_user"),
+        );
         let index_stmt = Parser::parse_sql(
             &PostgreSqlDialect {},
             "CREATE INDEX docs_title_idx ON public.docs(title);",
@@ -2499,7 +2615,9 @@ mod tests {
         )
         .expect("schema should build");
 
-        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_session_user_role("app_user"),
+        );
         let index_stmt = Parser::parse_sql(
             &PostgreSqlDialect {},
             "CREATE INDEX docs_title_idx ON my_custom_app.docs(title);",

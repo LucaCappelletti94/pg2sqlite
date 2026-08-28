@@ -19,7 +19,7 @@ use sqlparser::ast::{
     helpers::attached_token::AttachedToken,
 };
 
-use super::context::VariableBinding;
+use super::VariableBinding;
 use crate::impls::query_builder::{make_query, make_simple_select};
 
 /// Builder for constructing CTEs from variable bindings.

@@ -6,10 +6,7 @@
 //! The end-to-end Diesel variant lives in `test_postgis_gist_diesel.rs`.
 
 use diesel::connection::SimpleConnection;
-use pg2sqlite::{
-    errors::Error,
-    prelude::{Pg2SqliteOptions, TranslationOptions},
-};
+use pg2sqlite::{errors::Error, prelude::Pg2SqliteOptions};
 
 mod helpers;
 

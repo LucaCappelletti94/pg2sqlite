@@ -2003,6 +2003,7 @@ dependencies = [
  "sqlite-vec",
  "sqlitegis",
  "sqlparser",
+ "sqlparser-plpgsql",
  "tempfile",
  "testcontainers",
  "testcontainers-modules",
@@ -2800,6 +2801,15 @@ dependencies = [
  "log",
  "recursive",
  "sqlparser_derive",
+]
+
+[[package]]
+name = "sqlparser-plpgsql"
+version = "0.1.0"
+source = "git+https://github.com/LucaCappelletti94/sqlparser-plpgsql?branch=main#9b3f8dc6be4ff1a5c16f0badd370a3b81ee3702d"
+dependencies = [
+ "sqlparser",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

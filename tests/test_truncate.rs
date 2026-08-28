@@ -30,7 +30,6 @@ mod helpers;
 use diesel::{prelude::*, sql_query};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
     warnings::TranslationWarning,
 };
 

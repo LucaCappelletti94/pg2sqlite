@@ -12,7 +12,7 @@
 //! asserted here to translate was measured as valid SQLite before it was
 //! written down, and the collisions were measured as the failures they are.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
 
 fn translate(sql: &str) -> Vec<String> {

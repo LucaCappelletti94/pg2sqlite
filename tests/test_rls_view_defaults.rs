@@ -21,9 +21,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::{establish_connection, set_session_user_id};
-use pg2sqlite::prelude::{
-    Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions, UuidRepresentation,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rosetta_uuid::Uuid;
 
 mod schema {

@@ -1,10 +1,7 @@
 //! Tests for trigger translation with multiple inserts and ON CONFLICT clauses.
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection, prelude::*};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 // Define Diesel schema and models
 

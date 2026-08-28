@@ -26,7 +26,7 @@ mod statistical_aggregates;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use emitted_corpus::{CORPUS_GROUPS, FIXTURE, row_statements, sweep_options};
-use pg2sqlite::prelude::{Pg2Sqlite, TranslationOptions};
+use pg2sqlite::prelude::Pg2Sqlite;
 use rusqlite::{Connection, functions::FunctionFlags};
 use statistical_aggregates::{STATISTICAL_AGGREGATES, register_statistical_aggregates};
 

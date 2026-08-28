@@ -56,8 +56,8 @@ use crate::{
             from_relation, make_query, make_simple_select, single_expr_query, table_function_factor,
         },
     },
-    prelude::{Pg2SqliteOptions, Translator},
-    traits::{ArrayRepresentation, TranslationOptions},
+    prelude::Pg2SqliteOptions,
+    traits::{ArrayRepresentation, translator::TranslatorWithContext},
 };
 
 /// Column of `json_each` holding the element value.
@@ -93,7 +93,7 @@ pub(crate) fn representation_required_message(construct: &str) -> String {
 /// [`representation_required_message`] as an error.
 #[must_use]
 pub(crate) fn representation_required(construct: &str) -> Error {
-    Error::UnsupportedSQLiteFeature(representation_required_message(construct))
+    Error::forward_refusal(representation_required_message(construct))
 }
 
 /// Message for an array construct with no faithful `json1` form, even under
@@ -106,7 +106,7 @@ pub(crate) fn no_json_message(construct: &str, hint: &str) -> String {
 /// [`no_json_message`] as an error.
 #[must_use]
 pub(crate) fn no_json_equivalent(construct: &str, hint: &str) -> Error {
-    Error::UnsupportedSQLiteFeature(no_json_message(construct, hint))
+    Error::forward_refusal(no_json_message(construct, hint))
 }
 
 /// `json_each(<array>)` as a `FROM` item.
@@ -265,13 +265,16 @@ fn json_array_length_call(array: Expr) -> Expr {
 pub(crate) fn translate_array_literal(
     elements: &[Expr],
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, Error> {
     if !is_json_array_representation(options) {
         return Err(representation_required("An ARRAY[...] literal"));
     }
-    let translated =
-        elements.iter().map(|e| e.translate(schema, options)).collect::<Result<Vec<_>, Error>>()?;
+    let translated = elements
+        .iter()
+        .map(|e| e.translate_with_warnings(schema, options, emit))
+        .collect::<Result<Vec<_>, Error>>()?;
     Ok(json_array_call(translated))
 }
 
@@ -287,7 +290,8 @@ pub(crate) fn translate_array_subscript(
     root: Expr,
     index: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, Error> {
     if !is_json_array_representation(options) {
         return Err(representation_required("Array subscripting"));
@@ -301,7 +305,7 @@ pub(crate) fn translate_array_subscript(
         return Ok(json_extract_call(root, string_literal(&format!("$[{}]", literal - 1))));
     }
 
-    let translated_index = index.translate(schema, options)?;
+    let translated_index = index.translate_with_warnings(schema, options, emit)?;
     let zero_based = Expr::Nested(Box::new(Expr::BinaryOp {
         left: Box::new(translated_index.clone()),
         op: BinaryOperator::Minus,
@@ -406,11 +410,12 @@ fn translated_args<const N: usize>(
     args: &FunctionArguments,
     kind: ArrayFunction,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<[Expr; N], Error> {
     let translated = extract_exactly(args, N, kind.name())?
         .into_iter()
-        .map(|e| e.translate(schema, options))
+        .map(|e| e.translate_with_warnings(schema, options, emit))
         .collect::<Result<Vec<_>, Error>>()?;
     Ok(translated.try_into().expect("extract_exactly guarantees the argument count"))
 }
@@ -424,24 +429,25 @@ pub(crate) fn translate_array_function(
     kind: ArrayFunction,
     args: &FunctionArguments,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, Error> {
     if !is_json_array_representation(options) {
         return Err(representation_required(&format!("{}()", kind.name())));
     }
 
     if kind == ArrayFunction::Replace {
-        let [array, from, to] = translated_args(args, kind, schema, options)?;
+        let [array, from, to] = translated_args(args, kind, schema, options, emit)?;
         return Ok(array_replace(array, from, to));
     }
 
     // array_cat takes two arrays; array_prepend takes (element, array).
     if kind == ArrayFunction::Cat {
-        let [a, b] = translated_args(args, kind, schema, options)?;
+        let [a, b] = translated_args(args, kind, schema, options, emit)?;
         return Ok(array_cat_expr(a, b));
     }
     if kind == ArrayFunction::Prepend {
-        let [element, array] = translated_args(args, kind, schema, options)?;
+        let [element, array] = translated_args(args, kind, schema, options, emit)?;
         // Prepend element to array by concatenating a one-element array with
         // the target array.  json_cat(json_array(v), a) is NULL when a is NULL,
         // but that case returns [v] correctly because json_each(json_array(v))
@@ -449,7 +455,7 @@ pub(crate) fn translate_array_function(
         return Ok(array_concat(json_array_call(vec![element]), array));
     }
 
-    let [array, second] = translated_args(args, kind, schema, options)?;
+    let [array, second] = translated_args(args, kind, schema, options, emit)?;
     match kind {
         ArrayFunction::Length | ArrayFunction::Lower | ArrayFunction::Upper => {
             if integer_literal_value(&second) != Some(1) {
@@ -713,7 +719,8 @@ pub(crate) fn translate_unnest_factor(
     with_offset: bool,
     with_ordinality: bool,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableFactor, Error> {
     if !is_json_array_representation(options) {
         return Err(representation_required("UNNEST in a FROM clause"));
@@ -764,7 +771,7 @@ pub(crate) fn translate_unnest_factor(
         ));
     }
 
-    let translated_array = array_expr.translate(schema, options)?;
+    let translated_array = array_expr.translate_with_warnings(schema, options, emit)?;
     Ok(TableFactor::Derived {
         lateral: false,
         subquery: Box::new(make_query(
@@ -841,7 +848,7 @@ pub(crate) fn is_json_set_returning(lowered: &str) -> bool {
 /// SQLite has no table-valued form for any of these, so the alternative to a
 /// projection is emitting the call verbatim, which produces `no such table`
 /// when the script is applied. A name that is neither mapped here nor declared
-/// through [`TranslationOptions::with_user_defined_functions`] is refused,
+/// through [`Pg2SqliteOptions::with_user_defined_functions`] is refused,
 /// naming the function, which is the same policy scalar functions follow.
 ///
 /// The projection is what supplies PostgreSQL's column names.
@@ -853,7 +860,8 @@ pub(crate) fn translate_set_returning_factor(
     args: &[FunctionArg],
     alias: Option<&TableAlias>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableFactor, Error> {
     let lowered = crate::impls::object_name::last_ident(name)
         .map(|ident| ident.value.to_ascii_lowercase())
@@ -871,7 +879,7 @@ pub(crate) fn translate_set_returning_factor(
                 alias: alias.cloned(),
             });
         }
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "{name}() is used where a table goes, and SQLite has no table-valued function of that \
              name, so emitting it would produce `no such table: {lowered}` when the script runs. \
              SQLite provides only json_each and json_tree. If the destination registers this one, \
@@ -933,7 +941,7 @@ pub(crate) fn translate_set_returning_factor(
         }
     }
 
-    let translated_document = document.translate(schema, options)?;
+    let translated_document = document.translate_with_warnings(schema, options, emit)?;
     Ok(TableFactor::Derived {
         lateral: false,
         subquery: Box::new(make_query(

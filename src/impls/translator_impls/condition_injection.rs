@@ -45,12 +45,12 @@ pub(crate) fn inject_condition_into_dml_statement(
     match stmt {
         Statement::Insert(insert) => {
             let Some(source) = &mut insert.source else {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::forward_refusal(
                     "Cannot inject IF condition into INSERT without source".to_string(),
                 ));
             };
             let sqlparser::ast::SetExpr::Select(select) = &mut *source.body else {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::forward_refusal(
                     "Cannot inject IF condition into INSERT with non-SELECT source".to_string(),
                 ));
             };
@@ -66,14 +66,14 @@ pub(crate) fn inject_condition_into_dml_statement(
         // has to reach its WHERE clause or the abort fires for every row.
         Statement::Query(query) => {
             let sqlparser::ast::SetExpr::Select(select) = &mut *query.body else {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::forward_refusal(
                     "Cannot inject IF condition into a non-SELECT query".to_string(),
                 ));
             };
             select.selection = Some(guarded(select.selection.take(), condition));
         }
         _ => {
-            return Err(Error::UnsupportedSQLiteFeature(
+            return Err(Error::forward_refusal(
                 "Cannot inject IF condition into this statement variant".to_string(),
             ));
         }

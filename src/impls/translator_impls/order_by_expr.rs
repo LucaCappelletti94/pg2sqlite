@@ -12,28 +12,23 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::structs::ParserDB;
 use sqlparser::ast::OrderByExpr;
 
-use crate::prelude::{Pg2SqliteOptions, Translator};
-
-impl Translator for OrderByExpr {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Self;
-
+crate::traits::translator::impl_contextual_translator!(OrderByExpr => OrderByExpr);
+impl crate::traits::translator::TranslatorWithContext for OrderByExpr {
     /// Only the `CREATE INDEX` column path reaches this. A query's `ORDER BY`
     /// goes through `shared_helpers::translate_order_by_expr`, where the
     /// `NULLS` qualifier is legal in SQLite and decides which rows come
     /// back, which is R48's subject. The two must not be made to share a
     /// rule.
-    fn translate(
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         if self.with_fill.is_some() {
-            return Err(crate::errors::Error::UnknownPostgresFeature(
+            return Err(crate::errors::Error::unsupported_source_syntax(
                 "WITH FILL in ORDER BY".to_string(),
             ));
         }
@@ -46,17 +41,17 @@ impl Translator for OrderByExpr {
         // and are kept.
         let mut index_options = self.options.clone();
         if index_options.nulls_first.take().is_some() {
-            crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+            emit(crate::warnings::TranslationWarning::LossyDrop {
                 construct: "NULLS FIRST/LAST".to_string(),
                 reason: "SQLite has no null ordering inside an index, so the index serves fewer \
-                         orderings than the PostgreSQL one and a matching ORDER BY is sorted \
-                         instead."
+             orderings than the PostgreSQL one and a matching ORDER BY is sorted \
+             instead."
                     .to_string(),
             });
         }
 
         Ok(OrderByExpr {
-            expr: self.expr.translate(schema, options)?,
+            expr: self.expr.translate_with_warnings(schema, options, emit)?,
             options: index_options,
             with_fill: None,
         })

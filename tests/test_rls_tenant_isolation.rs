@@ -8,10 +8,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::establish_connection;
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rosetta_uuid::Uuid;
 
 use crate::helpers::set_session_user_id;

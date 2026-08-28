@@ -1,10 +1,9 @@
 //! Warnings emitted during translation when constructs have no SQLite
 //! equivalent and are dropped or downgraded.
 //!
-//! Translators push warnings through a thread-local collector installed
-//! by `Pg2Sqlite::translate_with_report`. The plain `translate` API
-//! ignores them. The collector is std-only, so under no_std features warnings
-//! are silently discarded, there being no allocator to back the global.
+//! Each translation call owns its warning collector and passes it explicitly
+//! through every translator. The plain `translate` API discards the collected
+//! warnings after the same translation path completes.
 //!
 //! # When a warning is the right answer
 //!
@@ -24,8 +23,6 @@
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::{string::String, vec::Vec};
-#[cfg(feature = "std")]
-use std::cell::RefCell;
 
 use sqlparser::ast::Statement;
 
@@ -80,6 +77,8 @@ pub enum TranslationWarning {
     },
 }
 
+pub(crate) type WarningSink<'a> = &'a mut dyn FnMut(TranslationWarning);
+
 impl core::fmt::Display for TranslationWarning {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -113,65 +112,4 @@ pub struct TranslationReport {
     /// Warnings collected during translation. Empty when nothing was
     /// dropped or downgraded.
     pub warnings: Vec<TranslationWarning>,
-}
-
-#[cfg(feature = "std")]
-thread_local! {
-    static COLLECTOR: RefCell<Option<Vec<TranslationWarning>>> = const { RefCell::new(None) };
-}
-
-/// Push a warning onto the currently-installed collector. No-op when no
-/// collector is installed (the plain `translate` API path).
-pub(crate) fn emit(warning: TranslationWarning) {
-    #[cfg(feature = "std")]
-    COLLECTOR.with(|cell| {
-        if let Some(vec) = cell.borrow_mut().as_mut() {
-            vec.push(warning);
-        }
-    });
-    #[cfg(not(feature = "std"))]
-    let _ = warning;
-}
-
-/// RAII scope guard that installs a warning collector for the duration
-/// of one `translate_with_report` call. The previous collector (if any)
-/// is restored on drop so nested calls do not clobber an outer scope.
-pub(crate) struct CollectorScope {
-    #[cfg(feature = "std")]
-    previous: Option<Vec<TranslationWarning>>,
-}
-
-impl CollectorScope {
-    /// Install a fresh empty collector, saving the previous one.
-    pub fn install() -> Self {
-        #[cfg(feature = "std")]
-        let previous = COLLECTOR.with(|c| c.borrow_mut().replace(Vec::new()));
-        Self {
-            #[cfg(feature = "std")]
-            previous,
-        }
-    }
-
-    /// Take the collected warnings. Dropping `self` after this returns
-    /// runs the `Drop` impl, which restores any previous collector.
-    pub fn take(self) -> Vec<TranslationWarning> {
-        let collected;
-        #[cfg(feature = "std")]
-        {
-            collected = COLLECTOR.with(|c| c.borrow_mut().take().unwrap_or_default());
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            collected = Vec::new();
-        }
-        drop(self);
-        collected
-    }
-}
-
-#[cfg(feature = "std")]
-impl Drop for CollectorScope {
-    fn drop(&mut self) {
-        COLLECTOR.with(|cell| *cell.borrow_mut() = self.previous.take());
-    }
 }

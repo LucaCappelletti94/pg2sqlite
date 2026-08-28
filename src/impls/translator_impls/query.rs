@@ -31,33 +31,32 @@ use crate::{
         query_builder::make_query,
         shared_helpers::TranslationDirection,
     },
-    prelude::{Pg2SqliteOptions, Translator},
-    warnings::{TranslationWarning, emit as emit_warning},
+    traits::translator::TranslatorWithContext,
+    warnings::TranslationWarning,
 };
 
 pub(crate) const DISTINCT_ON_DERIVED_ALIAS: &str = "__pg2sqlite_distinct_on";
 pub(crate) const DISTINCT_ON_ROWNUM_ALIAS: &str = "__pg2sqlite_rn";
 
-impl Translator for Query {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Query;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(Query => Query);
+impl crate::traits::translator::TranslatorWithContext for Query {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        let with = translate_with_clause(self.with.as_ref(), schema, options)?;
-        let order_by = translate_order_by(self.order_by.as_ref(), schema, options)?;
+        let with = translate_with_clause(self.with.as_ref(), schema, options, emit)?;
+        let order_by = translate_order_by(self.order_by.as_ref(), schema, options, emit)?;
         let (limit_clause, fetch) = forward_translate_limit_and_fetch(
             self.limit_clause.as_ref(),
             self.fetch.as_ref(),
             schema,
             options,
+            emit,
         )?;
-        let settings = translate_query_settings(self.settings.as_ref(), schema, options)?;
-        let pipe_operators = translate_pipe_operators(&self.pipe_operators, schema, options)?;
+        let settings = translate_query_settings(self.settings.as_ref(), schema, options, emit)?;
+        let pipe_operators = translate_pipe_operators(&self.pipe_operators, schema, options, emit)?;
 
         if let Some(rewritten) = try_translate_distinct_on_query(
             self,
@@ -69,6 +68,7 @@ impl Translator for Query {
             fetch.clone(),
             settings.clone(),
             pipe_operators.clone(),
+            emit,
         )? {
             return Ok(rewritten);
         }
@@ -83,20 +83,21 @@ impl Translator for Query {
             fetch.clone(),
             settings.clone(),
             pipe_operators.clone(),
+            emit,
         )? {
             return Ok(rewritten);
         }
 
         // Emit warning if FOR UPDATE or FOR SHARE is present
         if !self.locks.is_empty() || self.for_clause.is_some() {
-            emit_warning(TranslationWarning::LossyDrop {
+            emit(TranslationWarning::LossyDrop {
                 construct: "FOR UPDATE / FOR SHARE".to_string(),
                 reason: "SQLite has no row-level locking; the clause is dropped".to_string(),
             });
         }
 
         Ok(build_query_envelope(
-            self.body.translate(schema, options)?,
+            self.body.translate_with_warnings(schema, options, emit)?,
             with,
             order_by,
             limit_clause,
@@ -111,9 +112,10 @@ impl Translator for Query {
 fn translate_order_by(
     order_by: Option<&OrderBy>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<OrderBy>, crate::errors::Error> {
-    translate_order_by_clause(order_by, schema, options)
+    translate_order_by_clause(order_by, schema, options, emit)
 }
 
 /// Build a `Query` envelope with the translated top-level clauses and the given
@@ -156,39 +158,43 @@ fn build_query_envelope(
 ///
 /// # Errors
 ///
-/// Returns `Error::UnsupportedSQLiteFeature` for `FETCH ... WITH TIES` (no
+/// Returns `Error::TranslationRefusal` for `FETCH ... WITH TIES` (no
 /// SQLite equivalent) and for `FETCH FIRST ... PERCENT ROWS ONLY` (SQLite has
 /// no percentage limit).
 fn forward_translate_limit_and_fetch(
     limit_clause: Option<&LimitClause>,
     fetch: Option<&Fetch>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<(Option<LimitClause>, Option<Fetch>), crate::errors::Error> {
     use crate::errors::Error;
 
     if let Some(f) = fetch {
         if f.with_ties {
-            return Err(Error::UnsupportedSQLiteFeature(
+            return Err(Error::forward_refusal(
                 "FETCH ... WITH TIES is not supported in SQLite. SQLite has no equivalent. \
-                 Use a window function with ROW_NUMBER() to emulate it."
+                         Use a window function with ROW_NUMBER() to emulate it."
                     .to_string(),
             ));
         }
         if f.percent {
-            return Err(Error::UnsupportedSQLiteFeature(
+            return Err(Error::forward_refusal(
                 "FETCH FIRST ... PERCENT ROWS is not supported in SQLite. \
-                 Compute the count explicitly and pass it as LIMIT."
+                         Compute the count explicitly and pass it as LIMIT."
                     .to_string(),
             ));
         }
         // FETCH FIRST m ROWS ONLY -> LIMIT m [OFFSET n]
-        let quantity =
-            f.quantity.as_ref().map(|q| Forward::translate_expr(q, schema, options)).transpose()?;
+        let quantity = f
+            .quantity
+            .as_ref()
+            .map(|q| Forward::translate_expr(q, schema, options, emit))
+            .transpose()?;
         let offset = match limit_clause {
             Some(LimitClause::LimitOffset { offset: Some(o), .. }) => {
                 Some(Offset {
-                    value: Forward::translate_expr(&o.value, schema, options)?,
+                    value: Forward::translate_expr(&o.value, schema, options, emit)?,
                     rows: OffsetRows::None,
                 })
             }
@@ -211,20 +217,22 @@ fn forward_translate_limit_and_fetch(
     let new_lc = match limit_clause {
         None => None,
         Some(LimitClause::LimitOffset { limit, offset, limit_by }) => {
-            let translated_limit =
-                limit.as_ref().map(|e| Forward::translate_expr(e, schema, options)).transpose()?;
+            let translated_limit = limit
+                .as_ref()
+                .map(|e| Forward::translate_expr(e, schema, options, emit))
+                .transpose()?;
             let translated_offset = offset
                 .as_ref()
                 .map(|o| {
                     Ok::<_, crate::errors::Error>(Offset {
-                        value: Forward::translate_expr(&o.value, schema, options)?,
+                        value: Forward::translate_expr(&o.value, schema, options, emit)?,
                         rows: OffsetRows::None,
                     })
                 })
                 .transpose()?;
             let translated_limit_by = limit_by
                 .iter()
-                .map(|e| Forward::translate_expr(e, schema, options))
+                .map(|e| Forward::translate_expr(e, schema, options, emit))
                 .collect::<Result<Vec<_>, _>>()?;
             let final_limit = if translated_limit.is_none() && translated_offset.is_some() {
                 Some(integer_literal(-1))
@@ -239,8 +247,8 @@ fn forward_translate_limit_and_fetch(
         }
         Some(LimitClause::OffsetCommaLimit { offset, limit }) => {
             Some(LimitClause::OffsetCommaLimit {
-                offset: Forward::translate_expr(offset, schema, options)?,
-                limit: Forward::translate_expr(limit, schema, options)?,
+                offset: Forward::translate_expr(offset, schema, options, emit)?,
+                limit: Forward::translate_expr(limit, schema, options, emit)?,
             })
         }
     };
@@ -261,28 +269,28 @@ fn ensure_distinct_on_projection_is_rewriteable(
             }
             SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => {
                 let alias = parts.last().cloned().ok_or_else(|| {
-                    crate::errors::Error::UnsupportedSQLiteFeature(
+                    crate::errors::Error::forward_refusal(
                         "DISTINCT ON projection contains an empty compound identifier".to_string(),
                     )
                 })?;
                 (Expr::CompoundIdentifier(parts.clone()), alias)
             }
             SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "DISTINCT ON rewrite supports only projections that can be named explicitly. \
-                     Wildcards are not supported."
+                 Wildcards are not supported."
                         .to_string(),
                 ));
             }
             SelectItem::ExprWithAliases { .. } => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "DISTINCT ON rewrite does not support multi-alias projections \
-                     (Spark `expr AS (a, b)` form)"
+                 (Spark `expr AS (a, b)` form)"
                         .to_string(),
                 ));
             }
             SelectItem::UnnamedExpr(other_expr) => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                return Err(crate::errors::Error::forward_refusal(format!(
                     "DISTINCT ON rewrite supports only named/identifier projections. \
                      Unsupported projection item: {other_expr}",
                 )));
@@ -290,7 +298,7 @@ fn ensure_distinct_on_projection_is_rewriteable(
         };
 
         if !seen.insert(alias.value.to_lowercase()) {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "DISTINCT ON rewrite requires unique output column names".to_string(),
             ));
         }
@@ -308,7 +316,7 @@ fn projection_aliases(projection: &[SelectItem]) -> Result<Vec<Ident>, crate::er
             match item {
                 SelectItem::ExprWithAlias { alias, .. } => Ok(alias.clone()),
                 _ => {
-                    Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    Err(crate::errors::Error::forward_refusal(
                         "DISTINCT ON rewrite expected aliased projection items".to_string(),
                     ))
                 }
@@ -414,13 +422,14 @@ fn null_literal() -> Expr {
 fn try_translate_distinct_on_query(
     query: &Query,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
     with: Option<sqlparser::ast::With>,
     order_by: Option<OrderBy>,
     limit_clause: Option<LimitClause>,
     fetch: Option<Fetch>,
     settings: Option<Vec<Setting>>,
     pipe_operators: Vec<PipeOperator>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<Query>, crate::errors::Error> {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Ok(None);
@@ -430,14 +439,14 @@ fn try_translate_distinct_on_query(
     };
 
     if select.top.is_some() {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+        return Err(crate::errors::Error::forward_refusal(
             "DISTINCT ON rewrite does not support TOP clauses".to_string(),
         ));
     }
 
     let mut inner_select = select.as_ref().clone();
     inner_select.distinct = None;
-    let mut translated_inner = inner_select.translate(schema, options)?;
+    let mut translated_inner = inner_select.translate_with_warnings(schema, options, emit)?;
 
     translated_inner.projection =
         ensure_distinct_on_projection_is_rewriteable(&translated_inner.projection)?;
@@ -445,7 +454,7 @@ fn try_translate_distinct_on_query(
 
     let partition_by = distinct_on_exprs
         .iter()
-        .map(|expr| expr.translate(schema, options))
+        .map(|expr| expr.translate_with_warnings(schema, options, emit))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Two separate corrections, because the two ORDER BY positions see different
@@ -475,7 +484,7 @@ fn try_translate_distinct_on_query(
                         .collect::<Vec<_>>()
                 }
                 OrderByKind::All(_) => {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                    return Err(crate::errors::Error::forward_refusal(
                         "DISTINCT ON rewrite does not support ORDER BY ALL".to_string(),
                     ));
                 }
@@ -495,7 +504,7 @@ fn try_translate_distinct_on_query(
 
     // Emit warning if FOR UPDATE or FOR SHARE is present
     if !query.locks.is_empty() || query.for_clause.is_some() {
-        emit_warning(TranslationWarning::LossyDrop {
+        emit(TranslationWarning::LossyDrop {
             construct: "FOR UPDATE / FOR SHARE".to_string(),
             reason: "SQLite has no row-level locking; the clause is dropped".to_string(),
         });
@@ -573,7 +582,7 @@ fn expand_rollup(elements: &[Vec<Expr>]) -> Vec<Vec<Expr>> {
 
 fn expand_cube(elements: &[Vec<Expr>]) -> Result<Vec<Vec<Expr>>, crate::errors::Error> {
     if elements.len() > 8 {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+        return Err(crate::errors::Error::forward_refusal(
             "CUBE rewrite is limited to 8 grouping elements to avoid combinatorial explosion"
                 .to_string(),
         ));
@@ -697,7 +706,7 @@ fn rewrite_projection_for_grouping_set(
                 SelectItem::Wildcard(_)
                 | SelectItem::QualifiedWildcard(_, _)
                 | SelectItem::ExprWithAliases { .. } => {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    return Err(crate::errors::Error::forward_refusal(format!(
                         "{kind_name} rewrite supports explicit single-alias projection items only",
                         kind_name = match kind {
                             GroupingRewriteKind::GroupingSets => "GROUPING SETS",
@@ -726,9 +735,9 @@ fn rewrite_projection_for_grouping_set(
                 return Ok(item.clone());
             }
 
-            Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            Err(crate::errors::Error::forward_refusal(
                 "GROUPING SETS/ROLLUP/CUBE rewrite supports only grouping-key columns, \
-                 aggregate expressions, and literals in SELECT projections"
+             aggregate expressions, and literals in SELECT projections"
                     .to_string(),
             ))
         })
@@ -752,13 +761,14 @@ fn union_all(set_exprs: Vec<SetExpr>) -> SetExpr {
 fn try_translate_grouping_query(
     query: &Query,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
     with: Option<sqlparser::ast::With>,
     order_by: Option<OrderBy>,
     limit_clause: Option<LimitClause>,
     fetch: Option<Fetch>,
     settings: Option<Vec<Setting>>,
     pipe_operators: Vec<PipeOperator>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<Query>, crate::errors::Error> {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Ok(None);
@@ -766,7 +776,7 @@ fn try_translate_grouping_query(
 
     let GroupByExpr::Expressions(group_exprs, modifiers) = &select.group_by else {
         if matches!(&select.group_by, GroupByExpr::All(mods) if !mods.is_empty()) {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "GROUP BY ALL with modifiers is not supported in SQLite translation".to_string(),
             ));
         }
@@ -782,7 +792,7 @@ fn try_translate_grouping_query(
                     | GroupByWithModifier::GroupingSets(_)
             )
         }) {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "GROUP BY ... WITH ROLLUP/CUBE/GROUPING SETS modifiers are not supported"
                     .to_string(),
             ));
@@ -802,10 +812,8 @@ fn try_translate_grouping_query(
 
         if let Some(grouped_sets) = grouped_sets {
             if grouping_operator.is_some() {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                    "GROUPING SETS/ROLLUP/CUBE rewrite supports at most one grouping operator per GROUP BY"
-                        .to_string(),
-                ));
+                return Err(crate::errors::Error::forward_refusal("GROUPING SETS/ROLLUP/CUBE rewrite supports at most one grouping operator per GROUP BY"
+                    .to_string()));
             }
             grouping_operator = Some(grouped_sets);
         } else {
@@ -827,31 +835,31 @@ fn try_translate_grouping_query(
         .collect::<Vec<_>>();
 
     if select.distinct.is_some() {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+        return Err(crate::errors::Error::forward_refusal(
             "GROUPING SETS/ROLLUP/CUBE rewrite does not support DISTINCT in the same SELECT"
                 .to_string(),
         ));
     }
     if select.having.is_some() {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+        return Err(crate::errors::Error::forward_refusal(
             "GROUPING SETS/ROLLUP/CUBE rewrite does not yet support HAVING clauses".to_string(),
         ));
     }
     if select.top.is_some() {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+        return Err(crate::errors::Error::forward_refusal(
             "GROUPING SETS/ROLLUP/CUBE rewrite does not support TOP clauses".to_string(),
         ));
     }
 
     let mut base_select = select.as_ref().clone();
     base_select.group_by = GroupByExpr::Expressions(Vec::new(), Vec::new());
-    let translated_base = base_select.translate(schema, options)?;
+    let translated_base = base_select.translate_with_warnings(schema, options, emit)?;
 
     let translated_sets = expanded_sets
         .iter()
         .map(|set| {
             set.iter()
-                .map(|expr| expr.translate(schema, options))
+                .map(|expr| expr.translate_with_warnings(schema, options, emit))
                 .collect::<Result<Vec<_>, crate::errors::Error>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -882,7 +890,7 @@ fn try_translate_grouping_query(
 
     // Emit warning if FOR UPDATE or FOR SHARE is present
     if !query.locks.is_empty() || query.for_clause.is_some() {
-        emit_warning(TranslationWarning::LossyDrop {
+        emit(TranslationWarning::LossyDrop {
             construct: "FOR UPDATE / FOR SHARE".to_string(),
             reason: "SQLite has no row-level locking; the clause is dropped".to_string(),
         });
@@ -900,31 +908,31 @@ fn try_translate_grouping_query(
     )))
 }
 
-impl Translator for SetExpr {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = SetExpr;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(SetExpr => SetExpr);
+impl crate::traits::translator::TranslatorWithContext for SetExpr {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        crate::impls::shared_helpers::translate_set_expr_shared::<Forward>(self, schema, options)
+        crate::impls::shared_helpers::translate_set_expr_shared::<Forward>(
+            self, schema, options, emit,
+        )
     }
 }
 
-impl Translator for Select {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Select;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(Select => Select);
+impl crate::traits::translator::TranslatorWithContext for Select {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        crate::impls::shared_helpers::translate_select_shared::<Forward>(self, schema, options)
+        crate::impls::shared_helpers::translate_select_shared::<Forward>(
+            self, schema, options, emit,
+        )
     }
 }
 
@@ -933,45 +941,70 @@ impl Translator for Select {
 fn translate_group_by(
     group_by: &sqlparser::ast::GroupByExpr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<sqlparser::ast::GroupByExpr, crate::errors::Error> {
-    crate::impls::shared_helpers::translate_group_by_expr::<Forward>(group_by, schema, options)
+    crate::impls::shared_helpers::translate_group_by_expr::<Forward>(
+        group_by,
+        schema,
+        options,
+        &mut |_| {},
+    )
 }
 
 #[cfg(all(test, feature = "std"))]
 fn translate_limit_clause(
     limit_clause: Option<&LimitClause>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Option<LimitClause>, crate::errors::Error> {
-    crate::impls::shared_helpers::translate_limit_clause::<Forward>(limit_clause, schema, options)
+    crate::impls::shared_helpers::translate_limit_clause::<Forward>(
+        limit_clause,
+        schema,
+        options,
+        &mut |_| {},
+    )
 }
 
 #[cfg(all(test, feature = "std"))]
 fn translate_fetch(
     fetch: Option<&Fetch>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Option<Fetch>, crate::errors::Error> {
-    crate::impls::shared_helpers::translate_fetch_clause::<Forward>(fetch, schema, options)
+    crate::impls::shared_helpers::translate_fetch_clause::<Forward>(
+        fetch,
+        schema,
+        options,
+        &mut |_| {},
+    )
 }
 
 #[cfg(all(test, feature = "std"))]
 fn translate_distinct(
     distinct: Option<&Distinct>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Option<Distinct>, crate::errors::Error> {
-    crate::impls::shared_helpers::translate_distinct_shared::<Forward>(distinct, schema, options)
+    crate::impls::shared_helpers::translate_distinct_shared::<Forward>(
+        distinct,
+        schema,
+        options,
+        &mut |_| {},
+    )
 }
 
 #[cfg(all(test, feature = "std"))]
 fn translate_named_window(
     named_windows: &[sqlparser::ast::NamedWindowDefinition],
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Vec<sqlparser::ast::NamedWindowDefinition>, crate::errors::Error> {
-    crate::impls::shared_helpers::translate_named_windows::<Forward>(named_windows, schema, options)
+    crate::impls::shared_helpers::translate_named_windows::<Forward>(
+        named_windows,
+        schema,
+        options,
+        &mut |_| {},
+    )
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -1068,7 +1101,7 @@ mod tests {
     #[test]
     fn query_translation_rejects_distinct_on_order_by_all_and_grouping_edge_cases() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let mut distinct_on_order_all =
             parse_query("SELECT DISTINCT ON (user_id) user_id, ts FROM events ORDER BY user_id");
@@ -1140,7 +1173,7 @@ mod tests {
     #[test]
     fn low_level_translation_helpers_cover_remaining_variants() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let order_by_all = Some(sqlparser::ast::OrderBy {
             kind: sqlparser::ast::OrderByKind::All(sqlparser::ast::OrderByOptions {
@@ -1149,7 +1182,7 @@ mod tests {
             }),
             interpolate: None,
         });
-        let _ = translate_order_by(order_by_all.as_ref(), &schema, &options).unwrap();
+        let _ = translate_order_by(order_by_all.as_ref(), &schema, &options, &mut |_| {}).unwrap();
 
         let offset_comma_limit = Some(sqlparser::ast::LimitClause::OffsetCommaLimit {
             offset: parse_expr("5"),
@@ -1169,7 +1202,7 @@ mod tests {
     #[test]
     fn additional_query_helpers_cover_error_paths_for_distinct_and_grouping() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let empty_compound =
             vec![SelectItem::UnnamedExpr(sqlparser::ast::Expr::CompoundIdentifier(Vec::new()))];
@@ -1209,10 +1242,15 @@ mod tests {
             distinct_query.fetch.clone(),
             distinct_query.settings.clone(),
             distinct_query.pipe_operators.clone(),
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(err.to_string().contains("TOP clauses"));
-
+        additional_query_helpers_cover_grouping_error_paths();
+    }
+    fn additional_query_helpers_cover_grouping_error_paths() {
+        let schema = empty_schema();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut group_all_mod_query = parse_query("SELECT id FROM users");
         if let SetExpr::Select(select) = group_all_mod_query.body.as_mut() {
             select.group_by = GroupByExpr::All(vec![sqlparser::ast::GroupByWithModifier::Rollup]);
@@ -1227,6 +1265,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(err.to_string().contains("GROUP BY ALL with modifiers"));
@@ -1248,6 +1287,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(err.to_string().contains("WITH ROLLUP/CUBE/GROUPING SETS"));
@@ -1270,6 +1310,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(err.to_string().contains("TOP clauses"));
@@ -1302,7 +1343,7 @@ mod tests {
     #[test]
     fn additional_query_helpers_cover_modifier_and_named_window_paths() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         assert!(!is_aggregate_expression(&parse_expr("sum(v) OVER (PARTITION BY id)")));
         assert!(is_aggregate_expression(&parse_expr("bool_and(active)")));
@@ -1351,7 +1392,7 @@ mod tests {
     #[test]
     fn additional_query_helpers_cover_remaining_non_error_paths() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let compound_projection =
             vec![SelectItem::UnnamedExpr(sqlparser::ast::Expr::CompoundIdentifier(vec![
@@ -1372,6 +1413,7 @@ mod tests {
             None,
             distinct_no_order.settings.clone(),
             distinct_no_order.pipe_operators.clone(),
+            &mut |_| {},
         )
         .unwrap();
         assert!(rewritten.is_some());
@@ -1390,6 +1432,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            &mut |_| {},
         )
         .unwrap();
         assert!(result.is_none());
@@ -1411,6 +1454,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            &mut |_| {},
         )
         .unwrap();
         assert!(result.is_none());
@@ -1438,7 +1482,7 @@ mod tests {
     #[test]
     fn named_window_translation_supports_named_window_expr_variant_directly() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let windows = vec![NamedWindowDefinition(
             sqlparser::ast::Ident::new("w2"),
             NamedWindowExpr::NamedWindow(sqlparser::ast::Ident::new("w1")),
@@ -1451,7 +1495,7 @@ mod tests {
     #[test]
     fn query_translation_translates_select_side_and_query_level_expression_paths() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let mut query = parse_query("SELECT id FROM users");
         let SetExpr::Select(select) = query.body.as_mut() else {
@@ -1510,7 +1554,7 @@ mod tests {
     #[test]
     fn foreign_select_clauses_are_refused() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let refused = |mutate: &dyn Fn(&mut sqlparser::ast::Select), needle: &str| {
             let mut query = parse_query("SELECT id FROM users");

@@ -1,8 +1,5 @@
-//! Regression tests for generated SQL snippet handling.
-//!
-//! Translators that synthesize SQL snippets (FTS5/vec0 triggers) must either
-//! fail loudly on invalid SQL or produce valid SQL for quoted/problematic
-//! identifiers.
+//! Regression tests for trigger identifiers built through direct AST
+//! construction.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 

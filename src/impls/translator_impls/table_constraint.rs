@@ -14,7 +14,8 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, ConstraintReferenceMatchKind, Expr, Ident, NullsDistinctOption, TableConstraint,
+    BinaryOperator, ConstraintReferenceMatchKind, Expr, Ident, IndexColumn, NullsDistinctOption,
+    TableConstraint,
 };
 
 use crate::{
@@ -25,29 +26,29 @@ use crate::{
         },
         translator_impls::constraint_characteristic::deferrability_outside_a_foreign_key,
     },
-    options::Pg2SqliteOptions,
-    prelude::{TranslationOptions, Translator},
+    traits::translator::TranslatorWithContext,
 };
 
-impl Translator for TableConstraint {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    /// A constraint can translate to none, as a dropped CHECK does, to one, or
-    /// to several: a composite `MATCH FULL` foreign key needs a CHECK beside
-    /// it because SQLite ignores the MATCH clause.
-    type SQLiteEntry = Vec<TableConstraint>;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(
+    TableConstraint => Vec<TableConstraint>
+);
+/// A constraint can translate to none, as a dropped CHECK does, to one, or
+/// to several: a composite `MATCH FULL` foreign key needs a CHECK beside
+/// it because SQLite ignores the MATCH clause.
+impl crate::traits::translator::TranslatorWithContext for TableConstraint {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match self {
             Self::Check(check_constraint) => {
-                match check_constraint.expr.translate(schema, options) {
+                match check_constraint.expr.translate_with_warnings(schema, options, emit) {
                     Ok(translated_expr) => {
                         crate::impls::translator_impls::column_option::warn_no_inherit_dropped(
                             check_constraint,
+                            emit,
                         );
                         Ok(vec![Self::Check(sqlparser::ast::CheckConstraint {
                             name: check_constraint.name.clone(),
@@ -70,14 +71,18 @@ impl Translator for TableConstraint {
                         append_suffix(&fk_constraint.foreign_table, options.get_rls_table_suffix());
                 }
 
-                updated_fk.on_delete =
-                    fk_constraint.on_delete.map(|a| a.translate(schema, options)).transpose()?;
-                updated_fk.on_update =
-                    fk_constraint.on_update.map(|a| a.translate(schema, options)).transpose()?;
+                updated_fk.on_delete = fk_constraint
+                    .on_delete
+                    .map(|a| a.translate_with_warnings(schema, options, emit))
+                    .transpose()?;
+                updated_fk.on_update = fk_constraint
+                    .on_update
+                    .map(|a| a.translate_with_warnings(schema, options, emit))
+                    .transpose()?;
 
                 updated_fk.characteristics = fk_constraint
                     .characteristics
-                    .map(|c| c.translate(schema, options))
+                    .map(|c| c.translate_with_warnings(schema, options, emit))
                     .transpose()?;
 
                 let mut constraints = vec![Self::ForeignKey(updated_fk)];
@@ -86,11 +91,8 @@ impl Translator for TableConstraint {
             }
             Self::PrimaryKey(pk_constraint) => {
                 let mut updated_pk = pk_constraint.clone();
-                updated_pk.columns = pk_constraint
-                    .columns
-                    .iter()
-                    .map(|col| col.translate(schema, options))
-                    .collect::<Result<Vec<_>, _>>()?;
+                updated_pk.columns =
+                    translate_index_columns(&pk_constraint.columns, schema, options, emit)?;
                 if let Some(characteristics) = pk_constraint.characteristics {
                     return Err(deferrability_outside_a_foreign_key(
                         "PRIMARY KEY",
@@ -105,11 +107,8 @@ impl Translator for TableConstraint {
                 }
 
                 let mut updated_unique = unique_constraint.clone();
-                updated_unique.columns = unique_constraint
-                    .columns
-                    .iter()
-                    .map(|col| col.translate(schema, options))
-                    .collect::<Result<Vec<_>, _>>()?;
+                updated_unique.columns =
+                    translate_index_columns(&unique_constraint.columns, schema, options, emit)?;
                 if let Some(characteristics) = unique_constraint.characteristics {
                     return Err(deferrability_outside_a_foreign_key("UNIQUE", characteristics));
                 }
@@ -125,35 +124,43 @@ impl Translator for TableConstraint {
             // could not run. There is no wildcard arm on purpose: a new
             // `sqlparser` variant fails to compile until it is classified.
             Self::Exclude(exclude) => {
-                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                Err(crate::errors::Error::forward_refusal(format!(
                     "{exclude} cannot be translated. An exclusion constraint enforces that no two \
-                     rows satisfy a comparison, which SQLite has no constraint for. Express it \
-                     with a trigger that raises, or with a unique index where the comparison is \
-                     equality."
+                         rows satisfy a comparison, which SQLite has no constraint for. Express it \
+                         with a trigger that raises, or with a unique index where the comparison is \
+                         equality."
                 )))
             }
             Self::Index(index) => {
-                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                Err(crate::errors::Error::forward_refusal(format!(
                     "{index} cannot be translated. SQLite declares an index with a CREATE INDEX \
-                     statement of its own rather than inside the table body."
+                         statement of its own rather than inside the table body."
                 )))
             }
             Self::FulltextOrSpatial(constraint) => {
-                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                Err(crate::errors::Error::forward_refusal(format!(
                     "{constraint} cannot be translated. SQLite offers full-text search through the \
-                     FTS5 virtual table rather than a key on an ordinary table."
+                         FTS5 virtual table rather than a key on an ordinary table."
                 )))
             }
             Self::PrimaryKeyUsingIndex(constraint) | Self::UniqueUsingIndex(constraint) => {
-                Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                Err(crate::errors::Error::forward_refusal(format!(
                     "USING INDEX {} cannot be translated. It adopts an existing index as the \
-                     constraint, and SQLite has no way to promote an index that way. Declare the \
-                     constraint on the table instead.",
+                         constraint, and SQLite has no way to promote an index that way. Declare the \
+                         constraint on the table instead.",
                     constraint.index_name
                 )))
             }
         }
     }
+}
+fn translate_index_columns(
+    columns: &[IndexColumn],
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Vec<IndexColumn>, crate::errors::Error> {
+    columns.iter().map(|column| column.translate_with_warnings(schema, options, emit)).collect()
 }
 
 /// The CHECK that makes a composite `MATCH FULL` foreign key behave the way

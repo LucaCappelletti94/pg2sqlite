@@ -24,36 +24,26 @@ use crate::{
         append_suffix, normalize_schema_qualified_object_name_for_sqlite,
         table_has_implicit_public_rls,
     },
-    prelude::{Pg2SqliteOptions, Translator},
-    traits::TranslationOptions,
 };
 
-impl Translator for CreateView {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = CreateView;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(CreateView => CreateView);
+impl crate::traits::translator::TranslatorWithContext for CreateView {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         if self.materialized {
-            return Err(Error::UnsupportedSQLiteFeature(
-                "MATERIALIZED VIEW is not supported in SQLite".into(),
-            ));
+            return Err(Error::forward_refusal("MATERIALIZED VIEW is not supported in SQLite"));
         }
 
         if self.or_alter {
-            return Err(Error::UnsupportedSQLiteFeature(
-                "CREATE OR ALTER VIEW is not supported in SQLite".into(),
-            ));
+            return Err(Error::forward_refusal("CREATE OR ALTER VIEW is not supported in SQLite"));
         }
 
         if self.secure {
-            return Err(Error::UnsupportedSQLiteFeature(
-                "SECURE VIEW is not supported in SQLite".into(),
-            ));
+            return Err(Error::forward_refusal("SECURE VIEW is not supported in SQLite"));
         }
 
         // PostgreSQL runs a view with its owner's rights, so a view over a
@@ -65,31 +55,27 @@ impl Translator for CreateView {
         // SQLite has no view option to carry it.
         let security_invoker = reads_as_the_invoker(&self.options);
         if !matches!(self.options, CreateTableOptions::None) && !security_invoker {
-            return Err(Error::UnsupportedSQLiteFeature(format!(
+            return Err(Error::forward_refusal(format!(
                 "VIEW options are not supported in SQLite: {:?}",
                 self.options
             )));
         }
 
         if !self.cluster_by.is_empty() {
-            return Err(Error::UnsupportedSQLiteFeature(
-                "CLUSTER BY is not supported in SQLite views".into(),
-            ));
+            return Err(Error::forward_refusal("CLUSTER BY is not supported in SQLite views"));
         }
 
         if self.to.is_some() {
-            return Err(Error::UnsupportedSQLiteFeature(
-                "VIEW TO clause is not supported in SQLite".into(),
-            ));
+            return Err(Error::forward_refusal("VIEW TO clause is not supported in SQLite"));
         }
 
         if self.with_no_schema_binding {
-            return Err(Error::UnsupportedSQLiteFeature(
-                "WITH NO SCHEMA BINDING is not supported in SQLite".into(),
+            return Err(Error::forward_refusal(
+                "WITH NO SCHEMA BINDING is not supported in SQLite",
             ));
         }
 
-        let mut query = self.query.translate(schema, options)?;
+        let mut query = self.query.translate_with_warnings(schema, options, emit)?;
         if !security_invoker {
             retarget_rls_reads(&mut query, schema, options)?;
         }
@@ -139,7 +125,7 @@ fn reads_as_the_invoker(options: &CreateTableOptions) -> bool {
 fn retarget_rls_reads(
     query: &mut Query,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), Error> {
     let outcome = visit_relations_mut(query, |name: &mut ObjectName| {
         match table_has_implicit_public_rls(schema, name) {

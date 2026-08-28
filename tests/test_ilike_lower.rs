@@ -7,10 +7,7 @@
 //! `lower(expr) LIKE lower(pattern)`, which is pragma-independent.
 
 use diesel::{QueryableByName, RunQueryDsl, SqliteConnection, prelude::*};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 // ── 1. Output shape tests ────────────────────────────────────────────────────
 

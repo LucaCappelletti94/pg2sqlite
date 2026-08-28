@@ -39,7 +39,7 @@ impl ReverseTranslator for Update {
         // REPLACE deletes and re-inserts), so silently dropping the clause would
         // change the observable error behaviour. Reject all of them.
         if let Some(or_clause) = self.or {
-            return Err(Error::UnsupportedSQLiteFeature(format!(
+            return Err(Error::reverse_refusal(format!(
                 "UPDATE {or_clause} has no PostgreSQL form. PostgreSQL UPDATE has no \
                  conflict-resolution clause. Use an explicit transaction with appropriate \
                  error handling instead."
@@ -48,12 +48,12 @@ impl ReverseTranslator for Update {
         // PostgreSQL UPDATE has no ORDER BY or LIMIT clause. Refuse them so
         // the emitted SQL does not fail at the server with a syntax error.
         if !self.order_by.is_empty() || self.limit.is_some() {
-            return Err(Error::UnsupportedSQLiteFeature(
+            return Err(Error::reverse_refusal(
                 "PostgreSQL UPDATE has no ORDER BY or LIMIT clause; these are SQLite extensions \
-                 with no PostgreSQL form"
+             with no PostgreSQL form"
                     .to_string(),
             ));
         }
-        translate_update::<Reverse>(self, schema, options)
+        translate_update::<Reverse>(self, schema, options, &mut |_| {})
     }
 }

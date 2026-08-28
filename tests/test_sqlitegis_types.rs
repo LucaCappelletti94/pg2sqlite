@@ -3,10 +3,7 @@
 //! at runtime, and the new `sqlitegis_enabled` option plumbs through
 //! `Pg2SqliteOptions` for use by later steps.
 
-use pg2sqlite::{
-    pg2sqlite::Pg2Sqlite,
-    prelude::{Pg2SqliteOptions, TranslationOptions},
-};
+use pg2sqlite::{pg2sqlite::Pg2Sqlite, prelude::Pg2SqliteOptions};
 
 #[test]
 fn geometry_column_translates_to_blob() {

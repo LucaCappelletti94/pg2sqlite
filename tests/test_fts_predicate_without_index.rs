@@ -21,7 +21,7 @@
 //! emitted SQL applies cleanly against an FTS5 vtable that has not
 //! been declared.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 
 const SCHEMA_WITHOUT_GIN_INDEX: &str = "\
 CREATE TABLE docs (

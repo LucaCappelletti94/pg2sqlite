@@ -68,8 +68,6 @@ struct Document<'a> {
 /// (documents_rls) instead of the view (documents).
 #[test]
 fn test_fts5_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let fixture = include_str!("fixtures/fts5_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
     let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;
@@ -121,8 +119,6 @@ fn test_fts5_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::e
 /// tables.
 #[test]
 fn test_fts5_search_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let mut conn = establish_connection();
     let fixture = include_str!("fixtures/fts5_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
@@ -183,8 +179,6 @@ fn test_fts5_search_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
 /// Snapshot test to verify the full translated SQL output.
 #[test]
 fn test_fts5_rls_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let fixture = include_str!("fixtures/fts5_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
     let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;

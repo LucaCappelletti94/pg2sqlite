@@ -21,10 +21,7 @@ use diesel::{
     prelude::*,
     sql_types::{Integer, Text},
 };
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 /// One row of the translated `UNNEST` query. The query under test is the
 /// artifact, so it is run as generated text rather than through the DSL.

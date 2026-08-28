@@ -6,10 +6,7 @@
 //! flat-AND, simple-column-ref shape falls through to passthrough.
 
 use diesel::connection::SimpleConnection;
-use pg2sqlite::{
-    errors::Error,
-    prelude::{Pg2SqliteOptions, TranslationOptions},
-};
+use pg2sqlite::{errors::Error, prelude::Pg2SqliteOptions};
 
 mod helpers;
 

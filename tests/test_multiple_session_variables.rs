@@ -6,10 +6,7 @@
 //! (text username) — are applied independently and correctly within the same
 //! policy.
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rusqlite::Connection as SqliteConn;
 
 fn make_options() -> Pg2SqliteOptions {

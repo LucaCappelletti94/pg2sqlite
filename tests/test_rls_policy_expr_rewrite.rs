@@ -4,10 +4,7 @@
 //! preservation, and quoted-table update trigger execution.
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sqlparser::ast::Statement;
 
 fn translate(sql: &str) -> Result<Vec<Statement>, Box<dyn std::error::Error>> {

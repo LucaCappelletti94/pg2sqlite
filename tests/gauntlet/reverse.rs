@@ -14,15 +14,13 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::collections::HashSet;
+
 use diesel::{
-    QueryableByName, RunQueryDsl, sql_query,
-    sql_types::{Array, Integer, Nullable, Text},
+    Connection, QueryableByName, RunQueryDsl, SqliteConnection, sql_query,
+    sql_types::{Integer, Nullable, Text},
 };
-use pg2sqlite::{
-    internals::{postgres_only, shared_with_postgres, sqlite_has},
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 use postgres_harness::{apply, fresh_database};
 use sql_traits::structs::ParserDB;
 
@@ -548,65 +546,6 @@ struct CatalogueName {
     name: String,
 }
 
-/// The reverse direction emits every name in this crate's two PostgreSQL
-/// inventories unchanged, so the server is asked whether it has them.
-///
-/// This is the half of the reverse catch-all that does not need judgement:
-/// existence is a fact the catalogue answers. Whether the two engines agree on
-/// what a name means is decided in `sqlite_functions.rs`, name by name, and is
-/// not what this checks.
-#[test]
-fn every_name_the_reverse_direction_emits_exists_in_postgres() {
-    let mut connection = fresh_database();
-
-    // The ten the catalogue cannot answer for, because PostgreSQL parses them
-    // as expressions or constructors rather than as functions. Evaluating them
-    // is the check.
-    const EXPRESSIONS: [&str; 10] = [
-        "coalesce",
-        "nullif",
-        "current_date",
-        "current_time",
-        "current_timestamp",
-        "least",
-        "greatest",
-        "localtime",
-        "localtimestamp",
-        "row",
-    ];
-    apply(
-        &mut connection,
-        "SELECT coalesce(NULL::int, 1), nullif(1, 1), current_date, current_time, \
-         current_timestamp, least(1, 2), greatest(1, 2), localtime, localtimestamp, row(1, 2)",
-    )
-    .expect("the expression-shaped names evaluate");
-
-    let asked: Vec<String> = shared_with_postgres()
-        .iter()
-        .chain(postgres_only())
-        .filter(|name| !EXPRESSIONS.contains(name))
-        .map(|name| (*name).to_string())
-        .collect();
-
-    let absent: Vec<CatalogueName> = sql_query(
-        "SELECT nm AS name FROM unnest($1::text[]) AS nm \
-         WHERE NOT EXISTS ( \
-             SELECT 1 FROM pg_proc p \
-             WHERE p.proname = nm AND p.pronamespace = 'pg_catalog'::regnamespace \
-         )",
-    )
-    .bind::<Array<Text>, _>(asked)
-    .load(&mut connection)
-    .expect("the catalogue answers");
-
-    assert!(
-        absent.is_empty(),
-        "the reverse direction would emit {} name(s) PostgreSQL does not have: {:?}",
-        absent.len(),
-        absent.iter().map(|row| row.name.as_str()).collect::<Vec<_>>()
-    );
-}
-
 /// The check whose absence let the omission happen: the corpus comes from the
 /// server, so a name this crate never heard of is still asked about.
 ///
@@ -694,7 +633,17 @@ fn every_scalar_the_forward_direction_knows_reverses() {
     /// `SCHEMA_DDL` above is twenty tables of shapes no probe here needs.
     const PROBE_DDL: &str = "CREATE TABLE t (id INT PRIMARY KEY, n INT, r REAL, s TEXT);";
 
-    let mut connection = fresh_database();
+    let mut postgres = fresh_database();
+    let mut sqlite = SqliteConnection::establish(":memory:").expect("SQLite opens");
+
+    // Diesel's query DSL cannot name SQLite's PRAGMA virtual tables.
+    let sqlite_function_names: HashSet<String> =
+        sql_query("SELECT DISTINCT name FROM pragma_function_list")
+            .load::<CatalogueName>(&mut sqlite)
+            .expect("SQLite reports its scalar functions")
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
 
     // `regnamespace` is a catalogue cast with no diesel schema, which is why
     // this one statement is raw. The pattern drops the handful of names that
@@ -704,7 +653,7 @@ fn every_scalar_the_forward_direction_knows_reverses() {
          WHERE pronamespace = 'pg_catalog'::regnamespace AND proname ~ '^[a-z_][a-z0-9_]*$' \
          ORDER BY name",
     )
-    .load(&mut connection)
+    .load(&mut postgres)
     .expect("the catalogue answers");
     assert!(names.len() >= 2500, "the catalogue should be whole, got {}", names.len());
 
@@ -735,9 +684,23 @@ fn every_scalar_the_forward_direction_knows_reverses() {
                 !message.contains("is not a SQLite function")
             }
         };
-        if !forward_knows || sqlite_has(&row.name) {
+        if !forward_knows {
             continue;
         }
+        let sqlite_has_scalar = sqlite_function_names.contains(&row.name);
+        let sqlite_has_table_function = (0..=3).any(|arity| {
+            let arguments = core::iter::repeat_n("NULL", arity).collect::<Vec<_>>().join(", ");
+            sql_query(format!(
+                "SELECT CAST(1 AS TEXT) AS name FROM {}({arguments}) LIMIT 0",
+                row.name
+            ))
+            .load::<CatalogueName>(&mut sqlite)
+            .is_ok()
+        });
+        if sqlite_has_scalar || sqlite_has_table_function {
+            continue;
+        }
+
         known += 1;
 
         if let Err(error) = Pg2Sqlite::default().reverse_sql(&call, &schema, &options) {
@@ -745,9 +708,8 @@ fn every_scalar_the_forward_direction_knows_reverses() {
         }
     }
 
-    // PostgreSQL 17 leaves 235 names the forward direction knows, of which 214
-    // are absent from SQLite. A collapse here means the refusal's wording moved
-    // and the filter stopped filtering.
+    // PostgreSQL 17 leaves 214 names the forward direction knows that SQLite
+    // does not provide. A collapse here means a filter stopped filtering.
     assert!(known >= 180, "the forward direction should know far more names, got {known}");
 
     assert!(

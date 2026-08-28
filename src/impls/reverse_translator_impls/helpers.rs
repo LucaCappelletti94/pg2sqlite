@@ -25,10 +25,16 @@ use crate::{
 pub(crate) struct Reverse;
 
 impl TranslationDirection for Reverse {
+    type Options<'a> = Pg2SqliteOptions;
+    fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions {
+        options
+    }
+
     fn translate_expr(
         expr: &Expr,
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
+        _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Expr, Error> {
         expr.reverse_translate(schema, options)
     }
@@ -37,6 +43,7 @@ impl TranslationDirection for Reverse {
         query: &Query,
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
+        _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Query, Error> {
         query.reverse_translate(schema, options)
     }
@@ -45,6 +52,7 @@ impl TranslationDirection for Reverse {
         insert: &sqlparser::ast::Insert,
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
+        _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Insert, Error> {
         insert.reverse_translate(schema, options)
     }
@@ -53,6 +61,7 @@ impl TranslationDirection for Reverse {
         delete: &sqlparser::ast::Delete,
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
+        _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Delete, Error> {
         delete.reverse_translate(schema, options)
     }

@@ -14,7 +14,7 @@
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
 
-use pg2sqlite::prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions};
 use run_translated_helper::run_translated_with;
 
 fn run(pg: &str) -> Vec<Option<String>> {

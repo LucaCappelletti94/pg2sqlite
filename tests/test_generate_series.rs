@@ -1,5 +1,5 @@
 //! Tests that `generate_series` in a FROM clause produces an explicit
-//! `UnsupportedSQLiteFeature` error rather than silently passing through
+//! typed translation refusal rather than silently passing through
 //! to SQLite (where it would fail at runtime with "no such table").
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};

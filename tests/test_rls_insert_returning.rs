@@ -8,9 +8,7 @@
 //! RETURNING (including auto-assigned integer primary keys) must
 //! come back as the value actually stored.
 
-use pg2sqlite::prelude::{
-    Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions, UuidRepresentation,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rusqlite::Connection;
 
 const RLS_SCHEMA: &str = "\
@@ -293,7 +291,7 @@ fn a_table_without_a_policy_still_returns_its_assigned_key() {
 
 mod m1_tests {
     use diesel::{prelude::*, sqlite::SqliteConnection};
-    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
     fn strict_opts() -> Pg2SqliteOptions {
         Pg2SqliteOptions::default()

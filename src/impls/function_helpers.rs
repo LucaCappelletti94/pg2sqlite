@@ -116,11 +116,7 @@ pub(crate) fn function_arg_expr_or_err(arg: &FunctionArg) -> Result<&Expr, Error
         FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
         | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
         | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => Ok(e),
-        _ => {
-            Err(Error::UnsupportedSQLiteFeature(
-                "Expected expression argument in function".to_string(),
-            ))
-        }
+        _ => Err(Error::reverse_refusal("Expected expression argument in function".to_string())),
     }
 }
 
@@ -131,9 +127,26 @@ pub(crate) fn extract_exactly<'a>(
     count: usize,
     func_name: &str,
 ) -> Result<Vec<&'a Expr>, Error> {
+    extract_exactly_with(args, count, func_name, Error::forward_refusal)
+}
+
+pub(crate) fn extract_exactly_reverse<'a>(
+    args: &'a FunctionArguments,
+    count: usize,
+    func_name: &str,
+) -> Result<Vec<&'a Expr>, Error> {
+    extract_exactly_with(args, count, func_name, Error::reverse_refusal)
+}
+
+fn extract_exactly_with<'a>(
+    args: &'a FunctionArguments,
+    count: usize,
+    func_name: &str,
+    refusal: impl FnOnce(String) -> Error,
+) -> Result<Vec<&'a Expr>, Error> {
     let exprs: Vec<&Expr> = crate::impls::shared_helpers::function_argument_exprs(args);
     if exprs.len() != count {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(refusal(format!(
             "{func_name}() requires exactly {count} argument{}",
             if count == 1 { "" } else { "s" }
         )));

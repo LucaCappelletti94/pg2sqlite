@@ -8,7 +8,7 @@
 use std::io::Write;
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use pg2sqlite::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite, traits::TranslationOptions};
+use pg2sqlite::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite};
 use rusqlite::Connection as SqliteConn;
 use tempfile::{NamedTempFile, TempDir};
 

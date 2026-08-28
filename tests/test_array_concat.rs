@@ -14,10 +14,7 @@
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
 
-use pg2sqlite::{
-    prelude::{ArrayRepresentation, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{ArrayRepresentation, Pg2SqliteOptions};
 use run_translated_helper::run_translated_with;
 
 const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, a INT[], b INT[], s TEXT, u TEXT);

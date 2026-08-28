@@ -4,7 +4,7 @@
 mod helpers;
 
 use helpers::{translate_sql, translate_statements};
-use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2SqliteOptions, UuidRepresentation};
 
 #[test]
 fn plpgsql_trigger_translates_function_in_window_partition() {

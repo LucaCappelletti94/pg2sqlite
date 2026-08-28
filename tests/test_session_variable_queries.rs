@@ -19,7 +19,6 @@ use helpers::{establish_connection, set_session_username};
 use pg2sqlite::{
     errors::Error,
     prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
-    traits::TranslationOptions,
 };
 
 diesel::table! {

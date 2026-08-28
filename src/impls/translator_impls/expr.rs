@@ -58,8 +58,7 @@ use crate::{
             helpers::Forward,
         },
     },
-    prelude::{Pg2SqliteOptions, Translator},
-    traits::TranslationOptions,
+    traits::translator::TranslatorWithContext,
 };
 
 /// Extract the search query string from a to_tsquery expression.
@@ -121,7 +120,8 @@ fn translate_fts_expression(
     tsvector_func: &Function,
     tsquery_func: &Function,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    _emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     let columns = extract_columns_from_function(tsvector_func);
     let table = schema
@@ -136,9 +136,9 @@ fn translate_fts_expression(
             columns.iter().all(|col| table_columns.contains(&col.to_lowercase()))
         })
         .ok_or_else(|| {
-            crate::errors::Error::UnsupportedSQLiteFeature(
+            crate::errors::Error::forward_refusal(
                 "Could not determine table name from to_tsvector expression. \
-                 Ensure the columns referenced exist in a table with a GIN/GiST index."
+                     Ensure the columns referenced exist in a table with a GIN/GiST index."
                     .to_string(),
             )
         })?;
@@ -152,7 +152,7 @@ fn translate_fts_expression(
     let missing_index = !columns.iter().any(|col| options.has_fts_index(&table_name, col));
     if missing_index {
         let cols_joined = columns.join(", ");
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "FTS5 index over column(s) `{cols_joined}` in table `{table_name}` is not declared. \
              Add `CREATE INDEX <name> ON {table_name} USING GIN (to_tsvector('<lang>', \
              {first_col}))` to the schema to enable the `@@ to_tsquery(...)` rewrite.",
@@ -162,7 +162,7 @@ fn translate_fts_expression(
 
     let pk_columns: Vec<_> = table.primary_key_columns(schema)?.collect();
     if pk_columns.len() != 1 {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "FTS5 requires a single-column primary key. Table '{table_name}' has {} primary key columns.",
             pk_columns.len()
         )));
@@ -171,7 +171,7 @@ fn translate_fts_expression(
 
     // Get the search query from tsquery
     let query_str = extract_query_from_tsquery(tsquery_func).ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(
+        crate::errors::Error::forward_refusal(
             "Could not extract search query from to_tsquery expression. \
              Only string literal arguments are supported (e.g., to_tsquery('search term')). \
              Parameterized queries like to_tsquery($1) are not yet supported."
@@ -214,10 +214,11 @@ fn translate_extract(
     field: &DateTimeField,
     expr: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     let key = datetime_field_key(field).ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        crate::errors::Error::forward_refusal(format!(
             "EXTRACT({field}) is not supported in SQLite. Supported fields: \
              YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH, WEEK, ISODOW, ISOYEAR."
         ))
@@ -226,11 +227,11 @@ fn translate_extract(
     // PostgreSQL answers as an interval, which erases the interval before it
     // needs a value of its own.
     if key == DatePartKey::Epoch
-        && let Some(result) = epoch_of_temporal_difference(expr, schema, options)
+        && let Some(result) = epoch_of_temporal_difference(expr, schema, options, emit)
     {
         return result;
     }
-    Ok(build_date_part_expr(key, expr.translate(schema, options)?))
+    Ok(build_date_part_expr(key, expr.translate_with_warnings(schema, options, emit)?))
 }
 /// True when `expr` is an array: an `ARRAY[...]` literal, or a column declared
 /// with an array type.
@@ -268,7 +269,8 @@ fn can_be_null(expr: &Expr) -> bool {
 fn translate_boolean_cast(
     expr: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     const TRUE_SPELLINGS: [&str; 9] = ["t", "tr", "tru", "true", "y", "ye", "yes", "on", "1"];
     const FALSE_SPELLINGS: [&str; 10] =
@@ -282,13 +284,13 @@ fn translate_boolean_cast(
         if FALSE_SPELLINGS.contains(&spelling.as_str()) {
             return Ok(number_literal("0"));
         }
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "invalid input syntax for type boolean: \"{text}\". PostgreSQL accepts true, false, \
              yes, no, on, off, 1, 0, and any unambiguous prefix of those words."
         )));
     }
 
-    let value = expr.translate(schema, options)?;
+    let value = expr.translate_with_warnings(schema, options, emit)?;
     let normalized = simple_function_expr(
         "lower",
         vec![simple_function_expr("trim", vec![value.clone()], None)],
@@ -433,12 +435,13 @@ fn is_boolean_expression(expr: &Expr, schema: &ParserDB) -> bool {
 fn render_boolean_as_text(
     expr: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     if let Some(word) = boolean_literal_word(expr) {
         return Ok(string_literal(word));
     }
-    let value = expr.translate(schema, options)?;
+    let value = expr.translate_with_warnings(schema, options, emit)?;
     Ok(Expr::Case {
         case_token: AttachedToken::empty(),
         end_token: AttachedToken::empty(),
@@ -488,14 +491,15 @@ fn translate_integral_rounding(
     expr: &Expr,
     direction: RoundingDirection,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     let (truncation_is_exact, adjustment) = match direction {
         RoundingDirection::Down => (BinaryOperator::GtEq, BinaryOperator::Minus),
         RoundingDirection::Up => (BinaryOperator::LtEq, BinaryOperator::Plus),
     };
 
-    let translated_expr = expr.translate(schema, options)?;
+    let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
     let cast_to_int = Expr::Cast {
         expr: Box::new(translated_expr.clone()),
         data_type: DataType::Integer(None),
@@ -535,10 +539,11 @@ fn translate_position(
     substr_expr: &Expr,
     in_expr: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_substr = substr_expr.translate(schema, options)?;
-    let translated_in = in_expr.translate(schema, options)?;
+    let translated_substr = substr_expr.translate_with_warnings(schema, options, emit)?;
+    let translated_in = in_expr.translate_with_warnings(schema, options, emit)?;
 
     // Build: INSTR(str, substr) - note the reversed argument order
     Ok(simple_function_expr("INSTR", vec![translated_in, translated_substr], None))
@@ -562,7 +567,8 @@ fn translate_trim(
     trim_what: Option<&Expr>,
     trim_characters: Option<&[Expr]>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     use sqlparser::ast::TrimWhereField;
 
@@ -574,15 +580,15 @@ fn translate_trim(
     };
 
     if let Some(name) = func_name {
-        let translated_expr = expr.translate(schema, options)?;
+        let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
         let char_arg = match trim_what {
-            Some(e) => Some(e.translate(schema, options)?),
+            Some(e) => Some(e.translate_with_warnings(schema, options, emit)?),
             // trim_characters is the pg-dialect "TRIM(LEADING FROM str USING chars)" form;
             // treat the first character expression as the trim set when present.
             None => {
                 trim_characters
                     .and_then(|c| c.first())
-                    .map(|e| e.translate(schema, options))
+                    .map(|e| e.translate_with_warnings(schema, options, emit))
                     .transpose()?
             }
         };
@@ -598,12 +604,17 @@ fn translate_trim(
 
     // Plain TRIM(str) or TRIM(str, chars) - pass through with translated parts.
     Ok(Expr::Trim {
-        expr: Box::new(expr.translate(schema, options)?),
+        expr: Box::new(expr.translate_with_warnings(schema, options, emit)?),
         trim_where,
-        trim_what: trim_what.map(|e| e.translate(schema, options).map(Box::new)).transpose()?,
+        trim_what: trim_what
+            .map(|e| e.translate_with_warnings(schema, options, emit).map(Box::new))
+            .transpose()?,
         trim_characters: trim_characters
             .map(|chars| {
-                chars.iter().map(|e| e.translate(schema, options)).collect::<Result<Vec<_>, _>>()
+                chars
+                    .iter()
+                    .map(|e| e.translate_with_warnings(schema, options, emit))
+                    .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?,
     })
@@ -622,17 +633,18 @@ fn translate_substring(
     substring_from: Option<&Expr>,
     substring_for: Option<&Expr>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated = expr.translate(schema, options)?;
+    let translated = expr.translate_with_warnings(schema, options, emit)?;
     let start = substring_from
-        .map(|e| e.translate(schema, options))
+        .map(|e| e.translate_with_warnings(schema, options, emit))
         .transpose()?
         .map(|s| simple_function_expr("max", vec![s.clone(), integer_literal(1)], None));
     let length = match (substring_from, substring_for) {
         (Some(from), Some(for_len)) => {
-            let from = from.translate(schema, options)?;
-            let for_len = for_len.translate(schema, options)?;
+            let from = from.translate_with_warnings(schema, options, emit)?;
+            let for_len = for_len.translate_with_warnings(schema, options, emit)?;
             // Characters before position one do not exist, so drop as many of
             // them from the requested length as the start was short by.
             let clipped = Expr::BinaryOp {
@@ -650,7 +662,7 @@ fn translate_substring(
             };
             Some(simple_function_expr("max", vec![clipped, integer_literal(0)], None))
         }
-        (None, Some(for_len)) => Some(for_len.translate(schema, options)?),
+        (None, Some(for_len)) => Some(for_len.translate_with_warnings(schema, options, emit)?),
         (_, None) => None,
     };
 
@@ -731,10 +743,11 @@ fn translate_distinct_comparison(
     right: &Expr,
     is_not_distinct: bool,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let l = left.translate(schema, options)?;
-    let r = right.translate(schema, options)?;
+    let l = left.translate_with_warnings(schema, options, emit)?;
+    let r = right.translate_with_warnings(schema, options, emit)?;
     Ok(if is_not_distinct { null_safe_eq(l, r) } else { null_safe_neq(l, r) })
 }
 
@@ -849,24 +862,25 @@ fn translate_json_path_operator(
     right: &Expr,
     text_form: bool,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     let operator = if text_form { "#>>" } else { "#>" };
     let Some(literal) = single_quoted_literal(right) else {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "`{operator}` needs its path as a literal. PostgreSQL accepts a computed one, and \
              the path decides which keys are read, so it cannot be rewritten without its value."
         )));
     };
     let Some(elements) = parse_text_array_path(literal) else {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "`{literal}` is not a path literal `{operator}` can read: PostgreSQL takes a text \
              array like '{{a,b}}', with a double-quoted element for a key containing a comma, \
              a brace or a quote."
         )));
     };
 
-    let mut value = left.translate(schema, options)?;
+    let mut value = left.translate_with_warnings(schema, options, emit)?;
     if elements.is_empty() {
         // The document itself, and its text for the text form.
         if text_form {
@@ -902,9 +916,9 @@ fn translate_json_path_operator(
                 )
             }
             JsonPathElement::Null => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                return Err(crate::errors::Error::forward_refusal(format!(
                     "the path `{literal}` contains a NULL element, which PostgreSQL answers \
-                     NULL for; write the path without NULL."
+                             NULL for; write the path without NULL."
                 )));
             }
         };
@@ -920,14 +934,15 @@ fn translate_overlay(
     overlay_from: &Expr,
     overlay_for: Option<&Expr>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_expr = expr.translate(schema, options)?;
-    let translated_overlay_what = overlay_what.translate(schema, options)?;
-    let translated_overlay_from = overlay_from.translate(schema, options)?;
+    let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
+    let translated_overlay_what = overlay_what.translate_with_warnings(schema, options, emit)?;
+    let translated_overlay_from = overlay_from.translate_with_warnings(schema, options, emit)?;
 
     let replacement_len = if let Some(overlay_for) = overlay_for {
-        overlay_for.translate(schema, options)?
+        overlay_for.translate_with_warnings(schema, options, emit)?
     } else {
         simple_function_expr("length", vec![translated_overlay_what.clone()], None)
     };
@@ -989,10 +1004,11 @@ fn translate_numeric_cast(
     expr: &Expr,
     info: &ExactNumberInfo,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     let (_, target_scale) = numeric_precision_and_scale(info)?;
-    let translated = expr.translate(schema, options)?;
+    let translated = expr.translate_with_warnings(schema, options, emit)?;
 
     if let Some(source_scale) = numeric_scale(expr, schema) {
         return Ok(rescale_minor_units(translated, source_scale, target_scale));
@@ -1004,10 +1020,10 @@ fn translate_numeric_cast(
     if is_integral_expression(expr, schema) {
         return Ok(rescale_minor_units(translated, 0, target_scale));
     }
-    Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    Err(crate::errors::Error::forward_refusal(format!(
         "CAST({expr} AS NUMERIC) needs the operand's scale, since a NUMERIC column is emitted as \
-         an INTEGER of minor units and the cast has to know how far to move the point. The type \
-         of `{expr}` cannot be resolved here. Cast it to a declared NUMERIC first."
+     an INTEGER of minor units and the cast has to know how far to move the point. The type \
+     of `{expr}` cannot be resolved here. Cast it to a declared NUMERIC first."
     )))
 }
 
@@ -1024,18 +1040,17 @@ fn translate_at_time_zone(
     timestamp: &Expr,
     time_zone: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_timestamp = timestamp.translate(schema, options)?;
+    let translated_timestamp = timestamp.translate_with_warnings(schema, options, emit)?;
 
     let modifier = single_quoted_literal(time_zone)
-        .and_then(normalize_at_time_zone_modifier)
-        .ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(
-            "AT TIME ZONE supports only literal UTC/local or fixed offsets (+HH:MM/-HH:MM) in SQLite translation."
-                .to_string(),
-        )
-    })?;
+.and_then(normalize_at_time_zone_modifier)
+.ok_or_else(|| {
+crate::errors::Error::forward_refusal("AT TIME ZONE supports only literal UTC/local or fixed offsets (+HH:MM/-HH:MM) in SQLite translation."
+    .to_string())
+})?;
 
     // UTC shifts nothing in PostgreSQL whichever side the operand is on, so its
     // type need not be resolved. SQLite's own `utc` modifier is NOT that: it
@@ -1056,7 +1071,7 @@ fn translate_at_time_zone(
     };
 
     let awareness = timestamp_awareness(timestamp, schema).ok_or_else(|| {
-        crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        crate::errors::Error::forward_refusal(format!(
             "AT TIME ZONE shifts a bare timestamp and a timestamptz in opposite directions, and \
              `{timestamp}` is not known to be either, so either choice would be wrong half the \
              time. Cast the operand, as `{timestamp}::timestamptz`, to say which it is."
@@ -1083,9 +1098,10 @@ fn translate_vector_cast(
     expr: &Expr,
     data_type: &DataType,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_expr = expr.translate(schema, options)?;
+    let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
     let func_name = if crate::impls::translator_impls::vector::is_halfvec_data_type(data_type) {
         "vec_f16"
     } else {
@@ -1111,10 +1127,11 @@ fn translate_vector_distance_op(
     right: &Expr,
     function_name: &str,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_left = left.translate(schema, options)?;
-    let translated_right = right.translate(schema, options)?;
+    let translated_left = left.translate_with_warnings(schema, options, emit)?;
+    let translated_right = right.translate_with_warnings(schema, options, emit)?;
 
     Ok(simple_function_expr(function_name, vec![translated_left, translated_right], None))
 }
@@ -1145,14 +1162,15 @@ fn translate_any_all_to_in(
     right: &Expr,
     negated: bool,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_left = left.translate(schema, options)?;
+    let translated_left = left.translate_with_warnings(schema, options, emit)?;
 
     if let Expr::Subquery(q) = right {
         return Ok(Expr::InSubquery {
             expr: Box::new(translated_left),
-            subquery: Box::new(q.translate(schema, options)?),
+            subquery: Box::new(q.translate_with_warnings(schema, options, emit)?),
             negated,
         });
     }
@@ -1161,7 +1179,7 @@ fn translate_any_all_to_in(
             expr: Box::new(translated_left),
             list: elements
                 .iter()
-                .map(|e| e.translate(schema, options))
+                .map(|e| e.translate_with_warnings(schema, options, emit))
                 .collect::<Result<Vec<_>, _>>()?,
             negated,
         });
@@ -1175,7 +1193,7 @@ fn translate_any_all_to_in(
     translate_quantified_over_array(
         &translated_left,
         &compare_op,
-        right.translate(schema, options)?,
+        right.translate_with_warnings(schema, options, emit)?,
         quantifier,
         options,
     )
@@ -1217,10 +1235,10 @@ fn alias_quantifier_projection(query: &mut Query) -> Result<(), crate::errors::E
     }
 
     let refusal = || {
-        crate::errors::Error::UnsupportedSQLiteFeature(
+        crate::errors::Error::forward_refusal(
             "ANY/ALL over this subquery cannot be translated: the rewrite names the compared \
-             column inside the projection, so the subquery must project exactly one named \
-             expression. Project the column explicitly, `SELECT col FROM ...`."
+         column inside the projection, so the subquery must project exactly one named \
+         expression. Project the column explicitly, `SELECT col FROM ...`."
                 .to_string(),
         )
     };
@@ -1300,9 +1318,10 @@ fn translate_quantified_operation(
     right: &Expr,
     quantifier: Quantifier,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_left = left.translate(schema, options)?;
+    let translated_left = left.translate_with_warnings(schema, options, emit)?;
     let (fold_op, empty_value, negate) = match quantifier {
         Quantifier::Any => (BinaryOperator::Or, false, false),
         Quantifier::All => (BinaryOperator::And, true, true),
@@ -1312,7 +1331,7 @@ fn translate_quantified_operation(
         return build_exists_over_subquery(
             &translated_left,
             compare_op,
-            q.translate(schema, options)?,
+            q.translate_with_warnings(schema, options, emit)?,
             negate,
             negate,
         );
@@ -1324,7 +1343,7 @@ fn translate_quantified_operation(
                 Ok(Expr::BinaryOp {
                     left: Box::new(translated_left.clone()),
                     op: compare_op.clone(),
-                    right: Box::new(expr.translate(schema, options)?),
+                    right: Box::new(expr.translate_with_warnings(schema, options, emit)?),
                 })
             })
             .collect::<Result<Vec<_>, crate::errors::Error>>()?;
@@ -1334,7 +1353,7 @@ fn translate_quantified_operation(
     translate_quantified_over_array(
         &translated_left,
         compare_op,
-        right.translate(schema, options)?,
+        right.translate_with_warnings(schema, options, emit)?,
         quantifier,
         options,
     )
@@ -1357,9 +1376,10 @@ fn translate_numeric_arithmetic(
     right: &Expr,
     (left_scale, right_scale): (u32, u32),
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<Expr>, crate::errors::Error> {
-    let translated = |side: &Expr| side.translate(schema, options);
+    let mut translated = |side: &Expr| side.translate_with_warnings(schema, options, emit);
     let combined = match op {
         BinaryOperator::Plus | BinaryOperator::Minus => {
             let common = left_scale.max(right_scale);
@@ -1375,12 +1395,12 @@ fn translate_numeric_arithmetic(
             if let (Some(left_precision), Some(right_precision)) = (left_precision, right_precision)
                 && left_precision + right_precision > MAX_NUMERIC_PRECISION
             {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                return Err(crate::errors::Error::forward_refusal(format!(
                     "NUMERIC({left_precision},{left_scale}) * \
-                     NUMERIC({right_precision},{right_scale}) needs \
-                     {} digits, and a SQLite INTEGER holds at most {MAX_NUMERIC_PRECISION}. \
-                     PostgreSQL gives a product the sum of the operand precisions, so the \
-                     result would silently become a float. Narrow one of the operands.",
+                             NUMERIC({right_precision},{right_scale}) needs \
+                             {} digits, and a SQLite INTEGER holds at most {MAX_NUMERIC_PRECISION}. \
+                             PostgreSQL gives a product the sum of the operand precisions, so the \
+                             result would silently become a float. Narrow one of the operands.",
                     left_precision + right_precision
                 )));
             }
@@ -1391,12 +1411,12 @@ fn translate_numeric_arithmetic(
             }
         }
         BinaryOperator::Divide => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "dividing NUMERIC values has no faithful SQLite form: PostgreSQL chooses the \
-                 result scale from both operand precisions, answering `{left} / {right}` at a \
-                 scale neither operand has, and SQLite's integer division truncates toward zero \
-                 on top of that. Write the scale you want, as CAST({left} AS NUMERIC(18,6)) / \
-                 ..., or do the division in the application."
+                     result scale from both operand precisions, answering `{left} / {right}` at a \
+                     scale neither operand has, and SQLite's integer division truncates toward zero \
+                     on top of that. Write the scale you want, as CAST({left} AS NUMERIC(18,6)) / \
+                     ..., or do the division in the application."
             )));
         }
         _ => return Ok(None),
@@ -1513,7 +1533,8 @@ fn translate_binary_op(
     op: &BinaryOperator,
     right: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     if numeric_rules_may_apply(op, left, right) {
         let scales = (numeric_scale(left, schema), numeric_scale(right, schema));
@@ -1524,7 +1545,7 @@ fn translate_binary_op(
             && let Some(scaled) = scale_decimal_literal(right, scale)?
         {
             return Ok(Expr::BinaryOp {
-                left: Box::new(left.translate(schema, options)?),
+                left: Box::new(left.translate_with_warnings(schema, options, emit)?),
                 op: op.clone(),
                 right: Box::new(scaled),
             });
@@ -1535,7 +1556,7 @@ fn translate_binary_op(
             return Ok(Expr::BinaryOp {
                 left: Box::new(scaled),
                 op: op.clone(),
-                right: Box::new(right.translate(schema, options)?),
+                right: Box::new(right.translate_with_warnings(schema, options, emit)?),
             });
         }
         if let (Some(left_scale), Some(right_scale)) = scales
@@ -1546,6 +1567,7 @@ fn translate_binary_op(
                 (left_scale, right_scale),
                 schema,
                 options,
+                emit,
             )?
         {
             return Ok(combined);
@@ -1558,9 +1580,9 @@ fn translate_binary_op(
             && is_to_tsvector(tsvector_func)
             && is_to_tsquery(tsquery_func)
         {
-            return translate_fts_expression(tsvector_func, tsquery_func, schema, options);
+            return translate_fts_expression(tsvector_func, tsquery_func, schema, options, emit);
         }
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+        return Err(crate::errors::Error::forward_refusal(
             "The @@ operator is only supported for to_tsvector(...) @@ to_tsquery(...) \
              full-text search expressions."
                 .to_string(),
@@ -1576,20 +1598,28 @@ fn translate_binary_op(
             *op == BinaryOperator::HashLongArrow,
             schema,
             options,
+            emit,
         );
     }
 
     // pgvector distance operators -> sqlite-vec functions
     // <-> (LtDashGt) - Euclidean distance
     if *op == BinaryOperator::LtDashGt {
-        return translate_vector_distance_op(left, right, "vec_distance_L2", schema, options);
+        return translate_vector_distance_op(left, right, "vec_distance_L2", schema, options, emit);
     }
 
     // <=> (Spaceship) - Cosine distance
     // Note: In MySQL this is the NULL-safe equality operator, but in pgvector it's
     // cosine distance
     if *op == BinaryOperator::Spaceship {
-        return translate_vector_distance_op(left, right, "vec_distance_cosine", schema, options);
+        return translate_vector_distance_op(
+            left,
+            right,
+            "vec_distance_cosine",
+            schema,
+            options,
+            emit,
+        );
     }
 
     // Custom operators for pgvector
@@ -1603,36 +1633,37 @@ fn translate_binary_op(
                     "vec_distance_hamming",
                     schema,
                     options,
+                    emit,
                 );
             }
             // <#> - Negative inner product (not supported in sqlite-vec)
             "<#>" => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "The <#> operator (negative inner product) is not supported by sqlite-vec. \
-                     Consider using <-> (L2 distance) or <=> (cosine distance) instead."
+                             Consider using <-> (L2 distance) or <=> (cosine distance) instead."
                         .to_string(),
                 ));
             }
             // <+> - L1/Manhattan distance (not supported in sqlite-vec)
             "<+>" => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "The <+> operator (L1/Manhattan distance) is not supported by sqlite-vec. \
-                     Consider using <-> (L2 distance) or <=> (cosine distance) instead."
+                             Consider using <-> (L2 distance) or <=> (cosine distance) instead."
                         .to_string(),
                 ));
             }
             // <%> - Jaccard distance (not supported in sqlite-vec)
             "<%>" => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "The <%> operator (Jaccard distance) is not supported by sqlite-vec. \
-                     Consider using <~> (Hamming distance) for bit vectors instead."
+                             Consider using <~> (Hamming distance) for bit vectors instead."
                         .to_string(),
                 ));
             }
             other => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                return Err(crate::errors::Error::forward_refusal(format!(
                     "The {other} operator has no SQLite translation. Emitting it would fail at \
-                     prepare time, since SQLite has no such operator."
+                             prepare time, since SQLite has no such operator."
                 )));
             }
         }
@@ -1642,22 +1673,22 @@ fn translate_binary_op(
     // is wrong.
     if *op == BinaryOperator::PGExp {
         if !options.is_math_functions_available() {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "^ (PostgreSQL exponentiation) requires SQLITE_ENABLE_MATH_FUNCTIONS. \
-                 Enable with .with_math_functions_available() or use pow() explicitly."
+                     Enable with .with_math_functions_available() or use pow() explicitly."
                     .to_string(),
             ));
         }
-        let l = left.translate(schema, options)?;
-        let r = right.translate(schema, options)?;
+        let l = left.translate_with_warnings(schema, options, emit)?;
+        let r = right.translate_with_warnings(schema, options, emit)?;
         return Ok(simple_function_expr("pow", vec![l, r], None));
     }
 
     // # is PostgreSQL bitwise XOR; SQLite has no # token.
     // (a | b) - (a & b) equals a XOR b exactly for all integers.
     if *op == BinaryOperator::PGBitwiseXor {
-        let l = left.translate(schema, options)?;
-        let r = right.translate(schema, options)?;
+        let l = left.translate_with_warnings(schema, options, emit)?;
+        let r = right.translate_with_warnings(schema, options, emit)?;
         let or_expr = Expr::Nested(Box::new(Expr::BinaryOp {
             left: Box::new(l.clone()),
             op: BinaryOperator::BitwiseOr,
@@ -1688,8 +1719,8 @@ fn translate_binary_op(
         // PostgreSQL appends or prepends a lone element, and a one element
         // array expands to exactly that element, so both spellings reuse the
         // array shape rather than needing their own.
-        let as_array = |side: &Expr| -> Result<Expr, crate::errors::Error> {
-            let translated = side.translate(schema, options)?;
+        let mut as_array = |side: &Expr| -> Result<Expr, crate::errors::Error> {
+            let translated = side.translate_with_warnings(schema, options, emit)?;
             Ok(if is_array_expression(side, schema) {
                 translated
             } else {
@@ -1705,9 +1736,13 @@ fn translate_binary_op(
         if can_be_null(left) && can_be_null(right) {
             return Ok(case_when(
                 Expr::BinaryOp {
-                    left: Box::new(Expr::IsNull(Box::new(left.translate(schema, options)?))),
+                    left: Box::new(Expr::IsNull(Box::new(
+                        left.translate_with_warnings(schema, options, emit)?,
+                    ))),
                     op: BinaryOperator::And,
-                    right: Box::new(Expr::IsNull(Box::new(right.translate(schema, options)?))),
+                    right: Box::new(Expr::IsNull(Box::new(
+                        right.translate_with_warnings(schema, options, emit)?,
+                    ))),
                 },
                 Expr::Value(Value::Null.with_empty_span()),
                 Some(concatenated),
@@ -1723,11 +1758,11 @@ fn translate_binary_op(
     if *op == BinaryOperator::StringConcat
         && (is_boolean_expression(left, schema) || is_boolean_expression(right, schema))
     {
-        let rendered = |side: &Expr| -> Result<Expr, crate::errors::Error> {
+        let mut rendered = |side: &Expr| -> Result<Expr, crate::errors::Error> {
             if is_boolean_expression(side, schema) {
-                render_boolean_as_text(side, schema, options)
+                render_boolean_as_text(side, schema, options, emit)
             } else {
-                side.translate(schema, options)
+                side.translate_with_warnings(schema, options, emit)
             }
         };
         return Ok(Expr::BinaryOp {
@@ -1745,8 +1780,8 @@ fn translate_binary_op(
             return Err(representation_required("The && (array overlap) operator"));
         }
         return Ok(array_overlap(
-            left.translate(schema, options)?,
-            right.translate(schema, options)?,
+            left.translate_with_warnings(schema, options, emit)?,
+            right.translate_with_warnings(schema, options, emit)?,
         ));
     }
 
@@ -1755,18 +1790,16 @@ fn translate_binary_op(
     // regexp_match/regexp_matches.
     match op {
         BinaryOperator::PGRegexMatch | BinaryOperator::PGRegexNotMatch => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "~ / !~ (PostgreSQL POSIX regex) are not supported in SQLite without a REGEXP \
-                 extension. For basic pattern matching use LIKE or GLOB."
+                     extension. For basic pattern matching use LIKE or GLOB."
                     .to_string(),
             ));
         }
         BinaryOperator::PGRegexIMatch | BinaryOperator::PGRegexNotIMatch => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                "~* / !~* (case-insensitive POSIX regex) are not supported in SQLite without a \
-                 REGEXP extension, which cannot honor case-insensitive matching even when registered."
-                    .to_string(),
-            ));
+            return Err(crate::errors::Error::forward_refusal("~* / !~* (case-insensitive POSIX regex) are not supported in SQLite without a \
+                     REGEXP extension, which cannot honor case-insensitive matching even when registered."
+                .to_string()));
         }
         // Array containment (@> / <@). When both operands resolve to arrays under
         // the JSON representation, rewrite via NOT EXISTS / json_each anti-join.
@@ -1778,15 +1811,15 @@ fn translate_binary_op(
             {
                 // a @> b: every element of b must be in a.
                 return Ok(array_containment(
-                    left.translate(schema, options)?,
-                    right.translate(schema, options)?,
+                    left.translate_with_warnings(schema, options, emit)?,
+                    right.translate_with_warnings(schema, options, emit)?,
                 ));
             }
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "@> (jsonb containment) is not supported in SQLite. PostgreSQL jsonb \
-                 containment is recursive partial-match; json_each cannot express it without \
-                 a recursive CTE per nesting level. For array columns use \
-                 ArrayRepresentation::Json."
+                     containment is recursive partial-match; json_each cannot express it without \
+                     a recursive CTE per nesting level. For array columns use \
+                     ArrayRepresentation::Json."
                     .to_string(),
             ));
         }
@@ -1796,30 +1829,30 @@ fn translate_binary_op(
             {
                 // a <@ b: every element of a is in b (same as b @> a).
                 return Ok(array_containment(
-                    right.translate(schema, options)?,
-                    left.translate(schema, options)?,
+                    right.translate_with_warnings(schema, options, emit)?,
+                    left.translate_with_warnings(schema, options, emit)?,
                 ));
             }
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "<@ (jsonb contained-by) is not supported in SQLite. PostgreSQL jsonb \
-                 containment is recursive partial-match; json_each cannot express it without \
-                 a recursive CTE per nesting level. For array columns use \
-                 ArrayRepresentation::Json."
+                     containment is recursive partial-match; json_each cannot express it without \
+                     a recursive CTE per nesting level. For array columns use \
+                     ArrayRepresentation::Json."
                     .to_string(),
             ));
         }
         // doc ? 'k' -> json_type(doc, '$."k"') IS NOT NULL
         BinaryOperator::Question => {
             return rebuild(|| {
-                let translated_doc = left.translate(schema, options)?;
+                let translated_doc = left.translate_with_warnings(schema, options, emit)?;
                 let key = match right {
                     Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
                         s.clone()
                     }
                     _ => {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        return Err(crate::errors::Error::forward_refusal(
                             "? (key-exists) requires a single-quoted string literal key on the \
-                             right-hand side."
+                                             right-hand side."
                                 .to_string(),
                         ));
                     }
@@ -1837,13 +1870,11 @@ fn translate_binary_op(
         // doc ?& ARRAY[...] -> AND chain of json_type IS NOT NULL
         BinaryOperator::QuestionPipe | BinaryOperator::QuestionAnd => {
             return rebuild(|| {
-                let translated_doc = left.translate(schema, options)?;
+                let translated_doc = left.translate_with_warnings(schema, options, emit)?;
                 let keys = extract_string_array_keys(right).ok_or_else(|| {
-                    crate::errors::Error::UnsupportedSQLiteFeature(
-                        "?| / ?& require an ARRAY literal of string literals on the right-hand side; \
-                         the key list must be known at translation time to build json_type() paths."
-                            .to_string(),
-                    )
+                    crate::errors::Error::forward_refusal("?| / ?& require an ARRAY literal of string literals on the right-hand side; \
+                     the key list must be known at translation time to build json_type() paths."
+                        .to_string())
                 })?;
                 let is_all = matches!(op, BinaryOperator::QuestionAnd);
                 let predicates: Vec<Expr> = keys
@@ -1866,18 +1897,18 @@ fn translate_binary_op(
         // Reuses the same {a,b} -> $.a.b path conversion used by #> / #>>.
         BinaryOperator::HashMinus => {
             return rebuild(|| {
-                let translated_doc = left.translate(schema, options)?;
+                let translated_doc = left.translate_with_warnings(schema, options, emit)?;
                 let path = match right {
                     Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
                         pg_text_path_to_sqlite_json_path(s).ok_or_else(|| {
-                            crate::errors::Error::UnsupportedSQLiteFeature(
+                            crate::errors::Error::forward_refusal(
                                 "#- path must be a '{key1,key2}' PostgreSQL text-array literal."
                                     .to_string(),
                             )
                         })?
                     }
                     _ => {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                        return Err(crate::errors::Error::forward_refusal(
                             "#- path must be a '{key1,key2}' PostgreSQL text-array literal."
                                 .to_string(),
                         ));
@@ -1894,8 +1925,8 @@ fn translate_binary_op(
         // LIKE translation would misread % and _ in the prefix.
         BinaryOperator::PGStartsWith => {
             return rebuild(|| {
-                let translated_left = left.translate(schema, options)?;
-                let translated_right = right.translate(schema, options)?;
+                let translated_left = left.translate_with_warnings(schema, options, emit)?;
+                let translated_right = right.translate_with_warnings(schema, options, emit)?;
                 let prefix_len =
                     simple_function_expr("length", vec![translated_right.clone()], None);
                 let head = simple_function_expr(
@@ -1913,10 +1944,10 @@ fn translate_binary_op(
         // jsonpath has no json1 counterpart, so refuse rather than emit the
         // operator SQLite cannot tokenise.
         BinaryOperator::AtQuestion => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "@? (jsonpath exists) is not supported: SQLite's json1 has no jsonpath engine. \
-                 Rewrite the check as json_type(doc, '$.path') IS NOT NULL with a SQLite JSON \
-                 path."
+                     Rewrite the check as json_type(doc, '$.path') IS NOT NULL with a SQLite JSON \
+                     path."
                     .to_string(),
             ));
         }
@@ -1927,13 +1958,13 @@ fn translate_binary_op(
         // rather than emitted, since SQLite has no OPERATOR() grammar.
         BinaryOperator::PGCustomBinaryOperator(parts) => {
             let Some(plain) = unwrap_pg_catalog_operator(parts) else {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                return Err(crate::errors::Error::forward_refusal(format!(
                     "OPERATOR({}) has no SQLite translation: only pg_catalog operators with a \
-                     plain spelling can be unwrapped.",
+                             plain spelling can be unwrapped.",
                     parts.join(".")
                 )));
             };
-            return translate_binary_op(left, &plain, right, schema, options);
+            return translate_binary_op(left, &plain, right, schema, options, emit);
         }
         _ => {}
     }
@@ -1952,7 +1983,7 @@ fn translate_binary_op(
 
         // Case 1: INTERVAL on the left commutes (addition only).
         if *op == BinaryOperator::Plus && extract_interval_expr(left).is_some() {
-            return translate_binary_op(right, op, left, schema, options);
+            return translate_binary_op(right, op, left, schema, options, emit);
         }
 
         // Case 2: n * INTERVAL or INTERVAL * n on the right.
@@ -1961,7 +1992,7 @@ fn translate_binary_op(
                 Some(n) => {
                     match interval_date_modifiers_scaled(interval, negating, n)? {
                         Some(modifiers) => {
-                            let target = left.translate(schema, options)?;
+                            let target = left.translate_with_warnings(schema, options, emit)?;
                             let mut args = vec![target];
                             for modifier in modifiers {
                                 args.push(string_literal(&modifier));
@@ -1969,7 +2000,7 @@ fn translate_binary_op(
                             return Ok(simple_function_expr("datetime", args, None));
                         }
                         None => {
-                            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                            return Err(crate::errors::Error::forward_refusal(format!(
                                 "INTERVAL '{}' notation is not supported. Use the verbose form                                  with explicit count and unit pairs, for example                                  INTERVAL '1 hour 30 minutes'.",
                                 single_quoted_literal(interval.value.as_ref()).unwrap_or("...")
                             )));
@@ -1978,10 +2009,8 @@ fn translate_binary_op(
                 }
                 None => {
                     // Runtime scalar: cannot be constant-folded into a modifier.
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                        "INTERVAL scaled by a runtime expression cannot be folded at translation                          time. Compute the multiplier in application code and use a plain                          INTERVAL literal, for example INTERVAL '3 days'."
-                            .to_string(),
-                    ));
+                    return Err(crate::errors::Error::forward_refusal("INTERVAL scaled by a runtime expression cannot be folded at translation                          time. Compute the multiplier in application code and use a plain                          INTERVAL literal, for example INTERVAL '3 days'."
+                        .to_string()));
                 }
             }
         }
@@ -1990,7 +2019,7 @@ fn translate_binary_op(
         if let Some(interval) = extract_interval_expr(right) {
             match interval_date_modifiers(interval, negating)? {
                 Some(modifiers) => {
-                    let target = left.translate(schema, options)?;
+                    let target = left.translate_with_warnings(schema, options, emit)?;
                     let mut args = vec![target];
                     for modifier in modifiers {
                         args.push(string_literal(&modifier));
@@ -1999,7 +2028,7 @@ fn translate_binary_op(
                 }
                 None => {
                     // The notation was not decoded (HH:MM:SS, ISO P-form, 'ago').
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    return Err(crate::errors::Error::forward_refusal(format!(
                         "INTERVAL '{}' notation is not supported. Use the verbose form with                          explicit count and unit pairs, for example INTERVAL '1 hour 30 minutes'.",
                         single_quoted_literal(interval.value.as_ref()).unwrap_or("...")
                     )));
@@ -2010,14 +2039,14 @@ fn translate_binary_op(
 
     // Every other `+`/`-` over a date, a timestamp or a time. Left alone it
     // reaches SQLite as arithmetic over the text those values are held in.
-    if let Some(result) = translate_temporal_binary_op(left, op, right, schema, options) {
+    if let Some(result) = translate_temporal_binary_op(left, op, right, schema, options, emit) {
         return result;
     }
 
     Ok(Expr::BinaryOp {
-        left: Box::new(left.translate(schema, options)?),
+        left: Box::new(left.translate_with_warnings(schema, options, emit)?),
         op: op.clone(),
-        right: Box::new(right.translate(schema, options)?),
+        right: Box::new(right.translate_with_warnings(schema, options, emit)?),
     })
 }
 
@@ -2058,21 +2087,19 @@ fn unwrap_pg_catalog_operator(parts: &[String]) -> Option<BinaryOperator> {
     })
 }
 
-impl Translator for Expr {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Self;
-
+crate::traits::translator::impl_contextual_translator!(Expr => Expr);
+impl crate::traits::translator::TranslatorWithContext for Expr {
     #[allow(clippy::too_many_lines)]
-    fn translate(
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         Ok(match self {
-            Expr::Function(func) => func.translate(schema, options)?,
+            Expr::Function(func) => func.translate_with_warnings(schema, options, emit)?,
             Expr::BinaryOp { left, op, right } => {
-                translate_binary_op(left, op, right, schema, options)?
+                translate_binary_op(left, op, right, schema, options, emit)?
             }
             Expr::Cast { expr, data_type, format, .. } => {
                 rebuild(|| {
@@ -2086,7 +2113,7 @@ impl Translator for Expr {
                         return Ok(paired);
                     }
                     if crate::impls::translator_impls::vector::is_vector_data_type(data_type) {
-                        return translate_vector_cast(expr, data_type, schema, options);
+                        return translate_vector_cast(expr, data_type, schema, options, emit);
                     }
                     // PG `'...'::uuid` under Blob representation: lower to the
                     // same text-to-blob expression used for INSERT/UPDATE wraps.
@@ -2097,7 +2124,7 @@ impl Translator for Expr {
                             options,
                         )
                     {
-                        let translated = expr.translate(schema, options)?;
+                        let translated = expr.translate_with_warnings(schema, options, emit)?;
                         // The literal wrapper validates and canonicalises, and
                         // passes anything else through, so the cast and the
                         // INSERT path accept and refuse exactly the same set.
@@ -2118,34 +2145,35 @@ impl Translator for Expr {
                     // honored and cloning it through produced SQL SQLite rejects at
                     // parse time.
                     if let Some(format) = format {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                        return Err(crate::errors::Error::forward_refusal(format!(
                             "CAST(... AS {data_type} FORMAT {format}) is not supported in SQLite, \
-                         which has no cast format clause. Format the value with strftime() or \
-                         printf() instead."
+                                     which has no cast format clause. Format the value with strftime() or \
+                                     printf() instead."
                         )));
                     }
                     if matches!(
                         data_type,
                         sqlparser::ast::DataType::Boolean | sqlparser::ast::DataType::Bool
                     ) {
-                        return translate_boolean_cast(expr, schema, options);
+                        return translate_boolean_cast(expr, schema, options, emit);
                     }
                     if let Some(info) = exact_numeric_info(data_type) {
-                        return translate_numeric_cast(expr, info, schema, options);
+                        return translate_numeric_cast(expr, info, schema, options, emit);
                     }
-                    let translated_type = data_type.translate(schema, options)?;
+                    let translated_type =
+                        data_type.translate_with_warnings(schema, options, emit)?;
                     // A boolean rendered as text reads `true` or `false` in
                     // PostgreSQL, and the translated integer would give `1`.
                     if matches!(translated_type, sqlparser::ast::DataType::Text)
                         && is_boolean_expression(expr, schema)
                     {
-                        return render_boolean_as_text(expr, schema, options);
+                        return render_boolean_as_text(expr, schema, options, emit);
                     }
                     // SQLite only accepts the `CAST(x AS type)` spelling, not
                     // PostgreSQL's `x::type` operator nor TRY_CAST / SAFE_CAST, so
                     // force `CastKind::Cast` regardless of how the source wrote it.
                     Ok(Expr::Cast {
-                        expr: Box::new(expr.translate(schema, options)?),
+                        expr: Box::new(expr.translate_with_warnings(schema, options, emit)?),
                         data_type: translated_type,
                         format: None,
                         kind: CastKind::Cast,
@@ -2153,34 +2181,37 @@ impl Translator for Expr {
                 })?
             }
             Expr::AtTimeZone { timestamp, time_zone } => {
-                translate_at_time_zone(timestamp, time_zone, schema, options)?
+                translate_at_time_zone(timestamp, time_zone, schema, options, emit)?
             }
             // UNKNOWN is rewritten as a NULL check on the boolean expression result.
-            Expr::IsUnknown(inner) => Expr::IsNull(Box::new(inner.translate(schema, options)?)),
+            Expr::IsUnknown(inner) => {
+                Expr::IsNull(Box::new(inner.translate_with_warnings(schema, options, emit)?))
+            }
             Expr::IsNotUnknown(inner) => {
-                Expr::IsNotNull(Box::new(inner.translate(schema, options)?))
+                Expr::IsNotNull(Box::new(inner.translate_with_warnings(schema, options, emit)?))
             }
             Expr::IsDistinctFrom(left, right) => {
-                translate_distinct_comparison(left, right, false, schema, options)?
+                translate_distinct_comparison(left, right, false, schema, options, emit)?
             }
             Expr::IsNotDistinctFrom(left, right) => {
-                translate_distinct_comparison(left, right, true, schema, options)?
+                translate_distinct_comparison(left, right, true, schema, options, emit)?
             }
             Expr::Like { negated, any, expr, pattern, escape_char } => {
                 rebuild(|| -> Result<Expr, crate::errors::Error> {
                     Ok(Expr::Like {
                         negated: *negated,
                         any: *any,
-                        expr: Box::new(expr.translate(schema, options)?),
-                        pattern: Box::new(pattern.translate(schema, options)?),
+                        expr: Box::new(expr.translate_with_warnings(schema, options, emit)?),
+                        pattern: Box::new(pattern.translate_with_warnings(schema, options, emit)?),
                         escape_char: sqlite_like_escape(escape_char.clone()),
                     })
                 })?
             }
             Expr::ILike { negated, any, expr, pattern, escape_char } => {
                 rebuild(|| -> Result<Expr, crate::errors::Error> {
-                    let translated_expr = expr.translate(schema, options)?;
-                    let translated_pattern = pattern.translate(schema, options)?;
+                    let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
+                    let translated_pattern =
+                        pattern.translate_with_warnings(schema, options, emit)?;
                     let escape = sqlite_like_escape(lowered_ilike_escape(escape_char.as_ref())?);
                     if let Some(fold_fn) = options.get_ilike_fold_function() {
                         // Use the caller-provided fold function instead of lower().
@@ -2197,13 +2228,11 @@ impl Translator for Expr {
                     // alphabetic characters: SQLite lower() is ASCII-only and
                     // would produce silent wrong results.
                     if has_non_ascii_alpha_literal(pattern) {
-                        return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                            "ILIKE with a pattern containing non-ASCII alphabetic characters \
-                             cannot translate faithfully because SQLite lower() folds ASCII \
-                             only. Declare a Unicode-capable fold function via \
-                             .with_ilike_fold_function() to enable non-ASCII ILIKE."
-                                .to_string(),
-                        ));
+                        return Err(crate::errors::Error::forward_refusal("ILIKE with a pattern containing non-ASCII alphabetic characters \
+                                         cannot translate faithfully because SQLite lower() folds ASCII \
+                                         only. Declare a Unicode-capable fold function via \
+                                         .with_ilike_fold_function() to enable non-ASCII ILIKE."
+                            .to_string()));
                     }
                     Ok(Expr::Like {
                         negated: *negated,
@@ -2214,7 +2243,9 @@ impl Translator for Expr {
                     })
                 })?
             }
-            Expr::Extract { field, expr, .. } => translate_extract(field, expr, schema, options)?,
+            Expr::Extract { field, expr, .. } => {
+                translate_extract(field, expr, schema, options, emit)?
+            }
             Expr::Trim { expr, trim_where, trim_what, trim_characters } => {
                 translate_trim(
                     expr,
@@ -2223,15 +2254,16 @@ impl Translator for Expr {
                     trim_characters.as_deref(),
                     schema,
                     options,
+                    emit,
                 )?
             }
             Expr::Ceil { expr, .. } => {
-                translate_integral_rounding(expr, RoundingDirection::Up, schema, options)?
+                translate_integral_rounding(expr, RoundingDirection::Up, schema, options, emit)?
             }
             Expr::Floor { expr, .. } => {
-                translate_integral_rounding(expr, RoundingDirection::Down, schema, options)?
+                translate_integral_rounding(expr, RoundingDirection::Down, schema, options, emit)?
             }
-            Expr::Position { expr, r#in } => translate_position(expr, r#in, schema, options)?,
+            Expr::Position { expr, r#in } => translate_position(expr, r#in, schema, options, emit)?,
             Expr::Substring { expr, substring_from, substring_for, .. } => {
                 translate_substring(
                     expr,
@@ -2239,6 +2271,7 @@ impl Translator for Expr {
                     substring_for.as_deref(),
                     schema,
                     options,
+                    emit,
                 )?
             }
             Expr::Overlay { expr, overlay_what, overlay_from, overlay_for } => {
@@ -2249,23 +2282,26 @@ impl Translator for Expr {
                     overlay_for.as_deref(),
                     schema,
                     options,
+                    emit,
                 )?
             }
             Expr::TypedString(typed_string) => {
                 rebuild(|| -> Result<Expr, crate::errors::Error> {
                     Ok(Expr::Cast {
                         expr: Box::new(Expr::Value(typed_string.value.clone())),
-                        data_type: typed_string.data_type.translate(schema, options)?,
+                        data_type: typed_string
+                            .data_type
+                            .translate_with_warnings(schema, options, emit)?,
                         format: None,
                         kind: sqlparser::ast::CastKind::Cast,
                     })
                 })?
             }
-            Expr::Prefixed { value, .. } => value.translate(schema, options)?,
+            Expr::Prefixed { value, .. } => value.translate_with_warnings(schema, options, emit)?,
             Expr::Collate { expr, collation } => {
                 rebuild(|| -> Result<Expr, crate::errors::Error> {
                     Ok(Expr::Collate {
-                        expr: Box::new(expr.translate(schema, options)?),
+                        expr: Box::new(expr.translate_with_warnings(schema, options, emit)?),
                         collation: sqlite_collation(collation)?,
                     })
                 })?
@@ -2273,22 +2309,20 @@ impl Translator for Expr {
             Expr::Interval(interval) => {
                 let field_str =
                     interval.leading_field.as_ref().map_or(String::new(), |f| format!(" {f}"));
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                return Err(crate::errors::Error::forward_refusal(format!(
                     "INTERVAL{field_str} expressions are not supported in SQLite. \
-                     Use SQLite date modifiers instead: \
-                     date('now', '-7 days'), datetime('now', '+1 hour'), etc."
+                         Use SQLite date modifiers instead: \
+                         date('now', '-7 days'), datetime('now', '+1 hour'), etc."
                 )));
             }
             Expr::IsNormalized { .. } => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                    "IS NORMALIZED (Unicode normalization check) is not supported in SQLite. \
-                     Consider using application-level normalization with ICU or a similar library."
-                        .to_string(),
-                ));
+                return Err(crate::errors::Error::forward_refusal("IS NORMALIZED (Unicode normalization check) is not supported in SQLite. \
+                         Consider using application-level normalization with ICU or a similar library."
+                    .to_string()));
             }
             Expr::AnyOp { left, compare_op, right, .. } => {
                 if matches!(compare_op, BinaryOperator::Eq) {
-                    return translate_any_all_to_in(left, right, false, schema, options);
+                    return translate_any_all_to_in(left, right, false, schema, options, emit);
                 }
                 translate_quantified_operation(
                     left,
@@ -2297,11 +2331,12 @@ impl Translator for Expr {
                     Quantifier::Any,
                     schema,
                     options,
+                    emit,
                 )?
             }
             Expr::AllOp { left, compare_op, right } => {
                 if matches!(compare_op, BinaryOperator::NotEq) {
-                    return translate_any_all_to_in(left, right, true, schema, options);
+                    return translate_any_all_to_in(left, right, true, schema, options, emit);
                 }
                 translate_quantified_operation(
                     left,
@@ -2310,59 +2345,60 @@ impl Translator for Expr {
                     Quantifier::All,
                     schema,
                     options,
+                    emit,
                 )?
             }
             Expr::IsJson { expr, kind, unique_keys, negated } => {
-                translate_is_json(expr, *kind, *unique_keys, *negated, schema, options)?
+                translate_is_json(expr, *kind, *unique_keys, *negated, schema, options, emit)?
             }
-            Expr::Array(Array { elem, .. }) => translate_array_literal(elem, schema, options)?,
+            Expr::Array(Array { elem, .. }) => {
+                translate_array_literal(elem, schema, options, emit)?
+            }
             Expr::CompoundFieldAccess { root, access_chain } => {
-                translate_compound_field_access(root, access_chain, schema, options)?
+                translate_compound_field_access(root, access_chain, schema, options, emit)?
             }
             Expr::SimilarTo { .. } => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                    "SIMILAR TO is not supported in SQLite. \
-                     Consider using LIKE for simple patterns or application-level regex matching."
-                        .to_string(),
-                ));
+                return Err(crate::errors::Error::forward_refusal("SIMILAR TO is not supported in SQLite. \
+                         Consider using LIKE for simple patterns or application-level regex matching."
+                    .to_string()));
             }
             Expr::Rollup(_) | Expr::Cube(_) | Expr::GroupingSets(_) => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "ROLLUP / CUBE / GROUPING SETS are not supported in SQLite. \
-                     Restructure as separate GROUP BY queries and UNION ALL the results."
+                         Restructure as separate GROUP BY queries and UNION ALL the results."
                         .to_string(),
                 ));
             }
             Expr::InUnnest { .. } => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "IN UNNEST (array unnesting) is not supported in SQLite. \
-                     Use a subquery with a VALUES clause or a temporary table instead."
+                         Use a subquery with a VALUES clause or a temporary table instead."
                         .to_string(),
                 ));
             }
             Expr::Lambda(_) => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "Lambda expressions are not supported in SQLite.".to_string(),
                 ));
             }
             Expr::MatchAgainst { .. } => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "MATCH...AGAINST is MySQL-specific syntax and is not supported in SQLite. \
-                     Use SQLite FTS5: table MATCH 'query'."
+                         Use SQLite FTS5: table MATCH 'query'."
                         .to_string(),
                 ));
             }
             Expr::OuterJoin(_) => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "Oracle outer join syntax (+) is not supported in SQLite. \
-                     Use standard SQL LEFT JOIN / RIGHT JOIN syntax."
+                         Use standard SQL LEFT JOIN / RIGHT JOIN syntax."
                         .to_string(),
                 ));
             }
             Expr::Prior(_) => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "PRIOR (Oracle hierarchical query syntax) is not supported in SQLite. \
-                     Use recursive CTEs (WITH RECURSIVE) for hierarchical queries."
+                         Use recursive CTEs (WITH RECURSIVE) for hierarchical queries."
                         .to_string(),
                 ));
             }
@@ -2374,37 +2410,37 @@ impl Translator for Expr {
                     Ok(match op {
                         UnaryOperator::PGSquareRoot => {
                             if !options.is_math_functions_available() {
-                                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                                return Err(crate::errors::Error::forward_refusal(
                                     "|/ (square root) requires SQLITE_ENABLE_MATH_FUNCTIONS. \
-                             Enable with .with_math_functions_available()."
+                                                 Enable with .with_math_functions_available()."
                                         .to_string(),
                                 ));
                             }
                             simple_function_expr(
                                 "sqrt",
-                                vec![expr.translate(schema, options)?],
+                                vec![expr.translate_with_warnings(schema, options, emit)?],
                                 None,
                             )
                         }
                         UnaryOperator::PGCubeRoot => {
                             if !options.is_math_functions_available() {
-                                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                                return Err(crate::errors::Error::forward_refusal(
                                     "||/ (cube root) requires SQLITE_ENABLE_MATH_FUNCTIONS. \
-                             Enable with .with_math_functions_available()."
+                                                 Enable with .with_math_functions_available()."
                                         .to_string(),
                                 ));
                             }
-                            let x = expr.translate(schema, options)?;
+                            let x = expr.translate_with_warnings(schema, options, emit)?;
                             cube_root_closed_form(x)
                         }
                         UnaryOperator::PGAbs => {
                             simple_function_expr(
                                 "abs",
-                                vec![expr.translate(schema, options)?],
+                                vec![expr.translate_with_warnings(schema, options, emit)?],
                                 None,
                             )
                         }
-                        _ => translate_expr_recursive::<Forward>(self, schema, options)?,
+                        _ => translate_expr_recursive::<Forward>(self, schema, options, emit)?,
                     })
                 })?
             }
@@ -2414,7 +2450,7 @@ impl Translator for Expr {
             // InList, InSubquery, Between, Case, Subquery, Tuple,
             // RLike, JsonAccess, QualifiedWildcard, Struct,
             // Named, Dictionary, Map, MemberOf, etc.
-            _ => translate_expr_recursive::<Forward>(self, schema, options)?,
+            _ => translate_expr_recursive::<Forward>(self, schema, options, emit)?,
         })
     }
 }
@@ -2444,7 +2480,7 @@ fn lowered_ilike_escape(
 
     let lowered = original.to_lowercase();
     if lowered.chars().count() != 1 {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "ILIKE ... ESCAPE '{original}' cannot be translated: ILIKE becomes LIKE over \
              lower()ed operands, and lowercasing this escape character changes its length, \
              which would shift the pattern instead of escaping in it. Use a caseless escape \
@@ -2516,7 +2552,7 @@ pub(crate) fn sqlite_collation(collation: &ObjectName) -> Result<ObjectName, cra
         "BINARY" | "NOCASE" | "RTRIM" => Ok(collation.clone()),
         "C" | "POSIX" => Ok(ObjectName(vec![ObjectNamePart::Identifier(Ident::new("BINARY"))])),
         _ => {
-            Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            Err(crate::errors::Error::forward_refusal(format!(
                 "COLLATE {name} is not a valid SQLite collation. SQLite only supports BINARY \
                  (default), NOCASE, and RTRIM, and PostgreSQL C and POSIX map onto BINARY. \
                  Any other PostgreSQL collation name must be dropped or replaced before \
@@ -2542,17 +2578,18 @@ fn translate_is_json(
     unique_keys: Option<JsonKeyUniqueness>,
     negated: bool,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     if let Some(unique_keys) = unique_keys {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "IS JSON ... {unique_keys} is not supported in SQLite. The json1 extension keeps the \
              last of a set of duplicate object keys and offers no way to detect that it did, so \
              the uniqueness constraint cannot be checked."
         )));
     }
 
-    let translated = expr.translate(schema, options)?;
+    let translated = expr.translate_with_warnings(schema, options, emit)?;
     let is_valid = simple_function_expr("json_valid", vec![translated.clone()], None);
 
     let predicate = match kind {
@@ -2596,19 +2633,18 @@ fn translate_compound_field_access(
     root: &Expr,
     access_chain: &[AccessExpr],
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     match access_chain {
         [AccessExpr::Subscript(Subscript::Index { index })] => {
-            let translated_root = root.translate(schema, options)?;
-            translate_array_subscript(translated_root, index, schema, options)
+            let translated_root = root.translate_with_warnings(schema, options, emit)?;
+            translate_array_subscript(translated_root, index, schema, options, emit)
         }
         [AccessExpr::Subscript(Subscript::Slice { .. })] => {
-            Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                "Array slice subscripting (arr[lo:hi]) is not supported in SQLite. Rebuild the \
-                 slice with json_each() and json_group_array(), or slice in the application."
-                    .to_string(),
-            ))
+            Err(crate::errors::Error::forward_refusal("Array slice subscripting (arr[lo:hi]) is not supported in SQLite. Rebuild the \
+                     slice with json_each() and json_group_array(), or slice in the application."
+                .to_string()))
         }
         // Plain `a.b.c` field paths carry no subscript and need no rewriting.
         _ if !access_chain.iter().any(|a| matches!(a, AccessExpr::Subscript(_))) => {
@@ -2619,15 +2655,14 @@ fn translate_compound_field_access(
                 },
                 schema,
                 options,
+                emit,
             )
         }
         _ => {
-            Err(crate::errors::Error::UnsupportedSQLiteFeature(
-                "Chained subscript access is not supported in SQLite. json_extract() returns a \
-                 nested element as JSON text, so a second subscript would index the text rather \
-                 than the element. Extract a single level at a time."
-                    .to_string(),
-            ))
+            Err(crate::errors::Error::forward_refusal("Chained subscript access is not supported in SQLite. json_extract() returns a \
+                     nested element as JSON text, so a second subscript would index the text rather \
+                     than the element. Extract a single level at a time."
+                .to_string()))
         }
     }
 }
@@ -2709,7 +2744,8 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn translate_extract_trim_any_and_unimplemented_branches() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
+        let emit = &mut |_| {};
 
         // EXTRACT(WEEK) is the ISO week, which SQLite spells %V. %W is the
         // Sunday based one and disagrees at every year boundary.
@@ -2718,6 +2754,7 @@ mod tests {
             &parse_expr("created_at"),
             &schema,
             &options,
+            emit,
         )
         .expect("week extract should translate");
         assert!(week.to_string().contains("'%V'"), "week must use the ISO format: {week}");
@@ -2727,6 +2764,7 @@ mod tests {
             &parse_expr("created_at"),
             &schema,
             &options,
+            emit,
         )
         .expect("doy extract should translate");
         assert!(extracted_day_of_year.to_string().contains("strftime('%j'"));
@@ -2736,6 +2774,7 @@ mod tests {
             &parse_expr("created_at"),
             &schema,
             &options,
+            emit,
         )
         .expect("dow extract should translate");
         assert!(extracted_day_of_week.to_string().contains("strftime('%w'"));
@@ -2747,6 +2786,7 @@ mod tests {
             Some(&[parse_expr("'x'"), parse_expr("'y'")]),
             &schema,
             &options,
+            emit,
         )
         .expect("trim should translate");
         assert!(trimmed.to_string().contains("TRIM"));
@@ -2759,6 +2799,7 @@ mod tests {
             None,
             &schema,
             &options,
+            emit,
         )
         .expect("leading trim should translate");
         assert_eq!(ltrimmed.to_string(), "LTRIM(str, 'x')");
@@ -2771,6 +2812,7 @@ mod tests {
             None,
             &schema,
             &options,
+            emit,
         )
         .expect("trailing trim should translate");
         assert_eq!(rtrimmed.to_string(), "RTRIM(str, 'x')");
@@ -2783,6 +2825,7 @@ mod tests {
             None,
             &schema,
             &options,
+            emit,
         )
         .expect("both trim should translate");
         assert_eq!(btrimmed.to_string(), "TRIM(str, 'x')");
@@ -2795,6 +2838,7 @@ mod tests {
             None,
             &schema,
             &options,
+            emit,
         )
         .expect("leading trim without char should translate");
         assert_eq!(ltrim_no_char.to_string(), "LTRIM(str)");
@@ -2805,6 +2849,7 @@ mod tests {
             false,
             &schema,
             &options,
+            emit,
         )
         .expect("ANY tuple should become IN list");
         assert!(matches!(in_tuple, Expr::InList { .. }));
@@ -2815,6 +2860,7 @@ mod tests {
             false,
             &schema,
             &options,
+            emit,
         )
         .expect_err("ANY over an array value should need an array representation");
         assert!(err.to_string().contains("with_array_representation"), "got: {err}");
@@ -2856,7 +2902,7 @@ mod tests {
     #[test]
     fn translate_json_access_expression() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let json_access = Expr::JsonAccess {
             value: Box::new(parse_expr("payload")),
             path: sqlparser::ast::JsonPath {

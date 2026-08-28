@@ -604,7 +604,7 @@ fn generated_column_stored() {
 
 #[test]
 fn table_fk_to_rls_table() {
-    use pg2sqlite::{prelude::SessionVariableMapping, traits::TranslationOptions};
+    use pg2sqlite::prelude::SessionVariableMapping;
     let sql = r#"
         CREATE TABLE users (
             id INT PRIMARY KEY,
@@ -649,7 +649,7 @@ fn table_fk_to_rls_table() {
 
 #[test]
 fn column_fk_to_rls_table() {
-    use pg2sqlite::{prelude::SessionVariableMapping, traits::TranslationOptions};
+    use pg2sqlite::prelude::SessionVariableMapping;
     let sql = r#"
         CREATE TABLE users (
             id INT PRIMARY KEY,
@@ -692,7 +692,6 @@ fn column_fk_to_rls_table() {
 
 #[test]
 fn check_constraint_with_function_removed() {
-    use pg2sqlite::traits::TranslationOptions;
     let sql = "
         CREATE TABLE items (
             id INT PRIMARY KEY,
@@ -756,7 +755,7 @@ fn materialized_view_error() {
 /// and switching the session to owner 1 deletes exactly that row's order.
 #[test]
 fn delete_using_with_rls_table_join() {
-    use pg2sqlite::{prelude::SessionVariableMapping, traits::TranslationOptions};
+    use pg2sqlite::prelude::SessionVariableMapping;
     let sql = r#"
         CREATE TABLE orders (
             id INT PRIMARY KEY,
@@ -934,7 +933,7 @@ fn or_replace_trigger() {
 
 #[test]
 fn before_trigger_on_rls_table() {
-    use pg2sqlite::{prelude::SessionVariableMapping, traits::TranslationOptions};
+    use pg2sqlite::prelude::SessionVariableMapping;
     let sql = r#"
         CREATE TABLE items (id INT PRIMARY KEY, name TEXT, owner_id INT NOT NULL);
         ALTER TABLE items ENABLE ROW LEVEL SECURITY;

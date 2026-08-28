@@ -6,7 +6,7 @@
 mod helpers;
 
 use helpers::translate_sql;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 use rusqlite::Connection as SqliteConn;
 
 fn uuid_options() -> Pg2SqliteOptions {

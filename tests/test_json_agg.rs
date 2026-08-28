@@ -72,7 +72,7 @@ fn a_qualified_json_column_nests_too() {
 /// array of strings.
 #[test]
 fn aggregating_an_array_column_nests_the_arrays() {
-    use pg2sqlite::prelude::{ArrayRepresentation, TranslationOptions};
+    use pg2sqlite::prelude::ArrayRepresentation;
 
     let rows = run_translated_with(
         "CREATE TABLE arr (id INT PRIMARY KEY, tags INT[]);

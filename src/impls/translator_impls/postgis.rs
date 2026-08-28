@@ -3,15 +3,14 @@
 //! on crates.io).
 //!
 //! Used by the function dispatcher in `function.rs` to decide whether an
-//! `ST_*`-shaped call should pass through unchanged (when
-//! [`crate::traits::TranslationOptions::with_sqlitegis_enabled`] is on) or
-//! fail with a precise `UnsupportedSQLiteFeature` error.
+//! `ST_*`-shaped call should pass through unchanged when
+//! [`crate::options::Pg2SqliteOptions::with_sqlitegis_enabled`] is on, or
+//! fail with a precise `TranslationRefusal` error.
 //!
 //! The list MUST stay in sync with SQLiteGIS's
 //! `sqlitegis::core::function_catalog::SQLITE_DETERMINISTIC_FUNCTIONS` and
-//! `SQLITE_DIRECT_ONLY_FUNCTIONS`. Drift is caught by the parity tests in
-//! `tests/test_postgis_diesel.rs`, which assert that every SQLiteGIS catalog
-//! entry has a matching `(name, arity)` here.
+//! `SQLITE_DIRECT_ONLY_FUNCTIONS`. The feature-gated unit tests assert that
+//! every SQLiteGIS catalog entry has a matching `(name, arity)` here.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -156,7 +155,7 @@ pub(crate) const POSTGIS_FUNCTION_CATALOG: &[(&str, i32)] = &[
 /// Returns `true` when `(name, arity)` is implemented by SQLiteGIS. `name`
 /// is matched case-insensitively against the lowercase catalog entries.
 #[must_use]
-pub fn is_sqlitegis_function(name: &str, arity: i32) -> bool {
+pub(crate) fn is_sqlitegis_function(name: &str, arity: i32) -> bool {
     let lower = name.to_ascii_lowercase();
     POSTGIS_FUNCTION_CATALOG.iter().any(|&(n, a)| n == lower && a == arity)
 }
@@ -164,7 +163,7 @@ pub fn is_sqlitegis_function(name: &str, arity: i32) -> bool {
 /// Returns the set of arities SQLiteGIS implements for `name`, lowercased
 /// case-insensitively. Empty when the function is unknown.
 #[must_use]
-pub fn sqlitegis_function_arities(name: &str) -> Vec<i32> {
+pub(crate) fn sqlitegis_function_arities(name: &str) -> Vec<i32> {
     let lower = name.to_ascii_lowercase();
     POSTGIS_FUNCTION_CATALOG.iter().filter_map(|&(n, a)| (n == lower).then_some(a)).collect()
 }
@@ -172,7 +171,7 @@ pub fn sqlitegis_function_arities(name: &str) -> Vec<i32> {
 /// Returns `true` if `name` is shaped like a PostGIS scalar, used to flag
 /// calls that look spatial but are absent from SQLiteGIS's catalog.
 #[must_use]
-pub fn is_postgis_shaped_name(name: &str) -> bool {
+pub(crate) fn is_postgis_shaped_name(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("st_")
 }
 
@@ -230,7 +229,7 @@ pub(crate) fn classify_gist_spatial_columns(
         return Ok(None);
     }
     if !non_spatial_columns.is_empty() {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "GiST index on {} mixes spatial columns ({}) with non-spatial entries ({}); \
              SQLiteGIS's CreateSpatialIndex operates on a single geometry/geography column at a time.",
             create_index.table_name,
@@ -239,7 +238,7 @@ pub(crate) fn classify_gist_spatial_columns(
         )));
     }
     if create_index.predicate.is_some() {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "GiST partial-index `WHERE` predicate is not supported on spatial columns; \
              SQLiteGIS's CreateSpatialIndex rebuilds the rtree from every row of {}.",
             create_index.table_name
@@ -342,17 +341,14 @@ pub(crate) fn geography_buffer_refusal(
 // bbox-overlap-narrowable predicate over a bare or correctly-qualified column
 // reference. Anything else passes through unchanged.
 
-use sqlparser::{
-    ast::{BinaryOperator, Select, TableFactor, TableWithJoins},
-    dialect::PostgreSqlDialect,
+use sqlparser::ast::{
+    BinaryOperator, Ident, ObjectName, ObjectNamePart, Select, TableFactor, TableWithJoins,
 };
 
-use crate::{
-    impls::{
-        generated_sql::parse_single_generated_sql,
-        shared_helpers::{every_declared_type_matches, function_argument_exprs},
-    },
-    options::Pg2SqliteOptions,
+use crate::impls::{
+    function_helpers::simple_function_expr,
+    query_builder::{from_relation, plain_table_factor, single_expr_query},
+    shared_helpers::{every_declared_type_matches, function_argument_exprs},
 };
 
 /// Bbox-overlap-narrowable spatial predicates. For each of these, a positive
@@ -379,60 +375,51 @@ pub(crate) fn is_bbox_narrowable_predicate(name: &str) -> bool {
 
 /// Returns a rewritten `Select` when `select`'s shape is eligible for spatial
 /// predicate rewriting against the spatial index catalog in `options`, or
-/// `Ok(None)` to fall through to the original.
+/// `None` to fall through to the original.
 pub(crate) fn try_rewrite_spatial_select(
     select: &Select,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<Select>, crate::errors::Error> {
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<Select> {
     if select.from.len() != 1 {
-        return Ok(None);
+        return None;
     }
-    let Some(new_selection) =
-        compute_rtree_filtered_where(&select.from[0], select.selection.as_ref(), options)?
-    else {
-        return Ok(None);
-    };
+    let new_selection =
+        compute_rtree_filtered_where(&select.from[0], select.selection.as_ref(), options)?;
     let mut rewritten = select.clone();
     rewritten.selection = Some(new_selection);
-    Ok(Some(rewritten))
+    Some(rewritten)
 }
 
 /// Shared analysis half of the spatial rewrite, used by SELECT, UPDATE, and
 /// DELETE wrappers. Resolves the single-table base and the WHERE clause,
 /// then asks `try_build_rtree_filter` to produce the rewritten predicate.
-/// Returns `Ok(None)` for any shape the rewrite can't handle so callers
-/// fall through to their existing translation.
+/// Returns `None` for any shape the rewrite cannot handle so callers fall
+/// through to their existing translation.
 fn compute_rtree_filtered_where(
     base_twj: &TableWithJoins,
     where_expr: Option<&sqlparser::ast::Expr>,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<sqlparser::ast::Expr>, crate::errors::Error> {
-    let Some((base_table_name, base_alias)) = single_base_table(base_twj) else {
-        return Ok(None);
-    };
-    let Some(where_expr) = where_expr else {
-        return Ok(None);
-    };
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<sqlparser::ast::Expr> {
+    let (base_table_name, base_alias) = single_base_table(base_twj)?;
+    let where_expr = where_expr?;
     try_build_rtree_filter(&base_table_name, base_alias.as_deref(), where_expr, options)
 }
 
 /// Given a single-table base reference plus its WHERE clause, returns a new
-/// WHERE expression that pre-filters via the rtree shadow, or `Ok(None)` when
-/// the shape isn't eligible. Shared by the SELECT, UPDATE, and DELETE rewrite
+/// WHERE expression that pre-filters via the rtree shadow, or `None` when the
+/// shape is not eligible. Shared by the SELECT, UPDATE, and DELETE rewrite
 /// paths so the analysis and SQL synthesis live in one place.
 ///
 /// The returned expression has shape `(<base>.rowid IN (SELECT id FROM <rtree>
-/// WHERE bbox-conditions)) AND (<original_where>)`, parsed from a synthesized
-/// `SELECT 1 WHERE ...` so we can reuse the existing PG-dialect parser instead
-/// of constructing the AST by hand.
+/// WHERE bbox-conditions)) AND (<original_where>)`.
 pub(crate) fn try_build_rtree_filter(
     base_table_name: &str,
     base_alias: Option<&str>,
     where_expr: &sqlparser::ast::Expr,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<sqlparser::ast::Expr>, crate::errors::Error> {
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<sqlparser::ast::Expr> {
     if !is_safe_top_level_and(where_expr) {
-        return Ok(None);
+        return None;
     }
     let conjuncts = flatten_top_level_and(where_expr);
 
@@ -442,88 +429,92 @@ pub(crate) fn try_build_rtree_filter(
     let spatial = conjuncts.iter().find_map(|c| {
         extract_spatial_filter(c, &base_table_lower, base_alias_lower.as_deref(), options)
     });
-    let Some(spatial) = spatial else {
-        return Ok(None);
-    };
+    let spatial = spatial?;
 
     let rtree_table = format!("{}_{}_rtree", base_table_lower, spatial.column);
-    let base_for_rowid = base_alias.map_or_else(|| base_table_name.to_string(), str::to_string);
-    let geom_sql = format!("{}", spatial.geom_expr);
-    let original_where = format!("{where_expr}");
-
-    let probe_sql = format!(
-        "SELECT 1 WHERE \
-         ({base_for_rowid}.rowid IN ( \
-             SELECT id FROM {rtree_table} \
-             WHERE xmin <= ST_XMax({geom_sql}) AND xmax >= ST_XMin({geom_sql}) \
-               AND ymin <= ST_YMax({geom_sql}) AND ymax >= ST_YMin({geom_sql}) \
-         )) AND ({original_where})"
+    let base_for_rowid = base_alias.unwrap_or(base_table_name);
+    let geom = spatial.geom_expr.clone();
+    let bound = |column: &str, op: BinaryOperator, function: &str| {
+        Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new(column))),
+            op,
+            right: Box::new(simple_function_expr(function, vec![geom.clone()], None)),
+        }
+    };
+    let and = |left: Expr, right: Expr| {
+        Expr::BinaryOp { left: Box::new(left), op: BinaryOperator::And, right: Box::new(right) }
+    };
+    let bounds = and(
+        and(
+            and(
+                bound("xmin", BinaryOperator::LtEq, "ST_XMax"),
+                bound("xmax", BinaryOperator::GtEq, "ST_XMin"),
+            ),
+            bound("ymin", BinaryOperator::LtEq, "ST_YMax"),
+        ),
+        bound("ymax", BinaryOperator::GtEq, "ST_YMin"),
     );
-
-    let stmt = parse_single_generated_sql(
-        &PostgreSqlDialect {},
-        &probe_sql,
-        "spatial predicate rewriting",
-    )?;
-    let sqlparser::ast::Statement::Query(query) = stmt else {
-        return Ok(None);
+    let rtree_name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(rtree_table))]);
+    let candidates = single_expr_query(
+        Expr::Identifier(Ident::new("id")),
+        from_relation(plain_table_factor(rtree_name)),
+        Some(bounds),
+    );
+    let indexed_row = Expr::InSubquery {
+        expr: Box::new(Expr::CompoundIdentifier(vec![
+            Ident::new(base_for_rowid),
+            Ident::new("rowid"),
+        ])),
+        subquery: Box::new(candidates),
+        negated: false,
     };
-    let sqlparser::ast::SetExpr::Select(inner) = *query.body else {
-        return Ok(None);
-    };
-    Ok(inner.selection)
+    Some(and(Expr::Nested(Box::new(indexed_row)), Expr::Nested(Box::new(where_expr.clone()))))
 }
 
 /// Returns a rewritten `Delete` when the target is a single base table
 /// without `USING` and the WHERE clause carries a rewriteable spatial
-/// predicate. Otherwise returns `Ok(None)`. `DELETE ... USING` is naturally
+/// predicate. Otherwise returns `None`. `DELETE ... USING` is naturally
 /// excluded: the `<Delete as Translator>::translate` caller wraps its WHERE
 /// in `EXISTS(subquery)` before invoking this helper, and that shape fails
 /// the flat-AND check inside `try_build_rtree_filter`.
 pub(crate) fn try_rewrite_spatial_delete(
     delete: &sqlparser::ast::Delete,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<sqlparser::ast::Delete>, crate::errors::Error> {
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<sqlparser::ast::Delete> {
     use sqlparser::ast::FromTable;
 
     if delete.using.as_ref().is_some_and(|u| !u.is_empty()) {
-        return Ok(None);
+        return None;
     }
     let from_tables = match &delete.from {
         FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
     };
     if from_tables.len() != 1 {
-        return Ok(None);
+        return None;
     }
-    let Some(new_selection) =
-        compute_rtree_filtered_where(&from_tables[0], delete.selection.as_ref(), options)?
-    else {
-        return Ok(None);
-    };
+    let new_selection =
+        compute_rtree_filtered_where(&from_tables[0], delete.selection.as_ref(), options)?;
     let mut rewritten = delete.clone();
     rewritten.selection = Some(new_selection);
-    Ok(Some(rewritten))
+    Some(rewritten)
 }
 
 /// Returns a rewritten `Update` when the target's shape is a single base
 /// table without an `UPDATE ... FROM` extension and the WHERE clause carries
-/// a rewriteable spatial predicate. Otherwise returns `Ok(None)`.
+/// a rewriteable spatial predicate. Otherwise returns `None`.
 pub(crate) fn try_rewrite_spatial_update(
     update: &sqlparser::ast::Update,
-    options: &Pg2SqliteOptions,
-) -> Result<Option<sqlparser::ast::Update>, crate::errors::Error> {
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<sqlparser::ast::Update> {
     // UPDATE ... FROM is multi-source; out of scope for v1.
     if update.from.is_some() {
-        return Ok(None);
+        return None;
     }
-    let Some(new_selection) =
-        compute_rtree_filtered_where(&update.table, update.selection.as_ref(), options)?
-    else {
-        return Ok(None);
-    };
+    let new_selection =
+        compute_rtree_filtered_where(&update.table, update.selection.as_ref(), options)?;
     let mut rewritten = update.clone();
     rewritten.selection = Some(new_selection);
-    Ok(Some(rewritten))
+    Some(rewritten)
 }
 
 /// Returns `(table_name, alias)` from a `TableWithJoins` that names exactly
@@ -588,7 +579,7 @@ fn extract_spatial_filter<'a>(
     expr: &'a sqlparser::ast::Expr,
     base_table_lower: &str,
     base_alias_lower: Option<&str>,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Option<SpatialFilter<'a>> {
     let sqlparser::ast::Expr::Function(func) = expr else {
         return None;
@@ -628,5 +619,68 @@ fn column_resolving_to_base(
             qualifier_ok.then_some(column)
         }
         _ => None,
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::is_sqlitegis_function;
+
+    #[test]
+    fn catalog_lookup_finds_st_point_with_known_arities() {
+        assert!(is_sqlitegis_function("st_point", 2));
+        assert!(is_sqlitegis_function("st_point", 3));
+        assert!(!is_sqlitegis_function("st_point", 1));
+        assert!(!is_sqlitegis_function("st_point", 4));
+    }
+
+    #[test]
+    fn catalog_lookup_is_case_insensitive_on_supplied_name() {
+        assert!(is_sqlitegis_function("ST_Point", 2));
+        assert!(is_sqlitegis_function("st_POINT", 2));
+    }
+
+    #[test]
+    fn catalog_lookup_rejects_unknown_names() {
+        assert!(!is_sqlitegis_function("st_transform", 2));
+        assert!(!is_sqlitegis_function("st_simplify", 2));
+        assert!(!is_sqlitegis_function("now", 0));
+    }
+
+    #[test]
+    fn catalog_includes_spatial_index_helpers() {
+        assert!(is_sqlitegis_function("createspatialindex", 2));
+        assert!(is_sqlitegis_function("dropspatialindex", 2));
+    }
+
+    #[cfg(feature = "sqlitegis")]
+    #[test]
+    fn pg2sqlite_catalog_covers_every_sqlitegis_deterministic_function() {
+        let missing = sqlitegis::core::function_catalog::SQLITE_DETERMINISTIC_FUNCTIONS
+            .iter()
+            .filter(|spec| !is_sqlitegis_function(&spec.name.to_ascii_lowercase(), spec.n_arg))
+            .map(|spec| format!("{}/{}", spec.name, spec.n_arg))
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "pg2sqlite's PostGIS catalog is missing {} SQLiteGIS deterministic entries:\n{}",
+            missing.len(),
+            missing.join(", ")
+        );
+    }
+
+    #[cfg(feature = "sqlitegis")]
+    #[test]
+    fn pg2sqlite_catalog_covers_every_sqlitegis_direct_only_function() {
+        let missing = sqlitegis::core::function_catalog::SQLITE_DIRECT_ONLY_FUNCTIONS
+            .iter()
+            .filter(|spec| !is_sqlitegis_function(&spec.name.to_ascii_lowercase(), spec.n_arg))
+            .map(|spec| format!("{}/{}", spec.name, spec.n_arg))
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "pg2sqlite's PostGIS catalog is missing {} SQLiteGIS direct-only entries:\n{}",
+            missing.len(),
+            missing.join(", ")
+        );
     }
 }

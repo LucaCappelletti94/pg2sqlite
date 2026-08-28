@@ -2,14 +2,25 @@
 //!
 //! A table that is selectable but not writable and carries no RLS policy is
 //! emitted as a plain table plus `BEFORE INSERT`/`UPDATE`/`DELETE` deny
-//! triggers that `RAISE(ABORT)`, so interactive writes fail at the statement
-//! rather than deferring to a server-side catalog rejection. Authoritative
-//! changeset applies must disable triggers (`SQLITE_DBCONFIG_ENABLE_TRIGGER`),
-//! pinned by the triggers-disabled test; `rusqlite` is used there because
-//! `diesel` does not expose `sqlite3_db_config`.
+//! triggers that `RAISE(ABORT)`, so interactive writes fail at the statement.
+//! A configured write exemption bypasses only these generated guards, leaving
+//! unrelated SQLite triggers active. Without an exemption, authoritative
+//! changesets can disable every trigger through
+//! `SQLITE_DBCONFIG_ENABLE_TRIGGER`.
+
+use std::cell::Cell;
 
 use diesel::prelude::*;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+
+diesel::define_sql_function! {
+    /// Reports whether generated write guards are exempt.
+    fn write_is_exempt() -> diesel::sql_types::Bool;
+}
+
+thread_local! {
+    static WRITE_IS_EXEMPT: Cell<bool> = const { Cell::new(false) };
+}
 
 diesel::table! {
     /// The read-only reference table.
@@ -80,6 +91,57 @@ fn readonly_nonrls_select_works_and_insert_fails() {
         format!("{:?}", result.unwrap_err()).contains("read-only"),
         "deny message should mention read-only"
     );
+}
+
+#[test]
+fn write_exemption_bypasses_each_nonrls_deny_trigger() {
+    let opts = options().with_write_exemption_function("write_is_exempt");
+    let translated =
+        Pg2Sqlite::default().sql(SCHEMA).expect("parse").translate(&opts).expect("translate");
+    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
+    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+        WRITE_IS_EXEMPT.with(Cell::get)
+    })
+    .expect("register write_is_exempt");
+    for statement in translated {
+        diesel::sql_query(statement.to_string()).execute(&mut conn).expect("apply statement");
+    }
+
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(false));
+    assert!(
+        diesel::insert_into(orders::table)
+            .values(NewOrder { id: 1, item: "seed".to_owned() })
+            .execute(&mut conn)
+            .is_err()
+    );
+
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(true));
+    diesel::insert_into(orders::table)
+        .values(NewOrder { id: 1, item: "seed".to_owned() })
+        .execute(&mut conn)
+        .expect("exempt insert");
+
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(false));
+    assert!(
+        diesel::update(orders::table.find(1))
+            .set(orders::item.eq("blocked"))
+            .execute(&mut conn)
+            .is_err()
+    );
+
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(true));
+    diesel::update(orders::table.find(1))
+        .set(orders::item.eq("updated"))
+        .execute(&mut conn)
+        .expect("exempt update");
+
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(false));
+    assert!(diesel::delete(orders::table.find(1)).execute(&mut conn).is_err());
+
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(true));
+    diesel::delete(orders::table.find(1)).execute(&mut conn).expect("exempt delete");
+    assert_eq!(orders::table.count().get_result::<i64>(&mut conn).unwrap(), 0);
+    WRITE_IS_EXEMPT.with(|exempt| exempt.set(false));
 }
 
 #[test]

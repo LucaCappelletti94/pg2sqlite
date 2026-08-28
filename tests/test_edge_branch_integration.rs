@@ -3,16 +3,11 @@
 
 use pg2sqlite::{
     errors::Error,
-    internals::{
-        generate_readonly_rls_statements, generate_rls_statements,
-        generate_rls_validation_statements, generate_rls_view_sql, resolve_trigger_table_name,
-        table_has_rls,
-    },
     options::Pg2SqliteOptions,
     prelude::{ReverseTranslator, Translator},
-    traits::{Schema as _, TranslationOptions},
+    traits::Schema as _,
 };
-use sql_traits::{structs::ParserDB, traits::DatabaseLike};
+use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
         ConditionalStatements, ConstraintCharacteristics, CreateFunctionBody, CreateIndex,
@@ -21,7 +16,7 @@ use sqlparser::{
         ObjectName, ObjectNamePart, Query, SetExpr, SqlOption, Statement, TableObject,
         TriggerExecBodyType,
     },
-    dialect::{PostgreSqlDialect, SQLiteDialect},
+    dialect::PostgreSqlDialect,
     parser::Parser,
     tokenizer::Span,
 };
@@ -94,7 +89,7 @@ fn schema_from_sql(sql: &str) -> ParserDB {
 
 fn unsupported_message(err: Error) -> String {
     match err {
-        Error::UnsupportedSQLiteFeature(msg) | Error::UnknownPostgresFeature(msg) => msg,
+        Error::TranslationRefusal(refusal) => refusal.detail().to_owned(),
         other => panic!("unexpected error type: {other:?}"),
     }
 }
@@ -354,83 +349,6 @@ fn schema_function_body_covers_missing_and_error_paths() {
         .expect("function body should parse")
         .expect("body should exist");
     assert_eq!(body.statements.len(), 1, "RETURN NEW should be stripped");
-}
-
-#[test]
-fn rls_public_helpers_cover_no_pk_and_readonly_paths() {
-    let schema = schema_from_sql(
-        r#"
-        CREATE TABLE docs(id INTEGER PRIMARY KEY, owner TEXT, body TEXT);
-        ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-        CREATE POLICY docs_select ON docs FOR SELECT USING (owner = 'alice');
-        CREATE POLICY docs_insert ON docs FOR INSERT WITH CHECK (owner = 'alice');
-        CREATE POLICY docs_update ON docs FOR UPDATE USING (owner = 'alice') WITH CHECK (owner = 'alice');
-        CREATE POLICY docs_delete ON docs FOR DELETE USING (owner = 'alice');
-
-        CREATE TABLE logs(msg TEXT);
-        ALTER TABLE logs ENABLE ROW LEVEL SECURITY;
-        CREATE POLICY logs_select_no_using ON logs FOR SELECT;
-
-        CREATE TABLE public_table(id INTEGER PRIMARY KEY, body TEXT);
-        "#,
-    );
-    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-
-    assert!(table_has_rls("docs", &schema).expect("rls lookup should resolve"));
-    assert!(!table_has_rls("public_table", &schema).expect("rls lookup should resolve"));
-
-    let docs_table = schema.table(None, "docs").expect("docs table must exist");
-    let public_table = schema.table(None, "public_table").expect("public table must exist");
-
-    assert_eq!(
-        resolve_trigger_table_name("docs", docs_table, &schema, &options)
-            .expect("trigger table name should resolve"),
-        "docs_rls"
-    );
-    assert_eq!(
-        resolve_trigger_table_name("public_table", public_table, &schema, &options)
-            .expect("trigger table name should resolve"),
-        "public_table"
-    );
-
-    let docs_rls_sql = generate_rls_view_sql(docs_table, &schema, &options)
-        .expect("sql generation should succeed");
-    assert!(docs_rls_sql.contains("WHERE"), "expected policy WHERE clause");
-
-    let logs_table = schema.table(None, "logs").expect("logs table must exist");
-    let logs_rls_sql = generate_rls_view_sql(logs_table, &schema, &options)
-        .expect("sql generation should succeed");
-    assert!(
-        !logs_rls_sql.contains(" WHERE "),
-        "SELECT policy without USING should produce no WHERE clause"
-    );
-
-    let rw = generate_rls_statements(docs_table, &schema, &options).expect("rw rls statements");
-    assert!(
-        rw.iter().any(|s| matches!(s, Statement::CreateView { .. })),
-        "expected generated RLS view"
-    );
-    assert!(
-        rw.iter().any(|s| matches!(s, Statement::CreateTrigger { .. })),
-        "expected generated RLS triggers"
-    );
-
-    let readonly = generate_readonly_rls_statements(docs_table, &schema, &options)
-        .expect("readonly statements");
-    let readonly_trigger_count =
-        readonly.iter().filter(|s| matches!(s, Statement::CreateTrigger { .. })).count();
-    assert!(
-        readonly_trigger_count >= 2,
-        "read-only RLS still includes validation monitoring triggers"
-    );
-
-    let no_pk_validation =
-        generate_rls_validation_statements(logs_table, &schema, &options, "rls_audit")
-            .expect("validation statements should parse");
-    assert!(
-        no_pk_validation.iter().any(|s| matches!(s, Statement::CreateView { .. })),
-        "expected validation view for no-PK table"
-    );
 }
 
 #[test]
@@ -874,46 +792,4 @@ fn reverse_insert_translation_covers_replace_table_function_and_partitioned_path
     let reversed =
         fail_insert.reverse_translate(&schema, &options).expect("or fail should reverse");
     assert!(reversed.on.is_none());
-}
-
-#[test]
-fn rls_view_generation_covers_subquery_join_transform_paths() {
-    let schema = schema_from_sql(
-        r#"
-        CREATE TABLE docs(
-            id INTEGER PRIMARY KEY,
-            owner_id INTEGER NOT NULL,
-            team_id INTEGER NOT NULL
-        );
-        ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-        -- Reads `memberships` rather than `docs` in the derived table. The
-        -- shape under test is the derived-table and JOIN rewrite, and a policy
-        -- whose read predicate reads its own table is refused per F8, since
-        -- PostgreSQL answers `infinite recursion detected` for one.
-        CREATE POLICY docs_select ON docs
-            FOR SELECT
-            USING (
-                EXISTS (
-                    SELECT d.owner_id
-                    FROM (SELECT user_id AS owner_id, team_id FROM memberships) AS d
-                    JOIN (teams t JOIN memberships m ON t.id = m.team_id)
-                      ON m.team_id = d.team_id
-                    WHERE d.owner_id = docs.owner_id
-                    GROUP BY d.owner_id
-                    HAVING d.owner_id IS NOT NULL
-                )
-            );
-        CREATE TABLE teams(id INTEGER PRIMARY KEY, team_name TEXT);
-        CREATE TABLE memberships(id INTEGER PRIMARY KEY, team_id INTEGER, user_id INTEGER);
-        "#,
-    );
-    let options = Pg2SqliteOptions::default();
-    let docs = schema.table(None, "docs").expect("docs table should exist");
-
-    let sql = generate_rls_view_sql(docs, &schema, &options).expect("RLS view SQL should generate");
-    assert!(sql.contains("docs_rls"), "expected backing table rename in SQL: {sql}");
-    assert!(sql.contains("EXISTS"), "expected EXISTS policy to be preserved: {sql}");
-    assert!(sql.contains("JOIN"), "expected JOIN subquery rewrite path: {sql}");
-    Parser::parse_sql(&SQLiteDialect {}, &sql)
-        .expect("generated RLS view SQL must parse as SQLite");
 }

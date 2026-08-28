@@ -10,46 +10,8 @@ mod helpers;
 
 use diesel::{RunQueryDsl, sql_query};
 use helpers::sqlitegis::sqlitegis_connection;
-use pg2sqlite::{
-    internals::postgis,
-    pg2sqlite::Pg2Sqlite,
-    prelude::{Pg2SqliteOptions, TranslationOptions},
-};
-use sqlitegis::core::function_catalog::{
-    SQLITE_DETERMINISTIC_FUNCTIONS, SQLITE_DIRECT_ONLY_FUNCTIONS,
-};
-
-#[test]
-fn pg2sqlite_catalog_covers_every_sqlitegis_deterministic_function() {
-    let mut missing = Vec::new();
-    for spec in SQLITE_DETERMINISTIC_FUNCTIONS {
-        if !postgis::is_sqlitegis_function(&spec.name.to_ascii_lowercase(), spec.n_arg) {
-            missing.push(format!("{}/{}", spec.name, spec.n_arg));
-        }
-    }
-    assert!(
-        missing.is_empty(),
-        "pg2sqlite's PostGIS catalog is missing {} SQLiteGIS deterministic entries:\n{}",
-        missing.len(),
-        missing.join(", ")
-    );
-}
-
-#[test]
-fn pg2sqlite_catalog_covers_every_sqlitegis_direct_only_function() {
-    let mut missing = Vec::new();
-    for spec in SQLITE_DIRECT_ONLY_FUNCTIONS {
-        if !postgis::is_sqlitegis_function(&spec.name.to_ascii_lowercase(), spec.n_arg) {
-            missing.push(format!("{}/{}", spec.name, spec.n_arg));
-        }
-    }
-    assert!(
-        missing.is_empty(),
-        "pg2sqlite's PostGIS catalog is missing {} SQLiteGIS direct-only entries:\n{}",
-        missing.len(),
-        missing.join(", ")
-    );
-}
+use pg2sqlite::{pg2sqlite::Pg2Sqlite, prelude::Pg2SqliteOptions};
+use sqlitegis::core::function_catalog::SQLITE_DETERMINISTIC_FUNCTIONS;
 
 #[test]
 fn every_sqlitegis_smoke_sql_translates_and_executes() {

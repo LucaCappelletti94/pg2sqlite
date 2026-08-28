@@ -3,7 +3,6 @@
 use pg2sqlite::{
     errors::Error,
     prelude::{Pg2SqliteOptions, ReverseTranslator, Translator},
-    traits::TranslationOptions,
 };
 use sql_traits::structs::ParserDB;
 use sqlparser::{
@@ -43,7 +42,7 @@ fn empty_schema() -> ParserDB {
 
 fn unsupported_message(err: Error) -> String {
     match err {
-        Error::UnsupportedSQLiteFeature(msg) | Error::UnknownPostgresFeature(msg) => msg,
+        Error::TranslationRefusal(refusal) => refusal.detail().to_owned(),
         other => panic!("unexpected error type: {other:?}"),
     }
 }

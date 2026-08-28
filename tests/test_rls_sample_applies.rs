@@ -6,9 +6,7 @@
 //! or the translator's trigger emission shows up as a normal test
 //! failure rather than a "in-memory apply failed" toast.
 
-use pg2sqlite::prelude::{
-    Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions, UuidRepresentation,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rusqlite::{Connection, params};
 
 const RLS_SAMPLE: &str = "\

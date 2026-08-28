@@ -13,7 +13,8 @@ use std::path::Path;
 
 /// Variants no code names because `#[from]` builds them, so `?` is the only
 /// construction site and it never spells the variant out.
-const BUILT_BY_QUESTION_MARK: &[&str] = &["SchemaError", "LookupError", "IoError"];
+const BUILT_BY_QUESTION_MARK: &[&str] =
+    &["SchemaError", "LookupError", "IoError", "SqlParse", "TranslationRefusal"];
 
 /// The variant names declared by `pub enum Error`.
 ///
@@ -22,6 +23,13 @@ const BUILT_BY_QUESTION_MARK: &[&str] = &["SchemaError", "LookupError", "IoError
 /// `/` and `#`, and variant bodies are indented deeper, so this separates them
 /// without needing to parse Rust.
 fn declared_variants(source: &str) -> Vec<&str> {
+    let source = source
+        .split_once("pub enum Error {")
+        .expect("Error enum must exist")
+        .1
+        .split_once("\n}\nimpl Error")
+        .expect("Error impl must follow the enum")
+        .0;
     source
         .lines()
         .filter_map(|line| {

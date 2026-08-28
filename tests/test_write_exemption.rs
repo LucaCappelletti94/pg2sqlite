@@ -9,7 +9,7 @@ use diesel::{
     Connection as _, ExpressionMethods, QueryDsl, RunQueryDsl, SqliteConnection,
     connection::SimpleConnection,
 };
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 const WRITE_EXEMPTION_FUNCTION: &str = "write_is_exempt";
 

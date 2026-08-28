@@ -12,20 +12,15 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::structs::ParserDB;
 use sqlparser::ast::IndexColumn;
 
-use crate::prelude::{Pg2SqliteOptions, Translator};
-
-impl Translator for IndexColumn {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Self;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(IndexColumn => IndexColumn);
+impl crate::traits::translator::TranslatorWithContext for IndexColumn {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         // SQLite has no operator classes, so the clause cannot be emitted:
         // `CREATE INDEX i ON t (s text_pattern_ops)` is `near
@@ -36,20 +31,23 @@ impl Translator for IndexColumn {
         // only under a nondeterministic collation, which `Expr::Collate`
         // already refuses.
         if let Some(operator_class) = &self.operator_class {
-            crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+            emit(crate::warnings::TranslationWarning::LossyDowngrade {
                 construct: "index operator class".to_string(),
                 from: format!("{} {operator_class}", self.column),
                 to: self.column.to_string(),
                 location: self.column.to_string(),
                 reason: "SQLite has no operator classes, so the index serves fewer queries than \
-                         the PostgreSQL one, notably the pattern matches a text pattern class \
-                         exists for."
+             the PostgreSQL one, notably the pattern matches a text pattern class \
+             exists for."
                     .to_string(),
             });
         }
 
         // Every field is listed, with no `..self.clone()`, so a field added
         // upstream fails to compile here instead of reaching SQLite unexamined.
-        Ok(IndexColumn { column: self.column.translate(schema, options)?, operator_class: None })
+        Ok(IndexColumn {
+            column: self.column.translate_with_warnings(schema, options, emit)?,
+            operator_class: None,
+        })
     }
 }

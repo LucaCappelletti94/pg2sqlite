@@ -10,10 +10,8 @@ use std::cell::Cell;
 
 use diesel::{prelude::*, sql_query};
 use pg2sqlite::{
-    options::Pg2SqliteOptions,
-    pg2sqlite::Pg2Sqlite,
-    prelude::UuidRepresentation,
-    traits::{SessionVariableMapping, TranslationOptions},
+    options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite, prelude::UuidRepresentation,
+    traits::SessionVariableMapping,
 };
 use rosetta_uuid::Uuid;
 

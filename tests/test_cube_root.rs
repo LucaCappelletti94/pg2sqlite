@@ -12,10 +12,7 @@
 //!
 //! Every expected value below was read off PostgreSQL 17.
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::{Connection, functions::FunctionFlags, types::FromSql};
 
 fn options() -> Pg2SqliteOptions {

@@ -34,7 +34,8 @@ use crate::{
             },
         },
     },
-    prelude::{Pg2SqliteOptions, Translator},
+    prelude::Pg2SqliteOptions,
+    traits::translator::TranslatorWithContext,
 };
 
 /// Rewrites a scaled `NUMERIC` column's declared `DEFAULT` as minor units, or
@@ -103,7 +104,7 @@ fn quoted_decimal_as_number(text: &str) -> Option<Expr> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::UnsupportedSQLiteFeature`] when a scaled `NUMERIC` column's
+/// Returns [`Error::TranslationRefusal`] when a scaled `NUMERIC` column's
 /// default is not one number at the column's scale, or when a UUID BLOB
 /// column's default is a text literal that is not a valid UUID.
 pub(crate) fn declared_default(
@@ -137,7 +138,7 @@ fn scaled_default(column: &ColumnDef, expr: &Expr) -> Result<Expr, Error> {
         return Ok(round_scale_zero_default(&column.data_type, expr));
     };
     scaled_numeric_default(expr, scale)?.ok_or_else(|| {
-        Error::UnsupportedSQLiteFeature(format!(
+        Error::forward_refusal(format!(
             "the DEFAULT on column '{}' does not land as one number at the column's scale. The \
              column is a NUMERIC held as an INTEGER of minor units, so the default has to be a \
              plain literal, which PostgreSQL coerces the same way. Write it as a number at the \
@@ -221,7 +222,8 @@ pub(crate) fn translate_column_def(
     table: &ObjectName,
     primary_key_columns: &[String],
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<ColumnDef, crate::errors::Error> {
     // Both an identity column and a serial ask SQLite to supply values, which
     // it does only through the rowid alias, so both need the translated type
@@ -233,7 +235,7 @@ pub(crate) fn translate_column_def(
     let is_serial = is_serial_type(&column.data_type);
 
     if has_identity || is_serial {
-        let translated_type = column.data_type.translate(schema, options)?;
+        let translated_type = column.data_type.translate_with_warnings(schema, options, emit)?;
         if !is_rowid_alias(&translated_type, column, primary_key_columns) {
             return Err(no_value_source(&column.name, is_serial));
         }
@@ -245,7 +247,7 @@ pub(crate) fn translate_column_def(
             .options
             .iter()
             .filter(|o| !matches!(o.option, ColumnOption::Generated { generation_expr: None, .. }))
-            .map(|o| o.translate(schema, options))
+            .map(|o| o.translate_with_warnings(schema, options, emit))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
@@ -265,7 +267,7 @@ pub(crate) fn translate_column_def(
         .iter()
         .map(|o| {
             let ColumnOption::Default(expr) = &o.option else {
-                return o.translate(schema, options);
+                return o.translate_with_warnings(schema, options, emit);
             };
             let scaled = scaled_default(column, expr)?;
             let default_expr =
@@ -275,7 +277,7 @@ pub(crate) fn translate_column_def(
                     scaled
                 };
             ColumnOptionDef { name: o.name.clone(), option: ColumnOption::Default(default_expr) }
-                .translate(schema, options)
+                .translate_with_warnings(schema, options, emit)
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -327,11 +329,11 @@ pub(crate) fn translate_column_def(
         });
     }
 
-    report_column_downgrades(column, table);
+    report_column_downgrades(column, table, emit);
 
     Ok(ColumnDef {
         name: column.name.clone(),
-        data_type: column.data_type.translate(schema, options)?,
+        data_type: column.data_type.translate_with_warnings(schema, options, emit)?,
         options: translated_options,
     })
 }
@@ -367,7 +369,7 @@ fn is_rowid_alias(
 /// refused.
 fn no_value_source(column: &Ident, is_serial: bool) -> Error {
     let construct = if is_serial { "SERIAL" } else { "GENERATED AS IDENTITY" };
-    Error::UnsupportedSQLiteFeature(format!(
+    Error::forward_refusal(format!(
         "{construct} on column '{column}' cannot be expressed in SQLite. It asks the database to \
          supply the value, and SQLite does that only for an INTEGER PRIMARY KEY, which is its \
          rowid alias, so a column that is not the whole primary key has no value source. Make it \
@@ -381,12 +383,16 @@ fn no_value_source(column: &Ident, is_serial: bool) -> Error {
 /// Only losses the emitted schema cannot make good. A declared character
 /// length is not here, because it survives as a `CHECK`, and `NUMERIC` is not
 /// here because D1 maps it exactly.
-fn report_column_downgrades(column: &ColumnDef, table: &ObjectName) {
+fn report_column_downgrades(
+    column: &ColumnDef,
+    table: &ObjectName,
+    emit: crate::warnings::WarningSink<'_>,
+) {
     let location = format!("{}.{}", last_ident_value_or_display(table), column.name.value);
 
     // CHAR pads to its declared width and TEXT stores what it is given.
     if matches!(column.data_type, DataType::Char(_) | DataType::Character(_)) {
-        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+        emit(crate::warnings::TranslationWarning::LossyDowngrade {
             construct: "CHAR".to_string(),
             from: column.data_type.to_string(),
             to: "TEXT".to_string(),
@@ -405,7 +411,7 @@ fn report_column_downgrades(column: &ColumnDef, table: &ObjectName) {
         DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
             | DataType::Time(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
     ) {
-        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+        emit(crate::warnings::TranslationWarning::LossyDowngrade {
             construct: "WITH TIME ZONE".to_string(),
             from: column.data_type.to_string(),
             to: "TEXT".to_string(),

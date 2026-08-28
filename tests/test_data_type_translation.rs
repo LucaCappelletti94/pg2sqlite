@@ -11,10 +11,7 @@
 
 use std::sync::Once;
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 use sqlite_vec::sqlite3_vec_init;
 
 /// Register sqlite-vec once so connections opened by any test in this binary

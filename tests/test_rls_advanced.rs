@@ -8,10 +8,7 @@
 //! generate_rls_audit_table, InList/Between/IsNull in transform_expr,
 //! InList/Between in transform_outer_table_refs.
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 
 fn make_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()

@@ -214,7 +214,7 @@ impl<'a> Scope<'a> {
     }
 
     fn outside_error(&self, reference: &str) -> Error {
-        Error::UnsupportedSQLiteFeature(format!(
+        Error::forward_refusal(format!(
             "RETURNING {reference} cannot be translated. SQLite's RETURNING sees only the row \
              being changed in {}, so the {} relations are out of scope. Return columns of {} \
              alone, and read the other relation with a separate SELECT.",
@@ -225,7 +225,7 @@ impl<'a> Scope<'a> {
     }
 
     fn star_error(&self) -> Error {
-        Error::UnsupportedSQLiteFeature(format!(
+        Error::forward_refusal(format!(
             "RETURNING * cannot be translated beside a {} clause. PostgreSQL expands it over the \
              {} relations as well, while SQLite's RETURNING * is the changed row in {} alone, so \
              the emitted statement would answer a narrower row than the source. Name the columns \
