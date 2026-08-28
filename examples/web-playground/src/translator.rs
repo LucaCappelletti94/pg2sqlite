@@ -70,10 +70,9 @@ pub fn reverse_translate(
 
 fn classify_error(err: PgError) -> TranslationError {
     let category = match &err {
-        PgError::ParserError(..) => ErrorCategory::Parser,
+        PgError::SqlParse(..) => ErrorCategory::Parser,
         PgError::SchemaError(_) => ErrorCategory::Schema,
-        PgError::UnsupportedSQLiteFeature(_)
-        | PgError::UnknownPostgresFeature(_)
+        PgError::TranslationRefusal(_)
         | PgError::UnsupportedReverseStatement { .. }
         | PgError::UnsupportedRlsExpressionVariant { .. }
         | PgError::UnsupportedSchemaQualification { .. } => ErrorCategory::Unsupported,
