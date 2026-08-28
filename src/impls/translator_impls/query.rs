@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `Query`, `SetExpr`, and `Select` types.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `Query`, `SetExpr`, and `Select` types.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]

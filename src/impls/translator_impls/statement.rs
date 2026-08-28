@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `Statement` type.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `Statement` type.
 //!
 //! # How an untranslatable construct is reported
 //!

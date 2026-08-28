@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `Column` type.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `Column` type.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -214,9 +214,10 @@ fn round_literal_to_integer(expr: &Expr) -> Option<Expr> {
 /// column is SQLite's rowid alias. `ALTER TABLE ADD COLUMN` passes none, since
 /// SQLite cannot add a primary key that way.
 ///
-/// This is a free function rather than a [`Translator`] impl for the same
-/// reason: the trait's signature has nowhere to put the table, and an impl
-/// that reported an unqualified column would be the defect this exists to fix.
+/// This is a free function rather than a
+/// [`Translator`](crate::traits::Translator) impl for the same reason: the
+/// trait's signature has nowhere to put the table, and an impl that reported an
+/// unqualified column would be the defect this exists to fix.
 pub(crate) fn translate_column_def(
     column: &ColumnDef,
     table: &ObjectName,

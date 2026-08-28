@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `CreateTable` type.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `CreateTable` type.
 
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
@@ -288,7 +288,8 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
 }
 
 /// Refuses the `CREATE TABLE` modifiers that cannot reach SQLite, so
-/// [`Translator::translate`] can rebuild the statement naming every field.
+/// [`Translator::translate`](crate::traits::Translator::translate) can rebuild
+/// the statement naming every field.
 ///
 /// Two kinds land here. The foreign spellings are refused because PostgreSQL
 /// rejects them, so a file carrying one is not the input this crate accepts.

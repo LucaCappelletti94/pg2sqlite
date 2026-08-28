@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `Insert` type.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `Insert` type.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
