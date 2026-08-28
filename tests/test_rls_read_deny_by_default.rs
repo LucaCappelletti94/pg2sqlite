@@ -27,7 +27,6 @@ mod helpers;
 use diesel::prelude::*;
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
     warnings::TranslationWarning,
 };
 

@@ -243,3 +243,18 @@ fn an_operator_class_downgrade_names_the_column_and_the_class() {
         "the warning should name the class that was dropped: {downgrades:?}"
     );
 }
+
+#[test]
+fn nested_warning_contract_is_feature_independent() {
+    assert_eq!(
+        warnings_for("CREATE TABLE labels (value CHAR(3));"),
+        vec![TranslationWarning::LossyDowngrade {
+            construct: "CHAR".to_string(),
+            from: "CHAR(3)".to_string(),
+            to: "TEXT".to_string(),
+            location: "labels.value".to_string(),
+            reason: "SQLite stores the value as given, so it is no longer blank padded to the declared width."
+                .to_string(),
+        }]
+    );
+}

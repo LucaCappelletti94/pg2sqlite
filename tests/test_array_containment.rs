@@ -17,10 +17,7 @@ mod helpers;
 
 use diesel::{QueryableByName, RunQueryDsl, prelude::*, sql_query, sql_types};
 use helpers::establish_connection;
-use pg2sqlite::{
-    prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions};
 
 fn opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_array_representation(ArrayRepresentation::Json)

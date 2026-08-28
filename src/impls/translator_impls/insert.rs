@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `Insert` type.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `Insert` type.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -14,7 +14,7 @@ use alloc::{
 
 use sql_traits::{
     structs::ParserDB,
-    traits::{ColumnLike, IndexLike, TableLike, UniqueIndexLike},
+    traits::{ColumnLike, DatabaseLike, IndexLike, TableLike, UniqueIndexLike},
 };
 use sqlparser::ast::{Insert, SelectItem, SetExpr, TableObject};
 
@@ -36,18 +36,48 @@ use crate::{
             vector::{maybe_wrap_text_vector_literal, vector_columns_of_table},
         },
     },
-    prelude::{Pg2SqliteOptions, TranslationOptions, Translator},
+    traits::translator::TranslatorWithContext,
 };
+type ParserTable = <ParserDB as DatabaseLike>::Table;
 
-impl Translator for Insert {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Insert;
+struct ResolvedInsertTarget<'schema> {
+    table: Option<&'schema ParserTable>,
+    error: Option<crate::errors::Error>,
+}
 
-    fn translate(
+impl<'schema> ResolvedInsertTarget<'schema> {
+    fn new(table: &TableObject, schema: &'schema ParserDB) -> Self {
+        let TableObject::TableName(name) = table else {
+            return Self { table: None, error: None };
+        };
+        match table_with_implicit_public_lookup(schema, name) {
+            Ok(table) => Self { table, error: None },
+            Err(error) => Self { table: None, error: Some(error) },
+        }
+    }
+
+    fn optional(&self) -> Option<&'schema ParserTable> {
+        self.table
+    }
+
+    fn required(
+        &mut self,
+        missing: impl FnOnce() -> crate::errors::Error,
+    ) -> Result<&'schema ParserTable, crate::errors::Error> {
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
+        self.table.ok_or_else(missing)
+    }
+}
+
+crate::traits::translator::impl_contextual_translator!(Insert => Insert);
+impl crate::traits::translator::TranslatorWithContext for Insert {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         // Replace DEFAULT with the column's declared default BEFORE translating
         // the source, for two reasons. The substituted expression is PostgreSQL
@@ -57,16 +87,17 @@ impl Translator for Insert {
         // reaching it from anywhere else, which is the only other place the
         // parser accepts one.
         let mut prepared = self.clone();
-        substitute_default_values(&mut prepared, schema, options)?;
+        substitute_default_values(&mut prepared, schema, options, emit)?;
 
         let source = prepared
             .source
             .as_ref()
-            .map(|q| q.translate(schema, options))
+            .map(|q| q.translate_with_warnings(schema, options, emit))
             .transpose()?
             .map(Box::new);
 
-        let returning = translate_returning::<Forward>(self.returning.as_ref(), schema, options)?;
+        let returning =
+            translate_returning::<Forward>(self.returning.as_ref(), schema, options, emit)?;
 
         let mut insert = Insert { source, returning, ..prepared };
 
@@ -78,7 +109,7 @@ impl Translator for Insert {
         // BEFORE INSERT guard trigger emitted in `rls.rs` keeps WITH
         // CHECK enforcement on this path. Plain INSERTs (no RETURNING)
         // keep going through the view's INSTEAD OF trigger.
-        rewrite_rls_view_insert(&mut insert, schema, options)?;
+        let mut target = rewrite_rls_view_insert(&mut insert, schema, options, emit)?;
 
         // Wrap text-literal values targeting `vector` / `halfvec` columns
         // with `vec_f32(...)` / `vec_f16(...)`. The main backing table is
@@ -86,25 +117,24 @@ impl Translator for Insert {
         // be rejected at apply time. Only direct VALUES rows are
         // rewritten. INSERT INTO ... SELECT carries arbitrary row shapes
         // through a subquery and is left untouched.
-        wrap_vector_text_literals(&mut insert, schema);
+        wrap_vector_text_literals(&mut insert, target.optional(), schema);
 
         // Same shape for UUID-Blob columns: PG accepts text literals via
         // the `uuid` type's input function, but the translated BLOB
         // STRICT column does not. Wrap with the configured text-to-blob
         // expression (default `unhex(replace(literal, '-', ''))`).
         if is_blob_uuid_representation(options) {
-            wrap_uuid_text_literals(&mut insert, schema, options)?;
+            wrap_uuid_text_literals(&mut insert, target.optional(), schema, options)?;
         }
 
         // A NUMERIC column is an INTEGER of minor units, so a decimal literal
         // has to be moved onto that scale before it reaches a STRICT table.
         // The full rewrite set serves the DO UPDATE list below, which writes
         // into the same columns the insert does.
-        let rewrites = match &insert.table {
-            TableObject::TableName(name) => ColumnRewrites::for_named_table(schema, name, options),
-            TableObject::TableFunction(_) | TableObject::TableQuery(_) => ColumnRewrites::default(),
-        };
-        scale_numeric_literals(&mut insert, schema, &rewrites.numeric_scales)?;
+        let rewrites = target.optional().map_or_else(ColumnRewrites::default, |table| {
+            ColumnRewrites::of_table(table, schema, options)
+        });
+        scale_numeric_literals(&mut insert, target.optional(), schema, &rewrites.numeric_scales)?;
 
         if let Some(on_insert) = &self.on {
             match on_insert {
@@ -125,6 +155,7 @@ impl Translator for Insert {
                                     conflict_target: resolve_conflict_target(
                                         on_conflict.conflict_target.as_ref(),
                                         &insert.table,
+                                        &mut target,
                                         schema,
                                     )?,
                                     action: sqlparser::ast::OnConflictAction::DoNothing,
@@ -139,6 +170,7 @@ impl Translator for Insert {
                                 conflict_target: resolve_conflict_target(
                                     on_conflict.conflict_target.as_ref(),
                                     &insert.table,
+                                    &mut target,
                                     schema,
                                 )?,
                                 action: on_conflict.action.clone(),
@@ -150,18 +182,20 @@ impl Translator for Insert {
                             let substituted = substitute_do_update_defaults(
                                 do_update,
                                 &insert.table,
+                                &mut target,
                                 schema,
                                 options,
+                                emit,
                             )?;
                             let do_update = substituted.as_ref().unwrap_or(do_update);
                             insert.on = Some(translate_on_conflict_do_update::<Forward>(
-                                &resolved, do_update, schema, options, &rewrites,
+                                &resolved, do_update, schema, options, &rewrites, emit,
                             )?);
                         }
                     }
                 }
                 _ => {
-                    return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+                    return Err(crate::errors::Error::forward_refusal(format!(
                         "Unsupported ON INSERT clause: {on_insert:?}"
                     )));
                 }
@@ -211,6 +245,7 @@ fn disambiguate_upsert_source(insert: &mut Insert) {
 fn resolve_conflict_target(
     conflict_target: Option<&sqlparser::ast::ConflictTarget>,
     table: &TableObject,
+    target: &mut ResolvedInsertTarget<'_>,
     schema: &ParserDB,
 ) -> Result<Option<sqlparser::ast::ConflictTarget>, crate::errors::Error> {
     let Some(sqlparser::ast::ConflictTarget::OnConstraint(constraint)) = conflict_target else {
@@ -221,9 +256,8 @@ fn resolve_conflict_target(
     let TableObject::TableName(table_name) = table else {
         return Err(unresolvable_constraint(&wanted, &table.to_string()));
     };
-    let Some(resolved_table) = table_with_implicit_public_lookup(schema, table_name)? else {
-        return Err(unresolvable_constraint(&wanted, &table_name.to_string()));
-    };
+    let resolved_table =
+        target.required(|| unresolvable_constraint(&wanted, &table_name.to_string()))?;
 
     for unique_index in resolved_table.unique_indices(schema)? {
         let columns: Vec<String> =
@@ -276,7 +310,7 @@ fn postgres_constraint_name(table: &str, columns: &[String], is_primary_key: boo
 }
 
 fn unresolvable_constraint(constraint: &str, table: &str) -> crate::errors::Error {
-    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    crate::errors::Error::forward_refusal(format!(
         "ON CONFLICT ON CONSTRAINT {constraint} cannot be translated because {table} declares no \
          unique constraint of that name, and SQLite's conflict target is a column list. Name the \
          conflicting columns instead, as ON CONFLICT (col, ...)."
@@ -293,8 +327,10 @@ fn unresolvable_constraint(constraint: &str, table: &str) -> crate::errors::Erro
 fn substitute_do_update_defaults(
     do_update: &sqlparser::ast::DoUpdate,
     table_object: &TableObject,
+    target: &mut ResolvedInsertTarget<'_>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<sqlparser::ast::DoUpdate>, crate::errors::Error> {
     if !do_update.assignments.iter().any(|a| carries_default_keyword(&a.value)) {
         return Ok(None);
@@ -302,16 +338,14 @@ fn substitute_do_update_defaults(
     let TableObject::TableName(table_name) = table_object else {
         return Err(default_without_a_named_table(table_object));
     };
-    let Some(table) = table_with_implicit_public_lookup(schema, table_name)? else {
-        return Err(unknown_default_table(table_name));
-    };
+    let table = target.required(|| unknown_default_table(table_name))?;
 
     let assignments = do_update
         .assignments
         .iter()
         .map(|a| {
             let substituted =
-                substituted_assignment_default(&a.target, &a.value, table, schema, options)?;
+                substituted_assignment_default(&a.target, &a.value, table, schema, options, emit)?;
             Ok(sqlparser::ast::Assignment {
                 target: a.target.clone(),
                 value: substituted.unwrap_or_else(|| a.value.clone()),
@@ -342,7 +376,8 @@ fn substitute_do_update_defaults(
 fn substitute_default_values(
     insert: &mut Insert,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<(), crate::errors::Error> {
     if !carries_default(insert) {
         return Ok(());
@@ -372,7 +407,7 @@ fn substitute_default_values(
             let column_name = column_names
                 .get(index)
                 .ok_or_else(|| default_without_a_column(table_name, index))?;
-            *expr = default_expr_for_column(table, column_name, schema, options)?;
+            *expr = default_expr_for_column(table, column_name, schema, options, emit)?;
         }
     }
 
@@ -384,7 +419,8 @@ pub(crate) fn default_expr_for_column(
     table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
     column_name: &str,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::Expr, crate::errors::Error> {
     let Some(column) = table.column(column_name, schema)? else {
         return Err(unknown_default_column(table.table_name(), column_name));
@@ -401,7 +437,8 @@ pub(crate) fn default_expr_for_column(
         }
     }
 
-    if column.is_nullable(schema)? || is_generated_primary_key(table, column_name, schema, options)?
+    if column.is_nullable(schema)?
+        || is_generated_primary_key(table, column_name, schema, options, emit)?
     {
         return Ok(sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan {
             value: sqlparser::ast::Value::Null,
@@ -409,7 +446,7 @@ pub(crate) fn default_expr_for_column(
         }));
     }
 
-    Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    Err(crate::errors::Error::forward_refusal(format!(
         "DEFAULT was written for {}.{column_name}, which declares no default and is NOT NULL, so \
          there is nothing to insert and the statement could only fail. Give the column a DEFAULT, \
          or write the value out.",
@@ -425,7 +462,8 @@ fn is_generated_primary_key(
     table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
     column_name: &str,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<bool, crate::errors::Error> {
     let mut primary_key = table.primary_key_columns(schema)?;
     let Some(only) = primary_key.next() else { return Ok(false) };
@@ -438,7 +476,7 @@ fn is_generated_primary_key(
     // translator knows it becomes `INTEGER`, which is what makes the column a
     // rowid alias.
     Ok(matches!(
-        only.attribute().data_type.translate(schema, options)?,
+        only.attribute().data_type.translate_with_warnings(schema, options, emit)?,
         sqlparser::ast::DataType::Int(_)
             | sqlparser::ast::DataType::Integer(_)
             | sqlparser::ast::DataType::BigInt(_)
@@ -450,7 +488,7 @@ fn default_without_a_column(
     table: &sqlparser::ast::ObjectName,
     index: usize,
 ) -> crate::errors::Error {
-    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    crate::errors::Error::forward_refusal(format!(
         "DEFAULT appears at position {} of a VALUES row for {table}, which names no column there, \
          so there is no default to substitute.",
         index + 1
@@ -468,21 +506,21 @@ fn carries_default(insert: &Insert) -> bool {
 }
 
 fn default_without_a_named_table(table: &TableObject) -> crate::errors::Error {
-    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    crate::errors::Error::forward_refusal(format!(
         "DEFAULT was written in a VALUES row for {table}, which is not a named table, so there are \
          no column defaults to resolve."
     ))
 }
 
 fn unknown_default_table(table: &sqlparser::ast::ObjectName) -> crate::errors::Error {
-    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    crate::errors::Error::forward_refusal(format!(
         "DEFAULT was written in a VALUES row for {table}, which the translation schema does not \
          declare, so its column defaults cannot be resolved."
     ))
 }
 
 fn unknown_default_column(table: &str, column_name: &str) -> crate::errors::Error {
-    crate::errors::Error::UnsupportedSQLiteFeature(format!(
+    crate::errors::Error::forward_refusal(format!(
         "DEFAULT was written for {table}.{column_name}, which the translation schema does not \
          declare, so its default cannot be resolved."
     ))
@@ -495,11 +533,8 @@ fn unknown_default_column(table: &str, column_name: &str) -> crate::errors::Erro
 /// INTO ... SELECT); in those cases the function silently returns and
 /// leaves the insert verbatim, which preserves the prior behaviour for
 /// every non-vector path.
-fn wrap_vector_text_literals(insert: &mut Insert, schema: &ParserDB) {
-    let TableObject::TableName(table_name) = &insert.table else { return };
-    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
-        return;
-    };
+fn wrap_vector_text_literals(insert: &mut Insert, table: Option<&ParserTable>, schema: &ParserDB) {
+    let Some(table) = table else { return };
     // A table absent from the schema has no vector columns to wrap, so this
     // leaves the insert verbatim exactly as the lookup above does.
     let Ok(vector_cols) = vector_columns_of_table(table, schema) else { return };
@@ -544,16 +579,14 @@ fn wrap_vector_text_literals(insert: &mut Insert, schema: &ParserDB) {
 /// and a SELECT projection map position to target column the same way.
 fn scale_numeric_literals(
     insert: &mut Insert,
+    table: Option<&ParserTable>,
     schema: &ParserDB,
     scales: &[(String, u32)],
 ) -> Result<(), crate::errors::Error> {
     if scales.is_empty() {
         return Ok(());
     }
-    let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
-    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
-        return Ok(());
-    };
+    let Some(table) = table else { return Ok(()) };
 
     let column_names: Vec<String> = if insert.columns.is_empty() {
         let Ok(columns) = table.columns(schema) else { return Ok(()) };
@@ -648,54 +681,56 @@ fn scale_insert_source_body(
 /// redirecting there would write past the policy.
 ///
 /// Non-RLS tables and unresolvable targets are left untouched.
-fn rewrite_rls_view_insert(
+fn rewrite_rls_view_insert<'schema>(
     insert: &mut Insert,
-    schema: &ParserDB,
-    options: &Pg2SqliteOptions,
-) -> Result<(), crate::errors::Error> {
+    schema: &'schema ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<ResolvedInsertTarget<'schema>, crate::errors::Error> {
+    let target = ResolvedInsertTarget::new(&insert.table, schema);
     // INSERT OR IGNORE / OR REPLACE use insert.or, not insert.on; they are
     // accepted by SQLite on a view and must not be redirected here.
     let has_on_conflict = matches!(&insert.on, Some(sqlparser::ast::OnInsert::OnConflict(_)));
     let returning = insert.returning.clone();
 
     if returning.is_none() && !has_on_conflict {
-        return Ok(());
+        return Ok(target);
     }
 
-    let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
-    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
-        return Ok(());
+    let TableObject::TableName(table_name) = &insert.table else { return Ok(target) };
+    let Some(table) = target.optional() else {
+        return Ok(target);
     };
-    let Some(last) = last_ident(table_name) else { return Ok(()) };
+    let Some(last) = last_ident(table_name) else { return Ok(target) };
     let Ok(true) = rls::table_has_rls(&last.value, schema) else {
-        return Ok(());
+        return Ok(target);
     };
 
     if !options.is_strict_rls_validation() {
         // RETURNING: refuse when a database-filled column would come back NULL
         // from the view row.
         if let Some(items) = &returning
-            && let Some(column) = database_filled_column(items, table, schema, options)?
+            && let Some(column) = database_filled_column(items, table, schema, options, emit)?
         {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "RETURNING reads {column} back from a view over {}, and a view row holds only what \
-                 the caller wrote, so a column the database fills in would come back NULL. Call \
-                 `with_strict_rls_validation()`, which sends a RETURNING insert straight at the \
-                 backing table, or write {column} out in the insert.",
+             the caller wrote, so a column the database fills in would come back NULL. Call \
+             `with_strict_rls_validation()`, which sends a RETURNING insert straight at the \
+             backing table, or write {column} out in the insert.",
                 last.value
             )));
         }
         // ON CONFLICT: refuse, because no backing-table guard is emitted in
         // default mode and a redirect would write past the policy.
         if has_on_conflict {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "ON CONFLICT against {}, a policy-bearing table, cannot be forwarded to its view \
-                 because SQLite does not support UPSERT on a view. Call \
-                 `with_strict_rls_validation()` to redirect the insert to the backing table.",
+             because SQLite does not support UPSERT on a view. Call \
+             `with_strict_rls_validation()` to redirect the insert to the backing table.",
                 last.value
             )));
         }
-        return Ok(());
+        return Ok(target);
     }
 
     // Strict mode: redirect to the backing table. The BEFORE INSERT guard on
@@ -708,7 +743,7 @@ fn rewrite_rls_view_insert(
             sqlparser::ast::ObjectNamePart::Identifier(sqlparser::ast::Ident::new(backing_name));
     }
     insert.table = TableObject::TableName(sqlparser::ast::ObjectName(new_parts));
-    Ok(())
+    Ok(target)
 }
 
 /// The first returned column whose value the database supplies rather than the
@@ -722,7 +757,8 @@ fn database_filled_column(
     returning: &[SelectItem],
     table: &<ParserDB as sql_traits::traits::DatabaseLike>::Table,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<String>, crate::errors::Error> {
     let every_column = || -> Result<Vec<String>, crate::errors::Error> {
         Ok(table.columns(schema)?.map(|column| column.column_name().to_owned()).collect())
@@ -750,7 +786,7 @@ fn database_filled_column(
                 sqlparser::ast::ColumnOption::Default(_)
                     | sqlparser::ast::ColumnOption::Generated { generation_expr: Some(_), .. }
             )
-        }) || is_generated_primary_key(table, &name, schema, options)?;
+        }) || is_generated_primary_key(table, &name, schema, options, emit)?;
         if filled {
             return Ok(Some(name));
         }
@@ -766,13 +802,11 @@ fn database_filled_column(
 /// INSERT INTO ... SELECT).
 fn wrap_uuid_text_literals(
     insert: &mut Insert,
+    table: Option<&ParserTable>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), crate::errors::Error> {
-    let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
-    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, table_name) else {
-        return Ok(());
-    };
+    let Some(table) = table else { return Ok(()) };
     // A table absent from the schema has no UUID columns to wrap, so this leaves
     // the insert verbatim exactly as the lookup above does.
     let Ok(uuid_cols) = uuid_columns_of_table(table, schema) else { return Ok(()) };

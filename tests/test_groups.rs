@@ -12,10 +12,7 @@ mod helpers;
 
 use diesel::{prelude::*, sqlite::SqliteConnection};
 use helpers::establish_connection;
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 use rosetta_uuid::Uuid;
 
 diesel::table! {

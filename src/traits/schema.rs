@@ -13,18 +13,11 @@ use alloc::{
 };
 
 use sql_traits::traits::{DatabaseLike, FunctionLike};
-use sqlparser::{
-    ast::{
-        BeginEndStatements, CreateFunction, CreateTable, ReturnStatement, ReturnStatementValue,
-        Statement, helpers::attached_token::AttachedToken,
-    },
-    keywords::Keyword,
-    tokenizer::{Token, TokenWithSpan, Tokenizer, Word},
-};
+use sqlparser::ast::{BeginEndStatements, CreateFunction, CreateTable};
 
 use crate::{
     errors::Error,
-    impls::translator_impls::plpgsql::{PlPgSqlContext, PlPgSqlPreprocessor},
+    impls::translator_impls::plpgsql::{PlPgSqlContext, parse_body},
 };
 
 /// Trait to define a schema for the translation between `PostgreSQL` and
@@ -34,7 +27,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownPostgresFeature`] if the body cannot be
+    /// Returns [`Error::TranslationRefusal`] if the body cannot be
     /// tokenized, parsed, or does not contain a valid `BEGIN ... END`
     /// block.
     fn function_body(&self, name: &str) -> Result<Option<BeginEndStatements>, Error> {
@@ -45,7 +38,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownPostgresFeature`] if the function body cannot be
+    /// Returns [`Error::TranslationRefusal`] if the function body cannot be
     /// tokenized, parsed, or does not contain a valid `BEGIN ... END` block.
     fn function_body_with_context(
         &self,
@@ -58,88 +51,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
             return Ok(None);
         };
 
-        // We strip spaces and semicolons from the body.
-        let maybe_body = function_body.trim().trim_end_matches(';').trim();
-
-        // Reported here rather than left to the SQL parser, which names the
-        // statement after the keyword instead of the handler itself.
-        if PlPgSqlPreprocessor::has_exception_handler(maybe_body) {
-            return Err(Error::UnsupportedSQLiteFeature(format!(
-                "trigger function '{name}' uses exception handling, which SQLite has no \
-                 equivalent for: a trigger body can abort the statement with RAISE(ABORT) but \
-                 cannot catch anything. Move the handling into the application, or drop the \
-                 handler and let the error surface."
-            )));
-        }
-
-        // Preprocess the PL/pgSQL body to handle syntax like `variable := expr`
-        let (preprocessed_body, context) = PlPgSqlPreprocessor::preprocess(maybe_body)?;
-
-        let dialect = sqlparser::dialect::PostgreSqlDialect {};
-        let tokens = Tokenizer::new(&dialect, &preprocessed_body).tokenize().map_err(|e| {
-            Error::UnknownPostgresFeature(format!(
-                "Failed to tokenize trigger function '{name}' body: {e}. Body: {preprocessed_body}",
-            ))
-        })?;
-
-        let begin_idx = tokens
-            .iter()
-            .position(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::BEGIN))
-            .ok_or_else(|| {
-                Error::UnknownPostgresFeature(format!(
-                    "Trigger function '{name}' body must contain BEGIN...END block. Body: {preprocessed_body}",
-                ))
-            })?;
-
-        // We look for the last END that is a keyword
-        let end_idx = tokens
-            .iter()
-            .rposition(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::END))
-            .ok_or_else(|| {
-                Error::UnknownPostgresFeature(format!(
-                    "Trigger function '{name}' body must end with END. Body: {preprocessed_body}",
-                ))
-            })?;
-
-        let body_tokens = tokens[begin_idx + 1..end_idx].to_vec();
-
-        let mut statements = sqlparser::parser::Parser::new(&dialect)
-            .with_tokens(body_tokens)
-            .parse_statements()
-            .map_err(|e| {
-                Error::UnknownPostgresFeature(format!(
-                    "Failed to parse trigger function '{name}' body statements: {e}. Body: {preprocessed_body}",
-                ))
-            })?;
-
-        // The function body may end with a `RETURN NEW;` or `RETURN OLD;` statement.
-        // If that's the case, we remove it.
-        if let Some(Statement::Return(ReturnStatement {
-            value: Some(ReturnStatementValue::Expr(expr)),
-        })) = statements.last()
-        {
-            let string_expr = expr.to_string();
-            if string_expr == "NEW" || string_expr == "OLD" {
-                statements.pop();
-            }
-        }
-
-        Ok(Some((
-            BeginEndStatements {
-                begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-                    value: "BEGIN".into(),
-                    quote_style: None,
-                    keyword: Keyword::BEGIN,
-                }))),
-                statements,
-                end_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-                    value: "END".into(),
-                    quote_style: None,
-                    keyword: Keyword::END,
-                }))),
-            },
-            context,
-        )))
+        Ok(Some(parse_body(name, function_body)?))
     }
 }
 

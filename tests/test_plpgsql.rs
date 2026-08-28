@@ -9,10 +9,7 @@
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use translate_helpers::translate_default as translate;
 
 fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {

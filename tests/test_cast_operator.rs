@@ -12,7 +12,7 @@ use diesel::{
     QueryableByName, connection::SimpleConnection, prelude::*, sql_query, sql_types::Text,
 };
 use helpers::{establish_connection, translate_pg};
-use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2SqliteOptions, UuidRepresentation};
 use sqlite_vec::sqlite3_vec_init;
 
 /// Register sqlite-vec once per process so connections opened by any test in

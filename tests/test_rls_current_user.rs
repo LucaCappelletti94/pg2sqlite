@@ -35,8 +35,6 @@ struct Profile {
 }
 
 fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let sql = include_str!("fixtures/rls_current_user.sql");
 
     let options = Pg2SqliteOptions::default()
@@ -61,8 +59,6 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
 /// Snapshot test for current_user RLS translation.
 #[test]
 fn test_current_user_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let sql = include_str!("fixtures/rls_current_user.sql");
 
     let options = Pg2SqliteOptions::default()

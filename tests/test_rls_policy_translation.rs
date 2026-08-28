@@ -11,7 +11,7 @@
 
 mod helpers;
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 fn options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string())

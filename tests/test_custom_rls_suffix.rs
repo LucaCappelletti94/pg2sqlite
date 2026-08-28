@@ -6,10 +6,7 @@
 //! - Foreign-key references pointing at the backing table
 //! - View and trigger names derived from the backing table
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rusqlite::Connection;
 
 fn make_options_with_suffix(suffix: &str) -> Pg2SqliteOptions {

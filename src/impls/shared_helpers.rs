@@ -53,35 +53,52 @@ pub(crate) trait TranslationDirection {
     /// `true` for forward (PostgreSQL → SQLite) translation, `false` for
     /// reverse.
     const IS_FORWARD: bool = false;
+    type Options<'a>;
+    fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions;
+
+    fn forward_context<'options, 'config>(
+        _options: &'options Self::Options<'config>,
+    ) -> Option<&'options crate::options::TranslationContext<'config>> {
+        None
+    }
 
     fn translate_expr(
         expr: &Expr,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &Self::Options<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Expr, Error>;
     fn translate_query(
         query: &Query,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &Self::Options<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Query, Error>;
     fn translate_insert(
         insert: &sqlparser::ast::Insert,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &Self::Options<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Insert, Error>;
     fn translate_delete(
         delete: &sqlparser::ast::Delete,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &Self::Options<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Delete, Error>;
 
     fn translate_object_name(
         name: &ObjectName,
         _schema: &ParserDB,
-        _options: &Pg2SqliteOptions,
+        _options: &Self::Options<'_>,
     ) -> Result<ObjectName, Error> {
         Ok(name.clone())
     }
+}
+fn required_forward_context<'options, 'config, D: TranslationDirection>(
+    options: &'options D::Options<'config>,
+) -> &'options crate::options::TranslationContext<'config> {
+    D::forward_context(options).expect("forward translation context")
 }
 
 /// Shared unsupported-feature message for `generate_series` usage.
@@ -103,7 +120,7 @@ pub(crate) fn is_generate_series_object_name(name: &ObjectName) -> bool {
 /// Returns the standardized error for unsupported `generate_series`.
 #[must_use]
 pub(crate) fn generate_series_not_supported_error() -> Error {
-    Error::UnsupportedSQLiteFeature(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
+    Error::forward_refusal(GENERATE_SERIES_UNSUPPORTED_MESSAGE.to_string())
 }
 
 /// Returns the standardised error for `WITH ORDINALITY`, which SQLite has no
@@ -115,10 +132,10 @@ pub(crate) fn generate_series_not_supported_error() -> Error {
 /// it onto `json_each`, whose `key` column supplies the ordinality.
 #[must_use]
 pub(crate) fn with_ordinality_not_supported_error() -> Error {
-    Error::UnsupportedSQLiteFeature(
+    Error::forward_refusal(
         "WITH ORDINALITY is not supported in SQLite, which has no clause that numbers the rows of \
-         a FROM item. Number them in the query instead, with ROW_NUMBER() OVER (), or use UNNEST, \
-         which is translated through json_each and does supply an ordinality column."
+     a FROM item. Number them in the query instead, with ROW_NUMBER() OVER (), or use UNNEST, \
+     which is translated through json_each and does supply an ordinality column."
             .to_string(),
     )
 }
@@ -136,12 +153,10 @@ pub(crate) fn with_ordinality_not_supported_error() -> Error {
 /// spelling is dropped rather than refused.
 #[must_use]
 pub(crate) fn nulls_not_distinct_not_supported_error() -> Error {
-    Error::UnsupportedSQLiteFeature(
-        "NULLS NOT DISTINCT is not supported in SQLite, whose unique indexes always treat NULLs as \
-         distinct, so the constraint would accept rows PostgreSQL rejects. Add a CHECK that the \
-         column is NOT NULL, or enforce the rule with a trigger."
-            .to_string(),
-    )
+    Error::forward_refusal("NULLS NOT DISTINCT is not supported in SQLite, whose unique indexes always treat NULLs as \
+     distinct, so the constraint would accept rows PostgreSQL rejects. Add a CHECK that the \
+     column is NOT NULL, or enforce the rule with a trigger."
+        .to_string())
 }
 
 /// Returns the standardised error for `MATCH PARTIAL` on a foreign key.
@@ -152,11 +167,11 @@ pub(crate) fn nulls_not_distinct_not_supported_error() -> Error {
 /// one would claim an enforcement neither engine implements.
 #[must_use]
 pub(crate) fn match_partial_not_supported_error() -> Error {
-    Error::UnsupportedSQLiteFeature(
+    Error::forward_refusal(
         "FOREIGN KEY ... MATCH PARTIAL cannot be translated. PostgreSQL does not implement it \
-         either, answering `MATCH PARTIAL not yet implemented`, and SQLite ignores every MATCH \
-         clause, so the emitted constraint would enforce nothing. Use MATCH FULL, which is \
-         translated, or the default MATCH SIMPLE."
+     either, answering `MATCH PARTIAL not yet implemented`, and SQLite ignores every MATCH \
+     clause, so the emitted constraint would enforce nothing. Use MATCH FULL, which is \
+     translated, or the default MATCH SIMPLE."
             .to_string(),
     )
 }
@@ -358,7 +373,7 @@ pub(crate) fn scale_decimal_literal(expr: &Expr, scale: u32) -> Result<Option<Ex
     };
 
     if digits.contains(['e', 'E']) {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "the literal {digits} is in exponent notation, which this translator does not scale \
              onto a NUMERIC column. Write it in full."
         )));
@@ -367,7 +382,7 @@ pub(crate) fn scale_decimal_literal(expr: &Expr, scale: u32) -> Result<Option<Ex
     let (whole, fraction) = digits.split_once('.').unwrap_or((digits.as_str(), ""));
     let fraction_digits = u32::try_from(fraction.len()).unwrap_or(u32::MAX);
     if fraction_digits > scale {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "the literal {digits} has {fraction_digits} decimal places and the column holds \
              {scale}. PostgreSQL would round it, which silently changes the value, so write it \
              at the column's scale instead."
@@ -563,24 +578,25 @@ pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
     on_conflict: &sqlparser::ast::OnConflict,
     do_update: &sqlparser::ast::DoUpdate,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
     rewrites: &ColumnRewrites,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::OnInsert, Error> {
     let assignments = do_update
         .assignments
         .iter()
         .map(|a| {
-            let value = D::translate_expr(&a.value, schema, options)?;
+            let value = D::translate_expr(&a.value, schema, options, emit)?;
             Ok(Assignment {
                 target: a.target.clone(),
-                value: rewrites.finish_assignment(&a.target, value, options)?,
+                value: rewrites.finish_assignment(&a.target, value, D::config(options))?,
             })
         })
         .collect::<Result<Vec<_>, Error>>()?;
     let selection = do_update
         .selection
         .as_ref()
-        .map(|expr| D::translate_expr(expr, schema, options))
+        .map(|expr| D::translate_expr(expr, schema, options, emit))
         .transpose()?;
     Ok(sqlparser::ast::OnInsert::OnConflict(sqlparser::ast::OnConflict {
         conflict_target: on_conflict.conflict_target.clone(),
@@ -630,9 +646,10 @@ pub(crate) fn substituted_assignment_default(
     value: &Expr,
     table: &<ParserDB as DatabaseLike>::Table,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<Expr>, Error> {
-    let default_for = |name: &ObjectName| -> Result<Expr, Error> {
+    let mut default_for = |name: &ObjectName| -> Result<Expr, Error> {
         match last_ident(name) {
             Some(column) => {
                 crate::impls::translator_impls::insert::default_expr_for_column(
@@ -640,6 +657,7 @@ pub(crate) fn substituted_assignment_default(
                     &column.value,
                     schema,
                     options,
+                    emit,
                 )
             }
             None => Err(default_outside_an_insert_error()),
@@ -681,10 +699,10 @@ pub(crate) fn substituted_assignment_default(
 /// too, or names a table the schema does not hold.
 #[must_use]
 pub(crate) fn default_outside_an_insert_error() -> Error {
-    Error::UnsupportedSQLiteFeature(
+    Error::forward_refusal(
         "DEFAULT stands for a column's declared default, and only a VALUES row of an INSERT or \
-         an UPDATE assignment on a declared table ties it to a column. PostgreSQL rejects it in \
-         other positions too, and SQLite has no form of it at all."
+     an UPDATE assignment on a declared table ties it to a column. PostgreSQL rejects it in \
+     other positions too, and SQLite has no form of it at all."
             .to_string(),
     )
 }
@@ -702,12 +720,14 @@ pub(crate) fn debug_variant_name(value: &impl core::fmt::Debug) -> String {
 pub(crate) fn translate_expr_recursive<D: TranslationDirection>(
     expr: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, Error> {
+    let emit = core::cell::RefCell::new(emit);
     crate::impls::expr_helpers::try_map_expr_children(
         expr,
-        &mut |e| D::translate_expr(e, schema, options),
-        &mut |q| D::translate_query(q, schema, options),
+        &mut |e| D::translate_expr(e, schema, options, &mut **emit.borrow_mut()),
+        &mut |q| D::translate_query(q, schema, options, &mut **emit.borrow_mut()),
     )
 }
 
@@ -717,22 +737,29 @@ pub(crate) fn translate_expr_recursive<D: TranslationDirection>(
 pub(crate) fn translate_delete_core<D: TranslationDirection>(
     delete: &sqlparser::ast::Delete,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<(Option<Expr>, FromTable, Option<Vec<SelectItem>>, Vec<OrderByExpr>, Option<Expr>), Error>
 {
-    let selection =
-        delete.selection.as_ref().map(|e| D::translate_expr(e, schema, options)).transpose()?;
+    let selection = delete
+        .selection
+        .as_ref()
+        .map(|e| D::translate_expr(e, schema, options, emit))
+        .transpose()?;
     let from = map_from_table(&delete.from, |table| {
-        translate_table_with_joins::<D>(table, schema, options)
+        translate_table_with_joins::<D>(table, schema, options, emit)
     })?;
-    let returning = translate_returning::<D>(delete.returning.as_ref(), schema, options)?;
+    let returning = translate_returning::<D>(delete.returning.as_ref(), schema, options, emit)?;
     let order_by = delete
         .order_by
         .iter()
-        .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+        .map(|expr| translate_order_by_expr::<D>(expr, schema, options, emit))
         .collect::<Result<Vec<_>, _>>()?;
-    let limit =
-        delete.limit.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?;
+    let limit = delete
+        .limit
+        .as_ref()
+        .map(|expr| D::translate_expr(expr, schema, options, emit))
+        .transpose()?;
     Ok((selection, from, returning, order_by, limit))
 }
 
@@ -761,23 +788,31 @@ pub(crate) fn function_argument_exprs(args: &FunctionArguments) -> Vec<&Expr> {
 pub(crate) fn translate_function_arguments<D: TranslationDirection>(
     args: &FunctionArguments,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<FunctionArguments, Error> {
     match args {
         FunctionArguments::None => Ok(FunctionArguments::None),
         FunctionArguments::Subquery(query) => {
-            Ok(FunctionArguments::Subquery(Box::new(D::translate_query(query, schema, options)?)))
+            Ok(FunctionArguments::Subquery(Box::new(D::translate_query(
+                query, schema, options, emit,
+            )?)))
         }
         FunctionArguments::List(list) => {
             let translated = list
                 .args
                 .iter()
-                .map(|arg| translate_function_arg::<D>(arg, schema, options))
+                .map(|arg| translate_function_arg::<D>(arg, schema, options, emit))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(FunctionArguments::List(FunctionArgumentList {
                 duplicate_treatment: list.duplicate_treatment,
                 args: translated,
-                clauses: translate_function_argument_clauses::<D>(&list.clauses, schema, options)?,
+                clauses: translate_function_argument_clauses::<D>(
+                    &list.clauses,
+                    schema,
+                    options,
+                    emit,
+                )?,
             }))
         }
     }
@@ -786,11 +821,12 @@ pub(crate) fn translate_function_arguments<D: TranslationDirection>(
 fn translate_function_arg_expr<D: TranslationDirection>(
     arg: &FunctionArgExpr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<FunctionArgExpr, Error> {
     Ok(match arg {
         FunctionArgExpr::Expr(expr) => {
-            FunctionArgExpr::Expr(D::translate_expr(expr, schema, options)?)
+            FunctionArgExpr::Expr(D::translate_expr(expr, schema, options, emit)?)
         }
         FunctionArgExpr::QualifiedWildcard(name) => {
             FunctionArgExpr::QualifiedWildcard(name.clone())
@@ -805,25 +841,26 @@ fn translate_function_arg_expr<D: TranslationDirection>(
 fn translate_function_arg<D: TranslationDirection>(
     arg: &FunctionArg,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<FunctionArg, Error> {
     Ok(match arg {
         FunctionArg::Named { name, arg, operator } => {
             FunctionArg::Named {
                 name: name.clone(),
-                arg: translate_function_arg_expr::<D>(arg, schema, options)?,
+                arg: translate_function_arg_expr::<D>(arg, schema, options, emit)?,
                 operator: operator.clone(),
             }
         }
         FunctionArg::ExprNamed { name, arg, operator } => {
             FunctionArg::ExprNamed {
-                name: D::translate_expr(name, schema, options)?,
-                arg: translate_function_arg_expr::<D>(arg, schema, options)?,
+                name: D::translate_expr(name, schema, options, emit)?,
+                arg: translate_function_arg_expr::<D>(arg, schema, options, emit)?,
                 operator: operator.clone(),
             }
         }
         FunctionArg::Unnamed(arg) => {
-            FunctionArg::Unnamed(translate_function_arg_expr::<D>(arg, schema, options)?)
+            FunctionArg::Unnamed(translate_function_arg_expr::<D>(arg, schema, options, emit)?)
         }
     })
 }
@@ -831,24 +868,26 @@ fn translate_function_arg<D: TranslationDirection>(
 pub(crate) fn translate_setting<D: TranslationDirection>(
     setting: &Setting,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Setting, Error> {
     Ok(Setting {
         key: setting.key.clone(),
-        value: D::translate_expr(&setting.value, schema, options)?,
+        value: D::translate_expr(&setting.value, schema, options, emit)?,
     })
 }
 
 fn translate_table_function_args<D: TranslationDirection>(
     args: &TableFunctionArgs,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableFunctionArgs, Error> {
     Ok(TableFunctionArgs {
         args: args
             .args
             .iter()
-            .map(|arg| translate_function_arg::<D>(arg, schema, options))
+            .map(|arg| translate_function_arg::<D>(arg, schema, options, emit))
             .collect::<Result<Vec<_>, _>>()?,
         settings: args
             .settings
@@ -856,7 +895,7 @@ fn translate_table_function_args<D: TranslationDirection>(
             .map(|settings| {
                 settings
                     .iter()
-                    .map(|setting| translate_setting::<D>(setting, schema, options))
+                    .map(|setting| translate_setting::<D>(setting, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?,
@@ -866,26 +905,30 @@ fn translate_table_function_args<D: TranslationDirection>(
 fn translate_table_version<D: TranslationDirection>(
     version: &TableVersion,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableVersion, Error> {
     Ok(match version {
         TableVersion::ForSystemTimeAsOf(expr) => {
-            TableVersion::ForSystemTimeAsOf(D::translate_expr(expr, schema, options)?)
+            TableVersion::ForSystemTimeAsOf(D::translate_expr(expr, schema, options, emit)?)
         }
         TableVersion::TimestampAsOf(expr) => {
-            TableVersion::TimestampAsOf(D::translate_expr(expr, schema, options)?)
+            TableVersion::TimestampAsOf(D::translate_expr(expr, schema, options, emit)?)
         }
         TableVersion::VersionAsOf(expr) => {
-            TableVersion::VersionAsOf(D::translate_expr(expr, schema, options)?)
+            TableVersion::VersionAsOf(D::translate_expr(expr, schema, options, emit)?)
         }
         TableVersion::Function(expr) => {
-            TableVersion::Function(D::translate_expr(expr, schema, options)?)
+            TableVersion::Function(D::translate_expr(expr, schema, options, emit)?)
         }
         TableVersion::Changes { changes, at, end } => {
             TableVersion::Changes {
-                changes: D::translate_expr(changes, schema, options)?,
-                at: D::translate_expr(at, schema, options)?,
-                end: end.as_ref().map(|e| D::translate_expr(e, schema, options)).transpose()?,
+                changes: D::translate_expr(changes, schema, options, emit)?,
+                at: D::translate_expr(at, schema, options, emit)?,
+                end: end
+                    .as_ref()
+                    .map(|e| D::translate_expr(e, schema, options, emit))
+                    .transpose()?,
             }
         }
     })
@@ -894,11 +937,12 @@ fn translate_table_version<D: TranslationDirection>(
 fn translate_table_sample_quantity<D: TranslationDirection>(
     quantity: &TableSampleQuantity,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableSampleQuantity, Error> {
     Ok(TableSampleQuantity {
         parenthesized: quantity.parenthesized,
-        value: D::translate_expr(&quantity.value, schema, options)?,
+        value: D::translate_expr(&quantity.value, schema, options, emit)?,
         unit: quantity.unit,
     })
 }
@@ -906,19 +950,25 @@ fn translate_table_sample_quantity<D: TranslationDirection>(
 fn translate_table_sample_bucket<D: TranslationDirection>(
     bucket: &TableSampleBucket,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableSampleBucket, Error> {
     Ok(TableSampleBucket {
         bucket: bucket.bucket.clone(),
         total: bucket.total.clone(),
-        on: bucket.on.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?,
+        on: bucket
+            .on
+            .as_ref()
+            .map(|expr| D::translate_expr(expr, schema, options, emit))
+            .transpose()?,
     })
 }
 
 fn translate_table_sample<D: TranslationDirection>(
     sample: &TableSample,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableSample, Error> {
     Ok(TableSample {
         modifier: sample.modifier,
@@ -926,18 +976,18 @@ fn translate_table_sample<D: TranslationDirection>(
         quantity: sample
             .quantity
             .as_ref()
-            .map(|quantity| translate_table_sample_quantity::<D>(quantity, schema, options))
+            .map(|quantity| translate_table_sample_quantity::<D>(quantity, schema, options, emit))
             .transpose()?,
         seed: sample.seed.clone(),
         bucket: sample
             .bucket
             .as_ref()
-            .map(|bucket| translate_table_sample_bucket::<D>(bucket, schema, options))
+            .map(|bucket| translate_table_sample_bucket::<D>(bucket, schema, options, emit))
             .transpose()?,
         offset: sample
             .offset
             .as_ref()
-            .map(|expr| D::translate_expr(expr, schema, options))
+            .map(|expr| D::translate_expr(expr, schema, options, emit))
             .transpose()?,
     })
 }
@@ -945,17 +995,18 @@ fn translate_table_sample<D: TranslationDirection>(
 fn translate_table_sample_kind<D: TranslationDirection>(
     sample: &TableSampleKind,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableSampleKind, Error> {
     Ok(match sample {
         TableSampleKind::BeforeTableAlias(sample) => {
             TableSampleKind::BeforeTableAlias(Box::new(translate_table_sample::<D>(
-                sample, schema, options,
+                sample, schema, options, emit,
             )?))
         }
         TableSampleKind::AfterTableAlias(sample) => {
             TableSampleKind::AfterTableAlias(Box::new(translate_table_sample::<D>(
-                sample, schema, options,
+                sample, schema, options, emit,
             )?))
         }
     })
@@ -964,23 +1015,24 @@ fn translate_table_sample_kind<D: TranslationDirection>(
 fn translate_with_fill<D: TranslationDirection>(
     with_fill: &WithFill,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<WithFill, Error> {
     Ok(WithFill {
         from: with_fill
             .from
             .as_ref()
-            .map(|expr| D::translate_expr(expr, schema, options))
+            .map(|expr| D::translate_expr(expr, schema, options, emit))
             .transpose()?,
         to: with_fill
             .to
             .as_ref()
-            .map(|expr| D::translate_expr(expr, schema, options))
+            .map(|expr| D::translate_expr(expr, schema, options, emit))
             .transpose()?,
         step: with_fill
             .step
             .as_ref()
-            .map(|expr| D::translate_expr(expr, schema, options))
+            .map(|expr| D::translate_expr(expr, schema, options, emit))
             .transpose()?,
     })
 }
@@ -988,7 +1040,8 @@ fn translate_with_fill<D: TranslationDirection>(
 pub(crate) fn translate_order_by_expr<D: TranslationDirection>(
     order_by_expr: &OrderByExpr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<OrderByExpr, Error> {
     let options_out = if D::IS_FORWARD {
         // The two databases default oppositely, PostgreSQL ASC NULLS LAST and
@@ -1005,12 +1058,12 @@ pub(crate) fn translate_order_by_expr<D: TranslationDirection>(
     };
 
     Ok(OrderByExpr {
-        expr: D::translate_expr(&order_by_expr.expr, schema, options)?,
+        expr: D::translate_expr(&order_by_expr.expr, schema, options, emit)?,
         options: options_out,
         with_fill: order_by_expr
             .with_fill
             .as_ref()
-            .map(|with_fill| translate_with_fill::<D>(with_fill, schema, options))
+            .map(|with_fill| translate_with_fill::<D>(with_fill, schema, options, emit))
             .transpose()?,
     })
 }
@@ -1018,10 +1071,11 @@ pub(crate) fn translate_order_by_expr<D: TranslationDirection>(
 fn translate_expr_with_alias<D: TranslationDirection>(
     expr_with_alias: &ExprWithAlias,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<ExprWithAlias, Error> {
     Ok(ExprWithAlias {
-        expr: D::translate_expr(&expr_with_alias.expr, schema, options)?,
+        expr: D::translate_expr(&expr_with_alias.expr, schema, options, emit)?,
         alias: expr_with_alias.alias.clone(),
     })
 }
@@ -1029,14 +1083,15 @@ fn translate_expr_with_alias<D: TranslationDirection>(
 fn translate_pivot_value_source<D: TranslationDirection>(
     value_source: &PivotValueSource,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<PivotValueSource, Error> {
     Ok(match value_source {
         PivotValueSource::List(values) => {
             PivotValueSource::List(
                 values
                     .iter()
-                    .map(|value| translate_expr_with_alias::<D>(value, schema, options))
+                    .map(|value| translate_expr_with_alias::<D>(value, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             )
         }
@@ -1045,13 +1100,13 @@ fn translate_pivot_value_source<D: TranslationDirection>(
                 order_by
                     .iter()
                     .map(|order_by_expr| {
-                        translate_order_by_expr::<D>(order_by_expr, schema, options)
+                        translate_order_by_expr::<D>(order_by_expr, schema, options, emit)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             )
         }
         PivotValueSource::Subquery(query) => {
-            PivotValueSource::Subquery(Box::new(D::translate_query(query, schema, options)?))
+            PivotValueSource::Subquery(Box::new(D::translate_query(query, schema, options, emit)?))
         }
     })
 }
@@ -1059,10 +1114,16 @@ fn translate_pivot_value_source<D: TranslationDirection>(
 fn translate_expr_with_alias_and_order_by<D: TranslationDirection>(
     expr_with_alias_and_order_by: &ExprWithAliasAndOrderBy,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<ExprWithAliasAndOrderBy, Error> {
     Ok(ExprWithAliasAndOrderBy {
-        expr: translate_expr_with_alias::<D>(&expr_with_alias_and_order_by.expr, schema, options)?,
+        expr: translate_expr_with_alias::<D>(
+            &expr_with_alias_and_order_by.expr,
+            schema,
+            options,
+            emit,
+        )?,
         order_by: expr_with_alias_and_order_by.order_by.clone(),
     })
 }
@@ -1070,11 +1131,12 @@ fn translate_expr_with_alias_and_order_by<D: TranslationDirection>(
 fn translate_assignment<D: TranslationDirection>(
     assignment: &Assignment,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Assignment, Error> {
     Ok(Assignment {
         target: assignment.target.clone(),
-        value: D::translate_expr(&assignment.value, schema, options)?,
+        value: D::translate_expr(&assignment.value, schema, options, emit)?,
     })
 }
 
@@ -1082,26 +1144,27 @@ fn translate_assignment<D: TranslationDirection>(
 fn translate_pipe_operator<D: TranslationDirection>(
     pipe_operator: &PipeOperator,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<PipeOperator, Error> {
     Ok(match pipe_operator {
         PipeOperator::Limit { expr, offset } => {
             PipeOperator::Limit {
-                expr: D::translate_expr(expr, schema, options)?,
+                expr: D::translate_expr(expr, schema, options, emit)?,
                 offset: offset
                     .as_ref()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .transpose()?,
             }
         }
         PipeOperator::Where { expr } => {
-            PipeOperator::Where { expr: D::translate_expr(expr, schema, options)? }
+            PipeOperator::Where { expr: D::translate_expr(expr, schema, options, emit)? }
         }
         PipeOperator::OrderBy { exprs } => {
             PipeOperator::OrderBy {
                 exprs: exprs
                     .iter()
-                    .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+                    .map(|expr| translate_order_by_expr::<D>(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             }
         }
@@ -1109,7 +1172,7 @@ fn translate_pipe_operator<D: TranslationDirection>(
             PipeOperator::Select {
                 exprs: exprs
                     .iter()
-                    .map(|expr| translate_select_item::<D>(expr, schema, options))
+                    .map(|expr| translate_select_item::<D>(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             }
         }
@@ -1117,7 +1180,7 @@ fn translate_pipe_operator<D: TranslationDirection>(
             PipeOperator::Extend {
                 exprs: exprs
                     .iter()
-                    .map(|expr| translate_select_item::<D>(expr, schema, options))
+                    .map(|expr| translate_select_item::<D>(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             }
         }
@@ -1125,7 +1188,7 @@ fn translate_pipe_operator<D: TranslationDirection>(
             PipeOperator::Set {
                 assignments: assignments
                     .iter()
-                    .map(|assignment| translate_assignment::<D>(assignment, schema, options))
+                    .map(|assignment| translate_assignment::<D>(assignment, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             }
         }
@@ -1135,17 +1198,26 @@ fn translate_pipe_operator<D: TranslationDirection>(
             PipeOperator::Aggregate {
                 full_table_exprs: full_table_exprs
                     .iter()
-                    .map(|expr| translate_expr_with_alias_and_order_by::<D>(expr, schema, options))
+                    .map(|expr| {
+                        translate_expr_with_alias_and_order_by::<D>(expr, schema, options, emit)
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
                 group_by_expr: group_by_expr
                     .iter()
-                    .map(|expr| translate_expr_with_alias_and_order_by::<D>(expr, schema, options))
+                    .map(|expr| {
+                        translate_expr_with_alias_and_order_by::<D>(expr, schema, options, emit)
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
             }
         }
         PipeOperator::TableSample { sample } => {
             PipeOperator::TableSample {
-                sample: Box::new(translate_table_sample::<D>(sample.as_ref(), schema, options)?),
+                sample: Box::new(translate_table_sample::<D>(
+                    sample.as_ref(),
+                    schema,
+                    options,
+                    emit,
+                )?),
             }
         }
         PipeOperator::Rename { mappings } => PipeOperator::Rename { mappings: mappings.clone() },
@@ -1154,16 +1226,16 @@ fn translate_pipe_operator<D: TranslationDirection>(
                 set_quantifier: *set_quantifier,
                 queries: queries
                     .iter()
-                    .map(|query| D::translate_query(query, schema, options))
+                    .map(|query| D::translate_query(query, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             }
         }
         PipeOperator::Intersect { set_quantifier, queries } => {
             if D::IS_FORWARD && matches!(set_quantifier, SetQuantifier::All) {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::forward_refusal(
                     "INTERSECT ALL is not supported in SQLite. \
-                     SQLite INTERSECT always deduplicates. \
-                     Use INTERSECT without ALL for the deduplicating form."
+                             SQLite INTERSECT always deduplicates. \
+                             Use INTERSECT without ALL for the deduplicating form."
                         .to_string(),
                 ));
             }
@@ -1171,16 +1243,16 @@ fn translate_pipe_operator<D: TranslationDirection>(
                 set_quantifier: *set_quantifier,
                 queries: queries
                     .iter()
-                    .map(|query| D::translate_query(query, schema, options))
+                    .map(|query| D::translate_query(query, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             }
         }
         PipeOperator::Except { set_quantifier, queries } => {
             if D::IS_FORWARD && matches!(set_quantifier, SetQuantifier::All) {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::forward_refusal(
                     "EXCEPT ALL is not supported in SQLite. \
-                     SQLite EXCEPT always deduplicates. \
-                     Use EXCEPT without ALL for the deduplicating form."
+                             SQLite EXCEPT always deduplicates. \
+                             Use EXCEPT without ALL for the deduplicating form."
                         .to_string(),
                 ));
             }
@@ -1188,15 +1260,15 @@ fn translate_pipe_operator<D: TranslationDirection>(
                 set_quantifier: *set_quantifier,
                 queries: queries
                     .iter()
-                    .map(|query| D::translate_query(query, schema, options))
+                    .map(|query| D::translate_query(query, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             }
         }
         PipeOperator::Call { function, alias } => {
             let translated_expr =
-                D::translate_expr(&Expr::Function(function.clone()), schema, options)?;
+                D::translate_expr(&Expr::Function(function.clone()), schema, options, emit)?;
             let Expr::Function(translated_function) = translated_expr else {
-                return Err(Error::UnsupportedSQLiteFeature(format!(
+                return Err(semantic_refusal_for::<D>(format!(
                     "Pipe CALL translation expected function expression, got {}",
                     debug_variant_name(&translated_expr)
                 )));
@@ -1207,10 +1279,15 @@ fn translate_pipe_operator<D: TranslationDirection>(
             PipeOperator::Pivot {
                 aggregate_functions: aggregate_functions
                     .iter()
-                    .map(|expr| translate_expr_with_alias::<D>(expr, schema, options))
+                    .map(|expr| translate_expr_with_alias::<D>(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 value_column: value_column.clone(),
-                value_source: translate_pivot_value_source::<D>(value_source, schema, options)?,
+                value_source: translate_pivot_value_source::<D>(
+                    value_source,
+                    schema,
+                    options,
+                    emit,
+                )?,
                 alias: alias.clone(),
             }
         }
@@ -1222,20 +1299,23 @@ fn translate_pipe_operator<D: TranslationDirection>(
                 alias: alias.clone(),
             }
         }
-        PipeOperator::Join(join) => PipeOperator::Join(translate_join::<D>(join, schema, options)?),
+        PipeOperator::Join(join) => {
+            PipeOperator::Join(translate_join::<D>(join, schema, options, emit)?)
+        }
     })
 }
 
 pub(crate) fn translate_query_settings<D: TranslationDirection>(
     settings: Option<&Vec<Setting>>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<Vec<Setting>>, Error> {
     settings
         .map(|settings| {
             settings
                 .iter()
-                .map(|setting| translate_setting::<D>(setting, schema, options))
+                .map(|setting| translate_setting::<D>(setting, schema, options, emit))
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()
@@ -1244,7 +1324,8 @@ pub(crate) fn translate_query_settings<D: TranslationDirection>(
 pub(crate) fn translate_with_clause<D: TranslationDirection>(
     with: Option<&With>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<With>, Error> {
     with.map(|w| {
         let cte_tables = w
@@ -1253,7 +1334,7 @@ pub(crate) fn translate_with_clause<D: TranslationDirection>(
             .map(|cte| {
                 Ok(sqlparser::ast::Cte {
                     alias: cte.alias.clone(),
-                    query: Box::new(D::translate_query(&cte.query, schema, options)?),
+                    query: Box::new(D::translate_query(&cte.query, schema, options, emit)?),
                     from: cte.from.clone(),
                     materialized: cte.materialized,
                     closing_paren_token: cte.closing_paren_token.clone(),
@@ -1268,7 +1349,8 @@ pub(crate) fn translate_with_clause<D: TranslationDirection>(
 pub(crate) fn translate_order_by_clause<D: TranslationDirection>(
     order_by: Option<&OrderBy>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<OrderBy>, Error> {
     order_by
         .map(|ob| -> Result<OrderBy, Error> {
@@ -1277,7 +1359,7 @@ pub(crate) fn translate_order_by_clause<D: TranslationDirection>(
                     OrderByKind::Expressions(
                         exprs
                             .iter()
-                            .map(|expr| translate_order_by_expr::<D>(expr, schema, options))
+                            .map(|expr| translate_order_by_expr::<D>(expr, schema, options, emit))
                             .collect::<Result<Vec<_>, _>>()?,
                     )
                 }
@@ -1291,7 +1373,8 @@ pub(crate) fn translate_order_by_clause<D: TranslationDirection>(
 pub(crate) fn translate_limit_clause<D: TranslationDirection>(
     limit_clause: Option<&LimitClause>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<LimitClause>, Error> {
     limit_clause
         .map(|lc| {
@@ -1300,20 +1383,20 @@ pub(crate) fn translate_limit_clause<D: TranslationDirection>(
                     LimitClause::LimitOffset {
                         limit: limit
                             .as_ref()
-                            .map(|e| D::translate_expr(e, schema, options))
+                            .map(|e| D::translate_expr(e, schema, options, emit))
                             .transpose()?,
                         offset: offset
                             .as_ref()
                             .map(|o| {
                                 Ok::<_, Error>(sqlparser::ast::Offset {
-                                    value: D::translate_expr(&o.value, schema, options)?,
+                                    value: D::translate_expr(&o.value, schema, options, emit)?,
                                     rows: o.rows,
                                 })
                             })
                             .transpose()?,
                         limit_by: limit_by
                             .iter()
-                            .map(|e| D::translate_expr(e, schema, options))
+                            .map(|e| D::translate_expr(e, schema, options, emit))
                             .collect::<Result<Vec<_>, _>>()?,
                     }
                 }
@@ -1321,9 +1404,9 @@ pub(crate) fn translate_limit_clause<D: TranslationDirection>(
                 // first, so `LIMIT 5, 10` is offset 5 and limit 10.
                 LimitClause::OffsetCommaLimit { offset, limit } if !D::IS_FORWARD => {
                     LimitClause::LimitOffset {
-                        limit: Some(D::translate_expr(limit, schema, options)?),
+                        limit: Some(D::translate_expr(limit, schema, options, emit)?),
                         offset: Some(sqlparser::ast::Offset {
-                            value: D::translate_expr(offset, schema, options)?,
+                            value: D::translate_expr(offset, schema, options, emit)?,
                             rows: sqlparser::ast::OffsetRows::None,
                         }),
                         limit_by: Vec::new(),
@@ -1331,8 +1414,8 @@ pub(crate) fn translate_limit_clause<D: TranslationDirection>(
                 }
                 LimitClause::OffsetCommaLimit { offset, limit } => {
                     LimitClause::OffsetCommaLimit {
-                        offset: D::translate_expr(offset, schema, options)?,
-                        limit: D::translate_expr(limit, schema, options)?,
+                        offset: D::translate_expr(offset, schema, options, emit)?,
+                        limit: D::translate_expr(limit, schema, options, emit)?,
                     }
                 }
             })
@@ -1343,7 +1426,8 @@ pub(crate) fn translate_limit_clause<D: TranslationDirection>(
 pub(crate) fn translate_fetch_clause<D: TranslationDirection>(
     fetch: Option<&Fetch>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<Fetch>, Error> {
     fetch
         .map(|f| {
@@ -1353,7 +1437,7 @@ pub(crate) fn translate_fetch_clause<D: TranslationDirection>(
                 quantity: f
                     .quantity
                     .as_ref()
-                    .map(|e| D::translate_expr(e, schema, options))
+                    .map(|e| D::translate_expr(e, schema, options, emit))
                     .transpose()?,
             })
         })
@@ -1363,14 +1447,15 @@ pub(crate) fn translate_fetch_clause<D: TranslationDirection>(
 pub(crate) fn translate_group_by_expr<D: TranslationDirection>(
     group_by: &GroupByExpr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<GroupByExpr, Error> {
     Ok(match group_by {
         GroupByExpr::Expressions(exprs, modifiers) => {
             GroupByExpr::Expressions(
                 exprs
                     .iter()
-                    .map(|e| D::translate_expr(e, schema, options))
+                    .map(|e| D::translate_expr(e, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 modifiers.clone(),
             )
@@ -1382,24 +1467,25 @@ pub(crate) fn translate_group_by_expr<D: TranslationDirection>(
 pub(crate) fn translate_window_spec<D: TranslationDirection>(
     spec: &WindowSpec,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<WindowSpec, Error> {
     Ok(WindowSpec {
         window_name: spec.window_name.clone(),
         partition_by: spec
             .partition_by
             .iter()
-            .map(|e| D::translate_expr(e, schema, options))
+            .map(|e| D::translate_expr(e, schema, options, emit))
             .collect::<Result<Vec<_>, _>>()?,
         order_by: spec
             .order_by
             .iter()
-            .map(|e| translate_order_by_expr::<D>(e, schema, options))
+            .map(|e| translate_order_by_expr::<D>(e, schema, options, emit))
             .collect::<Result<Vec<_>, _>>()?,
         window_frame: spec
             .window_frame
             .as_ref()
-            .map(|frame| translate_window_frame::<D>(frame, schema, options))
+            .map(|frame| translate_window_frame::<D>(frame, schema, options, emit))
             .transpose()?,
     })
 }
@@ -1407,13 +1493,16 @@ pub(crate) fn translate_window_spec<D: TranslationDirection>(
 pub(crate) fn translate_window_type<D: TranslationDirection>(
     over: Option<&WindowType>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<WindowType>, Error> {
     match over {
         None => Ok(None),
         Some(WindowType::NamedWindow(name)) => Ok(Some(WindowType::NamedWindow(name.clone()))),
         Some(WindowType::WindowSpec(spec)) => {
-            Ok(Some(WindowType::WindowSpec(translate_window_spec::<D>(spec, schema, options)?)))
+            Ok(Some(WindowType::WindowSpec(translate_window_spec::<D>(
+                spec, schema, options, emit,
+            )?)))
         }
     }
 }
@@ -1421,14 +1510,19 @@ pub(crate) fn translate_window_type<D: TranslationDirection>(
 fn translate_window_frame_bound<D: TranslationDirection>(
     bound: &WindowFrameBound,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<WindowFrameBound, Error> {
     Ok(match bound {
         WindowFrameBound::Preceding(Some(e)) => {
-            WindowFrameBound::Preceding(Some(Box::new(D::translate_expr(e, schema, options)?)))
+            WindowFrameBound::Preceding(Some(Box::new(D::translate_expr(
+                e, schema, options, emit,
+            )?)))
         }
         WindowFrameBound::Following(Some(e)) => {
-            WindowFrameBound::Following(Some(Box::new(D::translate_expr(e, schema, options)?)))
+            WindowFrameBound::Following(Some(Box::new(D::translate_expr(
+                e, schema, options, emit,
+            )?)))
         }
         other => other.clone(),
     })
@@ -1437,15 +1531,16 @@ fn translate_window_frame_bound<D: TranslationDirection>(
 fn translate_window_frame<D: TranslationDirection>(
     frame: &WindowFrame,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<WindowFrame, Error> {
     Ok(WindowFrame {
         units: frame.units,
-        start_bound: translate_window_frame_bound::<D>(&frame.start_bound, schema, options)?,
+        start_bound: translate_window_frame_bound::<D>(&frame.start_bound, schema, options, emit)?,
         end_bound: frame
             .end_bound
             .as_ref()
-            .map(|b| translate_window_frame_bound::<D>(b, schema, options))
+            .map(|b| translate_window_frame_bound::<D>(b, schema, options, emit))
             .transpose()?,
     })
 }
@@ -1455,42 +1550,44 @@ fn translate_window_frame<D: TranslationDirection>(
 pub(crate) fn translate_function_argument_clauses<D: TranslationDirection>(
     clauses: &[FunctionArgumentClause],
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<FunctionArgumentClause>, Error> {
     clauses
         .iter()
-        .map(|clause| translate_function_argument_clause::<D>(clause, schema, options))
+        .map(|clause| translate_function_argument_clause::<D>(clause, schema, options, emit))
         .collect()
 }
 
 fn translate_function_argument_clause<D: TranslationDirection>(
     clause: &FunctionArgumentClause,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<FunctionArgumentClause, Error> {
     Ok(match clause {
         FunctionArgumentClause::OrderBy(order_by_exprs) => {
             FunctionArgumentClause::OrderBy(
                 order_by_exprs
                     .iter()
-                    .map(|e| translate_order_by_expr::<D>(e, schema, options))
+                    .map(|e| translate_order_by_expr::<D>(e, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             )
         }
         FunctionArgumentClause::Limit(e) => {
-            FunctionArgumentClause::Limit(D::translate_expr(e, schema, options)?)
+            FunctionArgumentClause::Limit(D::translate_expr(e, schema, options, emit)?)
         }
         FunctionArgumentClause::Having(HavingBound(kind, e)) => {
             FunctionArgumentClause::Having(HavingBound(
                 *kind,
-                D::translate_expr(e, schema, options)?,
+                D::translate_expr(e, schema, options, emit)?,
             ))
         }
         FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate { filler, with_count }) => {
             FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate {
                 filler: filler
                     .as_ref()
-                    .map(|e| D::translate_expr(e, schema, options).map(Box::new))
+                    .map(|e| D::translate_expr(e, schema, options, emit).map(Box::new))
                     .transpose()?,
                 with_count: *with_count,
             })
@@ -1502,7 +1599,8 @@ fn translate_function_argument_clause<D: TranslationDirection>(
 pub(crate) fn translate_named_windows<D: TranslationDirection>(
     named_windows: &[NamedWindowDefinition],
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<NamedWindowDefinition>, Error> {
     named_windows
         .iter()
@@ -1510,7 +1608,9 @@ pub(crate) fn translate_named_windows<D: TranslationDirection>(
             let translated_expr = match &nwd.1 {
                 NamedWindowExpr::NamedWindow(ident) => NamedWindowExpr::NamedWindow(ident.clone()),
                 NamedWindowExpr::WindowSpec(spec) => {
-                    NamedWindowExpr::WindowSpec(translate_window_spec::<D>(spec, schema, options)?)
+                    NamedWindowExpr::WindowSpec(translate_window_spec::<D>(
+                        spec, schema, options, emit,
+                    )?)
                 }
             };
             Ok(NamedWindowDefinition(nwd.0.clone(), translated_expr))
@@ -1521,7 +1621,8 @@ pub(crate) fn translate_named_windows<D: TranslationDirection>(
 pub(crate) fn translate_values_rows<D: TranslationDirection>(
     values: &Values,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Values, Error> {
     Ok(Values {
         explicit_row: values.explicit_row,
@@ -1536,7 +1637,7 @@ pub(crate) fn translate_values_rows<D: TranslationDirection>(
                         if D::IS_FORWARD && is_default_keyword(expr) {
                             return Err(default_outside_an_insert_error());
                         }
-                        D::translate_expr(expr, schema, options)
+                        D::translate_expr(expr, schema, options, emit)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(sqlparser::ast::Parens {
@@ -1596,10 +1697,11 @@ where
 pub(crate) fn translate_update<D: TranslationDirection>(
     update: &sqlparser::ast::Update,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::Update, Error> {
     if D::IS_FORWARD && !update.table.joins.is_empty() {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(Error::forward_refusal(
             "UPDATE with joins on the target table is not supported in SQLite. \
              Use UPDATE ... FROM ... instead."
                 .to_string(),
@@ -1615,7 +1717,7 @@ pub(crate) fn translate_update<D: TranslationDirection>(
             TableFactor::Table { name, .. } => {
                 match table_with_implicit_public_lookup(schema, name) {
                     Ok(Some(table)) => {
-                        (ColumnRewrites::of_table(table, schema, options), Some(table))
+                        (ColumnRewrites::of_table(table, schema, D::config(options)), Some(table))
                     }
                     _ => (ColumnRewrites::default(), None),
                 }
@@ -1635,7 +1737,14 @@ pub(crate) fn translate_update<D: TranslationDirection>(
             // default is still the raw PostgreSQL expression.
             let substituted = match target_table {
                 Some(table) => {
-                    substituted_assignment_default(&a.target, &a.value, table, schema, options)?
+                    substituted_assignment_default(
+                        &a.target,
+                        &a.value,
+                        table,
+                        schema,
+                        required_forward_context::<D>(options),
+                        emit,
+                    )?
                 }
                 None => None,
             };
@@ -1643,10 +1752,10 @@ pub(crate) fn translate_update<D: TranslationDirection>(
                 return Err(default_outside_an_insert_error());
             }
             let source = substituted.as_ref().unwrap_or(&a.value);
-            let value = D::translate_expr(source, schema, options)?;
+            let value = D::translate_expr(source, schema, options, emit)?;
             Ok(Assignment {
                 target: a.target.clone(),
-                value: rewrites.finish_assignment(&a.target, value, options)?,
+                value: rewrites.finish_assignment(&a.target, value, D::config(options))?,
             })
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -1654,7 +1763,7 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     let selection = update
         .selection
         .as_ref()
-        .map(|expr| D::translate_expr(expr, schema, options))
+        .map(|expr| D::translate_expr(expr, schema, options, emit))
         .transpose()?;
 
     let from = update
@@ -1662,19 +1771,22 @@ pub(crate) fn translate_update<D: TranslationDirection>(
         .as_ref()
         .map(|f| {
             map_update_table_from_kind(f, |table| {
-                translate_table_with_joins::<D>(table, schema, options)
+                translate_table_with_joins::<D>(table, schema, options, emit)
             })
         })
         .transpose()?;
 
-    let returning = translate_returning::<D>(update.returning.as_ref(), schema, options)?;
-    let limit =
-        update.limit.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?;
+    let returning = translate_returning::<D>(update.returning.as_ref(), schema, options, emit)?;
+    let limit = update
+        .limit
+        .as_ref()
+        .map(|expr| D::translate_expr(expr, schema, options, emit))
+        .transpose()?;
 
     let translated = sqlparser::ast::Update {
         update_token: update.update_token.clone(),
         optimizer_hints: update.optimizer_hints.clone(),
-        table: translate_table_with_joins::<D>(&update.table, schema, options)?,
+        table: translate_table_with_joins::<D>(&update.table, schema, options, emit)?,
         assignments,
         from,
         selection,
@@ -1688,11 +1800,10 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     // Route ST_* WHERE predicates through the rtree shadow via IN-subquery.
     // Single-target-table only. UPDATE ... FROM and joined targets pass through.
     if D::IS_FORWARD
-        && let Some(rewritten) =
-            crate::impls::translator_impls::postgis::try_rewrite_spatial_update(
-                &translated,
-                options,
-            )?
+        && let Some(rewritten) = crate::impls::translator_impls::postgis::try_rewrite_spatial_update(
+            &translated,
+            required_forward_context::<D>(options),
+        )
     {
         return Ok(rewritten);
     }
@@ -1704,21 +1815,22 @@ pub(crate) fn translate_update<D: TranslationDirection>(
 pub(crate) fn translate_distinct_shared<D: TranslationDirection>(
     distinct: Option<&sqlparser::ast::Distinct>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<sqlparser::ast::Distinct>, Error> {
     distinct
         .map(|d| {
             Ok(match d {
                 sqlparser::ast::Distinct::On(exprs) => {
                     if D::IS_FORWARD {
-                        return Err(Error::UnsupportedSQLiteFeature(
+                        return Err(Error::forward_refusal(
                             "DISTINCT ON is not supported in SQLite".to_string(),
                         ));
                     }
                     sqlparser::ast::Distinct::On(
                         exprs
                             .iter()
-                            .map(|e| D::translate_expr(e, schema, options))
+                            .map(|e| D::translate_expr(e, schema, options, emit))
                             .collect::<Result<Vec<_>, _>>()?,
                     )
                 }
@@ -1733,7 +1845,8 @@ pub(crate) fn translate_distinct_shared<D: TranslationDirection>(
 pub(crate) fn translate_top_shared<D: TranslationDirection>(
     top: Option<&sqlparser::ast::Top>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<sqlparser::ast::Top>, Error> {
     top.map(|t| {
         if D::IS_FORWARD {
@@ -1746,7 +1859,7 @@ pub(crate) fn translate_top_shared<D: TranslationDirection>(
                 match q {
                     sqlparser::ast::TopQuantity::Expr(expr) => {
                         Ok(sqlparser::ast::TopQuantity::Expr(D::translate_expr(
-                            expr, schema, options,
+                            expr, schema, options, emit,
                         )?))
                     }
                     sqlparser::ast::TopQuantity::Constant(c) => {
@@ -1767,45 +1880,47 @@ pub(crate) fn translate_top_shared<D: TranslationDirection>(
 /// syntax error, measured while fixing R122. Each message names the clause and
 /// its home dialect. The empty fields in the rebuilt `Select` below are this
 /// guard's postcondition.
-fn reject_foreign_select_clauses(select: &sqlparser::ast::Select) -> Result<(), Error> {
+fn reject_foreign_select_clauses<D: TranslationDirection>(
+    select: &sqlparser::ast::Select,
+) -> Result<(), Error> {
     if !select.lateral_views.is_empty() {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(unsupported_source_syntax_for::<D>(
             "LATERAL VIEW is HiveQL, and neither PostgreSQL nor SQLite has the clause. \
-             PostgreSQL spells lateral iteration as a FROM item, `FROM t, LATERAL (...)`."
+         PostgreSQL spells lateral iteration as a FROM item, `FROM t, LATERAL (...)`."
                 .to_string(),
         ));
     }
     if !select.cluster_by.is_empty() {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(unsupported_source_syntax_for::<D>(
             "CLUSTER BY is HiveQL, and neither PostgreSQL nor SQLite has the clause. \
-             Use ORDER BY."
+         Use ORDER BY."
                 .to_string(),
         ));
     }
     if !select.distribute_by.is_empty() {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(unsupported_source_syntax_for::<D>(
             "DISTRIBUTE BY is HiveQL, and neither PostgreSQL nor SQLite has the clause."
                 .to_string(),
         ));
     }
     if !select.sort_by.is_empty() {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(unsupported_source_syntax_for::<D>(
             "SORT BY is HiveQL, and neither PostgreSQL nor SQLite has the clause. \
-             Use ORDER BY."
+         Use ORDER BY."
                 .to_string(),
         ));
     }
     if select.qualify.is_some() {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(unsupported_source_syntax_for::<D>(
             "QUALIFY is Snowflake and Teradata grammar, and neither PostgreSQL nor SQLite has \
-             the clause. Filter window function results in an outer query's WHERE."
+         the clause. Filter window function results in an outer query's WHERE."
                 .to_string(),
         ));
     }
     if !select.connect_by.is_empty() {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(unsupported_source_syntax_for::<D>(
             "CONNECT BY is Oracle grammar, and neither PostgreSQL nor SQLite has the clause. \
-             Use a recursive CTE, WITH RECURSIVE, for hierarchical queries."
+         Use a recursive CTE, WITH RECURSIVE, for hierarchical queries."
                 .to_string(),
         ));
     }
@@ -1816,36 +1931,40 @@ fn reject_foreign_select_clauses(select: &sqlparser::ast::Select) -> Result<(), 
 pub(crate) fn translate_select_shared<D: TranslationDirection>(
     select: &sqlparser::ast::Select,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::Select, Error> {
-    reject_foreign_select_clauses(select)?;
+    reject_foreign_select_clauses::<D>(select)?;
     let selection = select
         .selection
         .as_ref()
-        .map(|expr| D::translate_expr(expr, schema, options))
+        .map(|expr| D::translate_expr(expr, schema, options, emit))
         .transpose()?;
-    let having =
-        select.having.as_ref().map(|expr| D::translate_expr(expr, schema, options)).transpose()?;
+    let having = select
+        .having
+        .as_ref()
+        .map(|expr| D::translate_expr(expr, schema, options, emit))
+        .transpose()?;
     let from = select
         .from
         .iter()
-        .map(|twj| translate_table_with_joins::<D>(twj, schema, options))
+        .map(|twj| translate_table_with_joins::<D>(twj, schema, options, emit))
         .collect::<Result<Vec<_>, _>>()?;
     let projection = select
         .projection
         .iter()
-        .map(|item| translate_select_item::<D>(item, schema, options))
+        .map(|item| translate_select_item::<D>(item, schema, options, emit))
         .collect::<Result<Vec<_>, _>>()?;
     let prewhere = select
         .prewhere
         .as_ref()
-        .map(|expr| D::translate_expr(expr, schema, options))
+        .map(|expr| D::translate_expr(expr, schema, options, emit))
         .transpose()?;
 
     let translated = sqlparser::ast::Select {
         select_token: select.select_token.clone(),
-        distinct: translate_distinct_shared::<D>(select.distinct.as_ref(), schema, options)?,
-        top: translate_top_shared::<D>(select.top.as_ref(), schema, options)?,
+        distinct: translate_distinct_shared::<D>(select.distinct.as_ref(), schema, options, emit)?,
+        top: translate_top_shared::<D>(select.top.as_ref(), schema, options, emit)?,
         top_before_distinct: select.top_before_distinct,
         projection,
         into: select.into.clone(),
@@ -1853,12 +1972,12 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         lateral_views: Vec::new(),
         prewhere,
         selection,
-        group_by: translate_group_by_expr::<D>(&select.group_by, schema, options)?,
+        group_by: translate_group_by_expr::<D>(&select.group_by, schema, options, emit)?,
         cluster_by: Vec::new(),
         distribute_by: Vec::new(),
         sort_by: Vec::new(),
         having,
-        named_window: translate_named_windows::<D>(&select.named_window, schema, options)?,
+        named_window: translate_named_windows::<D>(&select.named_window, schema, options, emit)?,
         qualify: None,
         window_before_qualify: select.window_before_qualify,
         value_table_mode: select.value_table_mode,
@@ -1872,11 +1991,10 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
     // Hooked here so DISTINCT ON and GROUPING SETS rewrites that call
     // translate_select_shared directly also receive spatial rewriting.
     if D::IS_FORWARD
-        && let Some(rewritten) =
-            crate::impls::translator_impls::postgis::try_rewrite_spatial_select(
-                &translated,
-                options,
-            )?
+        && let Some(rewritten) = crate::impls::translator_impls::postgis::try_rewrite_spatial_select(
+            &translated,
+            required_forward_context::<D>(options),
+        )
     {
         return Ok(rewritten);
     }
@@ -1887,48 +2005,49 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
 pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
     set_expr: &sqlparser::ast::SetExpr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::SetExpr, Error> {
     use sqlparser::ast::SetExpr;
     Ok(match set_expr {
         SetExpr::Select(select) => {
-            SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, options)?))
+            SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, options, emit)?))
         }
         SetExpr::Query(query) => {
-            SetExpr::Query(Box::new(translate_query_shared::<D>(query, schema, options)?))
+            SetExpr::Query(Box::new(translate_query_shared::<D>(query, schema, options, emit)?))
         }
         SetExpr::SetOperation { op, set_quantifier, left, right } => {
             if D::IS_FORWARD
                 && matches!(set_quantifier, SetQuantifier::All)
                 && matches!(op, SetOperator::Except | SetOperator::Intersect)
             {
-                return Err(Error::UnsupportedSQLiteFeature(format!(
+                return Err(Error::forward_refusal(format!(
                     "{op} ALL is not supported in SQLite. SQLite {op} always deduplicates. \
-                     Use {op} without the ALL quantifier for the deduplicating form."
+                             Use {op} without the ALL quantifier for the deduplicating form."
                 )));
             }
             SetExpr::SetOperation {
                 op: *op,
                 set_quantifier: *set_quantifier,
-                left: Box::new(translate_set_expr_shared::<D>(left, schema, options)?),
-                right: Box::new(translate_set_expr_shared::<D>(right, schema, options)?),
+                left: Box::new(translate_set_expr_shared::<D>(left, schema, options, emit)?),
+                right: Box::new(translate_set_expr_shared::<D>(right, schema, options, emit)?),
             }
         }
         SetExpr::Values(values) => {
-            SetExpr::Values(translate_values_rows::<D>(values, schema, options)?)
+            SetExpr::Values(translate_values_rows::<D>(values, schema, options, emit)?)
         }
         SetExpr::Insert(Statement::Insert(ins)) => {
-            SetExpr::Insert(Statement::Insert(D::translate_insert(ins, schema, options)?))
+            SetExpr::Insert(Statement::Insert(D::translate_insert(ins, schema, options, emit)?))
         }
         SetExpr::Update(Statement::Update(upd)) => {
-            SetExpr::Update(Statement::Update(translate_update::<D>(upd, schema, options)?))
+            SetExpr::Update(Statement::Update(translate_update::<D>(upd, schema, options, emit)?))
         }
         SetExpr::Delete(Statement::Delete(del)) => {
-            SetExpr::Delete(Statement::Delete(D::translate_delete(del, schema, options)?))
+            SetExpr::Delete(Statement::Delete(D::translate_delete(del, schema, options, emit)?))
         }
         SetExpr::Table(_) | SetExpr::Merge(_) => {
             if D::IS_FORWARD {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::forward_refusal(
                     "TABLE and MERGE expressions are not supported in SQLite".to_string(),
                 ));
             }
@@ -1943,18 +2062,21 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
 pub(crate) fn translate_query_shared<D: TranslationDirection>(
     query: &Query,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Query, Error> {
-    let order_by = translate_order_by_clause::<D>(query.order_by.as_ref(), schema, options)?;
-    let settings = translate_query_settings::<D>(query.settings.as_ref(), schema, options)?;
-    let pipe_operators = translate_pipe_operators::<D>(&query.pipe_operators, schema, options)?;
-    let with = translate_with_clause::<D>(query.with.as_ref(), schema, options)?;
-    let limit_clause = translate_limit_clause::<D>(query.limit_clause.as_ref(), schema, options)?;
-    let fetch = translate_fetch_clause::<D>(query.fetch.as_ref(), schema, options)?;
+    let order_by = translate_order_by_clause::<D>(query.order_by.as_ref(), schema, options, emit)?;
+    let settings = translate_query_settings::<D>(query.settings.as_ref(), schema, options, emit)?;
+    let pipe_operators =
+        translate_pipe_operators::<D>(&query.pipe_operators, schema, options, emit)?;
+    let with = translate_with_clause::<D>(query.with.as_ref(), schema, options, emit)?;
+    let limit_clause =
+        translate_limit_clause::<D>(query.limit_clause.as_ref(), schema, options, emit)?;
+    let fetch = translate_fetch_clause::<D>(query.fetch.as_ref(), schema, options, emit)?;
 
     Ok(Query {
         with,
-        body: Box::new(translate_set_expr_shared::<D>(&query.body, schema, options)?),
+        body: Box::new(translate_set_expr_shared::<D>(&query.body, schema, options, emit)?),
         order_by,
         limit_clause,
         fetch,
@@ -1971,21 +2093,23 @@ pub(crate) fn translate_query_shared<D: TranslationDirection>(
 pub(crate) fn translate_pipe_operators<D: TranslationDirection>(
     pipe_operators: &[PipeOperator],
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<PipeOperator>, Error> {
     pipe_operators
         .iter()
-        .map(|pipe_operator| translate_pipe_operator::<D>(pipe_operator, schema, options))
+        .map(|pipe_operator| translate_pipe_operator::<D>(pipe_operator, schema, options, emit))
         .collect::<Result<Vec<_>, _>>()
 }
 
 fn translate_measure<D: TranslationDirection>(
     measure: &Measure,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Measure, Error> {
     Ok(Measure {
-        expr: D::translate_expr(&measure.expr, schema, options)?,
+        expr: D::translate_expr(&measure.expr, schema, options, emit)?,
         alias: measure.alias.clone(),
     })
 }
@@ -1993,11 +2117,12 @@ fn translate_measure<D: TranslationDirection>(
 fn translate_symbol_definition<D: TranslationDirection>(
     symbol: &SymbolDefinition,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<SymbolDefinition, Error> {
     Ok(SymbolDefinition {
         symbol: symbol.symbol.clone(),
-        definition: D::translate_expr(&symbol.definition, schema, options)?,
+        definition: D::translate_expr(&symbol.definition, schema, options, emit)?,
     })
 }
 
@@ -2005,7 +2130,8 @@ fn translate_symbol_definition<D: TranslationDirection>(
 fn translate_json_table_column<D: TranslationDirection>(
     column: &sqlparser::ast::JsonTableColumn,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::JsonTableColumn, Error> {
     Ok(match column {
         sqlparser::ast::JsonTableColumn::Named(named) => {
@@ -2020,7 +2146,7 @@ fn translate_json_table_column<D: TranslationDirection>(
                 columns: nested
                     .columns
                     .iter()
-                    .map(|column| translate_json_table_column::<D>(column, schema, options))
+                    .map(|column| translate_json_table_column::<D>(column, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
             })
         }
@@ -2030,10 +2156,11 @@ fn translate_json_table_column<D: TranslationDirection>(
 fn translate_xml_passing_argument<D: TranslationDirection>(
     argument: &XmlPassingArgument,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<XmlPassingArgument, Error> {
     Ok(XmlPassingArgument {
-        expr: D::translate_expr(&argument.expr, schema, options)?,
+        expr: D::translate_expr(&argument.expr, schema, options, emit)?,
         alias: argument.alias.clone(),
         by_value: argument.by_value,
     })
@@ -2042,13 +2169,14 @@ fn translate_xml_passing_argument<D: TranslationDirection>(
 fn translate_xml_passing_clause<D: TranslationDirection>(
     passing: &XmlPassingClause,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<XmlPassingClause, Error> {
     Ok(XmlPassingClause {
         arguments: passing
             .arguments
             .iter()
-            .map(|argument| translate_xml_passing_argument::<D>(argument, schema, options))
+            .map(|argument| translate_xml_passing_argument::<D>(argument, schema, options, emit))
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
@@ -2056,7 +2184,8 @@ fn translate_xml_passing_clause<D: TranslationDirection>(
 fn translate_xml_table_column_option<D: TranslationDirection>(
     option: &XmlTableColumnOption,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<XmlTableColumnOption, Error> {
     Ok(match option {
         XmlTableColumnOption::NamedInfo { r#type, path, default, nullable } => {
@@ -2064,11 +2193,11 @@ fn translate_xml_table_column_option<D: TranslationDirection>(
                 r#type: r#type.clone(),
                 path: path
                     .as_ref()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .transpose()?,
                 default: default
                     .as_ref()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .transpose()?,
                 nullable: *nullable,
             }
@@ -2080,21 +2209,23 @@ fn translate_xml_table_column_option<D: TranslationDirection>(
 fn translate_xml_table_column<D: TranslationDirection>(
     column: &XmlTableColumn,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<XmlTableColumn, Error> {
     Ok(XmlTableColumn {
         name: column.name.clone(),
-        option: translate_xml_table_column_option::<D>(&column.option, schema, options)?,
+        option: translate_xml_table_column_option::<D>(&column.option, schema, options, emit)?,
     })
 }
 
 fn translate_xml_namespace_definition<D: TranslationDirection>(
     namespace: &XmlNamespaceDefinition,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<XmlNamespaceDefinition, Error> {
     Ok(XmlNamespaceDefinition {
-        uri: D::translate_expr(&namespace.uri, schema, options)?,
+        uri: D::translate_expr(&namespace.uri, schema, options, emit)?,
         name: namespace.name.clone(),
     })
 }
@@ -2102,15 +2233,16 @@ fn translate_xml_namespace_definition<D: TranslationDirection>(
 pub(crate) fn translate_table_with_joins<D: TranslationDirection>(
     table_with_joins: &TableWithJoins,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableWithJoins, Error> {
     let mut translated_joins = Vec::with_capacity(table_with_joins.joins.len());
     for join in &table_with_joins.joins {
-        translated_joins.push(translate_join::<D>(join, schema, options)?);
+        translated_joins.push(translate_join::<D>(join, schema, options, emit)?);
     }
 
     Ok(TableWithJoins {
-        relation: translate_table_factor::<D>(&table_with_joins.relation, schema, options)?,
+        relation: translate_table_factor::<D>(&table_with_joins.relation, schema, options, emit)?,
         joins: translated_joins,
     })
 }
@@ -2118,12 +2250,13 @@ pub(crate) fn translate_table_with_joins<D: TranslationDirection>(
 pub(crate) fn translate_join<D: TranslationDirection>(
     join: &Join,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Join, Error> {
     Ok(Join {
-        relation: translate_table_factor::<D>(&join.relation, schema, options)?,
+        relation: translate_table_factor::<D>(&join.relation, schema, options, emit)?,
         global: join.global,
-        join_operator: translate_join_operator::<D>(&join.join_operator, schema, options)?,
+        join_operator: translate_join_operator::<D>(&join.join_operator, schema, options, emit)?,
     })
 }
 
@@ -2225,22 +2358,27 @@ pub(crate) fn join_constraint_mut(op: &mut JoinOperator) -> Option<&mut JoinCons
 pub(crate) fn translate_join_operator<D: TranslationDirection>(
     join_operator: &JoinOperator,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<JoinOperator, Error> {
+    let emit = core::cell::RefCell::new(emit);
     map_join_operator(
         join_operator,
-        &|c| translate_join_constraint::<D>(c, schema, options),
-        &|e| D::translate_expr(e, schema, options),
+        &|c| translate_join_constraint::<D>(c, schema, options, &mut **emit.borrow_mut()),
+        &|e| D::translate_expr(e, schema, options, &mut **emit.borrow_mut()),
     )
 }
 
 pub(crate) fn translate_join_constraint<D: TranslationDirection>(
     constraint: &JoinConstraint,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<JoinConstraint, Error> {
     Ok(match constraint {
-        JoinConstraint::On(expr) => JoinConstraint::On(D::translate_expr(expr, schema, options)?),
+        JoinConstraint::On(expr) => {
+            JoinConstraint::On(D::translate_expr(expr, schema, options, emit)?)
+        }
         JoinConstraint::Using(idents) => JoinConstraint::Using(idents.clone()),
         JoinConstraint::Natural => JoinConstraint::Natural,
         JoinConstraint::None => JoinConstraint::None,
@@ -2280,7 +2418,8 @@ fn subquery_is_trivially_uncorrelated(query: &Query) -> bool {
 pub(crate) fn translate_table_factor<D: TranslationDirection>(
     table_factor: &TableFactor,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableFactor, Error> {
     Ok(match table_factor {
         TableFactor::Table {
@@ -2300,9 +2439,9 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 return Err(generate_series_not_supported_error());
             }
             if D::IS_FORWARD && sample.is_some() {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::forward_refusal(
                     "TABLESAMPLE is not supported in SQLite. \
-                     Use ORDER BY random() LIMIT n as an approximation."
+                             Use ORDER BY random() LIMIT n as an approximation."
                         .to_string(),
                 ));
             }
@@ -2321,7 +2460,8 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                     &args.args,
                     alias.as_ref(),
                     schema,
-                    options,
+                    required_forward_context::<D>(options),
+                    emit,
                 );
             }
 
@@ -2338,7 +2478,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                         &crate::impls::session_variable::function_name_lower(name),
                     )
             {
-                return Err(Error::UnsupportedSQLiteFeature(reason));
+                return Err(Error::reverse_refusal(reason));
             }
 
             // SQLite accepts no column list on a table alias, the same
@@ -2348,29 +2488,29 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             if D::IS_FORWARD
                 && let Some(alias) = alias.as_ref().filter(|alias| !alias.columns.is_empty())
             {
-                return renamed_relation_factor::<D>(name, alias, schema, options);
+                return renamed_relation_factor::<D>(name, alias, schema, options, emit);
             }
             TableFactor::Table {
                 name: D::translate_object_name(name, schema, options)?,
                 alias: alias.clone(),
                 args: args
                     .as_ref()
-                    .map(|args| translate_table_function_args::<D>(args, schema, options))
+                    .map(|args| translate_table_function_args::<D>(args, schema, options, emit))
                     .transpose()?,
                 with_hints: with_hints
                     .iter()
-                    .map(|hint| D::translate_expr(hint, schema, options))
+                    .map(|hint| D::translate_expr(hint, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 version: version
                     .as_ref()
-                    .map(|version| translate_table_version::<D>(version, schema, options))
+                    .map(|version| translate_table_version::<D>(version, schema, options, emit))
                     .transpose()?,
                 with_ordinality: *with_ordinality,
                 partitions: partitions.clone(),
                 json_path: json_path.clone(),
                 sample: sample
                     .as_ref()
-                    .map(|sample| translate_table_sample_kind::<D>(sample, schema, options))
+                    .map(|sample| translate_table_sample_kind::<D>(sample, schema, options, emit))
                     .transpose()?,
                 index_hints: index_hints.clone(),
             }
@@ -2381,48 +2521,44 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 // The same limitation forces the derived-table shape in
                 // array.rs::translate_unnest_factor.
                 if alias.as_ref().is_some_and(|a| !a.columns.is_empty()) {
-                    return Err(Error::UnsupportedSQLiteFeature(
-                        "Table alias with a column list (AS alias(col1, col2, ...)) is not \
-                         supported in SQLite grammar. Project the column names instead, for \
-                         example: SELECT column1 AS a FROM (VALUES (1),(2)) AS v"
-                            .to_string(),
-                    ));
+                    return Err(Error::forward_refusal("Table alias with a column list (AS alias(col1, col2, ...)) is not \
+                                     supported in SQLite grammar. Project the column names instead, for \
+                                     example: SELECT column1 AS a FROM (VALUES (1),(2)) AS v"
+                        .to_string()));
                 }
                 // SQLite has no LATERAL join. Drop the keyword only when the
                 // subquery is trivially uncorrelated (no FROM clause, no column
                 // references). Any other case would fail at runtime with
                 // "no such column" because the outer scope is invisible.
                 if *lateral && !subquery_is_trivially_uncorrelated(subquery) {
-                    return Err(Error::UnsupportedSQLiteFeature(
-                        "LATERAL on a correlated subquery is not supported in SQLite. SQLite \
-                         has no LATERAL join. A correlated lateral cannot be expressed and a \
-                         derived table would fail at runtime with no such column."
-                            .to_string(),
-                    ));
+                    return Err(Error::forward_refusal("LATERAL on a correlated subquery is not supported in SQLite. SQLite \
+                                     has no LATERAL join. A correlated lateral cannot be expressed and a \
+                                     derived table would fail at runtime with no such column."
+                        .to_string()));
                 }
                 if sample.is_some() {
-                    return Err(Error::UnsupportedSQLiteFeature(
+                    return Err(Error::forward_refusal(
                         "TABLESAMPLE is not supported in SQLite. \
-                         Use ORDER BY random() LIMIT n as an approximation."
+                                     Use ORDER BY random() LIMIT n as an approximation."
                             .to_string(),
                     ));
                 }
             }
             TableFactor::Derived {
-                subquery: Box::new(D::translate_query(subquery, schema, options)?),
+                subquery: Box::new(D::translate_query(subquery, schema, options, emit)?),
                 // Drop LATERAL; uncorrelated subqueries are safe without it and
                 // correlated ones are rejected above.
                 lateral: false,
                 alias: alias.clone(),
                 sample: sample
                     .as_ref()
-                    .map(|sample| translate_table_sample_kind::<D>(sample, schema, options))
+                    .map(|sample| translate_table_sample_kind::<D>(sample, schema, options, emit))
                     .transpose()?,
             }
         }
         TableFactor::TableFunction { expr, alias } => {
             TableFactor::TableFunction {
-                expr: D::translate_expr(expr, schema, options)?,
+                expr: D::translate_expr(expr, schema, options, emit)?,
                 alias: alias.clone(),
             }
         }
@@ -2439,7 +2575,8 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                     args,
                     alias.as_ref(),
                     schema,
-                    options,
+                    required_forward_context::<D>(options),
+                    emit,
                 );
             }
             TableFactor::Function {
@@ -2447,7 +2584,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 name: name.clone(),
                 args: args
                     .iter()
-                    .map(|arg| translate_function_arg::<D>(arg, schema, options))
+                    .map(|arg| translate_function_arg::<D>(arg, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 with_ordinality: *with_ordinality,
                 alias: alias.clone(),
@@ -2469,14 +2606,15 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                     *with_offset,
                     *with_ordinality,
                     schema,
-                    options,
+                    required_forward_context::<D>(options),
+                    emit,
                 );
             }
             TableFactor::UNNEST {
                 alias: alias.clone(),
                 array_exprs: array_exprs
                     .iter()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 with_offset: *with_offset,
                 with_offset_alias: with_offset_alias.clone(),
@@ -2485,18 +2623,18 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
         }
         TableFactor::JsonTable { json_expr, json_path, columns, alias } => {
             TableFactor::JsonTable {
-                json_expr: D::translate_expr(json_expr, schema, options)?,
+                json_expr: D::translate_expr(json_expr, schema, options, emit)?,
                 json_path: json_path.clone(),
                 columns: columns
                     .iter()
-                    .map(|column| translate_json_table_column::<D>(column, schema, options))
+                    .map(|column| translate_json_table_column::<D>(column, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 alias: alias.clone(),
             }
         }
         TableFactor::OpenJsonTable { json_expr, json_path, columns, alias } => {
             TableFactor::OpenJsonTable {
-                json_expr: D::translate_expr(json_expr, schema, options)?,
+                json_expr: D::translate_expr(json_expr, schema, options, emit)?,
                 json_path: json_path.clone(),
                 columns: columns.clone(),
                 alias: alias.clone(),
@@ -2508,6 +2646,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                     table_with_joins,
                     schema,
                     options,
+                    emit,
                 )?),
                 alias: alias.clone(),
             }
@@ -2521,34 +2660,39 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             alias,
         } => {
             TableFactor::Pivot {
-                table: Box::new(translate_table_factor::<D>(table, schema, options)?),
+                table: Box::new(translate_table_factor::<D>(table, schema, options, emit)?),
                 aggregate_functions: aggregate_functions
                     .iter()
                     .map(|expr_with_alias| {
-                        translate_expr_with_alias::<D>(expr_with_alias, schema, options)
+                        translate_expr_with_alias::<D>(expr_with_alias, schema, options, emit)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 value_column: value_column
                     .iter()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
-                value_source: translate_pivot_value_source::<D>(value_source, schema, options)?,
+                value_source: translate_pivot_value_source::<D>(
+                    value_source,
+                    schema,
+                    options,
+                    emit,
+                )?,
                 default_on_null: default_on_null
                     .as_ref()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .transpose()?,
                 alias: alias.clone(),
             }
         }
         TableFactor::Unpivot { table, value, name, columns, null_inclusion, alias } => {
             TableFactor::Unpivot {
-                table: Box::new(translate_table_factor::<D>(table, schema, options)?),
-                value: D::translate_expr(value, schema, options)?,
+                table: Box::new(translate_table_factor::<D>(table, schema, options, emit)?),
+                value: D::translate_expr(value, schema, options, emit)?,
                 name: name.clone(),
                 columns: columns
                     .iter()
                     .map(|expr_with_alias| {
-                        translate_expr_with_alias::<D>(expr_with_alias, schema, options)
+                        translate_expr_with_alias::<D>(expr_with_alias, schema, options, emit)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 null_inclusion: null_inclusion.clone(),
@@ -2556,10 +2700,10 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             }
         }
         TableFactor::UnpivotExpr { .. } => {
-            return Err(Error::UnsupportedSQLiteFeature(
+            return Err(unsupported_source_syntax_for::<D>(
                 "UNPIVOT over an expression (Redshift object unpivoting) is not supported. \
-                 Neither PostgreSQL nor SQLite has this construct. Unpivot a JSON document \
-                 with json_each instead."
+                     Neither PostgreSQL nor SQLite has this construct. Unpivot a JSON document \
+                     with json_each instead."
                     .to_string(),
             ));
         }
@@ -2575,27 +2719,27 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             alias,
         } => {
             TableFactor::MatchRecognize {
-                table: Box::new(translate_table_factor::<D>(table, schema, options)?),
+                table: Box::new(translate_table_factor::<D>(table, schema, options, emit)?),
                 partition_by: partition_by
                     .iter()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 order_by: order_by
                     .iter()
                     .map(|order_by_expr| {
-                        translate_order_by_expr::<D>(order_by_expr, schema, options)
+                        translate_order_by_expr::<D>(order_by_expr, schema, options, emit)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 measures: measures
                     .iter()
-                    .map(|measure| translate_measure::<D>(measure, schema, options))
+                    .map(|measure| translate_measure::<D>(measure, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 rows_per_match: rows_per_match.clone(),
                 after_match_skip: after_match_skip.clone(),
                 pattern: pattern.clone(),
                 symbols: symbols
                     .iter()
-                    .map(|symbol| translate_symbol_definition::<D>(symbol, schema, options))
+                    .map(|symbol| translate_symbol_definition::<D>(symbol, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 alias: alias.clone(),
             }
@@ -2605,14 +2749,14 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 namespaces: namespaces
                     .iter()
                     .map(|namespace| {
-                        translate_xml_namespace_definition::<D>(namespace, schema, options)
+                        translate_xml_namespace_definition::<D>(namespace, schema, options, emit)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
-                row_expression: D::translate_expr(row_expression, schema, options)?,
-                passing: translate_xml_passing_clause::<D>(passing, schema, options)?,
+                row_expression: D::translate_expr(row_expression, schema, options, emit)?,
+                passing: translate_xml_passing_clause::<D>(passing, schema, options, emit)?,
                 columns: columns
                     .iter()
-                    .map(|column| translate_xml_table_column::<D>(column, schema, options))
+                    .map(|column| translate_xml_table_column::<D>(column, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 alias: alias.clone(),
             }
@@ -2622,19 +2766,19 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                 name: name.clone(),
                 dimensions: dimensions
                     .iter()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 metrics: metrics
                     .iter()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 facts: facts
                     .iter()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?,
                 where_clause: where_clause
                     .as_ref()
-                    .map(|expr| D::translate_expr(expr, schema, options))
+                    .map(|expr| D::translate_expr(expr, schema, options, emit))
                     .transpose()?,
                 alias: alias.clone(),
             }
@@ -2656,10 +2800,11 @@ fn renamed_relation_factor<D: TranslationDirection>(
     name: &ObjectName,
     alias: &TableAlias,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    _emit: crate::warnings::WarningSink<'_>,
 ) -> Result<TableFactor, Error> {
     if let Some(typed) = alias.columns.iter().find(|column| column.data_type.is_some()) {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "FROM {name} AS {} ({} ...) carries a data type in the column alias list. \
              PostgreSQL only accepts one on a function returning record, so a file carrying \
              it on a table is not the input this crate translates. Name the columns alone.",
@@ -2668,7 +2813,7 @@ fn renamed_relation_factor<D: TranslationDirection>(
     }
 
     let Some(table) = table_with_implicit_public_lookup(schema, name)? else {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "FROM {name} AS {} (...) renames the columns of a relation the translation schema \
              does not declare, so the declared column list the rewrite needs is unknown. \
              Include the relation's definition in the same translation batch.",
@@ -2688,7 +2833,7 @@ fn renamed_relation_factor<D: TranslationDirection>(
         .collect();
 
     if alias.columns.len() > declared.len() {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "FROM {name} AS {} (...) names {} columns for a table that declares only {}. \
              PostgreSQL refuses the longer list too. Name at most the table's column count.",
             alias.name,
@@ -2749,15 +2894,16 @@ fn renamed_relation_factor<D: TranslationDirection>(
 pub(crate) fn translate_select_item<D: TranslationDirection>(
     item: &SelectItem,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<SelectItem, Error> {
     Ok(match item {
         SelectItem::UnnamedExpr(expr) => {
-            SelectItem::UnnamedExpr(D::translate_expr(expr, schema, options)?)
+            SelectItem::UnnamedExpr(D::translate_expr(expr, schema, options, emit)?)
         }
         SelectItem::ExprWithAlias { expr, alias } => {
             SelectItem::ExprWithAlias {
-                expr: D::translate_expr(expr, schema, options)?,
+                expr: D::translate_expr(expr, schema, options, emit)?,
                 alias: alias.clone(),
             }
         }
@@ -2768,17 +2914,29 @@ pub(crate) fn translate_select_item<D: TranslationDirection>(
 pub(crate) fn translate_returning<D: TranslationDirection>(
     returning: Option<&Vec<SelectItem>>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<Vec<SelectItem>>, Error> {
     match returning {
         Some(items) => {
             let mut translated = Vec::with_capacity(items.len());
             for item in items {
-                translated.push(translate_select_item::<D>(item, schema, options)?);
+                translated.push(translate_select_item::<D>(item, schema, options, emit)?);
             }
             Ok(Some(translated))
         }
         None => Ok(None),
+    }
+}
+fn semantic_refusal_for<D: TranslationDirection>(detail: impl Into<String>) -> Error {
+    if D::IS_FORWARD { Error::forward_refusal(detail) } else { Error::reverse_refusal(detail) }
+}
+
+fn unsupported_source_syntax_for<D: TranslationDirection>(detail: impl Into<String>) -> Error {
+    if D::IS_FORWARD {
+        Error::unsupported_source_syntax(detail)
+    } else {
+        Error::reverse_unsupported_source_syntax(detail)
     }
 }
 
@@ -2806,10 +2964,17 @@ mod tests {
     struct IdentityDirection;
 
     impl TranslationDirection for IdentityDirection {
+        type Options<'a> = Pg2SqliteOptions;
+
+        fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions {
+            options
+        }
+
         fn translate_expr(
             expr: &Expr,
             _schema: &ParserDB,
             _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<Expr, Error> {
             Ok(expr.clone())
         }
@@ -2818,6 +2983,7 @@ mod tests {
             query: &Query,
             _schema: &ParserDB,
             _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<Query, Error> {
             Ok(query.clone())
         }
@@ -2826,6 +2992,7 @@ mod tests {
             insert: &sqlparser::ast::Insert,
             _schema: &ParserDB,
             _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<sqlparser::ast::Insert, Error> {
             Ok(insert.clone())
         }
@@ -2834,6 +3001,7 @@ mod tests {
             delete: &sqlparser::ast::Delete,
             _schema: &ParserDB,
             _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<sqlparser::ast::Delete, Error> {
             Ok(delete.clone())
         }
@@ -2842,10 +3010,17 @@ mod tests {
     struct NestingDirection;
 
     impl TranslationDirection for NestingDirection {
+        type Options<'a> = Pg2SqliteOptions;
+
+        fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions {
+            options
+        }
+
         fn translate_expr(
             expr: &Expr,
             _schema: &ParserDB,
             _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<Expr, Error> {
             Ok(Expr::Nested(Box::new(expr.clone())))
         }
@@ -2854,6 +3029,7 @@ mod tests {
             query: &Query,
             _schema: &ParserDB,
             _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<Query, Error> {
             Ok(query.clone())
         }
@@ -2862,6 +3038,7 @@ mod tests {
             insert: &sqlparser::ast::Insert,
             _schema: &ParserDB,
             _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<sqlparser::ast::Insert, Error> {
             Ok(insert.clone())
         }
@@ -2870,6 +3047,7 @@ mod tests {
             delete: &sqlparser::ast::Delete,
             _schema: &ParserDB,
             _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<sqlparser::ast::Delete, Error> {
             Ok(delete.clone())
         }
@@ -2906,6 +3084,7 @@ mod tests {
             select.from.first().unwrap(),
             &schema,
             &options,
+            &mut |_| {},
         )
         .unwrap();
         assert_eq!(translated.joins.len(), 2);
@@ -2916,11 +3095,13 @@ mod tests {
             alias: sqlparser::ast::Ident::new("b1"),
         };
         assert!(matches!(
-            translate_select_item::<IdentityDirection>(&unnamed, &schema, &options).unwrap(),
+            translate_select_item::<IdentityDirection>(&unnamed, &schema, &options, &mut |_| {},)
+                .unwrap(),
             SelectItem::UnnamedExpr(_)
         ));
         assert!(matches!(
-            translate_select_item::<IdentityDirection>(&named, &schema, &options).unwrap(),
+            translate_select_item::<IdentityDirection>(&named, &schema, &options, &mut |_| {},)
+                .unwrap(),
             SelectItem::ExprWithAlias { .. }
         ));
     }
@@ -2961,10 +3142,13 @@ mod tests {
         ];
 
         for op in &operators {
-            let _ = translate_join_operator::<IdentityDirection>(op, &schema, &options).unwrap();
+            let _ =
+                translate_join_operator::<IdentityDirection>(op, &schema, &options, &mut |_| {})
+                    .unwrap();
         }
 
-        let _ = translate_join_constraint::<IdentityDirection>(&on, &schema, &options).unwrap();
+        let _ = translate_join_constraint::<IdentityDirection>(&on, &schema, &options, &mut |_| {})
+            .unwrap();
     }
 
     #[test]
@@ -2977,7 +3161,9 @@ mod tests {
         };
 
         let derived = &select.from[0].relation;
-        let _ = translate_table_factor::<IdentityDirection>(derived, &schema, &options).unwrap();
+        let _ =
+            translate_table_factor::<IdentityDirection>(derived, &schema, &options, &mut |_| {})
+                .unwrap();
 
         let nested_query = parse_query("SELECT * FROM (t JOIN u ON t.id = u.id) AS z");
         let sqlparser::ast::SetExpr::Select(nested_select) = nested_query.body.as_ref() else {
@@ -2985,8 +3171,13 @@ mod tests {
         };
         let nested_factor = &nested_select.from[0].relation;
         if let TableFactor::NestedJoin { .. } = nested_factor {
-            let _ = translate_table_factor::<IdentityDirection>(nested_factor, &schema, &options)
-                .unwrap();
+            let _ = translate_table_factor::<IdentityDirection>(
+                nested_factor,
+                &schema,
+                &options,
+                &mut |_| {},
+            )
+            .unwrap();
         }
 
         let joined_query = parse_query("SELECT * FROM t INNER JOIN u ON t.id = u.id");
@@ -2997,8 +3188,13 @@ mod tests {
             table_with_joins: Box::new(joined_select.from[0].clone()),
             alias: None,
         };
-        let translated_manual =
-            translate_table_factor::<IdentityDirection>(&manual_nested, &schema, &options).unwrap();
+        let translated_manual = translate_table_factor::<IdentityDirection>(
+            &manual_nested,
+            &schema,
+            &options,
+            &mut |_| {},
+        )
+        .unwrap();
         assert!(matches!(translated_manual, TableFactor::NestedJoin { .. }));
 
         let returning_items = vec![
@@ -3009,14 +3205,21 @@ mod tests {
             },
         ];
         assert_eq!(
-            translate_returning::<IdentityDirection>(Some(&returning_items), &schema, &options)
-                .unwrap()
-                .unwrap()
-                .len(),
+            translate_returning::<IdentityDirection>(
+                Some(&returning_items),
+                &schema,
+                &options,
+                &mut |_| {},
+            )
+            .unwrap()
+            .unwrap()
+            .len(),
             2
         );
         assert!(
-            translate_returning::<IdentityDirection>(None, &schema, &options).unwrap().is_none()
+            translate_returning::<IdentityDirection>(None, &schema, &options, &mut |_| {},)
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -3030,7 +3233,8 @@ mod tests {
         };
         let mut join = select.from[0].joins[0].clone();
         join.global = true;
-        let translated = translate_join::<IdentityDirection>(&join, &schema, &options).unwrap();
+        let translated =
+            translate_join::<IdentityDirection>(&join, &schema, &options, &mut |_| {}).unwrap();
         assert!(translated.global);
     }
 
@@ -3043,7 +3247,8 @@ mod tests {
             match_condition: parse_expr("t.id > u.id"),
         };
         let translated_as_of =
-            translate_join_operator::<NestingDirection>(&as_of, &schema, &options).unwrap();
+            translate_join_operator::<NestingDirection>(&as_of, &schema, &options, &mut |_| {})
+                .unwrap();
         let JoinOperator::AsOf { match_condition, .. } = translated_as_of else {
             panic!("expected AS OF join");
         };
@@ -3054,7 +3259,8 @@ mod tests {
             alias: sqlparser::ast::Ident::new("a1"),
         };
         let translated_alias =
-            translate_select_item::<NestingDirection>(&alias_item, &schema, &options).unwrap();
+            translate_select_item::<NestingDirection>(&alias_item, &schema, &options, &mut |_| {})
+                .unwrap();
         let SelectItem::ExprWithAlias { expr, .. } = translated_alias else {
             panic!("expected alias expression");
         };

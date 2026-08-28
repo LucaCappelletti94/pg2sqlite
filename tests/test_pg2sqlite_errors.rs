@@ -8,14 +8,20 @@
 //! - `reverse_sql()` with invalid SQL -> `ParserError`
 //! - `translate()` with empty statements -> empty result
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::{
+    errors::{Error, RefusalCategory, TranslationDirection},
+    prelude::{Pg2Sqlite, Pg2SqliteOptions},
+};
 
 #[test]
 fn sql_with_invalid_sql_produces_parser_error() {
-    let result = Pg2Sqlite::default().sql("THIS IS NOT VALID SQL !!!");
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("Parser error"), "Expected parser error, got: {err}");
+    let input = "THIS IS NOT VALID SQL !!!";
+    let error = Pg2Sqlite::default().sql(input).expect_err("invalid SQL must fail");
+    let Error::SqlParse(parse_error) = error else {
+        panic!("expected owned parse error");
+    };
+    assert_eq!(parse_error.input(), input);
+    assert!(std::error::Error::source(&parse_error).is_some());
 }
 
 #[cfg(feature = "std")]
@@ -132,11 +138,40 @@ fn reverse_sql_with_invalid_sql_produces_parser_error() {
         Pg2Sqlite::default().sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
     let schema = translator.build_schema().unwrap();
     let options = Pg2SqliteOptions::default();
+    let input = "NOT VALID SQL !!!";
 
-    let result = translator.reverse_sql("NOT VALID SQL !!!", &schema, &options);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("Parser error"), "Expected parser error, got: {err}");
+    let error =
+        translator.reverse_sql(input, &schema, &options).expect_err("invalid SQL must fail");
+    let Error::SqlParse(parse_error) = error else {
+        panic!("expected owned parse error");
+    };
+    assert_eq!(parse_error.input(), input);
+    assert!(std::error::Error::source(&parse_error).is_some());
+}
+
+#[test]
+fn refusals_expose_direction_and_stable_category() {
+    let forward = Pg2Sqlite::default()
+        .sql("SELECT sqrt(2.0)")
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("math functions require an explicit destination capability");
+    let Error::TranslationRefusal(forward) = forward else {
+        panic!("expected a forward refusal");
+    };
+    assert_eq!(forward.direction(), TranslationDirection::PostgreSqlToSqlite);
+    assert_eq!(forward.category(), RefusalCategory::UnrepresentableSemantics);
+
+    let translator = Pg2Sqlite::default().sql("CREATE TABLE t (id INT PRIMARY KEY);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let reverse = translator
+        .reverse_sql("SELECT rowid FROM t", &schema, &Pg2SqliteOptions::default())
+        .expect_err("SQLite rowid has no PostgreSQL equivalent");
+    let Error::TranslationRefusal(reverse) = reverse else {
+        panic!("expected a reverse refusal");
+    };
+    assert_eq!(reverse.direction(), TranslationDirection::SqliteToPostgreSql);
+    assert_eq!(reverse.category(), RefusalCategory::UnrepresentableSemantics);
 }
 
 #[test]

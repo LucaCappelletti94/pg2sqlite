@@ -188,8 +188,6 @@ FOR EACH ROW EXECUTE FUNCTION propagate_delete();
 /// and the qualifiers match it by construction.
 #[test]
 fn test_delete_using_with_rls_table() -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
 
     // Combine schema setup and DELETE statement so the translator has full context

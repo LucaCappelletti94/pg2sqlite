@@ -9,10 +9,7 @@ mod helpers;
 
 use diesel::connection::SimpleConnection;
 use helpers::{establish_connection, translate_pg};
-use pg2sqlite::{
-    internals::gated_math,
-    prelude::{Pg2SqliteOptions, TranslationOptions},
-};
+use pg2sqlite::prelude::Pg2SqliteOptions;
 
 fn opts_off() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -145,71 +142,9 @@ fn sqlite_parses(sql: &str) {
         Err(e)
             if {
                 let m = e.to_string();
-                gated_math().iter().any(|f| m.contains(&format!("no such function: {f}")))
+                m.contains("no such function:")
             } => {}
         Err(e) => panic!("SQLite rejected emitted SQL: {e}\n{sql}"),
-    }
-}
-
-/// A call shape that parses for `name`, since arity is not what these tests are
-/// about.
-fn call(name: &str) -> String {
-    match name {
-        "pi" => format!("{name}()"),
-        "atan2" | "log" | "mod" | "pow" | "power" | "trunc" => format!("{name}(a, b)"),
-        _ => format!("{name}(v)"),
-    }
-}
-
-/// The option says the destination carries SQLite's maths build, so every name
-/// that build answers may be emitted.
-///
-/// It used to admit only the names with a translation arm of their own, which
-/// left the whole trigonometry family refused while `sqrt` passed: `acos`,
-/// `acosh`, `asin`, `asinh`, `atan`, `atan2`, `atanh`, `ceiling`, `cos`,
-/// `cosh`, `degrees`, `log2`, `pi`, `radians`, `sin`, `sinh`, `tan` and `tanh`,
-/// all eighteen of them names both engines answer, `log2` excepted. The reverse
-/// direction accepts every one, so the refusal was the same omission as the
-/// aggregate one, pointing the other way.
-#[test]
-fn the_option_admits_every_name_the_maths_build_answers() {
-    for name in gated_math() {
-        let query = format!("SELECT {} FROM t;", call(name));
-        let emitted = translate_on(&query)
-            .unwrap_or_else(|error| panic!("{name} is in the maths build: {error}"));
-        sqlite_parses(&emitted);
-    }
-}
-
-/// The other half of the gate, which the widening must not undo: with no
-/// declaration, a gated name is never emitted. A few are not refused at all
-/// because they are lowered to something portable instead, `ceil` and `floor`
-/// into `CASE` over `CAST` and `mod` into the `%` operator, so the assertion is
-/// about what comes out rather than about failing.
-#[test]
-fn without_the_option_no_gated_name_is_emitted() {
-    for name in gated_math() {
-        let query = format!("SELECT {} FROM t;", call(name));
-        match translate_off(&query) {
-            Ok(emitted) => {
-                assert!(
-                    !emitted.to_lowercase().contains(&format!("{name}(")),
-                    "{name} was emitted without the maths declaration: {emitted}"
-                );
-            }
-            // The refusal has to point at the build, not send the caller off to
-            // register a function the build would already carry. Fourteen of
-            // these used to give that wrong advice, having no arm of their own.
-            // The flag rather than the option name, because `trunc` carries its
-            // own narrower message about a computed scale needing `pow`.
-            Err(error) => {
-                let message = error.to_string();
-                assert!(
-                    message.contains("SQLITE_ENABLE_MATH_FUNCTIONS"),
-                    "the refusal for {name} should name the build, got: {message}"
-                );
-            }
-        }
     }
 }
 

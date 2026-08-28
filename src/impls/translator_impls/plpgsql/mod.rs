@@ -4,24 +4,13 @@
 //! and IF conditions become WHERE clauses injected into each enclosed DML
 //! statement. UUID variables are regenerated per INSERT via the
 //! `last_insert_rowid()` pattern.
+//!
+//! Scanning, context tracking, preprocessing, and body parsing live in
+//! `sqlparser-plpgsql` and are re-exported here.
 
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use alloc::{
-    borrow::ToOwned,
-    boxed::Box,
-    format,
-    string::{String, ToString},
-    vec,
-    vec::Vec,
-};
+pub use sqlparser_plpgsql::{PlPgSqlContext, VariableBinding, parse_body};
 
-mod context;
 mod cte_builder;
-mod preprocessor;
-mod scanner;
 mod translator;
 
-pub use context::PlPgSqlContext;
-pub use preprocessor::PlPgSqlPreprocessor;
 pub use translator::PlPgSqlTranslator;

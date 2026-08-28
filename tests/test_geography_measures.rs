@@ -20,10 +20,7 @@ mod helpers;
 
 use diesel::{QueryableByName, RunQueryDsl, sql_query, sql_types::Double};
 use helpers::sqlitegis::sqlitegis_connection;
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 const SCHEMA: &str = "CREATE TABLE g (id INT PRIMARY KEY, geog geography, geom geometry);";
 

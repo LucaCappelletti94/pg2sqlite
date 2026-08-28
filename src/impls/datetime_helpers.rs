@@ -301,7 +301,7 @@ fn push_quoted_literal(result: &mut String, literal: &str, pg_format: &str) -> R
 }
 
 fn unsupported_template(pg_format: &str, reason: &str) -> Error {
-    Error::UnsupportedSQLiteFeature(format!("to_char format '{pg_format}' {reason}"))
+    Error::forward_refusal(format!("to_char format '{pg_format}' {reason}"))
 }
 
 /// The `to_char` template that answers what `format` answers, when every

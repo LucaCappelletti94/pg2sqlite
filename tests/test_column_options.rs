@@ -6,10 +6,7 @@
 
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use translate_helpers::translate_default as translate;
 
 fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
@@ -275,7 +272,7 @@ fn constraint_characteristics_keep_deferrability_and_refuse_enforced() {
     .expect_err("SQLite has no ENFORCED clause");
     assert!(matches!(
         error,
-        Error::UnsupportedSQLiteFeature(message) if message.contains("ENFORCED")
+        Error::TranslationRefusal(refusal) if refusal.detail().contains("ENFORCED")
     ));
 
     let deferred = ConstraintCharacteristics {

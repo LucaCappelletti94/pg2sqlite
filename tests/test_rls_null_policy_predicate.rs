@@ -12,7 +12,7 @@
 //! WITH CHECK evaluates to NULL must be refused.
 
 use diesel::{prelude::*, sqlite::SqliteConnection};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 
 #[declare_sql_function]
 extern "SQL" {

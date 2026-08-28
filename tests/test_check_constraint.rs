@@ -8,10 +8,7 @@
 //! - Nested function calls inside CHECK are handled correctly
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection as SqliteConn;
 
 /// The constraint must survive translation AND still be enforced at runtime, so

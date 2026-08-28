@@ -5,10 +5,7 @@
 //! I1c: Function parameters not transformed in RLS
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 fn translate(sql: &str) -> Result<String, Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");

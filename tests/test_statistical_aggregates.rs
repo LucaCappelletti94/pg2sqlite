@@ -19,10 +19,7 @@
 #[path = "helpers/statistical_aggregates.rs"]
 mod statistical_aggregates;
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
 use statistical_aggregates::{STATISTICAL_AGGREGATES, register_statistical_aggregates};
 

@@ -7,7 +7,7 @@
 //! The default conversion expression is the pure-SQLite shape
 //! `unhex(replace(literal, '-', ''))` so callers do not need to register
 //! a custom UDF. When
-//! [`crate::traits::TranslationOptions::with_uuid_text_to_blob_function_name`]
+//! [`Pg2SqliteOptions::with_uuid_text_to_blob_function_name`]
 //! is configured, the translator instead emits a call to that UDF.
 
 #[cfg(not(feature = "std"))]
@@ -31,7 +31,7 @@ use sqlparser::ast::{BinaryOperator, DataType, Expr, Ident, Value, ValueWithSpan
 use crate::{
     impls::function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
     prelude::Pg2SqliteOptions,
-    traits::{TranslationOptions, UuidRepresentation},
+    traits::UuidRepresentation,
 };
 
 /// True when the data type is the PostgreSQL `UUID` builtin.
@@ -130,7 +130,7 @@ pub(crate) fn maybe_wrap_text_uuid_literal(
         return Ok(expr);
     };
     let Some(hex) = canonical_uuid_hex(text) else {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "invalid input syntax for type uuid: \"{text}\""
         )));
     };
@@ -166,7 +166,7 @@ pub(crate) fn wrap_uuid_column_default(
         return Ok(expr);
     };
     if canonical_uuid_hex(text).is_none() {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "column '{}' has a DEFAULT that is not a valid UUID: \"{text}\". PostgreSQL \
              refuses this at CREATE TABLE time with 'invalid input syntax for type uuid', \
              and the Blob representation cannot convert it to sixteen bytes.",

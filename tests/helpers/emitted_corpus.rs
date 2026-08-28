@@ -7,9 +7,7 @@
 // `scripts/check_sqlite_floor.sh`, so a corpus row is automatically a floor
 // check. One home for the data keeps the two proofs over the same corpus.
 
-use pg2sqlite::prelude::{
-    ArrayRepresentation, Pg2SqliteOptions, TranslationOptions, UuidRepresentation,
-};
+use pg2sqlite::prelude::{ArrayRepresentation, Pg2SqliteOptions, UuidRepresentation};
 
 /// Declared up front so no case fails merely for naming an unknown relation.
 pub const FIXTURE: &str = "

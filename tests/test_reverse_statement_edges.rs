@@ -1,9 +1,6 @@
 //! Additional reverse-statement edge coverage.
 
-use pg2sqlite::{
-    prelude::{Pg2SqliteOptions, ReverseTranslator},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2SqliteOptions, ReverseTranslator};
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{

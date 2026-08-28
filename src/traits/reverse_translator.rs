@@ -13,7 +13,6 @@ use alloc::{
 };
 
 use super::Schema;
-use crate::traits::TranslationOptions;
 
 /// Trait for reverse translating SQLite DML statements to PostgreSQL,
 /// the inverse of [`crate::traits::Translator`].
@@ -21,7 +20,7 @@ pub trait ReverseTranslator {
     /// Schema type for the translation.
     type Schema: Schema;
     /// Translation options type.
-    type Options: TranslationOptions;
+    type Options;
     /// Produced PostgreSQL entry type.
     type PostgresEntry;
 

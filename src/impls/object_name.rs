@@ -48,14 +48,6 @@ pub(crate) fn last_ident_value_or_display(name: &ObjectName) -> String {
     last_ident(name).map_or_else(|| name.to_string(), |ident| ident.value.clone())
 }
 
-/// Wraps `value` in single quotes and escapes interior single quotes per the
-/// standard SQL convention (`'` -> `''`). Used wherever we synthesize SQL
-/// string literals into generated statements.
-#[must_use]
-pub(crate) fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 /// Appends a suffix to the last identifier in an object name.
 pub(crate) fn append_suffix(name: &ObjectName, suffix: &str) -> ObjectName {
     let mut updated = name.clone();
@@ -253,12 +245,6 @@ pub(crate) fn quote_identifier(name: &str) -> String {
     if is_simple { name.to_string() } else { format!("\"{}\"", name.replace('"', "\"\"")) }
 }
 
-/// Builds a quoted qualified reference such as `NEW."column"`.
-#[must_use]
-pub(crate) fn prefixed_quoted_identifier(prefix: &str, name: &str) -> String {
-    format!("{prefix}.{}", quote_identifier(name))
-}
-
 /// Creates an identifier that keeps double-quote style when formatted.
 #[must_use]
 pub(crate) fn quoted_ident(name: &str) -> Ident {
@@ -276,9 +262,9 @@ mod tests {
 
     use super::{
         append_suffix, implicit_public_lookup_parts, last_ident,
-        normalize_schema_qualified_object_name_for_sqlite, prefixed_quoted_identifier,
-        quote_identifier, quoted_ident, sqlite_unqualified_object_name,
-        table_with_implicit_public_lookup, validate_schema_qualified_object_name_for_sqlite,
+        normalize_schema_qualified_object_name_for_sqlite, quote_identifier, quoted_ident,
+        sqlite_unqualified_object_name, table_with_implicit_public_lookup,
+        validate_schema_qualified_object_name_for_sqlite,
     };
 
     fn name(parts: &[&str]) -> ObjectName {
@@ -301,7 +287,6 @@ mod tests {
         assert_eq!(quote_identifier("simple_name"), "simple_name");
         assert_eq!(quote_identifier("a b"), "\"a b\"");
         assert_eq!(quote_identifier("a\"b"), "\"a\"\"b\"");
-        assert_eq!(prefixed_quoted_identifier("NEW", "a b"), "NEW.\"a b\"");
 
         let ident = quoted_ident("spaced ident");
         assert_eq!(ident.to_string(), "\"spaced ident\"");

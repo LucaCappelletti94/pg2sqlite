@@ -37,8 +37,7 @@ use crate::{
         query_builder::single_expr_query,
         shared_helpers::ColumnRewrites,
     },
-    options::Pg2SqliteOptions,
-    traits::{schema::Schema, translation_options::TranslationOptions, translator::Translator},
+    traits::{schema::Schema, translator::TranslatorWithContext},
 };
 
 /// Builds the `UPDATE` that stands in for a plpgsql body assigning to
@@ -54,7 +53,8 @@ fn generate_maintenance_trigger_body(
     target_table_name: &ObjectName,
     row_context: &str,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::BeginEndStatements, crate::errors::Error> {
     // The rewrites come from the trigger's own table, whose name is still the
     // PostgreSQL one at this point. `target_table_name` may already be the
@@ -63,7 +63,7 @@ fn generate_maintenance_trigger_body(
     let assignments = trigger
         .maintenance_assignments(schema)?
         .map(|(col, expr)| {
-            let value = expr.translate(schema, options)?;
+            let value = expr.translate_with_warnings(schema, options, emit)?;
             Ok(Assignment {
                 target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
                     Ident::new(col.column_name()),
@@ -135,12 +135,13 @@ fn generate_maintenance_trigger_body(
 /// the plpgsql translator emptied by dropping statements it could not render.
 fn substitute_no_op_body_when_empty(
     mut body: sqlparser::ast::BeginEndStatements,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> sqlparser::ast::BeginEndStatements {
     if !body.statements.is_empty() {
         return body;
     }
 
-    crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+    emit(crate::warnings::TranslationWarning::LossyDrop {
         construct: "empty trigger body".to_string(),
         reason: "the translated trigger body has no statements left, so the trigger does nothing. \
                  SQLite rejects an empty BEGIN END, so it carries SELECT NULL instead."
@@ -159,7 +160,7 @@ fn substitute_no_op_body_when_empty(
 fn route_trigger_write_name(
     name: &mut ObjectName,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), crate::errors::Error> {
     if options.get_write_exemption_function().is_none() {
         return Ok(());
@@ -176,7 +177,7 @@ fn route_trigger_write_name(
 fn route_trigger_table_factor(
     factor: &mut TableFactor,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), crate::errors::Error> {
     if let TableFactor::Table { name, .. } = factor {
         route_trigger_write_name(name, schema, options)?;
@@ -187,7 +188,7 @@ fn route_trigger_table_factor(
 fn route_trigger_query_writes(
     query: &mut Query,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), crate::errors::Error> {
     if let Some(with) = &mut query.with {
         for cte in &mut with.cte_tables {
@@ -211,7 +212,7 @@ fn route_trigger_query_writes(
 fn route_trigger_statement_writes(
     statement: &mut Statement,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), crate::errors::Error> {
     match statement {
         Statement::Insert(insert) => {
@@ -240,7 +241,8 @@ fn generate_standard_trigger_body(
     events: &[sqlparser::ast::TriggerEvent],
     table_name: &sqlparser::ast::ObjectName,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<sqlparser::ast::BeginEndStatements>, crate::errors::Error> {
     let function_name = exec_body.func_desc.name.clone();
     if let Some((mut body, mut context)) =
@@ -266,7 +268,7 @@ fn generate_standard_trigger_body(
             }
         });
         let mut translated = super::plpgsql::PlPgSqlTranslator::translate_with_context(
-            &body, context, schema, options,
+            &body, context, schema, options, emit,
         )?;
         for statement in &mut translated {
             route_trigger_statement_writes(statement, schema, options)?;
@@ -387,22 +389,22 @@ fn split_before_insert_maintenance_trigger(
     Some((insert_trigger, non_insert_trigger))
 }
 
-impl Translator for CreateTrigger {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Vec<(Option<DropTrigger>, Self)>;
-
+crate::traits::translator::impl_contextual_translator!(
+    CreateTrigger => Vec<(Option<DropTrigger>, CreateTrigger)>
+);
+impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
     #[allow(clippy::too_many_lines)]
-    fn translate(
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         // Checked before the FOR EACH clause because PostgreSQL allows
         // TRUNCATE triggers only FOR EACH STATEMENT, so that check would catch
         // every valid one first and advise a rewrite PostgreSQL rejects.
         if self.events.iter().any(|event| matches!(event, TriggerEvent::Truncate)) {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+            return Err(crate::errors::Error::forward_refusal(
                 "a TRUNCATE trigger has no SQLite equivalent, since SQLite has no TRUNCATE. \
                  PostgreSQL TRUNCATE is translated to DELETE FROM, which fires DELETE triggers, \
                  so add the work to a DELETE trigger if it should run on that."
@@ -423,19 +425,19 @@ impl Translator for CreateTrigger {
                 TriggerObjectKind::For(TriggerObject::Statement)
                 | TriggerObjectKind::ForEach(TriggerObject::Statement),
             ) => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "a statement trigger has no SQLite equivalent, since SQLite fires a trigger \
-                     once per row rather than once per statement. Rewrite the body so it is \
-                     correct once per row and declare the trigger FOR EACH ROW."
+                         once per row rather than once per statement. Rewrite the body so it is \
+                         correct once per row and declare the trigger FOR EACH ROW."
                         .to_string(),
                 ));
             }
             None => {
-                return Err(crate::errors::Error::UnsupportedSQLiteFeature(
+                return Err(crate::errors::Error::forward_refusal(
                     "a trigger with no FOR EACH clause is a statement trigger in PostgreSQL, \
-                     which has no SQLite equivalent, since SQLite fires a trigger once per row \
-                     rather than once per statement. Write FOR EACH ROW if that is what was \
-                     meant, since SQLite would otherwise silently run the body once per row."
+                         which has no SQLite equivalent, since SQLite fires a trigger once per row \
+                         rather than once per statement. Write FOR EACH ROW if that is what was \
+                         meant, since SQLite would otherwise silently run the body once per row."
                         .to_string(),
                 ));
             }
@@ -445,7 +447,7 @@ impl Translator for CreateTrigger {
         // which a SQLite row trigger cannot see. PostgreSQL allows the clause
         // on a FOR EACH ROW trigger too, so R27's rejection does not cover it.
         if let Some(referencing) = self.referencing.first() {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "the transition table `{referencing}` has no SQLite equivalent, since a SQLite \
                  trigger body sees one row at a time through NEW and OLD and never the set of \
                  rows a statement touched. Collect the rows in a table the body appends to, or \
@@ -478,8 +480,8 @@ impl Translator for CreateTrigger {
                 split_before_insert_maintenance_trigger(&trigger_for_helpers, schema)
         {
             let mut translated = Vec::new();
-            translated.extend(non_insert_trigger.translate(schema, options)?);
-            translated.extend(insert_trigger.translate(schema, options)?);
+            translated.extend(non_insert_trigger.translate_with_warnings(schema, options, emit)?);
+            translated.extend(insert_trigger.translate_with_warnings(schema, options, emit)?);
             return Ok(translated);
         }
 
@@ -504,19 +506,19 @@ impl Translator for CreateTrigger {
         } = normalized_trigger;
 
         if let Some(statements) = statements {
-            return Err(crate::errors::Error::UnknownPostgresFeature(format!(
+            return Err(crate::errors::Error::unsupported_source_syntax(format!(
                 "Triggers with statements are not supported: `{statements}`"
             )));
         }
 
         let Some(exec_body) = exec_body else {
-            return Err(crate::errors::Error::UnknownPostgresFeature(
-                "Triggers without an execution body are not supported".into(),
+            return Err(crate::errors::Error::unsupported_source_syntax(
+                "Triggers without an execution body are not supported",
             ));
         };
 
         if matches!(exec_body.exec_type, TriggerExecBodyType::Procedure) {
-            return Err(crate::errors::Error::UnknownPostgresFeature(format!(
+            return Err(crate::errors::Error::unsupported_source_syntax(format!(
                 "Triggers with execution body of type `Procedure` are not supported: `{exec_body}`"
             )));
         }
@@ -565,6 +567,7 @@ impl Translator for CreateTrigger {
                 row_context,
                 schema,
                 options,
+                emit,
             )?
         } else if let Some(body) = generate_standard_trigger_body(
             &exec_body,
@@ -572,10 +575,11 @@ impl Translator for CreateTrigger {
             &redirected_table_name,
             schema,
             options,
+            emit,
         )? {
             body
         } else {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "Trigger function '{}' body not found. Make sure the CREATE FUNCTION statement \
                  is included in the same translation batch as the CREATE TRIGGER.",
                 exec_body.func_desc.name
@@ -588,7 +592,7 @@ impl Translator for CreateTrigger {
         // place, which skipping the statement would not: a later DROP TRIGGER
         // would find nothing, and a CREATE OR REPLACE could not emit its DROP
         // at all, since this returns pairs in which the CREATE is not optional.
-        let function_body = substitute_no_op_body_when_empty(function_body);
+        let function_body = substitute_no_op_body_when_empty(function_body, emit);
 
         let maybe_drop_trigger = or_replace.then(|| {
             DropTrigger {
@@ -600,19 +604,19 @@ impl Translator for CreateTrigger {
         });
 
         if or_alter {
-            return Err(crate::errors::Error::UnknownPostgresFeature(
-                "Triggers with `OR ALTER` are not supported".into(),
+            return Err(crate::errors::Error::unsupported_source_syntax(
+                "Triggers with `OR ALTER` are not supported",
             ));
         }
 
         if is_constraint {
-            return Err(crate::errors::Error::UnknownPostgresFeature(
-                "Constraint triggers are not supported".into(),
+            return Err(crate::errors::Error::unsupported_source_syntax(
+                "Constraint triggers are not supported",
             ));
         }
 
         if let Some(characteristics) = &characteristics {
-            return Err(crate::errors::Error::UnknownPostgresFeature(format!(
+            return Err(crate::errors::Error::unsupported_source_syntax(format!(
                 "Triggers with characteristics are not supported: `{characteristics}`"
             )));
         }
@@ -635,7 +639,7 @@ impl Translator for CreateTrigger {
                 statements_as,
                 condition: condition
                     .as_ref()
-                    .map(|cond| cond.translate(schema, options))
+                    .map(|cond| cond.translate_with_warnings(schema, options, emit))
                     .transpose()?,
                 exec_body: None,
                 statements: Some(ConditionalStatements::BeginEnd(function_body)),
@@ -654,7 +658,7 @@ mod tests {
         parser::Parser,
     };
 
-    use crate::prelude::{Pg2SqliteOptions, TranslationOptions, Translator};
+    use crate::prelude::{Pg2SqliteOptions, Translator};
 
     fn parse_statements(sql: &str) -> Vec<Statement> {
         Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
@@ -685,7 +689,7 @@ mod tests {
     #[test]
     fn instead_of_trigger_on_rls_table_keeps_original_table_name() {
         let schema = schema_with_trigger_function_and_rls_table();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let trigger = parse_trigger(
             "CREATE TRIGGER docs_instead INSTEAD OF INSERT ON docs \
              FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn()",
@@ -886,7 +890,9 @@ mod tests {
     #[test]
     fn configured_exemption_routes_trigger_dml_targets_to_backing_tables() {
         let schema = schema_with_trigger_function_and_rls_table();
-        let options = Pg2SqliteOptions::default().with_write_exemption_function("write_is_exempt");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_write_exemption_function("write_is_exempt"),
+        );
 
         for sql in [
             "INSERT INTO docs(id) VALUES (1)",
@@ -911,7 +917,7 @@ mod tests {
         super::route_trigger_statement_writes(
             &mut default_insert,
             &schema,
-            &Pg2SqliteOptions::default(),
+            &crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default()),
         )
         .expect("leave default translation alone");
         assert_eq!(default_insert.to_string(), "INSERT INTO docs (id) VALUES (1)");

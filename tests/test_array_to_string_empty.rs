@@ -13,10 +13,7 @@
 //!
 //! Every expected value below was read off PostgreSQL 17.
 
-use pg2sqlite::{
-    prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::{Connection, types::FromSql};
 
 const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, tags TEXT[]);";

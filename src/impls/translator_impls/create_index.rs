@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `CreateIndex` type.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `CreateIndex` type.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -16,23 +16,22 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
 };
-use sqlparser::{
-    ast::{
-        CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, Statement, VisitMut,
-        VisitorMut,
-    },
-    dialect::{PostgreSqlDialect, SQLiteDialect},
-    parser::Parser,
+use sqlparser::ast::{
+    CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, SetExpr, Statement,
+    TriggerEvent, TriggerPeriod, VisitMut, VisitorMut,
 };
 
 use crate::{
     errors::Error,
     impls::{
-        generated_sql::parse_generated_sql,
+        ast_builder,
+        function_helpers::{simple_function_expr, string_literal},
         object_name::{
             last_ident_value_or_display, normalize_schema_qualified_object_name_for_sqlite,
-            prefixed_quoted_identifier, quote_identifier, quoted_ident, sql_string_literal,
-            sqlite_unqualified_object_name, table_with_implicit_public_lookup,
+            quoted_ident, sqlite_unqualified_object_name, table_with_implicit_public_lookup,
+        },
+        query_builder::{
+            from_relation, make_query, make_simple_select, plain_table_factor, single_expr_query,
         },
         shared_helpers::{
             extract_columns_from_expr, function_argument_exprs,
@@ -40,7 +39,6 @@ use crate::{
         },
         translator_impls::{postgis, rls::resolve_trigger_table_name},
     },
-    prelude::{Pg2SqliteOptions, TranslationOptions, Translator},
 };
 
 /// Represents the result of translating a GIN/GiST index - either an FTS5
@@ -144,14 +142,7 @@ fn create_fts5_virtual_table(
     }
 }
 
-/// Qualify all bare identifier references in `predicate_sql` with `qualifier`
-/// (e.g. "NEW" or "OLD") so trigger WHEN clauses resolve columns through the
-/// correct row reference instead of failing with "no such column".
-///
-/// Parses the predicate with the SQLite dialect, applies the qualifier to each
-/// bare `Expr::Identifier` node, and serializes back. Returns the original
-/// string unchanged on parse failure.
-fn qualify_predicate(predicate_sql: &str, qualifier: &str) -> String {
+fn qualify_predicate(predicate: &Expr, qualifier: &str) -> Expr {
     use core::ops::ControlFlow;
 
     struct QualifyIdents(Ident);
@@ -159,24 +150,18 @@ fn qualify_predicate(predicate_sql: &str, qualifier: &str) -> String {
     impl VisitorMut for QualifyIdents {
         type Break = ();
         fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
-            if let Expr::Identifier(col) = expr {
-                let col = col.clone();
-                *expr = Expr::CompoundIdentifier(vec![self.0.clone(), col]);
+            if let Expr::Identifier(column) = expr {
+                let column = column.clone();
+                *expr = Expr::CompoundIdentifier(vec![self.0.clone(), column]);
             }
             ControlFlow::Continue(())
         }
     }
 
-    let Ok(mut parsed_expr) =
-        Parser::new(&SQLiteDialect {}).try_with_sql(predicate_sql).and_then(|mut p| p.parse_expr())
-    else {
-        return predicate_sql.to_string();
-    };
-
+    let mut qualified_predicate = predicate.clone();
     let _: ControlFlow<()> =
-        VisitMut::visit(&mut parsed_expr, &mut QualifyIdents(Ident::new(qualifier)));
-
-    parsed_expr.to_string()
+        VisitMut::visit(&mut qualified_predicate, &mut QualifyIdents(Ident::new(qualifier)));
+    qualified_predicate
 }
 
 /// Generate FTS5 sync triggers for external content mode.
@@ -199,80 +184,95 @@ fn create_fts5_triggers(
     fts_table_base: &str,
     pk_column: &str,
     columns: &[String],
-    predicate_sql: Option<&str>,
-) -> Vec<String> {
+    predicate: Option<&Expr>,
+) -> Vec<Statement> {
     let fts_name = format!("{fts_table_base}_fts");
-    let trigger_table_quoted = quote_identifier(trigger_table);
-    let fts_name_quoted = quote_identifier(&fts_name);
-    let columns_list = columns.iter().map(|c| quote_identifier(c)).collect::<Vec<_>>().join(", ");
-    let new_values =
-        columns.iter().map(|c| prefixed_quoted_identifier("new", c)).collect::<Vec<_>>().join(", ");
-    let old_values =
-        columns.iter().map(|c| prefixed_quoted_identifier("old", c)).collect::<Vec<_>>().join(", ");
-    let new_pk = prefixed_quoted_identifier("new", pk_column);
-    let old_pk = prefixed_quoted_identifier("old", pk_column);
-    let insert_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ai"));
-    let delete_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_ad"));
+    let name = |value: &str| ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(value))]);
+    let row_value = |row: &str, column: &str| {
+        Expr::CompoundIdentifier(vec![Ident::new(row), quoted_ident(column)])
+    };
+    let target_columns = || {
+        core::iter::once(name("rowid")).chain(columns.iter().map(|column| name(column))).collect()
+    };
+    let new_values = || {
+        core::iter::once(row_value("new", pk_column))
+            .chain(columns.iter().map(|column| row_value("new", column)))
+            .collect()
+    };
+    let old_values = || {
+        core::iter::once(string_literal("delete"))
+            .chain(core::iter::once(row_value("old", pk_column)))
+            .chain(columns.iter().map(|column| row_value("old", column)))
+            .collect()
+    };
+    let insert_new = || {
+        ast_builder::insert(
+            name(&fts_name),
+            target_columns(),
+            ast_builder::values(vec![new_values()]),
+        )
+    };
+    let delete_old = || {
+        let delete_columns = core::iter::once(name(&fts_name)).chain(target_columns()).collect();
+        ast_builder::insert(
+            name(&fts_name),
+            delete_columns,
+            ast_builder::values(vec![old_values()]),
+        )
+    };
+    let trigger =
+        |suffix: &str, event: TriggerEvent, condition: Option<Expr>, statements: Vec<Statement>| {
+            ast_builder::trigger(
+                name(&format!("{fts_table_base}_fts_{suffix}")),
+                name(trigger_table),
+                TriggerPeriod::After,
+                event,
+                false,
+                condition,
+                statements,
+            )
+        };
 
-    match predicate_sql {
+    match predicate {
         None => {
-            let update_trigger_name = quote_identifier(&format!("{fts_table_base}_fts_au"));
             vec![
-                format!(
-                    "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON {trigger_table_quoted} BEGIN \
-                     INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
-                     END"
-                ),
-                format!(
-                    "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON {trigger_table_quoted} BEGIN \
-                     INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
-                     VALUES ('delete', {old_pk}, {old_values}); \
-                     END"
-                ),
-                format!(
-                    "CREATE TRIGGER {update_trigger_name} AFTER UPDATE ON {trigger_table_quoted} BEGIN \
-                     INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
-                     VALUES ('delete', {old_pk}, {old_values}); \
-                     INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
-                     END"
+                trigger("ai", TriggerEvent::Insert, None, vec![insert_new()]),
+                trigger("ad", TriggerEvent::Delete, None, vec![delete_old()]),
+                trigger(
+                    "au",
+                    TriggerEvent::Update(Vec::new()),
+                    None,
+                    vec![delete_old(), insert_new()],
                 ),
             ]
         }
-        Some(pred) => {
-            let new_pred = qualify_predicate(pred, "NEW");
-            let old_pred = qualify_predicate(pred, "OLD");
-            // The UPDATE trigger cannot share a single WHEN because the delete
-            // half needs OLD-qualified columns and the insert half needs
-            // NEW-qualified ones. Two triggers with their respective WHEN
-            // clauses handle boundary crossings correctly.
-            let au_delete_name = quote_identifier(&format!("{fts_table_base}_fts_au_delete"));
-            let au_insert_name = quote_identifier(&format!("{fts_table_base}_fts_au_insert"));
+        Some(predicate) => {
+            let new_predicate = qualify_predicate(predicate, "NEW");
+            let old_predicate = qualify_predicate(predicate, "OLD");
             vec![
-                format!(
-                    "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON \
-                     {trigger_table_quoted} WHEN {new_pred} BEGIN \
-                     INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
-                     END"
+                trigger(
+                    "ai",
+                    TriggerEvent::Insert,
+                    Some(new_predicate.clone()),
+                    vec![insert_new()],
                 ),
-                format!(
-                    "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON \
-                     {trigger_table_quoted} WHEN {old_pred} BEGIN \
-                     INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
-                     VALUES ('delete', {old_pk}, {old_values}); \
-                     END"
+                trigger(
+                    "ad",
+                    TriggerEvent::Delete,
+                    Some(old_predicate.clone()),
+                    vec![delete_old()],
                 ),
-                format!(
-                    "CREATE TRIGGER {au_delete_name} AFTER UPDATE ON \
-                     {trigger_table_quoted} WHEN {old_pred} BEGIN \
-                     INSERT INTO {fts_name_quoted}({fts_name_quoted}, rowid, {columns_list}) \
-                     VALUES ('delete', {old_pk}, {old_values}); \
-                     END"
+                trigger(
+                    "au_delete",
+                    TriggerEvent::Update(Vec::new()),
+                    Some(old_predicate),
+                    vec![delete_old()],
                 ),
-                format!(
-                    "CREATE TRIGGER {au_insert_name} AFTER UPDATE ON \
-                     {trigger_table_quoted} WHEN {new_pred} BEGIN \
-                     INSERT INTO {fts_name_quoted}(rowid, {columns_list}) VALUES ({new_pk}, {new_values}); \
-                     END"
+                trigger(
+                    "au_insert",
+                    TriggerEvent::Update(Vec::new()),
+                    Some(new_predicate),
+                    vec![insert_new()],
                 ),
             ]
         }
@@ -284,9 +284,9 @@ fn create_fts5_triggers(
 fn create_fts5_statements(
     table_name: &ObjectName,
     columns: &[String],
-    predicate_sql: Option<&str>,
+    predicate: Option<&Expr>,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Vec<Statement>, Error> {
     let base_name = table_name
         .0
@@ -295,14 +295,14 @@ fn create_fts5_statements(
         .map_or_else(|| "unknown".to_string(), |i| i.value.clone());
 
     let table = table_with_implicit_public_lookup(schema, table_name)?.ok_or_else(|| {
-        Error::UnsupportedSQLiteFeature(format!(
+        Error::forward_refusal(format!(
             "Could not find table '{base_name}' in schema for FTS5 index creation"
         ))
     })?;
 
     let pk_columns: Vec<_> = table.primary_key_columns(schema)?.collect();
     if pk_columns.len() != 1 {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "FTS5 requires a single-column primary key. Table '{base_name}' has {} primary key columns.",
             pk_columns.len()
         )));
@@ -316,52 +316,40 @@ fn create_fts5_statements(
     let pk_type_str = pk_columns[0].attribute().data_type.to_string().to_uppercase();
     let is_integer_pk = pk_type_str.contains("INT") || pk_type_str.contains("SERIAL");
     if !is_integer_pk {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::forward_refusal(format!(
             "FTS5 external content mode requires an INTEGER primary key column for \
-             content_rowid= (table '{base_name}', column '{pk_column}', type '{pk_type_str}'). \
-             FTS5 uses the rowid - a 64-bit integer - to look up rows in the content table. \
-             Use an INTEGER or BIGINT primary key, or add a surrogate INTEGER rowid column."
+         content_rowid= (table '{base_name}', column '{pk_column}', type '{pk_type_str}'). \
+         FTS5 uses the rowid - a 64-bit integer - to look up rows in the content table. \
+         Use an INTEGER or BIGINT primary key, or add a surrogate INTEGER rowid column."
         )));
     }
     let trigger_table_name = resolve_trigger_table_name(&base_name, table, schema, options)?;
 
-    let fts_name = format!("{base_name}_fts");
-    let fts_name_quoted = quote_identifier(&fts_name);
-    let trigger_table_quoted = quote_identifier(&trigger_table_name);
-    let pk_column_quoted = quote_identifier(pk_column);
-    let columns_list = columns.iter().map(|c| quote_identifier(c)).collect::<Vec<_>>().join(", ");
-
+    let name = |value: &str| ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(value))]);
     let mut statements =
         vec![create_fts5_virtual_table(&base_name, &trigger_table_name, pk_column, columns)];
+    statements.extend(create_fts5_triggers(
+        &trigger_table_name,
+        &base_name,
+        pk_column,
+        columns,
+        predicate,
+    ));
 
-    for trigger_sql in
-        create_fts5_triggers(&trigger_table_name, &base_name, pk_column, columns, predicate_sql)
-    {
-        let parsed = parse_generated_sql(
-            &sqlparser::dialect::SQLiteDialect {},
-            &trigger_sql,
-            "Failed to parse generated FTS5 trigger SQL",
-        )?;
-        statements.extend(parsed);
-    }
-
-    let backfill_sql = if let Some(pred) = predicate_sql {
-        format!(
-            "INSERT INTO {fts_name_quoted}(rowid, {columns_list}) \
-             SELECT {pk_column_quoted}, {columns_list} FROM {trigger_table_quoted} WHERE {pred}"
-        )
-    } else {
-        format!(
-            "INSERT INTO {fts_name_quoted}(rowid, {columns_list}) \
-             SELECT {pk_column_quoted}, {columns_list} FROM {trigger_table_quoted}"
-        )
-    };
-    let parsed_backfill = parse_generated_sql(
-        &sqlparser::dialect::SQLiteDialect {},
-        &backfill_sql,
-        "Failed to parse generated FTS5 backfill SQL",
-    )?;
-    statements.extend(parsed_backfill);
+    let projection = core::iter::once(Expr::Identifier(quoted_ident(pk_column)))
+        .chain(columns.iter().map(|column| Expr::Identifier(quoted_ident(column))))
+        .collect();
+    let source = make_query(
+        None,
+        SetExpr::Select(Box::new(make_simple_select(
+            ast_builder::select_items(projection),
+            from_relation(plain_table_factor(name(&trigger_table_name))),
+            predicate.cloned(),
+        ))),
+    );
+    let target_columns =
+        core::iter::once(name("rowid")).chain(columns.iter().map(|column| name(column))).collect();
+    statements.push(ast_builder::insert(name(&format!("{base_name}_fts")), target_columns, source));
 
     Ok(statements)
 }
@@ -387,18 +375,21 @@ fn try_spatial_index_routing(
         return Ok(None);
     };
 
-    let table_literal = sql_string_literal(&last_ident_value_or_display(sqlite_table_name));
-    let mut statements = Vec::with_capacity(spatial_columns.len());
-    for col in spatial_columns {
-        let col_literal = sql_string_literal(&col);
-        let sql = format!("SELECT CreateSpatialIndex({table_literal}, {col_literal});");
-        let mut parsed = parse_generated_sql(
-            &PostgreSqlDialect {},
-            &sql,
-            "spatial index translation (CreateSpatialIndex call)",
-        )?;
-        statements.append(&mut parsed);
-    }
+    let table_name = last_ident_value_or_display(sqlite_table_name);
+    let statements = spatial_columns
+        .into_iter()
+        .map(|column| {
+            Statement::Query(Box::new(single_expr_query(
+                simple_function_expr(
+                    "CreateSpatialIndex",
+                    vec![string_literal(&table_name), string_literal(&column)],
+                    None,
+                ),
+                Vec::new(),
+                None,
+            )))
+        })
+        .collect();
     Ok(Some(statements))
 }
 /// Reports the PostgreSQL-only clauses the regular index path drops.
@@ -408,11 +399,11 @@ fn try_spatial_index_routing(
 /// one. Only the clauses a `PostgreSqlDialect` parse can deliver are here:
 /// `index_options` and `alter_options` belong to other dialects and never
 /// arrive populated.
-fn report_dropped_index_clauses(index: &CreateIndex) {
+fn report_dropped_index_clauses(index: &CreateIndex, emit: crate::warnings::WarningSink<'_>) {
     if !index.include.is_empty() {
         let included = index.include.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
         let key = index.columns.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+        emit(crate::warnings::TranslationWarning::LossyDowngrade {
             construct: "index INCLUDE".to_string(),
             from: format!("({key}) INCLUDE ({included})"),
             to: format!("({key})"),
@@ -426,7 +417,7 @@ fn report_dropped_index_clauses(index: &CreateIndex) {
     }
 
     if let Some(method) = &index.using {
-        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDowngrade {
+        emit(crate::warnings::TranslationWarning::LossyDowngrade {
             construct: "index method".to_string(),
             from: format!("USING {method}"),
             to: "a SQLite b-tree index".to_string(),
@@ -440,7 +431,7 @@ fn report_dropped_index_clauses(index: &CreateIndex) {
     }
 
     if index.concurrently {
-        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+        emit(crate::warnings::TranslationWarning::LossyDrop {
             construct: "CREATE INDEX CONCURRENTLY".to_string(),
             reason: "SQLite builds an index while holding a write lock and has no concurrent \
                      form. The resulting index is identical, so only the lock the build takes \
@@ -451,7 +442,7 @@ fn report_dropped_index_clauses(index: &CreateIndex) {
 
     if !index.with.is_empty() {
         let parameters = index.with.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-        crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+        emit(crate::warnings::TranslationWarning::LossyDrop {
             construct: "index storage parameters".to_string(),
             reason: format!(
                 "SQLite has no storage parameters, so WITH ({parameters}) is dropped. These \
@@ -462,15 +453,13 @@ fn report_dropped_index_clauses(index: &CreateIndex) {
     }
 }
 
-impl Translator for CreateIndex {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Vec<Statement>;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(CreateIndex => Vec<Statement>);
+impl crate::traits::translator::TranslatorWithContext for CreateIndex {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         let sqlite_table_name =
             normalize_schema_qualified_object_name_for_sqlite(schema, &self.table_name)?;
@@ -487,12 +476,10 @@ impl Translator for CreateIndex {
         }
 
         if matches!(self.using, Some(IndexType::GIN | IndexType::GiST)) {
-            // Translate the partial-index predicate (if any) to a SQLite SQL string
-            // so that FTS5 sync triggers can include a WHEN clause.
-            let predicate_sql: Option<String> = self
+            let predicate = self
                 .predicate
                 .as_ref()
-                .map(|p| p.translate(schema, options).map(|e| e.to_string()))
+                .map(|predicate| predicate.translate_with_warnings(schema, options, emit))
                 .transpose()?;
 
             let mut normalized_index = self.clone();
@@ -503,12 +490,12 @@ impl Translator for CreateIndex {
                     create_fts5_statements(
                         &table_name,
                         &columns,
-                        predicate_sql.as_deref(),
+                        predicate.as_ref(),
                         schema,
                         options,
                     )
                 }
-                FtsTranslation::Unsupported(reason) => Err(Error::UnsupportedSQLiteFeature(reason)),
+                FtsTranslation::Unsupported(reason) => Err(Error::forward_refusal(reason)),
             };
         }
 
@@ -516,7 +503,7 @@ impl Translator for CreateIndex {
             return Err(nulls_not_distinct_not_supported_error());
         }
 
-        report_dropped_index_clauses(self);
+        report_dropped_index_clauses(self, emit);
 
         // Regular index - translate normally, explicitly dropping PG-only fields
         // (using, concurrently, include, nulls_distinct, with, index_options,
@@ -530,7 +517,7 @@ impl Translator for CreateIndex {
             columns: self
                 .columns
                 .iter()
-                .map(|col| col.translate(schema, options))
+                .map(|col| col.translate_with_warnings(schema, options, emit))
                 .collect::<Result<_, _>>()?,
             unique: self.unique,
             concurrently: false,
@@ -542,7 +529,7 @@ impl Translator for CreateIndex {
             predicate: self
                 .predicate
                 .as_ref()
-                .map(|predicate| predicate.translate(schema, options))
+                .map(|predicate| predicate.translate_with_warnings(schema, options, emit))
                 .transpose()?,
             index_options: vec![],
             alter_options: vec![],

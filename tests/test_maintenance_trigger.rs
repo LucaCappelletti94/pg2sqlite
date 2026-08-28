@@ -1,10 +1,7 @@
 //! Test for maintenance trigger translation.
 
 use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection, prelude::*};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, Translator},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, Translator};
 use sql_traits::structs::ParserDB;
 use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 

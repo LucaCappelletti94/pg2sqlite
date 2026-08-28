@@ -14,7 +14,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::{establish_connection, set_session_username};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 
 mod schema {
     diesel::table! {

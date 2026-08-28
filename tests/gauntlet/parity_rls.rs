@@ -11,9 +11,7 @@ use diesel::{pg::PgConnection, prelude::*, sqlite::SqliteConnection};
 use helpers::{
     establish_connection, set_session_department, set_session_user_id, set_session_username,
 };
-use pg2sqlite::prelude::{
-    Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions, UuidRepresentation,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use postgres_harness::Outcome;
 use rosetta_uuid::Uuid;
 

@@ -13,10 +13,7 @@
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 use run_translated_helper::run_translated_with;
 
 const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, s TEXT, v VARCHAR(20), u UUID, b BYTEA);

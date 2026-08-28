@@ -10,10 +10,7 @@
 //! - Multiple statements via reverse_sql() -> all translated
 //! - Parser error in reverse_sql -> ParserError variant
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sqlparser::{
     ast::{SetExpr, Statement, Table},
     dialect::PostgreSqlDialect,

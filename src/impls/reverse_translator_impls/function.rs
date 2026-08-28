@@ -25,8 +25,8 @@ use crate::{
     impls::{
         datetime_helpers::{datetime_field_from_strftime_format, strftime_format_to_pg_to_char},
         function_helpers::{
-            extract_exactly, function_arg_expr_or_err, integer_literal, simple_function_expr,
-            string_literal,
+            extract_exactly_reverse as extract_exactly, function_arg_expr_or_err, integer_literal,
+            simple_function_expr, string_literal,
         },
         idioms::{
             extract_json_group_array_nullif, extract_json_group_object_nullif,
@@ -45,7 +45,7 @@ use crate::{
         translator_impls::{expr::sqlite_json_path_to_pg_text_path, postgis},
     },
     prelude::Pg2SqliteOptions,
-    traits::{SessionVariableMapping, TranslationOptions},
+    traits::SessionVariableMapping,
 };
 
 /// Simple reverse renames: `(sqlite_name, pg_name)`.
@@ -282,7 +282,7 @@ fn at_time_zone_for_modifier(
     let flipped = flipped_shifting_offset(&modifier);
 
     let Some(awareness) = timestamp_awareness(timestamp, schema) else {
-        return Err(Error::UnsupportedSQLiteFeature(if flipped.is_some() {
+        return Err(Error::reverse_refusal(if flipped.is_some() {
             format!(
                 "a datetime offset modifier of '{modifier}' shifts a bare timestamp and a \
                  timestamptz in opposite directions, and `{timestamp}` is not known to be \
@@ -853,13 +853,13 @@ fn json_path_extraction(
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, Error> {
     let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(literal), .. }) = path else {
-        return Err(Error::UnsupportedSQLiteFeature(format!(
+        return Err(Error::reverse_refusal(format!(
             "{caller} JSON path must be a string literal; non-literal paths cannot be converted \
              at translation time"
         )));
     };
     let text_path = sqlite_json_path_to_pg_text_path(literal).ok_or_else(|| {
-        Error::UnsupportedSQLiteFeature(format!(
+        Error::reverse_refusal(format!(
             "{caller} path must be a simple dotted literal like '$.a'; paths with array indices \
              cannot be converted"
         ))
@@ -883,8 +883,13 @@ fn build_reverse_function(
     Ok(Expr::Function(Function {
         name,
         uses_odbc_syntax: func.uses_odbc_syntax,
-        parameters: translate_function_arguments::<Reverse>(&func.parameters, schema, options)?,
-        args: translate_function_arguments::<Reverse>(&func.args, schema, options)?,
+        parameters: translate_function_arguments::<Reverse>(
+            &func.parameters,
+            schema,
+            options,
+            &mut |_| {},
+        )?,
+        args: translate_function_arguments::<Reverse>(&func.args, schema, options, &mut |_| {})?,
         filter: func
             .filter
             .as_ref()
@@ -894,11 +899,11 @@ fn build_reverse_function(
             .transpose()?
             .map(Box::new),
         null_treatment: func.null_treatment,
-        over: reverse_translate_window_type(func.over.as_ref(), schema, options)?,
+        over: reverse_translate_window_type(func.over.as_ref(), schema, options, &mut |_| {})?,
         within_group: func
             .within_group
             .iter()
-            .map(|e| translate_order_by_expr::<Reverse>(e, schema, options))
+            .map(|e| translate_order_by_expr::<Reverse>(e, schema, options, &mut |_| {}))
             .collect::<Result<Vec<_>, _>>()?,
     }))
 }
@@ -1045,7 +1050,7 @@ pub fn reverse_translate_function(
                     expr: Box::new(reversed_expr),
                 });
             }
-            Err(Error::UnsupportedSQLiteFeature(
+            Err(Error::reverse_refusal(
                 "Invalid strftime arguments for EXTRACT conversion".to_string(),
             ))
         }
@@ -1071,7 +1076,7 @@ pub fn reverse_translate_function(
                     r#in: Box::new(reversed_str),
                 });
             }
-            Err(Error::UnsupportedSQLiteFeature("INSTR requires exactly 2 arguments".to_string()))
+            Err(Error::reverse_refusal("INSTR requires exactly 2 arguments".to_string()))
         }
         FunctionReversal::ToOperator(op) => {
             // vec_distance_*(a, b) -> a <op> b
@@ -1094,7 +1099,7 @@ pub fn reverse_translate_function(
                     right: Box::new(reversed_right),
                 });
             }
-            Err(Error::UnsupportedSQLiteFeature(
+            Err(Error::reverse_refusal(
                 "Vector distance function requires exactly 2 arguments".to_string(),
             ))
         }
@@ -1117,7 +1122,7 @@ pub fn reverse_translate_function(
                     kind: sqlparser::ast::CastKind::DoubleColon,
                 });
             }
-            Err(Error::UnsupportedSQLiteFeature("vec_f32 requires exactly 1 argument".to_string()))
+            Err(Error::reverse_refusal("vec_f32 requires exactly 1 argument".to_string()))
         }
         FunctionReversal::ToHalfvecCast => {
             // vec_f16(expr) -> expr::halfvec
@@ -1138,7 +1143,7 @@ pub fn reverse_translate_function(
                     kind: sqlparser::ast::CastKind::DoubleColon,
                 });
             }
-            Err(Error::UnsupportedSQLiteFeature("vec_f16 requires exactly 1 argument".to_string()))
+            Err(Error::reverse_refusal("vec_f16 requires exactly 1 argument".to_string()))
         }
         FunctionReversal::ToChr => {
             build_reverse_function(ObjectName::from(vec![Ident::new("chr")]), func, schema, options)
@@ -1157,7 +1162,7 @@ pub fn reverse_translate_function(
                     None,
                 ));
             }
-            Err(Error::UnsupportedSQLiteFeature("unicode requires exactly 1 argument".to_string()))
+            Err(Error::reverse_refusal("unicode requires exactly 1 argument".to_string()))
         }
         FunctionReversal::ToTrimDirectional(field) => {
             // LTRIM/RTRIM(str, chars) or TRIM(str, chars)
@@ -1181,7 +1186,7 @@ pub fn reverse_translate_function(
         }
         FunctionReversal::ToTimestampFromEpoch => {
             let FunctionArguments::List(list) = &func.args else {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::reverse_refusal(
                     "datetime unixepoch requires list arguments".to_string(),
                 ));
             };
@@ -1194,7 +1199,7 @@ pub fn reverse_translate_function(
         }
         FunctionReversal::ToDateTrunc(field) => {
             let FunctionArguments::List(list) = &func.args else {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::reverse_refusal(
                     "strftime requires list arguments for date_trunc reversal".to_string(),
                 ));
             };
@@ -1204,7 +1209,7 @@ pub fn reverse_translate_function(
             let reversed_ts =
                 crate::prelude::ReverseTranslator::reverse_translate(ts_expr, schema, options)?;
             let translated_over =
-                reverse_translate_window_type(func.over.as_ref(), schema, options)?;
+                reverse_translate_window_type(func.over.as_ref(), schema, options, &mut |_| {})?;
             Ok(simple_function_expr(
                 "date_trunc",
                 vec![string_literal(&field), reversed_ts],
@@ -1235,7 +1240,7 @@ pub fn reverse_translate_function(
             // be resolved from the schema, to_jsonb() is the consistent fallback.
             let exprs = function_argument_exprs(&func.args);
             if exprs.len() < 3 {
-                return Err(Error::UnsupportedSQLiteFeature(format!(
+                return Err(Error::reverse_refusal(format!(
                     "{pg_func} requires at least 3 arguments"
                 )));
             }
@@ -1244,14 +1249,14 @@ pub fn reverse_translate_function(
             let path_str = match exprs[1] {
                 Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
                     sqlite_json_path_to_pg_text_path(s).ok_or_else(|| {
-                        Error::UnsupportedSQLiteFeature(format!(
+                        Error::reverse_refusal(format!(
                             "{pg_func} JSON path must be a simple dotted literal like '$.a.b'; \
                          paths with array indices or non-dot separators cannot be converted"
                         ))
                     })?
                 }
                 _ => {
-                    return Err(Error::UnsupportedSQLiteFeature(format!(
+                    return Err(Error::reverse_refusal(format!(
                         "{pg_func} JSON path must be a string literal; \
                          non-literal paths cannot be converted at translation time"
                     )));
@@ -1270,7 +1275,7 @@ pub fn reverse_translate_function(
             // json_remove(j, '$.a') -> j #- '{a}'
             let exprs = function_argument_exprs(&func.args);
             if exprs.len() < 2 {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::reverse_refusal(
                     "json_remove requires at least 2 arguments".to_string(),
                 ));
             }
@@ -1279,17 +1284,17 @@ pub fn reverse_translate_function(
             let path_str = match exprs[1] {
                 Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
                     sqlite_json_path_to_pg_text_path(s).ok_or_else(|| {
-                        Error::UnsupportedSQLiteFeature(
+                        Error::reverse_refusal(
                             "json_remove path must be a simple dotted literal like '$.a'; \
-                         paths with array indices cannot be converted"
+                                                 paths with array indices cannot be converted"
                                 .to_string(),
                         )
                     })?
                 }
                 _ => {
-                    return Err(Error::UnsupportedSQLiteFeature(
+                    return Err(Error::reverse_refusal(
                         "json_remove JSON path must be a string literal; \
-                         non-literal paths cannot be converted at translation time"
+                     non-literal paths cannot be converted at translation time"
                             .to_string(),
                     ));
                 }
@@ -1304,7 +1309,7 @@ pub fn reverse_translate_function(
             // json_extract(j, '$.a') -> j #> '{a}'
             let exprs = function_argument_exprs(&func.args);
             let [value, path] = exprs.as_slice() else {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::reverse_refusal(
                     "json_extract requires exactly 2 arguments".to_string(),
                 ));
             };
@@ -1460,9 +1465,9 @@ pub fn reverse_translate_function(
                     }),
                 ] if modifier == "subsec" => value,
                 _ => {
-                    return Err(Error::UnsupportedSQLiteFeature(
+                    return Err(Error::reverse_refusal(
                         "unixepoch reverses as unixepoch(), unixepoch(x) or \
-                         unixepoch(x, 'subsec'). Any other modifier has no PostgreSQL form."
+                     unixepoch(x, 'subsec'). Any other modifier has no PostgreSQL form."
                             .to_string(),
                     ));
                 }
@@ -1502,7 +1507,7 @@ pub fn reverse_translate_function(
                 within_group: vec![],
             }))
         }
-        FunctionReversal::Reject(msg) => Err(Error::UnsupportedSQLiteFeature(msg)),
+        FunctionReversal::Reject(msg) => Err(Error::reverse_refusal(msg)),
         FunctionReversal::PassThrough => {
             build_reverse_function(func.name.clone(), func, schema, options)
         }
@@ -1526,7 +1531,6 @@ mod tests {
     use crate::{
         impls::{function_helpers::function_arg_expr_or_err, timezone::is_fixed_utc_offset},
         prelude::Pg2SqliteOptions,
-        traits::TranslationOptions,
     };
 
     /// The passthrough is decided before the reasoned refusal, so a name in

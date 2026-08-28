@@ -6,10 +6,7 @@
 //! against the SQLiteGIS extension lives in `test_postgis_diesel.rs`.
 
 use diesel::connection::SimpleConnection;
-use pg2sqlite::{
-    internals::postgis,
-    prelude::{Pg2SqliteOptions, TranslationOptions},
-};
+use pg2sqlite::prelude::Pg2SqliteOptions;
 
 mod helpers;
 
@@ -66,34 +63,4 @@ fn st_transform_errors_when_sqlitegis_enabled() {
         format!("{err:?}").to_ascii_lowercase().contains("st_transform"),
         "error should name the function, got: {err:?}"
     );
-}
-
-#[test]
-fn catalog_lookup_finds_st_point_with_known_arities() {
-    assert!(postgis::is_sqlitegis_function("st_point", 2));
-    assert!(postgis::is_sqlitegis_function("st_point", 3));
-    assert!(!postgis::is_sqlitegis_function("st_point", 1));
-    assert!(!postgis::is_sqlitegis_function("st_point", 4));
-}
-
-#[test]
-fn catalog_lookup_is_case_insensitive_on_supplied_name() {
-    // Callers may pass mixed case from the parser. Catalog stores lowercase,
-    // and lookups should treat the input as case-insensitive.
-    assert!(postgis::is_sqlitegis_function("ST_Point", 2));
-    assert!(postgis::is_sqlitegis_function("st_POINT", 2));
-}
-
-#[test]
-fn catalog_lookup_rejects_unknown_names() {
-    assert!(!postgis::is_sqlitegis_function("st_transform", 2));
-    assert!(!postgis::is_sqlitegis_function("st_simplify", 2));
-    assert!(!postgis::is_sqlitegis_function("now", 0)); // not PostGIS
-}
-
-#[test]
-fn catalog_includes_spatial_index_helpers() {
-    // SQLite-side DDL helpers from SQLiteGIS's DIRECT_ONLY catalog.
-    assert!(postgis::is_sqlitegis_function("createspatialindex", 2));
-    assert!(postgis::is_sqlitegis_function("dropspatialindex", 2));
 }

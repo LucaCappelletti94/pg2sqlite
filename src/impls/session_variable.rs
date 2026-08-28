@@ -29,7 +29,7 @@ use crate::{
     errors::Error,
     impls::function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
     options::Pg2SqliteOptions,
-    traits::{SessionVariableMapping, SessionVariablePattern, TranslationOptions},
+    traits::{SessionVariableMapping, SessionVariablePattern},
 };
 
 /// The lower-cased last part of a function's name.
@@ -97,7 +97,7 @@ pub(crate) fn unpaired(pattern: &SessionVariablePattern) -> Error {
 /// The mapping whose paired function is `name`, when one is installed.
 ///
 /// A single function can be reached from both patterns, which
-/// [`TranslationOptions::with_session_user`] always arranges, and coming back
+/// [`Pg2SqliteOptions::with_session_user`] always arranges, and coming back
 /// only one of them can be written. The setting wins: it names a value the
 /// application binds per connection, where `current_user` names whatever role
 /// the connection opened as, so the setting is the reading that carries the

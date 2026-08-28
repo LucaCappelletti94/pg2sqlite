@@ -39,17 +39,20 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
 };
-use sqlparser::ast::{CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Statement};
+use sqlparser::ast::{
+    BinaryOperator, CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, SetExpr,
+    Statement, TriggerEvent, TriggerPeriod,
+};
 
 use crate::{
     errors::Error,
     impls::{
+        ast_builder,
         function_helpers::{simple_function_expr, single_quoted_literal},
-        generated_sql::parse_generated_sql,
         object_name::{
-            last_ident, prefixed_quoted_identifier, quote_identifier, quoted_ident,
-            table_with_implicit_public_lookup,
+            last_ident, quote_identifier, quoted_ident, table_with_implicit_public_lookup,
         },
+        query_builder::{make_query, make_simple_select},
         translator_impls::rls::resolve_trigger_table_name,
     },
     prelude::Pg2SqliteOptions,
@@ -181,53 +184,72 @@ fn create_vec0_virtual_table(
     }
 }
 
-/// Create vec0 sync triggers.
 fn create_vec0_triggers(
     table_name: &str,
     vec_table_name: &str,
     pk_column: &str,
     column_name: &str,
-) -> Vec<String> {
-    let trigger_table_quoted = quote_identifier(table_name);
-    let vec_table_quoted = quote_identifier(vec_table_name);
-    let vec_pk_column = format!("{pk_column}_id");
-    let vec_pk_column_quoted = quote_identifier(&vec_pk_column);
-    let column_name_quoted = quote_identifier(column_name);
-    let new_pk = prefixed_quoted_identifier("NEW", pk_column);
-    let old_pk = prefixed_quoted_identifier("OLD", pk_column);
-    let new_vec_col = prefixed_quoted_identifier("NEW", column_name);
-    let insert_trigger_name = quote_identifier(&format!("{vec_table_name}_ai"));
-    let delete_trigger_name = quote_identifier(&format!("{vec_table_name}_ad"));
-    let update_trigger_name = quote_identifier(&format!("{vec_table_name}_au"));
+) -> Vec<Statement> {
+    let name = |value: &str| ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(value))]);
+    let row_value = |row: &str, column: &str| {
+        Expr::CompoundIdentifier(vec![Ident::new(row), quoted_ident(column)])
+    };
+    let insert = |pk: Expr, vector: Expr| {
+        let query = make_query(
+            None,
+            SetExpr::Select(Box::new(make_simple_select(
+                ast_builder::select_items(vec![pk, vector.clone()]),
+                Vec::new(),
+                Some(Expr::IsNotNull(Box::new(vector))),
+            ))),
+        );
+        ast_builder::insert(
+            name(vec_table_name),
+            vec![name(&format!("{pk_column}_id")), name(column_name)],
+            query,
+        )
+    };
+    let delete = |pk: Expr| {
+        ast_builder::delete(
+            name(vec_table_name),
+            Some(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(quoted_ident(&format!("{pk_column}_id")))),
+                op: BinaryOperator::Eq,
+                right: Box::new(pk),
+            }),
+        )
+    };
 
+    let new_pk = row_value("NEW", pk_column);
+    let old_pk = row_value("OLD", pk_column);
+    let new_vector = row_value("NEW", column_name);
     vec![
-        format!(
-            "CREATE TRIGGER {insert_trigger_name} AFTER INSERT ON {trigger_table_quoted} BEGIN \
-             INSERT INTO {vec_table_quoted} ({vec_pk_column_quoted}, {column_name_quoted}) \
-             SELECT {new_pk}, {new_vec_col} WHERE {new_vec_col} IS NOT NULL; \
-             END"
+        ast_builder::trigger(
+            name(&format!("{vec_table_name}_ai")),
+            name(table_name),
+            TriggerPeriod::After,
+            TriggerEvent::Insert,
+            false,
+            None,
+            vec![insert(new_pk.clone(), new_vector.clone())],
         ),
-        format!(
-            "CREATE TRIGGER {delete_trigger_name} AFTER DELETE ON {trigger_table_quoted} BEGIN \
-             DELETE FROM {vec_table_quoted} WHERE {vec_pk_column_quoted} = {old_pk}; \
-             END"
+        ast_builder::trigger(
+            name(&format!("{vec_table_name}_ad")),
+            name(table_name),
+            TriggerPeriod::After,
+            TriggerEvent::Delete,
+            false,
+            None,
+            vec![delete(old_pk.clone())],
         ),
-        // Update sync on vector value or PK changes, as delete plus
-        // conditional insert. An in-place UPDATE is wrong three ways, all
-        // measured on sqlite-vec 0.1.9: vec0 silently ignores both a NULL
-        // assignment and a primary key change (each reports success and
-        // leaves the row untouched, so the index serves stale vectors), and
-        // a row born with a NULL embedding has no shadow row to update, so
-        // it silently never joins the index. The conditional insert is the
-        // insert trigger's rule: a NULL embedding stays out of the index.
-        // UPSERT is not an option, SQLite refuses it on virtual tables.
-        format!(
-            "CREATE TRIGGER {update_trigger_name} AFTER UPDATE OF {column_name_quoted}, {} ON {trigger_table_quoted} BEGIN \
-             DELETE FROM {vec_table_quoted} WHERE {vec_pk_column_quoted} = {old_pk}; \
-             INSERT INTO {vec_table_quoted} ({vec_pk_column_quoted}, {column_name_quoted}) \
-             SELECT {new_pk}, {new_vec_col} WHERE {new_vec_col} IS NOT NULL; \
-             END",
-            quote_identifier(pk_column)
+        ast_builder::trigger(
+            name(&format!("{vec_table_name}_au")),
+            name(table_name),
+            TriggerPeriod::After,
+            TriggerEvent::Update(vec![quoted_ident(column_name), quoted_ident(pk_column)]),
+            false,
+            None,
+            vec![delete(old_pk), insert(new_pk, new_vector)],
         ),
     ]
 }
@@ -243,6 +265,7 @@ pub fn generate_vec0_statements(
     create_table: &CreateTable,
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
+    emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     let vector_cols = extract_vector_columns(create_table);
     if vector_cols.is_empty() {
@@ -252,7 +275,7 @@ pub fn generate_vec0_statements(
     let table_name = last_ident(&create_table.name)
         .map_or_else(|| create_table.name.to_string(), |ident| ident.value.clone());
     let pk_column = find_pk_column(create_table, schema).ok_or_else(|| {
-        Error::UnsupportedSQLiteFeature(format!(
+        Error::forward_refusal(format!(
             "Table '{table_name}' with vector columns requires a single-column primary key \
              for sqlite-vec synchronization triggers."
         ))
@@ -260,14 +283,13 @@ pub fn generate_vec0_statements(
 
     let table_obj =
         table_with_implicit_public_lookup(schema, &create_table.name)?.ok_or_else(|| {
-            Error::UnsupportedSQLiteFeature(format!(
+            Error::forward_refusal(format!(
                 "Table '{table_name}' not found in schema for vector sync triggers"
             ))
         })?;
 
     let trigger_table_name = resolve_trigger_table_name(&table_name, table_obj, schema, options)?;
 
-    let dialect = sqlparser::dialect::SQLiteDialect {};
     let mut statements = Vec::new();
 
     for vec_col in &vector_cols {
@@ -276,7 +298,7 @@ pub fn generate_vec0_statements(
         // emitted. Warn rather than skip silently so the caller knows the index
         // story is incomplete.
         if vec_col.dimensions.is_none() {
-            crate::warnings::emit(crate::warnings::TranslationWarning::LossyDrop {
+            emit(crate::warnings::TranslationWarning::LossyDrop {
                 construct: format!("vector column '{}'", vec_col.column_name),
                 reason: format!(
                     "vec0 requires an explicit dimension count (e.g. vector(384)); \
@@ -292,19 +314,12 @@ pub fn generate_vec0_statements(
         let create_vec0 = create_vec0_virtual_table(&vec_table_name, &pk_column, vec_col);
         statements.push(create_vec0);
 
-        for trigger_sql in create_vec0_triggers(
+        statements.extend(create_vec0_triggers(
             &trigger_table_name,
             &vec_table_name,
             &pk_column,
             &vec_col.column_name,
-        ) {
-            let parsed = parse_generated_sql(
-                &dialect,
-                &trigger_sql,
-                "Failed to parse generated vec0 synchronization trigger SQL",
-            )?;
-            statements.extend(parsed);
-        }
+        ));
     }
 
     Ok(statements)
@@ -397,8 +412,8 @@ mod tests {
         let create_table = parse_create_table(sql);
         let options = Pg2SqliteOptions::default();
 
-        let statements =
-            generate_vec0_statements(&create_table, &schema, &options).expect("should succeed");
+        let statements = generate_vec0_statements(&create_table, &schema, &options, &mut |_| {})
+            .expect("should succeed");
         assert!(
             statements.is_empty(),
             "a dimensionless vector column emits no vec0 statement, got {statements:?}"
@@ -414,7 +429,7 @@ mod tests {
             ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build");
         let options = Pg2SqliteOptions::default();
 
-        let err = generate_vec0_statements(&create_table, &schema, &options)
+        let err = generate_vec0_statements(&create_table, &schema, &options, &mut |_| {})
             .expect_err("missing table should error");
         assert!(err.to_string().contains("not found in schema"));
     }
@@ -427,7 +442,7 @@ mod tests {
         let create_table = parse_create_table(sql);
         let options = Pg2SqliteOptions::default();
 
-        let statements = generate_vec0_statements(&create_table, &schema, &options)
+        let statements = generate_vec0_statements(&create_table, &schema, &options, &mut |_| {})
             .expect("quoted identifiers should translate");
         assert!(
             statements.iter().any(|stmt| stmt.to_string().contains("CREATE TRIGGER")),
@@ -443,8 +458,8 @@ mod tests {
         let create_table = parse_create_table(sql);
         let options = Pg2SqliteOptions::default();
 
-        let statements =
-            generate_vec0_statements(&create_table, &schema, &options).expect("should succeed");
+        let statements = generate_vec0_statements(&create_table, &schema, &options, &mut |_| {})
+            .expect("should succeed");
         let update_trigger_sql = statements
             .iter()
             .map(ToString::to_string)

@@ -15,7 +15,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::establish_connection;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 use rosetta_uuid::Uuid;
 
 const LITERAL: &str = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";

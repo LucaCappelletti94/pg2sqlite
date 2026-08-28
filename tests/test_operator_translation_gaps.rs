@@ -13,7 +13,7 @@ mod helpers;
 
 use diesel::{QueryableByName, prelude::*, sql_query, sql_types};
 use helpers::{establish_connection, translate_pg};
-use pg2sqlite::prelude::{ArrayRepresentation, Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::{ArrayRepresentation, Pg2SqliteOptions};
 
 fn opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()

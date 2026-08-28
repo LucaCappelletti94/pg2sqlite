@@ -20,7 +20,7 @@ mod helpers;
 
 use diesel::{QueryableByName, RunQueryDsl, connection::SimpleConnection, sql_query};
 use helpers::{establish_connection, translate_pg};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 
 /// The name the test harness registers a real version 7 generator under.
 const V7: &str = "uuidv7";

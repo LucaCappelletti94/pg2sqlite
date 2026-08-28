@@ -47,6 +47,9 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets
 
+      - name: Run git loader test
+        run: cargo test --release --features git --test test_translator
+
       - name: Run doc tests
         run: cargo test --doc
 

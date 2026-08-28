@@ -14,7 +14,7 @@ use diesel::{
     sql_types::{Integer, Text},
 };
 use helpers::sqlitegis::sqlitegis_connection;
-use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::Pg2SqliteOptions;
 
 #[derive(QueryableByName)]
 struct CountRow {

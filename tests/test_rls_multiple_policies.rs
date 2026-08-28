@@ -7,10 +7,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::{establish_connection, set_session_department, set_session_user_id};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rosetta_uuid::Uuid;
 
 mod schema {
@@ -326,7 +323,7 @@ fn test_non_matching_sees_nothing() -> Result<(), Box<dyn std::error::Error>> {
 
 mod select_plus_for_all {
     use diesel::prelude::*;
-    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
     diesel::table! {
         /// The RLS backing table the translator emits for `mix1`.

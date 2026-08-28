@@ -9,34 +9,27 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::structs::ParserDB;
 use sqlparser::ast::{Delete, Expr, Statement};
 
 use super::helpers::{Forward, translate_table_with_joins};
-use crate::{
-    impls::{
-        function_helpers::integer_literal,
-        query_builder::single_expr_query,
-        returning_scope::{delete_target, scope_returning_to_target},
-        shared_helpers::translate_delete_core,
-        translator_impls::postgis,
-    },
-    options::Pg2SqliteOptions,
-    traits::translator::Translator,
+use crate::impls::{
+    function_helpers::integer_literal,
+    query_builder::single_expr_query,
+    returning_scope::{delete_target, scope_returning_to_target},
+    shared_helpers::translate_delete_core,
+    translator_impls::postgis,
 };
 
-impl Translator for Delete {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = Statement;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(Delete => Statement);
+impl crate::traits::translator::TranslatorWithContext for Delete {
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         let (selection, from, returning, order_by, limit) =
-            translate_delete_core::<Forward>(self, schema, options)?;
+            translate_delete_core::<Forward>(self, schema, options, emit)?;
 
         let mut delete = Delete { selection, from, returning, order_by, limit, ..self.clone() };
 
@@ -49,7 +42,7 @@ impl Translator for Delete {
             .map(|using| {
                 using
                     .iter()
-                    .map(|twj| translate_table_with_joins(twj, schema, options))
+                    .map(|twj| translate_table_with_joins(twj, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
@@ -86,7 +79,7 @@ impl Translator for Delete {
         // indexed columns through the rtree shadow via an IN-subquery. The
         // helper rejects multi-source shapes naturally, so DELETE ... USING
         // (which by this point has its WHERE wrapped in EXISTS) falls through.
-        if let Some(rewritten) = postgis::try_rewrite_spatial_delete(&delete, options)? {
+        if let Some(rewritten) = postgis::try_rewrite_spatial_delete(&delete, options) {
             return Ok(Statement::Delete(rewritten));
         }
 

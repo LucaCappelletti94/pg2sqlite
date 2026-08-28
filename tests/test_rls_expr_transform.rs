@@ -5,10 +5,7 @@
 //! C3: Missing Expr arms in `transform_outer_table_refs`
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 fn translate(sql: &str) -> Result<String, Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");

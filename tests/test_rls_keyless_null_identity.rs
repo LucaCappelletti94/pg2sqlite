@@ -12,7 +12,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::establish_connection;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 mod schema {
     diesel::table! {

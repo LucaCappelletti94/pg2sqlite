@@ -8,10 +8,7 @@
 
 mod helpers;
 use diesel::prelude::*;
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 // Tests (a) and (c): members + t, where members.team is absent from t.
 diesel::table! {
     /// Lookup table used in the correlated-subquery policy tests.

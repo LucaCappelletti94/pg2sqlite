@@ -218,8 +218,6 @@ const SQL_FIXTURE: &str = include_str!("fixtures/grant_filtering.sql");
 
 /// Creates translation options for grant-based filtering tests.
 fn translation_options() -> Pg2SqliteOptions {
-    use pg2sqlite::traits::TranslationOptions;
-
     Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_v7_function_name("uuidv7")

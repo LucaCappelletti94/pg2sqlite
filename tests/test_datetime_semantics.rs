@@ -4,7 +4,7 @@
 //! Each test executes translated SQL against an in-memory SQLite connection
 //! and compares the result to the value documented by PostgreSQL semantics.
 //! Where SQLite cannot express a construct faithfully the translation is
-//! expected to reject it with an `UnsupportedSQLiteFeature` error rather
+//! expected to return a typed translation refusal rather
 //! than silently returning a wrong answer.
 //!
 //! The SQL executed here is the output of the translator, which is not known

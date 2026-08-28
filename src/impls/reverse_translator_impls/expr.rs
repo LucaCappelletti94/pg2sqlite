@@ -40,9 +40,9 @@ use crate::{
 /// LIKE has no equivalent construct.
 fn glob_pattern_to_like(pattern: &str) -> Result<(String, bool), Error> {
     if pattern.contains('[') {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(Error::reverse_refusal(
             "GLOB character class (e.g. [abc]) has no LIKE equivalent; \
-             rewrite using separate LIKE patterns instead"
+         rewrite using separate LIKE patterns instead"
                 .to_string(),
         ));
     }
@@ -89,9 +89,9 @@ fn translate_glob_to_like(
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, Error> {
     let Some(glob_pat) = single_quoted_literal(right) else {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(Error::reverse_refusal(
             "GLOB with a non-literal pattern cannot be converted to LIKE at translation time; \
-             bind the constant pattern before translation"
+         bind the constant pattern before translation"
                 .to_string(),
         ));
     };
@@ -165,7 +165,7 @@ impl ReverseTranslator for Expr {
             // direct PostgreSQL equivalent. Reject it so callers know to
             // rewrite using `to_tsvector(col) @@ to_tsquery(query)` instead.
             Expr::BinaryOp { op: BinaryOperator::Match, left, .. } => {
-                Err(Error::UnsupportedSQLiteFeature(format!(
+                Err(Error::reverse_refusal(format!(
                     "SQLite FTS5 MATCH expression against {left} has no PostgreSQL operator. \
                      Rewrite using to_tsvector(col) @@ to_tsquery(query) instead."
                 )))
@@ -195,7 +195,7 @@ impl ReverseTranslator for Expr {
                     posix_regex(expr, pattern, *negated, schema, options)
                 } else {
                     let not = if *negated { "NOT " } else { "" };
-                    Err(Error::UnsupportedSQLiteFeature(format!(
+                    Err(Error::reverse_refusal(format!(
                         "RLIKE is not SQLite syntax, so {expr} {not}RLIKE {pattern} cannot have \
                          come from SQLite. Write REGEXP instead."
                     )))
@@ -204,9 +204,9 @@ impl ReverseTranslator for Expr {
 
             // SQLite identifier `rowid` does not exist in PostgreSQL.
             Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("rowid") => {
-                Err(Error::UnsupportedSQLiteFeature(
+                Err(Error::reverse_refusal(
                     "rowid: SQLite's implicit rowid column does not exist in PostgreSQL; \
-                     use an explicit INTEGER PRIMARY KEY column instead"
+                 use an explicit INTEGER PRIMARY KEY column instead"
                         .to_string(),
                 ))
             }
@@ -217,9 +217,9 @@ impl ReverseTranslator for Expr {
             Expr::CompoundIdentifier(parts)
                 if parts.last().is_some_and(|p| p.value.eq_ignore_ascii_case("rowid")) =>
             {
-                Err(Error::UnsupportedSQLiteFeature(
+                Err(Error::reverse_refusal(
                     "rowid: SQLite's implicit rowid column does not exist in PostgreSQL; \
-                     use an explicit INTEGER PRIMARY KEY column instead"
+                 use an explicit INTEGER PRIMARY KEY column instead"
                         .to_string(),
                 ))
             }
@@ -251,7 +251,7 @@ impl ReverseTranslator for Expr {
                             escape_char: None,
                         })
                     }
-                    _ => translate_expr_recursive::<Reverse>(self, schema, options),
+                    _ => translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {}),
                 }
             }
             // `COLLATE NOCASE`, `COLLATE BINARY`, and `COLLATE RTRIM` are
@@ -269,17 +269,17 @@ impl ReverseTranslator for Expr {
                     || name.eq_ignore_ascii_case("BINARY")
                     || name.eq_ignore_ascii_case("RTRIM")
                 {
-                    return Err(Error::UnsupportedSQLiteFeature(format!(
+                    return Err(Error::reverse_refusal(format!(
                         "COLLATE {name} is a SQLite-only collation with no PostgreSQL \
                          equivalent. Map it to a collation registered in the destination \
                          database, or drop the COLLATE clause if byte-order ordering is \
                          acceptable."
                     )));
                 }
-                translate_expr_recursive::<Reverse>(self, schema, options)
+                translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {})
             }
 
-            _ => translate_expr_recursive::<Reverse>(self, schema, options),
+            _ => translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {}),
         }
     }
 }

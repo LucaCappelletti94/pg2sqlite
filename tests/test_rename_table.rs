@@ -17,10 +17,7 @@
 //! apart again.
 
 use diesel::prelude::*;
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 
 /// Options that resolve the `app.user` setting the RLS tests at the end of this
 /// file reference.

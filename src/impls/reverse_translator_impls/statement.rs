@@ -30,7 +30,6 @@ use crate::{
         shared_helpers::debug_variant_name,
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
-    traits::TranslationOptions,
 };
 
 fn strip_identifier_quotes(name: &str) -> &str {
@@ -116,7 +115,7 @@ fn ensure_set_expr_supported_for_rls(
             check_table_command_for_rls(table, options)
         }
         SetExpr::Merge(_) => {
-            Err(Error::UnsupportedSQLiteFeature(
+            Err(Error::reverse_refusal(
                 "MERGE set expressions are not supported in reverse translation".to_string(),
             ))
         }

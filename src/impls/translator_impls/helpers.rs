@@ -24,7 +24,8 @@ use crate::{
         object_name::normalize_schema_qualified_object_name_for_sqlite,
         shared_helpers::TranslationDirection,
     },
-    prelude::{Pg2SqliteOptions, Translator},
+    prelude::Pg2SqliteOptions,
+    traits::translator::TranslatorWithContext,
 };
 
 /// Forward (PostgreSQL → SQLite) translation direction.
@@ -32,37 +33,51 @@ pub(crate) struct Forward;
 
 impl TranslationDirection for Forward {
     const IS_FORWARD: bool = true;
+    type Options<'a> = crate::options::TranslationContext<'a>;
+    fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions {
+        options
+    }
+
+    fn forward_context<'options, 'config>(
+        options: &'options Self::Options<'config>,
+    ) -> Option<&'options crate::options::TranslationContext<'config>> {
+        Some(options)
+    }
 
     fn translate_expr(
         expr: &Expr,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Expr, Error> {
-        expr.translate(schema, options)
+        expr.translate_with_warnings(schema, options, emit)
     }
 
     fn translate_query(
         query: &Query,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Query, Error> {
-        query.translate(schema, options)
+        query.translate_with_warnings(schema, options, emit)
     }
 
     fn translate_insert(
         insert: &sqlparser::ast::Insert,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Insert, Error> {
-        insert.translate(schema, options)
+        insert.translate_with_warnings(schema, options, emit)
     }
 
     fn translate_delete(
         delete: &sqlparser::ast::Delete,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Delete, Error> {
-        match delete.translate(schema, options)? {
+        match delete.translate_with_warnings(schema, options, emit)? {
             sqlparser::ast::Statement::Delete(d) => Ok(d),
             _ => Ok(delete.clone()),
         }
@@ -71,7 +86,7 @@ impl TranslationDirection for Forward {
     fn translate_object_name(
         name: &sqlparser::ast::ObjectName,
         schema: &ParserDB,
-        _options: &Pg2SqliteOptions,
+        _options: &crate::options::TranslationContext<'_>,
     ) -> Result<sqlparser::ast::ObjectName, Error> {
         normalize_schema_qualified_object_name_for_sqlite(schema, name)
     }

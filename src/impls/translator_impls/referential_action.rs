@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `ReferentialAction` type.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `ReferentialAction` type.
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -12,20 +12,17 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::structs::ParserDB;
 use sqlparser::ast::ReferentialAction;
 
-use crate::prelude::{Pg2SqliteOptions, Translator};
-
-impl Translator for ReferentialAction {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = ReferentialAction;
-
-    fn translate(
+crate::traits::translator::impl_contextual_translator!(
+    ReferentialAction => ReferentialAction
+);
+impl crate::traits::translator::TranslatorWithContext for ReferentialAction {
+    fn translate_with_warnings(
         &self,
         _schema: &Self::Schema,
-        _options: &Self::Options,
+        _options: &crate::options::TranslationContext<'_>,
+        _emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match self {
             ReferentialAction::NoAction => Ok(ReferentialAction::NoAction),

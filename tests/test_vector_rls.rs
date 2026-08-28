@@ -70,8 +70,6 @@ struct Embedding<'a> {
 /// (embeddings_rls) instead of the view (embeddings).
 #[test]
 fn test_vec0_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let fixture = include_str!("fixtures/vector_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
     let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;
@@ -133,8 +131,6 @@ fn test_vec0_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::e
 #[test]
 #[ignore = "sqlite-vec requires rusqlite, see test_vector_semantic.rs"]
 fn test_vec0_sync_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let mut conn = establish_connection();
     let fixture = include_str!("fixtures/vector_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
@@ -171,8 +167,6 @@ fn test_vec0_sync_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_role_filtered_vector_translation_keeps_vec0_artifacts()
 -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let sql = r#"
         CREATE ROLE readonly_user;
 
@@ -221,8 +215,6 @@ fn test_role_filtered_vector_translation_keeps_vec0_artifacts()
 /// Snapshot test to verify the full translated SQL output.
 #[test]
 fn test_vector_rls_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
-    use pg2sqlite::traits::TranslationOptions;
-
     let fixture = include_str!("fixtures/vector_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
     let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;

@@ -107,7 +107,7 @@ fn row_changing_delete_action(
 }
 
 fn unfaithful_replace(table: &str, because: &str) -> Error {
-    Error::UnsupportedSQLiteFeature(format!(
+    Error::reverse_refusal(format!(
         "INSERT OR REPLACE INTO {table} cannot be reversed faithfully, because {because}. \
          SQLite's REPLACE deletes the conflicting rows and inserts a new one, which PostgreSQL \
          has no single statement for. Write the upsert by hand, or a DELETE followed by an \
@@ -128,7 +128,7 @@ fn resolve_insert_table<'a>(
     table: &TableObject,
 ) -> Result<&'a <ParserDB as DatabaseLike>::Table, Error> {
     let TableObject::TableName(table_name) = table else {
-        return Err(Error::UnsupportedSQLiteFeature(
+        return Err(Error::reverse_refusal(
             "INSERT OR REPLACE with table function is not supported".to_string(),
         ));
     };
@@ -305,7 +305,8 @@ impl ReverseTranslator for Insert {
             .transpose()?;
 
         // Reverse translate RETURNING clause if present
-        let returning = translate_returning::<Reverse>(self.returning.as_ref(), schema, options)?;
+        let returning =
+            translate_returning::<Reverse>(self.returning.as_ref(), schema, options, &mut |_| {})?;
 
         // Reverse translate assignments if present
         let assignments = self
@@ -327,7 +328,7 @@ impl ReverseTranslator for Insert {
             // what the `OR REPLACE` path already did once it resolved the
             // target.
             TableObject::TableFunction(func) => {
-                return Err(Error::UnsupportedSQLiteFeature(format!(
+                return Err(Error::reverse_refusal(format!(
                     "INSERT into a table function is not supported: PostgreSQL inserts into a \
                      table or a view, and `{func}` is neither."
                 )));
@@ -428,6 +429,7 @@ impl ReverseTranslator for Insert {
                 // Reverse never unscales a NUMERIC, so there is nothing to
                 // move here either.
                 &crate::impls::shared_helpers::ColumnRewrites::default(),
+                &mut |_| {},
             )?);
         }
 

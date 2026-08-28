@@ -61,10 +61,7 @@ mod tests {
     use sqlparser::ast::Statement;
 
     use super::WrapperKind;
-    use crate::{
-        pg2sqlite::Pg2Sqlite,
-        prelude::{Pg2SqliteOptions, TranslationOptions},
-    };
+    use crate::{pg2sqlite::Pg2Sqlite, prelude::Pg2SqliteOptions};
 
     fn manifest(sql: &str, options: &Pg2SqliteOptions) -> Vec<super::TableManifestEntry> {
         Pg2Sqlite::default()
@@ -186,5 +183,22 @@ mod tests {
             manifest.iter().map(|e| e.logical.as_str()).collect::<Vec<_>>(),
             vec!["visible"]
         );
+    }
+
+    #[test]
+    fn manifest_returns_the_translation_error() {
+        let translator = Pg2Sqlite::default()
+            .sql("CREATE TABLE t (generated SERIAL, id INTEGER PRIMARY KEY);")
+            .expect("input should parse");
+        let options = Pg2SqliteOptions::default();
+
+        let translation_error =
+            translator.translate(&options).expect_err("translation should reject the serial");
+        let manifest_error = translator
+            .translation_manifest(&options)
+            .expect_err("manifest should reject the serial");
+
+        assert_eq!(manifest_error.to_string(), translation_error.to_string());
+        assert!(manifest_error.to_string().contains("value source"));
     }
 }

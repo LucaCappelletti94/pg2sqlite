@@ -13,14 +13,17 @@ use alloc::{
 };
 
 use super::Schema;
-use crate::traits::TranslationOptions;
+use crate::{
+    options::{Pg2SqliteOptions, TranslationContext},
+    warnings::WarningSink,
+};
 
-/// Trait to translate between a `PostgreSQL` entry and a `SQLite` entry.
+/// Translates a PostgreSQL entry to its SQLite equivalent.
 pub trait Translator {
     /// Schema type for the translation.
     type Schema: Schema;
     /// Translation options type.
-    type Options: TranslationOptions;
+    type Options;
     /// Produced SQLite entry type.
     type SQLiteEntry;
 
@@ -35,3 +38,40 @@ pub trait Translator {
         options: &Self::Options,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error>;
 }
+
+pub(crate) trait TranslatorWithContext:
+    Translator<Schema = sql_traits::structs::ParserDB, Options = Pg2SqliteOptions>
+{
+    fn translate_with_warnings(
+        &self,
+        schema: &Self::Schema,
+        context: &TranslationContext<'_>,
+        emit: WarningSink<'_>,
+    ) -> Result<Self::SQLiteEntry, crate::errors::Error>;
+}
+
+macro_rules! impl_contextual_translator {
+    ($source:ty => $output:ty) => {
+        impl crate::traits::translator::Translator for $source {
+            type Schema = sql_traits::structs::ParserDB;
+            type Options = crate::options::Pg2SqliteOptions;
+            type SQLiteEntry = $output;
+
+            fn translate(
+                &self,
+                schema: &Self::Schema,
+                options: &Self::Options,
+            ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+                let context = crate::options::TranslationContext::new(options);
+                <Self as crate::traits::translator::TranslatorWithContext>::translate_with_warnings(
+                    self,
+                    schema,
+                    &context,
+                    &mut |_| {},
+                )
+            }
+        }
+    };
+}
+
+pub(crate) use impl_contextual_translator;

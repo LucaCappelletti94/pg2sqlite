@@ -2,7 +2,7 @@
 //!
 //! These tests enforce pg2sqlite's "no silent passthroughs" guarantee: every
 //! PG construct must either translate to runnable SQLite or error at
-//! translation time with `Error::UnsupportedSQLiteFeature(...)`. A silent
+//! translation time with `Error::TranslationRefusal(...)`. A silent
 //! passthrough that fails downstream in SQLite (`no such function:
 //! JSON_BUILD_ARRAY`) is exactly the failure mode pg2sqlite advertises that
 //! it does not produce.

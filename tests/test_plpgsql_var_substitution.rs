@@ -8,7 +8,7 @@ mod helpers;
 
 use diesel::prelude::*;
 use helpers::{translate_sql, translate_statements};
-use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2SqliteOptions, UuidRepresentation};
 
 fn uuid_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)

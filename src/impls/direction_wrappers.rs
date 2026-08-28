@@ -22,9 +22,12 @@ macro_rules! define_direction_wrappers {
             pub(super) fn $fn_name(
                 $arg_name: $arg_ty,
                 schema: &sql_traits::structs::ParserDB,
-                options: &crate::prelude::Pg2SqliteOptions,
+                options: &<$direction as crate::impls::shared_helpers::TranslationDirection>::Options<'_>,
+                emit: crate::warnings::WarningSink<'_>,
             ) -> Result<$ret_ty, crate::errors::Error> {
-                crate::impls::shared_helpers::$shared_fn::<$direction>($arg_name, schema, options)
+                crate::impls::shared_helpers::$shared_fn::<$direction>(
+                    $arg_name, schema, options, emit,
+                )
             }
         )+
     };

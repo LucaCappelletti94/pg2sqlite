@@ -169,7 +169,12 @@ impl ReverseTranslator for Query {
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
         let restored = restore_distinct_on(self);
-        translate_query_shared::<Reverse>(restored.as_ref().unwrap_or(self), schema, options)
+        translate_query_shared::<Reverse>(
+            restored.as_ref().unwrap_or(self),
+            schema,
+            options,
+            &mut |_| {},
+        )
     }
 }
 
@@ -183,7 +188,7 @@ impl ReverseTranslator for SetExpr {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        translate_set_expr_shared::<Reverse>(self, schema, options)
+        translate_set_expr_shared::<Reverse>(self, schema, options, &mut |_| {})
     }
 }
 
@@ -197,7 +202,7 @@ impl ReverseTranslator for Select {
         schema: &Self::Schema,
         options: &Self::Options,
     ) -> Result<Self::PostgresEntry, Error> {
-        translate_select_shared::<Reverse>(self, schema, options)
+        translate_select_shared::<Reverse>(self, schema, options, &mut |_| {})
     }
 }
 
@@ -270,7 +275,8 @@ mod tests {
             limit_by: vec![parse_expr("2")],
         };
         let translated =
-            translate_limit_clause::<Reverse>(Some(&limit_offset), &schema, &options).unwrap();
+            translate_limit_clause::<Reverse>(Some(&limit_offset), &schema, &options, &mut |_| {})
+                .unwrap();
         assert!(matches!(translated, Some(LimitClause::LimitOffset { .. })));
 
         // The comma form has no PostgreSQL spelling, so it becomes LIMIT
@@ -278,7 +284,8 @@ mod tests {
         let offset_comma =
             LimitClause::OffsetCommaLimit { offset: parse_expr("1"), limit: parse_expr("10") };
         let translated =
-            translate_limit_clause::<Reverse>(Some(&offset_comma), &schema, &options).unwrap();
+            translate_limit_clause::<Reverse>(Some(&offset_comma), &schema, &options, &mut |_| {})
+                .unwrap();
         let Some(LimitClause::LimitOffset { limit, offset, .. }) = translated else {
             panic!("expected the explicit form, got: {translated:?}");
         };
@@ -296,23 +303,32 @@ mod tests {
             panic!("expected select");
         };
 
-        let distinct =
-            translate_distinct_shared::<Reverse>(select.distinct.as_ref(), &schema, &options)
-                .unwrap();
+        let distinct = translate_distinct_shared::<Reverse>(
+            select.distinct.as_ref(),
+            &schema,
+            &options,
+            &mut |_| {},
+        )
+        .unwrap();
         assert!(matches!(distinct, Some(Distinct::On(_))));
 
         let group_by = crate::impls::shared_helpers::translate_group_by_expr::<Reverse>(
             &select.group_by,
             &schema,
             &options,
+            &mut |_| {},
         )
         .unwrap();
         assert!(matches!(group_by, sqlparser::ast::GroupByExpr::Expressions(_, _)));
 
         let fetch_query = parse_query("SELECT 1 FETCH FIRST 2 ROWS ONLY");
-        let fetch =
-            translate_fetch_clause::<Reverse>(fetch_query.fetch.as_ref(), &schema, &options)
-                .unwrap();
+        let fetch = translate_fetch_clause::<Reverse>(
+            fetch_query.fetch.as_ref(),
+            &schema,
+            &options,
+            &mut |_| {},
+        )
+        .unwrap();
         assert!(fetch.is_some());
     }
 

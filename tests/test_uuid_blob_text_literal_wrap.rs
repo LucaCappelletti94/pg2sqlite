@@ -17,7 +17,7 @@
 //! (parse-time emission of `x'...'`, an unhex-based expression, a
 //! pseudo UDF, ...) is intentionally not prescribed.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TranslationOptions, UuidRepresentation};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 use rusqlite::Connection;
 
 const UUID_HEX_STR: &str = "550e8400-e29b-41d4-a716-446655440000";

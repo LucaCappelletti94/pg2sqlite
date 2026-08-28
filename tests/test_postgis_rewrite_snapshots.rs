@@ -6,7 +6,7 @@
 //! or the rtree subquery shape surfaces as a snapshot diff rather than a
 //! silent semantic change.
 
-use pg2sqlite::prelude::{Pg2SqliteOptions, TranslationOptions};
+use pg2sqlite::prelude::Pg2SqliteOptions;
 
 mod helpers;
 

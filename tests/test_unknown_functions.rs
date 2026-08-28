@@ -6,10 +6,7 @@
 //! that keep passing through are the ones SQLite can actually resolve: its own
 //! built-ins, and whatever the caller has declared.
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
 
 const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, n INT, s TEXT, payload JSONB);";

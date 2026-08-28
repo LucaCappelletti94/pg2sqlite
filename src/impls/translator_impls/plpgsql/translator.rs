@@ -26,10 +26,7 @@ use sqlparser::{
     tokenizer::Span,
 };
 
-use super::{
-    context::{PlPgSqlContext, VariableBinding},
-    cte_builder::CteBuilder,
-};
+use super::{PlPgSqlContext, VariableBinding, cte_builder::CteBuilder};
 use crate::{
     errors::Error,
     impls::{
@@ -38,8 +35,7 @@ use crate::{
         query_builder::{make_query, make_simple_select, single_expr_query},
         translator_impls::condition_injection::inject_condition_into_dml_statement,
     },
-    options::Pg2SqliteOptions,
-    traits::{TranslationOptions, Translator},
+    traits::translator::TranslatorWithContext,
 };
 
 /// Main translator for PL/pgSQL function bodies.
@@ -82,7 +78,8 @@ impl PlPgSqlTranslator {
         body: &BeginEndStatements,
         mut context: PlPgSqlContext,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Vec<Statement>, Error> {
         let mut result = Vec::new();
 
@@ -96,7 +93,7 @@ impl PlPgSqlTranslator {
         if options.get_uuid_v7_function_name().is_none() {
             for stmt in &body.statements {
                 if calls_uuid_v7(stmt) {
-                    return Err(Error::UnsupportedSQLiteFeature(
+                    return Err(Error::forward_refusal(
                         crate::impls::translator_impls::function::uuid_v7_not_declared(),
                     ));
                 }
@@ -104,7 +101,7 @@ impl PlPgSqlTranslator {
         }
 
         for stmt in &body.statements {
-            let translated = Self::translate_statement(stmt, &mut context, schema, options)?;
+            let translated = Self::translate_statement(stmt, &mut context, schema, options, emit)?;
             result.extend(translated);
         }
 
@@ -115,7 +112,8 @@ impl PlPgSqlTranslator {
         stmt: &Statement,
         context: &mut PlPgSqlContext,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Vec<Statement>, Error> {
         match stmt {
             Statement::Set(set) => {
@@ -124,19 +122,19 @@ impl PlPgSqlTranslator {
             }
 
             Statement::If(if_stmt) => {
-                Self::translate_if_statement(if_stmt, context, schema, options)
+                Self::translate_if_statement(if_stmt, context, schema, options, emit)
             }
 
             Statement::Insert(insert) => {
-                Self::translate_insert_statement(insert, context, schema, options)
+                Self::translate_insert_statement(insert, context, schema, options, emit)
             }
 
             Statement::Query(query) => {
-                Self::translate_query_statement(query, context, schema, options)
+                Self::translate_query_statement(query, context, schema, options, emit)
             }
 
             Statement::Update(_) | Statement::Delete(_) => {
-                let mut translated = stmt.translate(schema, options)?;
+                let mut translated = stmt.translate_with_warnings(schema, options, emit)?;
                 if let Some(condition) = context.current_condition() {
                     for t_stmt in &mut translated {
                         Self::inject_condition_into_statement(t_stmt, &condition)?;
@@ -146,10 +144,10 @@ impl PlPgSqlTranslator {
             }
 
             Statement::Return(ret) => {
-                Self::translate_return_statement(ret.value.as_ref(), context, schema, options)
+                Self::translate_return_statement(ret.value.as_ref(), context, schema, options, emit)
             }
 
-            other => other.translate(schema, options),
+            other => other.translate_with_warnings(schema, options, emit),
         }
     }
 
@@ -165,7 +163,8 @@ impl PlPgSqlTranslator {
         value: Option<&ReturnStatementValue>,
         context: &PlPgSqlContext,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Vec<Statement>, Error> {
         let Some(ReturnStatementValue::Expr(expr)) = value else {
             return Ok(Vec::new());
@@ -180,6 +179,7 @@ impl PlPgSqlTranslator {
                     context,
                     schema,
                     options,
+                    emit,
                 )
             }
             Expr::Identifier(ident)
@@ -189,9 +189,9 @@ impl PlPgSqlTranslator {
                 Ok(Vec::new())
             }
             other => {
-                Err(Error::UnsupportedSQLiteFeature(format!(
+                Err(Error::forward_refusal(format!(
                     "RETURN {other} has no SQLite equivalent in a trigger body. A trigger can only \
-                 proceed, which is RETURN NEW, or cancel the write, which is RETURN NULL."
+                             proceed, which is RETURN NEW, or cancel the write, which is RETURN NULL."
                 )))
             }
         }
@@ -246,7 +246,8 @@ impl PlPgSqlTranslator {
         if_stmt: &sqlparser::ast::IfStatement,
         context: &mut PlPgSqlContext,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Vec<Statement>, Error> {
         let mut result = Vec::new();
         let mut negated_conditions: Vec<String> = Vec::new();
@@ -258,6 +259,7 @@ impl PlPgSqlTranslator {
             &bindings,
             schema,
             options,
+            emit,
         )?;
 
         context.push_condition(if_condition.clone());
@@ -265,7 +267,7 @@ impl PlPgSqlTranslator {
         context.clear_uuid_first_use();
 
         for stmt in if_stmt.if_block.statements() {
-            let translated = Self::translate_statement(stmt, context, schema, options)?;
+            let translated = Self::translate_statement(stmt, context, schema, options, emit)?;
             result.extend(translated);
         }
 
@@ -280,6 +282,7 @@ impl PlPgSqlTranslator {
                 &bindings,
                 schema,
                 options,
+                emit,
             )?;
 
             debug_assert!(
@@ -294,7 +297,7 @@ impl PlPgSqlTranslator {
             context.clear_uuid_first_use();
 
             for stmt in elseif_block.statements() {
-                let translated = Self::translate_statement(stmt, context, schema, options)?;
+                let translated = Self::translate_statement(stmt, context, schema, options, emit)?;
                 result.extend(translated);
             }
 
@@ -309,7 +312,7 @@ impl PlPgSqlTranslator {
             context.clear_uuid_first_use();
 
             for stmt in else_block.statements() {
-                let translated = Self::translate_statement(stmt, context, schema, options)?;
+                let translated = Self::translate_statement(stmt, context, schema, options, emit)?;
                 result.extend(translated);
             }
 
@@ -330,7 +333,8 @@ impl PlPgSqlTranslator {
         context: &mut PlPgSqlContext,
         bindings: &[VariableBinding],
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<String, Error> {
         let Some(cond) = cond else {
             return Ok("TRUE".to_string());
@@ -338,7 +342,7 @@ impl PlPgSqlTranslator {
         let mut transformed = cond.clone();
         Self::transform_expr(&mut transformed, context, options);
         Self::fold_trigger_specials(&mut transformed, context)?;
-        let translated = transformed.translate(schema, options)?;
+        let translated = transformed.translate_with_warnings(schema, options, emit)?;
         let s = translated.to_string();
         if bindings.is_empty() {
             return Ok(s);
@@ -365,9 +369,9 @@ impl PlPgSqlTranslator {
                 match upper.as_str() {
                     "TG_OP" => {
                         if context.has_multiple_trigger_events() {
-                            return Err(Error::UnsupportedSQLiteFeature(
+                            return Err(Error::forward_refusal(
                                 "TG_OP is ambiguous in a multi-event trigger; split into one \
-                                 trigger function per event so TG_OP can be constant-folded"
+                             trigger function per event so TG_OP can be constant-folded"
                                     .to_string(),
                             ));
                         }
@@ -385,7 +389,7 @@ impl PlPgSqlTranslator {
                         }
                     }
                     other if other.starts_with("TG_") => {
-                        return Err(Error::UnsupportedSQLiteFeature(format!(
+                        return Err(Error::forward_refusal(format!(
                             "the trigger special variable {other} has no SQLite equivalent; \
                              only TG_OP (single-event) and TG_TABLE_NAME are constant-folded"
                         )));
@@ -438,7 +442,8 @@ impl PlPgSqlTranslator {
         query: &Query,
         context: &mut PlPgSqlContext,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Vec<Statement>, Error> {
         // The preprocessor rewrites `SELECT <exprs> INTO <vars> [FROM ...]`
         // into SET bindings before parsing. An INTO surviving to this point is
@@ -447,10 +452,10 @@ impl PlPgSqlTranslator {
         if let SetExpr::Select(select) = &*query.body
             && let Some(into) = &select.into
         {
-            return Err(Error::UnsupportedSQLiteFeature(format!(
+            return Err(Error::forward_refusal(format!(
                 "SELECT ... INTO {} inside a trigger body has no SET rewrite: only plain \
-                 variable names can receive a SELECT INTO binding, and SQLite has no SELECT \
-                 INTO of its own.",
+             variable names can receive a SELECT INTO binding, and SQLite has no SELECT \
+             INTO of its own.",
                 into.targets.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
             )));
         }
@@ -486,20 +491,22 @@ impl PlPgSqlTranslator {
             vec![Statement::Query(Box::new(transformed_query))]
         };
 
-        Self::finalize_query_statements(transformed_statements, context, schema, options)
+        Self::finalize_query_statements(transformed_statements, context, schema, options, emit)
     }
 
     fn finalize_query_statements(
         statements: Vec<Statement>,
         context: &PlPgSqlContext,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Vec<Statement>, Error> {
         let mut finalized = Vec::new();
         let condition = context.current_condition();
 
         for statement in statements {
-            let mut translated_statements = statement.translate(schema, options)?;
+            let mut translated_statements =
+                statement.translate_with_warnings(schema, options, emit)?;
 
             if let Some(condition) = &condition {
                 for translated in &mut translated_statements {
@@ -520,10 +527,10 @@ impl PlPgSqlTranslator {
         with: &sqlparser::ast::With,
         insert: &sqlparser::ast::Insert,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Vec<Statement>, Error> {
         let Some(source) = &insert.source else {
-            return Err(Error::UnsupportedSQLiteFeature(
+            return Err(Error::forward_refusal(
                 "WITH ... INSERT without source SELECT not supported".to_string(),
             ));
         };
@@ -578,8 +585,8 @@ impl PlPgSqlTranslator {
             .collect();
 
         let use_wildcard = outer_projection.iter().any(|item| {
-            matches!(item, SelectItem::UnnamedExpr(Expr::Identifier(id)) if id.value.starts_with("col"))
-        });
+        matches!(item, SelectItem::UnnamedExpr(Expr::Identifier(id)) if id.value.starts_with("col"))
+    });
 
         let final_projection = if use_wildcard {
             vec![SelectItem::Wildcard(sqlparser::ast::WildcardAdditionalOptions::default())]
@@ -625,7 +632,7 @@ impl PlPgSqlTranslator {
         with: &sqlparser::ast::With,
         delete: &sqlparser::ast::Delete,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Vec<Statement> {
         let mut new_delete = delete.clone();
 
@@ -640,7 +647,7 @@ impl PlPgSqlTranslator {
         expr: &mut Expr,
         with: &sqlparser::ast::With,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         use crate::impls::expr_helpers::mutate_expr_children;
 
@@ -648,7 +655,7 @@ impl PlPgSqlTranslator {
             subquery: &mut Query,
             with: &sqlparser::ast::With,
             context: &mut PlPgSqlContext,
-            options: &Pg2SqliteOptions,
+            options: &crate::options::TranslationContext<'_>,
         ) {
             let cte_names: Vec<String> =
                 with.cte_tables.iter().map(|cte| cte.alias.name.value.clone()).collect();
@@ -736,7 +743,7 @@ impl PlPgSqlTranslator {
     fn transform_query_body(
         body: &SetExpr,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<SetExpr, Error> {
         match body {
             SetExpr::Insert(Statement::Insert(insert)) => {
@@ -758,7 +765,7 @@ impl PlPgSqlTranslator {
     fn transform_query_expressions(
         query: &mut Query,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         if let Ok(transformed_body) = Self::transform_query_body(&query.body, context, options) {
             *query.body = transformed_body;
@@ -804,7 +811,7 @@ impl PlPgSqlTranslator {
     fn transform_cte_query(
         query: &mut Query,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         Self::transform_query_expressions(query, context, options);
     }
@@ -812,7 +819,7 @@ impl PlPgSqlTranslator {
     fn transform_insert_for_sqlite(
         insert: &sqlparser::ast::Insert,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) -> sqlparser::ast::Insert {
         let mut new_insert = insert.clone();
 
@@ -830,7 +837,7 @@ impl PlPgSqlTranslator {
     fn transform_delete_for_sqlite(
         delete: &sqlparser::ast::Delete,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) -> sqlparser::ast::Delete {
         let mut new_delete = delete.clone();
 
@@ -850,7 +857,7 @@ impl PlPgSqlTranslator {
     fn transform_set_expr(
         set_expr: &mut SetExpr,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         match set_expr {
             SetExpr::Select(select) => {
@@ -895,7 +902,7 @@ impl PlPgSqlTranslator {
     fn transform_table_with_joins(
         table_with_joins: &mut TableWithJoins,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         Self::transform_table_factor(&mut table_with_joins.relation, context, options);
 
@@ -912,7 +919,7 @@ impl PlPgSqlTranslator {
     fn transform_table_factor(
         factor: &mut TableFactor,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         match factor {
             TableFactor::Derived { subquery, .. } => {
@@ -928,7 +935,7 @@ impl PlPgSqlTranslator {
     fn transform_selection(
         selection: &mut Option<Expr>,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         if let Some(expr) = selection {
             Self::transform_expr(expr, context, options);
@@ -936,7 +943,11 @@ impl PlPgSqlTranslator {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn transform_expr(expr: &mut Expr, context: &mut PlPgSqlContext, options: &Pg2SqliteOptions) {
+    fn transform_expr(
+        expr: &mut Expr,
+        context: &mut PlPgSqlContext,
+        options: &crate::options::TranslationContext<'_>,
+    ) {
         use crate::impls::expr_helpers::mutate_expr_children;
 
         match expr {
@@ -984,10 +995,12 @@ impl PlPgSqlTranslator {
     fn transform_function_parts(
         func: &mut sqlparser::ast::Function,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         let transform_func_args =
-            |args: &mut FunctionArguments, ctx: &mut PlPgSqlContext, opts: &Pg2SqliteOptions| {
+            |args: &mut FunctionArguments,
+             ctx: &mut PlPgSqlContext,
+             opts: &crate::options::TranslationContext<'_>| {
                 if let FunctionArguments::List(list) = args {
                     for arg in &mut list.args {
                         match arg {
@@ -1022,7 +1035,7 @@ impl PlPgSqlTranslator {
     fn transform_subquery(
         subquery: &mut Query,
         context: &mut PlPgSqlContext,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
     ) {
         Self::transform_query_expressions(subquery, context, options);
     }
@@ -1039,7 +1052,8 @@ impl PlPgSqlTranslator {
         insert: &sqlparser::ast::Insert,
         context: &mut PlPgSqlContext,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Vec<Statement>, Error> {
         use sqlparser::ast::TableObject;
 
@@ -1047,7 +1061,8 @@ impl PlPgSqlTranslator {
         let condition = context.current_condition();
 
         if bindings.is_empty() && condition.is_none() {
-            return Statement::Insert(insert.clone()).translate(schema, options);
+            return Statement::Insert(insert.clone())
+                .translate_with_warnings(schema, options, emit);
         }
 
         let table_name = match &insert.table {
@@ -1064,7 +1079,7 @@ impl PlPgSqlTranslator {
                     .unwrap_or_default()
             }
             TableObject::TableFunction(_) | TableObject::TableQuery(_) => {
-                return Err(Error::UnsupportedSQLiteFeature(
+                return Err(Error::forward_refusal(
                     "INSERT into table function not supported".to_string(),
                 ));
             }
@@ -1145,7 +1160,7 @@ impl PlPgSqlTranslator {
         for binding in &ordered {
             let translated_expr = Self::translate_uuid_function(&binding.expression, options);
             let expr = Self::parse_expression(&translated_expr)?;
-            let expr = expr.translate(schema, options).unwrap_or(expr);
+            let expr = expr.translate_with_warnings(schema, options, emit).unwrap_or(expr);
             let expr = Self::substitute_variables(&expr, &in_scope);
             let referenced: Vec<VariableBinding> = in_scope
                 .iter()
@@ -1216,7 +1231,8 @@ impl PlPgSqlTranslator {
                     }));
                 }
                 _ => {
-                    return Statement::Insert(insert.clone()).translate(schema, options);
+                    return Statement::Insert(insert.clone())
+                        .translate_with_warnings(schema, options, emit);
                 }
             }
         }
@@ -1229,7 +1245,7 @@ impl PlPgSqlTranslator {
             Self::null_unbound_declarations(source, context, &ordered);
         }
 
-        Statement::Insert(new_insert).translate(schema, options)
+        Statement::Insert(new_insert).translate_with_warnings(schema, options, emit)
     }
 
     /// Replaces every declared variable that has no binding here with NULL.
@@ -1527,8 +1543,8 @@ impl PlPgSqlTranslator {
         condition: Option<&str>,
     ) -> Result<SetExpr, Error> {
         if values.rows.len() != 1 {
-            return Err(Error::UnknownPostgresFeature(
-                "Multi-row VALUES in trigger not supported".into(),
+            return Err(Error::unsupported_source_syntax(
+                "Multi-row VALUES in trigger not supported",
             ));
         }
 
@@ -1763,8 +1779,10 @@ impl PlPgSqlTranslator {
         }
     }
 
-    fn translate_uuid_function(expr_str: &str, options: &Pg2SqliteOptions) -> String {
-        use crate::traits::TranslationOptions;
+    fn translate_uuid_function(
+        expr_str: &str,
+        options: &crate::options::TranslationContext<'_>,
+    ) -> String {
         if let Ok(mut parsed_expr) = Self::parse_expression(expr_str) {
             let mut context = PlPgSqlContext::new();
             Self::transform_expr(&mut parsed_expr, &mut context, options);
@@ -1792,12 +1810,12 @@ impl PlPgSqlTranslator {
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let mut parser =
             sqlparser::parser::Parser::new(&dialect).try_with_sql(expr_str).map_err(|e| {
-                Error::UnknownPostgresFeature(format!("Failed to parse expression: {e}"))
+                Error::unsupported_source_syntax(format!("Failed to parse expression: {e}"))
             })?;
 
-        parser
-            .parse_expr()
-            .map_err(|e| Error::UnknownPostgresFeature(format!("Failed to parse expression: {e}")))
+        parser.parse_expr().map_err(|e| {
+            Error::unsupported_source_syntax(format!("Failed to parse expression: {e}"))
+        })
     }
 
     /// Attach an `IF` condition to a statement's WHERE clause.
@@ -1820,9 +1838,8 @@ mod tests {
 
     use super::PlPgSqlTranslator;
     use crate::{
-        impls::translator_impls::plpgsql::context::{PlPgSqlContext, VariableBinding},
+        impls::translator_impls::plpgsql::{PlPgSqlContext, VariableBinding},
         prelude::Pg2SqliteOptions,
-        traits::TranslationOptions,
     };
 
     fn empty_schema() -> ParserDB {
@@ -1846,9 +1863,11 @@ mod tests {
 
     #[test]
     fn uuid_function_translation_and_expression_parsing_behave_as_expected() {
-        let options = Pg2SqliteOptions::default()
-            .with_uuid_function_name("app_uuid".to_string())
-            .with_uuid_v7_function_name("uuid7");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default()
+                .with_uuid_function_name("app_uuid".to_string())
+                .with_uuid_v7_function_name("uuid7"),
+        );
         // The random spellings take the random name and the ordered one takes
         // its own, which is the whole point of the two options.
         let translated = PlPgSqlTranslator::translate_uuid_function(
@@ -1978,7 +1997,7 @@ mod tests {
         };
 
         let mut ctx = PlPgSqlContext::new();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let statements =
             PlPgSqlTranslator::transform_with_insert_to_subquery(&with, insert, &mut ctx, &options)
                 .unwrap();
@@ -1994,7 +2013,7 @@ mod tests {
     fn transform_query_body_covers_set_operation_path() {
         let query = parse_query("SELECT 1 UNION ALL SELECT 2");
         let mut ctx = PlPgSqlContext::new();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let transformed =
             PlPgSqlTranslator::transform_query_body(query.body.as_ref(), &mut ctx, &options)
@@ -2021,7 +2040,7 @@ mod tests {
         };
 
         let mut ctx = PlPgSqlContext::new();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let transformed =
             PlPgSqlTranslator::transform_with_delete_to_subquery(&with, delete, &mut ctx, &options);
         assert_eq!(transformed.len(), 1);
@@ -2031,23 +2050,28 @@ mod tests {
     #[test]
     fn translate_insert_statement_uses_fast_path_without_bindings() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let insert_stmt = parse_statement("INSERT INTO users(id) VALUES (1)");
         let Statement::Insert(insert) = insert_stmt else {
             panic!("expected insert");
         };
         let mut ctx = PlPgSqlContext::new();
 
-        let translated =
-            PlPgSqlTranslator::translate_insert_statement(&insert, &mut ctx, &schema, &options)
-                .unwrap();
+        let translated = PlPgSqlTranslator::translate_insert_statement(
+            &insert,
+            &mut ctx,
+            &schema,
+            &options,
+            &mut |_| {},
+        )
+        .unwrap();
         assert!(!translated.is_empty(), "the body should translate into at least one statement");
     }
 
     #[test]
     fn translate_query_statement_falls_back_for_non_insert_delete_with_bodies() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
 
         let query = parse_query(
@@ -2057,8 +2081,14 @@ mod tests {
             "#,
         );
 
-        let out = PlPgSqlTranslator::translate_query_statement(&query, &mut ctx, &schema, &options)
-            .unwrap();
+        let out = PlPgSqlTranslator::translate_query_statement(
+            &query,
+            &mut ctx,
+            &schema,
+            &options,
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], Statement::Query(_)));
     }
@@ -2074,7 +2104,7 @@ mod tests {
         insert.source = None;
 
         let mut ctx = PlPgSqlContext::new();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let err = PlPgSqlTranslator::transform_with_insert_to_subquery(
             &with, &insert, &mut ctx, &options,
         )
@@ -2084,7 +2114,7 @@ mod tests {
 
     #[test]
     fn transform_with_insert_to_subquery_handles_projection_shapes() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
 
         let q1 = parse_query(
@@ -2152,7 +2182,7 @@ mod tests {
         let selection = delete.selection.as_mut().unwrap();
 
         let mut ctx = PlPgSqlContext::new();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         PlPgSqlTranslator::inject_with_into_in_subqueries(selection, &with, &mut ctx, &options);
 
         let selection_sql = selection.to_string();
@@ -2162,7 +2192,7 @@ mod tests {
     #[test]
     fn transform_query_body_and_set_expr_cover_insert_delete_select_and_other_paths() {
         let mut ctx = PlPgSqlContext::new();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let Statement::Insert(insert) = parse_statement("INSERT INTO users(id) VALUES (1)") else {
             panic!("expected insert");
@@ -2205,7 +2235,7 @@ mod tests {
     #[test]
     fn transform_table_with_joins_and_expr_cover_recursive_paths() {
         let mut ctx = PlPgSqlContext::new();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let query = parse_query(
             "SELECT gen_random_uuid(), x FROM users u LEFT JOIN teams t ON u.team_id = t.id",
@@ -2242,7 +2272,9 @@ mod tests {
             "test".to_string(),
         )
         .unwrap();
-        let options = Pg2SqliteOptions::default().with_uuid_v7_function_name("uuid7");
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_uuid_v7_function_name("uuid7"),
+        );
 
         let mut ctx = PlPgSqlContext::new();
         ctx.add_binding(VariableBinding {
@@ -2260,6 +2292,7 @@ mod tests {
             &mut ctx,
             &schema,
             &options,
+            &mut |_| {},
         )
         .unwrap();
         assert!(
@@ -2279,6 +2312,7 @@ mod tests {
             &mut ctx,
             &schema,
             &options,
+            &mut |_| {},
         )
         .unwrap();
         assert!(
@@ -2296,6 +2330,7 @@ mod tests {
             &mut ctx,
             &schema,
             &options,
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(err.to_string().contains("table function not supported"));
@@ -2309,7 +2344,7 @@ mod tests {
             "test".to_string(),
         )
         .unwrap();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
         ctx.add_binding(VariableBinding {
             name: "v_id".to_string(),
@@ -2327,6 +2362,7 @@ mod tests {
             &mut ctx,
             &schema,
             &options,
+            &mut |_| {},
         )
         .expect("values insert should translate");
         assert!(!translated.is_empty(), "the body should translate into at least one statement");
@@ -2339,13 +2375,18 @@ mod tests {
     #[test]
     fn translate_statement_other_variant_and_inject_noop_paths_are_covered() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
 
         let drop_stmt = parse_statement("DROP TABLE IF EXISTS users");
-        let translated =
-            PlPgSqlTranslator::translate_statement(&drop_stmt, &mut ctx, &schema, &options)
-                .expect("fallback statement translation should work");
+        let translated = PlPgSqlTranslator::translate_statement(
+            &drop_stmt,
+            &mut ctx,
+            &schema,
+            &options,
+            &mut |_| {},
+        )
+        .expect("fallback statement translation should work");
         assert_eq!(translated.len(), 1);
 
         let mut insert = parse_statement("INSERT INTO users(id) VALUES (1)");
@@ -2357,7 +2398,7 @@ mod tests {
 
     #[test]
     fn transform_set_expr_and_transform_expr_cover_remaining_select_and_default_paths() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
 
         let query = parse_query(
@@ -2394,8 +2435,9 @@ mod tests {
 
     #[test]
     fn transform_subquery_matches_cte_query_for_limit_expression() {
-        let options =
-            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string());
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string()),
+        );
         let mut cte_ctx = PlPgSqlContext::new();
         let mut subquery_ctx = PlPgSqlContext::new();
 
@@ -2420,8 +2462,9 @@ mod tests {
 
     #[test]
     fn transform_subquery_matches_cte_query_for_offset_comma_limit_expression() {
-        let options =
-            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string());
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string()),
+        );
         let mut cte_ctx = PlPgSqlContext::new();
         let mut subquery_ctx = PlPgSqlContext::new();
 
@@ -2450,8 +2493,9 @@ mod tests {
 
     #[test]
     fn transform_subquery_matches_cte_query_for_fetch_expression() {
-        let options =
-            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string());
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_uuid_function_name("sqlite_uuid".to_string()),
+        );
         let mut cte_ctx = PlPgSqlContext::new();
         let mut subquery_ctx = PlPgSqlContext::new();
 
@@ -2481,7 +2525,7 @@ mod tests {
     #[test]
     fn transform_delete_and_insert_statement_cover_function_name_and_non_select_source_paths() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
         ctx.add_binding(VariableBinding { name: "v_id".to_string(), expression: "1".to_string() });
 
@@ -2514,6 +2558,7 @@ mod tests {
             &mut ctx,
             &schema,
             &options,
+            &mut |_| {},
         )
         .expect("function-style table object should still translate");
         assert!(!translated.is_empty(), "the body should translate into at least one statement");
@@ -2543,6 +2588,7 @@ mod tests {
             &mut ctx,
             &schema,
             &options,
+            &mut |_| {},
         );
         assert!(result.is_err(), "TABLE expression in INSERT source should error");
     }
@@ -2550,7 +2596,7 @@ mod tests {
     #[test]
     fn translate_insert_statement_merges_condition_with_existing_selection() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
         ctx.add_binding(VariableBinding { name: "v_id".to_string(), expression: "1".to_string() });
         ctx.push_condition("NEW.kind = 'a'".to_string());
@@ -2565,6 +2611,7 @@ mod tests {
             &mut ctx,
             &schema,
             &options,
+            &mut |_| {},
         )
         .expect("insert-select should translate");
         let sql = translated[0].to_string();
@@ -2667,7 +2714,7 @@ mod tests {
 
     #[test]
     fn transform_with_insert_to_subquery_covers_values_and_projection_alias_edges() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
 
         let values_query =
@@ -2713,7 +2760,7 @@ mod tests {
 
     #[test]
     fn transform_table_with_joins_handles_inner_left_right_and_full_outer_join_variants() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
 
         let inner_query =

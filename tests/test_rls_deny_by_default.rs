@@ -23,9 +23,7 @@
 //! has to be registered on the connection with `create_scalar_function`. That
 //! is a driver capability diesel does not expose.
 
-use pg2sqlite::prelude::{
-    Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, TranslationOptions, UuidRepresentation,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rusqlite::Connection;
 
 fn rls_opts() -> Pg2SqliteOptions {

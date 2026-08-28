@@ -1,5 +1,5 @@
-//! Implementation of the [`Translator`] trait for the
-//! `CreateTable` type.
+//! Implementation of the [`Translator`](crate::traits::Translator) trait for
+//! the `CreateTable` type.
 
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
@@ -13,7 +13,6 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     ColumnOption, ColumnOptionDef, CreateTable, CreateTableOptions, HiveDistributionStyle,
     OnCommit, TableConstraint, WithData,
@@ -24,27 +23,24 @@ use crate::{
         object_name::normalize_schema_qualified_object_name_for_sqlite,
         translator_impls::column::translate_column_def,
     },
-    prelude::{Pg2SqliteOptions, Translator},
-    warnings::{TranslationWarning, emit as emit_warning},
+    warnings::TranslationWarning,
 };
 
-impl Translator for CreateTable {
-    type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
-    type SQLiteEntry = CreateTable;
-
+crate::traits::translator::impl_contextual_translator!(CreateTable => CreateTable);
+impl crate::traits::translator::TranslatorWithContext for CreateTable {
     #[allow(clippy::too_many_lines)]
-    fn translate(
+    fn translate_with_warnings(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         // LIKE t is the most dangerous unsupported clause: SQLite would parse it as
         // a column named LIKE of type t and silently create a table with the wrong
         // schema. Reject before emitting anything.
         if self.like.is_some() {
             let table_name = self.name.to_string();
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "CREATE TABLE {table_name} (LIKE ...) cannot be translated to SQLite. \
                  SQLite would silently accept LIKE as a column name and create a table \
                  with a completely wrong schema. Spell out the columns explicitly instead."
@@ -54,7 +50,7 @@ impl Translator for CreateTable {
         // INHERITS has no SQLite equivalent.
         if self.inherits.is_some() {
             let table_name = self.name.to_string();
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "CREATE TABLE {table_name} ... INHERITS (...) cannot be translated to SQLite. \
                  SQLite has no table inheritance. Spell out the inherited columns explicitly."
             )));
@@ -63,7 +59,7 @@ impl Translator for CreateTable {
         // PARTITION OF has no SQLite equivalent.
         if self.partition_of.is_some() {
             let table_name = self.name.to_string();
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "CREATE TABLE {table_name} PARTITION OF ... cannot be translated to SQLite. \
                  SQLite has no partitioned tables."
             )));
@@ -73,7 +69,7 @@ impl Translator for CreateTable {
         // express any more than the PARTITION OF children it would carry.
         if self.partition_by.is_some() {
             let table_name = self.name.to_string();
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "CREATE TABLE {table_name} ... PARTITION BY cannot be translated to SQLite. \
                  SQLite has no partitioned tables."
             )));
@@ -86,11 +82,11 @@ impl Translator for CreateTable {
         // provably neutral. A bare GLOBAL without TEMPORARY is refused above,
         // since PostgreSQL rejects that spelling.
         if let Some(global) = self.global {
-            emit_warning(TranslationWarning::LossyDrop {
+            emit(TranslationWarning::LossyDrop {
                 construct: if global { "GLOBAL" } else { "LOCAL" }.to_string(),
                 reason: "PostgreSQL accepts and ignores the word before TEMPORARY, and SQLite \
-                         has no spelling for it, so it was dropped and the table stays \
-                         temporary."
+             has no spelling for it, so it was dropped and the table stays \
+             temporary."
                     .to_string(),
             });
         }
@@ -101,10 +97,10 @@ impl Translator for CreateTable {
         // dispositions empty or drop the table at commit, which SQLite cannot
         // express, and are refused above.
         if matches!(self.on_commit, Some(OnCommit::PreserveRows)) {
-            emit_warning(TranslationWarning::LossyDrop {
+            emit(TranslationWarning::LossyDrop {
                 construct: "ON COMMIT PRESERVE ROWS".to_string(),
                 reason: "SQLite has no ON COMMIT clause. PRESERVE ROWS is what a SQLite \
-                         temporary table does anyway, so the clause was dropped."
+             temporary table does anyway, so the clause was dropped."
                     .to_string(),
             });
         }
@@ -115,11 +111,11 @@ impl Translator for CreateTable {
         // rejects the clause outright. The other option spellings are foreign
         // and refused above.
         if let CreateTableOptions::With(_) = &self.table_options {
-            emit_warning(TranslationWarning::LossyDrop {
+            emit(TranslationWarning::LossyDrop {
                 construct: self.table_options.to_string(),
                 reason: "PostgreSQL storage parameters tune the storage engine and do not \
-                         change results, and SQLite has no equivalent clause, so they were \
-                         dropped."
+             change results, and SQLite has no equivalent clause, so they were \
+             dropped."
                     .to_string(),
             });
         }
@@ -128,20 +124,20 @@ impl Translator for CreateTable {
         // default, so dropping the words changes nothing. WITH NO DATA would
         // change the table's contents and is refused above.
         if matches!(self.with_data, Some(WithData { data: true, statistics: None })) {
-            emit_warning(TranslationWarning::LossyDrop {
+            emit(TranslationWarning::LossyDrop {
                 construct: "WITH DATA".to_string(),
                 reason: "CREATE TABLE AS populates the new table in both databases, so the \
-                         clause restates the default and was dropped."
+             clause restates the default and was dropped."
                     .to_string(),
             });
         }
 
         // UNLOGGED is a durability hint with no SQLite equivalent. Drop it and warn.
         if self.unlogged {
-            emit_warning(TranslationWarning::LossyDrop {
+            emit(TranslationWarning::LossyDrop {
                 construct: "UNLOGGED".to_string(),
                 reason: "SQLite has no UNLOGGED durability setting so the modifier was dropped \
-                         and the table is created as a regular table."
+             and the table is created as a regular table."
                     .to_string(),
             });
         }
@@ -151,7 +147,7 @@ impl Translator for CreateTable {
         let is_ctas = self.query.is_some();
 
         let query = match &self.query {
-            Some(q) => Some(Box::new(q.translate(schema, options)?)),
+            Some(q) => Some(Box::new(q.translate_with_warnings(schema, options, emit)?)),
             None => None,
         };
 
@@ -180,12 +176,14 @@ impl Translator for CreateTable {
             columns: self
                 .columns
                 .iter()
-                .map(|c| translate_column_def(c, &self.name, &primary_key_columns, schema, options))
+                .map(|c| {
+                    translate_column_def(c, &self.name, &primary_key_columns, schema, options, emit)
+                })
                 .collect::<Result<Vec<_>, _>>()?,
             constraints: self
                 .constraints
                 .iter()
-                .map(|c| c.translate(schema, options))
+                .map(|c| c.translate_with_warnings(schema, options, emit))
                 .collect::<Result<Vec<Vec<TableConstraint>>, _>>()?
                 .into_iter()
                 .flatten()
@@ -290,7 +288,8 @@ impl Translator for CreateTable {
 }
 
 /// Refuses the `CREATE TABLE` modifiers that cannot reach SQLite, so
-/// [`Translator::translate`] can rebuild the statement naming every field.
+/// [`Translator::translate`](crate::traits::Translator::translate) can rebuild
+/// the statement naming every field.
 ///
 /// Two kinds land here. The foreign spellings are refused because PostgreSQL
 /// rejects them, so a file carrying one is not the input this crate accepts.
@@ -426,7 +425,7 @@ fn reject_foreign_create_table_modifiers(
     };
 
     if let Some(clause) = foreign {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "CREATE TABLE {} carries {clause}. PostgreSQL rejects that spelling, so a file \
              containing it is not the input this crate translates. Remove the clause.",
             create_table.name
@@ -435,7 +434,7 @@ fn reject_foreign_create_table_modifiers(
 
     match create_table.on_commit {
         Some(OnCommit::DeleteRows) => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "CREATE TABLE {} ... ON COMMIT DELETE ROWS empties the table at every commit, \
                  and a SQLite temporary table always keeps its rows, so dropping the clause \
                  would change what a transaction leaves behind. Remove it and empty the table \
@@ -444,7 +443,7 @@ fn reject_foreign_create_table_modifiers(
             )));
         }
         Some(OnCommit::Drop) => {
-            return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+            return Err(crate::errors::Error::forward_refusal(format!(
                 "CREATE TABLE {} ... ON COMMIT DROP removes the table at commit, which SQLite \
                  cannot express, so dropping the clause would leave a table behind that \
                  PostgreSQL would have removed. Remove it and drop the table explicitly where \
@@ -456,7 +455,7 @@ fn reject_foreign_create_table_modifiers(
     }
 
     if matches!(create_table.with_data, Some(WithData { data: false, .. })) {
-        return Err(crate::errors::Error::UnsupportedSQLiteFeature(format!(
+        return Err(crate::errors::Error::forward_refusal(format!(
             "CREATE TABLE {} AS ... WITH NO DATA creates the table empty, and SQLite's CREATE \
              TABLE AS always populates it, so dropping the clause would change the table's \
              contents. Spell out the columns in a plain CREATE TABLE instead.",

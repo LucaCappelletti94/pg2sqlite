@@ -1,10 +1,7 @@
 #![allow(missing_docs)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation},
-    traits::TranslationOptions,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 
 // Schema fixtures loaded at compile time (non-RLS)
 const DATA_TYPES_EXTENDED_SQL: &str = include_str!("../tests/fixtures/data_types_extended.sql");

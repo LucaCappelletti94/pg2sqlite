@@ -1,15 +1,14 @@
 //! Integration test for translating migrations loaded from a git repository.
 //!
-//! Uses `Pg2Sqlite::from_git`, which is gated on the `std` feature (it
-//! pulls in `git2` + `tempfile`).
+//! Uses `Pg2Sqlite::from_git`, which is gated on the `git` feature.
 
-#![cfg(feature = "std")]
+#![cfg(feature = "git")]
 
 use diesel::{Connection, RunQueryDsl, SqliteConnection, declare_sql_function};
 use git2::{Repository, Signature};
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    traits::{TranslationOptions, UuidRepresentation},
+    traits::UuidRepresentation,
 };
 use rosetta_uuid::Uuid;
 use tempfile::TempDir;

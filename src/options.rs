@@ -1,5 +1,6 @@
 //! Submodule defining a struct providing options for the translation.
 
+use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::{
@@ -12,8 +13,7 @@ use alloc::{
 };
 
 use crate::traits::{
-    ArrayRepresentation, SessionVariableMapping, SessionVariablePattern, TranslationOptions,
-    UuidRepresentation,
+    ArrayRepresentation, SessionVariableMapping, SessionVariablePattern, UuidRepresentation,
 };
 
 /// Struct to hold options for the translation.
@@ -67,42 +67,6 @@ pub struct Pg2SqliteOptions {
     /// Whether the destination SQLite is declared to provide the math
     /// functions, which ship only under `SQLITE_ENABLE_MATH_FUNCTIONS`.
     math_functions_available: bool,
-    /// Spatially-indexed `(table, column)` pairs, both lowercased, populated
-    /// automatically by `Pg2Sqlite::translate` from `CREATE INDEX ... USING
-    /// gist (...)` statements in the input. Consumed by the query-time
-    /// predicate rewriting pass to drive `ST_*` predicates through the rtree
-    /// shadow table. Intentionally not exposed in the public builder API:
-    /// the catalog is derived from translation context, not user config.
-    pub(crate) spatial_indexes: Vec<(String, String)>,
-    /// FTS5-indexed `(table, column)` pairs, both lowercased, populated
-    /// automatically by `Pg2Sqlite::translate` from `CREATE INDEX ... USING
-    /// GIN (to_tsvector(...))` (or GiST equivalent) statements in the input.
-    /// Consumed by the query-time `@@ to_tsquery(...)` rewrite to validate
-    /// that the matched column has a declared FTS5 index before emitting
-    /// the IN-subquery against `<table>_fts`. Without this gate the
-    /// rewrite produced SQL that runtime-errored with "no such table".
-    /// Intentionally not exposed in the public builder API: the catalog
-    /// is derived from translation context, not user config.
-    pub(crate) fts_indexes: Vec<(String, String)>,
-    /// SQLite-unqualified names of every table, index, trigger, and view
-    /// declared in the translation unit, lowercased. Prewalked from the input
-    /// statements by `Pg2Sqlite::translate` and consumed by the read-only
-    /// deny-trigger pass to reject a generated trigger name that would collide
-    /// with an existing object. The translation schema omits index and trigger
-    /// definitions, so this catalog is the authoritative name source.
-    /// Intentionally not exposed in the public builder API: it is derived from
-    /// translation context, not user config.
-    pub(crate) declared_object_names: Vec<String>,
-    /// Names of the functions that a `CREATE TRIGGER` in the translation unit
-    /// executes, lowercased and unqualified. Prewalked from the input
-    /// statements by `Pg2Sqlite::translate` for the same reason as
-    /// `declared_object_names`: the translation schema omits trigger
-    /// definitions, so nothing else knows which functions a trigger inlines.
-    /// Consumed by the `CREATE FUNCTION` arm, which stays silent for a function
-    /// a trigger realises and warns for one that is genuinely dropped.
-    /// Intentionally not exposed in the public builder API: it is derived from
-    /// translation context, not user config.
-    pub(crate) trigger_function_names: Vec<String>,
     /// The name of the SQLite UDF to use for ILIKE case folding. When Some,
     /// both sides of an ILIKE expression are wrapped in this function rather
     /// than `lower()`. This enables Unicode-aware case folding for non-ASCII
@@ -112,11 +76,7 @@ pub struct Pg2SqliteOptions {
 
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
-    /// Randomises only the user-facing configuration fields. The
-    /// `spatial_indexes` and `fts_indexes` catalogs are populated by
-    /// the translator from `CREATE INDEX` statements in the input and
-    /// must start empty - randomising them would feed the translator
-    /// bogus catalog state that no real caller could produce.
+    /// Randomises user-facing configuration only.
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
             remove_unsupported_check_constraints: bool::arbitrary(u)?,
@@ -135,10 +95,6 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             strict_rls_write_deny: bool::arbitrary(u)?,
             sqlitegis_enabled: bool::arbitrary(u)?,
             math_functions_available: bool::arbitrary(u)?,
-            spatial_indexes: Vec::new(),
-            fts_indexes: Vec::new(),
-            declared_object_names: Vec::new(),
-            trigger_function_names: Vec::new(),
             user_defined_functions: Vec::<String>::arbitrary(u)?,
             ilike_fold_function: Option::<String>::arbitrary(u)?,
         })
@@ -164,17 +120,41 @@ impl Default for Pg2SqliteOptions {
             strict_rls_write_deny: false,
             sqlitegis_enabled: false,
             math_functions_available: false,
-            spatial_indexes: Vec::new(),
-            fts_indexes: Vec::new(),
-            declared_object_names: Vec::new(),
-            trigger_function_names: Vec::new(),
             user_defined_functions: Vec::new(),
             ilike_fold_function: None,
         }
     }
 }
 
-impl Pg2SqliteOptions {
+pub(crate) struct TranslationContext<'a> {
+    options: Cow<'a, Pg2SqliteOptions>,
+    spatial_indexes: Vec<(String, String)>,
+    fts_indexes: Vec<(String, String)>,
+    declared_object_names: Vec<String>,
+    trigger_function_names: Vec<String>,
+}
+
+impl<'a> TranslationContext<'a> {
+    pub(crate) fn new(options: &'a Pg2SqliteOptions) -> Self {
+        Self {
+            options: Cow::Borrowed(options),
+            spatial_indexes: Vec::new(),
+            fts_indexes: Vec::new(),
+            declared_object_names: Vec::new(),
+            trigger_function_names: Vec::new(),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn from_owned(options: Pg2SqliteOptions) -> TranslationContext<'static> {
+        TranslationContext {
+            options: Cow::Owned(options),
+            spatial_indexes: Vec::new(),
+            fts_indexes: Vec::new(),
+            declared_object_names: Vec::new(),
+            trigger_function_names: Vec::new(),
+        }
+    }
+
     /// Records `(table, column)` as having a translated spatial index. Both
     /// are lowercased on insert so later lookups via
     /// [`Self::has_spatial_index`] can match the parser's case-folded
@@ -259,105 +239,158 @@ impl Pg2SqliteOptions {
     }
 }
 
-impl TranslationOptions for Pg2SqliteOptions {
-    fn with_remove_unsupported_check_constraints(mut self) -> Self {
+impl core::ops::Deref for TranslationContext<'_> {
+    type Target = Pg2SqliteOptions;
+
+    fn deref(&self) -> &Self::Target {
+        self.options.as_ref()
+    }
+}
+
+impl Pg2SqliteOptions {
+    #[must_use]
+    /// Drops check constraints that call unsupported functions.
+    pub fn with_remove_unsupported_check_constraints(mut self) -> Self {
         self.remove_unsupported_check_constraints = true;
         self
     }
 
-    fn is_remove_unsupported_check_constraints_enabled(&self) -> bool {
+    #[must_use]
+    /// Returns whether unsupported check constraints are dropped.
+    pub fn is_remove_unsupported_check_constraints_enabled(&self) -> bool {
         self.remove_unsupported_check_constraints
     }
 
-    fn with_uuid_representation(mut self, representation: UuidRepresentation) -> Self {
+    #[must_use]
+    /// Sets how translated UUID columns are stored.
+    pub fn with_uuid_representation(mut self, representation: UuidRepresentation) -> Self {
         self.uuid_representation = Some(representation);
         self
     }
 
-    fn get_uuid_representation(&self) -> Option<UuidRepresentation> {
+    #[must_use]
+    /// Returns the configured UUID storage representation.
+    pub fn get_uuid_representation(&self) -> Option<UuidRepresentation> {
         self.uuid_representation
     }
 
-    fn with_uuid_function_name(mut self, name: impl Into<String>) -> Self {
+    #[must_use]
+    /// Sets the destination random UUID function, whose return type must match
+    /// the storage representation.
+    pub fn with_uuid_function_name(mut self, name: impl Into<String>) -> Self {
         self.uuid_function_name = name.into();
         self
     }
 
-    fn get_uuid_function_name(&self) -> &str {
+    #[must_use]
+    /// Returns the destination random UUID function name.
+    pub fn get_uuid_function_name(&self) -> &str {
         &self.uuid_function_name
     }
 
-    fn with_uuid_v7_function_name(mut self, name: impl Into<String>) -> Self {
+    #[must_use]
+    /// Sets the destination version 7 UUID function.
+    pub fn with_uuid_v7_function_name(mut self, name: impl Into<String>) -> Self {
         self.uuid_v7_function_name = Some(name.into());
         self
     }
 
-    fn get_uuid_v7_function_name(&self) -> Option<&str> {
+    #[must_use]
+    /// Returns the configured version 7 UUID function name.
+    pub fn get_uuid_v7_function_name(&self) -> Option<&str> {
         self.uuid_v7_function_name.as_deref()
     }
 
-    fn with_uuid_text_to_blob_function_name(mut self, name: impl Into<String>) -> Self {
+    #[must_use]
+    /// Sets the function that converts UUID text to a 16 byte blob.
+    pub fn with_uuid_text_to_blob_function_name(mut self, name: impl Into<String>) -> Self {
         self.uuid_text_to_blob_function_name = Some(name.into());
         self
     }
 
-    fn get_uuid_text_to_blob_function_name(&self) -> Option<&str> {
+    #[must_use]
+    /// Returns the configured UUID text to blob function name.
+    pub fn get_uuid_text_to_blob_function_name(&self) -> Option<&str> {
         self.uuid_text_to_blob_function_name.as_deref()
     }
 
-    fn with_array_representation(mut self, representation: ArrayRepresentation) -> Self {
+    #[must_use]
+    /// Sets how PostgreSQL arrays are represented in SQLite.
+    pub fn with_array_representation(mut self, representation: ArrayRepresentation) -> Self {
         self.array_representation = Some(representation);
         self
     }
 
-    fn get_array_representation(&self) -> Option<ArrayRepresentation> {
+    #[must_use]
+    /// Returns the configured array representation.
+    pub fn get_array_representation(&self) -> Option<ArrayRepresentation> {
         self.array_representation
     }
 
-    fn with_rls_table_suffix(mut self, suffix: impl Into<String>) -> Self {
+    #[must_use]
+    /// Sets the suffix used for RLS backing tables.
+    pub fn with_rls_table_suffix(mut self, suffix: impl Into<String>) -> Self {
         self.rls_table_suffix = suffix.into();
         self
     }
 
-    fn get_rls_table_suffix(&self) -> &str {
+    #[must_use]
+    /// Returns the suffix used for RLS backing tables.
+    pub fn get_rls_table_suffix(&self) -> &str {
         &self.rls_table_suffix
     }
 
-    fn with_readonly_deny_trigger_suffix(mut self, suffix: impl Into<String>) -> Self {
+    #[must_use]
+    /// Sets the marker used in read only deny trigger names.
+    pub fn with_readonly_deny_trigger_suffix(mut self, suffix: impl Into<String>) -> Self {
         self.readonly_deny_trigger_suffix = suffix.into();
         self
     }
 
-    fn get_readonly_deny_trigger_suffix(&self) -> &str {
+    #[must_use]
+    /// Returns the marker used in read only deny trigger names.
+    pub fn get_readonly_deny_trigger_suffix(&self) -> &str {
         &self.readonly_deny_trigger_suffix
     }
 
-    fn with_session_user_role(mut self, role: impl Into<String>) -> Self {
+    #[must_use]
+    /// Filters grants and policies for the named session role.
+    pub fn with_session_user_role(mut self, role: impl Into<String>) -> Self {
         self.session_user_role = Some(role.into());
         self
     }
 
-    fn get_session_user_role(&self) -> Option<&str> {
+    #[must_use]
+    /// Returns the role used to filter grants and policies.
+    pub fn get_session_user_role(&self) -> Option<&str> {
         self.session_user_role.as_deref()
     }
 
-    fn with_session_variable(mut self, mapping: SessionVariableMapping) -> Self {
+    #[must_use]
+    /// Adds a PostgreSQL session variable mapping.
+    pub fn with_session_variable(mut self, mapping: SessionVariableMapping) -> Self {
         self.session_variables.push(mapping);
         self
     }
 
-    fn get_session_variables(&self) -> &[SessionVariableMapping] {
+    #[must_use]
+    /// Returns the configured session variable mappings.
+    pub fn get_session_variables(&self) -> &[SessionVariableMapping] {
         &self.session_variables
     }
 
-    fn find_session_variable(
+    #[must_use]
+    /// Returns the last mapping for the requested session variable pattern.
+    pub fn find_session_variable(
         &self,
         pattern: &SessionVariablePattern,
     ) -> Option<&SessionVariableMapping> {
         self.session_variables.iter().rev().find(|m| &m.pg_pattern == pattern)
     }
 
-    fn with_session_user(
+    #[must_use]
+    /// Maps current user and one current setting to the same SQLite function.
+    pub fn with_session_user(
         self,
         variable_name: impl Into<String>,
         sqlite_function: impl Into<String>,
@@ -370,61 +403,90 @@ impl TranslationOptions for Pg2SqliteOptions {
             ))
     }
 
-    fn with_rls_audit_table_name(mut self, name: impl Into<String>) -> Self {
+    #[must_use]
+    /// Sets the table that records RLS validation results.
+    pub fn with_rls_audit_table_name(mut self, name: impl Into<String>) -> Self {
         self.rls_audit_table_name = Some(name.into());
         self
     }
 
-    fn get_rls_audit_table_name(&self) -> Option<&str> {
+    #[must_use]
+    /// Returns the configured RLS audit table name.
+    pub fn get_rls_audit_table_name(&self) -> Option<&str> {
         self.rls_audit_table_name.as_deref()
     }
 
-    fn with_write_exemption_function(mut self, name: impl Into<String>) -> Self {
+    #[must_use]
+    /// Sets the boolean function that exempts generated write guards.
+    pub fn with_write_exemption_function(mut self, name: impl Into<String>) -> Self {
         self.write_exemption_function = Some(name.into());
         self
     }
 
-    fn get_write_exemption_function(&self) -> Option<&str> {
+    #[must_use]
+    /// Returns the configured write exemption function name.
+    pub fn get_write_exemption_function(&self) -> Option<&str> {
         self.write_exemption_function.as_deref()
     }
 
-    fn with_strict_rls_validation(mut self) -> Self {
+    #[must_use]
+    /// Makes RLS validation errors fatal and redirects supported returning
+    /// inserts.
+    pub fn with_strict_rls_validation(mut self) -> Self {
         self.strict_rls_validation = true;
         self
     }
 
-    fn is_strict_rls_validation(&self) -> bool {
+    #[must_use]
+    /// Returns whether strict RLS validation is enabled.
+    pub fn is_strict_rls_validation(&self) -> bool {
         self.strict_rls_validation
     }
 
-    fn with_strict_rls_write_deny(mut self) -> Self {
+    #[must_use]
+    /// Makes policy denied updates and deletes raise instead of affecting no
+    /// rows.
+    pub fn with_strict_rls_write_deny(mut self) -> Self {
         self.strict_rls_write_deny = true;
         self
     }
 
-    fn is_strict_rls_write_deny(&self) -> bool {
+    #[must_use]
+    /// Returns whether policy denied updates and deletes raise.
+    pub fn is_strict_rls_write_deny(&self) -> bool {
         self.strict_rls_write_deny
     }
 
-    fn with_sqlitegis_enabled(mut self) -> Self {
+    #[must_use]
+    /// Enables functions supplied by the SQLiteGIS extension.
+    pub fn with_sqlitegis_enabled(mut self) -> Self {
         self.sqlitegis_enabled = true;
         self
     }
 
-    fn is_sqlitegis_enabled(&self) -> bool {
+    #[must_use]
+    /// Returns whether SQLiteGIS function translation is enabled.
+    pub fn is_sqlitegis_enabled(&self) -> bool {
         self.sqlitegis_enabled
     }
 
-    fn with_math_functions_available(mut self) -> Self {
+    #[must_use]
+    /// Declares that the destination provides the optional SQLite math
+    /// functions.
+    pub fn with_math_functions_available(mut self) -> Self {
         self.math_functions_available = true;
         self
     }
 
-    fn is_math_functions_available(&self) -> bool {
+    #[must_use]
+    /// Returns whether the destination provides SQLite math functions.
+    pub fn is_math_functions_available(&self) -> bool {
         self.math_functions_available
     }
 
-    fn with_user_defined_functions<S: Into<String>>(
+    #[must_use]
+    /// Declares function names that the destination provides.
+    pub fn with_user_defined_functions<S: Into<String>>(
         mut self,
         names: impl IntoIterator<Item = S>,
     ) -> Self {
@@ -433,17 +495,23 @@ impl TranslationOptions for Pg2SqliteOptions {
         self
     }
 
-    fn declares_user_defined_function(&self, name: &str) -> bool {
+    #[must_use]
+    /// Returns whether the destination declares the function name.
+    pub fn declares_user_defined_function(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
         self.user_defined_functions.contains(&name)
     }
 
-    fn with_ilike_fold_function(mut self, name: impl Into<String>) -> Self {
+    #[must_use]
+    /// Sets the Unicode aware case folding function used for ILIKE.
+    pub fn with_ilike_fold_function(mut self, name: impl Into<String>) -> Self {
         self.ilike_fold_function = Some(name.into());
         self
     }
 
-    fn get_ilike_fold_function(&self) -> Option<&str> {
+    #[must_use]
+    /// Returns the configured ILIKE case folding function name.
+    pub fn get_ilike_fold_function(&self) -> Option<&str> {
         self.ilike_fold_function.as_deref()
     }
 }
