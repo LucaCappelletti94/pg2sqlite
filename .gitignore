@@ -33,3 +33,9 @@ tarpaulin-report.json
 
 # Dioxus bundle output for the browser playground
 examples/web-playground/dist/
+
+# Lockfiles pin the git dependency to a resolved commit, which goes stale
+# silently. The manifests carry the contract instead.
+/Cargo.lock
+/fuzz/Cargo.lock
+/examples/web-playground/Cargo.lock
