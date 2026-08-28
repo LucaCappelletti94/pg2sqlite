@@ -67,9 +67,11 @@ std = [
     "sqlparser/recursive-protection",
     "sql-traits/std",
     "thiserror/std",
-    "dep:git2",
-    "dep:tempfile",
+    "git",
 ]
+# Cloning a schema from a repository. Only reachable with `std`, which is why
+# `std` turns it on rather than the other way round.
+git = ["dep:git2", "dep:tempfile"]
 # SQLiteGIS Diesel + native-SQLite spatial integration is native-only,
 # so it implies `std`.
 sqlitegis = [
