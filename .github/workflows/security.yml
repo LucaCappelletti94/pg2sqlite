@@ -7,12 +7,10 @@ on:
     branches: [main]
     paths:
       - "**/Cargo.toml"
-      - "**/Cargo.lock"
   pull_request:
     branches: [main]
     paths:
       - "**/Cargo.toml"
-      - "**/Cargo.lock"
 
 jobs:
   audit:
@@ -26,6 +24,11 @@ jobs:
       checks: write
     steps:
       - uses: actions/checkout@v4
+
+      # The lockfile is not tracked, since committing it freezes the git
+      # dependency at one commit. cargo-audit needs one, so resolve it here.
+      - name: Generate a lockfile
+        run: cargo generate-lockfile
 
       - name: Run security audit
         uses: rustsec/audit-check@v2
