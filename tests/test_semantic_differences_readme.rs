@@ -50,7 +50,10 @@ fn a_cast_of_unparsable_text_keeps_the_prefix() {
 
 #[test]
 fn integer_overflow_degrades_to_a_float() {
-    assert_eq!(sqlite_answers("9223372036854775807 + 1"), Some("9.22337203685478e+18".to_string()));
+    assert_eq!(
+        sqlite_answers("9223372036854775807 + 1"),
+        Some("9.2233720368547758e+18".to_string())
+    );
     assert_eq!(sqlite_answers("typeof(9223372036854775807 + 1)"), Some("real".to_string()));
 }
 

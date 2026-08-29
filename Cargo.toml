@@ -30,7 +30,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 diesel = { version = "2.3.9", features = ["postgres", "sqlite"] }
 insta = "1.47.2"
 rosetta-uuid = { version = "0.1.2", features = ["diesel", "postgres", "sqlite"] }
-rusqlite = { version = "0.35", features = ["bundled", "functions", "window"] }
+rusqlite = { version = "0.40", features = ["bundled", "functions", "window"] }
 sqlite-vec = "0.1.9"
 zerocopy = "0.8.48"
 rand = "0.10.1"
@@ -42,16 +42,17 @@ testcontainers = { version = "0.27", features = ["blocking"] }
 # `optional = true` on regular dependencies. Still test-only: nothing
 # in `src/` references it unless `feature = "sqlitegis"` is set.
 [dependencies.sqlitegis]
-# 0.1.5 is the floor rather than a preference: the ellipsoid measures
+# 0.2.0 is the floor rather than a preference: the ellipsoid measures
 # `ST_LengthSpheroid`, `ST_AreaSpheroid` and `ST_PerimeterSpheroid` arrived in
-# it, and the geography routing emits all three.
-version = "0.1.5"
+# 0.1.5, and 0.2.0 raises the `libsqlite3-sys` ceiling the rest of the graph
+# needs.
+version = "0.2.0"
 default-features = false
 features = ["sqlite", "diesel-sqlite"]
 optional = true
 
 [dependencies.libsqlite3-sys]
-version = "0.33"
+version = "0.38"
 optional = true
 
 [features]

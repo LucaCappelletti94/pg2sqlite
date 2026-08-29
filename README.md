@@ -84,7 +84,7 @@ SELECT CAST('12abc' AS INTEGER);
 
 SELECT 9223372036854775807 + 1;
 -- PostgreSQL: ERROR bigint out of range
--- SQLite:     9.22337203685478e+18, and typeof() answers 'real'
+-- SQLite:     9.2233720368547758e+18, and typeof() answers 'real'
 ```
 
 A `NUMERIC(p,s)` column is the exception to the third: it is stored as a scaled integer under a `CHECK` that bounds it, so `NUMERIC(10,2)` emits `CHECK (amount BETWEEN -9999999999 AND 9999999999)` and overflowing it fails. An `INTEGER` or `BIGINT` column carries no such bound.

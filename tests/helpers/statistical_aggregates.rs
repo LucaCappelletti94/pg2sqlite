@@ -70,10 +70,10 @@ pub const STATISTICAL_AGGREGATES: &[&str] = &[
 pub fn register_statistical_aggregates(connection: &Connection) -> Result<()> {
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
     for (name, kind) in UNIVARIATE {
-        connection.create_window_function(name, 1, flags, *kind)?;
+        connection.create_window_function(*name, 1, flags, *kind)?;
     }
     for (name, kind) in BIVARIATE {
-        connection.create_window_function(name, 2, flags, *kind)?;
+        connection.create_window_function(*name, 2, flags, *kind)?;
     }
     Ok(())
 }
