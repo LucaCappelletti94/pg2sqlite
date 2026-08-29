@@ -102,7 +102,7 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
         .execute(&mut connection)
         .expect("Failed to set journal mode to WAL");
 
-    uuid_utils::register_impl(&connection, uuid_impl).expect("Failed to register uuid()");
+    uuid_utils::register_impl(&mut connection, uuid_impl).expect("Failed to register uuid()");
 
     // Execute all translated statements and fail fast on runtime incompatibility.
     let number_of_migrations = translated_migrations.len();

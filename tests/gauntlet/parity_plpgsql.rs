@@ -64,7 +64,7 @@ fn apply_to_sqlite_with(fixture: &str, options: &Pg2SqliteOptions) -> SqliteConn
         .translate(options)
         .expect("translate fixture");
     let mut conn = establish_connection();
-    uuid_text_utils::register_impl(&conn, uuid_text_impl).expect("register uuid_text");
+    uuid_text_utils::register_impl(&mut conn, uuid_text_impl).expect("register uuid_text");
     for stmt in &translated {
         // DDL migration: raw SQL is the correct form here.
         diesel::sql_query(stmt.to_string())

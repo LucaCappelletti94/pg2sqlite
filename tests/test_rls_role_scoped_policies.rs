@@ -80,7 +80,7 @@ fn opts_without_role() -> Pg2SqliteOptions {
 fn apply(opts: &Pg2SqliteOptions) -> SqliteConnection {
     let stmts = Pg2Sqlite::default().sql(PG).expect("parse").translate(opts).expect("translate");
     let mut conn = SqliteConnection::establish(":memory:").expect("open db");
-    app_user_utils::register_impl(&conn, || "alice".to_string()).expect("register app_user");
+    app_user_utils::register_impl(&mut conn, || "alice".to_string()).expect("register app_user");
     for s in &stmts {
         // DDL (CREATE TABLE, CREATE VIEW, CREATE TRIGGER) cannot be expressed
         // in Diesel's typed DSL.

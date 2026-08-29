@@ -57,7 +57,7 @@ fn test_default_gen_random_uuid() {
 #[test]
 fn uuid_default_uses_registered_uuid_function() {
     let mut conn = SqliteConnection::establish(":memory:").expect("Failed to open SQLite");
-    uuid_utils::register_impl(&conn, uuid_impl).expect("Failed to register uuid()");
+    uuid_utils::register_impl(&mut conn, uuid_impl).expect("Failed to register uuid()");
 
     let sql = "CREATE TABLE users (id UUID PRIMARY KEY DEFAULT gen_random_uuid())";
     let translated = Pg2Sqlite::default()

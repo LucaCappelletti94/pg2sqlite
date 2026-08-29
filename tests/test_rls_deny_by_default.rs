@@ -18,13 +18,53 @@
 //! through `with_strict_rls_write_deny` for callers who want a missing policy
 //! to be loud, and `strict_write_deny_raises_for_update_and_delete` covers it.
 //!
-//! These tests drive `rusqlite` rather than diesel because the schema calls
-//! `current_setting('app.user_id')`, which translates to a SQLite function that
-//! has to be registered on the connection with `create_scalar_function`. That
-//! is a driver capability diesel does not expose.
+//! The schema calls `current_setting('app.user_id')`, which translates to a
+//! SQLite function that has to be registered on the connection before the
+//! emitted script applies.
 
+use diesel::{connection::SimpleConnection, prelude::*};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
-use rusqlite::Connection;
+
+diesel::define_sql_function! {
+    /// Resolves the session user the RLS policies compare rows against.
+    fn current_app_user() -> diesel::sql_types::BigInt;
+}
+
+diesel::table! {
+    /// The policy-wrapped view callers write through.
+    documents (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Owning user.
+        owner_id -> Integer,
+        /// Document title.
+        title -> Text,
+    }
+}
+
+diesel::table! {
+    /// The backing table the wrapper's triggers write to.
+    documents_rls (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Owning user.
+        owner_id -> Integer,
+        /// Document title.
+        title -> Text,
+    }
+}
+
+diesel::table! {
+    /// Target of the `ALTER TABLE ... ADD COLUMN` case.
+    notes (id) {
+        /// Primary key.
+        id -> Integer,
+        /// Owning user.
+        owner_id -> Integer,
+        /// Column added after the policies were declared.
+        note -> Nullable<Text>,
+    }
+}
 
 fn rls_opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -53,15 +93,16 @@ CREATE POLICY documents_insert_policy ON documents
 INSERT INTO documents (id, owner_id, title) VALUES (1, 42, 'First'), (2, 42, 'Second');
 ";
 
-fn open_with_session_user() -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.create_scalar_function(
-        "current_app_user",
-        0,
-        rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        |_| Ok(42i64),
-    )
-    .unwrap();
+fn open_with_session_user() -> SqliteConnection {
+    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
+    current_app_user_utils::register_impl(&mut conn, || 42i64).expect("register current_app_user");
+    conn
+}
+
+/// Applies the emitted script, which is DDL the typed DSL cannot express.
+fn apply(schema: &str, opts: &Pg2SqliteOptions) -> SqliteConnection {
+    let mut conn = open_with_session_user();
+    conn.batch_execute(&translate(schema, opts)).expect("apply schema");
     conn
 }
 
@@ -86,14 +127,12 @@ fn translate(schema: &str, opts: &Pg2SqliteOptions) -> String {
 /// from that, and is now available behind `with_strict_rls_write_deny`.
 #[test]
 fn delete_without_a_policy_affects_no_rows_and_does_not_raise() {
-    let opts = rls_opts();
-    let conn = open_with_session_user();
-    conn.execute_batch(&translate(SCHEMA_SELECT_INSERT_ONLY, &opts)).expect("apply schema");
+    let mut conn = apply(SCHEMA_SELECT_INSERT_ONLY, &rls_opts());
 
-    let before: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    let before: i64 = documents::table.count().get_result(&mut conn).expect("count before");
     assert_eq!(before, 2);
-    let result = conn.execute("DELETE FROM documents WHERE id = 1", []);
-    let after: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    let result = diesel::delete(documents::table.find(1)).execute(&mut conn);
+    let after: i64 = documents::table.count().get_result(&mut conn).expect("count after");
 
     assert!(result.is_ok(), "DELETE must succeed as it does in PostgreSQL, got {result:?}");
     assert_eq!(
@@ -108,13 +147,16 @@ fn delete_without_a_policy_affects_no_rows_and_does_not_raise() {
 /// error.
 #[test]
 fn update_without_a_policy_changes_nothing_and_does_not_raise() {
-    let opts = rls_opts();
-    let conn = open_with_session_user();
-    conn.execute_batch(&translate(SCHEMA_SELECT_INSERT_ONLY, &opts)).expect("apply schema");
+    let mut conn = apply(SCHEMA_SELECT_INSERT_ONLY, &rls_opts());
 
-    let result = conn.execute("UPDATE documents SET title = 'Hijacked' WHERE id = 1", []);
-    let title: String =
-        conn.query_row("SELECT title FROM documents WHERE id = 1", [], |r| r.get(0)).unwrap();
+    let result = diesel::update(documents::table.find(1))
+        .set(documents::title.eq("Hijacked"))
+        .execute(&mut conn);
+    let title: String = documents::table
+        .find(1)
+        .select(documents::title)
+        .first(&mut conn)
+        .expect("the row stays readable");
 
     assert!(result.is_ok(), "UPDATE must succeed as it does in PostgreSQL, got {result:?}");
     assert_ne!(title, "Hijacked", "the row must not change without an UPDATE policy");
@@ -123,20 +165,21 @@ fn update_without_a_policy_changes_nothing_and_does_not_raise() {
 /// The strict opt-in restores the raise for both operations.
 #[test]
 fn strict_write_deny_raises_for_update_and_delete() {
-    let opts = rls_opts().with_strict_rls_write_deny();
-    let conn = open_with_session_user();
-    conn.execute_batch(&translate(SCHEMA_SELECT_INSERT_ONLY, &opts)).expect("apply schema");
+    let mut conn = apply(SCHEMA_SELECT_INSERT_ONLY, &rls_opts().with_strict_rls_write_deny());
 
     assert!(
-        conn.execute("UPDATE documents SET title = 'Hijacked' WHERE id = 1", []).is_err(),
+        diesel::update(documents::table.find(1))
+            .set(documents::title.eq("Hijacked"))
+            .execute(&mut conn)
+            .is_err(),
         "strict write deny must raise on an UPDATE with no policy"
     );
     assert!(
-        conn.execute("DELETE FROM documents WHERE id = 1", []).is_err(),
+        diesel::delete(documents::table.find(1)).execute(&mut conn).is_err(),
         "strict write deny must raise on a DELETE with no policy"
     );
 
-    let after: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    let after: i64 = documents::table.count().get_result(&mut conn).expect("count after");
     assert_eq!(after, 2, "neither statement may change data");
 }
 
@@ -164,27 +207,27 @@ fn delete_with_matching_policy_succeeds() {
     // and the current row passes its USING predicate, DELETE must
     // succeed. This test must already pass today and must keep
     // passing after the deny-by-default fix lands.
-    let opts = rls_opts();
-    let conn = open_with_session_user();
-    conn.execute_batch(&translate(SCHEMA_FULL_POLICIES, &opts)).expect("apply schema");
+    let mut conn = apply(SCHEMA_FULL_POLICIES, &rls_opts());
 
-    let result = conn.execute("DELETE FROM documents WHERE id = 1", []);
+    let result = diesel::delete(documents::table.find(1)).execute(&mut conn);
     assert!(result.is_ok(), "DELETE with a matching FOR DELETE policy must succeed: {result:?}");
-    let remaining: i64 =
-        conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    let remaining: i64 = documents::table.count().get_result(&mut conn).expect("count remaining");
     assert_eq!(remaining, 1, "exactly one row should have been deleted");
 }
 
 #[test]
 fn update_with_matching_policy_succeeds() {
-    let opts = rls_opts();
-    let conn = open_with_session_user();
-    conn.execute_batch(&translate(SCHEMA_FULL_POLICIES, &opts)).expect("apply schema");
+    let mut conn = apply(SCHEMA_FULL_POLICIES, &rls_opts());
 
-    let result = conn.execute("UPDATE documents SET title = 'Updated' WHERE id = 1", []);
+    let result = diesel::update(documents::table.find(1))
+        .set(documents::title.eq("Updated"))
+        .execute(&mut conn);
     assert!(result.is_ok(), "UPDATE with a matching FOR UPDATE policy must succeed: {result:?}");
-    let title: String =
-        conn.query_row("SELECT title FROM documents WHERE id = 1", [], |r| r.get(0)).unwrap();
+    let title: String = documents::table
+        .find(1)
+        .select(documents::title)
+        .first(&mut conn)
+        .expect("the updated row stays readable");
     assert_eq!(title, "Updated");
 }
 
@@ -205,13 +248,12 @@ fn insert_is_blocked_when_no_insert_policy_is_defined() {
     // Symmetric coverage for INSERT: with a FOR SELECT policy only, every
     // INSERT must raise. Seeded rows are intentionally absent here so we
     // exercise the post-apply INSERT path directly.
-    let opts = rls_opts();
-    let conn = open_with_session_user();
-    conn.execute_batch(&translate(SCHEMA_SELECT_ONLY, &opts)).expect("apply schema");
+    let mut conn = apply(SCHEMA_SELECT_ONLY, &rls_opts());
 
-    let result =
-        conn.execute("INSERT INTO documents (id, owner_id, title) VALUES (1, 42, 'mine')", []);
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    let result = diesel::insert_into(documents::table)
+        .values((documents::id.eq(1), documents::owner_id.eq(42), documents::title.eq("mine")))
+        .execute(&mut conn);
+    let count: i64 = documents::table.count().get_result(&mut conn).expect("count after");
     assert!(
         result.is_err(),
         "INSERT must be rejected when no FOR INSERT policy is declared; got Ok ({result:?})"
@@ -235,22 +277,25 @@ fn insert_is_blocked_when_no_insert_policy_is_defined() {
 /// reason.
 #[test]
 fn select_only_table_blocks_inserts_and_silently_ignores_other_writes() {
-    let opts = rls_opts();
-    let conn = open_with_session_user();
-    conn.execute_batch(&translate(SCHEMA_SELECT_ONLY, &opts)).expect("apply schema");
+    let mut conn = apply(SCHEMA_SELECT_ONLY, &rls_opts());
 
     // Seed via backing table simulating system-level data loading that runs
     // with triggers disabled (authoritative-apply pattern). The BEFORE INSERT
     // guard on a zero-policy table is unconditional; disable it for the seed.
-    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
-        .expect("disable triggers for seed");
-    conn.execute("INSERT INTO documents_rls (id, owner_id, title) VALUES (1, 42, 'seed')", [])
+    conn.set_triggers_enabled(false).expect("disable triggers for seed");
+    diesel::insert_into(documents_rls::table)
+        .values((
+            documents_rls::id.eq(1),
+            documents_rls::owner_id.eq(42),
+            documents_rls::title.eq("seed"),
+        ))
+        .execute(&mut conn)
         .expect("seed via backing table");
-    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, true)
-        .expect("re-enable triggers");
+    conn.set_triggers_enabled(true).expect("re-enable triggers");
 
-    let insert_err = conn
-        .execute("INSERT INTO documents (id, owner_id, title) VALUES (2, 42, 't')", [])
+    let insert_err = diesel::insert_into(documents::table)
+        .values((documents::id.eq(2), documents::owner_id.eq(42), documents::title.eq("t")))
+        .execute(&mut conn)
         .expect_err("INSERT must be rejected");
     assert!(
         insert_err.to_string().contains("INSERT") && insert_err.to_string().contains("policy"),
@@ -258,19 +303,24 @@ fn select_only_table_blocks_inserts_and_silently_ignores_other_writes() {
     );
 
     assert!(
-        conn.execute("UPDATE documents SET title = 't' WHERE id = 1", []).is_ok(),
+        diesel::update(documents::table.find(1))
+            .set(documents::title.eq("t"))
+            .execute(&mut conn)
+            .is_ok(),
         "UPDATE must succeed, affecting nothing"
     );
     assert!(
-        conn.execute("DELETE FROM documents WHERE id = 1", []).is_ok(),
+        diesel::delete(documents::table.find(1)).execute(&mut conn).is_ok(),
         "DELETE must succeed, affecting nothing"
     );
 
-    let title: String =
-        conn.query_row("SELECT title FROM documents_rls WHERE id = 1", [], |r| r.get(0)).unwrap();
+    let title: String = documents_rls::table
+        .find(1)
+        .select(documents_rls::title)
+        .first(&mut conn)
+        .expect("the backing row stays readable");
     assert_eq!(title, "seed", "the backing row must be untouched by either write");
-    let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM documents_rls", [], |r| r.get(0)).unwrap();
+    let count: i64 = documents_rls::table.count().get_result(&mut conn).expect("backing count");
     assert_eq!(count, 1, "no row may be added or removed");
 }
 
@@ -288,9 +338,7 @@ fn select_only_table_blocks_inserts_and_silently_ignores_other_writes() {
 /// cost of translating against one schema snapshot.
 #[test]
 fn a_policy_survives_an_alter_add_column_on_its_table() {
-    let opts = rls_opts();
-    let conn = open_with_session_user();
-    conn.execute_batch(&translate(
+    let mut conn = apply(
         "CREATE TABLE notes (
              id INTEGER PRIMARY KEY,
              owner_id INTEGER NOT NULL
@@ -304,12 +352,13 @@ fn a_policy_survives_an_alter_add_column_on_its_table() {
              WITH CHECK (owner_id = current_setting('app.user_id')::integer);
          ALTER TABLE notes ADD COLUMN note TEXT;
          INSERT INTO notes (id, owner_id, note) VALUES (3, 42, 'kept');",
-        &opts,
-    ))
-    .expect("the emitted script must apply, ALTER included");
+        &rls_opts(),
+    );
 
-    let note: String = conn
-        .query_row("SELECT note FROM notes WHERE id = 3", [], |row| row.get(0))
+    let note: Option<String> = notes::table
+        .find(3)
+        .select(notes::note)
+        .first(&mut conn)
         .expect("the row must be visible through the view");
-    assert_eq!(note, "kept");
+    assert_eq!(note.as_deref(), Some("kept"));
 }

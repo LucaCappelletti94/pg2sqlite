@@ -232,7 +232,7 @@ fn setup_database() -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let translated = Pg2Sqlite::default().sql(SQL_FIXTURE)?.translate(&translation_options())?;
 
     let mut conn = establish_connection();
-    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+    write_is_exempt_utils::register_nondeterministic_impl(&mut conn, || {
         WRITE_IS_EXEMPT.with(Cell::get)
     })?;
 

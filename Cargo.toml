@@ -101,6 +101,10 @@ arbitrary = ["dep:arbitrary"]
 [patch.crates-io]
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 
+# `SqliteConnection::set_triggers_enabled` and its db-config siblings are on
+# diesel main and absent from 2.3.12, and the RLS trigger tests need them.
+diesel = { git = "https://github.com/diesel-rs/diesel", branch = "main" }
+
 [[bench]]
 name = "translation"
 harness = false

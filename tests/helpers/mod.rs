@@ -259,12 +259,12 @@ pub fn establish_connection() -> SqliteConnection {
         .execute(&mut connection)
         .expect("Failed to enable recursive triggers");
 
-    uuidv7_utils::register_impl(&connection, Uuid::utc_v7).expect("Failed to register uuidv7");
-    current_app_user_utils::register_impl(&connection, current_app_user_impl)
+    uuidv7_utils::register_impl(&mut connection, Uuid::utc_v7).expect("Failed to register uuidv7");
+    current_app_user_utils::register_impl(&mut connection, current_app_user_impl)
         .expect("Failed to register current_app_user");
-    current_app_username_utils::register_impl(&connection, current_app_username_impl)
+    current_app_username_utils::register_impl(&mut connection, current_app_username_impl)
         .expect("Failed to register current_app_username");
-    current_app_department_utils::register_impl(&connection, current_app_department_impl)
+    current_app_department_utils::register_impl(&mut connection, current_app_department_impl)
         .expect("Failed to register current_app_department");
 
     connection

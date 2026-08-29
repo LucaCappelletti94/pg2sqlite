@@ -315,8 +315,8 @@ fn set_write_exempt(exempt: bool) {
 
 fn apply_with_exemption(pg: &str) -> SqliteConnection {
     set_write_exempt(false);
-    let conn = apply(pg, &exemption_opts());
-    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+    let mut conn = apply(pg, &exemption_opts());
+    write_is_exempt_utils::register_nondeterministic_impl(&mut conn, || {
         WRITE_IS_EXEMPT.with(Cell::get)
     })
     .expect("register write_is_exempt");
@@ -679,7 +679,7 @@ fn zero_policy_backing_insert_honours_write_exemption() {
         .with_write_exemption_function("write_is_exempt");
     set_write_exempt(false);
     let mut conn = apply(ZERO_POLICY_SCHEMA, &options);
-    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+    write_is_exempt_utils::register_nondeterministic_impl(&mut conn, || {
         WRITE_IS_EXEMPT.with(Cell::get)
     })
     .expect("register write_is_exempt");

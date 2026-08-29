@@ -99,7 +99,7 @@ fn write_exemption_bypasses_each_nonrls_deny_trigger() {
     let translated =
         Pg2Sqlite::default().sql(SCHEMA).expect("parse").translate(&opts).expect("translate");
     let mut conn = SqliteConnection::establish(":memory:").expect("connect");
-    write_is_exempt_utils::register_nondeterministic_impl(&conn, || {
+    write_is_exempt_utils::register_nondeterministic_impl(&mut conn, || {
         WRITE_IS_EXEMPT.with(Cell::get)
     })
     .expect("register write_is_exempt");
@@ -297,38 +297,37 @@ CREATE TABLE \"orders__readonly_insert\" (x INTEGER);
 
 #[test]
 fn deny_triggers_are_inert_when_disabled_and_block_when_enabled() {
-    // rusqlite: diesel does not expose sqlite3_db_config, needed to toggle
-    // SQLITE_DBCONFIG_ENABLE_TRIGGER and pin the apply contract.
-    use rusqlite::{Connection, config::DbConfig};
-
-    let conn = Connection::open_in_memory().expect("open");
-    let batch = format!("{};", translate(SCHEMA).join(";\n"));
-    conn.execute_batch(&batch).expect("apply schema");
+    let mut conn = apply(SCHEMA);
 
     // With triggers disabled, the apply-path INSERT succeeds.
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false).expect("disable triggers");
-    conn.execute("INSERT INTO orders (id, item) VALUES (1, 'seed')", [])
+    conn.set_triggers_enabled(false).expect("disable triggers");
+    diesel::insert_into(orders::table)
+        .values(NewOrder { id: 1, item: "seed".to_owned() })
+        .execute(&mut conn)
         .expect("insert succeeds while triggers disabled");
 
     // Re-enable triggers: interactive writes are denied again.
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, true).expect("enable triggers");
+    conn.set_triggers_enabled(true).expect("enable triggers");
 
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM orders", [], |r| r.get(0)).unwrap();
+    let count: i64 = orders::table.count().get_result(&mut conn).expect("count after seed");
     assert_eq!(count, 1, "seeded row is visible via SELECT");
 
     assert!(
-        conn.execute("INSERT INTO orders (id, item) VALUES (2, 'x')", []).is_err(),
+        diesel::insert_into(orders::table)
+            .values(NewOrder { id: 2, item: "x".to_owned() })
+            .execute(&mut conn)
+            .is_err(),
         "INSERT must be denied when triggers are enabled"
     );
     assert!(
-        conn.execute("UPDATE orders SET item = 'x' WHERE id = 1", []).is_err(),
+        diesel::update(orders::table.find(1)).set(orders::item.eq("x")).execute(&mut conn).is_err(),
         "UPDATE must be denied when triggers are enabled"
     );
     assert!(
-        conn.execute("DELETE FROM orders WHERE id = 1", []).is_err(),
+        diesel::delete(orders::table.find(1)).execute(&mut conn).is_err(),
         "DELETE must be denied when triggers are enabled"
     );
 
-    let after: i64 = conn.query_row("SELECT COUNT(*) FROM orders", [], |r| r.get(0)).unwrap();
+    let after: i64 = orders::table.count().get_result(&mut conn).expect("count after denials");
     assert_eq!(after, 1, "denied writes must not change the table");
 }

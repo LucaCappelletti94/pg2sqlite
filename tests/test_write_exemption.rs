@@ -258,10 +258,10 @@ fn apply_with_exemption(
     pg: &str,
     options: &Pg2SqliteOptions,
 ) -> (SqliteConnection, Arc<AtomicBool>) {
-    let connection = apply(pg, options);
+    let mut connection = apply(pg, options);
     let exempt = Arc::new(AtomicBool::new(false));
     let function_state = Arc::clone(&exempt);
-    write_is_exempt_utils::register_nondeterministic_impl(&connection, move || {
+    write_is_exempt_utils::register_nondeterministic_impl(&mut connection, move || {
         function_state.load(Ordering::Relaxed)
     })
     .expect("register write exemption");
@@ -272,10 +272,9 @@ fn apply_with_exemption(
 fn null_and_function_error_fail_closed() {
     let null_options = options().with_write_exemption_function("write_exemption_is_null");
     let mut null_connection = apply(POLICY_SCHEMA, &null_options);
-    write_exemption_is_null_utils::register_nondeterministic_impl(
-        &null_connection,
-        || None::<bool>,
-    )
+    write_exemption_is_null_utils::register_nondeterministic_impl(&mut null_connection, || {
+        None::<bool>
+    })
     .expect("register NULL exemption");
     assert!(
         diesel::insert_into(schema::shared_items_rls::table)
@@ -291,9 +290,10 @@ fn null_and_function_error_fail_closed() {
 
     let panic_options = options().with_write_exemption_function("write_exemption_panics");
     let mut panic_connection = apply(POLICY_SCHEMA, &panic_options);
-    write_exemption_panics_utils::register_nondeterministic_impl(&panic_connection, || -> bool {
-        panic!("exemption failure")
-    })
+    write_exemption_panics_utils::register_nondeterministic_impl(
+        &mut panic_connection,
+        || -> bool { panic!("exemption failure") },
+    )
     .expect("register failing exemption");
     assert!(
         diesel::insert_into(schema::shared_items_rls::table)
@@ -706,9 +706,11 @@ fn quoted_exemption_function_name_is_safe() {
         .with_write_exemption_function(QUOTED_NAME);
     let mut connection = apply(POLICY_SCHEMA, &quoted_options);
     connection
-        .register_noarg_sql_function::<diesel::sql_types::Bool, bool, _>(QUOTED_NAME, false, || {
-            true
-        })
+        .register_noarg_sql_function::<diesel::sql_types::Bool, bool, _>(
+            QUOTED_NAME,
+            diesel::sqlite::SqliteFunctionBehavior::empty(),
+            || true,
+        )
         .expect("register quoted function name");
     diesel::insert_into(schema::shared_items_rls::table)
         .values((

@@ -72,7 +72,7 @@ fn apply() -> SqliteConnection {
     let mut conn = SqliteConnection::establish(":memory:").expect("open db");
     // app_user() maps current_setting('app.user'). Returns a static string so
     // the closure is 'static.
-    app_user_utils::register_impl(&conn, || "alice".to_string()).expect("register app_user");
+    app_user_utils::register_impl(&mut conn, || "alice".to_string()).expect("register app_user");
     for s in &stmts {
         // DDL (CREATE TABLE, CREATE VIEW, CREATE TRIGGER) cannot be expressed
         // in Diesel's typed DSL.

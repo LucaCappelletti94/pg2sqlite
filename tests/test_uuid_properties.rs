@@ -124,11 +124,11 @@ fn establish_connection() -> SqliteConnection {
     diesel::sql_query("PRAGMA journal_mode = WAL")
         .execute(&mut connection)
         .expect("Failed to set journal mode to WAL");
-    uuidv4_utils::register_impl(&connection, uuidv4_impl).expect("Failed to register uuidv4");
-    uuidv7_utils::register_impl(&connection, uuidv7_impl).expect("Failed to register uuidv7");
-    uuidv4_text_utils::register_impl(&connection, uuidv4_text_impl)
+    uuidv4_utils::register_impl(&mut connection, uuidv4_impl).expect("Failed to register uuidv4");
+    uuidv7_utils::register_impl(&mut connection, uuidv7_impl).expect("Failed to register uuidv7");
+    uuidv4_text_utils::register_impl(&mut connection, uuidv4_text_impl)
         .expect("Failed to register uuidv4_text");
-    uuidv7_text_utils::register_impl(&connection, uuidv7_text_impl)
+    uuidv7_text_utils::register_impl(&mut connection, uuidv7_text_impl)
         .expect("Failed to register uuidv7_text");
     connection
 }
