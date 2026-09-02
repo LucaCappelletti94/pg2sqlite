@@ -37,6 +37,7 @@ jobs:
           workspaces: |
             .
             examples/web-playground
+          cache-targets: false
 
       - name: Install dioxus-cli
         uses: taiki-e/install-action@v2
