@@ -23,7 +23,7 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The lockfile is not tracked, since committing it freezes the git
       # dependency at one commit. cargo-audit needs one, so resolve it here.
