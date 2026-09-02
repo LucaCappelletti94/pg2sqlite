@@ -29,6 +29,7 @@ use crate::{
     impls::{
         object_name::resolve_translation_table,
         shared_helpers::{translate_on_conflict_do_update, translate_returning},
+        translator_impls::insert::insert_target_scope,
     },
     prelude::ReverseTranslator,
 };
@@ -248,6 +249,9 @@ impl ReverseTranslator for Insert {
         schema: &Self::Schema,
         options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
+        let target_scope = insert_target_scope(self, schema)?;
+        let scoped = target_scope.as_ref().map(|scope| options.with_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
         // Reverse translate the source (VALUES or SELECT)
         let source = self
             .source

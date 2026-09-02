@@ -1482,24 +1482,28 @@ fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bo
     ) {
         return false;
     }
-    let addressable = |expr: &Expr| {
-        matches!(
-            expr,
-            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Nested(_) | Expr::Cast { .. }
-        )
-    };
-    // A scaled-integer rule can only bear on a pair where a number is in play,
-    // so a comparison against a string or a boolean asks nothing about the
-    // operand's declared type and cannot be refused for want of one. Without
-    // this, `WHERE type = 'trigger'` over an undeclared relation refused on a
-    // scale that could never have applied.
-    let numeric_candidate = |expr: &Expr| {
+    fn addressable(expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(_)
+            | Expr::CompoundIdentifier(_)
+            | Expr::Nested(_)
+            | Expr::Cast { .. } => true,
+            Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
+                addressable(expr)
+            }
+            _ => false,
+        }
+    }
+    fn numeric_candidate(expr: &Expr) -> bool {
         match expr {
             Expr::Value(ValueWithSpan { value: Value::Number(_, _), .. }) => true,
             Expr::Value(_) => false,
+            Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
+                numeric_candidate(expr)
+            }
             other => addressable(other),
         }
-    };
+    }
     (addressable(left) || addressable(right)) && numeric_candidate(left) && numeric_candidate(right)
 }
 

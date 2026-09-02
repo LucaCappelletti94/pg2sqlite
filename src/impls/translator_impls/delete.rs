@@ -23,7 +23,7 @@ use crate::impls::{
 crate::traits::translator::impl_contextual_translator!(Delete => Statement);
 /// Every relation a `DELETE` lists, so a reference qualified by a `USING`
 /// relation resolves as well as one naming the target.
-fn delete_scope_query(delete: &Delete) -> sqlparser::ast::Query {
+pub(crate) fn delete_scope_query(delete: &Delete) -> sqlparser::ast::Query {
     let (sqlparser::ast::FromTable::WithFromKeyword(tables)
     | sqlparser::ast::FromTable::WithoutKeyword(tables)) = &delete.from;
     let mut relations = tables.clone();

@@ -565,9 +565,8 @@ fn append_readonly_deny_triggers(
 
 /// Errors when the translation unit already declares a table, index, trigger,
 /// or view whose SQLite-unqualified name collides with a reserved deny-trigger
-/// name. The declared-name catalog is prewalked from the input statements
-/// (see `populate_declared_object_names`) because the translation schema omits
-/// index and trigger definitions.
+/// name. The declared-name catalog comes from `populate_prewalk_catalogs`,
+/// since the translation schema omits index and trigger definitions.
 fn reject_reserved_name_collision(
     options: &crate::options::TranslationContext<'_>,
     table_name: &str,
@@ -1582,10 +1581,9 @@ fn translate_set(
 /// name through the C API, the way this crate expects `current_setting` to be
 /// registered for row level security, so that one is warned about.
 ///
-/// The trigger names come from a prewalk of the input recorded in the options
-/// (`populate_declared_object_names`), not from the schema, because
-/// `schema_statements_for_translation` keeps `CREATE TRIGGER` out of the
-/// translation schema.
+/// The trigger names come from `populate_prewalk_catalogs`, since
+/// `schema_statement_is_ignored` excludes `CREATE TRIGGER` from the translation
+/// schema.
 fn translate_create_function(
     create_function: &CreateFunction,
     options: &crate::options::TranslationContext<'_>,

@@ -17,7 +17,9 @@ use sqlparser::ast::Delete;
 
 use super::helpers::{Reverse, reverse_translate_table_with_joins};
 use crate::{
-    errors::Error, impls::shared_helpers::translate_delete_core, prelude::ReverseTranslator,
+    errors::Error,
+    impls::{shared_helpers::translate_delete_core, translator_impls::delete::delete_scope_query},
+    prelude::ReverseTranslator,
 };
 
 impl ReverseTranslator for Delete {
@@ -38,8 +40,11 @@ impl ReverseTranslator for Delete {
                     .to_string(),
             ));
         }
+        let scope_query = delete_scope_query(self);
+        let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
+        let scoped = options.with_scope(&scope);
         let (selection, from, returning, order_by, limit) =
-            translate_delete_core::<Reverse>(self, schema, options, &mut |_| {})?;
+            translate_delete_core::<Reverse>(self, schema, &scoped, &mut |_| {})?;
 
         // Reverse translate USING clause if present
         let using = self
@@ -52,7 +57,7 @@ impl ReverseTranslator for Delete {
                         reverse_translate_table_with_joins(
                             table_with_joins,
                             schema,
-                            options,
+                            &scoped,
                             &mut |_| {},
                         )
                     })

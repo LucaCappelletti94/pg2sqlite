@@ -565,7 +565,7 @@ pub fn resolve_trigger_table_name(
 ///
 /// # Errors
 ///
-/// Returns [`Error::EmptyRlsTableSuffix`](crate::errors::Error::EmptyRlsTableSuffix)
+/// Returns [`Error::EmptyRlsTableSuffix`]
 /// when the configured suffix is empty.
 pub fn ensure_usable_rls_table_suffix(
     options: &Pg2SqliteOptions,

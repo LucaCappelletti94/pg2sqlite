@@ -16,7 +16,11 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::Update;
 
 use super::helpers::Reverse;
-use crate::{errors::Error, impls::shared_helpers::translate_update, prelude::ReverseTranslator};
+use crate::{
+    errors::Error,
+    impls::{shared_helpers::translate_update, translator_impls::update::update_scope_query},
+    prelude::ReverseTranslator,
+};
 
 impl ReverseTranslator for Update {
     type Schema = ParserDB;
@@ -50,6 +54,9 @@ impl ReverseTranslator for Update {
                     .to_string(),
             ));
         }
-        translate_update::<Reverse>(self, schema, options, &mut |_| {})
+        let scope_query = update_scope_query(self);
+        let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
+        let scoped = options.with_scope(&scope);
+        translate_update::<Reverse>(self, schema, &scoped, &mut |_| {})
     }
 }

@@ -23,7 +23,7 @@ use crate::{
 crate::traits::translator::impl_contextual_translator!(Update => Update);
 /// Every relation an `UPDATE` lists, so a reference qualified by a `FROM`
 /// relation resolves as well as one naming the target.
-fn update_scope_query(update: &Update) -> sqlparser::ast::Query {
+pub(crate) fn update_scope_query(update: &Update) -> sqlparser::ast::Query {
     let mut relations = vec![update.table.clone()];
     if let Some(UpdateTableFromKind::BeforeSet(tables) | UpdateTableFromKind::AfterSet(tables)) =
         &update.from

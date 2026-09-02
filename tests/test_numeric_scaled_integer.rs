@@ -192,6 +192,17 @@ fn a_decimal_literal_is_scaled_in_a_comparison() {
     assert_eq!(rows, vec![Some("1".to_string())]);
 }
 
+#[test]
+fn signed_decimal_literals_are_scaled_in_comparisons() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, -1.50), (2, 1.50);
+         SELECT count(*) FROM t WHERE price = -1.50 OR price = +1.50;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("2".to_string())]);
+}
+
 /// A literal carrying more decimals than the column can hold is a translation
 /// error rather than a silent round, since PostgreSQL would round and the
 /// author probably meant a different scale.

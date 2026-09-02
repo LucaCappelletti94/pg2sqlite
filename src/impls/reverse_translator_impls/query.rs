@@ -172,9 +172,9 @@ impl ReverseTranslator for Query {
         // The relations this query exposes decide which column a reference
         // names, which is what separates a json column from a jsonb one when
         // choosing the PostgreSQL spelling of a function.
-        let scope_substitute = crate::impls::shared_helpers::scope_query_for(self);
+        let scope_substitute = crate::impls::shared_helpers::scope_query_for(query);
         let scope = sql_traits::structs::ColumnScope::from_query(
-            scope_substitute.as_ref().unwrap_or(self),
+            scope_substitute.as_ref().unwrap_or(query),
             schema,
         )?;
         let scoped = options.with_scope(&scope);

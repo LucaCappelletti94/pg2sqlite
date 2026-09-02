@@ -719,10 +719,10 @@ pub(crate) fn rescale_minor_units(value: Expr, from: u32, to: u32) -> Expr {
 pub(crate) fn scale_decimal_literal(expr: &Expr, scale: u32) -> Result<Option<Expr>, Error> {
     let (negated, digits) = match expr {
         Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => (false, digits),
-        Expr::UnaryOp { op: UnaryOperator::Minus, expr } => {
+        Expr::UnaryOp { op: op @ (UnaryOperator::Minus | UnaryOperator::Plus), expr } => {
             match expr.as_ref() {
                 Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
-                    (true, digits)
+                    (matches!(op, UnaryOperator::Minus), digits)
                 }
                 _ => return Ok(None),
             }

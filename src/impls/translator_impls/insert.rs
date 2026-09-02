@@ -74,7 +74,7 @@ impl<'schema> ResolvedInsertTarget<'schema> {
 crate::traits::translator::impl_contextual_translator!(Insert => Insert);
 /// The relation an `INSERT` names, whose columns a default, an `ON CONFLICT`
 /// clause or a `RETURNING` item resolves against.
-fn insert_target_scope<'db>(
+pub(crate) fn insert_target_scope<'db>(
     insert: &Insert,
     schema: &'db sql_traits::structs::ParserDB,
 ) -> Result<

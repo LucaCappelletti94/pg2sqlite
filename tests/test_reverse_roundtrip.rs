@@ -477,6 +477,40 @@ fn distinct_on_round_trips_through_the_row_number_rewrite() {
     );
 }
 
+#[test]
+fn restored_distinct_on_uses_the_restored_relation_scope() {
+    let ddl = "CREATE TABLE t (id INT PRIMARY KEY, aware TIMESTAMPTZ, naive TIMESTAMP);";
+    let pg_query = "SELECT DISTINCT ON (id) id, naive AS aware FROM t \
+                    ORDER BY id, aware AT TIME ZONE '+05:00';";
+    let options = Pg2SqliteOptions::default();
+    let translator =
+        Pg2Sqlite::default().sql(&format!("{ddl} {pg_query}")).expect("source should parse");
+    let schema = translator.build_schema().expect("schema should build");
+    let forward = translator.clone().translate(&options).expect("source should translate");
+    let sqlite_sql = forward
+        .iter()
+        .find(|statement| matches!(statement, sqlparser::ast::Statement::Query(_)))
+        .expect("source should emit a query")
+        .to_string();
+
+    let reversed = translator
+        .reverse_sql(&format!("{sqlite_sql};"), &schema, &options)
+        .expect("query should reverse")[0]
+        .to_string();
+    let round_tripped = Pg2Sqlite::default()
+        .sql(&format!("{ddl} {reversed};"))
+        .expect("reversed query should parse")
+        .translate(&options)
+        .expect("reversed query should translate");
+    let round_tripped_sql = round_tripped
+        .iter()
+        .find(|statement| matches!(statement, sqlparser::ast::Statement::Query(_)))
+        .expect("reversed query should emit a query")
+        .to_string();
+
+    assert_eq!(round_tripped_sql, sqlite_sql, "restored query changed its fixed offset");
+}
+
 /// A `DISTINCT ON` with no `ORDER BY` leaves the window unordered too, which
 /// reaches a different branch of the reconstruction.
 #[test]
