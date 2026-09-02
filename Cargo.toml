@@ -35,7 +35,7 @@ sqlite-vec = "0.1.9"
 zerocopy = "0.8.48"
 rand = "0.10.1"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
-testcontainers = { version = "0.28", features = ["blocking"] }
+testcontainers = { version = "0.27", features = ["blocking"] }
 
 # Optional integration gated by the `sqlitegis` feature. Declared in
 # `[dependencies]` (not `[dev-dependencies]`) because Cargo only honors
