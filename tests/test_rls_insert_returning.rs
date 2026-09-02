@@ -244,6 +244,15 @@ fn monitor_mode_refuses_returning_the_assigned_key() {
 }
 
 #[test]
+fn monitor_mode_refuses_expression_over_the_assigned_key() {
+    let error = translate_error(
+        "INSERT INTO documents (owner_id, title) VALUES (42, 'x') RETURNING -id AS id;",
+        &monitor_opts(),
+    );
+    assert!(error.contains("RETURNING reads id"), "the refusal must name the column: {error}");
+}
+
+#[test]
 fn monitor_mode_refuses_returning_star() {
     let error = translate_error(
         "INSERT INTO documents (owner_id, title) VALUES (42, 'x') RETURNING *;",

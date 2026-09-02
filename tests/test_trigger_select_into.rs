@@ -510,7 +510,8 @@ FOR EACH ROW EXECUTE FUNCTION audit_team_membership();
     let audit_count_before: i64 = membership_audit::table.count().get_result(&mut connection)?;
     assert_eq!(audit_count_before, 0, "Should have 0 audit entries before");
 
-    // TEST: Add member to team - should trigger 2 audit entries (added + verified)
+    // TEST: Add member to team - should trigger 2 audit entries (added +
+    // verified)
     let membership_id = Uuid::new_v4();
     diesel::insert_into(team_members::table)
         .values(&TeamMember {

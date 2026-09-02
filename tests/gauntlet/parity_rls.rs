@@ -1426,8 +1426,8 @@ fn rls_current_user_engines_agree() {
     let mut pg = {
         let mut conn = postgres_harness::fresh_database();
         postgres_harness::apply(&mut conn, RLS_CURRENT_USER).expect("apply rls_current_user to pg");
-        // Both app and anon roles need DML grants since the scenario switches between
-        // them.
+        // Both app and anon roles need DML grants since the scenario switches
+        // between them.
         postgres_harness::apply(
             &mut conn,
             "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app, anon",
@@ -1450,7 +1450,8 @@ fn rls_current_user_engines_agree() {
         CurrentUserSqliteRunner { connection: conn, current_role: String::new() }
     };
 
-    // Set a session username so the profiles_rls audit trigger can query the view.
+    // Set a session username so the profiles_rls audit trigger can query the
+    // view.
     set_session_username("anon");
     // Seed the anon profile (public) before any role is set on either engine.
     pg.seed(prof1, "anon", "anon@test.com", true);

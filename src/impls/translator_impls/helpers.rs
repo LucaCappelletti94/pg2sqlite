@@ -34,6 +34,23 @@ pub(crate) struct Forward;
 impl TranslationDirection for Forward {
     const IS_FORWARD: bool = true;
     type Options<'a> = crate::options::TranslationContext<'a>;
+
+    fn cte_clause<'options>(
+        options: &'options Self::Options<'_>,
+    ) -> Option<&'options sqlparser::ast::With> {
+        options.cte_clause()
+    }
+
+    fn with_scope<'scope>(
+        options: &'scope Self::Options<'_>,
+        scope: &'scope sql_traits::structs::ColumnScope<
+            'scope,
+            'scope,
+            sql_traits::structs::ParserDB,
+        >,
+    ) -> Self::Options<'scope> {
+        options.with_scope(scope)
+    }
     fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions {
         options
     }

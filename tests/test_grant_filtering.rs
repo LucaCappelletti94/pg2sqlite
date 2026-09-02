@@ -437,7 +437,8 @@ fn test_writable_insert_succeeds() -> Result<(), Box<dyn std::error::Error>> {
 
     set_session_user_id(&user_id);
 
-    // Insert via the view - should succeed because created_by matches session user
+    // Insert via the view - should succeed because created_by matches session
+    // user
     let post = PostView {
         id: Uuid::new_v4().as_bytes().to_vec(),
         author_id: user_id.as_bytes().to_vec(),

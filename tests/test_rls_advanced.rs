@@ -158,9 +158,10 @@ fn update_with_check_resolves_against_new_row() {
             USING (owner_id = CAST(current_setting('app.user_id') AS INT));
     "#;
     let output = translate(sql);
-    // WITH CHECK constrains the NEW row, so its column refs resolve against NEW,
-    // and the forwarding SET clause assigns NEW.col directly. Neither uses
-    // COALESCE, which used to make `SET owner_id = NULL` a silent no-op.
+    // WITH CHECK constrains the NEW row, so its column refs resolve against
+    // NEW, and the forwarding SET clause assigns NEW.col directly. Neither
+    // uses COALESCE, which used to make `SET owner_id = NULL` a silent
+    // no-op.
     assert!(output.contains("NEW.owner_id"), "WITH CHECK must reference NEW: {output}");
     assert!(output.contains("owner_id = NEW.owner_id"), "SET must assign NEW: {output}");
     assert!(
@@ -193,7 +194,8 @@ fn compound_identifier_renamed_in_trigger() {
             USING (docs.owner_id = CAST(current_setting('app.user_id') AS INT));
     "#;
     let output = translate(sql);
-    // In trigger context, docs.owner_id should become NEW.owner_id or OLD.owner_id
+    // In trigger context, docs.owner_id should become NEW.owner_id or
+    // OLD.owner_id
     assert!(
         output.contains("NEW.owner_id") || output.contains("OLD.owner_id"),
         "Expected NEW/OLD prefix for compound identifier: {output}"
@@ -917,8 +919,8 @@ fn update_check_with_compound_identifier() {
     "#;
     let output = translate(sql);
     // The policy qualifies the column as `check_compound.owner_id`. In the WITH
-    // CHECK context the prefix wins over the backing-table rename, so it becomes
-    // NEW.owner_id rather than check_compound_rls.owner_id.
+    // CHECK context the prefix wins over the backing-table rename, so it
+    // becomes NEW.owner_id rather than check_compound_rls.owner_id.
     assert!(output.contains("NEW.owner_id"), "compound ref must become NEW: {output}");
     assert!(
         !update_trigger(&output).contains("COALESCE"),

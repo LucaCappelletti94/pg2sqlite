@@ -64,6 +64,31 @@ DELETE FROM orders
 WHERE user_id IN (SELECT id FROM users WHERE active = false);
 "#;
 
+const STATEMENT_SCHEMA_SQL: &str = r#"
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name TEXT,
+    email TEXT,
+    active BOOLEAN,
+    updated_at TIMESTAMPTZ
+);
+CREATE TABLE orders (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER,
+    total NUMERIC(10, 2),
+    status TEXT
+);
+CREATE TABLE archived_users (
+    id INTEGER PRIMARY KEY,
+    name TEXT,
+    email TEXT
+);
+"#;
+
+fn statement_schema() -> sql_traits::structs::ParserDB {
+    Pg2Sqlite::default().sql(STATEMENT_SCHEMA_SQL).unwrap().build_schema().unwrap()
+}
+
 fn bench_schema_translation(c: &mut Criterion) {
     // `groups.sql` defaults a key to `uuidv7()`, which is refused unless the
     // destination's version 7 generator is named, so the fixtures do not
@@ -132,6 +157,7 @@ fn bench_rls_translation(c: &mut Criterion) {
 
 fn bench_select_statements(c: &mut Criterion) {
     let options = Pg2SqliteOptions::default();
+    let schema = statement_schema();
     let mut group = c.benchmark_group("statement/select");
 
     let statements: &[(&str, &str)] = &[
@@ -145,7 +171,7 @@ fn bench_select_statements(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(name), *sql, |b, sql| {
             b.iter(|| {
                 let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate(&options).unwrap())
+                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
             });
         });
     }
@@ -154,6 +180,7 @@ fn bench_select_statements(c: &mut Criterion) {
 
 fn bench_insert_statements(c: &mut Criterion) {
     let options = Pg2SqliteOptions::default();
+    let schema = statement_schema();
     let mut group = c.benchmark_group("statement/insert");
 
     let statements: &[(&str, &str)] = &[
@@ -167,7 +194,7 @@ fn bench_insert_statements(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(name), *sql, |b, sql| {
             b.iter(|| {
                 let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate(&options).unwrap())
+                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
             });
         });
     }
@@ -176,6 +203,7 @@ fn bench_insert_statements(c: &mut Criterion) {
 
 fn bench_update_statements(c: &mut Criterion) {
     let options = Pg2SqliteOptions::default();
+    let schema = statement_schema();
     let mut group = c.benchmark_group("statement/update");
 
     let statements: &[(&str, &str)] =
@@ -185,7 +213,7 @@ fn bench_update_statements(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(name), *sql, |b, sql| {
             b.iter(|| {
                 let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate(&options).unwrap())
+                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
             });
         });
     }
@@ -194,6 +222,7 @@ fn bench_update_statements(c: &mut Criterion) {
 
 fn bench_delete_statements(c: &mut Criterion) {
     let options = Pg2SqliteOptions::default();
+    let schema = statement_schema();
     let mut group = c.benchmark_group("statement/delete");
 
     let statements: &[(&str, &str)] = &[("simple", DELETE_SIMPLE), ("subquery", DELETE_SUBQUERY)];
@@ -202,7 +231,7 @@ fn bench_delete_statements(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(name), *sql, |b, sql| {
             b.iter(|| {
                 let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate(&options).unwrap())
+                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
             });
         });
     }
@@ -211,6 +240,7 @@ fn bench_delete_statements(c: &mut Criterion) {
 
 fn bench_translation_samples(c: &mut Criterion) {
     let options = Pg2SqliteOptions::default();
+    let schema = statement_schema();
     let mut group = c.benchmark_group("translation_samples");
 
     let statements: &[(&str, &str)] = &[
@@ -232,7 +262,7 @@ fn bench_translation_samples(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("pg2sqlite", name), *sql, |b, sql| {
             b.iter(|| {
                 let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate(&options).unwrap())
+                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
             });
         });
     }

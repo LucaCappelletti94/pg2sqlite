@@ -84,7 +84,7 @@ fn reverse_statement_covers_table_function_and_query_setexpr_variants() {
     let mut insert_with_table_fn = parse_insert("INSERT INTO users(id, name) VALUES (1, 'a')");
     insert_with_table_fn.table = TableObject::TableFunction(table_function("remote_users"));
     let error = Statement::Insert(insert_with_table_fn)
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect_err("a table-function INSERT has no PostgreSQL form");
     assert!(
         error.to_string().contains("table function is not supported"),
@@ -99,14 +99,16 @@ fn reverse_statement_covers_table_function_and_query_setexpr_variants() {
     ] {
         *base_query.body = set_expr;
         let stmt = Statement::Query(Box::new(base_query.clone()));
-        let out = stmt.reverse_translate(&schema, &options).expect("query should reverse");
+        let out = stmt
+            .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+            .expect("query should reverse");
         assert!(matches!(out, Statement::Query(_)));
     }
 
     let delete_with_using =
         parse_statement("DELETE FROM users USING posts WHERE users.id = posts.user_id");
     let out = delete_with_using
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("delete using should reverse");
     assert!(matches!(out, Statement::Delete(_)));
 
@@ -115,7 +117,7 @@ fn reverse_statement_covers_table_function_and_query_setexpr_variants() {
         delete.tables = vec![ObjectName(vec![ObjectNamePart::Identifier(Ident::new("users"))])];
     }
     let out = delete_with_tables
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("delete tables list should reverse");
     assert!(matches!(out, Statement::Delete(_)));
 }
@@ -210,7 +212,7 @@ fn reverse_statement_covers_expression_and_limit_checker_variants() {
         });
         let stmt = Statement::Query(Box::new(query));
         let out = stmt
-            .reverse_translate(&schema, &options)
+            .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
             .expect("query with expression should reverse");
         assert!(matches!(out, Statement::Query(_)));
     }

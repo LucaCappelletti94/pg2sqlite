@@ -94,6 +94,29 @@ fn set_variable_binding_in_trigger() {
 }
 
 #[test]
+fn binding_created_inside_if_is_visible_to_later_branch_statements() {
+    let sql = "
+        CREATE TABLE events (id INT PRIMARY KEY);
+        CREATE TABLE audit (id INT PRIMARY KEY, value INT);
+        CREATE FUNCTION audit_event() RETURNS TRIGGER AS $$
+        DECLARE
+            v INT;
+        BEGIN
+            IF NEW.id > 0 THEN
+                SELECT 1 INTO v;
+                IF v + 1 > 1 THEN
+                    INSERT INTO audit (id, value) VALUES (NEW.id, v + 1);
+                END IF;
+            END IF;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER audit_event_trigger
+        AFTER INSERT ON events FOR EACH ROW EXECUTE FUNCTION audit_event();
+    ";
+    execute_trigger_ddl(sql);
+}
+
+#[test]
 fn declare_default_values_are_available_without_assignment() {
     let sql = r#"
         CREATE TABLE items (id INT PRIMARY KEY, kind TEXT);
@@ -188,7 +211,8 @@ fn select_into_with_comma_expression_produces_valid_sqlite_trigger_sql() {
 
 #[test]
 fn with_recursive_insert_transforms() {
-    // The trigger_issue.sql fixture has patterns that may involve CTE-based inserts
+    // The trigger_issue.sql fixture has patterns that may involve CTE-based
+    // inserts
     let sql = include_str!("fixtures/trigger_issue.sql");
     let output = translate(sql);
     // Should translate without error and produce valid statements
@@ -390,7 +414,7 @@ fn uuid_function_in_trigger() {
 }
 
 #[test]
-fn schema_qualified_uuid_function_in_trigger() {
+fn schema_qualified_uuid_function_in_trigger_is_refused() {
     let sql = r#"
         CREATE TABLE source_docs (id INT PRIMARY KEY);
         CREATE TABLE outbox (id TEXT PRIMARY KEY, source_id INT NOT NULL);
@@ -408,16 +432,16 @@ fn schema_qualified_uuid_function_in_trigger() {
         FOR EACH ROW EXECUTE FUNCTION copy_doc();
     "#;
 
-    let output = translate(sql);
+    let message = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("the qualifier gives the function a different identity")
+        .to_string();
     assert!(
-        output.contains("uuid()"),
-        "Expected schema-qualified UUID function to be rewritten: {output}"
+        message.contains("public.gen_random_uuid") && message.contains("qualified"),
+        "the refusal should preserve the written identity, got: {message}"
     );
-    assert!(
-        !output.contains("public.gen_random_uuid"),
-        "Schema-qualified UUID function should not remain in output: {output}"
-    );
-    execute_trigger_ddl(sql);
 }
 
 #[test]
@@ -593,7 +617,8 @@ fn trigger_multiple_inserts_on_conflict() {
 #[test]
 fn raise_info_single_space_is_dropped() -> Result<(), Box<dyn std::error::Error>> {
     // The trigger also copies NEW.val into a log table so the body is non-empty
-    // after RAISE INFO is stripped (SQLite requires at least one DML statement).
+    // after RAISE INFO is stripped (SQLite requires at least one DML
+    // statement).
     let sql = r"
         CREATE TABLE ri_test (id INTEGER PRIMARY KEY, val INTEGER NOT NULL);
         CREATE TABLE ri_log (id INTEGER PRIMARY KEY, logged_val INTEGER NOT NULL);

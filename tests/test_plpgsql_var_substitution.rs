@@ -35,8 +35,9 @@ fn plpgsql_substitute_variable_in_like_pattern() {
     )
     .unwrap();
 
-    // The variable 'pattern' should be substituted (not left as bare identifier)
-    // In the CTE-based approach, it becomes a reference to the CTE column
+    // The variable 'pattern' should be substituted (not left as bare
+    // identifier) In the CTE-based approach, it becomes a reference to the
+    // CTE column
     assert!(!sql.is_empty(), "Translation should succeed for LIKE with variable: {sql}");
 }
 

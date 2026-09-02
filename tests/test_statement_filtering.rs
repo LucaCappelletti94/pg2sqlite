@@ -54,8 +54,8 @@ fn rollback_passes_through() {
 #[test]
 fn start_transaction_passes_through() {
     let output = translate("START TRANSACTION;").unwrap();
-    // SQLite uses BEGIN instead of START TRANSACTION, but the parser should handle
-    // it
+    // SQLite uses BEGIN instead of START TRANSACTION, but the parser should
+    // handle it
     assert!(
         output.contains("TRANSACTION") || output.contains("BEGIN"),
         "START TRANSACTION should pass through, got: {output}"
@@ -175,7 +175,8 @@ fn grant_filtered() {
                CREATE ROLE some_role;
                GRANT SELECT ON t TO some_role;";
     let count = translate_count(sql).unwrap();
-    // CREATE TABLE produces 1 statement; CREATE ROLE and GRANT are both filtered
+    // CREATE TABLE produces 1 statement; CREATE ROLE and GRANT are both
+    // filtered
     assert_eq!(count, 1, "Only CREATE TABLE should survive; GRANT and CREATE ROLE filtered");
 }
 
@@ -265,8 +266,8 @@ fn mixed_statements_filters_correctly() {
     ";
     let stmts =
         Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
-    // CREATE TABLE, CREATE INDEX, ALTER TABLE, DROP INDEX. Only CREATE EXTENSION
-    // is filtered: ALTER TABLE ADD COLUMN is now translated.
+    // CREATE TABLE, CREATE INDEX, ALTER TABLE, DROP INDEX. Only CREATE
+    // EXTENSION is filtered: ALTER TABLE ADD COLUMN is now translated.
     assert_eq!(
         stmts.len(),
         4,

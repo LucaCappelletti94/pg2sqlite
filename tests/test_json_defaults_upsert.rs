@@ -161,9 +161,9 @@ fn test_jsonb_default_empty_object() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = translate_and_setup()?;
 
     // Insert with only metadata (settings should default to '{}')
-    // Note: We use diesel::sql_query here because Diesel's Insertable requires all
-    // non-nullable fields without defaults to be provided, but the schema has a
-    // default.
+    // Note: We use diesel::sql_query here because Diesel's Insertable requires
+    // all non-nullable fields without defaults to be provided, but the
+    // schema has a default.
     diesel::sql_query("INSERT INTO json_data (metadata) VALUES ('{\"test\": true}')")
         .execute(&mut connection)?;
 

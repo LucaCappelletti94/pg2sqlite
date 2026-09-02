@@ -62,8 +62,8 @@ fn test_both_session_variable_patterns_are_mapped() {
         !sql_output.contains("current_setting"),
         "All current_setting() references should be replaced, got:\n{sql_output}"
     );
-    // Execute the emitted statements to prove real SQLite accepts the translated
-    // schema.
+    // Execute the emitted statements to prove real SQLite accepts the
+    // translated schema.
     let conn = SqliteConn::open_in_memory().unwrap();
     let script = translated.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated SQL must execute: {e}"));
@@ -75,7 +75,8 @@ fn test_both_session_variable_patterns_are_mapped() {
 fn test_missing_session_variable_for_current_setting_fails() {
     let sql = include_str!("fixtures/rls_multi_session_vars.sql");
 
-    // Provide ONLY the current_user mapping; omit current_setting('app.user_id')
+    // Provide ONLY the current_user mapping; omit
+    // current_setting('app.user_id')
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_v7_function_name("uuidv7")

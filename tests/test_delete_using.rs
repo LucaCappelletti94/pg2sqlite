@@ -52,8 +52,8 @@ struct TeamMember {
 fn test_delete_using_in_trigger() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the PostgreSQL Schema + Trigger acting as the source
     // relying on internal function parsing simulation of pg2sqlite
-    // where body extraction works via schema helper if defined as standard postgres
-    // function.
+    // where body extraction works via schema helper if defined as standard
+    // postgres function.
     let sql = "
 CREATE TABLE teams (
     id SERIAL PRIMARY KEY,
@@ -190,7 +190,8 @@ FOR EACH ROW EXECUTE FUNCTION propagate_delete();
 fn test_delete_using_with_rls_table() -> Result<(), Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
 
-    // Combine schema setup and DELETE statement so the translator has full context
+    // Combine schema setup and DELETE statement so the translator has full
+    // context
     let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,

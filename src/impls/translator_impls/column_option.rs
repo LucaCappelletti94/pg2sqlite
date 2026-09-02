@@ -18,7 +18,7 @@ use sqlparser::ast::{
 };
 
 use crate::impls::{
-    object_name::{append_suffix, table_has_implicit_public_rls},
+    object_name::{append_suffix, translation_table_has_rls},
     shared_helpers::match_partial_not_supported_error,
     translator_impls::expr::sqlite_collation,
 };
@@ -157,7 +157,7 @@ impl crate::traits::translator::TranslatorWithContext for ColumnOptionDef {
                     return Err(match_partial_not_supported_error());
                 }
                 let updated_foreign_table = {
-                    if table_has_implicit_public_rls(schema, foreign_table)? {
+                    if translation_table_has_rls(schema, foreign_table)? {
                         append_suffix(foreign_table, options.get_rls_table_suffix())
                     } else {
                         foreign_table.clone()

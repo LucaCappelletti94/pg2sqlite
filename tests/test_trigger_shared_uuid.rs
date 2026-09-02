@@ -202,8 +202,8 @@ fn test_trigger_translation_uses_last_insert_rowid() {
     // Snapshot the translated SQL for consistency checking
     insta::assert_snapshot!("trigger_last_insert_rowid_pattern", &sqlite_sql);
 
-    // The second INSERT (ownables) should use last_insert_rowid() to get the UUID
-    // from the first INSERT (entities)
+    // The second INSERT (ownables) should use last_insert_rowid() to get the
+    // UUID from the first INSERT (entities)
     assert!(
         sqlite_sql.contains("last_insert_rowid()"),
         "Expected the trigger to use last_insert_rowid() pattern for sharing UUIDs.\nGenerated SQL:\n{sqlite_sql}",

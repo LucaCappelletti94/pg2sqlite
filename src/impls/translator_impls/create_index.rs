@@ -17,8 +17,9 @@ use sql_traits::{
     traits::{ColumnLike, TableLike},
 };
 use sqlparser::ast::{
-    CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart, SetExpr, Statement,
-    TriggerEvent, TriggerPeriod, VisitMut, VisitorMut,
+    BinaryOperator, CreateIndex, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, Ident, IndexType, ObjectName, ObjectNamePart, SetExpr, Statement,
+    TriggerEvent, TriggerPeriod, Value, VisitMut, VisitorMut,
 };
 
 use crate::{
@@ -28,14 +29,14 @@ use crate::{
         function_helpers::{simple_function_expr, string_literal},
         object_name::{
             last_ident_value_or_display, normalize_schema_qualified_object_name_for_sqlite,
-            quoted_ident, sqlite_unqualified_object_name, table_with_implicit_public_lookup,
+            postgres_catalog_function_name, quoted_ident, resolve_translation_table,
+            sqlite_unqualified_object_name,
         },
         query_builder::{
             from_relation, make_query, make_simple_select, plain_table_factor, single_expr_query,
         },
         shared_helpers::{
-            extract_columns_from_expr, function_argument_exprs,
-            nulls_not_distinct_not_supported_error,
+            ColumnReferences, extract_columns_from_expr, nulls_not_distinct_not_supported_error,
         },
         translator_impls::{postgis, rls::resolve_trigger_table_name},
     },
@@ -50,24 +51,111 @@ pub(crate) enum FtsTranslation {
     Unsupported(String),
 }
 
-/// Check if `expr` contains a `to_tsvector` call and return its column list.
+fn plain_argument_expr(arg: &FunctionArg) -> Option<&Expr> {
+    match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Some(expr),
+        _ => None,
+    }
+}
+
+fn tsvector_document(function: &Function) -> Option<&Expr> {
+    let FunctionArguments::List(arguments) = &function.args else { return None };
+    if !arguments.clauses.is_empty() {
+        return None;
+    }
+    match arguments.args.as_slice() {
+        [document] => plain_argument_expr(document),
+        [config, document]
+            if matches!(
+                plain_argument_expr(config),
+                Some(Expr::Value(value))
+                    if matches!(value.value, Value::SingleQuotedString(_))
+            ) =>
+        {
+            plain_argument_expr(document)
+        }
+        _ => None,
+    }
+}
+
+fn is_text_cast(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Character(_)
+            | DataType::Char(_)
+            | DataType::CharacterVarying(_)
+            | DataType::CharVarying(_)
+            | DataType::Varchar(_)
+            | DataType::Nvarchar(_)
+            | DataType::CharacterLargeObject(_)
+            | DataType::CharLargeObject(_)
+            | DataType::Clob(_)
+            | DataType::Text
+            | DataType::TinyText
+            | DataType::MediumText
+            | DataType::LongText
+            | DataType::String(_)
+            | DataType::FixedString(_)
+    )
+}
+
+fn lower_argument(function: &Function) -> Option<&Expr> {
+    let is_lower =
+        postgres_catalog_function_name(&function.name).is_some_and(|name| name == "lower");
+    if !is_lower
+        || function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let FunctionArguments::List(arguments) = &function.args else { return None };
+    if !arguments.clauses.is_empty() {
+        return None;
+    }
+    let [argument] = arguments.args.as_slice() else { return None };
+    plain_argument_expr(argument)
+}
+
+fn is_reproducible_fts_document(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
+        Expr::Nested(inner) => is_reproducible_fts_document(inner),
+        Expr::Cast { expr, data_type, .. } => {
+            is_text_cast(data_type) && is_reproducible_fts_document(expr)
+        }
+        Expr::BinaryOp { left, op: BinaryOperator::StringConcat, right } => {
+            is_reproducible_fts_document(left) && is_reproducible_fts_document(right)
+        }
+        Expr::Value(value) => {
+            matches!(&value.value, Value::SingleQuotedString(text) if text.chars().all(char::is_whitespace))
+        }
+        Expr::Function(function) => {
+            lower_argument(function).is_some_and(is_reproducible_fts_document)
+        }
+        _ => false,
+    }
+}
+
+/// Returns the columns in a `to_tsvector` document that FTS5 can reproduce.
 fn analyze_fts_expression(expr: &Expr) -> Option<Vec<String>> {
     match expr {
-        Expr::Function(func) => {
-            let func_name =
-                func.name.0.last().and_then(|p| p.as_ident()).map(|i| i.value.to_lowercase())?;
-
-            if func_name == "to_tsvector" {
-                // to_tsvector can have 1 or 2 arguments:
-                // to_tsvector(text) or to_tsvector('config', text)
-                let columns: Vec<String> = function_argument_exprs(&func.args)
-                    .into_iter()
-                    .flat_map(extract_columns_from_expr)
-                    .collect();
-
-                if columns.is_empty() { None } else { Some(columns) }
-            } else {
-                None
+        Expr::Function(function) => {
+            if postgres_catalog_function_name(&function.name)
+                .is_none_or(|name| name != "to_tsvector")
+            {
+                return None;
+            }
+            let document = tsvector_document(function)?;
+            if !is_reproducible_fts_document(document) {
+                return None;
+            }
+            match extract_columns_from_expr(document) {
+                ColumnReferences::Complete(columns) if !columns.is_empty() => Some(columns),
+                ColumnReferences::Complete(_) | ColumnReferences::Unknown => None,
             }
         }
         Expr::Nested(inner) => analyze_fts_expression(inner),
@@ -294,7 +382,7 @@ fn create_fts5_statements(
         .and_then(|p| p.as_ident())
         .map_or_else(|| "unknown".to_string(), |i| i.value.clone());
 
-    let table = table_with_implicit_public_lookup(schema, table_name)?.ok_or_else(|| {
+    let table = resolve_translation_table(schema, table_name)?.ok_or_else(|| {
         Error::forward_refusal(format!(
             "Could not find table '{base_name}' in schema for FTS5 index creation"
         ))
@@ -309,10 +397,11 @@ fn create_fts5_statements(
     }
     let pk_column = pk_columns[0].column_name();
 
-    // FTS5 external content mode uses `content_rowid=` to look up rows by SQLite
-    // rowid. The rowid must be a 64-bit integer alias, so the PK column must be
-    // an integer type. A TEXT or UUID primary key cannot serve as a rowid and
-    // would cause FTS5 reads to silently return empty or wrong results.
+    // FTS5 external content mode uses `content_rowid=` to look up rows by
+    // SQLite rowid. The rowid must be a 64-bit integer alias, so the PK
+    // column must be an integer type. A TEXT or UUID primary key cannot
+    // serve as a rowid and would cause FTS5 reads to silently return empty
+    // or wrong results.
     let pk_type_str = pk_columns[0].attribute().data_type.to_string().to_uppercase();
     let is_integer_pk = pk_type_str.contains("INT") || pk_type_str.contains("SERIAL");
     if !is_integer_pk {
@@ -461,6 +550,13 @@ impl crate::traits::translator::TranslatorWithContext for CreateIndex {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // An index expression and a partial index predicate name the indexed
+        // table's own columns, with no query around them.
+        let index_scope =
+            crate::impls::object_name::resolve_translation_table(schema, &self.table_name)?
+                .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+        let scoped = index_scope.as_ref().map(|scope| options.with_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
         let sqlite_table_name =
             normalize_schema_qualified_object_name_for_sqlite(schema, &self.table_name)?;
 
@@ -505,11 +601,12 @@ impl crate::traits::translator::TranslatorWithContext for CreateIndex {
 
         report_dropped_index_clauses(self, emit);
 
-        // Regular index - translate normally, explicitly dropping PG-only fields
-        // (using, concurrently, include, nulls_distinct, with, index_options,
-        // alter_options) that are not valid in SQLite. `nulls_distinct` is only
-        // safe to drop for the DISTINCT spelling, refused above otherwise,
-        // because it decides which rows collide.
+        // Regular index - translate normally, explicitly dropping PG-only
+        // fields (using, concurrently, include, nulls_distinct, with,
+        // index_options, alter_options) that are not valid in SQLite.
+        // `nulls_distinct` is only safe to drop for the DISTINCT
+        // spelling, refused above otherwise, because it decides which
+        // rows collide.
         Ok(vec![Statement::CreateIndex(CreateIndex {
             name: self.name.clone(),
             table_name: sqlite_unqualified_object_name(&sqlite_table_name),
@@ -549,7 +646,9 @@ mod tests {
         parser::Parser,
     };
 
-    use super::{analyze_fts_expression, analyze_fts_index, extract_columns_from_expr};
+    use super::{
+        ColumnReferences, analyze_fts_expression, analyze_fts_index, extract_columns_from_expr,
+    };
     use crate::prelude::{Pg2SqliteOptions, Translator};
 
     fn parse_create_index(sql: &str) -> sqlparser::ast::CreateIndex {
@@ -585,16 +684,18 @@ mod tests {
         });
 
         let columns = extract_columns_from_expr(&idx.columns[0].column.expr);
-        assert_eq!(columns, vec!["title".to_string()]);
+        assert_eq!(columns, ColumnReferences::Complete(vec!["title".to_string()]));
 
         let nested = Expr::Nested(Box::new(idx.columns[0].column.expr.clone()));
-        assert!(analyze_fts_expression(&nested).is_some());
+        assert!(analyze_fts_expression(&nested).is_none());
 
         if let Expr::Function(func) = &mut idx.columns[0].column.expr {
             func.args = FunctionArguments::None;
         }
-        let named = extract_columns_from_expr(&idx.columns[0].column.expr);
-        assert!(named.is_empty(), "the expression names no column, got {named:?}");
+        assert_eq!(
+            extract_columns_from_expr(&idx.columns[0].column.expr),
+            ColumnReferences::Complete(Vec::new())
+        );
 
         let mut idx_non_tsvector =
             parse_create_index("CREATE INDEX idx_docs2 ON docs USING GIN (to_tsvector(title))");
@@ -634,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_fts_expression_supports_expr_named_arguments() {
+    fn analyze_fts_expression_refuses_named_arguments() {
         let mut idx =
             parse_create_index("CREATE INDEX idx_docs ON docs USING GIN (to_tsvector(title))");
         let Expr::Function(func) = &mut idx.columns[0].column.expr else {
@@ -660,8 +761,6 @@ mod tests {
             clauses: vec![],
         });
 
-        let cols =
-            analyze_fts_expression(&idx.columns[0].column.expr).expect("should extract cols");
-        assert_eq!(cols, vec!["title".to_string()]);
+        assert!(analyze_fts_expression(&idx.columns[0].column.expr).is_none());
     }
 }

@@ -27,7 +27,7 @@ use crate::{
         shared_helpers::translate_expr_recursive,
         temporal_arithmetic::reverse_temporal_arithmetic,
     },
-    prelude::{Pg2SqliteOptions, ReverseTranslator},
+    prelude::ReverseTranslator,
 };
 
 /// Convert a SQLite GLOB pattern to a PostgreSQL LIKE pattern.
@@ -86,7 +86,7 @@ fn translate_glob_to_like(
     right: &Expr,
     negated: bool,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     let Some(glob_pat) = single_quoted_literal(right) else {
         return Err(Error::reverse_refusal(
@@ -126,16 +126,16 @@ fn is_backslash_escape(escape: &ValueWithSpan) -> bool {
 
 impl ReverseTranslator for Expr {
     type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
     type PostgresEntry = Self;
 
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
-        // Intercept the forward-translated random() pattern before the recursive
-        // descent would try to reverse-translate random() inside it (and reject it).
+        // Intercept the forward-translated random() pattern before the
+        // recursive descent would try to reverse-translate random()
+        // inside it (and reject it).
         if is_uniform_random_float(self) {
             return Ok(simple_function_expr("random", vec![], None));
         }
@@ -290,7 +290,7 @@ fn posix_regex(
     pattern: &Expr,
     negated: bool,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     Ok(Expr::BinaryOp {
         left: Box::new(Expr::reverse_translate(expr, schema, options)?),

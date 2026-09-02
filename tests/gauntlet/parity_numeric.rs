@@ -318,7 +318,8 @@ fn numeric_arithmetic() {
         .execute(&mut sqlite_conn)
         .expect("SQLite insert row 2");
 
-    // Addition: price + price (same scale). The result scale equals price_scale.
+    // Addition: price + price (same scale). The result scale equals
+    // price_scale.
     //
     // sql_query is used here because `price + price` is cross-expression
     // arithmetic that diesel's typed DSL for Nullable<BigInt> cannot represent
@@ -353,8 +354,9 @@ fn numeric_arithmetic() {
         "subtraction divergence: PG={pg_sub:?} SQLite={sqlite_sub} scale={sub_scale}"
     );
 
-    // Multiplication: price * rate. The translator passes integer multiplication
-    // through unchanged (no rescaling). Result scale = price_scale + rate_scale.
+    // Multiplication: price * rate. The translator passes integer
+    // multiplication through unchanged (no rescaling). Result scale =
+    // price_scale + rate_scale.
     let mul_scale = price_scale + rate_scale;
     let pg_mul =
         pg_text(&mut pg_conn, "SELECT CAST(price * rate AS TEXT) AS val FROM amounts WHERE id = 1");
@@ -465,8 +467,9 @@ fn numeric_rounding_finding() {
         pg_text(&mut pg_conn, "SELECT CAST(price AS TEXT) AS val FROM amounts WHERE id = 1");
 
     // Finding: PG accepted and rounded; the translator refused with the message
-    // below, so the two engines cannot agree through the translator on this insert.
-    // PG stored: {pg_rounded}, translator refused: {translation_err}
+    // below, so the two engines cannot agree through the translator on this
+    // insert. PG stored: {pg_rounded}, translator refused:
+    // {translation_err}
     let _ = (pg_rounded, translation_err);
 }
 

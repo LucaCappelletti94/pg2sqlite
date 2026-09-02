@@ -35,9 +35,16 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        // LIKE t is the most dangerous unsupported clause: SQLite would parse it as
-        // a column named LIKE of type t and silently create a table with the wrong
-        // schema. Reject before emitting anything.
+        // A constraint check, a computed column and a default all name this
+        // table's own columns, and there is no query around them, so the table
+        // being defined is the scope every expression below resolves against.
+        let table_scope = crate::impls::object_name::resolve_translation_table(schema, &self.name)?
+            .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+        let scoped = table_scope.as_ref().map(|scope| options.with_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
+        // LIKE t is the most dangerous unsupported clause: SQLite would parse
+        // it as a column named LIKE of type t and silently create a
+        // table with the wrong schema. Reject before emitting anything.
         if self.like.is_some() {
             let table_name = self.name.to_string();
             return Err(crate::errors::Error::forward_refusal(format!(
@@ -132,7 +139,8 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
             });
         }
 
-        // UNLOGGED is a durability hint with no SQLite equivalent. Drop it and warn.
+        // UNLOGGED is a durability hint with no SQLite equivalent. Drop it and
+        // warn.
         if self.unlogged {
             emit(TranslationWarning::LossyDrop {
                 construct: "UNLOGGED".to_string(),
@@ -142,8 +150,8 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
             });
         }
 
-        // STRICT mode is only valid for regular CREATE TABLE, not CREATE TABLE AS
-        // SELECT.
+        // STRICT mode is only valid for regular CREATE TABLE, not CREATE TABLE
+        // AS SELECT.
         let is_ctas = self.query.is_some();
 
         let query = match &self.query {

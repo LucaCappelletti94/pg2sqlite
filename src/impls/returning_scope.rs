@@ -32,7 +32,7 @@ use sqlparser::ast::{
 
 use super::{
     expr_helpers::try_map_expr_children,
-    object_name::{last_ident, table_with_implicit_public_lookup},
+    object_name::{last_ident, resolve_translation_table},
 };
 use crate::errors::Error;
 
@@ -52,10 +52,11 @@ pub(crate) fn scope_returning_to_target(
     target: Option<&TableFactor>,
     auxiliary: &[TableWithJoins],
     schema: &ParserDB,
+    schema_is_complete: bool,
     clause: &'static str,
 ) -> Result<Option<Vec<SelectItem>>, Error> {
     let Some(items) = returning else { return Ok(None) };
-    let scope = Scope::new(target, auxiliary, schema, clause);
+    let scope = Scope::new(target, auxiliary, schema, schema_is_complete, clause);
     items.into_iter().map(|item| scope.rewrite_item(item)).collect::<Result<_, _>>().map(Some)
 }
 
@@ -101,11 +102,13 @@ impl<'a> Scope<'a> {
         target: Option<&'a TableFactor>,
         auxiliary: &'a [TableWithJoins],
         schema: &ParserDB,
+        schema_is_complete: bool,
         clause: &'static str,
     ) -> Self {
         let target = target.and_then(Relation::of);
-        let target_columns =
-            target.as_ref().and_then(|relation| declared_columns(relation, schema));
+        let target_columns = target
+            .as_ref()
+            .and_then(|relation| declared_columns(relation, schema, schema_is_complete));
 
         let auxiliary = auxiliary
             .iter()
@@ -117,7 +120,7 @@ impl<'a> Scope<'a> {
             .collect::<Vec<_>>();
         let auxiliary_columns = auxiliary
             .iter()
-            .filter_map(|relation| declared_columns(relation, schema))
+            .filter_map(|relation| declared_columns(relation, schema, schema_is_complete))
             .flatten()
             .collect();
 
@@ -238,7 +241,16 @@ impl<'a> Scope<'a> {
 }
 
 /// The declared column names of `relation`, when the schema holds the table.
-fn declared_columns(relation: &Relation<'_>, schema: &ParserDB) -> Option<Vec<String>> {
-    let table = table_with_implicit_public_lookup(schema, relation.declared).ok()??;
-    Some(table.columns(schema).ok()?.map(|column| column.column_name().to_string()).collect())
+fn declared_columns(
+    relation: &Relation<'_>,
+    schema: &ParserDB,
+    schema_is_complete: bool,
+) -> Option<Vec<String>> {
+    let Some(table) = resolve_translation_table(schema, relation.declared).ok().flatten() else {
+        return schema_is_complete.then(Vec::new);
+    };
+    match table.columns(schema) {
+        Ok(columns) => Some(columns.map(|column| column.column_name().to_string()).collect()),
+        Err(_) => schema_is_complete.then(Vec::new),
+    }
 }

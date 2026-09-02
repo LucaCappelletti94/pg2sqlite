@@ -31,7 +31,7 @@ use crate::{
     impls::{
         object_name::{
             append_suffix, normalize_schema_qualified_object_name_for_sqlite,
-            table_has_implicit_public_rls, table_with_implicit_public_lookup,
+            resolve_translation_table, translation_table_has_rls,
             validate_schema_qualified_object_name_for_sqlite,
         },
         query_builder::single_expr_query,
@@ -248,8 +248,8 @@ fn generate_standard_trigger_body(
     if let Some((mut body, mut context)) =
         schema.function_body_with_context(&function_name.to_string())?
     {
-        // Seed trigger-specific context so the body translator can constant-fold
-        // TG_OP and TG_TABLE_NAME references.
+        // Seed trigger-specific context so the body translator can
+        // constant-fold TG_OP and TG_TABLE_NAME references.
         context.trigger_events = events
             .iter()
             .map(|e| {
@@ -285,7 +285,7 @@ fn collect_non_maintenance_update_columns(
     schema: &ParserDB,
     maintenance_columns: &BTreeSet<String>,
 ) -> Result<Vec<Ident>, LookupError> {
-    let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &trigger.table_name) else {
+    let Ok(Some(table)) = resolve_translation_table(schema, &trigger.table_name) else {
         return Ok(vec![]);
     };
 
@@ -400,6 +400,15 @@ impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // A trigger body reads the row of the table it is attached to, through
+        // `NEW` and `OLD` or bare, and there is no query around it, so that
+        // table is the outermost scope its column types resolve against. A
+        // query inside the body attaches its own scope over this one.
+        let trigger_scope =
+            crate::impls::object_name::resolve_translation_table(schema, &self.table_name)?
+                .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+        let scoped = trigger_scope.as_ref().map(|scope| options.with_pseudo_row_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
         // Checked before the FOR EACH clause because PostgreSQL allows
         // TRUNCATE triggers only FOR EACH STATEMENT, so that check would catch
         // every valid one first and advise a rewrite PostgreSQL rejects.
@@ -467,7 +476,7 @@ impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
         // spelling, so the traits-facing trigger carries the registry name
         // while the emitted trigger keeps the normalized one. The split
         // halves re-normalize on their own translate pass.
-        let resolved_table = table_with_implicit_public_lookup(schema, &source_table_name)?;
+        let resolved_table = resolve_translation_table(schema, &source_table_name)?;
         let can_use_trigger_traits = resolved_table.is_some();
 
         let mut trigger_for_helpers = self.clone();
@@ -534,19 +543,19 @@ impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
         let maintenance_insert_event =
             is_maintenance_trigger && maintenance_trigger_has_insert_event(&events);
         if maintenance_insert_event && matches!(period, Some(TriggerPeriod::Before)) {
-            // SQLite cannot apply row maintenance updates for INSERT in BEFORE timing
-            // because the row does not exist yet; translate to AFTER to
-            // preserve final-row semantics.
+            // SQLite cannot apply row maintenance updates for INSERT in BEFORE
+            // timing because the row does not exist yet; translate
+            // to AFTER to preserve final-row semantics.
             period = Some(TriggerPeriod::After);
         }
 
-        // For BEFORE/AFTER triggers on RLS-protected tables, redirect to the underlying
-        // _rls table. INSTEAD OF triggers are used on the view, but
-        // BEFORE/AFTER triggers must target the actual table (which has been
-        // renamed to table_rls).
+        // For BEFORE/AFTER triggers on RLS-protected tables, redirect to the
+        // underlying _rls table. INSTEAD OF triggers are used on the
+        // view, but BEFORE/AFTER triggers must target the actual table
+        // (which has been renamed to table_rls).
         let redirected_source_table_name =
             if matches!(period, Some(TriggerPeriod::Before | TriggerPeriod::After)) {
-                if table_has_implicit_public_rls(schema, &source_table_name)? {
+                if translation_table_has_rls(schema, &source_table_name)? {
                     append_suffix(&source_table_name, options.get_rls_table_suffix())
                 } else {
                     source_table_name.clone()

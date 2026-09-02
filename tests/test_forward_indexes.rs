@@ -128,8 +128,8 @@ fn hash_index() {
         CREATE INDEX idx_hash ON users USING HASH (name);
     ";
     let output = translate(sql);
-    // Hash indexes can't be directly translated - should become regular index or be
-    // dropped
+    // Hash indexes can't be directly translated - should become regular index
+    // or be dropped
     assert!(output.contains("users"), "Expected table still present: {output}");
     execute_translated(sql);
 }
@@ -259,7 +259,8 @@ fn gin_tsvector_translates_to_fts5() {
     ";
     let translated_sql = translate_result(sql).unwrap();
 
-    // Should have: table + FTS5 virtual table + 3 triggers (insert, delete, update)
+    // Should have: table + FTS5 virtual table + 3 triggers (insert, delete,
+    // update)
     // + 1 backfill INSERT
     assert_eq!(translated_sql.len(), 6);
 

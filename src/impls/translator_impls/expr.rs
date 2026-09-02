@@ -13,7 +13,7 @@ use alloc::{
 };
 
 use sql_traits::{
-    structs::ParserDB,
+    structs::{ColumnDefinition, ParserDB},
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
@@ -33,13 +33,15 @@ use crate::{
         },
         idioms::wrap_with_lower,
         interval::{interval_date_modifiers, interval_date_modifiers_scaled},
+        object_name::postgres_catalog_function_name,
         query_builder::{
             from_relation, plain_table_factor, single_expr_query, table_function_factor,
         },
         session_variable,
         shared_helpers::{
-            declared_numeric_precision, every_declared_type_matches, extract_columns_from_function,
-            function_argument_exprs, is_integral_expression, numeric_scale, rescale_minor_units,
+            declared_numeric_precision, declared_type_matches,
+            extract_column_references_from_function, function_argument_exprs,
+            is_integral_expression, numeric_scale, referenced_column_name, rescale_minor_units,
             scale_decimal_literal, translate_expr_recursive,
         },
         temporal_arithmetic::{epoch_of_temporal_difference, translate_temporal_binary_op},
@@ -63,8 +65,9 @@ use crate::{
 
 /// Extract the search query string from a to_tsquery expression.
 fn extract_query_from_tsquery(func: &Function) -> Option<String> {
-    // to_tsquery can have 1 or 2 args: to_tsquery('query') or to_tsquery('config',
-    // 'query'). The query is always the last expression argument.
+    // to_tsquery can have 1 or 2 args: to_tsquery('query') or
+    // to_tsquery('config', 'query'). The query is always the last
+    // expression argument.
     for expr in function_argument_exprs(&func.args).into_iter().rev() {
         if let Some(text) = single_quoted_literal(expr) {
             return Some(text.to_string());
@@ -98,18 +101,13 @@ fn translate_tsquery_to_fts5(tsquery: &str) -> String {
 
 /// Check if a function is to_tsvector.
 fn is_to_tsvector(func: &Function) -> bool {
-    func.name
-        .0
-        .last()
-        .and_then(|p| p.as_ident())
-        .is_some_and(|i| i.value.to_lowercase() == "to_tsvector")
+    postgres_catalog_function_name(&func.name).is_some_and(|name| name == "to_tsvector")
 }
 
 /// Check if a function is to_tsquery or plainto_tsquery or phraseto_tsquery.
 fn is_to_tsquery(func: &Function) -> bool {
-    func.name.0.last().and_then(|p| p.as_ident()).is_some_and(|i| {
-        let name = i.value.to_lowercase();
-        name == "to_tsquery" || name == "plainto_tsquery" || name == "phraseto_tsquery"
+    postgres_catalog_function_name(&func.name).is_some_and(|name| {
+        matches!(name.as_str(), "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery")
     })
 }
 
@@ -123,25 +121,43 @@ fn translate_fts_expression(
     options: &crate::options::TranslationContext<'_>,
     _emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let columns = extract_columns_from_function(tsvector_func);
-    let table = schema
-        .tables()
-        .find(|table| {
-            if columns.is_empty() {
-                return false;
+    let unresolved_table = || {
+        crate::errors::Error::forward_refusal(
+            "Could not determine table name from to_tsvector expression. \
+                 Ensure the columns referenced exist in a table with a GIN/GiST index."
+                .to_string(),
+        )
+    };
+    let references =
+        extract_column_references_from_function(tsvector_func).ok_or_else(&unresolved_table)?;
+    if references.is_empty() {
+        return Err(unresolved_table());
+    }
+    let columns = references
+        .iter()
+        .filter_map(referenced_column_name)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let mut table: Option<&<ParserDB as DatabaseLike>::Table> = None;
+    for reference in &references {
+        let mut resolved = None;
+        for definition in options.column_definitions(reference, None) {
+            match definition.map_err(|_| unresolved_table())? {
+                Some(ColumnDefinition::Base { table, .. }) => {
+                    resolved = Some(table);
+                    break;
+                }
+                Some(_) => return Err(unresolved_table()),
+                None => {}
             }
-            let Ok(table_column_iter) = table.columns(schema) else { return false };
-            let table_columns: alloc::collections::BTreeSet<_> =
-                table_column_iter.map(|c| c.column_name().to_lowercase()).collect();
-            columns.iter().all(|col| table_columns.contains(&col.to_lowercase()))
-        })
-        .ok_or_else(|| {
-            crate::errors::Error::forward_refusal(
-                "Could not determine table name from to_tsvector expression. \
-                     Ensure the columns referenced exist in a table with a GIN/GiST index."
-                    .to_string(),
-            )
-        })?;
+        }
+        let resolved = resolved.ok_or_else(&unresolved_table)?;
+        if table.is_some_and(|table| table.table_name() != resolved.table_name()) {
+            return Err(unresolved_table());
+        }
+        table = Some(resolved);
+    }
+    let table = table.ok_or_else(unresolved_table)?;
     let table_name = table.table_name().to_string();
 
     // Gate the rewrite on the column having a declared GIN / GiST
@@ -183,9 +199,18 @@ fn translate_fts_expression(
     let fts5_query = translate_tsquery_to_fts5(&query_str);
     let fts_table_name = format!("{table_name}_fts");
 
-    // Build: pk_col IN (SELECT rowid FROM table_fts WHERE table_fts MATCH 'query')
+    let pk_reference = match &references[0] {
+        Expr::CompoundIdentifier(parts) => {
+            let mut parts = parts.clone();
+            if let Some(column) = parts.last_mut() {
+                *column = Ident::new(pk_column);
+            }
+            Expr::CompoundIdentifier(parts)
+        }
+        _ => Expr::Identifier(Ident::new(pk_column)),
+    };
     Ok(Expr::InSubquery {
-        expr: Box::new(Expr::Identifier(Ident::new(pk_column))),
+        expr: Box::new(pk_reference),
         subquery: Box::new(single_expr_query(
             Expr::Identifier(Ident::new("rowid")),
             from_relation(plain_table_factor(ObjectName(vec![ObjectNamePart::Identifier(
@@ -239,12 +264,16 @@ fn translate_extract(
 /// Under the JSON array representation an array column is TEXT holding a JSON
 /// array, so nothing about the value distinguishes it from a string and the
 /// declared type is the only evidence there is.
-fn is_array_expression(expr: &Expr, schema: &ParserDB) -> bool {
+fn is_array_expression(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<bool, crate::errors::Error> {
     match expr {
-        Expr::Array(_) => true,
-        Expr::Nested(inner) => is_array_expression(inner, schema),
+        Expr::Array(_) => Ok(true),
+        Expr::Nested(inner) => is_array_expression(inner, schema, options),
         _ => {
-            every_declared_type_matches(expr, schema, |data_type| {
+            declared_type_matches(expr, schema, options, |data_type| {
                 let lowered = data_type.to_ascii_lowercase();
                 lowered.ends_with("[]") || lowered.starts_with("array")
             })
@@ -368,9 +397,13 @@ fn boolean_literal_word(expr: &Expr) -> Option<&'static str> {
 /// and nothing downstream can tell it from a count. Anything this does not
 /// recognise is left alone, which keeps a value that merely happens to be 1
 /// from being rendered as a word.
-fn is_boolean_expression(expr: &Expr, schema: &ParserDB) -> bool {
-    match expr {
-        Expr::Nested(inner) => is_boolean_expression(inner, schema),
+fn is_boolean_expression(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<bool, crate::errors::Error> {
+    Ok(match expr {
+        Expr::Nested(inner) => is_boolean_expression(inner, schema, options)?,
         Expr::Cast { data_type, .. } => {
             matches!(data_type, DataType::Boolean | DataType::Bool)
         }
@@ -413,11 +446,11 @@ fn is_boolean_expression(expr: &Expr, schema: &ParserDB) -> bool {
             )
         }
         _ => {
-            every_declared_type_matches(expr, schema, |declared| {
+            declared_type_matches(expr, schema, options, |declared| {
                 matches!(declared.to_ascii_lowercase().as_str(), "boolean" | "bool")
-            })
+            })?
         }
-    }
+    })
 }
 
 /// Renders a boolean operand the way PostgreSQL renders one as text.
@@ -1010,14 +1043,14 @@ fn translate_numeric_cast(
     let (_, target_scale) = numeric_precision_and_scale(info)?;
     let translated = expr.translate_with_warnings(schema, options, emit)?;
 
-    if let Some(source_scale) = numeric_scale(expr, schema) {
+    if let Some(source_scale) = numeric_scale(expr, schema, options)? {
         return Ok(rescale_minor_units(translated, source_scale, target_scale));
     }
 
     // An operand that is not already minor units, an integer column or a
     // literal, is at scale 0 by definition, so it only needs multiplying up.
     // Anything whose scale cannot be resolved would be shifted by a guess.
-    if is_integral_expression(expr, schema) {
+    if is_integral_expression(expr, schema, options)? {
         return Ok(rescale_minor_units(translated, 0, target_scale));
     }
     Err(crate::errors::Error::forward_refusal(format!(
@@ -1070,7 +1103,7 @@ crate::errors::Error::forward_refusal("AT TIME ZONE supports only literal UTC/lo
         ));
     };
 
-    let awareness = timestamp_awareness(timestamp, schema).ok_or_else(|| {
+    let awareness = timestamp_awareness(timestamp, schema, options)?.ok_or_else(|| {
         crate::errors::Error::forward_refusal(format!(
             "AT TIME ZONE shifts a bare timestamp and a timestamptz in opposite directions, and \
              `{timestamp}` is not known to be either, so either choice would be wrong half the \
@@ -1390,8 +1423,10 @@ fn translate_numeric_arithmetic(
             }
         }
         BinaryOperator::Multiply => {
-            let (left_precision, right_precision) =
-                (numeric_precision(left, schema), numeric_precision(right, schema));
+            let (left_precision, right_precision) = (
+                numeric_precision(left, schema, options)?,
+                numeric_precision(right, schema, options)?,
+            );
             if let (Some(left_precision), Some(right_precision)) = (left_precision, right_precision)
                 && left_precision + right_precision > MAX_NUMERIC_PRECISION
             {
@@ -1425,19 +1460,23 @@ fn translate_numeric_arithmetic(
 }
 
 /// The declared precision of a NUMERIC expression, when it has one.
-fn numeric_precision(expr: &Expr, schema: &ParserDB) -> Option<u64> {
-    match expr {
-        Expr::Nested(inner) => numeric_precision(inner, schema),
+fn numeric_precision(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<u64>, crate::errors::Error> {
+    Ok(match expr {
+        Expr::Nested(inner) => numeric_precision(inner, schema, options)?,
         Expr::Cast { data_type, .. } => {
             match exact_numeric_info(data_type) {
                 Some(info) => {
                     numeric_precision_and_scale(info).ok().map(|(precision, _)| precision)
                 }
-                None => declared_numeric_precision(expr, schema),
+                None => declared_numeric_precision(expr, schema, options)?,
             }
         }
-        _ => declared_numeric_precision(expr, schema),
-    }
+        _ => declared_numeric_precision(expr, schema, options)?,
+    })
 }
 
 /// Whether the NUMERIC scale rules could bear on this operation at all.
@@ -1462,13 +1501,30 @@ fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bo
     ) {
         return false;
     }
-    let addressable = |expr: &Expr| {
-        matches!(
-            expr,
-            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Nested(_) | Expr::Cast { .. }
-        )
-    };
-    addressable(left) || addressable(right)
+    fn addressable(expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(_)
+            | Expr::CompoundIdentifier(_)
+            | Expr::Nested(_)
+            | Expr::Cast { .. } => true,
+            Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
+                addressable(expr)
+            }
+            _ => false,
+        }
+    }
+    fn numeric_candidate(expr: &Expr) -> bool {
+        match expr {
+            Expr::Value(ValueWithSpan { value: Value::Number(_, _), .. }) => true,
+            Expr::Value(_) => false,
+            Expr::Nested(inner) => numeric_candidate(inner),
+            Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
+                numeric_candidate(expr)
+            }
+            other => addressable(other),
+        }
+    }
+    (addressable(left) || addressable(right)) && numeric_candidate(left) && numeric_candidate(right)
 }
 
 /// `a @> b` (a contains b): every element of b must be in a.
@@ -1537,7 +1593,8 @@ fn translate_binary_op(
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     if numeric_rules_may_apply(op, left, right) {
-        let scales = (numeric_scale(left, schema), numeric_scale(right, schema));
+        let scales =
+            (numeric_scale(left, schema, options)?, numeric_scale(right, schema, options)?);
         // A NUMERIC column holds minor units, so a decimal literal beside one
         // has to be moved onto the same scale. Missing this is silent:
         // `price = 19.99` compares 1999 against 19.99 and returns nothing.
@@ -1609,8 +1666,8 @@ fn translate_binary_op(
     }
 
     // <=> (Spaceship) - Cosine distance
-    // Note: In MySQL this is the NULL-safe equality operator, but in pgvector it's
-    // cosine distance
+    // Note: In MySQL this is the NULL-safe equality operator, but in pgvector
+    // it's cosine distance
     if *op == BinaryOperator::Spaceship {
         return translate_vector_distance_op(
             left,
@@ -1669,8 +1726,8 @@ fn translate_binary_op(
         }
     }
 
-    // ^ is exponentiation in PostgreSQL but bitwise XOR in SQLite, so passthrough
-    // is wrong.
+    // ^ is exponentiation in PostgreSQL but bitwise XOR in SQLite, so
+    // passthrough is wrong.
     if *op == BinaryOperator::PGExp {
         if !options.is_math_functions_available() {
             return Err(crate::errors::Error::forward_refusal(
@@ -1711,7 +1768,8 @@ fn translate_binary_op(
     // array is TEXT, so passing it through turned `{1,2} || {3,4}` into the
     // string `[1,2][3,4]`. The operands decide, not the operator.
     if *op == BinaryOperator::StringConcat
-        && (is_array_expression(left, schema) || is_array_expression(right, schema))
+        && (is_array_expression(left, schema, options)?
+            || is_array_expression(right, schema, options)?)
     {
         if !is_json_array_representation(options) {
             return Err(representation_required("The || (array concatenation) operator"));
@@ -1721,7 +1779,7 @@ fn translate_binary_op(
         // array shape rather than needing their own.
         let mut as_array = |side: &Expr| -> Result<Expr, crate::errors::Error> {
             let translated = side.translate_with_warnings(schema, options, emit)?;
-            Ok(if is_array_expression(side, schema) {
+            Ok(if is_array_expression(side, schema, options)? {
                 translated
             } else {
                 json_array_call(vec![translated])
@@ -1756,10 +1814,11 @@ fn translate_binary_op(
     // Only the boolean side is wrapped, so a text or numeric operand keeps
     // concatenating exactly as it did.
     if *op == BinaryOperator::StringConcat
-        && (is_boolean_expression(left, schema) || is_boolean_expression(right, schema))
+        && (is_boolean_expression(left, schema, options)?
+            || is_boolean_expression(right, schema, options)?)
     {
         let mut rendered = |side: &Expr| -> Result<Expr, crate::errors::Error> {
-            if is_boolean_expression(side, schema) {
+            if is_boolean_expression(side, schema, options)? {
                 render_boolean_as_text(side, schema, options, emit)
             } else {
                 side.translate_with_warnings(schema, options, emit)
@@ -1785,8 +1844,8 @@ fn translate_binary_op(
         ));
     }
 
-    // POSIX regex operators: SQLite's REGEXP needs an application-supplied function
-    // and cannot honor POSIX semantics. Match the wording used by
+    // POSIX regex operators: SQLite's REGEXP needs an application-supplied
+    // function and cannot honor POSIX semantics. Match the wording used by
     // regexp_match/regexp_matches.
     match op {
         BinaryOperator::PGRegexMatch | BinaryOperator::PGRegexNotMatch => {
@@ -1807,7 +1866,8 @@ fn translate_binary_op(
         // mislead array callers who forgot to set ArrayRepresentation::Json.
         BinaryOperator::AtArrow => {
             if is_json_array_representation(options)
-                && (is_array_expression(left, schema) || is_array_expression(right, schema))
+                && (is_array_expression(left, schema, options)?
+                    || is_array_expression(right, schema, options)?)
             {
                 // a @> b: every element of b must be in a.
                 return Ok(array_containment(
@@ -1825,7 +1885,8 @@ fn translate_binary_op(
         }
         BinaryOperator::ArrowAt => {
             if is_json_array_representation(options)
-                && (is_array_expression(left, schema) || is_array_expression(right, schema))
+                && (is_array_expression(left, schema, options)?
+                    || is_array_expression(right, schema, options)?)
             {
                 // a <@ b: every element of a is in b (same as b @> a).
                 return Ok(array_containment(
@@ -2008,7 +2069,8 @@ fn translate_binary_op(
                     }
                 }
                 None => {
-                    // Runtime scalar: cannot be constant-folded into a modifier.
+                    // Runtime scalar: cannot be constant-folded into a
+                    // modifier.
                     return Err(crate::errors::Error::forward_refusal("INTERVAL scaled by a runtime expression cannot be folded at translation                          time. Compute the multiplier in application code and use a plain                          INTERVAL literal, for example INTERVAL '3 days'."
                         .to_string()));
                 }
@@ -2027,7 +2089,8 @@ fn translate_binary_op(
                     return Ok(simple_function_expr("datetime", args, None));
                 }
                 None => {
-                    // The notation was not decoded (HH:MM:SS, ISO P-form, 'ago').
+                    // The notation was not decoded (HH:MM:SS, ISO P-form,
+                    // 'ago').
                     return Err(crate::errors::Error::forward_refusal(format!(
                         "INTERVAL '{}' notation is not supported. Use the verbose form with                          explicit count and unit pairs, for example INTERVAL '1 hour 30 minutes'.",
                         single_quoted_literal(interval.value.as_ref()).unwrap_or("...")
@@ -2116,9 +2179,10 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         return translate_vector_cast(expr, data_type, schema, options, emit);
                     }
                     // PG `'...'::uuid` under Blob representation: lower to the
-                    // same text-to-blob expression used for INSERT/UPDATE wraps.
-                    // Without this branch the cast would emit invalid
-                    // `'...'::BLOB` SQLite syntax via the generic Cast path.
+                    // same text-to-blob expression used for INSERT/UPDATE
+                    // wraps. Without this branch the cast
+                    // would emit invalid `'...'::BLOB`
+                    // SQLite syntax via the generic Cast path.
                     if matches!(data_type, sqlparser::ast::DataType::Uuid)
                         && crate::impls::translator_impls::uuid::is_blob_uuid_representation(
                             options,
@@ -2142,8 +2206,8 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         });
                     }
                     // SQLite has no cast format, so a `FORMAT` clause cannot be
-                    // honored and cloning it through produced SQL SQLite rejects at
-                    // parse time.
+                    // honored and cloning it through produced SQL SQLite
+                    // rejects at parse time.
                     if let Some(format) = format {
                         return Err(crate::errors::Error::forward_refusal(format!(
                             "CAST(... AS {data_type} FORMAT {format}) is not supported in SQLite, \
@@ -2165,13 +2229,14 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     // A boolean rendered as text reads `true` or `false` in
                     // PostgreSQL, and the translated integer would give `1`.
                     if matches!(translated_type, sqlparser::ast::DataType::Text)
-                        && is_boolean_expression(expr, schema)
+                        && is_boolean_expression(expr, schema, options)?
                     {
                         return render_boolean_as_text(expr, schema, options, emit);
                     }
                     // SQLite only accepts the `CAST(x AS type)` spelling, not
-                    // PostgreSQL's `x::type` operator nor TRY_CAST / SAFE_CAST, so
-                    // force `CastKind::Cast` regardless of how the source wrote it.
+                    // PostgreSQL's `x::type` operator nor TRY_CAST / SAFE_CAST,
+                    // so force `CastKind::Cast` regardless
+                    // of how the source wrote it.
                     Ok(Expr::Cast {
                         expr: Box::new(expr.translate_with_warnings(schema, options, emit)?),
                         data_type: translated_type,
@@ -2214,7 +2279,8 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         pattern.translate_with_warnings(schema, options, emit)?;
                     let escape = sqlite_like_escape(lowered_ilike_escape(escape_char.as_ref())?);
                     if let Some(fold_fn) = options.get_ilike_fold_function() {
-                        // Use the caller-provided fold function instead of lower().
+                        // Use the caller-provided fold function instead of
+                        // lower().
                         let fold = |e| simple_function_expr(fold_fn, vec![e], None);
                         return Ok(Expr::Like {
                             negated: *negated,

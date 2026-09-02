@@ -141,6 +141,13 @@ fn added_column_non_literal_default_is_applied() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+#[test]
+fn added_column_check_resolves_existing_table_columns() -> Result<(), Box<dyn std::error::Error>> {
+    let _connection =
+        apply(&format!("{BASE} ALTER TABLE t ADD COLUMN value INT CHECK (value + id > 0);"))?;
+    Ok(())
+}
+
 /// `DROP COLUMN` is emitted and removes the column.
 #[test]
 fn dropped_column_leaves_the_schema() -> Result<(), Box<dyn std::error::Error>> {
@@ -326,7 +333,8 @@ fn the_clauses_are_dropped_for_a_rename_too() -> Result<(), Box<dyn std::error::
     for clause in ["IF EXISTS", "ONLY"] {
         let mut conn = apply(&format!("{BASE} ALTER TABLE {clause} t RENAME TO t2;"))?;
         // `sqlite_master` is the only way to observe that the table now answers
-        // to the new name, which no typed query over a renamed table can express.
+        // to the new name, which no typed query over a renamed table can
+        // express.
         let rows: Vec<Renamed> = diesel::sql_query(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('t', 't2')",
         )

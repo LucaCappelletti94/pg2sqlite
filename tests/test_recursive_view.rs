@@ -195,7 +195,8 @@ fn test_category_descendant_count_view() -> Result<(), Box<dyn std::error::Error
 
     assert_eq!(counts.len(), 6, "Should have counts for 6 categories");
 
-    // Electronics (id=1) has 4 descendants: Computers, Phones, Laptops, Desktops
+    // Electronics (id=1) has 4 descendants: Computers, Phones, Laptops,
+    // Desktops
     let electronics_count = counts.iter().find(|c| c.category_id == 1).unwrap();
     assert_eq!(electronics_count.descendant_count, 4);
 

@@ -1,7 +1,6 @@
 //! Implementation of the [`ReverseTranslator`] trait for the
 //! `Statement` type.
 
-use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::{
@@ -14,10 +13,14 @@ use alloc::{
 };
 use core::ops::ControlFlow;
 
-use sql_traits::structs::ParserDB;
+use sql_traits::{
+    structs::ParserDB,
+    traits::{DatabaseLike, TableLike},
+    utils::identifier_resolution::{identifiers_match, parse_lookup_identifier},
+};
 use sqlparser::ast::{
-    Delete, Expr, Insert, ObjectName, Query, SetExpr, Statement, Table, TableObject, Update, Visit,
-    Visitor,
+    Delete, Expr, Ident, Insert, ObjectName, Query, SetExpr, Statement, Table, TableObject, Update,
+    Visit, Visitor,
 };
 #[cfg(all(test, feature = "std"))]
 use sqlparser::ast::{LimitClause, TableFactor};
@@ -26,120 +29,259 @@ use super::ident_quoting::normalize_identifier_quotes;
 use crate::{
     errors::Error,
     impls::{
-        object_name::last_ident, placeholder::rewrite_placeholders_for_postgres,
+        object_name::last_ident,
+        placeholder::rewrite_placeholders_for_postgres,
         shared_helpers::debug_variant_name,
+        translator_impls::rls::{ensure_usable_rls_table_suffix, resolve_trigger_table_name},
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
-fn strip_identifier_quotes(name: &str) -> &str {
-    if name.len() >= 2 {
-        let first = name.as_bytes()[0] as char;
-        let last = name.as_bytes()[name.len() - 1] as char;
-        if matches!((first, last), ('"', '"') | ('`', '`') | ('[', ']')) {
-            return &name[1..name.len() - 1];
+#[derive(Clone, Copy)]
+enum Written<'a> {
+    Ident(&'a Ident),
+    Text(&'a str),
+}
+
+impl<'a> Written<'a> {
+    fn from_ident(ident: &'a Ident) -> Self {
+        Self::Ident(ident)
+    }
+
+    fn from_text(text: &'a str) -> Self {
+        Self::Text(text)
+    }
+
+    fn with_parts<R>(&self, f: impl FnOnce(&str, bool) -> R) -> R {
+        match self {
+            Self::Ident(ident) => f(&ident.value, ident.quote_style.is_some()),
+            Self::Text(text) => {
+                let parsed = parse_lookup_identifier(text);
+                f(parsed.value(), parsed.is_quoted())
+            }
         }
     }
-    name
-}
 
-/// Checks whether an identifier string ends with a suffix, ignoring outer
-/// quotes.
-fn identifier_has_suffix(name: &str, suffix: &str) -> bool {
-    strip_identifier_quotes(name).ends_with(suffix)
-}
-
-fn is_rls_table(name: &ObjectName, options: &Pg2SqliteOptions) -> bool {
-    let suffix = options.get_rls_table_suffix();
-    last_ident(name).is_some_and(|ident| ident.value.ends_with(suffix))
-}
-
-fn check_table_for_rls(name: &ObjectName, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    if is_rls_table(name, options) {
-        return Err(Error::RlsTableDetected {
-            table_name: name.to_string(),
-            suffix: options.get_rls_table_suffix().to_string(),
-        });
+    fn sqlite_matches(&self, other: &Self) -> bool {
+        self.with_parts(|left, _| other.with_parts(|right, _| left.eq_ignore_ascii_case(right)))
     }
-    Ok(())
+
+    fn postgres_matches(&self, other: &Self) -> bool {
+        self.with_parts(|left, left_quoted| {
+            other.with_parts(|right, right_quoted| {
+                identifiers_match(left, left_quoted, right, right_quoted)
+            })
+        })
+    }
 }
 
-fn check_table_object_for_rls(
-    table: &TableObject,
-    options: &Pg2SqliteOptions,
-) -> Result<(), Error> {
+/// True when `name` ends with `suffix`, ignoring ASCII case.
+///
+/// Compared as bytes, so a non-ASCII name cannot put the boundary inside a
+/// character.
+fn ends_with_suffix_ignoring_case(name: &str, suffix: &str) -> bool {
+    let (name, suffix) = (name.as_bytes(), suffix.as_bytes());
+    name.len() >= suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+/// The names reverse translation must refuse, resolved against the schema.
+///
+/// Forward translation renames a secured table and leaves a view under the
+/// original name, so the physical name it produced is the one with no
+/// PostgreSQL counterpart. Asking the schema rather than reading the suffix off
+/// the reference keeps the two directions in agreement and stops a table the
+/// caller merely named `audit_rls` from being taken for a generated one.
+struct RlsTableNames<'a> {
+    suffix: &'a str,
+    /// Physical names of the secured tables, which is what forward translation
+    /// hid behind a view.
+    backing: Vec<String>,
+    /// Every name the schema declares, in its own spelling.
+    declared: Vec<String>,
+}
+
+impl<'a> RlsTableNames<'a> {
+    fn new(schema: &ParserDB, options: &'a Pg2SqliteOptions) -> Result<Self, Error> {
+        ensure_usable_rls_table_suffix(options)?;
+        let suffix = options.get_rls_table_suffix();
+
+        let mut backing = Vec::new();
+        let mut declared = Vec::new();
+        for table in schema.tables() {
+            let logical = table.table_name();
+            let physical = resolve_trigger_table_name(logical, table, schema, options)?;
+            if physical != logical {
+                backing.push(physical);
+            }
+            declared.push(logical.to_string());
+        }
+
+        Ok(Self { suffix, backing, declared })
+    }
+
+    /// The refusal `reference` earns, if any.
+    ///
+    /// `written` is the whole name as the statement spelled it, which is what
+    /// the message quotes, so a schema-qualified reference reads back the way
+    /// the caller wrote it.
+    fn refusal(&self, reference: Written<'_>, written: &str) -> Option<Error> {
+        reference.with_parts(|value, _| {
+            if let Some(backing) = self.backing.iter().find(|name| name.eq_ignore_ascii_case(value))
+            {
+                return Some(Error::RlsTableDetected {
+                    table_name: backing.clone(),
+                    suffix: self.suffix.to_string(),
+                });
+            }
+
+            if self.declared.iter().any(|name| name.eq_ignore_ascii_case(value)) {
+                return None;
+            }
+
+            ends_with_suffix_ignoring_case(value, self.suffix).then(|| {
+                Error::RlsTableDetected {
+                    table_name: written.to_string(),
+                    suffix: self.suffix.to_string(),
+                }
+            })
+        })
+    }
+}
+
+/// Refuses a reference SQLite reads as a CTE and PostgreSQL reads as a table.
+fn cte_shadow_disagreement(alias: &str, written: &str) -> Error {
+    Error::reverse_refusal(format!(
+        "WITH \"{alias}\" hides the row-security backing table {written} in SQLite, which \
+         matches a name without regard to case, while PostgreSQL keeps the capitals of a \
+         quoted name and would read {written} as the table instead. Spell the CTE name the \
+         way the reference spells it."
+    ))
+}
+
+/// What the CTE names in scope say about a relation reference.
+enum CteBinding {
+    /// No CTE in scope answers the reference.
+    Absent,
+    /// Both databases bind the reference to the CTE, so it names no table.
+    Shadowed,
+    /// SQLite binds the reference to the CTE while PostgreSQL does not, because
+    /// the alias is delimited and spelled differently.
+    SqliteOnly(String),
+}
+
+fn check_table_for_rls(name: &ObjectName, names: &RlsTableNames<'_>) -> Result<(), Error> {
+    let Some(last) = last_ident(name) else { return Ok(()) };
+    match names.refusal(Written::from_ident(last), &name.to_string()) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn check_table_object_for_rls(table: &TableObject, names: &RlsTableNames<'_>) -> Result<(), Error> {
     match table {
-        TableObject::TableName(name) => check_table_for_rls(name, options),
+        TableObject::TableName(name) => check_table_for_rls(name, names),
         TableObject::TableFunction(_) | TableObject::TableQuery(_) => Ok(()),
     }
 }
 
-fn check_table_command_for_rls(table: &Table, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    if let Some(table_name) = &table.table_name {
-        let full_name = table
+/// The name a `TABLE t` set expression reads, spelled as the statement wrote
+/// it.
+fn table_command_written_name(table: &Table) -> Option<String> {
+    let table_name = table.table_name.as_ref()?;
+    Some(
+        table
             .schema_name
             .as_ref()
-            .map_or_else(|| table_name.clone(), |schema| format!("{schema}.{table_name}"));
-        let suffix = options.get_rls_table_suffix();
-        if identifier_has_suffix(table_name, suffix) {
-            return Err(Error::RlsTableDetected {
-                table_name: full_name,
-                suffix: suffix.to_string(),
-            });
-        }
-    }
-    Ok(())
+            .map_or_else(|| table_name.clone(), |schema| format!("{schema}.{table_name}")),
+    )
 }
 
-fn table_command_name(table: &Table) -> Option<&str> {
-    table.table_name.as_deref()
+/// One query's CTE names and their visibility while its children are visited.
+struct CteScope {
+    aliases: Vec<Ident>,
+    body_visibility: Vec<(usize, usize)>,
+    visible_aliases: usize,
+    restore_parent_visibility: Option<usize>,
 }
 
-fn ensure_set_expr_supported_for_rls(
-    set_expr: &SetExpr,
-    options: &Pg2SqliteOptions,
-    cte_scopes: &[BTreeSet<String>],
-) -> Result<(), Error> {
-    match set_expr {
-        SetExpr::SetOperation { left, right, .. } => {
-            ensure_set_expr_supported_for_rls(left, options, cte_scopes)?;
-            ensure_set_expr_supported_for_rls(right, options, cte_scopes)
-        }
-        SetExpr::Table(table) => {
-            if let Some(table_name) = table_command_name(table) {
-                let normalized = strip_identifier_quotes(table_name).to_ascii_lowercase();
-                if cte_scopes.iter().rev().any(|scope| scope.contains(&normalized)) {
-                    return Ok(());
-                }
-            }
-            check_table_command_for_rls(table, options)
-        }
-        SetExpr::Merge(_) => {
-            Err(Error::reverse_refusal(
-                "MERGE set expressions are not supported in reverse translation".to_string(),
-            ))
-        }
-        SetExpr::Query(_)
-        | SetExpr::Select(_)
-        | SetExpr::Insert(_)
-        | SetExpr::Update(_)
-        | SetExpr::Delete(_)
-        | SetExpr::Values(_) => Ok(()),
-    }
-}
-
+/// Walks a node refusing any reference that reaches a row-security backing
+/// table.
 struct RlsAstVisitor<'a> {
-    options: &'a Pg2SqliteOptions,
-    cte_scopes: Vec<BTreeSet<String>>,
+    names: &'a RlsTableNames<'a>,
+    cte_scopes: Vec<CteScope>,
 }
 
 impl RlsAstVisitor<'_> {
-    fn is_cte_relation(&self, relation: &ObjectName) -> bool {
-        let Some(last) = last_ident(relation) else {
-            return false;
-        };
-        let normalized = strip_identifier_quotes(&last.value).to_ascii_lowercase();
-        self.cte_scopes.iter().rev().any(|scope| scope.contains(&normalized))
+    fn cte_binding(&self, reference: Written<'_>) -> CteBinding {
+        for scope in self.cte_scopes.iter().rev() {
+            for alias in scope.aliases.iter().take(scope.visible_aliases) {
+                let alias = Written::from_ident(alias);
+                if !alias.sqlite_matches(&reference) {
+                    continue;
+                }
+                return if alias.postgres_matches(&reference) {
+                    CteBinding::Shadowed
+                } else {
+                    CteBinding::SqliteOnly(alias.with_parts(|value, _| value.to_string()))
+                };
+            }
+        }
+        CteBinding::Absent
+    }
+
+    /// The refusal a relation reference earns, with the CTE names in scope
+    /// taken into account.
+    fn relation_refusal(&self, reference: Written<'_>, written: &str) -> Option<Error> {
+        match self.cte_binding(reference) {
+            CteBinding::Shadowed => None,
+            CteBinding::Absent => self.names.refusal(reference, written),
+            // Only a name the guard would otherwise refuse is worth refusing
+            // here. Whether a delimited mixed-case identifier reaches the same
+            // object in both databases is a question this crate leaves alone,
+            // see `super::ident_quoting`.
+            CteBinding::SqliteOnly(alias) => {
+                self.names
+                    .refusal(reference, written)
+                    .map(|_| cte_shadow_disagreement(&alias, written))
+            }
+        }
+    }
+
+    fn pop_query_scope(&mut self) {
+        let restore = self.cte_scopes.pop().and_then(|scope| scope.restore_parent_visibility);
+        if let Some(restore) = restore
+            && let Some(parent) = self.cte_scopes.last_mut()
+        {
+            parent.visible_aliases = restore;
+        }
+    }
+
+    fn check_set_expr(&self, set_expr: &SetExpr) -> Result<(), Error> {
+        match set_expr {
+            SetExpr::SetOperation { left, right, .. } => {
+                self.check_set_expr(left)?;
+                self.check_set_expr(right)
+            }
+            SetExpr::Table(table) => {
+                let Some(written) = table_command_written_name(table) else { return Ok(()) };
+                let name = table.table_name.as_deref().unwrap_or_default();
+                match self.relation_refusal(Written::from_text(name), &written) {
+                    Some(error) => Err(error),
+                    None => Ok(()),
+                }
+            }
+            SetExpr::Merge(_) => {
+                Err(Error::reverse_refusal(
+                    "MERGE set expressions are not supported in reverse translation".to_string(),
+                ))
+            }
+            SetExpr::Query(_)
+            | SetExpr::Select(_)
+            | SetExpr::Insert(_)
+            | SetExpr::Update(_)
+            | SetExpr::Delete(_)
+            | SetExpr::Values(_) => Ok(()),
+        }
     }
 }
 
@@ -147,40 +289,62 @@ impl Visitor for RlsAstVisitor<'_> {
     type Break = Box<Error>;
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        let current_scope = query
-            .with
-            .as_ref()
-            .map(|with| {
-                with.cte_tables
-                    .iter()
-                    .map(|cte| cte.alias.name.value.to_ascii_lowercase())
-                    .collect::<BTreeSet<_>>()
+        let address = core::ptr::from_ref(query) as usize;
+        let restore_parent_visibility = self.cte_scopes.last_mut().and_then(|scope| {
+            let child_visibility = scope
+                .body_visibility
+                .iter()
+                .find_map(|(child, visible)| (*child == address).then_some(*visible));
+            child_visibility.map(|visible| {
+                let restore = scope.visible_aliases;
+                scope.visible_aliases = visible;
+                restore
             })
-            .unwrap_or_default();
-        self.cte_scopes.push(current_scope);
+        });
+        let (aliases, body_visibility) = query.with.as_ref().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |with| {
+                let recursive = usize::from(with.recursive);
+                let aliases =
+                    with.cte_tables.iter().map(|cte| cte.alias.name.clone()).collect::<Vec<_>>();
+                let body_visibility = with
+                    .cte_tables
+                    .iter()
+                    .enumerate()
+                    .map(|(index, cte)| {
+                        (core::ptr::from_ref(cte.query.as_ref()) as usize, index + recursive)
+                    })
+                    .collect();
+                (aliases, body_visibility)
+            },
+        );
+        let visible_aliases = aliases.len();
+        self.cte_scopes.push(CteScope {
+            aliases,
+            body_visibility,
+            visible_aliases,
+            restore_parent_visibility,
+        });
 
-        match ensure_set_expr_supported_for_rls(query.body.as_ref(), self.options, &self.cte_scopes)
-        {
+        match self.check_set_expr(query.body.as_ref()) {
             Ok(()) => ControlFlow::Continue(()),
             Err(err) => {
-                let _ = self.cte_scopes.pop();
+                self.pop_query_scope();
                 ControlFlow::Break(Box::new(err))
             }
         }
     }
 
     fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
-        let _ = self.cte_scopes.pop();
+        self.pop_query_scope();
         ControlFlow::Continue(())
     }
 
     fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
-        if self.is_cte_relation(relation) {
-            return ControlFlow::Continue(());
-        }
-        match check_table_for_rls(relation, self.options) {
-            Ok(()) => ControlFlow::Continue(()),
-            Err(err) => ControlFlow::Break(Box::new(err)),
+        let Some(last) = last_ident(relation) else { return ControlFlow::Continue(()) };
+        match self.relation_refusal(Written::from_ident(last), &relation.to_string()) {
+            None => ControlFlow::Continue(()),
+            Some(err) => ControlFlow::Break(Box::new(err)),
         }
     }
 
@@ -195,86 +359,123 @@ impl Visitor for RlsAstVisitor<'_> {
     }
 }
 
-fn run_rls_visitor<T: Visit>(node: &T, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    let mut visitor = RlsAstVisitor { options, cte_scopes: Vec::new() };
+fn walk_for_rls<T: Visit>(node: &T, names: &RlsTableNames<'_>) -> Result<(), Error> {
+    let mut visitor = RlsAstVisitor { names, cte_scopes: Vec::new() };
     match node.visit(&mut visitor) {
         ControlFlow::Continue(()) => Ok(()),
         ControlFlow::Break(err) => Err(*err),
     }
 }
 
+fn run_rls_visitor<T: Visit>(
+    node: &T,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), Error> {
+    walk_for_rls(node, &RlsTableNames::new(schema, options)?)
+}
+
 #[cfg(all(test, feature = "std"))]
 fn check_table_factor_for_rls(
     factor: &TableFactor,
-    options: &Pg2SqliteOptions,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), Error> {
-    run_rls_visitor(factor, options)
+    run_rls_visitor(factor, schema, options)
 }
 
 /// Check an expression tree for RLS table references in subqueries.
 #[cfg(all(test, feature = "std"))]
-fn check_expr_for_rls(expr: &Expr, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    run_rls_visitor(expr, options)
+fn check_expr_for_rls(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), Error> {
+    run_rls_visitor(expr, schema, options)
 }
 
 #[cfg(all(test, feature = "std"))]
-fn check_set_expr_for_rls(set_expr: &SetExpr, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    ensure_set_expr_supported_for_rls(set_expr, options, &[])?;
-    run_rls_visitor(set_expr, options)
+fn check_set_expr_for_rls(
+    set_expr: &SetExpr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), Error> {
+    let names = RlsTableNames::new(schema, options)?;
+    RlsAstVisitor { names: &names, cte_scopes: Vec::new() }.check_set_expr(set_expr)?;
+    walk_for_rls(set_expr, &names)
 }
 
 #[cfg(all(test, feature = "std"))]
 fn check_limit_clause_for_rls(
     limit_clause: &LimitClause,
-    options: &Pg2SqliteOptions,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), Error> {
-    run_rls_visitor(limit_clause, options)
+    run_rls_visitor(limit_clause, schema, options)
 }
 
-fn check_query_for_rls(query: &Query, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    run_rls_visitor(query, options)
-}
-fn check_insert_for_rls(insert: &Insert, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    check_table_object_for_rls(&insert.table, options)?;
-    run_rls_visitor(insert, options)
-}
-
-fn check_update_for_rls(update: &Update, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    run_rls_visitor(update, options)
+fn check_query_for_rls(
+    query: &Query,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), Error> {
+    run_rls_visitor(query, schema, options)
 }
 
-fn check_delete_for_rls(delete: &Delete, options: &Pg2SqliteOptions) -> Result<(), Error> {
-    run_rls_visitor(delete, options)
+fn check_insert_for_rls(
+    insert: &Insert,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), Error> {
+    let names = RlsTableNames::new(schema, options)?;
+    check_table_object_for_rls(&insert.table, &names)?;
+    walk_for_rls(insert, &names)
+}
+
+fn check_update_for_rls(
+    update: &Update,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), Error> {
+    run_rls_visitor(update, schema, options)
+}
+
+fn check_delete_for_rls(
+    delete: &Delete,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), Error> {
+    run_rls_visitor(delete, schema, options)
 }
 
 impl ReverseTranslator for Statement {
     type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
     type PostgresEntry = Statement;
 
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
+        ensure_usable_rls_table_suffix(options)?;
         let mut translated = match self {
             Statement::Insert(insert) => {
-                check_insert_for_rls(insert, options)?;
+                check_insert_for_rls(insert, schema, options)?;
 
                 Statement::Insert(insert.reverse_translate(schema, options)?)
             }
             Statement::Update(update) => {
-                check_update_for_rls(update, options)?;
+                check_update_for_rls(update, schema, options)?;
 
                 Statement::Update(update.reverse_translate(schema, options)?)
             }
             Statement::Delete(delete) => {
-                check_delete_for_rls(delete, options)?;
+                check_delete_for_rls(delete, schema, options)?;
 
                 Statement::Delete(delete.reverse_translate(schema, options)?)
             }
             Statement::Query(query) => {
-                check_query_for_rls(query, options)?;
+                check_query_for_rls(query, schema, options)?;
 
                 Statement::Query(Box::new(query.reverse_translate(schema, options)?))
             }
@@ -343,7 +544,7 @@ mod tests {
 
     #[test]
     fn check_expr_for_rls_accepts_many_expression_variants() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let expressions = vec![
             "a = ANY(b)",
             "a = ALL(b)",
@@ -369,13 +570,13 @@ mod tests {
 
         for raw in expressions {
             let expr = parse_expr(raw);
-            check_expr_for_rls(&expr, &options).unwrap();
+            check_expr_for_rls(&expr, &empty_schema(), &options).unwrap();
         }
     }
 
     #[test]
     fn check_expr_for_rls_rejects_subquery_in_subscript_index() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let expr = Expr::CompoundFieldAccess {
             root: Box::new(parse_expr("payload")),
             access_chain: vec![AccessExpr::Subscript(Subscript::Index {
@@ -383,13 +584,13 @@ mod tests {
             })],
         };
 
-        let err = check_expr_for_rls(&expr, &options).unwrap_err();
+        let err = check_expr_for_rls(&expr, &empty_schema(), &options).unwrap_err();
         assert!(err.to_string().contains("users_rls"));
     }
 
     #[test]
     fn check_query_for_rls_covers_with_order_by_limit_fetch_and_function_shapes() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let query = parse_query(
             r#"
             WITH c AS (SELECT 1 AS id)
@@ -407,19 +608,24 @@ mod tests {
             "#,
         );
 
-        check_query_for_rls(&query, &options).unwrap();
+        check_query_for_rls(&query, &empty_schema(), &options).unwrap();
     }
 
     #[test]
     fn check_set_expr_for_rls_handles_insert_update_delete_values_and_table_variants() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let insert_stmt =
             Parser::parse_sql(&PostgreSqlDialect {}, "INSERT INTO users(id) VALUES (1)")
                 .unwrap()
                 .remove(0);
         if let Statement::Insert(insert) = insert_stmt {
-            check_set_expr_for_rls(&SetExpr::Insert(Statement::Insert(insert)), &options).unwrap();
+            check_set_expr_for_rls(
+                &SetExpr::Insert(Statement::Insert(insert)),
+                &empty_schema(),
+                &options,
+            )
+            .unwrap();
         } else {
             panic!("expected insert");
         }
@@ -427,7 +633,12 @@ mod tests {
         let update_stmt =
             Parser::parse_sql(&PostgreSqlDialect {}, "UPDATE users SET id = 1").unwrap().remove(0);
         if let Statement::Update(update) = update_stmt {
-            check_set_expr_for_rls(&SetExpr::Update(Statement::Update(update)), &options).unwrap();
+            check_set_expr_for_rls(
+                &SetExpr::Update(Statement::Update(update)),
+                &empty_schema(),
+                &options,
+            )
+            .unwrap();
         } else {
             panic!("expected update");
         }
@@ -437,53 +648,58 @@ mod tests {
                 .unwrap()
                 .remove(0);
         if let Statement::Delete(delete) = delete_stmt {
-            check_set_expr_for_rls(&SetExpr::Delete(Statement::Delete(delete)), &options).unwrap();
+            check_set_expr_for_rls(
+                &SetExpr::Delete(Statement::Delete(delete)),
+                &empty_schema(),
+                &options,
+            )
+            .unwrap();
         } else {
             panic!("expected delete");
         }
 
         let values_query = parse_query("VALUES (1), (2)");
-        check_set_expr_for_rls(values_query.body.as_ref(), &options).unwrap();
+        check_set_expr_for_rls(values_query.body.as_ref(), &empty_schema(), &options).unwrap();
 
         let table_expr = SetExpr::Table(Box::new(sqlparser::ast::Table {
             table_name: Some("users".to_string()),
             schema_name: None,
         }));
-        check_set_expr_for_rls(&table_expr, &options).unwrap();
+        check_set_expr_for_rls(&table_expr, &empty_schema(), &options).unwrap();
 
         let rls_table_expr = SetExpr::Table(Box::new(sqlparser::ast::Table {
             table_name: Some("users_rls".to_string()),
             schema_name: None,
         }));
-        let err = check_set_expr_for_rls(&rls_table_expr, &options).unwrap_err();
+        let err = check_set_expr_for_rls(&rls_table_expr, &empty_schema(), &options).unwrap_err();
         assert!(err.to_string().contains("users_rls"));
 
         let merge_stmt = Parser::parse_sql(&PostgreSqlDialect {}, "COMMIT;").unwrap().remove(0);
         let merge_expr = SetExpr::Merge(merge_stmt);
-        let err = check_set_expr_for_rls(&merge_expr, &options)
+        let err = check_set_expr_for_rls(&merge_expr, &empty_schema(), &options)
             .expect_err("merge set expr should be rejected");
         assert!(err.to_string().contains("MERGE set expressions"));
     }
 
     #[test]
     fn check_limit_clause_for_rls_handles_offset_comma_limit_variant() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let offset_comma =
             LimitClause::OffsetCommaLimit { offset: parse_expr("1"), limit: parse_expr("10") };
-        check_limit_clause_for_rls(&offset_comma, &options).unwrap();
+        check_limit_clause_for_rls(&offset_comma, &empty_schema(), &options).unwrap();
 
         let limit_offset = LimitClause::LimitOffset {
             limit: Some(parse_expr("10")),
             offset: Some(Offset { value: parse_expr("1"), rows: sqlparser::ast::OffsetRows::None }),
             limit_by: vec![parse_expr("2")],
         };
-        check_limit_clause_for_rls(&limit_offset, &options).unwrap();
+        check_limit_clause_for_rls(&limit_offset, &empty_schema(), &options).unwrap();
     }
 
     #[test]
     fn reverse_translate_rejects_rls_backing_tables_and_non_dml_statements() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let query_stmt =
             Parser::parse_sql(&PostgreSqlDialect {}, "SELECT * FROM users_rls").unwrap().remove(0);
@@ -497,37 +713,37 @@ mod tests {
 
     #[test]
     fn check_table_factor_and_set_expr_cover_query_fallback_paths() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let table_fn_query = parse_query("SELECT * FROM generate_series(1, 2)");
         let sqlparser::ast::SetExpr::Select(select) = table_fn_query.body.as_ref() else {
             panic!("expected select");
         };
-        check_table_factor_for_rls(&select.from[0].relation, &options).unwrap();
+        check_table_factor_for_rls(&select.from[0].relation, &empty_schema(), &options).unwrap();
 
         let manual_table_function =
             TableFactor::TableFunction { expr: parse_expr("generate_series(1, 2)"), alias: None };
-        check_table_factor_for_rls(&manual_table_function, &options).unwrap();
+        check_table_factor_for_rls(&manual_table_function, &empty_schema(), &options).unwrap();
 
         let set_expr = SetExpr::Query(Box::new(parse_query("SELECT 1")));
-        check_set_expr_for_rls(&set_expr, &options).unwrap();
+        check_set_expr_for_rls(&set_expr, &empty_schema(), &options).unwrap();
     }
 
     #[test]
     fn check_expr_for_rls_rejects_grouping_sets_with_rls_subquery() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let expr = Expr::GroupingSets(vec![vec![Expr::Subquery(Box::new(parse_query(
             "SELECT id FROM users_rls LIMIT 1",
         )))]]);
 
-        let err = check_expr_for_rls(&expr, &options)
+        let err = check_expr_for_rls(&expr, &empty_schema(), &options)
             .expect_err("GROUPING SETS expressions with RLS-backed subqueries should be rejected");
         assert!(err.to_string().contains("users_rls"));
     }
 
     #[test]
     fn check_query_for_rls_rejects_select_side_paths_with_rls_subqueries() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut query = parse_query("SELECT id FROM users");
         let SetExpr::Select(select) = query.body.as_mut() else {
             panic!("expected select");
@@ -545,7 +761,7 @@ mod tests {
             with_fill: None,
         }];
 
-        let err = check_query_for_rls(&query, &options).expect_err(
+        let err = check_query_for_rls(&query, &empty_schema(), &options).expect_err(
             "Select-side expression vectors should be traversed for RLS-backed subqueries",
         );
         assert!(err.to_string().contains("users_rls"));
@@ -553,7 +769,7 @@ mod tests {
 
     #[test]
     fn check_query_for_rls_rejects_query_settings_and_pipe_exprs() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut query = parse_query("SELECT id FROM users");
         query.settings = Some(vec![sqlparser::ast::Setting {
             key: sqlparser::ast::Ident::new("x"),
@@ -563,7 +779,7 @@ mod tests {
             expr: Expr::Subquery(Box::new(parse_query("SELECT id FROM users_rls LIMIT 1"))),
         }];
 
-        let err = check_query_for_rls(&query, &options).expect_err(
+        let err = check_query_for_rls(&query, &empty_schema(), &options).expect_err(
             "Query settings and pipe operators should be traversed for RLS-backed subqueries",
         );
         assert!(err.to_string().contains("users_rls"));
@@ -571,7 +787,7 @@ mod tests {
 
     #[test]
     fn check_expr_for_rls_rejects_function_subquery_arguments() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let expr = Expr::Function(sqlparser::ast::Function {
             name: sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new("array")]),
             uses_odbc_syntax: false,
@@ -585,14 +801,14 @@ mod tests {
             within_group: Vec::new(),
         });
 
-        let err = check_expr_for_rls(&expr, &options)
+        let err = check_expr_for_rls(&expr, &empty_schema(), &options)
             .expect_err("Function subquery arguments should be checked for RLS-backed tables");
         assert!(err.to_string().contains("users_rls"));
     }
 
     #[test]
     fn check_expr_for_rls_rejects_unhandled_match_against_variant() {
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let expr = Expr::MatchAgainst {
             columns: vec![sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new(
                 "body",
@@ -601,7 +817,7 @@ mod tests {
             opt_search_modifier: None,
         };
 
-        let err = check_expr_for_rls(&expr, &options)
+        let err = check_expr_for_rls(&expr, &empty_schema(), &options)
             .expect_err("unhandled expression variants must fail closed in RLS checks");
         assert!(matches!(err, Error::UnsupportedRlsExpressionVariant { .. }));
         assert!(err.to_string().contains("MatchAgainst"));

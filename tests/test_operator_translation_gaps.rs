@@ -192,7 +192,8 @@ fn pg_abs_prefix_translates_to_abs() {
 #[test]
 fn pg_abs_executes_correctly() {
     let mut conn = establish_connection();
-    // sql_query: executing dynamically generated SQL, not a static schema query.
+    // sql_query: executing dynamically generated SQL, not a static schema
+    // query.
     let result = sql_query("SELECT abs(-5) AS r")
         .get_result::<ScalarDouble>(&mut conn)
         .expect("execute abs")
@@ -212,7 +213,8 @@ fn pg_bitwise_xor_translates_to_or_minus_and() {
 fn pg_bitwise_xor_executes_correctly() {
     let mut conn = establish_connection();
     // (5 | 3) - (5 & 3) = 7 - 1 = 6 = 5 XOR 3
-    // sql_query: executing dynamically generated SQL, not a static schema query.
+    // sql_query: executing dynamically generated SQL, not a static schema
+    // query.
     let result = sql_query("SELECT (5 | 3) - (5 & 3) AS r")
         .get_result::<ScalarInt>(&mut conn)
         .expect("execute xor")
@@ -302,7 +304,8 @@ fn json_key_exists_translates_to_json_type_is_not_null() {
 #[test]
 fn json_key_exists_true_executes_correctly() {
     let mut conn = establish_connection();
-    // sql_query: executing dynamically generated SQL, not a static schema query.
+    // sql_query: executing dynamically generated SQL, not a static schema
+    // query.
     let result = sql_query(r#"SELECT json_type('{"a":1}', '$."a"') IS NOT NULL AS r"#)
         .get_result::<ScalarInt>(&mut conn)
         .expect("execute key-exists true")
@@ -313,7 +316,8 @@ fn json_key_exists_true_executes_correctly() {
 #[test]
 fn json_key_exists_false_executes_correctly() {
     let mut conn = establish_connection();
-    // sql_query: executing dynamically generated SQL, not a static schema query.
+    // sql_query: executing dynamically generated SQL, not a static schema
+    // query.
     let result = sql_query(r#"SELECT json_type('{"a":1}', '$."b"') IS NOT NULL AS r"#)
         .get_result::<ScalarInt>(&mut conn)
         .expect("execute key-exists false")
@@ -336,7 +340,8 @@ fn json_any_key_exists_translates_to_or_chain() {
 fn json_any_key_exists_executes_correctly() {
     let mut conn = establish_connection();
     // 'a' exists, 'b' does not -> OR is true (1)
-    // sql_query: executing dynamically generated SQL, not a static schema query.
+    // sql_query: executing dynamically generated SQL, not a static schema
+    // query.
     let result = sql_query(
         r#"SELECT json_type('{"a":1}', '$."a"') IS NOT NULL OR json_type('{"a":1}', '$."b"') IS NOT NULL AS r"#,
     )
@@ -361,7 +366,8 @@ fn json_all_keys_exist_translates_to_and_chain() {
 fn json_all_keys_exist_executes_correctly() {
     let mut conn = establish_connection();
     // Both 'a' and 'b' exist -> AND is true (1)
-    // sql_query: executing dynamically generated SQL, not a static schema query.
+    // sql_query: executing dynamically generated SQL, not a static schema
+    // query.
     let result = sql_query(
         r#"SELECT json_type('{"a":1,"b":2}', '$."a"') IS NOT NULL AND json_type('{"a":1,"b":2}', '$."b"') IS NOT NULL AS r"#,
     )
@@ -384,7 +390,8 @@ fn json_delete_path_translates_to_json_remove() {
 #[test]
 fn json_delete_path_executes_correctly() {
     let mut conn = establish_connection();
-    // sql_query: executing dynamically generated SQL, not a static schema query.
+    // sql_query: executing dynamically generated SQL, not a static schema
+    // query.
     let result = sql_query(r#"SELECT json_remove('{"a":1,"b":2}', '$.a') AS r"#)
         .get_result::<ScalarText>(&mut conn)
         .expect("execute json_remove")
@@ -404,7 +411,8 @@ fn json_delete_nested_path_translates() {
 
 #[test]
 fn json_containment_at_arrow_rejects() {
-    // @> (jsonb containment) cannot be expressed in SQLite without a recursive CTE.
+    // @> (jsonb containment) cannot be expressed in SQLite without a recursive
+    // CTE.
     let err = tr_err(r#"SELECT '{"a":1}' @> '{}'"#);
     let msg = err.to_string();
     assert!(

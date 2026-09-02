@@ -21,6 +21,18 @@ use crate::impls::{
 };
 
 crate::traits::translator::impl_contextual_translator!(Delete => Statement);
+/// Every relation a `DELETE` lists, so a reference qualified by a `USING`
+/// relation resolves as well as one naming the target.
+pub(crate) fn delete_scope_query(delete: &Delete) -> sqlparser::ast::Query {
+    let (sqlparser::ast::FromTable::WithFromKeyword(tables)
+    | sqlparser::ast::FromTable::WithoutKeyword(tables)) = &delete.from;
+    let mut relations = tables.clone();
+    if let Some(using) = &delete.using {
+        relations.extend(using.iter().cloned());
+    }
+    crate::impls::shared_helpers::relations_scope_query(relations)
+}
+
 impl crate::traits::translator::TranslatorWithContext for Delete {
     fn translate_with_warnings(
         &self,
@@ -28,6 +40,14 @@ impl crate::traits::translator::TranslatorWithContext for Delete {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // The statement's target is the relation an unqualified column names,
+        // and a query inside the statement attaches its own scope over this
+        // one, so an outer reference still resolves.
+        let scope_query = delete_scope_query(self);
+        let target_scope =
+            Some(sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?);
+        let scoped = target_scope.as_ref().map(|scope| options.with_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
         let (selection, from, returning, order_by, limit) =
             translate_delete_core::<Forward>(self, schema, options, emit)?;
 
@@ -52,6 +72,7 @@ impl crate::traits::translator::TranslatorWithContext for Delete {
             delete_target(&delete.from),
             translated_using.as_deref().unwrap_or_default(),
             schema,
+            options.schema_is_complete(),
             "USING",
         )?;
 

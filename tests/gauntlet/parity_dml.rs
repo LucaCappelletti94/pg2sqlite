@@ -354,8 +354,8 @@ fn conflict_and_default_shapes_agree() {
         assert_eq!(po, Outcome::Accepted, "DO NOTHING (non-conflicting): must be accepted");
     }
 
-    // ON CONFLICT DO NOTHING: conflicting row is accepted but the stored data is
-    // unchanged.
+    // ON CONFLICT DO NOTHING: conflicting row is accepted but the stored data
+    // is unchanged.
     {
         let po = pg.insert_do_nothing("alpha", 99);
         let so = sq.insert_do_nothing("alpha", 99);
@@ -479,7 +479,8 @@ fn conflict_and_default_shapes_agree() {
         );
     }
 
-    // Multi-row insert where one row conflicts: new row lands, conflict suppressed.
+    // Multi-row insert where one row conflicts: new row lands, conflict
+    // suppressed.
     {
         let pg_before = pg.count();
         let sq_before = sq.count();

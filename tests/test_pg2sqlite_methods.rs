@@ -176,7 +176,8 @@ fn test_ups_until_last_migration_matches_ups() {
 
 #[test]
 fn test_translate() {
-    // Basic test of translate flow, more detailed translation tests are elsewhere
+    // Basic test of translate flow, more detailed translation tests are
+    // elsewhere
     let translator = Pg2Sqlite::default().sql("CREATE TABLE test_trans (id INT);").unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default());
     assert!(result.is_ok());

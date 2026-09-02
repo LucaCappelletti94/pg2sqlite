@@ -54,8 +54,8 @@ fn fts_predicate_without_gin_index_errors_at_translate_time() {
              vtable. The schema did not declare a `CREATE INDEX ... USING GIN`, so the rewrite \
              must error at translate time (or pass the predicate through). Got:\n{joined}"
         );
-        // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
-        // accepts it.
+        // Translated SQL is dynamically generated; rusqlite execute_batch
+        // proves SQLite accepts it.
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
         for s in &stmts {
             conn.execute_batch(&format!("{s};"))
@@ -87,8 +87,8 @@ SELECT id FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('test');
         joined.contains("docs_fts MATCH 'test'"),
         "expected FTS5 MATCH rewrite, got:\n{joined}"
     );
-    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
-    // accepts it.
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves
+    // SQLite accepts it.
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
@@ -140,11 +140,41 @@ SELECT id FROM Docs WHERE to_tsvector('english', body) @@ to_tsquery('test');
         .expect("case-insensitive catalog lookup must allow the rewrite");
     let joined = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     assert!(joined.contains("MATCH 'test'"), "expected FTS5 MATCH rewrite, got:\n{joined}");
-    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
-    // accepts it.
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves
+    // SQLite accepts it.
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
             .unwrap_or_else(|e| panic!("SQLite rejected emitted SQL: {e}\n{s}"));
+    }
+}
+
+#[test]
+fn qualified_fts_predicate_resolves_the_indexed_relation() {
+    let schema = "
+CREATE TABLE a (id INTEGER PRIMARY KEY, title TEXT);
+CREATE TABLE b (id INTEGER PRIMARY KEY, title TEXT);
+CREATE INDEX b_title_fts ON b USING GIN (to_tsvector('english', title));
+INSERT INTO a (id, title) VALUES (1, 'other');
+INSERT INTO b (id, title) VALUES (1, 'needle');
+SELECT b.id FROM a CROSS JOIN b
+WHERE to_tsvector('english', b.title) @@ to_tsquery('needle');
+";
+    let statements = Pg2Sqlite::default()
+        .sql(schema)
+        .expect("parse")
+        .translate(&opts())
+        .expect("the qualified document names the indexed relation");
+    let joined =
+        statements.iter().map(|statement| statement.to_string()).collect::<Vec<_>>().join("\n");
+    assert!(
+        joined.contains("b_fts MATCH 'needle'") && !joined.contains("a_fts"),
+        "the rewrite should use the relation named by the document, got:\n{joined}"
+    );
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in statements {
+        connection
+            .execute_batch(&statement.to_string())
+            .unwrap_or_else(|error| panic!("SQLite rejected emitted SQL: {error}\n{statement}"));
     }
 }

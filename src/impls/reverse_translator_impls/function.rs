@@ -34,7 +34,7 @@ use crate::{
         },
         session_variable,
         shared_helpers::{
-            every_declared_type_matches, function_argument_exprs, translate_function_arguments,
+            declared_type_matches, function_argument_exprs, translate_function_arguments,
             translate_order_by_expr,
         },
         sqlite_functions::classify,
@@ -44,7 +44,6 @@ use crate::{
         },
         translator_impls::{expr::sqlite_json_path_to_pg_text_path, postgis},
     },
-    prelude::Pg2SqliteOptions,
     traits::SessionVariableMapping,
 };
 
@@ -278,10 +277,11 @@ fn at_time_zone_for_modifier(
     modifier: String,
     timestamp: &Expr,
     schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<String, Error> {
     let flipped = flipped_shifting_offset(&modifier);
 
-    let Some(awareness) = timestamp_awareness(timestamp, schema) else {
+    let Some(awareness) = timestamp_awareness(timestamp, schema, options)? else {
         return Err(Error::reverse_refusal(if flipped.is_some() {
             format!(
                 "a datetime offset modifier of '{modifier}' shifts a bare timestamp and a \
@@ -309,7 +309,7 @@ fn at_time_zone_for_modifier(
 pub fn reverse_function(
     name: &ObjectName,
     args: &FunctionArguments,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> FunctionReversal {
     let func_name = name.0.last().and_then(|part| part.as_ident()).map_or_else(
         || name.to_string().to_ascii_lowercase(),
@@ -347,9 +347,10 @@ pub fn reverse_function(
                 return FunctionReversal::ToAtTimeZone("UTC".to_string());
             }
             // localtimestamp: datetime('now', 'localtime') -> LOCALTIMESTAMP.
-            // This must be checked before the generic 2-arg timezone path, which
-            // would map 'localtime' to AT TIME ZONE and then fail because 'now'
-            // is not a known timestamp expression.
+            // This must be checked before the generic 2-arg timezone path,
+            // which would map 'localtime' to AT TIME ZONE and then
+            // fail because 'now' is not a known timestamp
+            // expression.
             if is_now_localtime_args(args) {
                 return FunctionReversal::ToBareKeyword("LOCALTIMESTAMP");
             }
@@ -785,7 +786,7 @@ const SQLITE_ONLY: &[(&str, &str)] = &[
 fn classify_unreversed(
     name: &str,
     args: &FunctionArguments,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> FunctionReversal {
     let class = classify(name);
     if class.shared_with_postgres
@@ -850,7 +851,7 @@ fn json_path_extraction(
     path: &Expr,
     caller: &str,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(literal), .. }) = path else {
         return Err(Error::reverse_refusal(format!(
@@ -878,7 +879,7 @@ fn build_reverse_function(
     name: ObjectName,
     func: &Function,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     Ok(Expr::Function(Function {
         name,
@@ -944,8 +945,15 @@ fn with_default_separator(mut reversed: Expr) -> Expr {
 pub fn reverse_translate_function(
     func: &Function,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
+    if func.uses_odbc_syntax {
+        return Err(Error::reverse_refusal(format!(
+            "ODBC function escape syntax around {} is not supported by reverse translation",
+            func.name
+        )));
+    }
+
     // Recognize NULLIF(json_group_array(x), '[]') and restore json_agg(x).
     // The forward translator emits this shape for both json_agg and array_agg
     // (after the R2-6 fix). The reverse cannot distinguish the two without type
@@ -1027,7 +1035,7 @@ pub fn reverse_translate_function(
                 options,
             )?;
 
-            let zone = at_time_zone_for_modifier(time_zone, &reversed_timestamp, schema)?;
+            let zone = at_time_zone_for_modifier(time_zone, &reversed_timestamp, schema, options)?;
             Ok(Expr::AtTimeZone {
                 timestamp: Box::new(reversed_timestamp),
                 time_zone: Box::new(Expr::Value(ValueWithSpan {
@@ -1237,7 +1245,8 @@ pub fn reverse_translate_function(
             // jsonb_set and jsonb_insert require the value argument to be typed
             // as jsonb. SQLite json_set accepts any value, so the value is
             // wrapped in to_jsonb(). For non-column arguments whose type cannot
-            // be resolved from the schema, to_jsonb() is the consistent fallback.
+            // be resolved from the schema, to_jsonb() is the consistent
+            // fallback.
             let exprs = function_argument_exprs(&func.args);
             if exprs.len() < 3 {
                 return Err(Error::reverse_refusal(format!(
@@ -1341,28 +1350,34 @@ pub fn reverse_translate_function(
             })
         }
         FunctionReversal::JsonTypeOf => {
-            // json_type(x) -> json_typeof(x) or jsonb_typeof(x) depending on the
-            // argument's declared column type. PostgreSQL's json_typeof takes
-            // json, jsonb_typeof takes jsonb; the wrong variant fails at the server.
+            // json_type(x) -> json_typeof(x) or jsonb_typeof(x) depending on
+            // the argument's declared column type. PostgreSQL's
+            // json_typeof takes json, jsonb_typeof takes jsonb; the
+            // wrong variant fails at the server.
             //
-            // Fallback when the argument is not a plain column reference or its
-            // type is absent from the schema: json_typeof, preserving the
-            // original rename behaviour as the conservative choice.
+            // Fallback when the argument is not a column reference:
+            // json_typeof, preserving the original rename behaviour
+            // as the conservative choice. A reference the relations
+            // in scope cannot resolve refuses rather than guessing,
+            // since the wrong spelling fails at the server.
             let exprs = function_argument_exprs(&func.args);
             let arg = exprs.first().copied();
-            let func_name = if arg.is_some_and(|a| {
-                every_declared_type_matches(a, schema, |t| t.to_ascii_lowercase().contains("jsonb"))
-            }) {
-                "jsonb_typeof"
-            } else {
-                "json_typeof"
+            let is_jsonb = match arg {
+                Some(argument) => {
+                    declared_type_matches(argument, schema, options, |declared| {
+                        declared.to_ascii_lowercase().contains("jsonb")
+                    })?
+                }
+                None => false,
             };
+            let func_name = if is_jsonb { "jsonb_typeof" } else { "json_typeof" };
 
             // json_type(x, '$.a') asks for the type at a path, and both
             // PostgreSQL spellings take one argument, so the path becomes an
             // extraction around the value. This is the shape the forward
-            // direction emits for the `?`, `?|` and `?&` existence operators, so
-            // without it a script this crate wrote could not be read back.
+            // direction emits for the `?`, `?|` and `?&` existence operators,
+            // so without it a script this crate wrote could not be
+            // read back.
             if let [value, path] = exprs.as_slice() {
                 let extracted = json_path_extraction(value, path, "json_type", schema, options)?;
                 return Ok(simple_function_expr(func_name, vec![extracted], None));
@@ -1376,19 +1391,19 @@ pub fn reverse_translate_function(
             )
         }
         FunctionReversal::JsonArrayLength => {
-            // json_array_length(json) vs jsonb_array_length(jsonb): PostgreSQL has both
-            // as distinct overloads. Use the argument's declared column type to pick.
-            // When the type is unknown or not jsonb, fall back to json_array_length,
-            // preserving the json behavior as the conservative default.
+            // The declared type chooses the overload, while unresolved columns
+            // refuse.
             let exprs = function_argument_exprs(&func.args);
             let arg = exprs.first().copied();
-            let target = if arg.is_some_and(|a| {
-                every_declared_type_matches(a, schema, |t| t.to_ascii_lowercase().contains("jsonb"))
-            }) {
-                "jsonb_array_length"
-            } else {
-                "json_array_length"
+            let is_jsonb = match arg {
+                Some(argument) => {
+                    declared_type_matches(argument, schema, options, |declared| {
+                        declared.to_ascii_lowercase().contains("jsonb")
+                    })?
+                }
+                None => false,
             };
+            let target = if is_jsonb { "jsonb_array_length" } else { "json_array_length" };
             build_reverse_function(
                 ObjectName::from(vec![Ident::new(target)]),
                 func,
@@ -1421,8 +1436,9 @@ pub fn reverse_translate_function(
             // encode() requires its first argument to be bytea. A text column
             // fails at the server with "function encode(text, unknown) does not
             // exist". Cast unconditionally: if the column is already bytea the
-            // cast is a no-op, and for non-column arguments where the type cannot
-            // be resolved from the schema this is the consistent fallback.
+            // cast is a no-op, and for non-column arguments where the type
+            // cannot be resolved from the schema this is the
+            // consistent fallback.
             //
             // The fold is what keeps the value: SQLite's hex answers uppercase
             // and PostgreSQL's encode answers lowercase, both measured, so the
@@ -1697,7 +1713,7 @@ mod tests {
         };
 
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let err = reverse_translate_function(&func, &schema, &options)
             .expect_err("datetime wildcard argument should be rejected");
         assert!(err.to_string().contains("Expected expression argument"));
@@ -1721,7 +1737,7 @@ mod tests {
         };
 
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let translated = reverse_translate_function(&func, &schema, &options)
             .expect("count should pass through");
         let Expr::Function(function) = translated else {
@@ -1766,9 +1782,12 @@ mod tests {
         };
 
         let schema = empty_schema();
-        // The subject here is the passthrough plumbing, so the name is declared:
-        // an undeclared one is refused, which `unknown_names_refuse` pins.
-        let options = Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]);
+        // The subject here is the passthrough plumbing, so the name is
+        // declared: an undeclared one is refused, which
+        // `unknown_names_refuse` pins.
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]),
+        );
         let translated = reverse_translate_function(&func, &schema, &options)
             .expect("custom function should pass through with translated args");
         let Expr::Function(function) = translated else {
@@ -1799,7 +1818,7 @@ mod tests {
             parameters: FunctionArguments::None,
         };
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let result = reverse_translate_function(&func, &schema, &options)
             .expect("LTRIM(str, 'x') should reverse-translate");
         assert_eq!(result.to_string(), "TRIM(LEADING 'x' FROM str)");
@@ -1825,7 +1844,7 @@ mod tests {
             parameters: FunctionArguments::None,
         };
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let result = reverse_translate_function(&func, &schema, &options)
             .expect("RTRIM(str, 'x') should reverse-translate");
         assert_eq!(result.to_string(), "TRIM(TRAILING 'x' FROM str)");
@@ -1851,7 +1870,7 @@ mod tests {
             parameters: FunctionArguments::None,
         };
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let result = reverse_translate_function(&func, &schema, &options)
             .expect("TRIM(str, 'x') should reverse-translate");
         assert_eq!(result.to_string(), "TRIM(BOTH 'x' FROM str)");
@@ -1874,7 +1893,7 @@ mod tests {
             parameters: FunctionArguments::None,
         };
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let result = reverse_translate_function(&func, &schema, &options)
             .expect("LTRIM(str) should pass through");
         assert_eq!(result.to_string(), "LTRIM(str)");
@@ -1894,7 +1913,9 @@ mod tests {
         };
 
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]);
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_user_defined_functions(["custom_fn"]),
+        );
         let translated = reverse_translate_function(&func, &schema, &options)
             .expect("custom function with subquery args should reverse-translate");
         let Expr::Function(function) = translated else {

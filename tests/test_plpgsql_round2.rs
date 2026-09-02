@@ -283,7 +283,8 @@ fn r2_14_raise_exception_using_message_literal_translates_and_fires() {
         .execute(&mut conn)
         .expect("valid insert must succeed");
 
-    // An insert violating the condition must raise 'negative value not allowed'.
+    // An insert violating the condition must raise 'negative value not
+    // allowed'.
     let result =
         diesel::sql_query("INSERT INTO r2_14_t (id, val) VALUES (2, -1)").execute(&mut conn);
     let err = result.expect_err("insert must be refused by trigger").to_string();

@@ -289,11 +289,8 @@ unsupported => {
 /// why a serial column needs a value source and not merely a type.
 pub(crate) fn is_serial_type(data_type: &DataType) -> bool {
     let DataType::Custom(name, _) = data_type else { return false };
-    name.0.last().and_then(|part| part.as_ident()).is_some_and(|ident| {
-        matches!(
-            ident.value.to_ascii_lowercase().as_str(),
-            "serial" | "smallserial" | "bigserial" | "largeserial"
-        )
+    crate::impls::object_name::last_catalog_name(name).is_some_and(|name| {
+        matches!(name.as_str(), "serial" | "smallserial" | "bigserial" | "largeserial")
     })
 }
 
@@ -302,11 +299,7 @@ pub(crate) fn is_serial_type(data_type: &DataType) -> bool {
 fn translate_custom_type(
     name: &sqlparser::ast::ObjectName,
 ) -> Result<DataType, crate::errors::Error> {
-    let custom_type_name = name
-        .0
-        .last()
-        .and_then(|part| part.as_ident())
-        .map(|ident| ident.value.to_ascii_lowercase());
+    let custom_type_name = crate::impls::object_name::last_catalog_name(name);
 
     match custom_type_name.as_deref() {
         Some("serial" | "smallserial" | "bigserial" | "largeserial") => Ok(DataType::Integer(None)),
@@ -326,9 +319,9 @@ fn translate_custom_type(
             "geometry" | "geography" | "cas" | "molecularformula" | "mediatype" | "vector"
             | "halfvec",
         ) => Ok(DataType::Blob(None)),
-        unknown => {
+        _ => {
             Err(crate::errors::Error::forward_refusal(format!(
-                "Unknown PostgreSQL custom type {unknown:?}"
+                "Unknown PostgreSQL custom type {name}"
             )))
         }
     }

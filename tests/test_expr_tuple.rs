@@ -93,8 +93,8 @@ fn test_tuple_equality_semantic() -> Result<(), Box<dyn std::error::Error>> {
     diesel::insert_into(points::table).values(&Point { id: 2, x: 10, y: 30 }).execute(&mut conn)?;
     diesel::insert_into(points::table).values(&Point { id: 3, x: 5, y: 20 }).execute(&mut conn)?;
 
-    // Query using tuple comparison (raw SQL needed as Diesel doesn't support tuple
-    // comparisons)
+    // Query using tuple comparison (raw SQL needed as Diesel doesn't support
+    // tuple comparisons)
     let results: Vec<Point> =
         diesel::sql_query("SELECT * FROM points WHERE (x, y) = (10, 20)").load(&mut conn)?;
 
@@ -161,8 +161,8 @@ fn test_tuple_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
     diesel::insert_into(points::table).values(&Point { id: 3, x: 5, y: 5 }).execute(&mut conn)?; // Not in the list
     diesel::insert_into(points::table).values(&Point { id: 4, x: 5, y: 6 }).execute(&mut conn)?;
 
-    // Query using tuple IN list (raw SQL needed as Diesel doesn't support tuple IN
-    // lists)
+    // Query using tuple IN list (raw SQL needed as Diesel doesn't support tuple
+    // IN lists)
     let results: Vec<Point> =
         diesel::sql_query("SELECT * FROM points WHERE (x, y) IN ((1, 2), (3, 4), (5, 6))")
             .load(&mut conn)?;

@@ -139,7 +139,8 @@ fn json_type_with_jsonb_column_uses_jsonb_typeof() {
 
 #[test]
 fn json_type_with_non_jsonb_column_falls_back_to_json_typeof() {
-    // A non-JSON column (INT) has no JSONB type, so the fallback is json_typeof.
+    // A non-JSON column (INT) has no JSONB type, so the fallback is
+    // json_typeof.
     assert_emits("SELECT json_type(n) FROM t", "json_typeof(n)");
 }
 

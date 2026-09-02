@@ -49,9 +49,7 @@ use crate::{
     impls::{
         ast_builder,
         function_helpers::{simple_function_expr, single_quoted_literal},
-        object_name::{
-            last_ident, quote_identifier, quoted_ident, table_with_implicit_public_lookup,
-        },
+        object_name::{last_ident, quote_identifier, quoted_ident, resolve_translation_table},
         query_builder::{make_query, make_simple_select},
         translator_impls::rls::resolve_trigger_table_name,
     },
@@ -73,9 +71,8 @@ pub struct VectorColumnInfo {
 /// Check if a data type is a pgvector type (vector or halfvec).
 pub(crate) fn is_vector_data_type(data_type: &DataType) -> bool {
     if let DataType::Custom(name, _) = data_type
-        && let Some(ident) = last_ident(name)
+        && let Some(type_name) = crate::impls::object_name::last_catalog_name(name)
     {
-        let type_name = ident.value.to_ascii_lowercase();
         return type_name == "vector" || type_name == "halfvec";
     }
     false
@@ -84,9 +81,9 @@ pub(crate) fn is_vector_data_type(data_type: &DataType) -> bool {
 /// Check if a data type is the halfvec (16-bit float) type.
 pub(crate) fn is_halfvec_data_type(data_type: &DataType) -> bool {
     if let DataType::Custom(name, _) = data_type
-        && let Some(ident) = last_ident(name)
+        && let Some(type_name) = crate::impls::object_name::last_catalog_name(name)
     {
-        return ident.value.eq_ignore_ascii_case("halfvec");
+        return type_name == "halfvec";
     }
     false
 }
@@ -146,7 +143,7 @@ fn find_pk_column(create_table: &CreateTable, schema: &ParserDB) -> Option<Strin
         }
     }
 
-    if let Ok(Some(table)) = table_with_implicit_public_lookup(schema, &create_table.name)
+    if let Ok(Some(table)) = resolve_translation_table(schema, &create_table.name)
         && let Ok(pk_iter) = table.primary_key_columns(schema)
     {
         let pk_cols: Vec<_> = pk_iter.collect();
@@ -281,12 +278,11 @@ pub fn generate_vec0_statements(
         ))
     })?;
 
-    let table_obj =
-        table_with_implicit_public_lookup(schema, &create_table.name)?.ok_or_else(|| {
-            Error::forward_refusal(format!(
-                "Table '{table_name}' not found in schema for vector sync triggers"
-            ))
-        })?;
+    let table_obj = resolve_translation_table(schema, &create_table.name)?.ok_or_else(|| {
+        Error::forward_refusal(format!(
+            "Table '{table_name}' not found in schema for vector sync triggers"
+        ))
+    })?;
 
     let trigger_table_name = resolve_trigger_table_name(&table_name, table_obj, schema, options)?;
 

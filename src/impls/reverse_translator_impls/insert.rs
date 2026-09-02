@@ -1,7 +1,6 @@
 //! Implementation of the [`ReverseTranslator`] trait for the
 //! `Insert` type.
 
-use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::{
@@ -28,10 +27,11 @@ use super::helpers::Reverse;
 use crate::{
     errors::Error,
     impls::{
-        object_name::{implicit_public_lookup_parts, table_with_implicit_public_lookup},
+        object_name::resolve_translation_table,
         shared_helpers::{translate_on_conflict_do_update, translate_returning},
+        translator_impls::insert::insert_target_scope,
     },
-    prelude::{Pg2SqliteOptions, ReverseTranslator},
+    prelude::ReverseTranslator,
 };
 
 /// Refuses `INSERT OR REPLACE` on a table where SQLite's delete-then-insert is
@@ -115,14 +115,7 @@ fn unfaithful_replace(table: &str, because: &str) -> Error {
     ))
 }
 
-/// Resolve the target table for reverse upsert reconstruction.
-///
-/// Behavior:
-/// - Accept unqualified or schema-qualified names with at most two parts.
-/// - Try implicit-public lookup (`None`/`public`) first.
-/// - For explicit non-public schemas, require schema resolution in `schema`.
-/// - If still missing, scan all schemas for unique table-name match.
-/// - If multiple schema matches exist, return an ambiguity error.
+/// Resolves the target table for reverse upsert reconstruction.
 fn resolve_insert_table<'a>(
     schema: &'a ParserDB,
     table: &TableObject,
@@ -133,35 +126,8 @@ fn resolve_insert_table<'a>(
         ));
     };
 
-    let (primary_schema, _, bare_table_name) = implicit_public_lookup_parts(table_name)?;
-    let is_unqualified = primary_schema.is_none();
-
-    if let Some(found) = table_with_implicit_public_lookup(schema, table_name)? {
-        return Ok(found);
-    }
-    if !is_unqualified {
-        return Err(Error::TableNotFoundInSchema { table_name: table_name.to_string() });
-    }
-
-    let bare_table_name = bare_table_name.as_ref();
-    let candidates = schema
-        .tables()
-        .filter(|candidate| candidate.table_name().eq_ignore_ascii_case(bare_table_name))
-        .collect::<Vec<_>>();
-
-    match candidates.as_slice() {
-        [] => Err(Error::TableNotFoundInSchema { table_name: bare_table_name.to_string() }),
-        [single] => Ok(*single),
-        many => {
-            let schemas = many
-                .iter()
-                .map(|table| table.table_schema().unwrap_or("<default>").to_string())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            Err(Error::AmbiguousTableInSchema { table_name: bare_table_name.to_string(), schemas })
-        }
-    }
+    resolve_translation_table(schema, table_name)?
+        .ok_or_else(|| Error::TableNotFoundInSchema { table_name: table_name.to_string() })
 }
 
 fn get_primary_key_columns(
@@ -275,15 +241,17 @@ fn build_upsert_on_conflict(
 
 impl ReverseTranslator for Insert {
     type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
     type PostgresEntry = Insert;
 
     #[allow(clippy::too_many_lines)]
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
+        let target_scope = insert_target_scope(self, schema)?;
+        let scoped = target_scope.as_ref().map(|scope| options.with_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
         // Reverse translate the source (VALUES or SELECT)
         let source = self
             .source
@@ -375,10 +343,12 @@ impl ReverseTranslator for Insert {
                     }));
                 }
                 SqliteOnConflict::Replace => {
-                    // INSERT OR REPLACE deletes the conflicting row and inserts a new
-                    // one, so every column not named in the INSERT list reverts to its
-                    // default. We must set those columns to DEFAULT in the DO UPDATE
-                    // clause; DO NOTHING would silently preserve the old values.
+                    // INSERT OR REPLACE deletes the conflicting row and inserts
+                    // a new one, so every column not named
+                    // in the INSERT list reverts to its
+                    // default. We must set those columns to DEFAULT in the DO
+                    // UPDATE clause; DO NOTHING would
+                    // silently preserve the old values.
                     //
                     // The update only stands in for the delete where nothing
                     // observes the delete, which is what the check enforces.
@@ -501,7 +471,7 @@ mod tests {
         }];
 
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let reversed =
             insert.reverse_translate(&schema, &options).expect("insert should reverse-translate");
 

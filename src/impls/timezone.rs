@@ -18,7 +18,7 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{DataType, Expr, TimezoneInfo};
 
-use crate::impls::shared_helpers::every_declared_type_matches;
+use crate::impls::shared_helpers::declared_type_matches;
 
 /// Returns `true` when `value` is a fixed UTC offset in `+HH:MM` / `-HH:MM`
 /// format.
@@ -99,8 +99,11 @@ pub(crate) enum TimestampAwareness {
 ///
 /// Both directions need this and must agree: the forward direction negates an
 /// aware operand's offset, so the reverse direction has to negate it back.
-#[must_use]
-pub(crate) fn timestamp_awareness(expr: &Expr, schema: &ParserDB) -> Option<TimestampAwareness> {
+pub(crate) fn timestamp_awareness(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<TimestampAwareness>, crate::errors::Error> {
     fn from_data_type(data_type: &DataType) -> Option<TimestampAwareness> {
         match data_type {
             DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone) => {
@@ -111,8 +114,8 @@ pub(crate) fn timestamp_awareness(expr: &Expr, schema: &ParserDB) -> Option<Time
         }
     }
 
-    match expr {
-        Expr::Nested(inner) => timestamp_awareness(inner, schema),
+    Ok(match expr {
+        Expr::Nested(inner) => timestamp_awareness(inner, schema, options)?,
         Expr::TypedString(typed) => from_data_type(&typed.data_type),
         Expr::Cast { data_type, .. } => from_data_type(data_type),
         // `AT TIME ZONE` inverts what it is given, so a nested one resolves.
@@ -120,42 +123,46 @@ pub(crate) fn timestamp_awareness(expr: &Expr, schema: &ParserDB) -> Option<Time
         // `timestamp with time zone` and a timestamptz answers `timestamp
         // without time zone`, and the inversion composes over nesting.
         Expr::AtTimeZone { timestamp, .. } => {
-            match timestamp_awareness(timestamp, schema)? {
-                TimestampAwareness::Naive => Some(TimestampAwareness::Aware),
-                TimestampAwareness::Aware => Some(TimestampAwareness::Naive),
+            match timestamp_awareness(timestamp, schema, options)? {
+                Some(TimestampAwareness::Aware) => Some(TimestampAwareness::Naive),
+                Some(TimestampAwareness::Naive) => Some(TimestampAwareness::Aware),
+                None => None,
             }
         }
         // PostgreSQL's now() and its aliases return timestamptz, and
         // localtimestamp returns a bare timestamp.
         Expr::Function(function) => {
-            let name =
-                crate::impls::object_name::last_ident(&function.name)?.value.to_ascii_lowercase();
-            match name.as_str() {
-                "now"
-                | "current_timestamp"
-                | "transaction_timestamp"
-                | "statement_timestamp"
-                | "clock_timestamp" => Some(TimestampAwareness::Aware),
-                "localtimestamp" => Some(TimestampAwareness::Naive),
-                _ => None,
+            match crate::impls::object_name::last_ident(&function.name) {
+                Some(ident) => {
+                    match ident.value.to_ascii_lowercase().as_str() {
+                        "now"
+                        | "current_timestamp"
+                        | "transaction_timestamp"
+                        | "statement_timestamp"
+                        | "clock_timestamp" => Some(TimestampAwareness::Aware),
+                        "localtimestamp" => Some(TimestampAwareness::Naive),
+                        _ => None,
+                    }
+                }
+                None => None,
             }
         }
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
             let declared_contains = |needle: &'static str| {
-                every_declared_type_matches(expr, schema, |declared| {
+                declared_type_matches(expr, schema, options, |declared| {
                     declared.to_ascii_lowercase().contains(needle)
                 })
             };
-            if declared_contains("with time zone") || declared_contains("timestamptz") {
+            if declared_contains("with time zone")? || declared_contains("timestamptz")? {
                 Some(TimestampAwareness::Aware)
-            } else if declared_contains("timestamp") || declared_contains("date") {
+            } else if declared_contains("timestamp")? || declared_contains("date")? {
                 Some(TimestampAwareness::Naive)
             } else {
                 None
             }
         }
         _ => None,
-    }
+    })
 }
 
 /// The same offset with its sign flipped, for the only zone spelling whose sign

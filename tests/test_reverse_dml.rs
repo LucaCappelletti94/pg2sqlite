@@ -35,6 +35,8 @@ const TWO_TABLES: &str = "
     CREATE TABLE posts (id INT PRIMARY KEY, user_id INT, title TEXT);
 ";
 
+const JSON_SCHEMA: &str = "CREATE TABLE docs (id INT PRIMARY KEY, payload JSONB);";
+
 #[test]
 fn reverse_delete_basic() {
     let pg = reverse(SCHEMA, "DELETE FROM users WHERE id = 1;");
@@ -86,6 +88,27 @@ fn reverse_insert_basic() {
 }
 
 #[test]
+fn reverse_update_uses_target_scope_for_json_type() {
+    let pg = reverse(JSON_SCHEMA, "UPDATE docs SET id = id WHERE json_type(payload) = 'object';");
+    assert!(pg.contains("jsonb_typeof(payload)"), "expected JSONB spelling: {pg}");
+}
+
+#[test]
+fn reverse_delete_uses_target_scope_for_json_type() {
+    let pg = reverse(JSON_SCHEMA, "DELETE FROM docs WHERE json_type(payload) = 'object';");
+    assert!(pg.contains("jsonb_typeof(payload)"), "expected JSONB spelling: {pg}");
+}
+
+#[test]
+fn reverse_insert_returning_uses_target_scope_for_json_type() {
+    let pg = reverse(
+        JSON_SCHEMA,
+        "INSERT INTO docs (id, payload) VALUES (1, '{}') RETURNING json_type(payload);",
+    );
+    assert!(pg.contains("jsonb_typeof(payload)"), "expected JSONB spelling: {pg}");
+}
+
+#[test]
 fn reverse_insert_or_ignore() {
     let pg =
         reverse(SCHEMA, "INSERT OR IGNORE INTO users (id, name, age) VALUES (1, 'Alice', 30);");
@@ -103,8 +126,8 @@ fn reverse_insert_or_replace() {
 
 #[test]
 fn reverse_insert_or_rollback() {
-    // INSERT OR ROLLBACK has no direct PG equivalent, should pass through without
-    // ON CONFLICT
+    // INSERT OR ROLLBACK has no direct PG equivalent, should pass through
+    // without ON CONFLICT
     let pg =
         reverse(SCHEMA, "INSERT OR ROLLBACK INTO users (id, name, age) VALUES (1, 'Alice', 30);");
     assert!(pg.contains("INSERT"), "Expected INSERT: {pg}");

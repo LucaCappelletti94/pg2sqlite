@@ -373,7 +373,8 @@ fn to_char_datetime_format() {
 /// empty or incorrect result.
 #[test]
 fn to_char_unsupported_format_is_rejected() {
-    // 'Day' is a valid PostgreSQL to_char format code that strftime cannot express.
+    // 'Day' is a valid PostgreSQL to_char format code that strftime cannot
+    // express.
     let err = translate_err("SELECT to_char(ts, 'Day') FROM t");
     assert!(
         err.contains("to_char") || err.contains("Day") || err.contains("unsupported"),
@@ -671,6 +672,7 @@ fn upper_non_ascii_sqlite_behavior() {
     let row = "INSERT INTO t (id, s) VALUES (1, 'straße');";
     // SQLite folds only the ASCII prefix 's','t','r','a' -> 'S','T','R','A'.
     // 'ß' (U+00DF) is left unchanged because it is outside the ASCII range.
-    // This matches PostgreSQL without ICU. Callers needing 'STRASSE' must use ICU.
+    // This matches PostgreSQL without ICU. Callers needing 'STRASSE' must use
+    // ICU.
     assert_eq!(eval_str(row, "upper(s)").as_deref(), Some("STRAßE"));
 }

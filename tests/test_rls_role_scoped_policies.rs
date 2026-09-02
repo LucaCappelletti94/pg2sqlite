@@ -113,8 +113,8 @@ fn role_scoped_policy_excluded_when_session_role_mismatch() {
     // Expected (fixed): only user_read applies for role app_user.
     // View filter: WHERE (owner = 'alice'). Alice sees 1 row.
     // Current (buggy): admin_read included for everyone.
-    // View filter: WHERE (id > 0) OR (owner = 'alice') = WHERE (id > 0). Both rows
-    // visible.
+    // View filter: WHERE (id > 0) OR (owner = 'alice') = WHERE (id > 0). Both
+    // rows visible.
     let count: i64 = docs::table.count().get_result(&mut conn).expect("count");
     assert_eq!(
         count, 1,

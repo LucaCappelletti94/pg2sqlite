@@ -232,8 +232,8 @@ fn test_row_number() -> Result<(), Box<dyn std::error::Error>> {
         "ORDER BY should be present in OVER clause, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -283,8 +283,8 @@ fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
         "ORDER BY should be present, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -325,8 +325,8 @@ fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
         "DENSE_RANK() should pass through, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -365,8 +365,8 @@ fn test_ntile() -> Result<(), Box<dyn std::error::Error>> {
         "NTILE() should pass through, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -413,8 +413,8 @@ fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
         "LEAD() should pass through, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -461,8 +461,8 @@ fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
         "LAST_VALUE() should pass through, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -504,8 +504,8 @@ fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
         "NTH_VALUE() should pass through, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -557,8 +557,8 @@ fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
         "COUNT() should pass through, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -604,8 +604,8 @@ fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
         "UNBOUNDED PRECEDING should be present, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -646,8 +646,8 @@ fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
         "RANGE BETWEEN should pass through, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -694,8 +694,8 @@ fn test_filter_clause_to_case() {
     assert!(lower.contains("filter"), "FILTER must be kept natively: {select_stmt}");
     assert!(!lower.contains("case when"), "CASE WHEN lowering must not happen: {select_stmt}");
 
-    // Value check: 3 rows, 2 active -> window reports active_count = 2 for every
-    // row.
+    // Value check: 3 rows, 2 active -> window reports active_count = 2 for
+    // every row.
     let conn = SqliteConn::open_in_memory().unwrap();
     let ddl = translated
         .iter()

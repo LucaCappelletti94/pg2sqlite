@@ -343,8 +343,9 @@ fn a_table_with_a_policy_is_still_monitored() -> Result<(), Box<dyn std::error::
         &options,
     )?;
     // Seed directly into the backing table. The BEFORE INSERT guard is AllowAll
-    // (WITH CHECK = true), so both rows land. The monitoring trigger then fires:
-    // owner_id=7 is visible (SELECT USING passes), owner_id=9 is not.
+    // (WITH CHECK = true), so both rows land. The monitoring trigger then
+    // fires: owner_id=7 is visible (SELECT USING passes), owner_id=9 is
+    // not.
     seed(&mut conn)?;
 
     let logged: i64 = rls_audit::table.count().get_result(&mut conn)?;

@@ -25,26 +25,33 @@ use alloc::{
     string::{String, ToString},
 };
 
+use sql_traits::{
+    structs::ParserDB,
+    traits::{DatabaseLike, IndexLike, TableLike, TriggerLike, ViewLike},
+};
 use sqlparser::ast::{AlterTableOperation, ObjectName, ObjectType, RenameTableNameKind, Statement};
 
 use super::object_name::last_ident_value_or_display;
 use crate::errors::Error;
 
 /// Where an emitted statement came from, for the message a collision raises.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum Source<'a> {
     /// The input statement it was translated from.
     Input(&'a Statement),
     /// Something the translation adds on its own.
     Generated(&'a str),
+    /// An object already represented by the supplied starting schema.
+    Initial(String),
 }
 
 impl Source<'_> {
     /// Names the source the way the author would recognise it, which is the
     /// object it declared rather than the statement's whole text.
-    fn describe(self) -> String {
+    fn describe(&self) -> String {
         let statement = match self {
-            Self::Generated(label) => return label.to_string(),
+            Self::Generated(label) => return (*label).to_string(),
+            Self::Initial(label) => return label.clone(),
             Self::Input(statement) => statement,
         };
         match statement {
@@ -69,9 +76,13 @@ impl Source<'_> {
 /// Refuses the first emitted definition that lands on a name the script already
 /// holds.
 pub(crate) fn reject_name_collisions<'a>(
+    initial_schema: Option<&ParserDB>,
     emitted: impl IntoIterator<Item = (Source<'a>, &'a Statement)>,
 ) -> Result<(), Error> {
     let mut namespaces = Namespaces::default();
+    if let Some(schema) = initial_schema {
+        namespaces.seed(schema)?;
+    }
     for (source, statement) in emitted {
         namespaces.apply(statement, source)?;
     }
@@ -94,6 +105,59 @@ struct Namespaces<'a> {
 }
 
 impl<'a> Namespaces<'a> {
+    fn seed(&mut self, schema: &ParserDB) -> Result<(), Error> {
+        for table in schema.tables() {
+            let name = table.stored_table_name();
+            self.define_object_key(
+                sqlite_key(&name),
+                None,
+                Source::Initial(initial_description(
+                    "table",
+                    table.table_schema(),
+                    table.table_name(),
+                )),
+            )?;
+        }
+        for view in schema.views() {
+            let name = view.stored_view_name();
+            self.define_object_key(
+                sqlite_key(&name),
+                None,
+                Source::Initial(initial_description("view", view.view_schema(), view.view_name())),
+            )?;
+        }
+        for view in schema.materialized_views() {
+            let name = view.stored_view_name();
+            self.define_object_key(
+                sqlite_key(&name),
+                None,
+                Source::Initial(initial_description(
+                    "materialized view",
+                    view.view_schema(),
+                    view.view_name(),
+                )),
+            )?;
+        }
+        for index in schema.indexes() {
+            let Some(name) = index.name() else { continue };
+            let owner = sqlite_key(&index.table().stored_table_name());
+            self.define_object_key(
+                sqlite_key(name),
+                Some(owner),
+                Source::Initial(initial_description("index", index.schema(), name)),
+            )?;
+        }
+        for trigger in schema.triggers() {
+            let owner = sqlite_key(&trigger.table(schema)?.stored_table_name());
+            self.define_trigger_key(
+                sqlite_key(trigger.name()),
+                owner,
+                Source::Initial(initial_description("trigger", None, trigger.name())),
+            )?;
+        }
+        Ok(())
+    }
+
     fn apply(&mut self, statement: &'a Statement, source: Source<'a>) -> Result<(), Error> {
         match statement {
             Statement::CreateTable(create) => self.define_object(&create.name, None, source),
@@ -125,7 +189,7 @@ impl<'a> Namespaces<'a> {
                     if let AlterTableOperation::RenameTable { table_name } = operation {
                         let (RenameTableNameKind::As(to) | RenameTableNameKind::To(to)) =
                             table_name;
-                        self.rename_object(&alter.name, to, source)?;
+                        self.rename_object(&alter.name, to, &source)?;
                     }
                 }
                 Ok(())
@@ -140,11 +204,19 @@ impl<'a> Namespaces<'a> {
         owner: Option<&ObjectName>,
         source: Source<'a>,
     ) -> Result<(), Error> {
-        let key = key(name);
+        self.define_object_key(key(name), owner.map(self::key), source)
+    }
+
+    fn define_object_key(
+        &mut self,
+        key: String,
+        owner: Option<String>,
+        source: Source<'a>,
+    ) -> Result<(), Error> {
         if let Some(held) = self.objects.get(&key) {
-            return Err(object_collision(&key, held.source, source));
+            return Err(object_collision(&key, &held.source, &source));
         }
-        self.objects.insert(key, Entry { source, owner: owner.map(self::key) });
+        self.objects.insert(key, Entry { source, owner });
         Ok(())
     }
 
@@ -154,11 +226,19 @@ impl<'a> Namespaces<'a> {
         owner: &ObjectName,
         source: Source<'a>,
     ) -> Result<(), Error> {
-        let key = key(name);
+        self.define_trigger_key(key(name), self::key(owner), source)
+    }
+
+    fn define_trigger_key(
+        &mut self,
+        key: String,
+        owner: String,
+        source: Source<'a>,
+    ) -> Result<(), Error> {
         if let Some(held) = self.triggers.get(&key) {
-            return Err(trigger_collision(&key, held.source, source));
+            return Err(trigger_collision(&key, &held.source, &source));
         }
-        self.triggers.insert(key, Entry { source, owner: Some(self::key(owner)) });
+        self.triggers.insert(key, Entry { source, owner: Some(owner) });
         Ok(())
     }
 
@@ -174,11 +254,11 @@ impl<'a> Namespaces<'a> {
         &mut self,
         from: &ObjectName,
         to: &ObjectName,
-        source: Source<'a>,
+        source: &Source<'a>,
     ) -> Result<(), Error> {
         let (from, to) = (key(from), key(to));
         if let Some(held) = self.objects.get(&to) {
-            return Err(object_collision(&to, held.source, source));
+            return Err(object_collision(&to, &held.source, source));
         }
         if let Some(entry) = self.objects.remove(&from) {
             self.objects.insert(to.clone(), entry);
@@ -197,7 +277,18 @@ fn key(name: &ObjectName) -> String {
     last_ident_value_or_display(name).to_ascii_lowercase()
 }
 
-fn object_collision(name: &str, first: Source<'_>, second: Source<'_>) -> Error {
+fn sqlite_key(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+fn initial_description(kind: &str, schema: Option<&str>, name: &str) -> String {
+    schema.map_or_else(
+        || format!("the initial {kind} {name}"),
+        |schema| format!("the initial {kind} {schema}.{name}"),
+    )
+}
+
+fn object_collision(name: &str, first: &Source<'_>, second: &Source<'_>) -> Error {
     Error::EmittedNameCollision {
         kind: "objects".to_string(),
         name: name.to_string(),
@@ -209,7 +300,7 @@ fn object_collision(name: &str, first: Source<'_>, second: Source<'_>) -> Error 
     }
 }
 
-fn trigger_collision(name: &str, first: Source<'_>, second: Source<'_>) -> Error {
+fn trigger_collision(name: &str, first: &Source<'_>, second: &Source<'_>) -> Error {
     Error::EmittedNameCollision {
         kind: "triggers".to_string(),
         name: name.to_string(),
@@ -235,9 +326,10 @@ pub(crate) fn sourced<'a>(
     inputs.iter().zip(translated).flat_map(|(input, emitted)| {
         let is_create_table = matches!(input, Statement::CreateTable(_));
         emitted.iter().enumerate().map(move |(i, s)| {
-            // The first statement is always the direct translation of the input.
-            // Subsequent statements from a CREATE TABLE are generated by the
-            // translator; label them by their actual statement kind.
+            // The first statement is always the direct translation of the
+            // input. Subsequent statements from a CREATE TABLE are
+            // generated by the translator; label them by their
+            // actual statement kind.
             let source = if is_create_table && i > 0 {
                 Source::Generated(generated_artifact_label(s))
             } else {

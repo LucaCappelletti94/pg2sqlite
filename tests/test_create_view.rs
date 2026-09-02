@@ -1,6 +1,4 @@
-//! Tests for CREATE VIEW translation (basic, IF NOT EXISTS, TEMPORARY,
-//! MATERIALIZED error, OR REPLACE rewrite) and the ALTER VIEW spelling of the
-//! same redefinition.
+//! Tests for `CREATE VIEW` translation and refusals.
 
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
@@ -31,12 +29,11 @@ fn basic_view_translates() {
 }
 
 #[test]
-fn view_if_not_exists() {
+fn view_if_not_exists_is_refused() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
                CREATE VIEW IF NOT EXISTS v AS SELECT * FROM t;";
-    let output = translate_joined(sql).unwrap();
-    assert!(output.contains("IF NOT EXISTS"), "Expected IF NOT EXISTS: {output}");
-    sqlite_accepts_all(sql);
+    let error = translate_joined(sql).expect_err("PostgreSQL refuses this syntax");
+    assert!(error.contains("does not take `IF NOT EXISTS`"), "{error}");
 }
 
 #[test]
@@ -89,7 +86,8 @@ fn materialized_view_still_errors() {
 
 #[test]
 fn create_or_replace_view_emits_drop_and_create() {
-    // CREATE OR REPLACE VIEW is now translated to DROP VIEW IF EXISTS + CREATE VIEW
+    // CREATE OR REPLACE VIEW is now translated to DROP VIEW IF EXISTS + CREATE
+    // VIEW
     let pg = "CREATE OR REPLACE VIEW v AS SELECT 1;";
     let sql = translate_joined(pg).unwrap();
     assert!(

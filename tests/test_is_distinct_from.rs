@@ -31,7 +31,8 @@ fn test_is_distinct_from_translation_form() {
     assert!(out.contains("IS DISTINCT FROM"), "the operator survives, got: {out}");
     assert!(!out.contains("CASE"), "Should NOT use CASE expression, got: {out}");
 
-    // Execute the translated query against a connection that has the fixture table.
+    // Execute the translated query against a connection that has the fixture
+    // table.
     let conn = rusqlite::Connection::open_in_memory().expect("open");
     conn.execute_batch("CREATE TABLE pairs (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")
         .expect("fixture");

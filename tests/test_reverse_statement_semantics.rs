@@ -129,7 +129,8 @@ fn partial_column_list_resets_omitted_columns_to_default() {
     diesel::replace_into(t::table).values(t::id.eq(1_i32)).execute(&mut conn).expect("replace");
 
     let row = row1(&mut conn);
-    // SQLite's DELETE-then-INSERT with omitted columns: the old values are gone.
+    // SQLite's DELETE-then-INSERT with omitted columns: the old values are
+    // gone.
     assert_eq!(row.id, 1, "the replaced row keeps its key: {row:?}");
     assert_eq!(row.s, None, "omitted column s resets to NULL after SQLite replace: {row:?}");
     assert_eq!(row.n, None, "omitted column n resets to NULL after SQLite replace: {row:?}");

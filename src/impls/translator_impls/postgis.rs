@@ -188,7 +188,7 @@ use sqlparser::ast::{CreateIndex, Expr};
 
 use crate::{
     errors::Error,
-    impls::object_name::{last_ident, table_with_implicit_public_lookup},
+    impls::object_name::{last_ident, resolve_translation_table},
 };
 
 /// Classifies a GiST `CreateIndex` against the schema.
@@ -208,7 +208,7 @@ pub(crate) fn classify_gist_spatial_columns(
     create_index: &CreateIndex,
     schema: &ParserDB,
 ) -> Result<Option<Vec<String>>, Error> {
-    let Some(table) = table_with_implicit_public_lookup(schema, &create_index.table_name)? else {
+    let Some(table) = resolve_translation_table(schema, &create_index.table_name)? else {
         return Ok(None);
     };
 
@@ -283,7 +283,8 @@ pub(crate) fn geography_measure_name(
     name: &str,
     first_argument: Option<&Expr>,
     schema: &ParserDB,
-) -> Option<&'static str> {
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<&'static str>, crate::errors::Error> {
     const MEASURES: &[(&str, &str)] = &[
         ("st_distance", "ST_DistanceSpheroid"),
         ("st_dwithin", "ST_DWithinSpheroid"),
@@ -292,12 +293,14 @@ pub(crate) fn geography_measure_name(
         ("st_perimeter", "ST_PerimeterSpheroid"),
     ];
     let lower = name.to_ascii_lowercase();
-    let (_, routed) = MEASURES.iter().find(|(measure, _)| *measure == lower)?;
-    let operand = first_argument?;
-    every_declared_type_matches(operand, schema, |declared| {
+    let Some((_, routed)) = MEASURES.iter().find(|(measure, _)| *measure == lower) else {
+        return Ok(None);
+    };
+    let Some(operand) = first_argument else { return Ok(None) };
+    Ok(declared_type_matches(operand, schema, options, |declared| {
         declared.trim().eq_ignore_ascii_case("geography")
-    })
-    .then_some(*routed)
+    })?
+    .then_some(*routed))
 }
 
 /// Returns an error message when `ST_Buffer` is called on a `geography` column.
@@ -313,14 +316,15 @@ pub(crate) fn geography_buffer_refusal(
     name: &str,
     first_argument: Option<&Expr>,
     schema: &ParserDB,
-) -> Option<String> {
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<String>, crate::errors::Error> {
     if !name.eq_ignore_ascii_case("st_buffer") {
-        return None;
+        return Ok(None);
     }
-    let operand = first_argument?;
-    every_declared_type_matches(operand, schema, |declared| {
+    let Some(operand) = first_argument else { return Ok(None) };
+    Ok(declared_type_matches(operand, schema, options, |declared| {
         declared.trim().eq_ignore_ascii_case("geography")
-    })
+    })?
     .then(|| {
         "ST_Buffer over a geography column is not supported: PostGIS computes geography \
          buffers in metres on the WGS84 ellipsoid, but the SQLiteGIS passthrough is planar \
@@ -328,7 +332,7 @@ pub(crate) fn geography_buffer_refusal(
          Consider ST_DWithinSpheroid for proximity checks, or cast the column to geometry \
          when a planar approximation is acceptable."
             .to_string()
-    })
+    }))
 }
 
 // When the input contains a `SELECT ... WHERE ST_*(col, expr) ...` over a
@@ -348,7 +352,7 @@ use sqlparser::ast::{
 use crate::impls::{
     function_helpers::simple_function_expr,
     query_builder::{from_relation, plain_table_factor, single_expr_query},
-    shared_helpers::{every_declared_type_matches, function_argument_exprs},
+    shared_helpers::{declared_type_matches, function_argument_exprs},
 };
 
 /// Bbox-overlap-narrowable spatial predicates. For each of these, a positive

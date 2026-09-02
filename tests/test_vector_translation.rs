@@ -152,8 +152,8 @@ fn test_vector_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
         create_table.contains("BLOB"),
         "vector(384) should translate to BLOB, got: {create_table}"
     );
-    // Translated DDL is dynamically generated; rusqlite execute_batch proves SQLite
-    // accepts it.
+    // Translated DDL is dynamically generated; rusqlite execute_batch proves
+    // SQLite accepts it.
     rusqlite::Connection::open_in_memory()
         .expect("in-memory SQLite")
         .execute_batch(&format!("{create_table};"))
@@ -184,8 +184,8 @@ fn test_halfvec_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
         create_table.contains("BLOB"),
         "halfvec(768) should translate to BLOB, got: {create_table}"
     );
-    // Translated DDL is dynamically generated; rusqlite execute_batch proves SQLite
-    // accepts it.
+    // Translated DDL is dynamically generated; rusqlite execute_batch proves
+    // SQLite accepts it.
     rusqlite::Connection::open_in_memory()
         .expect("in-memory SQLite")
         .execute_batch(&format!("{create_table};"))
@@ -395,8 +395,8 @@ fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>>
 
     let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
 
-    // Should have: main table + vec0 virtual table + 3 triggers (insert, update,
-    // delete)
+    // Should have: main table + vec0 virtual table + 3 triggers (insert,
+    // update, delete)
     assert!(
         translated_sql.len() >= 4,
         "Expected at least 4 statements (table + vec0 + 3 triggers), got: {} statements",
@@ -447,8 +447,8 @@ fn test_schema_qualified_vector_column_generates_vec0() -> Result<(), Box<dyn st
         has_vec0,
         "Schema-qualified vector type should still produce vec0 virtual table, got: {translated_sql:?}"
     );
-    // Execute non-vec0 statements; vec0 requires the sqlite-vec extension which is
-    // unavailable in the test environment, so vec0 DDL is skipped.
+    // Execute non-vec0 statements; vec0 requires the sqlite-vec extension which
+    // is unavailable in the test environment, so vec0 DDL is skipped.
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     for s in &translated_sql {
         if !s.to_ascii_uppercase().contains("VEC0") {
@@ -489,8 +489,8 @@ fn test_multiple_vector_columns() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(has_384, "Should have float[384] for title_embedding");
     assert!(has_768, "Should have float[768] for content_embedding");
-    // Execute non-vec0 statements; vec0 requires the sqlite-vec extension which is
-    // unavailable in the test environment, so vec0 DDL is skipped.
+    // Execute non-vec0 statements; vec0 requires the sqlite-vec extension which
+    // is unavailable in the test environment, so vec0 DDL is skipped.
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     for s in &translated_sql {
         if !s.to_ascii_uppercase().contains("VEC0") {

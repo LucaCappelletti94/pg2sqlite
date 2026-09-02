@@ -25,6 +25,10 @@ use crate::impls::query_builder::{make_query, make_simple_select};
 /// Builder for constructing CTEs from variable bindings.
 pub struct CteBuilder;
 
+/// The single column a variable CTE carries, holding the value bound to the
+/// PL/pgSQL variable the CTE stands for.
+pub(crate) const VARIABLE_VALUE_COLUMN: &str = "val";
+
 impl CteBuilder {
     /// Creates a CTE for a variable binding.
     ///
@@ -48,7 +52,7 @@ impl CteBuilder {
         Cte {
             alias: TableAlias {
                 name: Ident::new(binding.name.clone()),
-                columns: vec![TableAliasColumnDef::from_name("val")],
+                columns: vec![TableAliasColumnDef::from_name(VARIABLE_VALUE_COLUMN)],
                 explicit: false,
                 at: None,
             },
@@ -85,7 +89,7 @@ impl CteBuilder {
     /// For a variable CTE named "`v_id`", returns `v_id.val`
     #[must_use]
     pub fn variable_reference(var_name: &str) -> Expr {
-        Self::cte_column_reference(var_name, "val")
+        Self::cte_column_reference(var_name, VARIABLE_VALUE_COLUMN)
     }
 }
 

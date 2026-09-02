@@ -19,12 +19,14 @@ use super::Schema;
 pub trait ReverseTranslator {
     /// Schema type for the translation.
     type Schema: Schema;
-    /// Translation options type.
-    type Options;
     /// Produced PostgreSQL entry type.
     type PostgresEntry;
 
     /// Reverse translates a SQLite entry to its PostgreSQL equivalent.
+    ///
+    /// The context carries the settings and, where one is in scope, the
+    /// relations a column reference in this entry can name, which is what lets
+    /// a type-dependent reversal read the column it actually names.
     ///
     /// # Errors
     ///
@@ -32,6 +34,6 @@ pub trait ReverseTranslator {
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, crate::errors::Error>;
 }

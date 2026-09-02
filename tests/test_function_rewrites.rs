@@ -139,7 +139,8 @@ fn a_window_aggregate_keeps_its_over_clause() {
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
     // DDL: no typed DSL exists for CREATE TABLE in diesel.
     diesel::sql_query("CREATE TABLE employees (department_id INT)").execute(&mut conn).unwrap();
-    // Dynamically generated translated SQL cannot be expressed via the typed DSL.
+    // Dynamically generated translated SQL cannot be expressed via the typed
+    // DSL.
     diesel::sql_query(&sql).execute(&mut conn).expect("SUM OVER must run in SQLite");
 }
 

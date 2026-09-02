@@ -82,6 +82,35 @@ fn empty_schema() -> ParserDB {
     ParserDB::from_statements(Vec::new(), "test".to_string()).expect("schema should build")
 }
 
+/// Reverse translates `expr` with `table`'s columns in scope, which is what a
+/// caller handing in a naked expression must say: a reference no relation
+/// declares is refused rather than read off any table carrying the name.
+fn reverse_expr_in_table(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &Pg2SqliteOptions,
+    table: &str,
+) -> Result<Expr, pg2sqlite::errors::Error> {
+    use sql_traits::traits::DatabaseLike;
+    let relation = schema.table(None, table).expect("the fixture declares the table");
+    let scope = sql_traits::structs::ColumnScope::for_table(relation, schema);
+    let base = pg2sqlite::options::TranslationContext::new(options);
+    let context = base.with_scope(&scope);
+    expr.reverse_translate(schema, &context)
+}
+
+/// Translates a whole script and answers the last emitted statement, which is
+/// how a query supplies the relations its column references resolve against.
+fn translate_script(pg: &str, options: &Pg2SqliteOptions) -> String {
+    pg2sqlite::prelude::Pg2Sqlite::default()
+        .sql(pg)
+        .expect("the script parses")
+        .translate_to_sql(options)
+        .expect("the script translates")
+        .pop()
+        .expect("the script emits a statement")
+}
+
 fn schema_from_sql(sql: &str) -> ParserDB {
     ParserDB::from_statements(parse_statements(sql), "test".to_string())
         .expect("schema should build from sql")
@@ -372,7 +401,9 @@ fn reverse_translation_covers_uncommon_query_variants() {
         }),
         interpolate: None,
     });
-    let translated_query = all_query.reverse_translate(&schema, &options).expect("reverse query");
+    let translated_query = all_query
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("reverse query");
     assert!(translated_query.order_by.is_some());
 
     let set_operation = SetExpr::SetOperation {
@@ -391,7 +422,9 @@ fn reverse_translation_covers_uncommon_query_variants() {
             value_keyword: false,
         })),
     };
-    let _ = set_operation.reverse_translate(&schema, &options).expect("reverse set operation");
+    let _ = set_operation
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("reverse set operation");
 
     let passthroughs: Vec<SetExpr> = vec![
         SetExpr::Insert(parse_statement("INSERT INTO t VALUES (1)")),
@@ -406,7 +439,9 @@ fn reverse_translation_covers_uncommon_query_variants() {
         })),
     ];
     for passthrough in passthroughs {
-        let out = passthrough.reverse_translate(&schema, &options).expect("reverse set expr");
+        let out = passthrough
+            .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+            .expect("reverse set expr");
         assert_eq!(out, passthrough);
     }
 }
@@ -433,14 +468,18 @@ fn reverse_translation_covers_uncommon_function_variants() {
     };
 
     let bad_instr = make_func("instr", vec![FunctionArg::Unnamed(FunctionArgExpr::Wildcard)]);
-    let err = bad_instr.reverse_translate(&schema, &options).unwrap_err();
+    let err = bad_instr
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .unwrap_err();
     assert!(unsupported_message(err).contains("INSTR requires exactly 2 arguments"));
 
     let bad_vec = make_func(
         "vec_distance_l2",
         vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(Ident::new("a"))))],
     );
-    let err = bad_vec.reverse_translate(&schema, &options).unwrap_err();
+    let err = bad_vec
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .unwrap_err();
     assert!(unsupported_message(err).contains("requires exactly 2 arguments"));
 
     let bad_vec_f32 = make_func(
@@ -450,7 +489,9 @@ fn reverse_translation_covers_uncommon_function_variants() {
             FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(Ident::new("b")))),
         ],
     );
-    let err = bad_vec_f32.reverse_translate(&schema, &options).unwrap_err();
+    let err = bad_vec_f32
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .unwrap_err();
     assert!(unsupported_message(err).contains("vec_f32 requires exactly 1 argument"));
 
     let strftime_with_wildcard = make_func(
@@ -464,7 +505,9 @@ fn reverse_translation_covers_uncommon_function_variants() {
             FunctionArg::Unnamed(FunctionArgExpr::Wildcard),
         ],
     );
-    let err = strftime_with_wildcard.reverse_translate(&schema, &options).unwrap_err();
+    let err = strftime_with_wildcard
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .unwrap_err();
     assert!(unsupported_message(err).contains("Invalid strftime arguments"));
 
     let datetime_prefixed_offset = make_func(
@@ -483,8 +526,7 @@ fn reverse_translation_covers_uncommon_function_variants() {
     // operand needs a declared type, which is what this case always modelled.
     let dated =
         schema_from_sql("CREATE TABLE events(id INTEGER PRIMARY KEY, created_at TIMESTAMP);");
-    let translated = datetime_prefixed_offset
-        .reverse_translate(&dated, &options)
+    let translated = reverse_expr_in_table(&datetime_prefixed_offset, &dated, &options, "events")
         .expect("datetime timezone should reverse");
     assert!(translated.to_string().contains("AT TIME ZONE"));
 }
@@ -543,17 +585,14 @@ fn forward_expr_translation_covers_remaining_fts_extract_and_timezone_paths() {
     let tsquery_err_msg = unsupported_message(tsquery_not_literal_err);
     assert!(tsquery_err_msg.contains("to_tsquery"), "unexpected error: {tsquery_err_msg}");
 
-    // No GIN index declared at all: the new FTS-index gate fires with a clear
-    // "FTS5 index ... not declared" message before any deeper check runs.
-    // This pins the new gate so the silent-passthrough regression cannot
-    // come back.
+    // A naked expression has no active relation scope, so it must refuse
+    // instead of selecting the first schema table with a matching column.
     let no_index_schema = schema_from_sql("CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);");
     let no_index = parse_expr("to_tsvector(title) @@ to_tsquery('hello')");
     let err = no_index.translate(&no_index_schema, &options).unwrap_err();
-    let err_msg = unsupported_message(err);
     assert!(
-        err_msg.contains("FTS5 index") && err_msg.contains("not declared"),
-        "expected FTS-index gate error, got: {err_msg}"
+        unsupported_message(err).contains("Could not determine table name"),
+        "an unscoped expression must not guess a table"
     );
 
     let extract_epoch = parse_expr("EXTRACT(EPOCH FROM created_at)");
@@ -567,10 +606,12 @@ fn forward_expr_translation_covers_remaining_fts_extract_and_timezone_paths() {
     // `created_at` is declared TEXT here, so the cast is what says which of the
     // two AT TIME ZONE directions applies. This exercises the `utc±HH:MM`
     // prefix path, where a naive operand keeps the offset's sign.
-    let at_tz_prefixed = parse_expr("created_at::timestamp AT TIME ZONE 'utc+02:30'");
-    let translated =
-        at_tz_prefixed.translate(&schema, &options).expect("timezone should translate");
-    assert!(translated.to_string().contains("'+02:30'"));
+    let translated = translate_script(
+        "CREATE TABLE tz_docs(created_at TEXT); \
+         SELECT created_at::timestamp AT TIME ZONE 'utc+02:30' FROM tz_docs;",
+        &options,
+    );
+    assert!(translated.contains("'+02:30'"), "got: {translated}");
 
     let at_tz_invalid_offset = parse_expr("created_at AT TIME ZONE '+25:00'");
     let err = at_tz_invalid_offset.translate(&schema, &options).unwrap_err();
@@ -583,7 +624,9 @@ fn forward_expr_translation_covers_remaining_fts_extract_and_timezone_paths() {
 
 #[test]
 fn forward_function_translation_covers_named_filter_and_none_argument_paths() {
-    let schema = empty_schema();
+    // `amount > 0` inside FILTER reads the column's declared type, so the
+    // relation it belongs to has to be declared and in scope.
+    let schema = schema_from_sql("CREATE TABLE events(id INTEGER PRIMARY KEY, amount INTEGER);");
     let options = Pg2SqliteOptions::default();
 
     let named_concat = Expr::Function(Function {
@@ -654,8 +697,12 @@ fn forward_function_translation_covers_named_filter_and_none_argument_paths() {
         parameters: FunctionArguments::None,
         uses_odbc_syntax: false,
     });
-    let filtered = filtered_named.translate(&schema, &options).expect("FILTER should translate");
-    let filtered_sql = filtered.to_string();
+    let _ = &filtered_named;
+    let filtered_sql = translate_script(
+        "CREATE TABLE filtered_events(amount INTEGER); \
+         SELECT count(*) FILTER (WHERE amount > 0) FROM filtered_events;",
+        &options,
+    );
     // FILTER is kept natively: SQLite has supported FILTER on aggregates
     // since 3.30, and the CASE lowering put NULLs into json_group_array.
     assert!(filtered_sql.contains("FILTER"), "native FILTER expected: {filtered_sql}");
@@ -702,7 +749,9 @@ fn reverse_function_translation_covers_argument_error_and_passthrough_shapes() {
         parameters: FunctionArguments::None,
         uses_odbc_syntax: false,
     });
-    let err = instr_bad_arg.reverse_translate(&schema, &options).unwrap_err();
+    let err = instr_bad_arg
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .unwrap_err();
     assert!(unsupported_message(err).contains("Expected expression argument in function"));
 
     let passthrough_none = Expr::Function(Function {
@@ -716,7 +765,7 @@ fn reverse_function_translation_covers_argument_error_and_passthrough_shapes() {
         uses_odbc_syntax: false,
     });
     let translated = passthrough_none
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("passthrough function should reverse");
     assert!(translated.to_string().contains("custom_fn"));
 
@@ -742,7 +791,7 @@ fn reverse_function_translation_covers_argument_error_and_passthrough_shapes() {
         uses_odbc_syntax: false,
     });
     let translated = passthrough_named
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("named-arg passthrough function should reverse");
     let translated_sql = translated.to_string();
     assert!(translated_sql.contains("x => value"));
@@ -770,13 +819,15 @@ fn reverse_insert_translation_covers_replace_table_function_and_partitioned_path
         parameters: FunctionArguments::None,
         uses_odbc_syntax: false,
     });
-    let err = replace_with_table_fn.reverse_translate(&schema, &options).unwrap_err();
+    let err = replace_with_table_fn
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .unwrap_err();
     assert!(unsupported_message(err).contains("table function is not supported"));
 
     let mut with_partitioned = parse_insert("INSERT INTO docs (id, title) VALUES (1, 'a')");
     with_partitioned.partitioned = Some(vec![parse_expr("id + 1")]);
     let reversed = with_partitioned
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("insert with partitioned expressions should reverse");
     assert!(reversed.partitioned.is_some());
 
@@ -784,12 +835,14 @@ fn reverse_insert_translation_covers_replace_table_function_and_partitioned_path
         "INSERT INTO docs (id, title) VALUES (1, 'a')
          ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title WHERE id > 0",
     );
-    let reversed =
-        with_conflict.reverse_translate(&schema, &options).expect("upsert should reverse");
+    let reversed = with_conflict
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("upsert should reverse");
     assert!(reversed.on.is_some());
 
     let fail_insert = parse_insert("INSERT OR FAIL INTO docs (id, title) VALUES (1, 'a')");
-    let reversed =
-        fail_insert.reverse_translate(&schema, &options).expect("or fail should reverse");
+    let reversed = fail_insert
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("or fail should reverse");
     assert!(reversed.on.is_none());
 }

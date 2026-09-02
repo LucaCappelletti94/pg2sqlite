@@ -75,9 +75,9 @@ fn plpgsql_window_frame_bounds_transformed() {
 
 #[test]
 fn plpgsql_compound_field_access_dot_transformed() {
-    // CompoundFieldAccess with Dot accessor — inner expressions should be recursed
-    // This tests that the Dot arm is handled (even if the expression is just a
-    // field access)
+    // CompoundFieldAccess with Dot accessor — inner expressions should be
+    // recursed This tests that the Dot arm is handled (even if the
+    // expression is just a field access)
     let options = uuid_options();
     let sql = translate_sql(
         r#"

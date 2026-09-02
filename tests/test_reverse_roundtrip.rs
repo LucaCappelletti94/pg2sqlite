@@ -64,7 +64,8 @@ fn forward_execute_reverse(pg_ddl: &str, pg_query: &str, options: &Pg2SqliteOpti
 
     // Wrap in a column alias so diesel can bind by name
     let exec_sql = format!("SELECT ({sqlite_sql}) AS result");
-    // Allow execution to succeed (empty table is fine -- we just need valid SQL)
+    // Allow execution to succeed (empty table is fine -- we just need valid
+    // SQL)
     let _results = diesel::sql_query(&exec_sql)
         .load::<DynResult>(&mut conn)
         .unwrap_or_else(|e| panic!("SQLite execution failed: {e}\nSQL: {exec_sql}"));
@@ -143,7 +144,8 @@ fn reverse_strftime_date_only_is_not_date_trunc() {
 
 #[test]
 fn reverse_strftime_extract_still_works() {
-    // Single-token formats like %Y must still reverse to EXTRACT, not date_trunc
+    // Single-token formats like %Y must still reverse to EXTRACT, not
+    // date_trunc
     let pg = reverse(EVENTS, "SELECT strftime('%Y', created_at) FROM events;");
     assert!(pg.contains("EXTRACT(YEAR"), "Expected EXTRACT(YEAR): {pg}");
     assert!(!pg.contains("date_trunc"), "Should not contain date_trunc: {pg}");
@@ -473,6 +475,40 @@ fn distinct_on_round_trips_through_the_row_number_rewrite() {
         round_tripped, sqlite_sql,
         "the restored query should translate back to the same SQLite"
     );
+}
+
+#[test]
+fn restored_distinct_on_uses_the_restored_relation_scope() {
+    let ddl = "CREATE TABLE t (id INT PRIMARY KEY, aware TIMESTAMPTZ, naive TIMESTAMP);";
+    let pg_query = "SELECT DISTINCT ON (id) id, naive AS aware FROM t \
+                    ORDER BY id, aware AT TIME ZONE '+05:00';";
+    let options = Pg2SqliteOptions::default();
+    let translator =
+        Pg2Sqlite::default().sql(&format!("{ddl} {pg_query}")).expect("source should parse");
+    let schema = translator.build_schema().expect("schema should build");
+    let forward = translator.clone().translate(&options).expect("source should translate");
+    let sqlite_sql = forward
+        .iter()
+        .find(|statement| matches!(statement, sqlparser::ast::Statement::Query(_)))
+        .expect("source should emit a query")
+        .to_string();
+
+    let reversed = translator
+        .reverse_sql(&format!("{sqlite_sql};"), &schema, &options)
+        .expect("query should reverse")[0]
+        .to_string();
+    let round_tripped = Pg2Sqlite::default()
+        .sql(&format!("{ddl} {reversed};"))
+        .expect("reversed query should parse")
+        .translate(&options)
+        .expect("reversed query should translate");
+    let round_tripped_sql = round_tripped
+        .iter()
+        .find(|statement| matches!(statement, sqlparser::ast::Statement::Query(_)))
+        .expect("reversed query should emit a query")
+        .to_string();
+
+    assert_eq!(round_tripped_sql, sqlite_sql, "restored query changed its fixed offset");
 }
 
 /// A `DISTINCT ON` with no `ORDER BY` leaves the window unordered too, which

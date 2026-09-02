@@ -104,7 +104,8 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
 
     uuid_utils::register_impl(&mut connection, uuid_impl).expect("Failed to register uuid()");
 
-    // Execute all translated statements and fail fast on runtime incompatibility.
+    // Execute all translated statements and fail fast on runtime
+    // incompatibility.
     let number_of_migrations = translated_migrations.len();
     for (i, translated_migration) in
         translated_migrations.iter().enumerate().map(|(v, s)| (v + 1, s))

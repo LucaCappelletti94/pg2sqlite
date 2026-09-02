@@ -451,7 +451,8 @@ mod errors {
         let schema = translator.build_schema().unwrap();
         let options = Pg2SqliteOptions::default();
 
-        // No explicit insert column list should still be reversible for OR REPLACE.
+        // No explicit insert column list should still be reversible for OR
+        // REPLACE.
         let sqlite_sql = "INSERT OR REPLACE INTO users VALUES ('abc', 'Alice', 'a@b.com')";
         let result = translator.reverse_sql(sqlite_sql, &schema, &options);
 
@@ -485,24 +486,20 @@ mod errors {
     }
 
     #[test]
-    fn test_insert_or_replace_with_multiple_non_public_schema_tables_errors_on_ambiguous_lookup() {
-        let pg_ddl = "
-            CREATE SCHEMA app;
-            CREATE SCHEMA auth;
-            CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT);
-            CREATE TABLE auth.users (id UUID PRIMARY KEY, name TEXT);
-        ";
+    fn unqualified_insert_or_replace_does_not_guess_a_non_public_schema() {
+        let pg_ddl = "CREATE SCHEMA app; CREATE TABLE app.users (id UUID PRIMARY KEY, name TEXT);";
         let translator = setup_translator(pg_ddl);
-        let schema = translator
-            .build_schema()
-            .expect("schema build should allow multiple non-public schemas");
+        let schema = translator.build_schema().expect("schema should build");
         let options = Pg2SqliteOptions::default();
 
-        let sqlite_sql = "INSERT OR REPLACE INTO users (id, name) VALUES ('abc', 'Alice')";
         let err = translator
-            .reverse_sql(sqlite_sql, &schema, &options)
-            .expect_err("unqualified users should be ambiguous across app/auth schemas");
-        assert!(matches!(err, Error::AmbiguousTableInSchema { .. }));
+            .reverse_sql(
+                "INSERT OR REPLACE INTO users (id, name) VALUES ('abc', 'Alice')",
+                &schema,
+                &options,
+            )
+            .expect_err("an unqualified name should not guess a non-public schema");
+        assert!(matches!(err, Error::TableNotFoundInSchema { .. }));
     }
 
     #[test]

@@ -808,8 +808,9 @@ fn delete_using_with_rls_table_join() {
             .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{s}"));
     }
     // Seed each row with a matching session user so the BEFORE INSERT guard
-    // (WITH CHECK owner_id = current_app_user) passes. Mirrors the authoritative
-    // apply pattern where system inserts satisfy the configured policies.
+    // (WITH CHECK owner_id = current_app_user) passes. Mirrors the
+    // authoritative apply pattern where system inserts satisfy the
+    // configured policies.
     session_user.store(1, std::sync::atomic::Ordering::Relaxed);
     conn.execute_batch("INSERT INTO users_rls (id, owner_id) VALUES (5, 1);").unwrap();
     session_user.store(2, std::sync::atomic::Ordering::Relaxed);

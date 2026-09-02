@@ -133,8 +133,8 @@ fn test_vec0_knn_query_correctness() -> Result<()> {
     db.execute("INSERT INTO items (id, name, embedding) VALUES (2, 'y-axis', ?)", [v2.as_bytes()])?;
     db.execute("INSERT INTO items (id, name, embedding) VALUES (3, 'near-x', ?)", [v3.as_bytes()])?;
 
-    // Query for nearest neighbor to [1,0,0,0] - should be id=1 (exact match) then
-    // id=3 (close)
+    // Query for nearest neighbor to [1,0,0,0] - should be id=1 (exact match)
+    // then id=3 (close)
     let query_vec: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
 
     let mut stmt = db.prepare(

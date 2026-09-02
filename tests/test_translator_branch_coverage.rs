@@ -260,7 +260,7 @@ fn reverse_statement_and_update_cover_additional_checker_variants() {
 
     let insert_stmt = parse_statement("INSERT INTO users(id, name) VALUES (1, 'a')");
     let reversed_insert = insert_stmt
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("statement insert reverse translation should succeed");
     assert!(matches!(reversed_insert, Statement::Insert(_)));
 
@@ -279,7 +279,7 @@ fn reverse_statement_and_update_cover_additional_checker_variants() {
     update.from = Some(UpdateTableFromKind::BeforeSet(vec![join_from]));
 
     let reversed_update = Statement::Update(update)
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("statement update reverse translation should succeed");
     let Statement::Update(Update { from, .. }) = reversed_update else {
         panic!("expected reversed UPDATE");
@@ -288,19 +288,20 @@ fn reverse_statement_and_update_cover_additional_checker_variants() {
 
     let query_stmt = parse_statement("SELECT * FROM generate_series(1, 2)");
     let reversed_query = query_stmt
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("table-function query should reverse");
     assert!(matches!(reversed_query, Statement::Query(_)));
 
     let substring_query = parse_statement("SELECT SUBSTRING(name FROM 1 FOR 2) FROM users");
     let reversed_substring = substring_query
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("substring query should reverse");
     assert!(matches!(reversed_substring, Statement::Query(_)));
 
     let fn_query = parse_statement("SELECT custom_fn(name) FROM users");
-    let reversed_fn_query =
-        fn_query.reverse_translate(&schema, &options).expect("function query should reverse");
+    let reversed_fn_query = fn_query
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("function query should reverse");
     assert!(matches!(reversed_fn_query, Statement::Query(_)));
 
     let bad_stmt = parse_statement("INSERT INTO users(id, name) VALUES (1, 'a')");
@@ -310,6 +311,8 @@ fn reverse_statement_and_update_cover_additional_checker_variants() {
     insert.table = TableObject::TableName(ObjectName(vec![ObjectNamePart::Identifier(
         Ident::new("users_rls"),
     )]));
-    let err = Statement::Insert(insert).reverse_translate(&schema, &options).unwrap_err();
+    let err = Statement::Insert(insert)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .unwrap_err();
     assert!(err.to_string().contains("RLS backing table"));
 }

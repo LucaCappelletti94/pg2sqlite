@@ -28,7 +28,8 @@ fn pk_constraint_columns_translated() {
     let lower = sql_str.to_lowercase();
 
     assert!(lower.contains("primary key"), "PRIMARY KEY should appear in output: {sql_str}");
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -50,7 +51,8 @@ fn unique_constraint_columns_translated() {
     let lower = sql_str.to_lowercase();
 
     assert!(lower.contains("unique"), "UNIQUE should appear in output: {sql_str}");
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -119,7 +121,8 @@ fn the_translatable_constraints_still_translate() {
     for expected in ["primary key", "unique", "foreign key", "check"] {
         assert!(lower.contains(expected), "{expected} must survive: {sql_str}");
     }
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&default_options()).unwrap();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -155,7 +158,8 @@ fn unique_nulls_distinct_is_translated() {
         !sql_str.to_uppercase().contains("NULLS"),
         "the clause has no SQLite form and must not reach the output: {sql_str}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&default_options()).unwrap();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))

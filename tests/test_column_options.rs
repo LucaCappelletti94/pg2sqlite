@@ -82,11 +82,16 @@ fn default_uuid_function() {
 }
 
 #[test]
-fn default_schema_qualified_uuid_function() {
-    let output = translate("CREATE TABLE t (id TEXT DEFAULT public.gen_random_uuid());");
-    assert!(output.contains("DEFAULT"), "Expected DEFAULT: {output}");
-    assert!(output.contains("uuid"), "Expected translated uuid function: {output}");
-    assert_stmt_parses_as_sqlite(&output);
+fn default_schema_qualified_uuid_function_is_refused_without_identity() {
+    let error = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (id TEXT DEFAULT public.gen_random_uuid());")
+        .expect("source should parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("a qualified function has no known identity");
+    assert!(
+        error.to_string().contains("public.gen_random_uuid"),
+        "the refusal should name the written function: {error}"
+    );
 }
 
 #[test]

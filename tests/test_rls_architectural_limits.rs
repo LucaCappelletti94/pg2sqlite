@@ -168,9 +168,9 @@ fn blanket_update_through_view_touches_only_visible_rows() {
         .first(&mut conn)
         .expect("bob row");
 
-    // Current architectural behavior: only the view-trigger-reachable rows change.
-    // This assertion fails the day WHERE-less writes are routed to the backing
-    // table.
+    // Current architectural behavior: only the view-trigger-reachable rows
+    // change. This assertion fails the day WHERE-less writes are routed to
+    // the backing table.
     assert_eq!(alice_body, "updated", "alice's row must be updated");
     assert_eq!(
         bob_body, "bob-old",
@@ -207,11 +207,12 @@ fn delete_returning_through_view_reports_skipped_rows() {
         .expect("seed rows");
 
     // DELETE ... RETURNING through the view. PostgreSQL returns only [1].
-    // The emulation returns [1, 2] (both view-visible rows, per trigger firing).
+    // The emulation returns [1, 2] (both view-visible rows, per trigger
+    // firing).
     //
     // If/when this is fixed (by refusing RETURNING on UPDATE/DELETE through RLS
-    // views when write scope diverges from read scope, or by an accurate rewrite),
-    // this assertion will fail and must be updated.
+    // views when write scope diverges from read scope, or by an accurate
+    // rewrite), this assertion will fail and must be updated.
     #[derive(QueryableByName, Debug)]
     struct IdRow {
         #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -227,9 +228,9 @@ fn delete_returning_through_view_reports_skipped_rows() {
     let mut ids: Vec<i32> = returned_ids.iter().map(|r| r.id).collect();
     ids.sort_unstable();
 
-    // Current behavior: both ids returned even though bob's row was not deleted.
-    // PostgreSQL would return only [1]. This pin fails the day the emulation
-    // is made accurate; update it then and remove this comment.
+    // Current behavior: both ids returned even though bob's row was not
+    // deleted. PostgreSQL would return only [1]. This pin fails the day the
+    // emulation is made accurate; update it then and remove this comment.
     assert_eq!(
         ids,
         vec![1, 2],

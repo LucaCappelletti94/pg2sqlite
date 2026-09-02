@@ -47,9 +47,10 @@ fn test_check_constraint_is_translated() -> Result<(), Box<dyn std::error::Error
 /// should fail translation when the option is not set.
 #[test]
 fn test_check_constraint_with_unsupported_function_causes_error() {
-    // array_length is a PostgreSQL-specific function that doesn't exist in SQLite.
-    // Using it as the top-level expression of a TABLE-LEVEL check constraint
-    // (comma-separated, not inline on the column) triggers the function detection.
+    // array_length is a PostgreSQL-specific function that doesn't exist in
+    // SQLite. Using it as the top-level expression of a TABLE-LEVEL check
+    // constraint (comma-separated, not inline on the column) triggers the
+    // function detection.
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (array_length(col)));";
     let options = Pg2SqliteOptions::default();
 
@@ -77,7 +78,8 @@ fn test_check_constraint_removed_with_option() {
         !sql_output.contains("CHECK"),
         "CHECK constraint should be removed when option is set, got: {sql_output}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let conn = SqliteConn::open_in_memory().unwrap();
     let script = translated.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
@@ -100,7 +102,8 @@ fn test_valid_check_constraint_passes_through() {
         sql_output.contains("price > 0"),
         "CHECK condition should be preserved verbatim, got: {sql_output}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let conn = SqliteConn::open_in_memory().unwrap();
     let script = translated.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
@@ -137,7 +140,8 @@ fn test_nested_function_check_constraint_removed_with_option() {
         !sql_output.contains("CHECK"),
         "Nested function CHECK constraint should be removed when option is set, got: {sql_output}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let conn = SqliteConn::open_in_memory().unwrap();
     let script = translated.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
@@ -162,7 +166,8 @@ fn test_column_level_check_is_translated() {
         sql_output.contains("price > 0"),
         "CHECK condition should be preserved, got: {sql_output}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let conn = SqliteConn::open_in_memory().unwrap();
     let script = translated.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
@@ -182,7 +187,8 @@ fn test_column_level_check_is_dropped_with_option() {
         !sql_output.contains("CHECK"),
         "Column-level CHECK should be dropped when option is set, got: {sql_output}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let conn = SqliteConn::open_in_memory().unwrap();
     let script = translated.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
@@ -198,7 +204,8 @@ fn table_check_translates_char_length() {
     let lower = sql_output.to_lowercase();
     assert!(lower.contains("length("), "expected char_length -> length translation: {sql_output}");
     assert!(!lower.contains("char_length"), "char_length should be translated: {sql_output}");
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let conn = SqliteConn::open_in_memory().unwrap();
     let script = translated.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));

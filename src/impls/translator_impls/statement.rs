@@ -60,8 +60,7 @@ use crate::{
         object_name::{
             append_suffix, last_ident, last_ident_value_or_display,
             normalize_schema_qualified_object_name_for_sqlite, quoted_ident,
-            sqlite_unqualified_object_name, table_has_implicit_public_rls,
-            table_with_implicit_public_lookup,
+            resolve_translation_table, sqlite_unqualified_object_name, translation_table_has_rls,
         },
         placeholder::rewrite_placeholders_for_sqlite,
         translator_impls::{
@@ -566,9 +565,8 @@ fn append_readonly_deny_triggers(
 
 /// Errors when the translation unit already declares a table, index, trigger,
 /// or view whose SQLite-unqualified name collides with a reserved deny-trigger
-/// name. The declared-name catalog is prewalked from the input statements
-/// (see `populate_declared_object_names`) because the translation schema omits
-/// index and trigger definitions.
+/// name. The declared-name catalog comes from `populate_prewalk_catalogs`,
+/// since the translation schema omits index and trigger definitions.
 fn reject_reserved_name_collision(
     options: &crate::options::TranslationContext<'_>,
     table_name: &str,
@@ -618,7 +616,7 @@ fn role_access_for_object_name(
         return Ok(RoleTableAccess::Allow);
     };
 
-    let Some(table) = table_with_implicit_public_lookup(schema, table_name)? else {
+    let Some(table) = resolve_translation_table(schema, table_name)? else {
         return Err(Error::TableNotFoundInSchema { table_name: table_name.to_string() });
     };
 
@@ -646,7 +644,7 @@ fn translate_alter_table(
     // triggers already speak the post-ALTER shape, and this redirected ALTER
     // is what brings the backing table up to it. A rename never reaches here
     // on a secured table, `reject_rename_of_secured_table` refuses it first.
-    let normalized_name = if table_has_implicit_public_rls(schema, &alter_table.name)? {
+    let normalized_name = if translation_table_has_rls(schema, &alter_table.name)? {
         append_suffix(
             &normalize_schema_qualified_object_name_for_sqlite(schema, &alter_table.name)?,
             options.get_rls_table_suffix(),
@@ -734,7 +732,7 @@ fn reject_untranslatable_alter_table_clauses(
         )));
     }
 
-    if table_with_implicit_public_lookup(schema, &alter_table.name)?.is_none() {
+    if resolve_translation_table(schema, &alter_table.name)?.is_none() {
         return Err(Error::forward_refusal(format!(
             "ALTER TABLE {} names a table the translation schema does not declare. The schema \
              is built from the statements in the batch rather than from a live database, so an \
@@ -785,6 +783,10 @@ fn translate_alter_table_operation(
             column_position,
         } => {
             reject_unsupported_added_column(column_def, alter_table.name.to_string().as_str())?;
+            let table_scope = resolve_translation_table(schema, &alter_table.name)?
+                .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+            let scoped = table_scope.as_ref().map(|scope| options.with_scope(scope));
+            let options = scoped.as_ref().unwrap_or(options);
             Ok(Some(AlterTableOperation::AddColumn {
                 column_keyword: *column_keyword,
                 if_not_exists: *if_not_exists,
@@ -934,11 +936,12 @@ fn translate_truncate(
         // PostgreSQL does not apply policies to TRUNCATE: it needs the TRUNCATE
         // privilege and then empties the table. An RLS table is translated as a
         // view over a suffixed backing table, and the view's INSTEAD OF DELETE
-        // trigger carries the policy predicate, so deleting through it would empty
-        // only the admitted rows. Naming the backing table directly reproduces
-        // PostgreSQL. Nothing observes it: only INSERT and UPDATE monitoring
-        // triggers are generated, so a delete raises no validation event.
-        let rls_backed = table_has_implicit_public_rls(schema, &target.name)?;
+        // trigger carries the policy predicate, so deleting through it would
+        // empty only the admitted rows. Naming the backing table
+        // directly reproduces PostgreSQL. Nothing observes it: only
+        // INSERT and UPDATE monitoring triggers are generated, so a
+        // delete raises no validation event.
+        let rls_backed = translation_table_has_rls(schema, &target.name)?;
         let name = if rls_backed {
             append_suffix(&target.name, options.get_rls_table_suffix())
         } else {
@@ -946,8 +949,8 @@ fn translate_truncate(
         };
 
         // ONLY and the trailing asterisk both concern table inheritance, which
-        // CREATE TABLE ... INHERITS rejects outright, so no descendants can exist
-        // and either spelling names just this table.
+        // CREATE TABLE ... INHERITS rejects outright, so no descendants can
+        // exist and either spelling names just this table.
         let delete = Delete {
             tables: Vec::new(),
             from: FromTable::WithFromKeyword(vec![TableWithJoins {
@@ -976,11 +979,13 @@ fn translate_truncate(
         };
 
         if rls_backed {
-            // The backing name is deliberate and already final. Routing it through
-            // the DELETE translator would resolve it against the logical schema,
-            // which does not know the suffixed table, and could reapply the RLS
-            // rewrite this branch exists to avoid. A TRUNCATE carries no predicate,
-            // so there is nothing else for that pass to translate.
+            // The backing name is deliberate and already final. Routing it
+            // through the DELETE translator would resolve it
+            // against the logical schema, which does not know the
+            // suffixed table, and could reapply the RLS
+            // rewrite this branch exists to avoid. A TRUNCATE carries no
+            // predicate, so there is nothing else for that pass to
+            // translate.
             statements.push(Statement::Delete(delete));
         } else {
             statements.push(delete.translate_with_warnings(schema, options, emit)?);
@@ -1580,10 +1585,9 @@ fn translate_set(
 /// name through the C API, the way this crate expects `current_setting` to be
 /// registered for row level security, so that one is warned about.
 ///
-/// The trigger names come from a prewalk of the input recorded in the options
-/// (`populate_declared_object_names`), not from the schema, because
-/// `schema_statements_for_translation` keeps `CREATE TRIGGER` out of the
-/// translation schema.
+/// The trigger names come from `populate_prewalk_catalogs`, since
+/// `schema_statement_is_ignored` excludes `CREATE TRIGGER` from the translation
+/// schema.
 fn translate_create_function(
     create_function: &CreateFunction,
     options: &crate::options::TranslationContext<'_>,
@@ -1688,8 +1692,9 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
             }
             Self::If(if_stmt) => {
                 let Some(if_condition) = &if_stmt.if_block.condition else {
-                    // Guard-less: every branch's statements would be dropped, and
-                    // those statements are the work the script asked for.
+                    // Guard-less: every branch's statements would be dropped,
+                    // and those statements are the work the
+                    // script asked for.
                     return Err(reject_unsupported_statement(
                         self,
                         "The IF block carries no condition, so its branches cannot be turned into \
@@ -2092,9 +2097,10 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
             Self::Discard { object_type } => translate_discard(self, *object_type, emit)?,
         };
 
-        // PostgreSQL numbered parameters (`$N`) become SQLite `?N` placeholders,
-        // preserving the number so the bind index survives a round trip. Only
-        // DML carries placeholders, so DDL output skips the walk.
+        // PostgreSQL numbered parameters (`$N`) become SQLite `?N`
+        // placeholders, preserving the number so the bind index
+        // survives a round trip. Only DML carries placeholders, so DDL
+        // output skips the walk.
         for statement in &mut translated {
             if matches!(
                 statement,
@@ -2260,7 +2266,11 @@ mod tests {
         .next()
         .unwrap();
 
-        let schema = ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap();
+        let schema = ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE users(id INT);").unwrap(),
+            "test".to_string(),
+        )
+        .unwrap();
         let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let translated =
             if_stmt.translate(&schema, &options).expect("IF/ELSIF/ELSE should translate");

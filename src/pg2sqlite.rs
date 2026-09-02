@@ -16,10 +16,13 @@ use std::path::PathBuf;
 
 #[cfg(feature = "git")]
 use git2::Repository;
-use sql_traits::structs::{AccessResolution, ParseOptions, ParserDB};
-use sqlparser::ast::{
-    AlterTableOperation, CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart,
-    RenameTableNameKind, Statement, Value, ValueWithSpan, visit_expressions,
+use sql_traits::structs::{AccessResolution, ParseOptions, ParserDB, ParserDBIngestor};
+use sqlparser::{
+    ast::{
+        AlterTableOperation, CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart,
+        ObjectType, RenameTableNameKind, Statement, Value, ValueWithSpan, visit_expressions,
+    },
+    dialect::GenericDialect,
 };
 #[cfg(feature = "git")]
 use tempfile::TempDir;
@@ -81,32 +84,27 @@ fn register_spatial_index(
     }
 }
 
-/// Populates every catalog that a statement's translation reads but that only
-/// another statement in the same unit can declare, so a `SELECT` can be
-/// rewritten against an index written after it.
-///
-/// One traversal serves all three: they only read `statements`, and none
-/// observes what the others record.
-///
-/// Spatial registration is gated because the rewrite it feeds targets an
-/// extension that may not be loaded. The FTS catalog has no such toggle, since
-/// its rewrite depends on the declared indexes alone.
-fn populate_prewalk_catalogs(
+fn populate_prewalk_catalogs(statements: &[Statement], context: &mut TranslationContext<'_>) {
+    for statement in statements {
+        register_declared_object_name(statement, context);
+        if let Statement::CreateIndex(create_index) = statement {
+            register_fts_index(create_index, context);
+        }
+    }
+}
+
+fn populate_spatial_index_catalog(
     statements: &[Statement],
     schema: &ParserDB,
     context: &mut TranslationContext<'_>,
 ) {
-    let spatial_enabled = context.is_sqlitegis_enabled();
+    if !context.is_sqlitegis_enabled() {
+        return;
+    }
     for statement in statements {
-        register_declared_object_name(statement, context);
-
-        let Statement::CreateIndex(create_index) = statement else {
-            continue;
-        };
-        if spatial_enabled {
+        if let Statement::CreateIndex(create_index) = statement {
             register_spatial_index(create_index, schema, context);
         }
-        register_fts_index(create_index, context);
     }
 }
 
@@ -136,13 +134,8 @@ fn statement_contains_like(statement: &Statement) -> bool {
     .is_break()
 }
 
-/// Registers `statement`'s declared object name, so the read-only deny-trigger
-/// pass can reject names that collide with existing objects, and the function a
-/// trigger executes, so the `CREATE FUNCTION` arm knows which definitions are
-/// realised inside a trigger rather than lost. Both read the raw statement
-/// because [`Pg2Sqlite::schema_statements_for_translation`] keeps triggers out
-/// of the translation schema, and that exclusion is load-bearing, so this
-/// catalog cannot be replaced by reading names back off the schema.
+/// Registers names from the raw statement because translations can need a
+/// declaration before sequential schema ingestion reaches it.
 fn register_declared_object_name(statement: &Statement, context: &mut TranslationContext<'_>) {
     let name = match statement {
         Statement::CreateTable(create_table) => Some(&create_table.name),
@@ -169,9 +162,30 @@ pub struct Pg2Sqlite {
     pg_statements: Vec<Statement>,
 }
 
-struct PreparedTranslation {
+struct PreparedEpoch {
+    start: usize,
+    end: usize,
+    schema: ParserDB,
+}
+
+struct PreparedSchema {
+    schema: Result<ParserDB, crate::errors::Error>,
+    options: Pg2SqliteOptions,
+    epochs: Vec<PreparedEpoch>,
+    had_rls_tables: bool,
+    initial_schema: Option<ParserDB>,
+    complete: bool,
+}
+
+struct PreparedStatements {
     schema: ParserDB,
     options: Pg2SqliteOptions,
+    statements: Vec<Vec<Statement>>,
+    audit_table: Option<Statement>,
+    warnings: Vec<crate::warnings::TranslationWarning>,
+}
+
+struct PreparedTranslation {
     statements: Vec<Statement>,
     warnings: Vec<crate::warnings::TranslationWarning>,
 }
@@ -181,17 +195,8 @@ impl Pg2Sqlite {
     /// security.
     ///
     /// Row level security is realised as a backing table, two views, and five
-    /// triggers all named after the table, so a rename would have to move the
-    /// whole set together. Neither order works today. With the rename above,
-    /// the security statements name a table the schema does not carry,
-    /// because [`Pg2Sqlite::schema_statements_for_translation`] keeps renames
-    /// out. With the rename below, the security setting is applied and the
-    /// emitted rename then lands on the view, which SQLite answers with
-    /// `view <name> may not be altered`.
-    ///
-    /// Refusing is the whole answer rather than a stopgap: resolving a table by
-    /// a name it has since lost is ambiguous once a file swaps two names, so
-    /// the schema cannot be asked which table a pre-rename statement meant.
+    /// triggers all named after the table. A SQLite table rename cannot move
+    /// that generated set together.
     fn reject_rename_of_secured_table(
         statements: &[Statement],
     ) -> Result<(), crate::errors::Error> {
@@ -242,61 +247,68 @@ impl Pg2Sqlite {
         Ok(())
     }
 
-    /// Builds the schema every statement is translated against.
-    ///
-    /// Access resolution is open because a policy or grant naming a role the
-    /// input never creates is the normal shape: roles are cluster objects that
-    /// `pg_dump` does not emit, and a platform role such as `authenticated`
-    /// exists before any migration runs. Closed resolution, which is upstream's
-    /// default, refuses those outright.
+    /// Starts incremental schema ingestion with external grants allowed.
+    fn translation_ingestor() -> ParserDBIngestor {
+        ParseOptions::default()
+            .with_access_resolution(AccessResolution::OpenWorld)
+            .ingestor::<GenericDialect>("translation_db".to_owned())
+    }
+
     fn build_translation_schema(
         statements: Vec<Statement>,
     ) -> Result<ParserDB, crate::errors::Error> {
-        ParseOptions::default()
-            .with_access_resolution(AccessResolution::OpenWorld)
-            .from_statements(statements, "translation_db".to_owned())
-            .map_err(Into::into)
+        let mut input = Self::translation_ingestor();
+        for statement in statements {
+            input = input.apply_statement(statement)?;
+        }
+        Ok(input.finish())
     }
 
-    /// The statements that build the one schema snapshot every statement is
-    /// translated against.
-    ///
-    /// A statement is excluded when it needs no schema entry to translate and
-    /// including it would replace its own diagnostic with a schema-build
-    /// failure. Indexes and triggers translate from the statement alone, and
-    /// the shapes this crate refuses, a non-`public` schema qualifier or a
-    /// three-part name, are refused with a message naming the construct that a
-    /// schema lookup failure would pre-empt.
-    ///
-    /// Drops and renames are the same case with one addition: a single snapshot
-    /// serves every statement, so applying a drop or a rename to it hides the
-    /// object from the statements written before it, which then fail to resolve
-    /// their own target. `ALTER TABLE ... RENAME TO` becomes a SQLite rename
-    /// from the statement alone, and `RENAME TABLE` is refused outright.
-    ///
-    /// An `ALTER TABLE` carrying only non-rename operations is kept, because
-    /// `ENABLE ROW LEVEL SECURITY` and friends must reach the schema.
-    fn schema_statements_for_translation(statements: &[Statement]) -> Vec<Statement> {
-        statements
-            .iter()
-            .filter(|statement| {
-                if let Statement::AlterTable(alter_table) = statement {
-                    return !alter_table
-                        .operations
-                        .iter()
-                        .any(|op| matches!(op, AlterTableOperation::RenameTable { .. }));
-                }
-                !matches!(
-                    statement,
-                    Statement::CreateIndex(_)
-                        | Statement::CreateTrigger(_)
-                        | Statement::Drop { .. }
-                        | Statement::DropTrigger(_)
-                        | Statement::RenameTable(_)
-                )
-            })
-            .cloned()
-            .collect()
+    fn schema_statement_is_ignored(statement: &Statement) -> bool {
+        match statement {
+            Statement::CreateIndex(_) | Statement::CreateTrigger(_) | Statement::DropTrigger(_) => {
+                true
+            }
+            Statement::Drop { object_type, .. } => {
+                !matches!(object_type, ObjectType::Table | ObjectType::View)
+            }
+            _ => false,
+        }
+    }
+
+    fn schema_ends_epoch(statement: &Statement) -> bool {
+        if let Statement::AlterTable(alter_table) = statement {
+            return alter_table
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, AlterTableOperation::RenameTable { .. }));
+        }
+        matches!(
+            statement,
+            Statement::Drop { object_type: ObjectType::Table | ObjectType::View, .. }
+                | Statement::RenameTable(_)
+        )
+    }
+
+    fn manifest_statement_needs_translation(statement: &Statement) -> bool {
+        !matches!(
+            statement,
+            Statement::Query(_)
+                | Statement::Insert(_)
+                | Statement::Update(_)
+                | Statement::Delete(_)
+                | Statement::Merge(_)
+                | Statement::Truncate(_)
+                | Statement::Copy { .. }
+                | Statement::Directory { .. }
+                | Statement::ExportData(_)
+                | Statement::Unload { .. }
+                | Statement::LoadData { .. }
+                | Statement::CopyIntoSnowflake { .. }
+                | Statement::Put { .. }
+                | Statement::Remove { .. }
+                | Statement::List { .. }
+        )
     }
 
     /// Adds a new SQL statement to the set of `PostgreSQL` statements to be
@@ -475,50 +487,129 @@ impl Pg2Sqlite {
         Self::ups(temp_dir.path())
     }
 
-    fn prepare_translation(
+    fn prepare_schema(
         &self,
         options: &Pg2SqliteOptions,
-    ) -> Result<PreparedTranslation, crate::errors::Error> {
+        initial_schema: Option<&ParserDB>,
+    ) -> Result<PreparedSchema, crate::errors::Error> {
         use sql_traits::traits::DatabaseLike;
 
         let statements = &self.pg_statements;
+        crate::impls::translator_impls::rls::ensure_usable_rls_table_suffix(options)?;
         Self::reject_rename_of_secured_table(statements)?;
 
-        let schema_statements = Self::schema_statements_for_translation(statements);
-        let schema = Self::build_translation_schema(schema_statements)?;
-
         let options = options.clone();
-        let mut context = TranslationContext::new(&options);
-        populate_prewalk_catalogs(statements, &schema, &mut context);
-
-        let mut warnings = Vec::new();
-        let translated = {
-            let mut emit = |warning| warnings.push(warning);
-            statements
+        let had_rls_tables = match initial_schema {
+            Some(schema) => schema.has_rls_tables()?,
+            None => false,
+        };
+        let complete = initial_schema.is_some();
+        let initial_namespace = initial_schema.cloned();
+        let mut input = initial_schema
+            .map_or_else(Self::translation_ingestor, |schema| schema.clone().into_ingestor());
+        let mut epochs = Vec::new();
+        let mut start = 0;
+        let schema = loop {
+            if start >= statements.len() {
+                break Ok(input.finish());
+            }
+            let boundary = statements[start..]
                 .iter()
-                .map(|statement| statement.translate_with_warnings(&schema, &context, &mut emit))
-                .collect::<Result<Vec<Vec<Statement>>, crate::errors::Error>>()?
+                .position(Self::schema_ends_epoch)
+                .map(|offset| start + offset);
+            let end = boundary.map_or(statements.len(), |index| index + 1);
+            let schema_end = boundary.unwrap_or(end);
+            for statement in &statements[start..schema_end] {
+                if !Self::schema_statement_is_ignored(statement) {
+                    input = input.apply_statement(statement.clone())?;
+                }
+            }
+            epochs.push(PreparedEpoch { start, end, schema: input.snapshot() });
+            if let Some(index) = boundary {
+                match input.apply_statement(statements[index].clone()) {
+                    Ok(next) => input = next,
+                    Err(error) => break Err(error.into()),
+                }
+            }
+            start = end;
         };
 
-        // If any table has RLS enabled and audit table name is configured,
-        // prepend the audit table creation statement
-        let audit_table = schema
-            .has_rls_tables()?
+        Ok(PreparedSchema {
+            schema,
+            options,
+            epochs,
+            had_rls_tables,
+            complete,
+            initial_schema: initial_namespace,
+        })
+    }
+
+    fn translate_prepared(
+        &self,
+        prepared: PreparedSchema,
+        mut should_translate: impl FnMut(&Statement) -> bool,
+    ) -> Result<PreparedStatements, crate::errors::Error> {
+        use sql_traits::traits::DatabaseLike;
+
+        let PreparedSchema { schema, options, epochs, had_rls_tables, complete, initial_schema } =
+            prepared;
+        let statements = &self.pg_statements;
+        let mut context = if complete {
+            TranslationContext::with_complete_schema(&options)
+        } else {
+            TranslationContext::new(&options)
+        };
+        populate_prewalk_catalogs(statements, &mut context);
+
+        let mut warnings = Vec::new();
+        let mut translated = Vec::with_capacity(statements.len());
+        for epoch in &epochs {
+            populate_spatial_index_catalog(
+                &statements[epoch.start..epoch.end],
+                &epoch.schema,
+                &mut context,
+            );
+            for statement in &statements[epoch.start..epoch.end] {
+                if should_translate(statement) {
+                    let mut emit = |warning| warnings.push(warning);
+                    translated.push(statement.translate_with_warnings(
+                        &epoch.schema,
+                        &context,
+                        &mut emit,
+                    )?);
+                } else {
+                    translated.push(Vec::new());
+                }
+            }
+        }
+
+        let schema = schema?;
+        let audit_table = (!had_rls_tables && schema.has_rls_tables()?)
             .then(|| options.get_rls_audit_table_name())
             .flatten()
             .map(generate_rls_audit_table);
 
-        // Every name the script defines has to be free when it defines it:
-        // PostgreSQL has a namespace per schema and names a trigger within its
-        // table, SQLite has one of each for the whole database.
         reject_name_collisions(
+            initial_schema.as_ref(),
             audit_table
                 .iter()
                 .map(|statement| (Source::Generated("the row-security audit table"), statement))
                 .chain(sourced(statements, &translated)),
         )?;
 
-        let mut result: Vec<Statement> = translated.into_iter().flatten().collect();
+        Ok(PreparedStatements { schema, options, statements: translated, audit_table, warnings })
+    }
+
+    fn prepare_translation(
+        &self,
+        options: &Pg2SqliteOptions,
+        initial_schema: Option<&ParserDB>,
+    ) -> Result<PreparedTranslation, crate::errors::Error> {
+        let prepared = self.prepare_schema(options, initial_schema)?;
+        let PreparedStatements { schema: _, options: _, statements, audit_table, warnings } =
+            self.translate_prepared(prepared, |_| true)?;
+
+        let mut result: Vec<Statement> = statements.into_iter().flatten().collect();
         if let Some(audit_table) = audit_table {
             result.insert(0, audit_table);
         }
@@ -544,7 +635,7 @@ impl Pg2Sqlite {
             result.insert(0, case_sensitive_like_pragma());
         }
 
-        Ok(PreparedTranslation { schema, options, statements: result, warnings })
+        Ok(PreparedTranslation { statements: result, warnings })
     }
 
     /// Translates loaded PostgreSQL statements to SQLite.
@@ -570,7 +661,24 @@ impl Pg2Sqlite {
         &self,
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<Statement>, crate::errors::Error> {
-        Ok(self.prepare_translation(options)?.statements)
+        Ok(self.prepare_translation(options, None)?.statements)
+    }
+
+    /// Translates loaded PostgreSQL statements using `schema` as the complete
+    /// starting database state.
+    ///
+    /// Loaded schema statements update that state before later statements are
+    /// translated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if schema ingestion or translation fails.
+    pub fn translate_with_schema(
+        &self,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<Statement>, crate::errors::Error> {
+        Ok(self.prepare_translation(options, Some(schema))?.statements)
     }
 
     /// Translates the loaded PostgreSQL statements to SQLite and returns
@@ -599,7 +707,24 @@ impl Pg2Sqlite {
         &self,
         options: &Pg2SqliteOptions,
     ) -> Result<crate::warnings::TranslationReport, crate::errors::Error> {
-        let PreparedTranslation { statements, warnings, .. } = self.prepare_translation(options)?;
+        let PreparedTranslation { statements, warnings, .. } =
+            self.prepare_translation(options, None)?;
+        Ok(crate::warnings::TranslationReport { statements, warnings })
+    }
+
+    /// Translates against a complete starting `schema` and returns statements
+    /// with their warnings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if schema ingestion or translation fails.
+    pub fn translate_with_report_and_schema(
+        &self,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<crate::warnings::TranslationReport, crate::errors::Error> {
+        let PreparedTranslation { statements, warnings, .. } =
+            self.prepare_translation(options, Some(schema))?;
         Ok(crate::warnings::TranslationReport { statements, warnings })
     }
 
@@ -627,6 +752,23 @@ impl Pg2Sqlite {
         options: &Pg2SqliteOptions,
     ) -> Result<Vec<String>, crate::errors::Error> {
         Ok(self.translate(options)?.into_iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Translates against a complete starting `schema` and returns SQL strings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if schema ingestion or translation fails.
+    pub fn translate_to_sql_with_schema(
+        &self,
+        schema: &ParserDB,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Vec<String>, crate::errors::Error> {
+        Ok(self
+            .translate_with_schema(schema, options)?
+            .into_iter()
+            .map(|statement| statement.to_string())
+            .collect())
     }
 
     /// Builds a [`ParserDB`] schema from the loaded PostgreSQL statements,
@@ -701,9 +843,11 @@ impl Pg2Sqlite {
             manifest::{ColumnManifestEntry, TableManifestEntry, WrapperKind},
         };
 
-        let prepared = self.prepare_translation(options)?;
-        let schema = &prepared.schema;
-        let options = &prepared.options;
+        let prepared = self.prepare_schema(options, None)?;
+        let PreparedStatements { schema, options, .. } =
+            self.translate_prepared(prepared, Self::manifest_statement_needs_translation)?;
+        let schema = &schema;
+        let options = &options;
 
         let role = options.get_session_user_role().and_then(|name| schema.role(name));
 
@@ -790,7 +934,8 @@ impl Pg2Sqlite {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<Statement, crate::errors::Error> {
-        sqlite_stmt.reverse_translate(schema, options)
+        let context = TranslationContext::new(options);
+        sqlite_stmt.reverse_translate(schema, &context)
     }
 
     /// Parses SQLite SQL and reverse translates all statements to PostgreSQL.

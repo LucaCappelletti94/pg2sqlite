@@ -464,7 +464,8 @@ fn test_last_owner_detection() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(doc.owner_count(&mut conn)?, 1, "Should have exactly one owner");
 
     // Application-level check: don't allow removal if count would become 0
-    // (In a real application, this would return an error or prevent the operation)
+    // (In a real application, this would return an error or prevent the
+    // operation)
 
     // Verify Alice is still the owner
     assert!(doc.has_owner(&alice, &mut conn)?, "Alice should still be the owner");

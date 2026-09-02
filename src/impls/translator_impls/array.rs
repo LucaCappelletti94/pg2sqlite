@@ -39,9 +39,9 @@ use core::ops::ControlFlow;
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArguments,
-    Ident, ObjectName, OrderByExpr, OrderByOptions, SelectItem, SetExpr, SetOperator,
-    SetQuantifier, TableAlias, TableFactor, Value, ValueWithSpan, visit_expressions,
+    BinaryOperator, CastKind, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArgumentClause,
+    FunctionArguments, Ident, ObjectName, OrderByExpr, OrderByOptions, SelectItem, SetExpr,
+    SetOperator, SetQuantifier, TableAlias, TableFactor, Value, ValueWithSpan, visit_expressions,
 };
 
 use crate::{
@@ -896,10 +896,10 @@ pub(crate) fn translate_set_returning_factor(
         ));
     };
 
-    // PostgreSQL reads a column argument as an implicit LATERAL, and the derived
-    // table that names the output columns cannot see a sibling FROM item.
-    // Verified on SQLite: the correlated form runs as a bare passthrough and
-    // answers `no such column` inside a derived table.
+    // PostgreSQL reads a column argument as an implicit LATERAL, and the
+    // derived table that names the output columns cannot see a sibling FROM
+    // item. Verified on SQLite: the correlated form runs as a bare
+    // passthrough and answers `no such column` inside a derived table.
     if references_a_column(document) {
         return Err(no_json_equivalent(
             &format!("{name}() over a column reference"),
@@ -915,25 +915,31 @@ pub(crate) fn translate_set_returning_factor(
         .unwrap_or_default();
 
     let mut projection = Vec::with_capacity(2);
+    let text_column = |name| {
+        Expr::Cast {
+            kind: CastKind::Cast,
+            expr: Box::new(json_each_column(name)),
+            data_type: DataType::Text,
+            format: None,
+        }
+    };
     let value_column = if requote {
         simple_function_expr("json_quote", vec![json_each_column(VALUE_COLUMN)], None)
     } else {
-        json_each_column(VALUE_COLUMN)
+        text_column(VALUE_COLUMN)
     };
 
     match shape {
         // PostgreSQL names this column after the function itself.
         JsonSetShape::Key => {
             projection.push(aliased(
-                json_each_column(KEY_COLUMN),
+                text_column(KEY_COLUMN),
                 declared.first().copied().unwrap_or(&lowered),
             ));
         }
         JsonSetShape::KeyValue => {
-            projection.push(aliased(
-                json_each_column(KEY_COLUMN),
-                declared.first().copied().unwrap_or("key"),
-            ));
+            projection
+                .push(aliased(text_column(KEY_COLUMN), declared.first().copied().unwrap_or("key")));
             projection.push(aliased(value_column, declared.get(1).copied().unwrap_or("value")));
         }
         JsonSetShape::Value => {

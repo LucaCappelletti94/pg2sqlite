@@ -12,6 +12,8 @@ use alloc::{
     vec::Vec,
 };
 
+use sql_traits::structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, ParserDB};
+
 use crate::traits::{
     ArrayRepresentation, SessionVariableMapping, SessionVariablePattern, UuidRepresentation,
 };
@@ -126,33 +128,219 @@ impl Default for Pg2SqliteOptions {
     }
 }
 
-pub(crate) struct TranslationContext<'a> {
-    options: Cow<'a, Pg2SqliteOptions>,
+/// The script-wide facts a pass before translation collects, shared by every
+/// [`TranslationContext`] derived for a query so a child costs no copying.
+#[derive(Default, Clone)]
+pub(crate) struct PrewalkCatalogs {
     spatial_indexes: Vec<(String, String)>,
     fts_indexes: Vec<(String, String)>,
     declared_object_names: Vec<String>,
     trigger_function_names: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum TranslationScope<'a> {
+    Query { scope: &'a ColumnScope<'a, 'a, ParserDB>, pseudo_row: bool },
+    Definition(ColumnDefinitionScope<'a, 'a, 'a, ParserDB>),
+}
+
+/// The options a translation runs under, together with what it has learned
+/// about the statements around the one it is translating.
+///
+/// Built from [`Pg2SqliteOptions`], which it dereferences to, so every setting
+/// reads through it unchanged. Both directions carry it, because both resolve a
+/// column reference against the relations in scope before reading a declared
+/// type.
+pub struct TranslationContext<'a> {
+    options: Cow<'a, Pg2SqliteOptions>,
+    catalogs: Cow<'a, PrewalkCatalogs>,
+    /// The relations whose columns a reference in this context can name. A
+    /// query attaches its own `FROM` clause and a definition attaches the table
+    /// it belongs to, so a type-dependent rewrite reads the column it actually
+    /// names rather than any column of that name in the schema. `None` means
+    /// nothing is in scope, which refuses rather than guessing.
+    scope: Option<TranslationScope<'a>>,
+    /// The context this one was derived from, whose scope answers a reference
+    /// the inner one cannot. PostgreSQL resolves an outer reference in a
+    /// correlated subquery against the enclosing query, and a trigger body
+    /// reads the guarded table the same way, so resolution walks outward rather
+    /// than stopping at the innermost `FROM`.
+    outer: Option<&'a TranslationContext<'a>>,
+    /// The `WITH` clause of the query being translated, so a scope built for
+    /// one arm of a set operation still reads a CTE reference as opaque rather
+    /// than matching a base table of the same name.
+    with: Option<&'a sqlparser::ast::With>,
+    /// Names bound as PL/pgSQL variables in the body being translated. A
+    /// variable is not a column, so a reference naming one has no declared type
+    /// to read and is neither resolved nor refused.
+    variables: &'a [String],
+    /// Whether every relation available to the input is present in the schema.
+    schema_is_complete: bool,
+}
+
 impl<'a> TranslationContext<'a> {
-    pub(crate) fn new(options: &'a Pg2SqliteOptions) -> Self {
+    /// Builds a context that carries `options` and no scope, which is what a
+    /// caller starting a translation has.
+    #[must_use]
+    pub fn new(options: &'a Pg2SqliteOptions) -> Self {
         Self {
             options: Cow::Borrowed(options),
-            spatial_indexes: Vec::new(),
-            fts_indexes: Vec::new(),
-            declared_object_names: Vec::new(),
-            trigger_function_names: Vec::new(),
+            catalogs: Cow::Owned(PrewalkCatalogs::default()),
+            scope: None,
+            outer: None,
+            with: None,
+            variables: &[],
+            schema_is_complete: false,
         }
     }
+    pub(crate) fn with_complete_schema(options: &'a Pg2SqliteOptions) -> Self {
+        let mut context = Self::new(options);
+        context.schema_is_complete = true;
+        context
+    }
+
     #[cfg(test)]
     pub(crate) fn from_owned(options: Pg2SqliteOptions) -> TranslationContext<'static> {
         TranslationContext {
             options: Cow::Owned(options),
-            spatial_indexes: Vec::new(),
-            fts_indexes: Vec::new(),
-            declared_object_names: Vec::new(),
-            trigger_function_names: Vec::new(),
+            catalogs: Cow::Owned(PrewalkCatalogs::default()),
+            scope: None,
+            outer: None,
+            with: None,
+            variables: &[],
+            schema_is_complete: false,
         }
+    }
+
+    /// The same context with `scope` attached, for translating the expressions
+    /// of one query, one definition, or one naked expression a caller hands in.
+    ///
+    /// The script-wide catalogs are borrowed rather than copied, so a child is
+    /// two pointers. Building one is the only way a scope enters translation,
+    /// which is why forgetting to build one loses the scope rather than leaving
+    /// an enclosing query's relations in place. A reference the attached scope
+    /// cannot answer is tried against the enclosing one, as PostgreSQL resolves
+    /// an outer reference.
+    #[must_use]
+    pub fn with_scope<'s>(
+        &'s self,
+        scope: &'s ColumnScope<'s, 's, ParserDB>,
+    ) -> TranslationContext<'s> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: Some(TranslationScope::Query { scope, pseudo_row: false }),
+            outer: Some(self),
+            with: self.with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+        }
+    }
+    pub(crate) fn with_pseudo_row_scope<'s>(
+        &'s self,
+        scope: &'s ColumnScope<'s, 's, ParserDB>,
+    ) -> TranslationContext<'s> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: Some(TranslationScope::Query { scope, pseudo_row: true }),
+            outer: Some(self),
+            with: self.with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+        }
+    }
+
+    pub(crate) fn with_definition_scope<'s>(
+        &'s self,
+        scope: ColumnDefinitionScope<'s, 's, 's, ParserDB>,
+    ) -> TranslationContext<'s> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: Some(TranslationScope::Definition(scope)),
+            outer: Some(self),
+            with: self.with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+        }
+    }
+
+    /// The same context noting `with` as the enclosing query's CTE clause.
+    pub(crate) fn with_cte_clause<'s>(
+        &'s self,
+        with: Option<&'s sqlparser::ast::With>,
+    ) -> TranslationContext<'s> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: self.scope,
+            outer: self.outer,
+            with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+        }
+    }
+
+    /// The same context noting the PL/pgSQL variables in scope.
+    pub(crate) fn with_variables<'s>(&'s self, variables: &'s [String]) -> TranslationContext<'s> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: self.scope,
+            outer: self.outer,
+            with: self.with,
+            variables,
+            schema_is_complete: self.schema_is_complete,
+        }
+    }
+
+    /// True when `name` is a PL/pgSQL variable rather than a column.
+    #[must_use]
+    pub(crate) fn is_variable(&self, name: &str) -> bool {
+        self.variables.iter().any(|variable| variable == name)
+    }
+
+    #[must_use]
+    pub(crate) const fn schema_is_complete(&self) -> bool {
+        self.schema_is_complete
+    }
+
+    /// The enclosing query's `WITH` clause, if it has one.
+    #[must_use]
+    pub(crate) fn cte_clause(&self) -> Option<&sqlparser::ast::With> {
+        self.with
+    }
+    /// The scopes a reference may resolve against, innermost first.
+    pub(crate) fn column_definitions<'s>(
+        &'s self,
+        reference: &'s sqlparser::ast::Expr,
+        pseudo_row_reference: Option<&'s sqlparser::ast::Expr>,
+    ) -> impl Iterator<
+        Item = Result<
+            Option<ColumnDefinition<'s, 's, 's, ParserDB>>,
+            sql_traits::errors::LookupError,
+        >,
+    > + 's {
+        let mut context = Some(self);
+        core::iter::from_fn(move || {
+            while let Some(current) = context {
+                context = current.outer;
+                if let Some(scope) = current.scope {
+                    return Some(match scope {
+                        TranslationScope::Query { scope, pseudo_row } => {
+                            scope.resolve_column_definition(
+                                pseudo_row_reference.filter(|_| pseudo_row).unwrap_or(reference),
+                            )
+                        }
+                        TranslationScope::Definition(scope) => {
+                            scope.resolve_column_definition(reference)
+                        }
+                    });
+                }
+            }
+            None
+        })
     }
 
     /// Records `(table, column)` as having a translated spatial index. Both
@@ -166,8 +354,8 @@ impl<'a> TranslationContext<'a> {
         column: impl Into<String>,
     ) {
         let entry = (table.into().to_ascii_lowercase(), column.into().to_ascii_lowercase());
-        if !self.spatial_indexes.contains(&entry) {
-            self.spatial_indexes.push(entry);
+        if !self.catalogs.spatial_indexes.contains(&entry) {
+            self.catalogs.to_mut().spatial_indexes.push(entry);
         }
     }
 
@@ -178,15 +366,15 @@ impl<'a> TranslationContext<'a> {
     pub(crate) fn has_spatial_index(&self, table: &str, column: &str) -> bool {
         let table = table.to_ascii_lowercase();
         let column = column.to_ascii_lowercase();
-        self.spatial_indexes.iter().any(|(t, c)| *t == table && *c == column)
+        self.catalogs.spatial_indexes.iter().any(|(t, c)| *t == table && *c == column)
     }
 
     /// Records `(table, column)` as having a translated FTS5 index. Same
     /// case-folded, idempotent shape as [`Self::add_spatial_index`].
     pub(crate) fn add_fts_index(&mut self, table: impl Into<String>, column: impl Into<String>) {
         let entry = (table.into().to_ascii_lowercase(), column.into().to_ascii_lowercase());
-        if !self.fts_indexes.contains(&entry) {
-            self.fts_indexes.push(entry);
+        if !self.catalogs.fts_indexes.contains(&entry) {
+            self.catalogs.to_mut().fts_indexes.push(entry);
         }
     }
 
@@ -198,7 +386,7 @@ impl<'a> TranslationContext<'a> {
     pub(crate) fn has_fts_index(&self, table: &str, column: &str) -> bool {
         let table = table.to_ascii_lowercase();
         let column = column.to_ascii_lowercase();
-        self.fts_indexes.iter().any(|(t, c)| *t == table && *c == column)
+        self.catalogs.fts_indexes.iter().any(|(t, c)| *t == table && *c == column)
     }
 
     /// Records `name` as a declared SQLite object name, lowercased and
@@ -206,8 +394,8 @@ impl<'a> TranslationContext<'a> {
     /// case-insensitively as SQLite does.
     pub(crate) fn add_declared_object_name(&mut self, name: impl Into<String>) {
         let name = name.into().to_ascii_lowercase();
-        if !self.declared_object_names.contains(&name) {
-            self.declared_object_names.push(name);
+        if !self.catalogs.declared_object_names.contains(&name) {
+            self.catalogs.to_mut().declared_object_names.push(name);
         }
     }
 
@@ -216,7 +404,7 @@ impl<'a> TranslationContext<'a> {
     #[must_use]
     pub(crate) fn has_declared_object_name(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        self.declared_object_names.contains(&name)
+        self.catalogs.declared_object_names.contains(&name)
     }
 
     /// Records `name` as a function executed by a trigger in the translation
@@ -224,8 +412,8 @@ impl<'a> TranslationContext<'a> {
     /// [`Self::has_trigger_function_name`].
     pub(crate) fn add_trigger_function_name(&mut self, name: impl Into<String>) {
         let name = name.into().to_ascii_lowercase();
-        if !self.trigger_function_names.contains(&name) {
-            self.trigger_function_names.push(name);
+        if !self.catalogs.trigger_function_names.contains(&name) {
+            self.catalogs.to_mut().trigger_function_names.push(name);
         }
     }
 
@@ -235,7 +423,7 @@ impl<'a> TranslationContext<'a> {
     #[must_use]
     pub(crate) fn has_trigger_function_name(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        self.trigger_function_names.contains(&name)
+        self.catalogs.trigger_function_names.contains(&name)
     }
 }
 
