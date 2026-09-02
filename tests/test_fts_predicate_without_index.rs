@@ -148,3 +148,33 @@ SELECT id FROM Docs WHERE to_tsvector('english', body) @@ to_tsquery('test');
             .unwrap_or_else(|e| panic!("SQLite rejected emitted SQL: {e}\n{s}"));
     }
 }
+
+#[test]
+fn qualified_fts_predicate_resolves_the_indexed_relation() {
+    let schema = "
+CREATE TABLE a (id INTEGER PRIMARY KEY, title TEXT);
+CREATE TABLE b (id INTEGER PRIMARY KEY, title TEXT);
+CREATE INDEX b_title_fts ON b USING GIN (to_tsvector('english', title));
+INSERT INTO a (id, title) VALUES (1, 'other');
+INSERT INTO b (id, title) VALUES (1, 'needle');
+SELECT b.id FROM a CROSS JOIN b
+WHERE to_tsvector('english', b.title) @@ to_tsquery('needle');
+";
+    let statements = Pg2Sqlite::default()
+        .sql(schema)
+        .expect("parse")
+        .translate(&opts())
+        .expect("the qualified document names the indexed relation");
+    let joined =
+        statements.iter().map(|statement| statement.to_string()).collect::<Vec<_>>().join("\n");
+    assert!(
+        joined.contains("b_fts MATCH 'needle'") && !joined.contains("a_fts"),
+        "the rewrite should use the relation named by the document, got:\n{joined}"
+    );
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in statements {
+        connection
+            .execute_batch(&statement.to_string())
+            .unwrap_or_else(|error| panic!("SQLite rejected emitted SQL: {error}\n{statement}"));
+    }
+}

@@ -61,6 +61,23 @@ fn two_tables_in_different_schemas_are_refused() {
 }
 
 #[test]
+fn a_batch_cannot_reuse_an_initial_schema_object_name() {
+    let initial = Pg2Sqlite::default()
+        .sql("CREATE TABLE public.users (id INT PRIMARY KEY);")
+        .expect("initial schema should parse")
+        .build_schema()
+        .expect("initial schema should build");
+    let error = Pg2Sqlite::default()
+        .sql("CREATE SCHEMA app; CREATE TABLE app.users (id INT PRIMARY KEY);")
+        .expect("batch should parse")
+        .translate_with_schema(&initial, &Pg2SqliteOptions::default())
+        .expect_err("the emitted users table already exists")
+        .to_string();
+    assert!(error.contains("public.users"), "{error}");
+    assert!(error.contains("app.users"), "{error}");
+}
+
+#[test]
 fn an_unqualified_table_collides_with_a_schema_qualified_one() {
     let error = translate_err(
         "CREATE SCHEMA x;

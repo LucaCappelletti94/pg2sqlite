@@ -29,7 +29,8 @@ use crate::{
         function_helpers::{simple_function_expr, string_literal},
         object_name::{
             last_ident_value_or_display, normalize_schema_qualified_object_name_for_sqlite,
-            quoted_ident, resolve_translation_table, sqlite_unqualified_object_name,
+            postgres_catalog_function_name, quoted_ident, resolve_translation_table,
+            sqlite_unqualified_object_name,
         },
         query_builder::{
             from_relation, make_query, make_simple_select, plain_table_factor, single_expr_query,
@@ -99,12 +100,8 @@ fn is_text_cast(data_type: &DataType) -> bool {
 }
 
 fn lower_argument(function: &Function) -> Option<&Expr> {
-    let is_lower = function
-        .name
-        .0
-        .last()
-        .and_then(|part| part.as_ident())
-        .is_some_and(|name| name.value.eq_ignore_ascii_case("lower"));
+    let is_lower =
+        postgres_catalog_function_name(&function.name).is_some_and(|name| name == "lower");
     if !is_lower
         || function.uses_odbc_syntax
         || !matches!(function.parameters, FunctionArguments::None)
@@ -147,13 +144,9 @@ fn is_reproducible_fts_document(expr: &Expr) -> bool {
 fn analyze_fts_expression(expr: &Expr) -> Option<Vec<String>> {
     match expr {
         Expr::Function(function) => {
-            let function_name = function
-                .name
-                .0
-                .last()
-                .and_then(|part| part.as_ident())
-                .map(|name| name.value.to_lowercase())?;
-            if function_name != "to_tsvector" {
+            if postgres_catalog_function_name(&function.name)
+                .is_none_or(|name| name != "to_tsvector")
+            {
                 return None;
             }
             let document = tsvector_document(function)?;

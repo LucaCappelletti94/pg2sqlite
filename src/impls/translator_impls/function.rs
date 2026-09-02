@@ -392,38 +392,21 @@ enum WrittenName {
     /// own. SQLite folds it back onto the built-in, which is why passing it
     /// through would answer with the wrong function.
     OwnName(String),
-    /// Prefixed with a schema other than `pg_catalog`, carrying the catalogue
-    /// name its last segment could name.
-    Prefixed(Option<String>),
+    /// Prefixed with a schema other than `pg_catalog`.
+    Prefixed,
 }
 
 /// Reads what `name` can name, applying PostgreSQL's own resolution.
 fn classify_written_name(name: &ObjectName) -> WrittenName {
-    let last_catalog = crate::impls::object_name::last_ident(name)
-        .and_then(crate::impls::object_name::catalog_name);
-    let prefix_is_catalog = match name.0.as_slice() {
-        [_] => true,
-        [prefix, _] => {
-            prefix
-                .as_ident()
-                .and_then(crate::impls::object_name::catalog_name)
-                .is_some_and(|prefix| prefix == "pg_catalog")
-        }
-        // PostgreSQL has no three-part function name, so anything longer is
-        // somebody else's spelling whatever it ends with.
-        _ => false,
-    };
-    if !prefix_is_catalog {
-        return WrittenName::Prefixed(last_catalog);
+    if let Some(catalog) = crate::impls::object_name::postgres_catalog_function_name(name) {
+        return WrittenName::Catalog(catalog);
     }
-    match last_catalog {
-        Some(catalog) => WrittenName::Catalog(catalog),
-        None => {
-            crate::impls::object_name::last_ident(name)
-                .map_or(WrittenName::Prefixed(None), |last| {
-                    WrittenName::OwnName(last.value.clone())
-                })
+    match name.0.as_slice() {
+        [part] => {
+            part.as_ident()
+                .map_or(WrittenName::Prefixed, |last| WrittenName::OwnName(last.value.clone()))
         }
+        _ => WrittenName::Prefixed,
     }
 }
 
@@ -442,32 +425,11 @@ fn qualified_call_message(name: &ObjectName) -> String {
     )
 }
 
-/// True when the loaded script defines a function of this bare name.
-///
-/// The schema also carries the built-ins `sql-traits` seeds, which it qualifies
-/// with `pg_catalog` exactly so a caller's own definition can shadow one, so
-/// those are skipped here. A definition records only its last segment, so this
-/// cannot tell one schema's copy of a name from another's.
-fn script_defines_function(schema: &sql_traits::structs::ParserDB, catalog: &str) -> bool {
-    sql_traits::traits::DatabaseLike::functions(schema).any(|function| {
-        let parts = &function.name.0;
-        let seeded = parts.len() >= 2
-            && parts[parts.len() - 2]
-                .as_ident()
-                .and_then(crate::impls::object_name::catalog_name)
-                .is_some_and(|schema_name| schema_name == "pg_catalog");
-        !seeded
-            && crate::impls::object_name::last_catalog_name(&function.name)
-                .is_some_and(|name| name == catalog)
-    })
-}
-
 /// Translates a call, deciding first whether this crate may claim the written
 /// name as the catalogue's.
 fn translate_function(
     name: &ObjectName,
     args: &FunctionArguments,
-    schema: &sql_traits::structs::ParserDB,
     options: &crate::options::TranslationContext<'_>,
 ) -> FunctionTranslation {
     match classify_written_name(name) {
@@ -476,26 +438,7 @@ fn translate_function(
         // answers are a refusal or a passthrough the caller has asked for by
         // declaring the name.
         WrittenName::OwnName(written) => classify_unrecognised_function(&written, args, options),
-        WrittenName::Prefixed(Some(catalog)) => {
-            // A definition in the loaded script settles whose function this is,
-            // and the crate cannot emit a qualified call, so there is nothing
-            // to translate it to. The schema records a function under its bare
-            // name, so this cannot tell one schema's copy from another's.
-            if script_defines_function(schema, &catalog) {
-                return FunctionTranslation::Unsupported(qualified_call_message(name));
-            }
-            match translate_catalog_function(&catalog, args, options) {
-                // A passthrough keeps the name as written, prefix and all,
-                // which SQLite cannot parse.
-                FunctionTranslation::PassThrough => {
-                    FunctionTranslation::Unsupported(qualified_call_message(name))
-                }
-                translation => translation,
-            }
-        }
-        WrittenName::Prefixed(None) => {
-            FunctionTranslation::Unsupported(qualified_call_message(name))
-        }
+        WrittenName::Prefixed => FunctionTranslation::Unsupported(qualified_call_message(name)),
     }
 }
 
@@ -1724,7 +1667,7 @@ impl crate::traits::translator::TranslatorWithContext for Function {
             return Err(crate::errors::Error::forward_refusal(msg));
         }
 
-        match translate_function(&func.name, &func.args, schema, options) {
+        match translate_function(&func.name, &func.args, options) {
             FunctionTranslation::Rename(new_name) => {
                 let translated_args =
                     translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;

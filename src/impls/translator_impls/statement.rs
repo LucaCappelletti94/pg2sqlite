@@ -783,6 +783,10 @@ fn translate_alter_table_operation(
             column_position,
         } => {
             reject_unsupported_added_column(column_def, alter_table.name.to_string().as_str())?;
+            let table_scope = resolve_translation_table(schema, &alter_table.name)?
+                .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+            let scoped = table_scope.as_ref().map(|scope| options.with_scope(scope));
+            let options = scoped.as_ref().unwrap_or(options);
             Ok(Some(AlterTableOperation::AddColumn {
                 column_keyword: *column_keyword,
                 if_not_exists: *if_not_exists,

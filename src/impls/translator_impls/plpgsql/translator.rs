@@ -101,12 +101,7 @@ impl PlPgSqlTranslator {
         }
 
         for stmt in &body.statements {
-            // Rebuilt per statement, since a DECLARE or a SELECT INTO earlier
-            // in the body adds names the ones after it can read.
-            let variables: Vec<String> =
-                context.bindings().map(|binding| binding.name.clone()).collect();
-            let scoped = options.with_variables(&variables);
-            let translated = Self::translate_statement(stmt, &mut context, schema, &scoped, emit)?;
+            let translated = Self::translate_statement(stmt, &mut context, schema, options, emit)?;
             result.extend(translated);
         }
 
@@ -120,6 +115,10 @@ impl PlPgSqlTranslator {
         options: &crate::options::TranslationContext<'_>,
         emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Vec<Statement>, Error> {
+        let variables: Vec<String> =
+            context.bindings().map(|binding| binding.name.clone()).collect();
+        let scoped = options.with_variables(&variables);
+        let options = &scoped;
         match stmt {
             Statement::Set(set) => {
                 Self::handle_set_statement(set, context);

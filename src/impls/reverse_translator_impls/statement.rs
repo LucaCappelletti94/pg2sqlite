@@ -196,19 +196,25 @@ fn table_command_written_name(table: &Table) -> Option<String> {
     )
 }
 
+/// One query's CTE names and their visibility while its children are visited.
+struct CteScope {
+    aliases: Vec<Ident>,
+    body_visibility: Vec<(usize, usize)>,
+    visible_aliases: usize,
+    restore_parent_visibility: Option<usize>,
+}
+
 /// Walks a node refusing any reference that reaches a row-security backing
 /// table.
 struct RlsAstVisitor<'a> {
     names: &'a RlsTableNames<'a>,
-    /// One entry per nested query, holding the CTE alias spellings that query
-    /// introduced.
-    cte_scopes: Vec<Vec<Ident>>,
+    cte_scopes: Vec<CteScope>,
 }
 
 impl RlsAstVisitor<'_> {
     fn cte_binding(&self, reference: Written<'_>) -> CteBinding {
         for scope in self.cte_scopes.iter().rev() {
-            for alias in scope {
+            for alias in scope.aliases.iter().take(scope.visible_aliases) {
                 let alias = Written::from_ident(alias);
                 if !alias.sqlite_matches(&reference) {
                     continue;
@@ -238,6 +244,15 @@ impl RlsAstVisitor<'_> {
                     .refusal(reference, written)
                     .map(|_| cte_shadow_disagreement(&alias, written))
             }
+        }
+    }
+
+    fn pop_query_scope(&mut self) {
+        let restore = self.cte_scopes.pop().and_then(|scope| scope.restore_parent_visibility);
+        if let Some(restore) = restore
+            && let Some(parent) = self.cte_scopes.last_mut()
+        {
+            parent.visible_aliases = restore;
         }
     }
 
@@ -274,26 +289,54 @@ impl Visitor for RlsAstVisitor<'_> {
     type Break = Box<Error>;
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        let current_scope = query
-            .with
-            .as_ref()
-            .map(|with| {
-                with.cte_tables.iter().map(|cte| cte.alias.name.clone()).collect::<Vec<_>>()
+        let address = core::ptr::from_ref(query) as usize;
+        let restore_parent_visibility = self.cte_scopes.last_mut().and_then(|scope| {
+            let child_visibility = scope
+                .body_visibility
+                .iter()
+                .find_map(|(child, visible)| (*child == address).then_some(*visible));
+            child_visibility.map(|visible| {
+                let restore = scope.visible_aliases;
+                scope.visible_aliases = visible;
+                restore
             })
-            .unwrap_or_default();
-        self.cte_scopes.push(current_scope);
+        });
+        let (aliases, body_visibility) = query.with.as_ref().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |with| {
+                let recursive = usize::from(with.recursive);
+                let aliases =
+                    with.cte_tables.iter().map(|cte| cte.alias.name.clone()).collect::<Vec<_>>();
+                let body_visibility = with
+                    .cte_tables
+                    .iter()
+                    .enumerate()
+                    .map(|(index, cte)| {
+                        (core::ptr::from_ref(cte.query.as_ref()) as usize, index + recursive)
+                    })
+                    .collect();
+                (aliases, body_visibility)
+            },
+        );
+        let visible_aliases = aliases.len();
+        self.cte_scopes.push(CteScope {
+            aliases,
+            body_visibility,
+            visible_aliases,
+            restore_parent_visibility,
+        });
 
         match self.check_set_expr(query.body.as_ref()) {
             Ok(()) => ControlFlow::Continue(()),
             Err(err) => {
-                let _ = self.cte_scopes.pop();
+                self.pop_query_scope();
                 ControlFlow::Break(Box::new(err))
             }
         }
     }
 
     fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
-        let _ = self.cte_scopes.pop();
+        self.pop_query_scope();
         ControlFlow::Continue(())
     }
 

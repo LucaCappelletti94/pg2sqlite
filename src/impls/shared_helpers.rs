@@ -227,7 +227,7 @@ impl ColumnReferences {
 }
 
 struct FunctionColumnCollector {
-    columns: Vec<String>,
+    references: Vec<Expr>,
 }
 
 impl Visitor for FunctionColumnCollector {
@@ -239,11 +239,8 @@ impl Visitor for FunctionColumnCollector {
 
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
         match expr {
-            Expr::Identifier(ident) => self.columns.push(ident.value.clone()),
-            Expr::CompoundIdentifier(idents) => {
-                if let Some(ident) = idents.last() {
-                    self.columns.push(ident.value.clone());
-                }
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
+                self.references.push(expr.clone());
             }
             Expr::Wildcard(_) | Expr::QualifiedWildcard(..) | Expr::MatchAgainst { .. } => {
                 return ControlFlow::Break(());
@@ -281,14 +278,25 @@ pub(crate) fn extract_columns_from_expr(expr: &Expr) -> ColumnReferences {
     }
 }
 
+/// Returns every structured column reference in a function, unless it contains
+/// a query or wildcard.
+#[must_use]
+pub(crate) fn extract_column_references_from_function(function: &Function) -> Option<Vec<Expr>> {
+    let mut collector = FunctionColumnCollector { references: Vec::new() };
+    match function.visit(&mut collector) {
+        ControlFlow::Continue(()) => Some(collector.references),
+        ControlFlow::Break(()) => None,
+    }
+}
+
 /// Returns every column name in a function, unless it contains a query.
 #[must_use]
 pub(crate) fn extract_columns_from_function(function: &Function) -> ColumnReferences {
-    let mut collector = FunctionColumnCollector { columns: Vec::new() };
-    match function.visit(&mut collector) {
-        ControlFlow::Continue(()) => ColumnReferences::Complete(collector.columns),
-        ControlFlow::Break(()) => ColumnReferences::Unknown,
-    }
+    extract_column_references_from_function(function).map_or(ColumnReferences::Unknown, |refs| {
+        ColumnReferences::Complete(
+            refs.iter().filter_map(referenced_column_name).map(ToString::to_string).collect(),
+        )
+    })
 }
 
 /// The declared type of the column `expr` names, read through the relations in

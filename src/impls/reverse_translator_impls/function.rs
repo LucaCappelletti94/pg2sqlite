@@ -1391,11 +1391,8 @@ pub fn reverse_translate_function(
             )
         }
         FunctionReversal::JsonArrayLength => {
-            // json_array_length(json) vs jsonb_array_length(jsonb): PostgreSQL
-            // has both as distinct overloads. Use the argument's
-            // declared column type to pick. When the type is
-            // unknown or not jsonb, fall back to json_array_length,
-            // preserving the json behavior as the conservative default.
+            // The declared type chooses the overload, while unresolved columns
+            // refuse.
             let exprs = function_argument_exprs(&func.args);
             let arg = exprs.first().copied();
             let is_jsonb = match arg {

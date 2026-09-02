@@ -585,17 +585,14 @@ fn forward_expr_translation_covers_remaining_fts_extract_and_timezone_paths() {
     let tsquery_err_msg = unsupported_message(tsquery_not_literal_err);
     assert!(tsquery_err_msg.contains("to_tsquery"), "unexpected error: {tsquery_err_msg}");
 
-    // No GIN index declared at all: the new FTS-index gate fires with a clear
-    // "FTS5 index ... not declared" message before any deeper check runs.
-    // This pins the new gate so the silent-passthrough regression cannot
-    // come back.
+    // A naked expression has no active relation scope, so it must refuse
+    // instead of selecting the first schema table with a matching column.
     let no_index_schema = schema_from_sql("CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);");
     let no_index = parse_expr("to_tsvector(title) @@ to_tsquery('hello')");
     let err = no_index.translate(&no_index_schema, &options).unwrap_err();
-    let err_msg = unsupported_message(err);
     assert!(
-        err_msg.contains("FTS5 index") && err_msg.contains("not declared"),
-        "expected FTS-index gate error, got: {err_msg}"
+        unsupported_message(err).contains("Could not determine table name"),
+        "an unscoped expression must not guess a table"
     );
 
     let extract_epoch = parse_expr("EXTRACT(EPOCH FROM created_at)");

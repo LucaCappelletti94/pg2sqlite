@@ -173,6 +173,7 @@ struct PreparedSchema {
     options: Pg2SqliteOptions,
     epochs: Vec<PreparedEpoch>,
     had_rls_tables: bool,
+    initial_schema: Option<ParserDB>,
     complete: bool,
 }
 
@@ -503,6 +504,7 @@ impl Pg2Sqlite {
             None => false,
         };
         let complete = initial_schema.is_some();
+        let initial_namespace = initial_schema.cloned();
         let mut input = initial_schema
             .map_or_else(Self::translation_ingestor, |schema| schema.clone().into_ingestor());
         let mut epochs = Vec::new();
@@ -532,7 +534,14 @@ impl Pg2Sqlite {
             start = end;
         };
 
-        Ok(PreparedSchema { schema, options, epochs, had_rls_tables, complete })
+        Ok(PreparedSchema {
+            schema,
+            options,
+            epochs,
+            had_rls_tables,
+            complete,
+            initial_schema: initial_namespace,
+        })
     }
 
     fn translate_prepared(
@@ -542,7 +551,8 @@ impl Pg2Sqlite {
     ) -> Result<PreparedStatements, crate::errors::Error> {
         use sql_traits::traits::DatabaseLike;
 
-        let PreparedSchema { schema, options, epochs, had_rls_tables, complete } = prepared;
+        let PreparedSchema { schema, options, epochs, had_rls_tables, complete, initial_schema } =
+            prepared;
         let statements = &self.pg_statements;
         let mut context = if complete {
             TranslationContext::with_complete_schema(&options)
@@ -580,6 +590,7 @@ impl Pg2Sqlite {
             .map(generate_rls_audit_table);
 
         reject_name_collisions(
+            initial_schema.as_ref(),
             audit_table
                 .iter()
                 .map(|statement| (Source::Generated("the row-security audit table"), statement))

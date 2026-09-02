@@ -173,37 +173,66 @@ fn a_quoted_serial_carrying_a_capital_is_not_the_serial_shorthand() {
 }
 
 #[test]
-fn a_prefixed_call_the_script_does_not_define_is_taken_as_the_builtin() {
-    let emitted = translate("SELECT public.now() AS v;", &Pg2SqliteOptions::default())
-        .expect("nothing defines public.now, so it names the catalogue's now");
-    assert_eq!(emitted, ["SELECT datetime('now') AS v"]);
+fn a_prefixed_builtin_is_refused_without_identity() {
+    let message = refusal("SELECT public.now() AS v;", &Pg2SqliteOptions::default());
+    assert!(
+        message.contains("public.now") && message.contains("qualified"),
+        "the refusal should preserve the written identity, got: {message}"
+    );
 }
 
 #[test]
-fn a_prefixed_extension_function_keeps_translating() {
-    let emitted = translate(
+fn a_prefixed_extension_function_is_refused_without_identity() {
+    let message = refusal(
         "CREATE TABLE t (id TEXT DEFAULT public.gen_random_uuid());",
         &Pg2SqliteOptions::default(),
-    )
-    .expect("pgcrypto may live in a named schema");
+    );
     assert!(
-        emitted[0].contains("uuid()"),
-        "the default should still generate a uuid, got: {emitted:?}"
+        message.contains("public.gen_random_uuid") && message.contains("qualified"),
+        "the refusal should preserve the written identity, got: {message}"
     );
 }
 
-/// The discrimination rests on what the script defines, and a definition
-/// records only its last segment, so a prefixed call to a function the script
-/// never defines is still read as the catalogue's. Pinned rather than fixed:
-/// nothing in the input says otherwise, and refusing every prefixed call would
-/// take `public.gen_random_uuid()` with it.
 #[test]
-fn a_prefixed_call_to_an_undefined_function_is_still_read_as_the_builtin() {
-    let emitted =
-        translate("CREATE SCHEMA app; SELECT app.random() AS v;", &Pg2SqliteOptions::default())
-            .expect("nothing in the script claims this name");
+fn a_prefixed_custom_name_is_not_taken_as_the_builtin() {
+    let message =
+        refusal("CREATE SCHEMA app; SELECT app.random() AS v;", &Pg2SqliteOptions::default());
     assert!(
-        emitted[0].contains("random()"),
-        "the built-in rewrite is what this answers today, got: {emitted:?}"
+        message.contains("app.random") && message.contains("qualified"),
+        "the refusal should preserve the written identity, got: {message}"
     );
+}
+
+#[test]
+fn qualified_fts_functions_are_not_taken_as_builtins() {
+    for expression in ["app.to_tsvector(body)", "to_tsvector(app.lower(body))"] {
+        let message = refusal(
+            &format!(
+                "CREATE SCHEMA app; CREATE TABLE docs (id INT PRIMARY KEY, body TEXT); \
+                 CREATE INDEX docs_fts ON docs USING GIN ({expression});"
+            ),
+            &Pg2SqliteOptions::default(),
+        );
+        assert!(
+            message.contains("to_tsvector"),
+            "the refusal should name the unsupported index expression, got: {message}"
+        );
+    }
+}
+
+#[test]
+fn quoted_fts_functions_with_capitals_are_not_taken_as_builtins() {
+    for expression in [r#""TO_TSVECTOR"(body)"#, r#"to_tsvector("LOWER"(body))"#] {
+        let message = refusal(
+            &format!(
+                "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT); \
+                 CREATE INDEX docs_fts ON docs USING GIN ({expression});"
+            ),
+            &Pg2SqliteOptions::default(),
+        );
+        assert!(
+            message.contains("to_tsvector"),
+            "the refusal should name the unsupported index expression, got: {message}"
+        );
+    }
 }

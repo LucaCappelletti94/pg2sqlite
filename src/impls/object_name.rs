@@ -47,6 +47,25 @@ pub(crate) fn last_catalog_name(name: &ObjectName) -> Option<String> {
     last_ident(name).and_then(catalog_name)
 }
 
+/// The PostgreSQL catalogue function name named by an unqualified call or an
+/// explicit `pg_catalog` call.
+#[must_use]
+pub(crate) fn postgres_catalog_function_name(name: &ObjectName) -> Option<String> {
+    let function = last_ident(name).and_then(catalog_name)?;
+    match name.0.as_slice() {
+        [_] => Some(function),
+        [schema, _]
+            if schema
+                .as_ident()
+                .and_then(catalog_name)
+                .is_some_and(|schema| schema == "pg_catalog") =>
+        {
+            Some(function)
+        }
+        _ => None,
+    }
+}
+
 /// Returns the last identifier's value if `name` ends in a bare identifier.
 /// Otherwise falls back to the full `ObjectName`'s `Display` form. Useful when
 /// synthesizing single-quoted SQL string literals from a table or column

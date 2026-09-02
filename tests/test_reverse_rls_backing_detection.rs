@@ -162,6 +162,19 @@ fn a_cte_alias_matching_a_backing_table_exactly_still_shadows_it() {
 }
 
 #[test]
+fn a_cte_alias_does_not_shadow_the_same_name_inside_its_body() {
+    let error = refusal(
+        "WITH docs_rls AS (SELECT id FROM docs_rls) SELECT * FROM docs_rls",
+        SECURED,
+        &Pg2SqliteOptions::default(),
+    );
+    assert!(
+        matches!(&error, Error::RlsTableDetected { .. }),
+        "the CTE body still reads the backing table, got: {error:?}"
+    );
+}
+
+#[test]
 fn an_empty_suffix_is_refused_when_translating_forward() {
     let error = Pg2Sqlite::default()
         .sql("CREATE TABLE t (id INT PRIMARY KEY);")

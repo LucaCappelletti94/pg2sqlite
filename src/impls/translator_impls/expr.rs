@@ -13,7 +13,7 @@ use alloc::{
 };
 
 use sql_traits::{
-    structs::ParserDB,
+    structs::{ColumnDefinition, ParserDB},
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
@@ -33,14 +33,16 @@ use crate::{
         },
         idioms::wrap_with_lower,
         interval::{interval_date_modifiers, interval_date_modifiers_scaled},
+        object_name::postgres_catalog_function_name,
         query_builder::{
             from_relation, plain_table_factor, single_expr_query, table_function_factor,
         },
         session_variable,
         shared_helpers::{
-            ColumnReferences, declared_numeric_precision, declared_type_matches,
-            extract_columns_from_function, function_argument_exprs, is_integral_expression,
-            numeric_scale, rescale_minor_units, scale_decimal_literal, translate_expr_recursive,
+            declared_numeric_precision, declared_type_matches,
+            extract_column_references_from_function, function_argument_exprs,
+            is_integral_expression, numeric_scale, referenced_column_name, rescale_minor_units,
+            scale_decimal_literal, translate_expr_recursive,
         },
         temporal_arithmetic::{epoch_of_temporal_difference, translate_temporal_binary_op},
         timezone::{
@@ -99,18 +101,13 @@ fn translate_tsquery_to_fts5(tsquery: &str) -> String {
 
 /// Check if a function is to_tsvector.
 fn is_to_tsvector(func: &Function) -> bool {
-    func.name
-        .0
-        .last()
-        .and_then(|p| p.as_ident())
-        .is_some_and(|i| i.value.to_lowercase() == "to_tsvector")
+    postgres_catalog_function_name(&func.name).is_some_and(|name| name == "to_tsvector")
 }
 
 /// Check if a function is to_tsquery or plainto_tsquery or phraseto_tsquery.
 fn is_to_tsquery(func: &Function) -> bool {
-    func.name.0.last().and_then(|p| p.as_ident()).is_some_and(|i| {
-        let name = i.value.to_lowercase();
-        name == "to_tsquery" || name == "plainto_tsquery" || name == "phraseto_tsquery"
+    postgres_catalog_function_name(&func.name).is_some_and(|name| {
+        matches!(name.as_str(), "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery")
     })
 }
 
@@ -131,22 +128,36 @@ fn translate_fts_expression(
                 .to_string(),
         )
     };
-    let columns = match extract_columns_from_function(tsvector_func) {
-        ColumnReferences::Complete(columns) => columns,
-        ColumnReferences::Unknown => return Err(unresolved_table()),
-    };
-    let table = schema
-        .tables()
-        .find(|table| {
-            if columns.is_empty() {
-                return false;
+    let references =
+        extract_column_references_from_function(tsvector_func).ok_or_else(&unresolved_table)?;
+    if references.is_empty() {
+        return Err(unresolved_table());
+    }
+    let columns = references
+        .iter()
+        .filter_map(referenced_column_name)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let mut table: Option<&<ParserDB as DatabaseLike>::Table> = None;
+    for reference in &references {
+        let mut resolved = None;
+        for definition in options.column_definitions(reference, None) {
+            match definition.map_err(|_| unresolved_table())? {
+                Some(ColumnDefinition::Base { table, .. }) => {
+                    resolved = Some(table);
+                    break;
+                }
+                Some(_) => return Err(unresolved_table()),
+                None => {}
             }
-            let Ok(table_column_iter) = table.columns(schema) else { return false };
-            let table_columns: alloc::collections::BTreeSet<_> =
-                table_column_iter.map(|c| c.column_name().to_lowercase()).collect();
-            columns.iter().all(|col| table_columns.contains(&col.to_lowercase()))
-        })
-        .ok_or_else(unresolved_table)?;
+        }
+        let resolved = resolved.ok_or_else(&unresolved_table)?;
+        if table.is_some_and(|table| table.table_name() != resolved.table_name()) {
+            return Err(unresolved_table());
+        }
+        table = Some(resolved);
+    }
+    let table = table.ok_or_else(unresolved_table)?;
     let table_name = table.table_name().to_string();
 
     // Gate the rewrite on the column having a declared GIN / GiST
@@ -188,10 +199,18 @@ fn translate_fts_expression(
     let fts5_query = translate_tsquery_to_fts5(&query_str);
     let fts_table_name = format!("{table_name}_fts");
 
-    // Build: pk_col IN (SELECT rowid FROM table_fts WHERE table_fts MATCH
-    // 'query')
+    let pk_reference = match &references[0] {
+        Expr::CompoundIdentifier(parts) => {
+            let mut parts = parts.clone();
+            if let Some(column) = parts.last_mut() {
+                *column = Ident::new(pk_column);
+            }
+            Expr::CompoundIdentifier(parts)
+        }
+        _ => Expr::Identifier(Ident::new(pk_column)),
+    };
     Ok(Expr::InSubquery {
-        expr: Box::new(Expr::Identifier(Ident::new(pk_column))),
+        expr: Box::new(pk_reference),
         subquery: Box::new(single_expr_query(
             Expr::Identifier(Ident::new("rowid")),
             from_relation(plain_table_factor(ObjectName(vec![ObjectNamePart::Identifier(
@@ -1498,6 +1517,7 @@ fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bo
         match expr {
             Expr::Value(ValueWithSpan { value: Value::Number(_, _), .. }) => true,
             Expr::Value(_) => false,
+            Expr::Nested(inner) => numeric_candidate(inner),
             Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
                 numeric_candidate(expr)
             }
