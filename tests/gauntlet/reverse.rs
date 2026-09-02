@@ -449,7 +449,8 @@ fn reverse_output_runs_in_postgres() {
     for &(sqlite_input, source) in ACCEPT_CASES {
         let pg_sql = match Pg2Sqlite::default().reverse_sql(sqlite_input, &schema, &options) {
             Err(e) => {
-                // The translator refused something that all existing tests accept.
+                // The translator refused something that all existing tests
+                // accept.
                 failures.push(format!("[{source}] translator refused {sqlite_input:?}: {e}"));
                 n += 1;
                 continue;

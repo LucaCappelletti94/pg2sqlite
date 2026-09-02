@@ -61,7 +61,8 @@ fn concat_single_arg_passthrough() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
                SELECT concat(name) FROM t;";
     let output = translate(sql).unwrap();
-    // With a single arg, CONCAT(name) should become just `name` (no || operator)
+    // With a single arg, CONCAT(name) should become just `name` (no ||
+    // operator)
     assert!(!output.contains("||"), "Single arg CONCAT should not use ||, got: {output}");
     assert!(
         output.contains("name"),

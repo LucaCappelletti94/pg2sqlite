@@ -35,7 +35,7 @@ use sqlparser::{
         CreatePolicy, CreatePolicyCommand, CreatePolicyType, CreateTable, DataType, Expr, Function,
         FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
         FunctionArguments, HavingBound, Ident, JoinConstraint, JoinOperator, ListAggOnOverflow,
-        ObjectName, ObjectNamePart, Owner, SelectItem, SetExpr, Statement, TableFactor,
+        ObjectName, ObjectNamePart, Owner, SelectItem, SetExpr, Statement, TableAlias, TableFactor,
         TriggerEvent, TriggerPeriod, UnaryOperator, Value, ValueWithSpan, VisitMut, VisitorMut,
         WindowType,
     },
@@ -53,7 +53,7 @@ use crate::{
             from_relation, make_query, make_simple_select, plain_table_factor, single_expr_query,
         },
         session_variable,
-        shared_helpers::{join_constraint_mut, join_constraint_ref},
+        shared_helpers::{join_constraint_mut, join_constraint_ref, relations_scope_query},
         translator_impls::column::declared_default,
     },
     options::Pg2SqliteOptions,
@@ -329,8 +329,8 @@ fn combine_policy_predicates(
     let table_rename = Some(ctx.as_rename_tuple());
 
     // Both sets are resolved once here rather than inside the recursive
-    // transformer, which keeps that transformer total and avoids re-querying the
-    // schema at every node it visits.
+    // transformer, which keeps that transformer total and avoids re-querying
+    // the schema at every node it visits.
     let lowercased_columns: Vec<String> =
         table.columns(schema)?.map(|c| c.column_name().to_lowercase()).collect();
     let facts = ResolvedSchemaFacts { lowercased_columns: &lowercased_columns };
@@ -379,7 +379,25 @@ fn combine_policy_predicates(
         // cannot smuggle an untranslated operator or function into the emitted
         // view or trigger guard, where it would fail at apply time (ILIKE) or
         // lie dormant until the first read (now, date_trunc).
-        let transformed = transformed.translate_with_warnings(schema, options, emit)?;
+        // The emitted backing-table name is an alias of the declared table for
+        // type resolution.
+        let scope_query;
+        let policy_scope = if let Some((_, renamed)) = table_rename {
+            let mut relation = plain_table_factor(table.name.clone());
+            let TableFactor::Table { alias, .. } = &mut relation else { unreachable!() };
+            *alias = Some(TableAlias {
+                explicit: true,
+                name: Ident::new(renamed),
+                columns: Vec::new(),
+                at: None,
+            });
+            scope_query = relations_scope_query(from_relation(relation));
+            sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?
+        } else {
+            sql_traits::structs::ColumnScope::for_table(table, schema)
+        };
+        let scoped = options.with_pseudo_row_scope(&policy_scope);
+        let transformed = transformed.translate_with_warnings(schema, &scoped, emit)?;
         // A literally-true predicate constrains nothing. For a permissive
         // policy this means the permissive OR is satisfied for every row, so
         // we record that and skip adding any conjunct for it. For a restrictive
@@ -535,6 +553,27 @@ pub fn resolve_trigger_table_name(
     } else {
         Ok(base_name.to_string())
     }
+}
+
+/// Refuses a backing table suffix that cannot separate a secured table from the
+/// view that replaces it.
+///
+/// The empty string is the one value that breaks the scheme outright: forward
+/// translation would give the backing table and its view one name, and reverse
+/// translation would read every name as a backing table, since every name ends
+/// with nothing.
+///
+/// # Errors
+///
+/// Returns [`Error::EmptyRlsTableSuffix`](crate::errors::Error::EmptyRlsTableSuffix)
+/// when the configured suffix is empty.
+pub fn ensure_usable_rls_table_suffix(
+    options: &Pg2SqliteOptions,
+) -> Result<(), crate::errors::Error> {
+    if options.get_rls_table_suffix().is_empty() {
+        return Err(crate::errors::Error::EmptyRlsTableSuffix);
+    }
+    Ok(())
 }
 
 fn build_row_identity_clause(columns: &[String], pk_columns: &[String]) -> Expr {
@@ -1256,14 +1295,12 @@ fn transform_query(
     facts: ResolvedSchemaFacts<'_>,
 ) -> sqlparser::ast::Query {
     let mut transformed = query.clone();
-    let rls_suffix = options.get_rls_table_suffix();
     let context = SubqueryTransformContext {
         options,
         table,
         schema,
         prefix,
         outer_table,
-        rls_suffix,
         lowercased_columns: facts.lowercased_columns,
     };
 
@@ -1355,7 +1392,6 @@ struct SubqueryTransformContext<'a> {
     schema: &'a ParserDB,
     prefix: Option<&'a str>,
     outer_table: Option<(&'a str, &'a str)>,
-    rls_suffix: &'a str,
     /// The host table's column names, lower-cased once by the caller.
     lowercased_columns: &'a [String],
 }
@@ -1396,11 +1432,6 @@ fn transform_table_factor_for_subquery(
         TableFactor::Table { name, .. } => {
             let old_name =
                 last_ident(name).map_or_else(|| name.to_string(), |ident| ident.value.clone());
-            if old_name.ends_with(context.rls_suffix) {
-                subquery_table_renames.push((old_name.clone(), old_name));
-                return;
-            }
-
             // Every reference keeps the name the policy wrote, so a second
             // guarded table is read through its view and its own policy filters
             // what this subquery sees, which is how PostgreSQL evaluates it.
@@ -2299,15 +2330,17 @@ fn generate_rls_statements_with_mode(
 
         // Backing-table BEFORE INSERT guard: emitted in both monitor and strict
         // mode so raw backing writes (RETURNING redirect, ON CONFLICT redirect,
-        // direct insert) are also covered. Skipped when AllowAll (no guard needed).
+        // direct insert) are also covered. Skipped when AllowAll (no guard
+        // needed).
         if let Some(check) = generate_insert_check_trigger_sql(table, schema, options, emit)? {
             statements.push(check);
         }
 
         // Backing-table BEFORE UPDATE guard: covers ON CONFLICT DO UPDATE and
         // any direct backing UPDATE. The view-path INSTEAD OF UPDATE trigger
-        // already filters by USING before forwarding, so this guard never raises
-        // on the view path. Skipped when AllowAll (no guard needed).
+        // already filters by USING before forwarding, so this guard never
+        // raises on the view path. Skipped when AllowAll (no guard
+        // needed).
         if let Some(check) = generate_update_check_trigger_sql(table, schema, options, emit)? {
             statements.push(check);
         }
@@ -2322,10 +2355,10 @@ fn generate_rls_statements_with_mode(
         statements.extend(generate_readonly_backing_guard_sql(table, options));
     }
 
-    // A deny-all view makes the monitor useless rather than strict: its check asks
-    // whether a backing row is visible through the view, which is always no here,
-    // so it would flag every write and distinguish nothing. Report the
-    // configuration once now instead of once per row at runtime.
+    // A deny-all view makes the monitor useless rather than strict: its check
+    // asks whether a backing row is visible through the view, which is
+    // always no here, so it would flag every write and distinguish nothing.
+    // Report the configuration once now instead of once per row at runtime.
     if matches!(rls_read_predicate(table, schema, options, emit)?, PolicyPredicate::DenyAll) {
         emit(crate::warnings::TranslationWarning::RlsDeniesEveryRow {
             table: table.table_name().to_owned(),
@@ -2840,8 +2873,8 @@ mod tests {
         );
 
         // PostgreSQL reads a quoted `"current_user"` as a column name, so the
-        // transformer must not mistake it for the keyword. It is not a column of
-        // this table, so it takes no prefix either.
+        // transformer must not mistake it for the keyword. It is not a column
+        // of this table, so it takes no prefix either.
         let quoted = transform_expr(
             &parse_expr("\"current_user\""),
             &options,
@@ -2924,7 +2957,6 @@ mod tests {
             schema: &schema,
             prefix: Some("NEW"),
             outer_table: Some(("docs", "docs_rls")),
-            rls_suffix: options.get_rls_table_suffix(),
             lowercased_columns: &lowercased_columns,
         };
 
@@ -3002,7 +3034,6 @@ mod tests {
             schema: &schema,
             prefix: Some("NEW"),
             outer_table: Some(("docs", "docs_rls")),
-            rls_suffix: options.get_rls_table_suffix(),
             lowercased_columns: &lowercased_columns,
         };
 
@@ -3066,8 +3097,8 @@ mod tests {
         );
         assert_eq!(renamed_compound.to_string(), "docs_inner.owner_id");
 
-        // Qualified identifier with BOTH a prefix and a rename: the prefix wins,
-        // which is the branch the collapsed strategy resolves via
+        // Qualified identifier with BOTH a prefix and a rename: the prefix
+        // wins, which is the branch the collapsed strategy resolves via
         // `prefix.unwrap_or(new_name)`.
         let prefixed_over_rename = transform_expr(
             &parse_expr("docs.owner_id"),

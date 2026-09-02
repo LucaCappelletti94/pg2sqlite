@@ -11,6 +11,7 @@
 pub use sqlparser_plpgsql::{PlPgSqlContext, VariableBinding, parse_body};
 
 mod cte_builder;
+pub(crate) use cte_builder::VARIABLE_VALUE_COLUMN;
 mod translator;
 
 pub use translator::PlPgSqlTranslator;

@@ -223,8 +223,9 @@ fn glob_question_converts_to_like_underscore() {
 
 #[test]
 fn glob_literal_percent_in_pattern_is_escaped_for_like() {
-    // A `%` in a GLOB pattern is literal (GLOB does not treat it as a wildcard).
-    // It must be escaped in the LIKE pattern so it does not become a wildcard.
+    // A `%` in a GLOB pattern is literal (GLOB does not treat it as a
+    // wildcard). It must be escaped in the LIKE pattern so it does not
+    // become a wildcard.
     let out = ok("SELECT s FROM t WHERE s GLOB 'a%b'");
     assert!(
         out.contains("LIKE") && out.contains(r"\%"),

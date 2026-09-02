@@ -14,7 +14,7 @@ use alloc::{
 use core::ops::ControlFlow;
 
 use sql_traits::{
-    structs::ParserDB,
+    structs::{ColumnDefinition, ParserDB},
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
@@ -27,14 +27,15 @@ use sqlparser::ast::{
     SetQuantifier, Setting, Statement, SymbolDefinition, TableAlias, TableFactor,
     TableFunctionArgs, TableSample, TableSampleBucket, TableSampleKind, TableSampleQuantity,
     TableVersion, TableWithJoins, UnaryOperator, UpdateTableFromKind, Value, ValueWithSpan, Values,
-    WindowFrame, WindowFrameBound, WindowSpec, WindowType, With, WithFill, XmlNamespaceDefinition,
-    XmlPassingArgument, XmlPassingClause, XmlTableColumn, XmlTableColumnOption, visit_expressions,
+    Visit, Visitor, WindowFrame, WindowFrameBound, WindowSpec, WindowType, With, WithFill,
+    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
+    XmlTableColumnOption, visit_expressions,
 };
 
 use crate::{
     errors::Error,
     impls::{
-        object_name::{last_ident, table_with_implicit_public_lookup},
+        object_name::{last_ident, resolve_translation_table},
         query_builder::{from_relation, make_query, make_simple_select},
         translator_impls::{
             uuid::{
@@ -61,6 +62,21 @@ pub(crate) trait TranslationDirection {
     ) -> Option<&'options crate::options::TranslationContext<'config>> {
         None
     }
+
+    /// The `WITH` clause of the query being translated, so a scope built for
+    /// one arm of a set operation keeps a CTE reference opaque.
+    fn cte_clause<'options>(
+        _options: &'options Self::Options<'_>,
+    ) -> Option<&'options sqlparser::ast::With> {
+        None
+    }
+
+    /// The same options with `scope` attached, which is how a `SELECT` puts its
+    /// own relations in scope for the expressions inside it.
+    fn with_scope<'scope>(
+        options: &'scope Self::Options<'_>,
+        scope: &'scope sql_traits::structs::ColumnScope<'scope, 'scope, ParserDB>,
+    ) -> Self::Options<'scope>;
 
     fn translate_expr(
         expr: &Expr,
@@ -189,95 +205,417 @@ pub(crate) fn referenced_column_name(expr: &Expr) -> Option<&str> {
     }
 }
 
-/// Every column name `expr` mentions, in the order it mentions them.
-///
-/// The plural sibling of [`referenced_column_name`], which answers for a single
-/// reference. A compound name contributes its last part, since the qualifier
-/// may be an alias, and anything that is not a reference contributes nothing.
-#[must_use]
-pub(crate) fn extract_columns_from_expr(expr: &Expr) -> Vec<String> {
-    match expr {
-        Expr::Identifier(ident) => vec![ident.value.clone()],
-        Expr::CompoundIdentifier(idents) => {
-            idents.last().map(|i| vec![i.value.clone()]).unwrap_or_default()
+/// The complete column references in an expression, or an explicit unknown
+/// result when resolving names requires query scope.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ColumnReferences {
+    Complete(Vec<String>),
+    Unknown,
+}
+
+impl ColumnReferences {
+    fn extend(&mut self, other: Self) {
+        match other {
+            Self::Unknown => *self = Self::Unknown,
+            Self::Complete(mut additional) => {
+                if let Self::Complete(columns) = self {
+                    columns.append(&mut additional);
+                }
+            }
         }
-        Expr::BinaryOp { left, right, .. } => {
-            let mut columns = extract_columns_from_expr(left);
-            columns.extend(extract_columns_from_expr(right));
-            columns
-        }
-        Expr::Nested(inner) => extract_columns_from_expr(inner),
-        Expr::Function(function) => extract_columns_from_function(function),
-        Expr::Cast { expr, .. } => extract_columns_from_expr(expr),
-        _ => Vec::new(),
     }
 }
 
-/// Every column name the arguments of `function` mention.
-#[must_use]
-pub(crate) fn extract_columns_from_function(function: &Function) -> Vec<String> {
-    function_argument_exprs(&function.args)
-        .into_iter()
-        .flat_map(extract_columns_from_expr)
-        .collect()
+struct FunctionColumnCollector {
+    columns: Vec<String>,
 }
 
-/// Fold over every column in the schema named by `expr`, stopping as soon as
-/// `read` returns `None`.
+impl Visitor for FunctionColumnCollector {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
+        ControlFlow::Break(())
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        match expr {
+            Expr::Identifier(ident) => self.columns.push(ident.value.clone()),
+            Expr::CompoundIdentifier(idents) => {
+                if let Some(ident) = idents.last() {
+                    self.columns.push(ident.value.clone());
+                }
+            }
+            Expr::Wildcard(_) | Expr::QualifiedWildcard(..) | Expr::MatchAgainst { .. } => {
+                return ControlFlow::Break(());
+            }
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Returns every column name `expr` mentions.
+#[must_use]
+pub(crate) fn extract_columns_from_expr(expr: &Expr) -> ColumnReferences {
+    match expr {
+        Expr::Identifier(ident) => ColumnReferences::Complete(vec![ident.value.clone()]),
+        Expr::CompoundIdentifier(idents) => {
+            ColumnReferences::Complete(
+                idents.last().map(|ident| vec![ident.value.clone()]).unwrap_or_default(),
+            )
+        }
+        Expr::Function(function) => extract_columns_from_function(function),
+        Expr::Subquery(_)
+        | Expr::Exists { .. }
+        | Expr::InSubquery { .. }
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(..)
+        | Expr::MatchAgainst { .. } => ColumnReferences::Unknown,
+        _ => {
+            let mut columns = ColumnReferences::Complete(Vec::new());
+            crate::impls::expr_helpers::for_each_child_expr(expr, &mut |child| {
+                columns.extend(extract_columns_from_expr(child));
+            });
+            columns
+        }
+    }
+}
+
+/// Returns every column name in a function, unless it contains a query.
+#[must_use]
+pub(crate) fn extract_columns_from_function(function: &Function) -> ColumnReferences {
+    let mut collector = FunctionColumnCollector { columns: Vec::new() };
+    match function.visit(&mut collector) {
+        ControlFlow::Continue(()) => ColumnReferences::Complete(collector.columns),
+        ControlFlow::Break(()) => ColumnReferences::Unknown,
+    }
+}
+
+/// The declared type of the column `expr` names, read through the relations in
+/// scope.
 ///
-/// The answer has to be unanimous, since the qualifier is dropped, and the
-/// early stop is what keeps this off the hot path: a first column that already
-/// settles the question ends the walk instead of visiting every table.
+/// Three answers, and the difference between the last two is what keeps a guess
+/// out of the output:
+///
+/// - `Ok(None)` when `expr` is not a column reference, so there is nothing to
+///   resolve and nothing to refuse,
+/// - `Ok(Some(_))` when the scope resolves the reference and `read` accepts the
+///   declared type, or `Ok(None)` when `read` declines it,
+/// - an error when `expr` is a reference the relations in scope cannot answer.
+///   That case used to be answered by scanning every table in the schema for a
+///   column of the same name, which reads another table's type when the names
+///   collide.
 ///
 /// `read` needs the structured type, so the parsed DDL is read directly rather
 /// than through `ColumnLike::data_type`, which answers a normalised token.
-pub(crate) fn unanimous_declared<T: PartialEq>(
+pub(crate) fn declared_in_scope<T: PartialEq>(
     expr: &Expr,
     schema: &ParserDB,
-    read: impl Fn(&DataType) -> Option<T>,
-) -> Option<T> {
-    let column_name = referenced_column_name(expr)?;
-    let mut answer: Option<T> = None;
-    for table in schema.tables() {
-        let Ok(mut columns) = table.columns(schema) else { continue };
-        let Some(column) = columns.find(|c| c.column_name().eq_ignore_ascii_case(column_name))
+    options: &crate::options::TranslationContext<'_>,
+    read_type: impl Fn(&DataType) -> Option<T>,
+    read_expression: impl Fn(
+        &Expr,
+        &ParserDB,
+        &crate::options::TranslationContext<'_>,
+    ) -> Result<Option<T>, crate::errors::Error>,
+) -> Result<Option<T>, crate::errors::Error> {
+    let reference = strip_nesting(expr);
+    let bare_column;
+    let pseudo_row_reference = match reference {
+        Expr::CompoundIdentifier(parts)
+            if parts.len() == 2
+                && matches!(parts[0].value.to_ascii_uppercase().as_str(), "NEW" | "OLD") =>
+        {
+            bare_column = Expr::Identifier(parts[1].clone());
+            Some(&bare_column)
+        }
+        _ => None,
+    };
+    let Some(column_name) = referenced_column_name(pseudo_row_reference.unwrap_or(reference))
+    else {
+        return Ok(None);
+    };
+    if column_name.eq_ignore_ascii_case("rowid")
+        || column_name == crate::impls::translator_impls::plpgsql::VARIABLE_VALUE_COLUMN
+        || options.is_variable(column_name)
+    {
+        return Ok(None);
+    }
+
+    let mut tried_any = false;
+    for definition in options.column_definitions(reference, pseudo_row_reference) {
+        tried_any = true;
+        let Some(definition) = definition.map_err(|error| {
+            unresolved_reference(
+                reference,
+                &format!("more than one relation in scope exposes it ({error})"),
+            )
+        })?
         else {
             continue;
         };
-        let read = read(&column.attribute().data_type)?;
-        match &answer {
-            Some(previous) if *previous != read => return None,
-            Some(_) => {}
-            None => answer = Some(read),
+        return match evaluate_definition(
+            &definition,
+            schema,
+            options,
+            &read_type,
+            &read_expression,
+        )? {
+            DefinitionValue::Known(value) => Ok(value),
+            DefinitionValue::Opaque => {
+                Err(unresolved_reference(
+                    reference,
+                    "the relation exposes the column without an inspectable definition",
+                ))
+            }
+        };
+    }
+
+    Err(unresolved_reference(
+        reference,
+        if tried_any {
+            "no relation in scope declares it"
+        } else {
+            "no relation is in scope where this expression appears"
+        },
+    ))
+}
+
+enum DefinitionValue<T> {
+    Known(Option<T>),
+    Opaque,
+}
+
+fn evaluate_definition<T: PartialEq>(
+    definition: &ColumnDefinition<'_, '_, '_, ParserDB>,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    read_type: &impl Fn(&DataType) -> Option<T>,
+    read_expression: &impl Fn(
+        &Expr,
+        &ParserDB,
+        &crate::options::TranslationContext<'_>,
+    ) -> Result<Option<T>, crate::errors::Error>,
+) -> Result<DefinitionValue<T>, crate::errors::Error> {
+    match definition {
+        ColumnDefinition::Base { column, .. } => {
+            Ok(DefinitionValue::Known(read_type(&column.attribute().data_type)))
+        }
+        ColumnDefinition::Expression { expression, scope } => {
+            let scoped = options.with_definition_scope(*scope);
+            Ok(DefinitionValue::Known(read_expression(expression, schema, &scoped)?))
+        }
+        ColumnDefinition::SetOperation { left, right, .. } => {
+            let left = evaluate_definition(
+                &left.definition(),
+                schema,
+                options,
+                read_type,
+                read_expression,
+            )?;
+            let right = evaluate_definition(
+                &right.definition(),
+                schema,
+                options,
+                read_type,
+                read_expression,
+            )?;
+            Ok(match (left, right) {
+                (DefinitionValue::Known(left), DefinitionValue::Known(right)) if left == right => {
+                    DefinitionValue::Known(left)
+                }
+                (DefinitionValue::Opaque, _) | (_, DefinitionValue::Opaque) => {
+                    DefinitionValue::Opaque
+                }
+                _ => DefinitionValue::Known(None),
+            })
+        }
+        ColumnDefinition::RecursiveUnion { anchor, .. } => {
+            evaluate_definition(&anchor.definition(), schema, options, read_type, read_expression)
+        }
+        ColumnDefinition::Opaque => Ok(DefinitionValue::Opaque),
+    }
+}
+
+/// The query a column scope should be built from, when the written one has a
+/// shape the resolver reads as opaque.
+///
+/// A nested join is one: `FROM (a JOIN b) JOIN c` hides `a` and `b`, so the
+/// relations are flattened into a list. The `WITH` clause travels along, since
+/// a reference to a CTE must stay unresolvable rather than match a base table
+/// of the same name. `None` means the written query needs no substitute.
+pub(crate) fn scope_query_for(query: &Query) -> Option<Query> {
+    let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    if !select.from.iter().any(has_nested_join) {
+        return None;
+    }
+    let mut flattened = Vec::new();
+    for entry in &select.from {
+        flatten_relations(entry, &mut flattened);
+    }
+    let mut substitute = relations_scope_query(flattened);
+    substitute.with.clone_from(&query.with);
+    Some(substitute)
+}
+fn scope_query_after_factor_rewrites(
+    select: &sqlparser::ast::Select,
+    translated_from: &[sqlparser::ast::TableWithJoins],
+    with: Option<sqlparser::ast::With>,
+) -> Option<Query> {
+    fn replace_factor(
+        written: &mut sqlparser::ast::TableFactor,
+        translated: &sqlparser::ast::TableFactor,
+    ) -> bool {
+        match (&mut *written, translated) {
+            (
+                sqlparser::ast::TableFactor::Table { args: Some(_), .. }
+                | sqlparser::ast::TableFactor::Function { .. }
+                | sqlparser::ast::TableFactor::UNNEST { .. },
+                sqlparser::ast::TableFactor::Derived { .. },
+            ) => {
+                *written = translated.clone();
+                true
+            }
+            (
+                sqlparser::ast::TableFactor::NestedJoin { table_with_joins: written, .. },
+                sqlparser::ast::TableFactor::NestedJoin { table_with_joins: translated, .. },
+            ) => replace_entry(written, translated),
+            _ => false,
         }
     }
-    answer
+
+    fn replace_entry(
+        written: &mut sqlparser::ast::TableWithJoins,
+        translated: &sqlparser::ast::TableWithJoins,
+    ) -> bool {
+        let mut changed = replace_factor(&mut written.relation, &translated.relation);
+        for (written, translated) in written.joins.iter_mut().zip(&translated.joins) {
+            changed |= replace_factor(&mut written.relation, &translated.relation);
+        }
+        changed
+    }
+
+    let mut relations = select.from.clone();
+    let mut changed = false;
+    for (written, translated) in relations.iter_mut().zip(translated_from) {
+        changed |= replace_entry(written, translated);
+    }
+    if !changed {
+        return None;
+    }
+
+    let mut scoped_select = select.clone();
+    scoped_select.from = relations;
+    let query = crate::impls::query_builder::make_query(
+        with,
+        sqlparser::ast::SetExpr::Select(Box::new(scoped_select)),
+    );
+    scope_query_for(&query).or(Some(query))
+}
+
+fn has_nested_join(entry: &sqlparser::ast::TableWithJoins) -> bool {
+    core::iter::once(&entry.relation)
+        .chain(entry.joins.iter().map(|join| &join.relation))
+        .any(|factor| matches!(factor, sqlparser::ast::TableFactor::NestedJoin { .. }))
+}
+
+/// Appends `entry` and everything a nested join inside it hides.
+fn flatten_relations(
+    entry: &sqlparser::ast::TableWithJoins,
+    out: &mut Vec<sqlparser::ast::TableWithJoins>,
+) {
+    let mut factors = vec![&entry.relation];
+    factors.extend(entry.joins.iter().map(|join| &join.relation));
+    for factor in factors {
+        match factor {
+            sqlparser::ast::TableFactor::NestedJoin { table_with_joins, .. } => {
+                flatten_relations(table_with_joins, out);
+            }
+            other => {
+                out.push(sqlparser::ast::TableWithJoins { relation: other.clone(), joins: vec![] });
+            }
+        }
+    }
+}
+
+/// A query whose `FROM` carries `relations`, so a statement that has relations
+/// but no query of its own can build a column scope with the same resolver a
+/// `SELECT` uses.
+///
+/// `DELETE ... USING` and `UPDATE ... FROM` are the cases: an unqualified
+/// reference names the target, and a qualified one may name any relation the
+/// statement lists.
+pub(crate) fn relations_scope_query(
+    relations: Vec<sqlparser::ast::TableWithJoins>,
+) -> sqlparser::ast::Query {
+    crate::impls::query_builder::make_query(
+        None,
+        sqlparser::ast::SetExpr::Select(alloc::boxed::Box::new(
+            crate::impls::query_builder::make_simple_select(
+                vec![sqlparser::ast::SelectItem::Wildcard(
+                    sqlparser::ast::WildcardAdditionalOptions::default(),
+                )],
+                relations,
+                None,
+            ),
+        )),
+    )
+}
+
+/// Unwraps parentheses, which carry no meaning for resolution.
+fn strip_nesting(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Nested(inner) => strip_nesting(inner),
+        other => other,
+    }
+}
+
+fn unresolved_reference(reference: &Expr, reason: &str) -> crate::errors::Error {
+    crate::errors::Error::UnresolvedColumnReference {
+        reference: reference.to_string(),
+        reason: reason.to_string(),
+    }
 }
 
 /// True when the column `expr` names is declared with a type `predicate`
 /// accepts.
-pub(crate) fn every_declared_type_matches(
+pub(crate) fn declared_type_matches(
     expr: &Expr,
     schema: &ParserDB,
-    predicate: impl Fn(&str) -> bool,
-) -> bool {
-    unanimous_declared(expr, schema, |data_type| predicate(&data_type.to_string()).then_some(()))
-        .is_some()
+    options: &crate::options::TranslationContext<'_>,
+    predicate: impl Fn(&str) -> bool + Copy,
+) -> Result<bool, crate::errors::Error> {
+    Ok(declared_in_scope(
+        expr,
+        schema,
+        options,
+        |data_type| predicate(&data_type.to_string()).then_some(()),
+        |expression, schema, options| {
+            Ok(declared_type_matches(expression, schema, options, predicate)?.then_some(()))
+        },
+    )?
+    .is_some())
 }
 
 /// True when `expr` is a whole number by construction, so its scale is 0.
-pub(crate) fn is_integral_expression(expr: &Expr, schema: &ParserDB) -> bool {
+pub(crate) fn is_integral_expression(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<bool, crate::errors::Error> {
     match expr {
-        Expr::Nested(inner) => is_integral_expression(inner, schema),
+        Expr::Nested(inner) => is_integral_expression(inner, schema, options),
         Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
-            is_integral_expression(expr, schema)
+            is_integral_expression(expr, schema, options)
         }
         Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
-            !digits.contains('.') && !digits.contains(['e', 'E'])
+            Ok(!digits.contains('.') && !digits.contains(['e', 'E']))
         }
-        Expr::Cast { data_type, .. } => matches!(data_type, DataType::Integer(_)),
+        Expr::Cast { data_type, .. } => Ok(matches!(data_type, DataType::Integer(_))),
         _ => {
-            every_declared_type_matches(expr, schema, |declared| {
+            declared_type_matches(expr, schema, options, |declared| {
                 let lowered = declared.to_ascii_lowercase();
                 ["int", "smallint", "bigint", "serial"]
                     .iter()
@@ -288,24 +626,44 @@ pub(crate) fn is_integral_expression(expr: &Expr, schema: &ParserDB) -> bool {
 }
 
 /// The scale of `expr` when it is a `NUMERIC` value held as minor units.
-pub(crate) fn numeric_scale(expr: &Expr, schema: &ParserDB) -> Option<u32> {
-    numeric_precision_and_scale_of(expr, schema).map(|(_, scale)| scale)
+pub(crate) fn numeric_scale(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<u32>, crate::errors::Error> {
+    Ok(numeric_precision_and_scale_of(expr, schema, options)?.map(|(_, scale)| scale))
 }
 
 /// The declared precision of `expr`, which D1's multiplication rule needs.
-pub(crate) fn declared_numeric_precision(expr: &Expr, schema: &ParserDB) -> Option<u64> {
-    numeric_precision_and_scale_of(expr, schema).map(|(precision, _)| precision)
+pub(crate) fn declared_numeric_precision(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<u64>, crate::errors::Error> {
+    Ok(numeric_precision_and_scale_of(expr, schema, options)?.map(|(precision, _)| precision))
 }
 
-fn numeric_precision_and_scale_of(expr: &Expr, schema: &ParserDB) -> Option<(u64, u32)> {
+fn numeric_precision_and_scale_of(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<(u64, u32)>, crate::errors::Error> {
     let read = |data_type: &DataType| {
         let info = crate::impls::translator_impls::data_type::exact_numeric_info(data_type)?;
         crate::impls::translator_impls::data_type::numeric_precision_and_scale(info).ok()
     };
     match expr {
-        Expr::Nested(inner) => numeric_precision_and_scale_of(inner, schema),
-        Expr::Cast { data_type, .. } => read(data_type),
-        _ => unanimous_declared(expr, schema, read),
+        Expr::Nested(inner)
+        | Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr: inner } => {
+            numeric_precision_and_scale_of(inner, schema, options)
+        }
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. })
+            if !digits.contains('.') && !digits.contains(['e', 'E']) =>
+        {
+            Ok(u64::try_from(digits.len()).ok().map(|precision| (precision, 0)))
+        }
+        Expr::Cast { data_type, .. } => Ok(read(data_type)),
+        _ => declared_in_scope(expr, schema, options, read, numeric_precision_and_scale_of),
     }
 }
 
@@ -472,7 +830,7 @@ impl ColumnRewrites {
         table_name: &ObjectName,
         options: &Pg2SqliteOptions,
     ) -> Self {
-        match table_with_implicit_public_lookup(schema, table_name) {
+        match resolve_translation_table(schema, table_name) {
             Ok(Some(table)) => Self::of_table(table, schema, options),
             _ => Self::default(),
         }
@@ -1715,7 +2073,7 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     let (rewrites, target_table) = if D::IS_FORWARD {
         match &update.table.relation {
             TableFactor::Table { name, .. } => {
-                match table_with_implicit_public_lookup(schema, name) {
+                match resolve_translation_table(schema, name) {
                     Ok(Some(table)) => {
                         (ColumnRewrites::of_table(table, schema, D::config(options)), Some(table))
                     }
@@ -1798,7 +2156,8 @@ pub(crate) fn translate_update<D: TranslationDirection>(
     };
 
     // Route ST_* WHERE predicates through the rtree shadow via IN-subquery.
-    // Single-target-table only. UPDATE ... FROM and joined targets pass through.
+    // Single-target-table only. UPDATE ... FROM and joined targets pass
+    // through.
     if D::IS_FORWARD
         && let Some(rewritten) = crate::impls::translator_impls::postgis::try_rewrite_spatial_update(
             &translated,
@@ -1934,6 +2293,44 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
     options: &D::Options<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::Select, Error> {
+    let from = select
+        .from
+        .iter()
+        .map(|twj| translate_table_with_joins::<D>(twj, schema, options, emit))
+        .collect::<Result<Vec<_>, _>>()?;
+    translate_select_with_from::<D>(select, schema, options, emit, from)
+}
+
+pub(crate) fn translate_select_forward(
+    select: &sqlparser::ast::Select,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<sqlparser::ast::Select, Error> {
+    use crate::impls::translator_impls::Forward;
+
+    let from = select
+        .from
+        .iter()
+        .map(|twj| translate_table_with_joins::<Forward>(twj, schema, options, emit))
+        .collect::<Result<Vec<_>, _>>()?;
+    let scope_query =
+        scope_query_after_factor_rewrites(select, &from, options.cte_clause().cloned());
+    if let Some(scope_query) = scope_query {
+        let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
+        let scoped = options.with_scope(&scope);
+        return translate_select_with_from::<Forward>(select, schema, &scoped, emit, from);
+    }
+    translate_select_with_from::<Forward>(select, schema, options, emit, from)
+}
+
+fn translate_select_with_from<D: TranslationDirection>(
+    select: &sqlparser::ast::Select,
+    schema: &ParserDB,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+    from: Vec<sqlparser::ast::TableWithJoins>,
+) -> Result<sqlparser::ast::Select, Error> {
     reject_foreign_select_clauses::<D>(select)?;
     let selection = select
         .selection
@@ -1945,11 +2342,6 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         .as_ref()
         .map(|expr| D::translate_expr(expr, schema, options, emit))
         .transpose()?;
-    let from = select
-        .from
-        .iter()
-        .map(|twj| translate_table_with_joins::<D>(twj, schema, options, emit))
-        .collect::<Result<Vec<_>, _>>()?;
     let projection = select
         .projection
         .iter()
@@ -1988,8 +2380,8 @@ pub(crate) fn translate_select_shared<D: TranslationDirection>(
         select_modifiers: select.select_modifiers.clone(),
     };
 
-    // Hooked here so DISTINCT ON and GROUPING SETS rewrites that call
-    // translate_select_shared directly also receive spatial rewriting.
+    // Hooked here so DISTINCT ON and GROUPING SETS rewrites that call this
+    // helper directly also receive spatial rewriting.
     if D::IS_FORWARD
         && let Some(rewritten) = crate::impls::translator_impls::postgis::try_rewrite_spatial_select(
             &translated,
@@ -2010,8 +2402,24 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
 ) -> Result<sqlparser::ast::SetExpr, Error> {
     use sqlparser::ast::SetExpr;
     Ok(match set_expr {
-        SetExpr::Select(select) => {
+        SetExpr::Select(select) if select.from.is_empty() => {
             SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, options, emit)?))
+        }
+        SetExpr::Select(select) => {
+            // A SELECT's own FROM is what its column references resolve
+            // against, and each arm of a set operation has its own, so the
+            // scope is attached here rather than at the query around it.
+            let scope_query = crate::impls::query_builder::make_query(
+                D::cte_clause(options).cloned(),
+                SetExpr::Select(select.clone()),
+            );
+            let scope_substitute = scope_query_for(&scope_query);
+            let scope = sql_traits::structs::ColumnScope::from_query(
+                scope_substitute.as_ref().unwrap_or(&scope_query),
+                schema,
+            )?;
+            let scoped = D::with_scope(options, &scope);
+            SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, &scoped, emit)?))
         }
         SetExpr::Query(query) => {
             SetExpr::Query(Box::new(translate_query_shared::<D>(query, schema, options, emit)?))
@@ -2434,7 +2842,8 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             sample,
             index_hints,
         } => {
-            // generate_series with args parses as TableFactor::Table (not Function).
+            // generate_series with args parses as TableFactor::Table (not
+            // Function).
             if D::IS_FORWARD && args.is_some() && is_generate_series_object_name(name) {
                 return Err(generate_series_not_supported_error());
             }
@@ -2812,7 +3221,7 @@ fn renamed_relation_factor<D: TranslationDirection>(
         )));
     }
 
-    let Some(table) = table_with_implicit_public_lookup(schema, name)? else {
+    let Some(table) = resolve_translation_table(schema, name)? else {
         return Err(Error::forward_refusal(format!(
             "FROM {name} AS {} (...) renames the columns of a relation the translation schema \
              does not declare, so the declared column list the rewrite needs is unknown. \
@@ -2955,9 +3364,10 @@ mod tests {
     };
 
     use super::{
-        TranslationDirection, extract_columns_from_expr, extract_columns_from_function,
-        translate_join, translate_join_constraint, translate_join_operator, translate_returning,
-        translate_select_item, translate_table_factor, translate_table_with_joins,
+        ColumnReferences, TranslationDirection, extract_columns_from_expr,
+        extract_columns_from_function, translate_join, translate_join_constraint,
+        translate_join_operator, translate_returning, translate_select_item,
+        translate_table_factor, translate_table_with_joins,
     };
     use crate::{errors::Error, prelude::Pg2SqliteOptions};
 
@@ -2965,6 +3375,13 @@ mod tests {
 
     impl TranslationDirection for IdentityDirection {
         type Options<'a> = Pg2SqliteOptions;
+
+        fn with_scope<'scope>(
+            options: &'scope Self::Options<'_>,
+            _scope: &'scope sql_traits::structs::ColumnScope<'scope, 'scope, ParserDB>,
+        ) -> Self::Options<'scope> {
+            options.clone()
+        }
 
         fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions {
             options
@@ -3011,6 +3428,13 @@ mod tests {
 
     impl TranslationDirection for NestingDirection {
         type Options<'a> = Pg2SqliteOptions;
+
+        fn with_scope<'scope>(
+            options: &'scope Self::Options<'_>,
+            _scope: &'scope sql_traits::structs::ColumnScope<'scope, 'scope, ParserDB>,
+        ) -> Self::Options<'scope> {
+            options.clone()
+        }
 
         fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions {
             options
@@ -3291,23 +3715,21 @@ mod tests {
             parameters: FunctionArguments::None,
         };
         let cols = extract_columns_from_function(&named_func);
-        assert_eq!(cols, vec!["col".to_string()]);
+        assert_eq!(cols, ColumnReferences::Complete(vec!["col".to_string()]));
 
         let none_args_func = Function { args: FunctionArguments::None, ..named_func.clone() };
-        let no_args = extract_columns_from_function(&none_args_func);
-        assert!(
-            no_args.is_empty(),
-            "a call with no argument list names no column, got {no_args:?}"
+        assert_eq!(
+            extract_columns_from_function(&none_args_func),
+            ColumnReferences::Complete(Vec::new())
         );
 
-        let empty_compound = extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new()));
-        assert!(
-            empty_compound.is_empty(),
-            "an empty compound names no column, got {empty_compound:?}"
+        assert_eq!(
+            extract_columns_from_expr(&Expr::CompoundIdentifier(Vec::new())),
+            ColumnReferences::Complete(Vec::new())
         );
         assert_eq!(
             extract_columns_from_expr(&Expr::Nested(Box::new(parse_expr("a + b")))),
-            vec!["a".to_string(), "b".to_string()]
+            ColumnReferences::Complete(vec!["a".to_string(), "b".to_string()])
         );
         assert_eq!(
             extract_columns_from_expr(&Expr::Cast {
@@ -3316,8 +3738,25 @@ mod tests {
                 format: None,
                 kind: sqlparser::ast::CastKind::Cast,
             }),
-            vec!["payload".to_string()]
+            ColumnReferences::Complete(vec!["payload".to_string()])
         );
-        assert_eq!(extract_columns_from_expr(&Expr::Function(named_func)), vec!["col".to_string()]);
+        assert_eq!(
+            extract_columns_from_expr(&parse_expr(
+                "CASE WHEN enabled THEN -assigned_id ELSE fallback END"
+            )),
+            ColumnReferences::Complete(vec![
+                "enabled".to_string(),
+                "assigned_id".to_string(),
+                "fallback".to_string()
+            ])
+        );
+        assert_eq!(
+            extract_columns_from_expr(&parse_expr("EXISTS (SELECT outer_id FROM nested)")),
+            ColumnReferences::Unknown
+        );
+        assert_eq!(
+            extract_columns_from_expr(&Expr::Function(named_func)),
+            ColumnReferences::Complete(vec!["col".to_string()])
+        );
     }
 }

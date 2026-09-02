@@ -21,8 +21,7 @@ use sqlparser::ast::{
 use crate::{
     errors::Error,
     impls::object_name::{
-        append_suffix, normalize_schema_qualified_object_name_for_sqlite,
-        table_has_implicit_public_rls,
+        append_suffix, normalize_schema_qualified_object_name_for_sqlite, translation_table_has_rls,
     },
 };
 
@@ -128,7 +127,7 @@ fn retarget_rls_reads(
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), Error> {
     let outcome = visit_relations_mut(query, |name: &mut ObjectName| {
-        match table_has_implicit_public_rls(schema, name) {
+        match translation_table_has_rls(schema, name) {
             Ok(true) => {
                 *name = append_suffix(name, options.get_rls_table_suffix());
                 ControlFlow::Continue(())

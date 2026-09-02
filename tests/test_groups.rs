@@ -355,8 +355,8 @@ fn test_membership_removal_cascades_to_children() -> Result<(), Box<dyn std::err
     // Verify Bob is in 3 groups
     assert_eq!(bob.membership_count(&mut connection)?, 3);
 
-    // Now remove Bob from Engineering (should also remove from Backend, but keep
-    // Company)
+    // Now remove Bob from Engineering (should also remove from Backend, but
+    // keep Company)
     engineering.remove_member(&bob, &mut connection)?;
 
     // Verify Bob is only in Company now
@@ -385,7 +385,8 @@ fn test_duplicate_membership_prevented() -> Result<(), Box<dyn std::error::Error
     // Add user to group
     group.add_member(&user, &mut connection)?;
 
-    // Try to add the same membership again - should fail due to UNIQUE constraint
+    // Try to add the same membership again - should fail due to UNIQUE
+    // constraint
     let result = group.add_member(&user, &mut connection);
 
     assert!(result.is_err(), "Duplicate membership should be prevented by UNIQUE constraint");

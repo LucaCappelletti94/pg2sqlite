@@ -26,6 +26,7 @@ mod delete;
 pub(crate) mod expr;
 pub(crate) mod function;
 mod helpers;
+pub(crate) use helpers::Forward;
 mod index_column;
 pub(crate) mod insert;
 mod order_by_expr;

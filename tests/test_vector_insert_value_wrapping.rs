@@ -305,11 +305,11 @@ fn apply_vector_sql(pg: &str) {
         .expect("translate");
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     // sqlite-vec 0.1.9 does not provide vec_f16. We register it here.
-    // vec0 0.1.9 stores float16[N] columns as float32 blobs internally (its data
-    // validation always requires blobs whose length is divisible by 4). So our
-    // vec_f16 shim returns the same float32 encoding that vec_f32 would produce.
-    // rusqlite is used directly because diesel does not expose
-    // create_scalar_function.
+    // vec0 0.1.9 stores float16[N] columns as float32 blobs internally (its
+    // data validation always requires blobs whose length is divisible by
+    // 4). So our vec_f16 shim returns the same float32 encoding that
+    // vec_f32 would produce. rusqlite is used directly because diesel does
+    // not expose create_scalar_function.
     conn.create_scalar_function(
         "vec_f16",
         1,
@@ -321,8 +321,9 @@ fn apply_vector_sql(pg: &str) {
                 ValueRef::Text(t) => {
                     let text = String::from_utf8_lossy(t);
                     let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']');
-                    // Return float32 little-endian bytes: vec0 0.1.9 requires blobs
-                    // divisible by 4 even for float16[N] columns.
+                    // Return float32 little-endian bytes: vec0 0.1.9 requires
+                    // blobs divisible by 4 even for
+                    // float16[N] columns.
                     let bytes: Vec<u8> = trimmed
                         .split(',')
                         .filter_map(|s| s.trim().parse::<f32>().ok())

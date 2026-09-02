@@ -196,7 +196,8 @@ fn test_user_can_update_own_only() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(alice_profile.email, "alice_updated@example.com");
 
     // Alice cannot update Bob's profile (update will affect 0 rows)
-    // Bob's profile is visible but the USING clause prevents Alice from updating it
+    // Bob's profile is visible but the USING clause prevents Alice from
+    // updating it
     diesel::update(profiles::table.filter(profiles::id.eq(bob_id.as_bytes().to_vec())))
         .set(profiles::email.eq("hacked@example.com"))
         .execute(&mut connection)?;

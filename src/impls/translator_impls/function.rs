@@ -38,9 +38,9 @@ use crate::{
         object_name::last_ident,
         session_variable,
         shared_helpers::{
-            GENERATE_SERIES_UNSUPPORTED_MESSAGE, every_declared_type_matches,
+            GENERATE_SERIES_UNSUPPORTED_MESSAGE, declared_in_scope, declared_type_matches,
             function_argument_exprs, numeric_scale, referenced_column_name, rescale_minor_units,
-            translate_function_arguments, unanimous_declared,
+            translate_function_arguments,
         },
         temporal_arithmetic::{epoch_of_temporal_difference, subsecond_timestamp_from_epoch},
     },
@@ -378,22 +378,137 @@ fn unfoldable_scale_error(places: i64) -> crate::errors::Error {
     ))
 }
 
-#[allow(clippy::too_many_lines)]
+/// What a written function name can name.
+///
+/// PostgreSQL keeps the capitals of a delimited identifier, so only a spelling
+/// quoting leaves alone can name a catalogue entry, and a call it resolves
+/// through another schema is a different function from the built-in whose name
+/// it ends with.
+enum WrittenName {
+    /// A name PostgreSQL resolves to the catalogue, so this crate's tables
+    /// apply to it.
+    Catalog(String),
+    /// Delimited with a capital, so PostgreSQL resolves it to a name of its
+    /// own. SQLite folds it back onto the built-in, which is why passing it
+    /// through would answer with the wrong function.
+    OwnName(String),
+    /// Prefixed with a schema other than `pg_catalog`, carrying the catalogue
+    /// name its last segment could name.
+    Prefixed(Option<String>),
+}
+
+/// Reads what `name` can name, applying PostgreSQL's own resolution.
+fn classify_written_name(name: &ObjectName) -> WrittenName {
+    let last_catalog = crate::impls::object_name::last_ident(name)
+        .and_then(crate::impls::object_name::catalog_name);
+    let prefix_is_catalog = match name.0.as_slice() {
+        [_] => true,
+        [prefix, _] => {
+            prefix
+                .as_ident()
+                .and_then(crate::impls::object_name::catalog_name)
+                .is_some_and(|prefix| prefix == "pg_catalog")
+        }
+        // PostgreSQL has no three-part function name, so anything longer is
+        // somebody else's spelling whatever it ends with.
+        _ => false,
+    };
+    if !prefix_is_catalog {
+        return WrittenName::Prefixed(last_catalog);
+    }
+    match last_catalog {
+        Some(catalog) => WrittenName::Catalog(catalog),
+        None => {
+            crate::impls::object_name::last_ident(name)
+                .map_or(WrittenName::Prefixed(None), |last| {
+                    WrittenName::OwnName(last.value.clone())
+                })
+        }
+    }
+}
+
+/// Refuses a schema-qualified call, which SQLite has no syntax for.
+///
+/// Not a missing function but missing syntax: even `main.abs(-1)`, naming a
+/// real attached database, is a syntax error, so there is nothing to emit and
+/// nothing a declaration could license. Dropping the prefix instead would
+/// point the call at whatever the destination happens to have under the bare
+/// name.
+fn qualified_call_message(name: &ObjectName) -> String {
+    format!(
+        "{name}() is a schema-qualified call and SQLite has no syntax for one, not even over a \
+         real attached database. Write the call unqualified, and declare the bare name with \
+         with_user_defined_functions([\"...\"]) if the destination registers it."
+    )
+}
+
+/// True when the loaded script defines a function of this bare name.
+///
+/// The schema also carries the built-ins `sql-traits` seeds, which it qualifies
+/// with `pg_catalog` exactly so a caller's own definition can shadow one, so
+/// those are skipped here. A definition records only its last segment, so this
+/// cannot tell one schema's copy of a name from another's.
+fn script_defines_function(schema: &sql_traits::structs::ParserDB, catalog: &str) -> bool {
+    sql_traits::traits::DatabaseLike::functions(schema).any(|function| {
+        let parts = &function.name.0;
+        let seeded = parts.len() >= 2
+            && parts[parts.len() - 2]
+                .as_ident()
+                .and_then(crate::impls::object_name::catalog_name)
+                .is_some_and(|schema_name| schema_name == "pg_catalog");
+        !seeded
+            && crate::impls::object_name::last_catalog_name(&function.name)
+                .is_some_and(|name| name == catalog)
+    })
+}
+
+/// Translates a call, deciding first whether this crate may claim the written
+/// name as the catalogue's.
 fn translate_function(
     name: &ObjectName,
     args: &FunctionArguments,
+    schema: &sql_traits::structs::ParserDB,
     options: &crate::options::TranslationContext<'_>,
 ) -> FunctionTranslation {
-    let original_name = name
-        .0
-        .last()
-        .and_then(|part| part.as_ident())
-        .map_or_else(|| name.to_string().to_lowercase(), |ident| ident.value.to_ascii_lowercase());
+    match classify_written_name(name) {
+        WrittenName::Catalog(catalog) => translate_catalog_function(&catalog, args, options),
+        // SQLite folds a delimited name onto the built-in, so the only honest
+        // answers are a refusal or a passthrough the caller has asked for by
+        // declaring the name.
+        WrittenName::OwnName(written) => classify_unrecognised_function(&written, args, options),
+        WrittenName::Prefixed(Some(catalog)) => {
+            // A definition in the loaded script settles whose function this is,
+            // and the crate cannot emit a qualified call, so there is nothing
+            // to translate it to. The schema records a function under its bare
+            // name, so this cannot tell one schema's copy from another's.
+            if script_defines_function(schema, &catalog) {
+                return FunctionTranslation::Unsupported(qualified_call_message(name));
+            }
+            match translate_catalog_function(&catalog, args, options) {
+                // A passthrough keeps the name as written, prefix and all,
+                // which SQLite cannot parse.
+                FunctionTranslation::PassThrough => {
+                    FunctionTranslation::Unsupported(qualified_call_message(name))
+                }
+                translation => translation,
+            }
+        }
+        WrittenName::Prefixed(None) => {
+            FunctionTranslation::Unsupported(qualified_call_message(name))
+        }
+    }
+}
 
+#[allow(clippy::too_many_lines)]
+fn translate_catalog_function(
+    original_name: &str,
+    args: &FunctionArguments,
+    options: &crate::options::TranslationContext<'_>,
+) -> FunctionTranslation {
     // The caller's identity, wherever it is named. A mapping says which
     // function the replica answers it with, and it applies to a query exactly
     // as it applies to a policy predicate.
-    if let Some(pattern) = session_variable::pattern_of(&original_name, args) {
+    if let Some(pattern) = session_variable::pattern_of(original_name, args) {
         return match options.find_session_variable(&pattern) {
             Some(mapping) => {
                 FunctionTranslation::WithArgs {
@@ -404,7 +519,7 @@ fn translate_function(
             // A declared name is evidence the destination registered this very
             // function, which is a different claim from a mapping and is left
             // to stand.
-            None if options.declares_user_defined_function(&original_name) => {
+            None if options.declares_user_defined_function(original_name) => {
                 FunctionTranslation::PassThrough
             }
             None => FunctionTranslation::UnpairedSessionVariable(pattern),
@@ -412,18 +527,16 @@ fn translate_function(
     }
 
     // Fast path: check static rename table first.
-    if let Some(&(_, target)) =
-        FORWARD_RENAMES.iter().find(|&&(pg, _)| pg == original_name.as_str())
-    {
+    if let Some(&(_, target)) = FORWARD_RENAMES.iter().find(|&&(pg, _)| pg == original_name) {
         return FunctionTranslation::Rename(target.to_string());
     }
 
     // Array functions needing a rewritten body over `json_each`.
-    if let Some(kind) = ArrayFunction::from_name(original_name.as_str()) {
+    if let Some(kind) = ArrayFunction::from_name(original_name) {
         return FunctionTranslation::Array(kind);
     }
 
-    match original_name.as_str() {
+    match original_name {
     // bool_and / bool_or / every
     "bool_and" | "every" => FunctionTranslation::Unsupported(
         "bool_and/every is not supported in SQLite. \
@@ -482,7 +595,7 @@ fn translate_function(
     )),
     "var_pop" | "var_samp" | "variance" | "stddev" | "stddev_pop" | "stddev_samp"
     | "covar_pop" | "covar_samp" | "corr" => {
-        classify_statistical_aggregate(&original_name, options)
+        classify_statistical_aggregate(original_name, options)
     }
     "regr_slope" | "regr_intercept" | "regr_r2" | "regr_avgx" | "regr_avgy"
     | "regr_sxx" | "regr_syy" | "regr_sxy" | "regr_count" => {
@@ -718,7 +831,7 @@ fn translate_function(
          translates for a self-contained document, or write `FROM t, json_each(t.col) AS e` \
          for a column argument."
     )),
-    "encode" | "decode" => classify_bytea_encoding(&original_name, args),
+    "encode" | "decode" => classify_bytea_encoding(original_name, args),
     // to_number: PG pattern-based number parsing
     "to_number" => FunctionTranslation::Unsupported(
         "to_number() with PostgreSQL format patterns is not supported in SQLite. \
@@ -753,13 +866,13 @@ fn translate_function(
     "log" | "ln" | "exp" | "sqrt" | "log10" | "pow" | "power" | "cbrt" | "pi" | "degrees"
     | "radians" => {
         if options.is_math_functions_available() {
-            match original_name.as_str() {
+            match original_name {
                 "power" => FunctionTranslation::Rename("pow".to_string()),
                 "cbrt" => FunctionTranslation::ToCbrt,
                 _ => FunctionTranslation::PassThrough,
             }
         } else {
-            FunctionTranslation::Unsupported(math_not_declared(&original_name))
+            FunctionTranslation::Unsupported(math_not_declared(original_name))
         }
     }
 
@@ -833,7 +946,7 @@ fn translate_function(
         "{original_name}() is a PostgreSQL size function not available in SQLite."
     )),
 
-    _ => classify_unrecognised_function(&original_name, args, options),
+    _ => classify_unrecognised_function(original_name, args, options),
 }
 }
 
@@ -972,8 +1085,8 @@ fn classify_unrecognised_function(
     }
 
     // Reached only with the option off, since the clause above returns when it
-    // is on. The advice has to name the build rather than send the caller off to
-    // register a function SQLite would already have.
+    // is on. The advice has to name the build rather than send the caller off
+    // to register a function SQLite would already have.
     if class.gated_math {
         return FunctionTranslation::Unsupported(math_not_declared(name));
     }
@@ -1116,11 +1229,15 @@ fn replace_first_argument(args: &mut FunctionArguments, replacement: Expr) {
 /// False for anything with no declared type to consult, a literal or a computed
 /// expression, since those are not the case this guards and refusing them would
 /// refuse valid PostgreSQL.
-fn resolves_to_non_textual_column(expr: &Expr, schema: &ParserDB) -> bool {
+fn resolves_to_non_textual_column(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<bool, crate::errors::Error> {
     const TEXTUAL: [&str; 7] =
         ["text", "varchar", "character varying", "char", "bpchar", "citext", "name"];
 
-    every_declared_type_matches(expr, schema, |declared| {
+    declared_type_matches(expr, schema, options, |declared| {
         let lowered = declared.to_ascii_lowercase();
         !TEXTUAL.iter().any(|textual| lowered.starts_with(textual))
     })
@@ -1134,12 +1251,22 @@ fn resolves_to_non_textual_column(expr: &Expr, schema: &ParserDB) -> bool {
 /// thing that separates a document from its own text. An unqualified name is
 /// accepted only when every column with that name in the schema agrees, since
 /// guessing between the two is wrong half the time in either direction.
-fn carries_json(expr: &Expr, schema: &ParserDB, options: &Pg2SqliteOptions) -> bool {
-    is_already_json(expr)
-        || unanimous_declared(expr, schema, |data_type| {
-            is_json_document_type(data_type, options).then_some(())
-        })
-        .is_some()
+fn carries_json(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<bool, crate::errors::Error> {
+    if is_already_json(expr) {
+        return Ok(true);
+    }
+    Ok(declared_in_scope(
+        expr,
+        schema,
+        options,
+        |data_type| is_json_document_type(data_type, options).then_some(()),
+        |expression, schema, options| Ok(carries_json(expression, schema, options)?.then_some(())),
+    )?
+    .is_some())
 }
 
 /// Whether a declared type holds a JSON document once translated.
@@ -1516,6 +1643,13 @@ impl crate::traits::translator::TranslatorWithContext for Function {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        if self.uses_odbc_syntax {
+            return Err(crate::errors::Error::forward_refusal(format!(
+                "ODBC function escape syntax around {} is not supported in SQLite",
+                self.name
+            )));
+        }
+
         // SQLite 3.25 added native FILTER (WHERE ...) for aggregates; our floor
         // is 3.46, so CASE lowering is never needed. Translate the filter
         // expression now so every arm can keep it natively.
@@ -1526,8 +1660,9 @@ impl crate::traits::translator::TranslatorWithContext for Function {
             .transpose()?;
         let func = Function { filter: translated_filter, ..self.clone() };
 
-        // WITHIN GROUP is ordered-set aggregate syntax (percentile_cont, mode, ...).
-        // SQLite has no equivalent; reject early with a clear error.
+        // WITHIN GROUP is ordered-set aggregate syntax (percentile_cont, mode,
+        // ...). SQLite has no equivalent; reject early with a clear
+        // error.
         if !func.within_group.is_empty() {
             return Err(crate::errors::Error::forward_refusal(format!(
                 "{} with WITHIN GROUP (ORDER BY ...) is not supported in SQLite. \
@@ -1563,7 +1698,8 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 &name.value,
                 function_argument_exprs(&func.args).first().copied(),
                 schema,
-            )
+                options,
+            )?
         {
             return Ok(Expr::Function(Function {
                 name: ObjectName::from(vec![Ident::new(routed)]),
@@ -1573,20 +1709,22 @@ impl crate::traits::translator::TranslatorWithContext for Function {
         }
 
         // ST_Buffer on a geography column refuses: PostGIS buffers geography in
-        // metres on the WGS84 ellipsoid, but the SQLiteGIS passthrough is planar
-        // and reads the radius in degrees - wrong by ~111000. See postgis.rs.
+        // metres on the WGS84 ellipsoid, but the SQLiteGIS passthrough is
+        // planar and reads the radius in degrees - wrong by ~111000.
+        // See postgis.rs.
         if options.is_sqlitegis_enabled()
             && let Some(fname) = last_ident(&func.name)
             && let Some(msg) = postgis::geography_buffer_refusal(
                 &fname.value,
                 function_argument_exprs(&func.args).first().copied(),
                 schema,
-            )
+                options,
+            )?
         {
             return Err(crate::errors::Error::forward_refusal(msg));
         }
 
-        match translate_function(&func.name, &func.args, options) {
+        match translate_function(&func.name, &func.args, schema, options) {
             FunctionTranslation::Rename(new_name) => {
                 let translated_args =
                     translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
@@ -1612,8 +1750,9 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 Ok(simple_function_expr(&name, args, None))
             }
             FunctionTranslation::ToConcatenation => {
-                // CONCAT(a, b, c) -> COALESCE(a, '') || COALESCE(b, '') || COALESCE(c, '')
-                // PostgreSQL's CONCAT ignores NULLs; SQLite's || propagates them.
+                // CONCAT(a, b, c) -> COALESCE(a, '') || COALESCE(b, '') ||
+                // COALESCE(c, '') PostgreSQL's CONCAT ignores
+                // NULLs; SQLite's || propagates them.
                 let exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
                     .map(|e| e.translate_with_warnings(schema, options, emit))
@@ -1628,8 +1767,9 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 })
             }
             FunctionTranslation::ToConcatenationWithSeparator => {
-                // CONCAT_WS(sep, a, b, c) skips NULL value args and only inserts the
-                // separator between non-NULL values.
+                // CONCAT_WS(sep, a, b, c) skips NULL value args and only
+                // inserts the separator between non-NULL
+                // values.
                 let mut exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
                     .map(|e| e.translate_with_warnings(schema, options, emit))
@@ -1712,7 +1852,8 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 Ok(build_strftime_call(format_str, translated_ts))
             }
             FunctionTranslation::DatePart => {
-                // date_part('field', expr) -> CAST(strftime(format, expr) AS INTEGER/REAL)
+                // date_part('field', expr) -> CAST(strftime(format, expr) AS
+                // INTEGER/REAL)
                 reject_over_on_scalar(&func)?;
                 let exprs = extract_exactly(&func.args, 2, "date_part")?;
                 let field_expr = exprs[0];
@@ -1875,9 +2016,11 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                                 .to_string(),
                         ));
                     };
-                    // Quote any key that is not a plain identifier: a dot, space,
-                    // or other metacharacter would otherwise be treated as a path
-                    // separator or special JSONPath syntax by SQLite's json_extract.
+                    // Quote any key that is not a plain identifier: a dot,
+                    // space, or other metacharacter would
+                    // otherwise be treated as a path
+                    // separator or special JSONPath syntax by SQLite's
+                    // json_extract.
                     let is_plain_identifier = !key.is_empty()
                         && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                         && !key.starts_with(|c: char| c.is_ascii_digit());
@@ -1941,9 +2084,15 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                     return Ok(simple_function_expr("json", vec![translated], None));
                 }
                 if referenced_column_name(argument).is_some() {
-                    match unanimous_declared(argument, schema, |data_type| {
-                        Some(is_json_document_type(data_type, options))
-                    }) {
+                    match declared_in_scope(
+                        argument,
+                        schema,
+                        options,
+                        |data_type| Some(is_json_document_type(data_type, options)),
+                        |expression, schema, options| {
+                            Ok(Some(carries_json(expression, schema, options)?))
+                        },
+                    )? {
                         Some(true) => {
                             return Ok(simple_function_expr("json", vec![translated], None));
                         }
@@ -2000,7 +2149,7 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                         translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     ));
                 };
-                let Some(scale) = numeric_scale(value, schema) else {
+                let Some(scale) = numeric_scale(value, schema, options)? else {
                     return Ok(simple_function_expr(
                         "round",
                         vec![
@@ -2076,7 +2225,7 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 // char_length(uuid) does not exist`. SQLite's length takes the
                 // column anyway and counts a blob's bytes, so a UUID stored as
                 // one answered 16 for a query PostgreSQL never runs.
-                if resolves_to_non_textual_column(argument, schema) {
+                if resolves_to_non_textual_column(argument, schema, options)? {
                     return Err(crate::errors::Error::forward_refusal(format!(
                         "{label}({argument}) has no PostgreSQL meaning: {label} is defined over \
                                  text, and this column is not. PostgreSQL answers `function {label}(...) \
@@ -2093,8 +2242,9 @@ impl crate::traits::translator::TranslatorWithContext for Function {
             FunctionTranslation::Quote { nullable } => {
                 let label = if nullable { "quote_nullable" } else { "quote_literal" };
                 let exprs = extract_exactly(&func.args, 1, label)?;
-                // PostgreSQL casts to text before quoting, so `quote_literal(42)`
-                // is the four characters `'42'`. SQLite's `quote` renders a
+                // PostgreSQL casts to text before quoting, so
+                // `quote_literal(42)` is the four characters
+                // `'42'`. SQLite's `quote` renders a
                 // number as a bare numeric literal instead, which is different
                 // SQL from a function whose whole purpose is building SQL.
                 let quoted = simple_function_expr(
@@ -2134,7 +2284,7 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 // the document into a string. Reading it back with json() is
                 // only safe for a column declared JSON: json('hello') is
                 // `malformed JSON`.
-                let element = if carries_json(argument, schema, options) {
+                let element = if carries_json(argument, schema, options)? {
                     simple_function_expr("json", vec![element], None)
                 } else {
                     element
@@ -2163,7 +2313,8 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 Ok(crate::impls::idioms::nullif_empty_json_array(aggregate))
             }
             FunctionTranslation::JsonObjectAgg => {
-                // Translate the arguments (key and value) and build json_group_object.
+                // Translate the arguments (key and value) and build
+                // json_group_object.
                 let args =
                     translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
                 let aggregate = Expr::Function(Function {
@@ -2179,15 +2330,17 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                     filter: func.filter.clone(),
                     ..func
                 });
-                // PostgreSQL returns NULL over no rows; json_group_object returns
-                // '{}'. An aggregate over one or more rows always has at least one
-                // key, so '{}' can only mean no rows.
+                // PostgreSQL returns NULL over no rows; json_group_object
+                // returns '{}'. An aggregate over one or more
+                // rows always has at least one key, so '{}' can
+                // only mean no rows.
                 Ok(crate::impls::idioms::nullif_empty_json_object(aggregate))
             }
             FunctionTranslation::ArrayAgg => {
-                // Same NULLIF wrapper as JsonAgg, but without the json() wrapping
-                // since array_agg accumulates regular scalar values, not JSON
-                // documents. The filter is kept natively (3.46 floor).
+                // Same NULLIF wrapper as JsonAgg, but without the json()
+                // wrapping since array_agg accumulates regular
+                // scalar values, not JSON documents. The filter
+                // is kept natively (3.46 floor).
                 let translated_args_list =
                     translate_function_arguments::<Forward>(&func.args, schema, options, emit)?;
                 let translated_params = translate_function_arguments::<Forward>(
@@ -2206,9 +2359,10 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                     filter: func.filter.clone(),
                     ..func
                 });
-                // PostgreSQL returns NULL over no rows; json_group_array returns
-                // '[]'. The reverse translator restores json_agg from this shape
-                // (indistinguishable without type information, documented in the
+                // PostgreSQL returns NULL over no rows; json_group_array
+                // returns '[]'. The reverse translator restores
+                // json_agg from this shape (indistinguishable
+                // without type information, documented in the
                 // reverse arm comment).
                 Ok(crate::impls::idioms::nullif_empty_json_array(aggregate))
             }

@@ -64,7 +64,8 @@ fn forward_execute_reverse(pg_ddl: &str, pg_query: &str, options: &Pg2SqliteOpti
 
     // Wrap in a column alias so diesel can bind by name
     let exec_sql = format!("SELECT ({sqlite_sql}) AS result");
-    // Allow execution to succeed (empty table is fine -- we just need valid SQL)
+    // Allow execution to succeed (empty table is fine -- we just need valid
+    // SQL)
     let _results = diesel::sql_query(&exec_sql)
         .load::<DynResult>(&mut conn)
         .unwrap_or_else(|e| panic!("SQLite execution failed: {e}\nSQL: {exec_sql}"));
@@ -143,7 +144,8 @@ fn reverse_strftime_date_only_is_not_date_trunc() {
 
 #[test]
 fn reverse_strftime_extract_still_works() {
-    // Single-token formats like %Y must still reverse to EXTRACT, not date_trunc
+    // Single-token formats like %Y must still reverse to EXTRACT, not
+    // date_trunc
     let pg = reverse(EVENTS, "SELECT strftime('%Y', created_at) FROM events;");
     assert!(pg.contains("EXTRACT(YEAR"), "Expected EXTRACT(YEAR): {pg}");
     assert!(!pg.contains("date_trunc"), "Should not contain date_trunc: {pg}");

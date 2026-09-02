@@ -82,10 +82,11 @@ fn gist_geometry_index_round_trips_via_diesel() {
     assert_eq!(rows.len(), 1, "rtree shadow table should exist after CreateSpatialIndex");
     assert_eq!(rows[0].name, "features_geom_rtree");
 
-    // Insert one row and verify the spatial predicate finds it. The AFTER INSERT
-    // trigger installed by SQLiteGIS's CreateSpatialIndex also populates the rtree
-    // shadow, but this test focuses on translation shape only; the full-grid
-    // acceleration test below covers rtree sync and planner usage explicitly.
+    // Insert one row and verify the spatial predicate finds it. The AFTER
+    // INSERT trigger installed by SQLiteGIS's CreateSpatialIndex also
+    // populates the rtree shadow, but this test focuses on translation
+    // shape only; the full-grid acceleration test below covers rtree sync
+    // and planner usage explicitly.
     sql_query("INSERT INTO features (id, geom) VALUES (1, ST_Point(0.5, 0.5))")
         .execute(&mut conn)
         .expect("insert point");
@@ -135,9 +136,9 @@ fn gist_geometry_index_accelerates_spatial_queries() {
         .expect("rtree count (initial)");
     assert_eq!(rtree_initial[0].n, 0, "rtree must start empty on a freshly-translated GiST index");
 
-    // 3. Insert 10k points on a 100x100 grid. The AFTER INSERT triggers installed
-    //    by SQLiteGIS's CreateSpatialIndex must populate the rtree transparently;
-    //    pg2sqlite emits no extra sync SQL of its own.
+    // 3. Insert 10k points on a 100x100 grid. The AFTER INSERT triggers
+    //    installed by SQLiteGIS's CreateSpatialIndex must populate the rtree
+    //    transparently; pg2sqlite emits no extra sync SQL of its own.
     sql_query("BEGIN").execute(&mut conn).expect("begin tx");
     populate_grid_points(&mut conn, "perf_grid");
     sql_query("COMMIT").execute(&mut conn).expect("commit tx");
@@ -196,12 +197,12 @@ fn gist_geometry_index_accelerates_spatial_queries() {
         "rtree-join query must return the same count as the full scan"
     );
 
-    // 6. Query plan: the rtree-join must reach the rtree virtual table. SQLite's
-    //    EXPLAIN QUERY PLAN reports `VIRTUAL TABLE INDEX <n>:<id>` for rtree scans
-    //    (and only for rtree-style virtual tables in this schema), so the presence
-    //    of that marker is sufficient evidence that the planner is using the index
-    //    rather than falling back to a table scan on `perf_grid_geom_rtree`'s
-    //    shadow rows.
+    // 6. Query plan: the rtree-join must reach the rtree virtual table.
+    //    SQLite's EXPLAIN QUERY PLAN reports `VIRTUAL TABLE INDEX <n>:<id>` for
+    //    rtree scans (and only for rtree-style virtual tables in this schema),
+    //    so the presence of that marker is sufficient evidence that the planner
+    //    is using the index rather than falling back to a table scan on
+    //    `perf_grid_geom_rtree`'s shadow rows.
     let plan_text = explain_plan_text(
         &mut conn,
         "SELECT p.id FROM perf_grid p \

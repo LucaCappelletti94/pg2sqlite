@@ -134,7 +134,8 @@ pub(crate) fn declared_default(
 /// A declared default in the units the translated column stores.
 fn scaled_default(column: &ColumnDef, expr: &Expr) -> Result<Expr, Error> {
     let Some(scale) = minor_unit_scale(&column.data_type) else {
-        // For NUMERIC(p,0), round fractional literal defaults at translation time.
+        // For NUMERIC(p,0), round fractional literal defaults at translation
+        // time.
         return Ok(round_scale_zero_default(&column.data_type, expr));
     };
     scaled_numeric_default(expr, scale)?.ok_or_else(|| {

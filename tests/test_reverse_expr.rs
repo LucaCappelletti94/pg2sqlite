@@ -441,8 +441,9 @@ fn reverse_manual_expr_variants_cover_prefixed_trim_chars_and_compound_access() 
             sqlparser::ast::Value::SingleQuotedString("x".to_string()),
         ))]),
     };
-    let trimmed =
-        trim_with_characters.reverse_translate(&schema, &options).expect("trim should reverse");
+    let trimmed = trim_with_characters
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("trim should reverse");
     assert!(trimmed.to_string().contains("TRIM"));
 
     let prefixed = Expr::Prefixed {
@@ -451,8 +452,9 @@ fn reverse_manual_expr_variants_cover_prefixed_trim_chars_and_compound_access() 
             sqlparser::ast::Value::SingleQuotedString("abc".to_string()),
         ))),
     };
-    let prefixed_out =
-        prefixed.reverse_translate(&schema, &options).expect("prefixed should reverse");
+    let prefixed_out = prefixed
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("prefixed should reverse");
     assert!(prefixed_out.to_string().contains('N'));
 
     let qualified_wildcard = Expr::QualifiedWildcard(
@@ -460,7 +462,7 @@ fn reverse_manual_expr_variants_cover_prefixed_trim_chars_and_compound_access() 
         sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
     );
     let wildcard_out = qualified_wildcard
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("qualified wildcard should reverse");
     assert_eq!(wildcard_out.to_string(), "users.*");
 
@@ -472,8 +474,9 @@ fn reverse_manual_expr_variants_cover_prefixed_trim_chars_and_compound_access() 
         ))),
         regexp: true,
     };
-    let regexp_out =
-        regexp_expr.reverse_translate(&schema, &options).expect("regexp should reverse");
+    let regexp_out = regexp_expr
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("regexp should reverse");
     assert_eq!(regexp_out.to_string(), "name ~ '^[A-Z]'");
 
     let compound_access = Expr::CompoundFieldAccess {
@@ -488,7 +491,7 @@ fn reverse_manual_expr_variants_cover_prefixed_trim_chars_and_compound_access() 
         ],
     };
     let compound_out = compound_access
-        .reverse_translate(&schema, &options)
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
         .expect("compound field access should reverse");
     assert!(compound_out.to_string().contains("payload[1].field"));
 }
@@ -499,7 +502,9 @@ fn reverse_wildcard_expr_clones_through() {
     let options = Pg2SqliteOptions::default();
     let wildcard = Expr::Wildcard(sqlparser::ast::helpers::attached_token::AttachedToken::empty());
     // Wildcard is a leaf node — reverse translation clones it as-is.
-    let result = wildcard.reverse_translate(&schema, &options).expect("wildcard should clone");
+    let result = wildcard
+        .reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options))
+        .expect("wildcard should clone");
     assert_eq!(result.to_string(), wildcard.to_string());
 }
 

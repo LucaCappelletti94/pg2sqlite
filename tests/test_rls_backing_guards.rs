@@ -497,8 +497,9 @@ fn zero_policy_monitor_insert_to_backing_table_is_refused() {
     let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
     let mut conn = apply(ZERO_POLICY_SCHEMA, &opts);
 
-    // Direct insert to the backing table simulates a raw write that bypasses the
-    // view; this is exactly what the RETURNING redirect emits in strict mode.
+    // Direct insert to the backing table simulates a raw write that bypasses
+    // the view; this is exactly what the RETURNING redirect emits in strict
+    // mode.
     let result = diesel::insert_into(schema::posts_rls::table)
         .values((schema::posts_rls::body.eq("hello"),))
         .execute(&mut conn);
@@ -629,7 +630,8 @@ fn strict_monitor_allows_invisible_view_path_insert() {
         .count;
     assert_eq!(visible, 0, "bob's row must not be visible through alice's view");
 
-    // Audit table has a log row with honest wording (no policy-violation claim).
+    // Audit table has a log row with honest wording (no policy-violation
+    // claim).
     let audit: Vec<AuditLog> = diesel::sql_query("SELECT violation_type, details FROM rls_audit")
         .load(&mut conn)
         .expect("audit rows");

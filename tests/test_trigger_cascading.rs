@@ -256,7 +256,8 @@ FOR EACH ROW EXECUTE FUNCTION audit_inventory_creation();
     let audit_count_2: i64 = inventory_audit::table.count().get_result(&mut connection)?;
     assert_eq!(audit_count_2, 2, "Expected 2 audit entries after second product");
 
-    // Test 3: Verify that each product has its own inventory with correct quantity
+    // Test 3: Verify that each product has its own inventory with correct
+    // quantity
     let inv_2_records: Vec<Inventory> = inventory::table
         .filter(inventory::product_id.eq(product_id_2.as_bytes().to_vec()))
         .select(Inventory::as_select())
@@ -265,8 +266,8 @@ FOR EACH ROW EXECUTE FUNCTION audit_inventory_creation();
     assert_eq!(inv_2_records[0].quantity, 50);
 
     // Test 4: Verify the inventory_id in audit matches the actual inventory id
-    // Use diesel to load all inventory IDs and audit inventory IDs, then verify in
-    // Rust
+    // Use diesel to load all inventory IDs and audit inventory IDs, then verify
+    // in Rust
     let inventory_ids: Vec<Vec<u8>> =
         inventory::table.select(inventory::id).load(&mut connection)?;
     let audit_inventory_ids: Vec<Vec<u8>> =

@@ -35,9 +35,13 @@ fn create_table_as_select_translates_functions() -> Result<(), Box<dyn std::erro
 
 #[test]
 fn create_table_as_select_basic() -> Result<(), Box<dyn std::error::Error>> {
-    // Simple CTAS without PG-specific functions should translate cleanly
-    let sql = "CREATE TABLE archive AS SELECT id, name FROM users WHERE active = true;";
+    // The source table is declared in the batch, since `active = true` is
+    // rendered from the column's declared type and a reference no relation in
+    // scope declares is refused rather than guessed.
+    let sql = "CREATE TABLE users (id INT, name TEXT, active BOOLEAN); \
+               CREATE TABLE archive AS SELECT id, name FROM users WHERE active = true;";
     let output = translate(sql)?;
+    let output = output.lines().last().expect("the batch emits the CTAS").to_string();
 
     assert!(output.contains("CREATE TABLE"), "Should contain CREATE TABLE");
     assert!(output.contains("SELECT"), "Should contain SELECT subquery");

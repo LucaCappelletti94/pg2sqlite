@@ -110,6 +110,29 @@ fn test_gin_to_fts5_translation_snapshot() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
+fn a_conditional_fts_document_is_refused() {
+    let sql = "
+        CREATE TABLE docs (
+            id INT PRIMARY KEY,
+            title TEXT,
+            body TEXT,
+            extra TEXT,
+            flag BOOL
+        );
+        CREATE INDEX docs_search ON docs USING GIN (
+            to_tsvector('english', (CASE WHEN flag THEN title ELSE body END) || extra)
+        );
+    ";
+    let error = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("FTS5 cannot reproduce a conditional document")
+        .to_string();
+    assert!(error.contains("CASE") && error.contains("FTS5"), "unexpected error: {error}");
+}
+
+#[test]
 fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
         CREATE TABLE documents (
@@ -234,8 +257,8 @@ fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>>
 
     // Warm up SQLite caches with simple SELECT queries
     let _: i64 = documents::table.count().get_result(&mut connection)?;
-    // Note: Can't use diesel for FTS5 virtual table count (no schema), so use raw
-    // SQL
+    // Note: Can't use diesel for FTS5 virtual table count (no schema), so use
+    // raw SQL
     diesel::sql_query("SELECT COUNT(*) FROM documents_fts").execute(&mut connection)?;
 
     // Benchmark LIKE query (multiple runs for stability)
@@ -405,8 +428,8 @@ fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> 
         .values(NewDocument { title: "Test Document", body: "initial content here" })
         .execute(&mut connection)?;
 
-    // Verify it's searchable using FTS5 MATCH (must use raw SQL for FTS5-specific
-    // syntax)
+    // Verify it's searchable using FTS5 MATCH (must use raw SQL for
+    // FTS5-specific syntax)
     #[derive(QueryableByName, Debug)]
     struct DocResult {
         #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -441,7 +464,8 @@ fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> 
     .load::<DocResult>(&mut connection)?;
     assert_eq!(results.len(), 1, "Should find 'modified' after update");
 
-    // DELETE the document using Diesel ORM - trigger should remove from FTS5 index
+    // DELETE the document using Diesel ORM - trigger should remove from FTS5
+    // index
     diesel::delete(documents::table.filter(documents::id.eq(1))).execute(&mut connection)?;
 
     // 'modified' should no longer be found
@@ -982,8 +1006,9 @@ fn partial_gin_trigger_published_insert_blocked_by_bare_column() {
         .values(&NewFilterablePost { id: 1, title: "rust programming guide", published: true })
         .execute(&mut conn);
 
-    // PostgreSQL accepts this insert. Currently fails because WHEN published = true
-    // uses a bare column name that SQLite cannot resolve in a trigger context.
+    // PostgreSQL accepts this insert. Currently fails because WHEN published =
+    // true uses a bare column name that SQLite cannot resolve in a trigger
+    // context.
     assert!(result.is_ok(), "published insert must succeed; got: {}", result.unwrap_err());
 
     // FTS5 MATCH syntax is not expressible in the Diesel typed DSL.
@@ -1068,9 +1093,10 @@ fn partial_gin_backfill_indexes_all_rows_ignoring_predicate() {
         .execute(&mut conn)
         .expect("insert unpublished");
 
-    // Apply the remaining output: FTS virtual table, triggers, and backfill INSERT.
-    // diesel::sql_query is required because CREATE TRIGGER, CREATE VIRTUAL TABLE,
-    // and FTS5 backfill SQL are not expressible via the Diesel typed DSL.
+    // Apply the remaining output: FTS virtual table, triggers, and backfill
+    // INSERT. diesel::sql_query is required because CREATE TRIGGER, CREATE
+    // VIRTUAL TABLE, and FTS5 backfill SQL are not expressible via the
+    // Diesel typed DSL.
     for stmt in translated.iter().skip(1) {
         diesel::sql_query(stmt.to_string()).execute(&mut conn).expect("apply fts statements");
     }
@@ -1135,8 +1161,8 @@ fn partial_gin_update_crossing_predicate_boundary_syncs_index() {
     .expect("FTS query before flip");
     assert_eq!(hits.len(), 0, "unpublished row must not be in index before flip");
 
-    // Flip published to true. The au_insert trigger fires (NEW.published = true)
-    // and must add the row to the index.
+    // Flip published to true. The au_insert trigger fires (NEW.published =
+    // true) and must add the row to the index.
     diesel::update(filterable_posts::table.filter(filterable_posts::id.eq(1i32)))
         .set(filterable_posts::published.eq(true))
         .execute(&mut conn)
@@ -1150,8 +1176,8 @@ fn partial_gin_update_crossing_predicate_boundary_syncs_index() {
     .expect("FTS query after flip to published");
     assert_eq!(hits.len(), 1, "row must appear in index after flipping to published");
 
-    // Flip back to unpublished. The au_delete trigger fires (OLD.published = true)
-    // and must remove the row from the index.
+    // Flip back to unpublished. The au_delete trigger fires (OLD.published =
+    // true) and must remove the row from the index.
     diesel::update(filterable_posts::table.filter(filterable_posts::id.eq(1i32)))
         .set(filterable_posts::published.eq(false))
         .execute(&mut conn)

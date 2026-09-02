@@ -101,7 +101,12 @@ impl PlPgSqlTranslator {
         }
 
         for stmt in &body.statements {
-            let translated = Self::translate_statement(stmt, &mut context, schema, options, emit)?;
+            // Rebuilt per statement, since a DECLARE or a SELECT INTO earlier
+            // in the body adds names the ones after it can read.
+            let variables: Vec<String> =
+                context.bindings().map(|binding| binding.name.clone()).collect();
+            let scoped = options.with_variables(&variables);
+            let translated = Self::translate_statement(stmt, &mut context, schema, &scoped, emit)?;
             result.extend(translated);
         }
 
@@ -348,7 +353,8 @@ impl PlPgSqlTranslator {
             return Ok(s);
         }
         // Inline-substitute declared variable bindings so the condition works
-        // as a SQLite WHERE clause guard on UPDATE/DELETE, which have no WITH scope.
+        // as a SQLite WHERE clause guard on UPDATE/DELETE, which have no WITH
+        // scope.
         Ok(Self::parse_expression(&s)
             .map(|expr| Self::substitute_variables_inline(&expr, bindings).to_string())
             .unwrap_or(s))
@@ -1095,7 +1101,8 @@ impl PlPgSqlTranslator {
             })
             .collect();
 
-        // Check which bindings need the last_insert_rowid() pattern for UUID variables.
+        // Check which bindings need the last_insert_rowid() pattern for UUID
+        // variables.
         let mut modified_bindings = Vec::new();
         let mut uuid_var_to_column: Vec<(String, String)> = Vec::new();
 
@@ -1846,6 +1853,17 @@ mod tests {
         ParserDB::from_statements(Vec::new(), "test".to_string()).unwrap()
     }
 
+    /// A schema declaring the table these cases translate against, since a
+    /// column reference resolves through the relations in scope.
+    fn users_schema() -> ParserDB {
+        ParserDB::from_statements(
+            Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE users(id INT, kind TEXT);")
+                .unwrap(),
+            "test".to_string(),
+        )
+        .unwrap()
+    }
+
     fn parse_statement(sql: &str) -> Statement {
         Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap().remove(0)
     }
@@ -2266,7 +2284,7 @@ mod tests {
         let schema = ParserDB::from_statements(
             Parser::parse_sql(
                 &PostgreSqlDialect {},
-                "CREATE TABLE users(id TEXT, name TEXT); CREATE TABLE audit(id TEXT);",
+                "CREATE TABLE users(id TEXT, name TEXT, kind TEXT); CREATE TABLE audit(id TEXT);",
             )
             .unwrap(),
             "test".to_string(),
@@ -2524,7 +2542,7 @@ mod tests {
 
     #[test]
     fn transform_delete_and_insert_statement_cover_function_name_and_non_select_source_paths() {
-        let schema = empty_schema();
+        let schema = users_schema();
         let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
         ctx.add_binding(VariableBinding { name: "v_id".to_string(), expression: "1".to_string() });
@@ -2595,7 +2613,7 @@ mod tests {
 
     #[test]
     fn translate_insert_statement_merges_condition_with_existing_selection() {
-        let schema = empty_schema();
+        let schema = users_schema();
         let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let mut ctx = PlPgSqlContext::new();
         ctx.add_binding(VariableBinding { name: "v_id".to_string(), expression: "1".to_string() });

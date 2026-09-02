@@ -46,6 +46,25 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // Everything below reads column types through the relations this query
+        // exposes rather than through every table of that name in the schema,
+        // so the scope is attached before any expression is translated. A
+        // subquery builds its own when its own `Query` is translated.
+        let scope_substitute = crate::impls::shared_helpers::scope_query_for(self);
+        let scope_query = scope_substitute.as_ref().unwrap_or(self);
+        let scope = if matches!(
+            scope_query.body.as_ref(),
+            SetExpr::Select(select) if select.from.is_empty()
+        ) {
+            None
+        } else {
+            Some(sql_traits::structs::ColumnScope::from_query(scope_query, schema)?)
+        };
+        let scoped = scope.as_ref().map(|scope| options.with_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
+        let noted = options.with_cte_clause(self.with.as_ref().or_else(|| options.cte_clause()));
+        let options = &noted;
+
         let with = translate_with_clause(self.with.as_ref(), schema, options, emit)?;
         let order_by = translate_order_by(self.order_by.as_ref(), schema, options, emit)?;
         let (limit_clause, fetch) = forward_translate_limit_and_fetch(
@@ -457,22 +476,23 @@ fn try_translate_distinct_on_query(
         .map(|expr| expr.translate_with_warnings(schema, options, emit))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Two separate corrections, because the two ORDER BY positions see different
-    // scopes and each was wrong in its own way.
+    // Two separate corrections, because the two ORDER BY positions see
+    // different scopes and each was wrong in its own way.
     //
-    // The window sits INSIDE the derived table, where the source table's columns
-    // are in scope, so it keeps every operand. What it cannot carry is an output
-    // alias: a column alias is invisible inside `OVER`, and SQLite answers `no
-    // such column`. So each operand is resolved back to the expression the
-    // projection aliased.
+    // The window sits INSIDE the derived table, where the source table's
+    // columns are in scope, so it keeps every operand. What it cannot carry
+    // is an output alias: a column alias is invisible inside `OVER`, and
+    // SQLite answers `no such column`. So each operand is resolved back to
+    // the expression the projection aliased.
     //
     // The outer ORDER BY sees only what the derived table projects. PostgreSQL
-    // requires the DISTINCT ON expressions to be the leftmost ORDER BY operands,
-    // verified on 16, which rejects `DISTINCT ON (sensor) ... ORDER BY value`. So
-    // once one row per partition survives, those leading operands already order
-    // the result totally and every operand after them is unobservable. Dropping
-    // them is therefore exact rather than a compromise, and it avoids projecting
-    // helper columns, which would break the reverse direction: it rebuilds this
+    // requires the DISTINCT ON expressions to be the leftmost ORDER BY
+    // operands, verified on 16, which rejects `DISTINCT ON (sensor) ...
+    // ORDER BY value`. So once one row per partition survives, those
+    // leading operands already order the result totally and every operand
+    // after them is unobservable. Dropping them is therefore exact rather
+    // than a compromise, and it avoids projecting helper columns, which
+    // would break the reverse direction: it rebuilds this
     // shape and compares it with what it parsed.
     let window_order = match &order_by {
         Some(ob) => {
@@ -916,6 +936,33 @@ impl crate::traits::translator::TranslatorWithContext for SetExpr {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // Each arm of a set operation has its own FROM, so a scope belongs to a
+        // SELECT rather than to the query around it. A SELECT without a FROM
+        // keeps the enclosing scope so correlated scalar queries still work.
+        if let SetExpr::Select(select) = self {
+            if select.from.is_empty() {
+                return Ok(SetExpr::Select(Box::new(
+                    crate::impls::shared_helpers::translate_select_forward(
+                        select, schema, options, emit,
+                    )?,
+                )));
+            }
+            let scope_query = crate::impls::query_builder::make_query(
+                options.cte_clause().cloned(),
+                SetExpr::Select(select.clone()),
+            );
+            let scope_substitute = crate::impls::shared_helpers::scope_query_for(&scope_query);
+            let scope = sql_traits::structs::ColumnScope::from_query(
+                scope_substitute.as_ref().unwrap_or(&scope_query),
+                schema,
+            )?;
+            let scoped = options.with_scope(&scope);
+            return Ok(SetExpr::Select(Box::new(
+                crate::impls::shared_helpers::translate_select_forward(
+                    select, schema, &scoped, emit,
+                )?,
+            )));
+        }
         crate::impls::shared_helpers::translate_set_expr_shared::<Forward>(
             self, schema, options, emit,
         )
@@ -930,9 +977,7 @@ impl crate::traits::translator::TranslatorWithContext for Select {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        crate::impls::shared_helpers::translate_select_shared::<Forward>(
-            self, schema, options, emit,
-        )
+        crate::impls::shared_helpers::translate_select_forward(self, schema, options, emit)
     }
 }
 

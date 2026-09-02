@@ -48,14 +48,15 @@ fn test_fk_points_to_rls_backing_table() -> Result<(), Box<dyn std::error::Error
 
     let translated_sql: Vec<String> = translated.iter().map(ToString::to_string).collect();
 
-    // Verify that the CREATE TABLE posts statement contains REFERENCES users_rls,
-    // not REFERENCES users
+    // Verify that the CREATE TABLE posts statement contains REFERENCES
+    // users_rls, not REFERENCES users
     let posts_create = translated_sql
         .iter()
         .find(|s| s.contains("CREATE TABLE posts"))
         .expect("Should have CREATE TABLE posts");
 
-    // The FK should point to users_rls (the backing table), not users (the view)
+    // The FK should point to users_rls (the backing table), not users (the
+    // view)
     assert!(
         posts_create.contains("REFERENCES users_rls"),
         "FK should point to users_rls backing table, got: {posts_create}"

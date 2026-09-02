@@ -211,6 +211,29 @@ pub enum Error {
         /// The RLS table suffix that was detected.
         suffix: String,
     },
+    /// Error when the configured RLS backing table suffix cannot separate a
+    /// backing table from the view that replaces it.
+    #[error(
+        "The RLS backing table suffix is empty, so a secured table and its view would take \
+         the same name and every name would read as a backing table. Set a non-empty suffix \
+         with with_rls_table_suffix, or leave the default '_rls'."
+    )]
+    EmptyRlsTableSuffix,
+    /// Error when a column reference cannot be resolved to a declared column
+    /// through the relations in scope where it appears.
+    #[error(
+        "{reference} cannot be resolved to a declared column: {reason}. This translation depends \
+         on the column's declared type, and reading the type off any table in the schema that \
+         happens to carry the name would answer with another table's column. Include the \
+         column's table in the translation batch, or qualify the reference so it names one \
+         relation."
+    )]
+    UnresolvedColumnReference {
+        /// The reference as the statement wrote it.
+        reference: String,
+        /// Why the relations in scope cannot answer it.
+        reason: String,
+    },
     /// Error when attempting to reverse translate a non-DML statement.
     #[error(
         "Reverse translation only supports DML statements (INSERT, UPDATE, DELETE, SELECT). \
@@ -243,18 +266,6 @@ pub enum Error {
     TableNotFoundInSchema {
         /// The name of the table that was not found.
         table_name: String,
-    },
-    /// Error when an unqualified table reference matches multiple schema
-    /// tables.
-    #[error(
-        "Table '{table_name}' is ambiguous across schemas: {schemas:?}. \
-         Please qualify the table name with a schema."
-    )]
-    AmbiguousTableInSchema {
-        /// The unqualified table name that matched multiple schema entries.
-        table_name: String,
-        /// Candidate schema names where the table exists.
-        schemas: Vec<String>,
     },
     /// Error when two objects the translation emits would carry the same
     /// SQLite name.

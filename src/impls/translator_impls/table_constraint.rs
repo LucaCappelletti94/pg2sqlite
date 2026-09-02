@@ -20,7 +20,7 @@ use sqlparser::ast::{
 
 use crate::{
     impls::{
-        object_name::{append_suffix, table_has_implicit_public_rls},
+        object_name::{append_suffix, translation_table_has_rls},
         shared_helpers::{
             match_partial_not_supported_error, nulls_not_distinct_not_supported_error,
         },
@@ -66,7 +66,7 @@ impl crate::traits::translator::TranslatorWithContext for TableConstraint {
             Self::ForeignKey(fk_constraint) => {
                 let mut updated_fk = fk_constraint.clone();
 
-                if table_has_implicit_public_rls(schema, &fk_constraint.foreign_table)? {
+                if translation_table_has_rls(schema, &fk_constraint.foreign_table)? {
                     updated_fk.foreign_table =
                         append_suffix(&fk_constraint.foreign_table, options.get_rls_table_suffix());
                 }

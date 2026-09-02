@@ -100,8 +100,8 @@ fn test_is_true_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .values(&Flag { id: 3, name: "flag3".to_string(), active: None })
         .execute(&mut conn)?;
 
-    // Query using IS TRUE (via raw SQL since diesel doesn't have is_true directly)
-    // In SQLite, boolean is stored as INTEGER (0/1)
+    // Query using IS TRUE (via raw SQL since diesel doesn't have is_true
+    // directly) In SQLite, boolean is stored as INTEGER (0/1)
     let results: Vec<Flag> =
         diesel::sql_query("SELECT * FROM flags WHERE active IS 1").load(&mut conn)?;
 

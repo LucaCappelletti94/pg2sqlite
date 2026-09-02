@@ -25,7 +25,24 @@ use crate::{
 pub(crate) struct Reverse;
 
 impl TranslationDirection for Reverse {
-    type Options<'a> = Pg2SqliteOptions;
+    type Options<'a> = crate::options::TranslationContext<'a>;
+
+    fn cte_clause<'options>(
+        options: &'options Self::Options<'_>,
+    ) -> Option<&'options sqlparser::ast::With> {
+        options.cte_clause()
+    }
+
+    fn with_scope<'scope>(
+        options: &'scope Self::Options<'_>,
+        scope: &'scope sql_traits::structs::ColumnScope<
+            'scope,
+            'scope,
+            sql_traits::structs::ParserDB,
+        >,
+    ) -> Self::Options<'scope> {
+        options.with_scope(scope)
+    }
     fn config<'options>(options: &'options Self::Options<'_>) -> &'options Pg2SqliteOptions {
         options
     }
@@ -33,7 +50,7 @@ impl TranslationDirection for Reverse {
     fn translate_expr(
         expr: &Expr,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
         _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Expr, Error> {
         expr.reverse_translate(schema, options)
@@ -42,7 +59,7 @@ impl TranslationDirection for Reverse {
     fn translate_query(
         query: &Query,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
         _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<Query, Error> {
         query.reverse_translate(schema, options)
@@ -51,7 +68,7 @@ impl TranslationDirection for Reverse {
     fn translate_insert(
         insert: &sqlparser::ast::Insert,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
         _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Insert, Error> {
         insert.reverse_translate(schema, options)
@@ -60,7 +77,7 @@ impl TranslationDirection for Reverse {
     fn translate_delete(
         delete: &sqlparser::ast::Delete,
         schema: &ParserDB,
-        options: &Pg2SqliteOptions,
+        options: &crate::options::TranslationContext<'_>,
         _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Delete, Error> {
         delete.reverse_translate(schema, options)

@@ -50,7 +50,7 @@ fn tr(pg: &str) -> String {
 
 #[test]
 fn double_colon_text_cast_uses_cast_syntax() {
-    let out = tr("SELECT id::text FROM t");
+    let out = tr("CREATE TABLE cast_text_t (id INTEGER); SELECT id::text FROM cast_text_t");
     assert!(out.contains("CAST(id AS TEXT)"), "{out}");
     assert!(!out.contains("::"), "cast operator leaked into output: {out}");
     sqlite_accepts(&out);
@@ -71,14 +71,18 @@ fn double_colon_int_literal_cast_uses_cast_syntax() {
 /// `tests/test_numeric_scaled_integer.rs`, where the columns have types.
 #[test]
 fn double_colon_numeric_cast_needs_a_resolvable_scale() {
-    let error = translate_pg("SELECT val::numeric(10, 2) FROM t", &Pg2SqliteOptions::default())
-        .expect_err("the operand's scale cannot be resolved");
+    let error = translate_pg(
+        "CREATE TABLE t (val TEXT); SELECT val::numeric(10, 2) FROM t",
+        &Pg2SqliteOptions::default(),
+    )
+    .expect_err("the operand's scale cannot be resolved");
     assert!(error.to_string().contains("scale"), "got: {error}");
 }
 
 #[test]
 fn nested_double_colon_casts_have_no_operator() {
-    let out = tr("SELECT (a::int)::text FROM t");
+    let out =
+        tr("CREATE TABLE cast_nested_t (a INTEGER); SELECT (a::int)::text FROM cast_nested_t");
     assert!(!out.contains("::"), "nested cast operator leaked: {out}");
     assert!(out.matches("CAST(").count() >= 2, "expected two CAST calls: {out}");
     sqlite_accepts(&out);
@@ -91,7 +95,11 @@ fn cast_output_runs_in_sqlite() {
         .expect("apply schema");
     conn.batch_execute("INSERT INTO c (id, n) VALUES (1, 42)").expect("seed");
 
-    let out = tr("SELECT n::text AS r FROM c");
+    let out = tr("CREATE TABLE c (id INTEGER PRIMARY KEY, n INTEGER); SELECT n::text AS r FROM c")
+        .lines()
+        .last()
+        .expect("the script emits the select")
+        .to_string();
     assert!(!out.contains("::"), "{out}");
     let row: Row = sql_query(out).get_result(&mut conn).expect("cast output must run in SQLite");
     assert_eq!(row.r, "42");
@@ -157,9 +165,12 @@ fn array_cast_target_needs_an_array_representation() {
 fn array_cast_target_becomes_text_under_json_arrays() {
     let opts = Pg2SqliteOptions::default()
         .with_array_representation(pg2sqlite::prelude::ArrayRepresentation::Json);
-    let out = translate_pg("SELECT a::int[] FROM t", &opts)
-        .expect("array cast should translate")
-        .join("\n");
+    let out = translate_pg(
+        "CREATE TABLE cast_array_t (a INTEGER[]); SELECT a::int[] FROM cast_array_t",
+        &opts,
+    )
+    .expect("array cast should translate")
+    .join("\n");
     assert!(out.contains("CAST(a AS TEXT)"), "{out}");
     sqlite_accepts(&out);
 }
@@ -170,15 +181,19 @@ fn array_cast_target_becomes_text_under_json_arrays() {
 fn sqlite_accepts(sql: &str) {
     let mut conn = establish_connection();
     conn.batch_execute("CREATE TABLE t (id INTEGER, a TEXT, n INTEGER) STRICT;").unwrap();
-    conn.batch_execute(&format!("{sql};"))
-        .unwrap_or_else(|e| panic!("emitted SQL rejected by SQLite: {e}\n{sql}"));
+    // A translated script arrives as one statement per line, so each is applied
+    // in turn rather than as one batch, which would join them without a
+    // separator.
+    for statement in sql.lines().filter(|line| !line.trim().is_empty()) {
+        conn.batch_execute(&format!("{statement};"))
+            .unwrap_or_else(|e| panic!("emitted SQL rejected by SQLite: {e}\n{statement}"));
+    }
 }
 
 /// Execute emitted SQL that references sqlite-vec extension functions.
 ///
 /// Registers sqlite-vec globally so the functions are available, then runs the
-/// statement on a fresh in-memory connection. rusqlite is used directly
-/// because diesel does not expose `sqlite3_auto_extension`.
+/// emitted script.
 fn sqlite_syntax_check(sql: &str) {
     register_sqlite_vec_once();
     let conn = rusqlite::Connection::open_in_memory().unwrap();

@@ -256,7 +256,8 @@ fn test_drop_table_restrict_stripped() -> Result<(), Box<dyn std::error::Error>>
 fn test_drop_table_execution() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
-    // Create table directly in SQLite using DDL (table creation is DDL, not DML)
+    // Create table directly in SQLite using DDL (table creation is DDL, not
+    // DML)
     diesel::sql_query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         .execute(&mut connection)?;
     assert!(table_exists(&mut connection, "users"), "Table should exist after CREATE");
@@ -458,14 +459,15 @@ fn test_drop_trigger_cascade_stripped() -> Result<(), Box<dyn std::error::Error>
 fn test_drop_trigger_execution() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
-    // Create tables directly in SQLite using DDL (table creation is DDL, not DML)
+    // Create tables directly in SQLite using DDL (table creation is DDL, not
+    // DML)
     diesel::sql_query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         .execute(&mut connection)?;
     diesel::sql_query("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, message TEXT)")
         .execute(&mut connection)?;
 
-    // Create a trigger directly in SQLite using DDL (trigger creation is DDL, not
-    // DML)
+    // Create a trigger directly in SQLite using DDL (trigger creation is DDL,
+    // not DML)
     diesel::sql_query(
         "CREATE TRIGGER log_user_insert AFTER INSERT ON users \
          BEGIN INSERT INTO audit_log (message) VALUES ('user added'); END",

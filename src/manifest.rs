@@ -186,6 +186,49 @@ mod tests {
     }
 
     #[test]
+    fn manifest_does_not_translate_queries_or_row_changes() {
+        let options = Pg2SqliteOptions::default();
+        for statement in ["SELECT {fn ABS(-1)};", "INSERT INTO t (id) VALUES ({fn ABS(-1)});"] {
+            let translator = Pg2Sqlite::default()
+                .sql(&format!("CREATE TABLE t (id INTEGER PRIMARY KEY); {statement}"))
+                .expect("input should parse");
+            let error = translator
+                .translate(&options)
+                .expect_err("full translation should inspect the statement");
+            assert!(
+                error.to_string().contains("ODBC function escape syntax"),
+                "unexpected translation result for {statement}: {error}"
+            );
+
+            let entries = translator
+                .translation_manifest(&options)
+                .expect("non-schema SQL should not affect the manifest");
+            assert_eq!(
+                entries.iter().map(|entry| entry.logical.as_str()).collect::<Vec<_>>(),
+                vec!["t"]
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_validates_non_table_schema_statements() {
+        let translator = Pg2Sqlite::default()
+            .sql(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY);
+                 CREATE VIEW broken AS SELECT {fn ABS(-1)};",
+            )
+            .expect("input should parse");
+        let error = translator
+            .translation_manifest(&Pg2SqliteOptions::default())
+            .expect_err("an untranslatable view should block the manifest");
+
+        assert!(
+            error.to_string().contains("ODBC function escape syntax"),
+            "unexpected manifest result: {error}"
+        );
+    }
+
+    #[test]
     fn manifest_returns_the_translation_error() {
         let translator = Pg2Sqlite::default()
             .sql("CREATE TABLE t (generated SERIAL, id INTEGER PRIMARY KEY);")

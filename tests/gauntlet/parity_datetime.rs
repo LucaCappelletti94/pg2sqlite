@@ -365,8 +365,8 @@ fn datetime_expressions_agree() {
     // Tested on rows 1-3 only (whole-second timestamps). Row 4 has a known
     // divergence (KNOWN_DIVERGENCES["datetime_drops_subseconds"]): SQLite
     // datetime() drops sub-second precision, so '2024-03-05 14:07:09.250' +
-    // '1 day' gives '2024-03-06 14:07:09' in SQLite but '2024-03-06 14:07:09.25'
-    // in PostgreSQL.
+    // '1 day' gives '2024-03-06 14:07:09' in SQLite but '2024-03-06
+    // 14:07:09.25' in PostgreSQL.
 
     cmp("ts_add_interval_1_day", "ts + INTERVAL '1 day'", WHOLE_SECOND);
     cmp("ts_sub_interval_1_hour", "ts - INTERVAL '1 hour'", WHOLE_SECOND);
@@ -396,9 +396,9 @@ fn datetime_expressions_agree() {
     //
     // Tested on rows 1-3 (whole-second tstz values). Row 4 has a known
     // divergence (KNOWN_DIVERGENCES["datetime_drops_subseconds"]): SQLite
-    // datetime() drops sub-second precision, so tstz = '2024-03-05 14:07:09.250'
-    // would produce '2024-03-05 08:37:09.25' in PostgreSQL but
-    // '2024-03-05 08:37:09' in SQLite.
+    // datetime() drops sub-second precision, so tstz = '2024-03-05
+    // 14:07:09.250' would produce '2024-03-05 08:37:09.25' in PostgreSQL
+    // but '2024-03-05 08:37:09' in SQLite.
 
     cmp("tstz_at_time_zone", "tstz AT TIME ZONE '+05:30'", WHOLE_SECOND);
 

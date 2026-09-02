@@ -667,7 +667,8 @@ fn test_left_join_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .values(&Department { id: 2, name: "sales".to_string() })
         .execute(&mut connection)?;
 
-    // Only one employee in engineering (case mismatch to test ILIKE translation)
+    // Only one employee in engineering (case mismatch to test ILIKE
+    // translation)
     diesel::insert_into(employees::table)
         .values(&Employee {
             id: 1,

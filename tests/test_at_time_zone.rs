@@ -272,17 +272,21 @@ fn a_function_operand_reverses_with_its_sign_restored() {
     }
 }
 
-/// Two reasons to refuse an operand of unknown type, and the message says which
-/// one applies. This is the first: the sign of a shifting offset depends on the
-/// operand, so guessing is wrong half the time.
+/// An operand whose type cannot be resolved is refused, and the message names
+/// the reference and how to make it resolvable. The reference is now refused
+/// where it is read rather than where the offset is applied, because resolution
+/// runs against the relations in scope: `mystery` is declared by nothing, so
+/// the sign question is never reached.
 #[test]
 fn reversing_an_offset_over_an_unresolvable_operand_is_refused() {
     let error = refuse_reverse("SELECT datetime(mystery, '+05:30') FROM t");
-    assert!(error.contains("datetime"), "the error must name the construct, got: {error}");
-    assert!(error.contains("either sign"), "the sign is the reason here, got: {error}");
+    assert!(error.contains("mystery"), "the error must name the reference, got: {error}");
+    assert!(
+        error.contains("cannot be resolved to a declared column"),
+        "the unresolved reference is the reason here, got: {error}"
+    );
 }
 
-/// The second reason, and the one that used to let invalid PostgreSQL through.
 /// PostgreSQL applies `AT TIME ZONE` only to a timestamp, so a zone carrying no
 /// sign at all still needs the operand's type. Emitting these anyway answered
 /// `function pg_catalog.timezone(unknown, text) does not exist`, measured on 16
@@ -300,8 +304,8 @@ fn reversing_a_zone_that_carries_no_sign_still_needs_the_operand_type() {
     ] {
         let error = refuse_reverse(sqlite);
         assert!(
-            error.contains("not known to be a timestamp"),
-            "the type is the reason here, got: {error} for {sqlite}"
+            error.contains("cannot be resolved to a declared column"),
+            "an operand no relation declares is refused, got: {error} for {sqlite}"
         );
     }
 }

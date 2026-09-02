@@ -42,7 +42,8 @@ fn dimensionless_vector_column_emits_lossy_drop_warning() {
 #[test]
 fn dimensioned_vector_column_does_not_warn() {
     let warnings = warnings_for("CREATE TABLE docs (id INT PRIMARY KEY, embedding vector(384));");
-    // Only a vec0 table is emitted. No LossyDrop warning about a missing dimension.
+    // Only a vec0 table is emitted. No LossyDrop warning about a missing
+    // dimension.
     let has_dimension_warning = warnings.iter().any(|w| {
         matches!(
             w,
@@ -68,8 +69,8 @@ fn dimensionless_vector_column_translation_still_executes() {
 
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     for stmt in &report.statements {
-        // rusqlite: applying translated DDL (dynamically generated, diesel DSL cannot
-        // express DDL).
+        // rusqlite: applying translated DDL (dynamically generated, diesel DSL
+        // cannot express DDL).
         conn.execute_batch(&stmt.to_string())
             .unwrap_or_else(|e| panic!("emitted DDL failed: {e}\n{stmt}"));
     }

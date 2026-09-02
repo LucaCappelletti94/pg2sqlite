@@ -288,7 +288,7 @@ fn an_updates_returned_target_column_survives_a_from_clause() {
 /// whether the name is a column of a declared USING relation.
 #[test]
 fn an_undeclared_target_refuses_a_bare_column_of_the_using_relation() {
-    let error = translate_err("DELETE FROM nope USING r3 WHERE nope.link = r3.id RETURNING tag;");
+    let error = translate_err("DELETE FROM nope USING r3 WHERE TRUE RETURNING tag;");
     assert!(error.contains("tag"), "{error}");
 }
 
@@ -296,6 +296,6 @@ fn an_undeclared_target_refuses_a_bare_column_of_the_using_relation() {
 /// reports it, exactly as it does today.
 #[test]
 fn a_name_no_relation_declares_is_left_to_sqlite() {
-    let sql = emitted("DELETE FROM nope USING r3 WHERE nope.link = r3.id RETURNING whatever;");
+    let sql = emitted("DELETE FROM nope USING r3 WHERE TRUE RETURNING whatever;");
     assert!(sql.contains("RETURNING whatever"), "{sql}");
 }

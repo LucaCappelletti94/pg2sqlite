@@ -196,8 +196,8 @@ fn test_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(select_stmt.contains("IN ("), "Should contain IN clause, got: {select_stmt}");
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -295,8 +295,8 @@ fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should contain IN (SELECT ...), got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -346,7 +346,8 @@ fn test_in_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
     diesel::insert_into(users::table)
         .values(&User { id: 3, name: "Carol".to_string() })
         .execute(&mut connection)?;
-    // Only Alice and Bob have orders (using DSL to insert only specific columns)
+    // Only Alice and Bob have orders (using DSL to insert only specific
+    // columns)
     use crate::orders::dsl::*;
     diesel::insert_into(orders).values((id.eq(1), user_id.eq(Some(1)))).execute(&mut connection)?;
     diesel::insert_into(orders).values((id.eq(2), user_id.eq(Some(2)))).execute(&mut connection)?;
@@ -395,8 +396,8 @@ fn test_between_translation() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(select_stmt.contains("BETWEEN"), "Should contain BETWEEN, got: {select_stmt}");
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -500,8 +501,8 @@ fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
     assert!(select_stmt.contains("WHEN"), "Should contain WHEN, got: {select_stmt}");
     assert!(select_stmt.contains("END"), "Should contain END, got: {select_stmt}");
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -605,8 +606,8 @@ fn test_scalar_subquery_translation() -> Result<(), Box<dyn std::error::Error>> 
 
     assert!(select_stmt.contains("(SELECT"), "Should contain scalar subquery, got: {select_stmt}");
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated
@@ -719,8 +720,8 @@ fn test_extract_translation() -> Result<(), Box<dyn std::error::Error>> {
         "Should not contain EXTRACT, got: {select_stmt}"
     );
 
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the translated
-    // SQL.
+    // Execute DDL then prepare SELECT to prove real SQLite accepts the
+    // translated SQL.
     {
         let conn = SqliteConn::open_in_memory()?;
         let ddl = translated

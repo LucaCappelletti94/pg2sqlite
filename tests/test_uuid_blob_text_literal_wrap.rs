@@ -192,7 +192,8 @@ fn uuid_cast_in_select_lowers_to_conversion_call() {
         stmt.contains("unhex") || stmt.contains("uuid_text_to_blob"),
         "translated SELECT must invoke the text-to-blob conversion, got: {stmt}"
     );
-    // Execute the SELECT to prove SQLite accepts it (unhex is a built-in function).
+    // Execute the SELECT to prove SQLite accepts it (unhex is a built-in
+    // function).
     let conn = Connection::open_in_memory().unwrap();
     conn.prepare(&stmt)
         .unwrap_or_else(|e| panic!("translated SELECT must prepare in SQLite: {e}\n{stmt}"));
@@ -405,10 +406,12 @@ mod bind_param {
         let mut conn = diesel::sqlite::SqliteConnection::establish(":memory:").expect("open db");
 
         // Apply CREATE TABLE. diesel::sql_query is used because the emitted DDL
-        // includes STRICT and CHECK clauses that the Diesel typed DSL cannot express.
+        // includes STRICT and CHECK clauses that the Diesel typed DSL cannot
+        // express.
         diesel::sql_query(stmts[0].to_string()).execute(&mut conn).expect("create table");
 
-        // Find the translated INSERT which carries `?1` as the placeholder for id.
+        // Find the translated INSERT which carries `?1` as the placeholder for
+        // id.
         let insert_sql = stmts
             .iter()
             .find(|s| s.to_string().to_ascii_uppercase().trim_start().starts_with("INSERT"))
@@ -418,23 +421,26 @@ mod bind_param {
         let braced = "{550e8400-e29b-41d4-a716-446655440000}";
 
         // Execute the translator-emitted INSERT with a braced UUID bound to ?1.
-        // diesel::sql_query is used because we are testing the translator's exact
-        // output: the typed DSL would generate different SQL and would not exercise
-        // the placeholder-wrapping behavior this test pins.
+        // diesel::sql_query is used because we are testing the translator's
+        // exact output: the typed DSL would generate different SQL and
+        // would not exercise the placeholder-wrapping behavior this
+        // test pins.
         let result = diesel::sql_query(&insert_sql)
             .bind::<diesel::sql_types::Text, _>(braced)
             .execute(&mut conn);
 
-        // PostgreSQL accepts the braced UUID and stores the 16-byte representation.
-        // Currently fails: the BLOB STRICT column rejects a TEXT bind value because
-        // the translator does not wrap the placeholder in an unhex call.
+        // PostgreSQL accepts the braced UUID and stores the 16-byte
+        // representation. Currently fails: the BLOB STRICT column
+        // rejects a TEXT bind value because the translator does not
+        // wrap the placeholder in an unhex call.
         assert!(
             result.is_ok(),
             "INSERT with braced UUID bind must succeed; got: {}",
             result.unwrap_err()
         );
 
-        // The stored value must be the 16-byte binary form, not NULL and not text.
+        // The stored value must be the 16-byte binary form, not NULL and not
+        // text.
         let stored: Option<Vec<u8>> = u::table
             .select(u::id)
             .filter(u::pk.eq(1i32))

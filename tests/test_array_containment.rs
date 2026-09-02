@@ -56,8 +56,8 @@ fn array_contains_literal_truthy() {
     // PG: ARRAY[1,2,3] @> ARRAY[1,2] -> true
     let sql = tr("SELECT (ARRAY[1,2,3] @> ARRAY[1,2])::int AS r");
     let mut conn = establish_connection();
-    // sql_query: translated expression is dynamically generated, typed DSL cannot
-    // express it.
+    // sql_query: translated expression is dynamically generated, typed DSL
+    // cannot express it.
     let rows = sql_query(&sql).load::<ScalarInt>(&mut conn).expect("execute containment");
     assert_eq!(rows[0].r, 1, "ARRAY[1,2,3] @> ARRAY[1,2] must be true: {sql}");
 }
@@ -138,8 +138,8 @@ struct NewArrItem {
 }
 
 fn apply_ddl(conn: &mut SqliteConnection, sql: &str) {
-    // sql_query: applying translated DDL (dynamically generated, DSL cannot express
-    // DDL).
+    // sql_query: applying translated DDL (dynamically generated, DSL cannot
+    // express DDL).
     diesel::sql_query(sql).execute(conn).unwrap_or_else(|e| panic!("DDL failed: {e}\n{sql}"));
 }
 
@@ -221,7 +221,8 @@ fn array_column_contained_by_finds_matching_rows() {
 /// the fix, the jsonb path says "jsonb" and the array path succeeds.
 #[test]
 fn jsonb_at_arrow_refusal_names_jsonb() {
-    // Use default opts (no array representation) so both operands look like jsonb.
+    // Use default opts (no array representation) so both operands look like
+    // jsonb.
     let err = Pg2Sqlite::default()
         .sql("SELECT '{\"a\":1}'::jsonb @> '{}'::jsonb")
         .expect("parse")

@@ -54,8 +54,8 @@ fn fts_predicate_without_gin_index_errors_at_translate_time() {
              vtable. The schema did not declare a `CREATE INDEX ... USING GIN`, so the rewrite \
              must error at translate time (or pass the predicate through). Got:\n{joined}"
         );
-        // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
-        // accepts it.
+        // Translated SQL is dynamically generated; rusqlite execute_batch
+        // proves SQLite accepts it.
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
         for s in &stmts {
             conn.execute_batch(&format!("{s};"))
@@ -87,8 +87,8 @@ SELECT id FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('test');
         joined.contains("docs_fts MATCH 'test'"),
         "expected FTS5 MATCH rewrite, got:\n{joined}"
     );
-    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
-    // accepts it.
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves
+    // SQLite accepts it.
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
@@ -140,8 +140,8 @@ SELECT id FROM Docs WHERE to_tsvector('english', body) @@ to_tsquery('test');
         .expect("case-insensitive catalog lookup must allow the rewrite");
     let joined = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     assert!(joined.contains("MATCH 'test'"), "expected FTS5 MATCH rewrite, got:\n{joined}");
-    // Translated SQL is dynamically generated; rusqlite execute_batch proves SQLite
-    // accepts it.
+    // Translated SQL is dynamically generated; rusqlite execute_batch proves
+    // SQLite accepts it.
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))

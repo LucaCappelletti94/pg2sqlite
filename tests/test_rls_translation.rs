@@ -175,7 +175,8 @@ fn test_rls_insert_policy_enforces_owner() -> Result<(), Box<dyn std::error::Err
         .execute(&mut connection);
     assert!(result.is_ok(), "Alice should be able to insert a document with her own owner_id");
 
-    // Test: Alice cannot insert a document with Bob's owner_id (policy violation)
+    // Test: Alice cannot insert a document with Bob's owner_id (policy
+    // violation)
     let doc_id2 = Uuid::new_v4();
     let result = diesel::insert_into(documents::table)
         .values(Document {
@@ -258,8 +259,8 @@ fn test_rls_update_policy_restricts_updates() -> Result<(), Box<dyn std::error::
         "Alice's document should be updated to 'Updated Title'"
     );
 
-    // Test: Alice cannot update Bob's document (should not change data due to USING
-    // filter)
+    // Test: Alice cannot update Bob's document (should not change data due to
+    // USING filter)
     diesel::update(documents::table.filter(documents::id.eq(bob_doc_id.as_bytes().to_vec())))
         .set(documents::title.eq("Hacked!"))
         .execute(&mut connection)?;
@@ -330,8 +331,8 @@ fn test_rls_delete_policy_restricts_deletes() -> Result<(), Box<dyn std::error::
     // Set session as Alice for delete tests
     set_session_user_id(&user_alice);
 
-    // Test: Alice cannot delete Bob's document (should not actually delete due to
-    // USING filter)
+    // Test: Alice cannot delete Bob's document (should not actually delete due
+    // to USING filter)
     diesel::delete(documents::table.filter(documents::id.eq(bob_doc_id.as_bytes().to_vec())))
         .execute(&mut connection)?;
 

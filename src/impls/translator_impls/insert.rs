@@ -21,10 +21,10 @@ use sqlparser::ast::{Insert, SelectItem, SetExpr, TableObject};
 use super::helpers::Forward;
 use crate::{
     impls::{
-        object_name::{last_ident, last_ident_value_or_display, table_with_implicit_public_lookup},
+        object_name::{last_ident, last_ident_value_or_display, resolve_translation_table},
         shared_helpers::{
-            ColumnRewrites, carries_default_keyword, extract_columns_from_expr, is_default_keyword,
-            scale_literal_for_column, substituted_assignment_default,
+            ColumnReferences, ColumnRewrites, carries_default_keyword, extract_columns_from_expr,
+            is_default_keyword, scale_literal_for_column, substituted_assignment_default,
             translate_on_conflict_do_update, translate_returning,
         },
         translator_impls::{
@@ -50,7 +50,7 @@ impl<'schema> ResolvedInsertTarget<'schema> {
         let TableObject::TableName(name) = table else {
             return Self { table: None, error: None };
         };
-        match table_with_implicit_public_lookup(schema, name) {
+        match resolve_translation_table(schema, name) {
             Ok(table) => Self { table, error: None },
             Err(error) => Self { table: None, error: Some(error) },
         }
@@ -72,6 +72,25 @@ impl<'schema> ResolvedInsertTarget<'schema> {
 }
 
 crate::traits::translator::impl_contextual_translator!(Insert => Insert);
+/// The relation an `INSERT` names, whose columns a default, an `ON CONFLICT`
+/// clause or a `RETURNING` item resolves against.
+fn insert_target_scope<'db>(
+    insert: &Insert,
+    schema: &'db sql_traits::structs::ParserDB,
+) -> Result<
+    Option<sql_traits::structs::ColumnScope<'db, 'db, sql_traits::structs::ParserDB>>,
+    crate::errors::Error,
+> {
+    let sqlparser::ast::TableObject::TableName(name) = &insert.table else {
+        return Ok(None);
+    };
+    if crate::impls::object_name::last_ident(name).is_none() {
+        return Ok(None);
+    }
+    Ok(crate::impls::object_name::resolve_translation_table(schema, name)?
+        .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema)))
+}
+
 impl crate::traits::translator::TranslatorWithContext for Insert {
     fn translate_with_warnings(
         &self,
@@ -86,6 +105,12 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         // keyword any further, `translate_values_rows` can refuse a DEFAULT
         // reaching it from anywhere else, which is the only other place the
         // parser accepts one.
+        // The statement's target is the relation an unqualified column names,
+        // and a query inside the statement attaches its own scope over this
+        // one, so an outer reference still resolves.
+        let target_scope = insert_target_scope(self, schema)?;
+        let scoped = target_scope.as_ref().map(|scope| options.with_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
         let mut prepared = self.clone();
         substitute_default_values(&mut prepared, schema, options, emit)?;
 
@@ -386,7 +411,7 @@ fn substitute_default_values(
     let TableObject::TableName(table_name) = &insert.table else {
         return Err(default_without_a_named_table(&insert.table));
     };
-    let Some(table) = table_with_implicit_public_lookup(schema, table_name)? else {
+    let Some(table) = resolve_translation_table(schema, table_name)? else {
         return Err(unknown_default_table(table_name));
     };
 
@@ -471,10 +496,10 @@ fn is_generated_primary_key(
         return Ok(false);
     }
 
-    // Ask the data type translator rather than enumerating PostgreSQL spellings:
-    // `SERIAL` reaches here as `DataType::Custom("serial")` and only the
-    // translator knows it becomes `INTEGER`, which is what makes the column a
-    // rowid alias.
+    // Ask the data type translator rather than enumerating PostgreSQL
+    // spellings: `SERIAL` reaches here as `DataType::Custom("serial")` and
+    // only the translator knows it becomes `INTEGER`, which is what makes
+    // the column a rowid alias.
     Ok(matches!(
         only.attribute().data_type.translate_with_warnings(schema, options, emit)?,
         sqlparser::ast::DataType::Int(_)
@@ -770,7 +795,10 @@ fn database_filled_column(
             SelectItem::UnnamedExpr(expr)
             | SelectItem::ExprWithAlias { expr, .. }
             | SelectItem::ExprWithAliases { expr, .. } => {
-                named.extend(extract_columns_from_expr(expr));
+                match extract_columns_from_expr(expr) {
+                    ColumnReferences::Complete(columns) => named.extend(columns),
+                    ColumnReferences::Unknown => named.extend(every_column()?),
+                }
             }
             SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => {
                 named.extend(every_column()?);
@@ -807,8 +835,8 @@ fn wrap_uuid_text_literals(
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), crate::errors::Error> {
     let Some(table) = table else { return Ok(()) };
-    // A table absent from the schema has no UUID columns to wrap, so this leaves
-    // the insert verbatim exactly as the lookup above does.
+    // A table absent from the schema has no UUID columns to wrap, so this
+    // leaves the insert verbatim exactly as the lookup above does.
     let Ok(uuid_cols) = uuid_columns_of_table(table, schema) else { return Ok(()) };
     if uuid_cols.is_empty() {
         return Ok(());

@@ -188,7 +188,8 @@ fn select_into_with_comma_expression_produces_valid_sqlite_trigger_sql() {
 
 #[test]
 fn with_recursive_insert_transforms() {
-    // The trigger_issue.sql fixture has patterns that may involve CTE-based inserts
+    // The trigger_issue.sql fixture has patterns that may involve CTE-based
+    // inserts
     let sql = include_str!("fixtures/trigger_issue.sql");
     let output = translate(sql);
     // Should translate without error and produce valid statements
@@ -593,7 +594,8 @@ fn trigger_multiple_inserts_on_conflict() {
 #[test]
 fn raise_info_single_space_is_dropped() -> Result<(), Box<dyn std::error::Error>> {
     // The trigger also copies NEW.val into a log table so the body is non-empty
-    // after RAISE INFO is stripped (SQLite requires at least one DML statement).
+    // after RAISE INFO is stripped (SQLite requires at least one DML
+    // statement).
     let sql = r"
         CREATE TABLE ri_test (id INTEGER PRIMARY KEY, val INTEGER NOT NULL);
         CREATE TABLE ri_log (id INTEGER PRIMARY KEY, logged_val INTEGER NOT NULL);

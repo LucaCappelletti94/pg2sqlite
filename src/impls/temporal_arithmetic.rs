@@ -24,13 +24,9 @@ use sqlparser::ast::{
 use super::{
     datetime_helpers::build_subsecond_unixepoch_call,
     function_helpers::{simple_function_expr, string_literal},
-    shared_helpers::{function_argument_exprs, is_integral_expression, unanimous_declared},
+    shared_helpers::{declared_in_scope, function_argument_exprs, is_integral_expression},
 };
-use crate::{
-    errors::Error,
-    prelude::{Pg2SqliteOptions, ReverseTranslator},
-    traits::translator::TranslatorWithContext,
-};
+use crate::{errors::Error, prelude::ReverseTranslator, traits::translator::TranslatorWithContext};
 
 /// The temporal type of an operand, as far as it resolves without
 /// PostgreSQL's own type resolver.
@@ -45,24 +41,31 @@ pub(crate) enum TemporalKind {
 
 /// Resolve the temporal type of `expr` from its own spelling or from the
 /// declared type of the column it names.
-fn temporal_kind(expr: &Expr, schema: &ParserDB) -> Option<TemporalKind> {
-    match expr {
-        Expr::Nested(inner) => temporal_kind(inner, schema),
+fn temporal_kind(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<TemporalKind>, Error> {
+    Ok(match expr {
+        Expr::Nested(inner) => temporal_kind(inner, schema, options)?,
         Expr::TypedString(typed) => kind_of_data_type(&typed.data_type),
         Expr::Cast { data_type, .. } => kind_of_data_type(data_type),
         // Either operation answers a timestamp, aware or naive.
         Expr::AtTimeZone { .. } => Some(TemporalKind::Timestamp),
         Expr::Function(function) => {
-            kind_of_nullary(&crate::impls::object_name::last_ident(&function.name)?.value)
+            match crate::impls::object_name::last_ident(&function.name) {
+                Some(name) => kind_of_nullary(&name.value),
+                None => None,
+            }
         }
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
-            unanimous_declared(expr, schema, kind_of_data_type)
+            declared_in_scope(expr, schema, options, kind_of_data_type, temporal_kind)?
         }
         // A rewritten subexpression is an operand in its own right, so
         // `(d + 7) - d` resolves.
-        Expr::BinaryOp { left, op, right } => binary_result_kind(left, op, right, schema),
+        Expr::BinaryOp { left, op, right } => binary_result_kind(left, op, right, schema, options)?,
         _ => None,
-    }
+    })
 }
 
 fn kind_of_data_type(data_type: &DataType) -> Option<TemporalKind> {
@@ -97,27 +100,31 @@ fn binary_result_kind(
     op: &BinaryOperator,
     right: &Expr,
     schema: &ParserDB,
-) -> Option<TemporalKind> {
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<TemporalKind>, Error> {
     if !matches!(op, BinaryOperator::Plus | BinaryOperator::Minus) {
-        return None;
+        return Ok(None);
     }
     // An INTERVAL keeps the other operand's type, except that it widens a date
     // to a timestamp.
     let widen = |kind| if kind == TemporalKind::Date { TemporalKind::Timestamp } else { kind };
     if is_interval(right) {
-        return temporal_kind(left, schema).map(widen);
+        return Ok(temporal_kind(left, schema, options)?.map(widen));
     }
     if is_interval(left) && matches!(op, BinaryOperator::Plus) {
-        return temporal_kind(right, schema).map(widen);
+        return Ok(temporal_kind(right, schema, options)?.map(widen));
     }
 
-    match (temporal_kind(left, schema), temporal_kind(right, schema)) {
-        (Some(TemporalKind::Date), None) if is_integral_expression(right, schema) => {
-            Some(TemporalKind::Date)
-        }
-        (None, Some(TemporalKind::Date))
-            if matches!(op, BinaryOperator::Plus) && is_integral_expression(left, schema) =>
-        {
+    let kinds = (temporal_kind(left, schema, options)?, temporal_kind(right, schema, options)?);
+    // Asked before the match, since a guard cannot carry a refusal, and only
+    // for the operand whose kind is open, so a resolvable pair never asks about
+    // an operand it does not need.
+    let right_integral = kinds.1.is_none() && is_integral_expression(right, schema, options)?;
+    let left_integral = kinds.0.is_none() && is_integral_expression(left, schema, options)?;
+
+    Ok(match kinds {
+        (Some(TemporalKind::Date), None) if right_integral => Some(TemporalKind::Date),
+        (None, Some(TemporalKind::Date)) if matches!(op, BinaryOperator::Plus) && left_integral => {
             Some(TemporalKind::Date)
         }
         (Some(TemporalKind::Date), Some(TemporalKind::Time))
@@ -127,7 +134,7 @@ fn binary_result_kind(
             Some(TemporalKind::Timestamp)
         }
         _ => None,
-    }
+    })
 }
 
 fn is_interval(expr: &Expr) -> bool {
@@ -159,8 +166,14 @@ pub(crate) fn translate_temporal_binary_op(
     if is_interval(left) || is_interval(right) {
         return None;
     }
-    let left_kind = temporal_kind(left, schema);
-    let right_kind = temporal_kind(right, schema);
+    let left_kind = match temporal_kind(left, schema, options) {
+        Ok(kind) => kind,
+        Err(error) => return Some(Err(error)),
+    };
+    let right_kind = match temporal_kind(right, schema, options) {
+        Ok(kind) => kind,
+        Err(error) => return Some(Err(error)),
+    };
     if left_kind.is_none() && right_kind.is_none() {
         return None;
     }
@@ -177,6 +190,10 @@ fn rewrite(
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, Error> {
     let subtracting = matches!(op, BinaryOperator::Minus);
+    // Both integral questions are asked here rather than in a guard, which
+    // cannot carry a refusal, and only for the operand whose kind is open.
+    let right_integral = kinds.1.is_none() && is_integral_expression(right, schema, options)?;
+    let left_integral = kinds.0.is_none() && is_integral_expression(left, schema, options)?;
     match kinds {
         (Some(TemporalKind::Date), Some(TemporalKind::Date)) if subtracting => {
             Ok(day_difference(
@@ -184,16 +201,14 @@ fn rewrite(
                 right.translate_with_warnings(schema, options, emit)?,
             ))
         }
-        (Some(TemporalKind::Date), None) if is_integral_expression(right, schema) => {
+        (Some(TemporalKind::Date), None) if right_integral => {
             Ok(shift_date(
                 left.translate_with_warnings(schema, options, emit)?,
                 op,
                 right.translate_with_warnings(schema, options, emit)?,
             ))
         }
-        (None, Some(TemporalKind::Date))
-            if !subtracting && is_integral_expression(left, schema) =>
-        {
+        (None, Some(TemporalKind::Date)) if !subtracting && left_integral => {
             Ok(shift_date(
                 right.translate_with_warnings(schema, options, emit)?,
                 &BinaryOperator::Plus,
@@ -281,7 +296,11 @@ pub(crate) fn epoch_of_temporal_difference(
     let Expr::BinaryOp { left, op: BinaryOperator::Minus, right } = operand else {
         return None;
     };
-    let (left_kind, right_kind) = (temporal_kind(left, schema)?, temporal_kind(right, schema)?);
+    let (Ok(Some(left_kind)), Ok(Some(right_kind))) =
+        (temporal_kind(left, schema, options), temporal_kind(right, schema, options))
+    else {
+        return None;
+    };
     // `date - date` is an integer, and PostgreSQL refuses extract() over one.
     if left_kind == TemporalKind::Date && right_kind == TemporalKind::Date {
         return None;
@@ -349,7 +368,7 @@ fn trim_trailing_zeros(rendered: Expr) -> Expr {
 pub(crate) fn reverse_temporal_arithmetic(
     expr: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Option<Result<Expr, Error>> {
     if let Expr::Cast {
         expr: inner, data_type: DataType::Integer(None), kind: CastKind::Cast, ..
@@ -456,7 +475,7 @@ fn rtrim_argument<'a>(expr: &'a Expr, cut: &str) -> Option<&'a Expr> {
 fn reversed_to_timestamp(
     epoch: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     Ok(simple_function_expr(
         "to_timestamp",
@@ -475,7 +494,7 @@ fn reversed_binary_op(
     op: &BinaryOperator,
     right: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     Ok(Expr::BinaryOp {
         left: Box::new(left.reverse_translate(schema, options)?),
@@ -488,7 +507,7 @@ fn reversed_epoch_difference(
     left: &Expr,
     right: &Expr,
     schema: &ParserDB,
-    options: &Pg2SqliteOptions,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     Ok(Expr::Extract {
         field: DateTimeField::Epoch,

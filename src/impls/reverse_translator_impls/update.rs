@@ -16,28 +16,24 @@ use sql_traits::structs::ParserDB;
 use sqlparser::ast::Update;
 
 use super::helpers::Reverse;
-use crate::{
-    errors::Error,
-    impls::shared_helpers::translate_update,
-    prelude::{Pg2SqliteOptions, ReverseTranslator},
-};
+use crate::{errors::Error, impls::shared_helpers::translate_update, prelude::ReverseTranslator};
 
 impl ReverseTranslator for Update {
     type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
     type PostgresEntry = Update;
 
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
-        // PostgreSQL UPDATE has no conflict-resolution clause at all. Each SQLite
-        // OR mode changes error handling in a distinct way (ROLLBACK reverts the
-        // transaction, ABORT stops the statement but keeps prior changes, FAIL
-        // stops at the first conflicting row, IGNORE skips conflicting rows,
-        // REPLACE deletes and re-inserts), so silently dropping the clause would
-        // change the observable error behaviour. Reject all of them.
+        // PostgreSQL UPDATE has no conflict-resolution clause at all. Each
+        // SQLite OR mode changes error handling in a distinct way
+        // (ROLLBACK reverts the transaction, ABORT stops the statement
+        // but keeps prior changes, FAIL stops at the first conflicting
+        // row, IGNORE skips conflicting rows, REPLACE deletes and
+        // re-inserts), so silently dropping the clause would change the
+        // observable error behaviour. Reject all of them.
         if let Some(or_clause) = self.or {
             return Err(Error::reverse_refusal(format!(
                 "UPDATE {or_clause} has no PostgreSQL form. PostgreSQL UPDATE has no \

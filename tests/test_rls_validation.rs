@@ -164,8 +164,9 @@ fn test_monitor_mode_logs_violations() -> Result<(), Box<dyn std::error::Error>>
     // Schema with a permissive INSERT (WITH CHECK = true) but a restrictive
     // SELECT USING (owner_id = session_user). Alice can insert a bob-owned row
     // through the view (WITH CHECK passes), but the row is not visible to alice
-    // through SELECT USING. The monitoring trigger must log 'select_not_visible'
-    // rather than 'rls_policy_violation', matching PostgreSQL semantics.
+    // through SELECT USING. The monitoring trigger must log
+    // 'select_not_visible' rather than 'rls_policy_violation', matching
+    // PostgreSQL semantics.
     let audit_table_name = "rls_violations";
     const MONITOR_SCHEMA: &str = r#"
 CREATE TABLE documents (
@@ -234,8 +235,8 @@ CREATE POLICY documents_insert_policy ON documents
     assert_eq!(violations.len(), 1, "Should have logged exactly one audit row");
     assert_eq!(violations[0].table_name, "documents");
     // The monitor now reports 'select_not_visible', not 'rls_policy_violation',
-    // because a write whose new row is not SELECT-visible is not a policy violation
-    // in the PostgreSQL sense.
+    // because a write whose new row is not SELECT-visible is not a policy
+    // violation in the PostgreSQL sense.
     assert_eq!(violations[0].violation_type, "select_not_visible");
 
     Ok(())
@@ -368,8 +369,8 @@ CREATE POLICY documents_insert_policy ON documents
         .bind::<diesel::sql_types::Text, _>("Content")
         .execute(&mut conn)?;
 
-    // Alice inserts a bob-owned doc through the view (WITH CHECK=true, not visible
-    // to alice).
+    // Alice inserts a bob-owned doc through the view (WITH CHECK=true, not
+    // visible to alice).
     let bob_doc_id = Uuid::new_v4();
     diesel::sql_query("INSERT INTO documents (id, owner_id, title, content) VALUES (?, ?, ?, ?)")
         .bind::<diesel::sql_types::Binary, _>(bob_doc_id.as_bytes())

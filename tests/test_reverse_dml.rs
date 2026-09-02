@@ -103,8 +103,8 @@ fn reverse_insert_or_replace() {
 
 #[test]
 fn reverse_insert_or_rollback() {
-    // INSERT OR ROLLBACK has no direct PG equivalent, should pass through without
-    // ON CONFLICT
+    // INSERT OR ROLLBACK has no direct PG equivalent, should pass through
+    // without ON CONFLICT
     let pg =
         reverse(SCHEMA, "INSERT OR ROLLBACK INTO users (id, name, age) VALUES (1, 'Alice', 30);");
     assert!(pg.contains("INSERT"), "Expected INSERT: {pg}");

@@ -326,7 +326,8 @@ fn the_clauses_are_dropped_for_a_rename_too() -> Result<(), Box<dyn std::error::
     for clause in ["IF EXISTS", "ONLY"] {
         let mut conn = apply(&format!("{BASE} ALTER TABLE {clause} t RENAME TO t2;"))?;
         // `sqlite_master` is the only way to observe that the table now answers
-        // to the new name, which no typed query over a renamed table can express.
+        // to the new name, which no typed query over a renamed table can
+        // express.
         let rows: Vec<Renamed> = diesel::sql_query(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('t', 't2')",
         )

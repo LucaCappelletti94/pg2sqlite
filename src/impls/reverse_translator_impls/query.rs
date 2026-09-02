@@ -27,7 +27,7 @@ use crate::{
         },
         translator_impls::query::{DISTINCT_ON_ROWNUM_ALIAS, distinct_on_window_select},
     },
-    prelude::{Pg2SqliteOptions, ReverseTranslator},
+    prelude::ReverseTranslator,
 };
 
 /// The inner select, its projected aliases, and the window partition and order
@@ -160,47 +160,61 @@ fn restore_distinct_on(query: &Query) -> Option<Query> {
 }
 impl ReverseTranslator for Query {
     type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
     type PostgresEntry = Query;
 
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
         let restored = restore_distinct_on(self);
-        translate_query_shared::<Reverse>(
-            restored.as_ref().unwrap_or(self),
+        let query = restored.as_ref().unwrap_or(self);
+        // The relations this query exposes decide which column a reference
+        // names, which is what separates a json column from a jsonb one when
+        // choosing the PostgreSQL spelling of a function.
+        let scope_substitute = crate::impls::shared_helpers::scope_query_for(self);
+        let scope = sql_traits::structs::ColumnScope::from_query(
+            scope_substitute.as_ref().unwrap_or(self),
             schema,
-            options,
-            &mut |_| {},
-        )
+        )?;
+        let scoped = options.with_scope(&scope);
+        let noted = scoped.with_cte_clause(query.with.as_ref().or_else(|| scoped.cte_clause()));
+        translate_query_shared::<Reverse>(query, schema, &noted, &mut |_| {})
     }
 }
 
 impl ReverseTranslator for SetExpr {
     type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
     type PostgresEntry = SetExpr;
 
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
+        // Each arm of a set operation carries its own FROM, so the scope is
+        // attached per SELECT, with the enclosing WITH keeping a CTE opaque.
+        if let SetExpr::Select(select) = self {
+            let scope_query = crate::impls::query_builder::make_query(
+                options.cte_clause().cloned(),
+                SetExpr::Select(select.clone()),
+            );
+            let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
+            let scoped = options.with_scope(&scope);
+            return translate_set_expr_shared::<Reverse>(self, schema, &scoped, &mut |_| {});
+        }
         translate_set_expr_shared::<Reverse>(self, schema, options, &mut |_| {})
     }
 }
 
 impl ReverseTranslator for Select {
     type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
     type PostgresEntry = Select;
 
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
         translate_select_shared::<Reverse>(self, schema, options, &mut |_| {})
     }
@@ -242,7 +256,7 @@ mod tests {
     #[test]
     fn reverse_translate_query_preserves_complex_clauses() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let query = parse_query(
             r#"
@@ -267,7 +281,7 @@ mod tests {
     #[test]
     fn reverse_translate_limit_clause_covers_both_variants() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let limit_offset = LimitClause::LimitOffset {
             limit: Some(parse_expr("10")),
@@ -296,7 +310,7 @@ mod tests {
     #[test]
     fn reverse_translate_fetch_distinct_and_group_by_cover_variants() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let query = parse_query("SELECT DISTINCT ON (id) id FROM users GROUP BY id");
         let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
@@ -335,7 +349,7 @@ mod tests {
     #[test]
     fn reverse_translate_query_translates_select_side_and_query_level_expression_paths() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let mut query = parse_query("SELECT id FROM users");
         let sqlparser::ast::SetExpr::Select(select) = query.body.as_mut() else {
@@ -391,7 +405,7 @@ mod tests {
     #[test]
     fn reverse_foreign_select_clauses_are_refused() {
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let refused = |mutate: &dyn Fn(&mut sqlparser::ast::Select), needle: &str| {
             let mut query = parse_query("SELECT id FROM users");

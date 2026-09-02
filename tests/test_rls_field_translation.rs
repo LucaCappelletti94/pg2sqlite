@@ -51,8 +51,9 @@ fn rls_window_frame_bound_appears_in_output() -> Result<(), Box<dyn std::error::
         lower.contains("1 preceding") || lower.contains("rows between"),
         "Window frame bounds should appear in output: {output}"
     );
-    // Execute the emitted DDL to prove SQLite accepts the translated statements.
-    // Translated SQL is dynamic and cannot be expressed with diesel's typed DSL.
+    // Execute the emitted DDL to prove SQLite accepts the translated
+    // statements. Translated SQL is dynamic and cannot be expressed with
+    // diesel's typed DSL.
     apply_all(sql)?;
     Ok(())
 }
@@ -79,8 +80,9 @@ fn rls_function_args_in_policy_transformed() -> Result<(), Box<dyn std::error::E
         output.contains("NEW.email") || output.contains("NEW.\"email\""),
         "Column ref 'email' should become NEW.email in INSERT trigger: {output}"
     );
-    // Execute the emitted DDL to prove SQLite accepts the translated statements.
-    // Translated SQL is dynamic and cannot be expressed with diesel's typed DSL.
+    // Execute the emitted DDL to prove SQLite accepts the translated
+    // statements. Translated SQL is dynamic and cannot be expressed with
+    // diesel's typed DSL.
     apply_all(sql)?;
     Ok(())
 }

@@ -318,8 +318,8 @@ fn non_public_schema_qualified_delete_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("Unsupported schema-qualified object name")
-            && message.contains("does not resolve"),
+        message.contains("id cannot be resolved to a declared column")
+            && message.contains("without an inspectable definition"),
         "unexpected error: {message}"
     );
 }
@@ -429,8 +429,8 @@ fn non_public_schema_qualified_join_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("Unsupported schema-qualified object name")
-            && message.contains("does not resolve"),
+        message.contains("u.id cannot be resolved to a declared column")
+            && message.contains("without an inspectable definition"),
         "unexpected error: {message}"
     );
 }
@@ -549,8 +549,8 @@ fn create_view_non_public_schema_name_errors_when_schema_unresolved() {
         .expect_err("unresolved non-public view schema should error");
     let message = err.to_string();
     assert!(
-        message.contains("Unsupported schema-qualified object name")
-            && message.contains("does not resolve"),
+        message.contains("Schema `my_custom_app` not found")
+            && message.contains("View `active_users`"),
         "unexpected error: {message}"
     );
 }

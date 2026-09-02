@@ -221,7 +221,8 @@ fn to_char_iso_year_week_day() {
         "to_char('IYYY-IW-ID') should produce strftime('%G-%V-%u', ...), got: {output}"
     );
 
-    // Execute the boundary value: 2024-12-30 is calendar 2024 but ISO 2025-W01-1.
+    // Execute the boundary value: 2024-12-30 is calendar 2024 but ISO
+    // 2025-W01-1.
     let literal = translate("SELECT to_char(TIMESTAMP '2024-12-30 00:00:00', 'IYYY-IW-ID');")
         .expect("the ISO codes have exact strftime equivalents");
     // The SQL under test is translator output, a runtime string, so the raw

@@ -17,20 +17,17 @@ use sqlparser::ast::Delete;
 
 use super::helpers::{Reverse, reverse_translate_table_with_joins};
 use crate::{
-    errors::Error,
-    impls::shared_helpers::translate_delete_core,
-    prelude::{Pg2SqliteOptions, ReverseTranslator},
+    errors::Error, impls::shared_helpers::translate_delete_core, prelude::ReverseTranslator,
 };
 
 impl ReverseTranslator for Delete {
     type Schema = ParserDB;
-    type Options = Pg2SqliteOptions;
     type PostgresEntry = Delete;
 
     fn reverse_translate(
         &self,
         schema: &Self::Schema,
-        options: &Self::Options,
+        options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
         // PostgreSQL DELETE has no ORDER BY or LIMIT clause. Refuse them so
         // the emitted SQL does not fail at the server with a syntax error.
@@ -107,7 +104,7 @@ mod tests {
             "DELETE FROM users USING accounts WHERE users.account_id = accounts.id RETURNING users.id",
         );
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
 
         let translated = delete.reverse_translate(&schema, &options).unwrap();
         assert!(translated.using.is_some());
@@ -125,7 +122,7 @@ mod tests {
         delete.from = FromTable::WithoutKeyword(tables);
 
         let schema = empty_schema();
-        let options = Pg2SqliteOptions::default();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
         let translated = delete.reverse_translate(&schema, &options).unwrap();
         assert!(matches!(translated.from, FromTable::WithoutKeyword(_)));
     }

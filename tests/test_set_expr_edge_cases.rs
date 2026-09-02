@@ -77,7 +77,8 @@ fn table_expr_reverse_passthrough() {
     let options = Pg2SqliteOptions::default();
     let query = make_table_query();
 
-    let result = query.reverse_translate(&schema, &options);
+    let result =
+        query.reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options));
     assert!(result.is_ok(), "Reverse should pass through TABLE: {:?}", result.err());
 }
 
@@ -87,6 +88,7 @@ fn merge_expr_reverse_passthrough() {
     let options = Pg2SqliteOptions::default();
     let query = make_merge_query();
 
-    let result = query.reverse_translate(&schema, &options);
+    let result =
+        query.reverse_translate(&schema, &pg2sqlite::options::TranslationContext::new(&options));
     assert!(result.is_ok(), "Reverse should pass through MERGE: {:?}", result.err());
 }

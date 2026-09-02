@@ -40,7 +40,8 @@ fn plpgsql_combined_expr_types_transformed() {
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated alongside CEIL+FLOOR: {sql_str}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -67,7 +68,8 @@ fn plpgsql_position_expr_transformed() {
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated alongside POSITION: {sql_str}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -94,7 +96,8 @@ fn plpgsql_ceil_floor_expr_transformed() {
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated alongside CEIL: {sql_str}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -136,7 +139,8 @@ fn plpgsql_at_time_zone_is_transformed() {
         !lower.contains("gen_random_uuid"),
         "gen_random_uuid should be translated in trigger with AT TIME ZONE: {sql_str}"
     );
-    // Execute the emitted DDL to prove real SQLite accepts the translated schema.
+    // Execute the emitted DDL to prove real SQLite accepts the translated
+    // schema.
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))

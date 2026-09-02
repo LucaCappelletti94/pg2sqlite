@@ -31,7 +31,10 @@ fn parse_first_projection_expr(sql: &str) -> Expr {
 }
 
 fn reverse_expr(expr: &Expr) -> String {
-    expr.reverse_translate(&test_schema(), &Pg2SqliteOptions::default()).unwrap().to_string()
+    let options = Pg2SqliteOptions::default();
+    expr.reverse_translate(&test_schema(), &pg2sqlite::options::TranslationContext::new(&options))
+        .unwrap()
+        .to_string()
 }
 
 #[test]

@@ -402,7 +402,8 @@ fn statistical_aggregates_agree_within_tolerance() {
     //
     // r values (NULL in row 3 excluded): 1.5, 2.5, 3.5
     // var_pop = 2/3; var_samp = 1.0; stddev = 1.0
-    // n=[10,20,30] and r=[1.5,2.5,3.5] are perfectly linearly correlated: corr=1.0
+    // n=[10,20,30] and r=[1.5,2.5,3.5] are perfectly linearly correlated:
+    // corr=1.0
     let mut pg = setup_pg();
     let sq = setup_sq_rusqlite();
 
@@ -441,9 +442,9 @@ fn json_extraction_agrees() {
 
 #[test]
 fn json_typeof_agrees() {
-    // json_typeof: sql_query; the translator normalises vocabulary to PostgreSQL
-    // names ('object', 'array', 'number', 'string', 'boolean', 'null').
-    // Row 3 has NULL payload so json_typeof returns NULL.
+    // json_typeof: sql_query; the translator normalises vocabulary to
+    // PostgreSQL names ('object', 'array', 'number', 'string', 'boolean',
+    // 'null'). Row 3 has NULL payload so json_typeof returns NULL.
     let mut pg = setup_pg();
     let mut sq = setup_sq_diesel();
 
@@ -481,15 +482,16 @@ fn array_indexing_agrees() {
     let q = "SELECT tags[2] AS val FROM vals WHERE id = 1";
     assert_sql_scalar(&pg_sql(&mut pg, q), &sq_sql_diesel(&mut sq, q), "tags[2]");
 
-    // Index past the end of an empty array (id=3, tags=[]) returns NULL on both.
+    // Index past the end of an empty array (id=3, tags=[]) returns NULL on
+    // both.
     let q = "SELECT tags[1] AS val FROM vals WHERE id = 3";
     assert_sql_scalar(&pg_sql(&mut pg, q), &sq_sql_diesel(&mut sq, q), "tags[1] empty array");
 }
 
 #[test]
 fn array_length_agrees() {
-    // cardinality: sql_query; diesel has no cardinality / json_array_length DSL.
-    // Row 3 has an empty array, giving 0.
+    // cardinality: sql_query; diesel has no cardinality / json_array_length
+    // DSL. Row 3 has an empty array, giving 0.
     let mut pg = setup_pg();
     let mut sq = setup_sq_diesel();
 
