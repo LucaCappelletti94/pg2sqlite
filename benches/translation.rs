@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use std::hint::black_box;
+use core::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
