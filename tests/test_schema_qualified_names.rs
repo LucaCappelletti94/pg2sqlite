@@ -351,6 +351,41 @@ fn non_public_schema_qualified_delete_target_is_unqualified_when_schema_resolves
 }
 
 #[test]
+fn schema_qualified_insert_target_is_unqualified() {
+    let output = translated_sql(
+        "
+        CREATE TABLE public.users (id INT PRIMARY KEY, name TEXT);
+        INSERT INTO public.users (id, name) VALUES (1, 'a');
+        ",
+    );
+    assert!(
+        output.contains("INSERT INTO users"),
+        "expected INSERT target to be unqualified, got: {output}"
+    );
+    execute_as_sqlite(
+        "
+        CREATE TABLE public.users (id INT PRIMARY KEY, name TEXT);
+        INSERT INTO public.users (id, name) VALUES (1, 'a');
+        ",
+    );
+}
+
+#[test]
+fn non_public_schema_qualified_insert_target_is_unqualified_when_schema_resolves() {
+    let sql = "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
+        CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
+        INSERT INTO my_custom_app.users (id, name) VALUES (1, 'a');
+    ";
+    let output = translated_sql(sql);
+    assert!(
+        !output.contains("my_custom_app."),
+        "schema qualifier should be removed for SQLite, got: {output}"
+    );
+    execute_as_sqlite(sql);
+}
+
+#[test]
 fn non_public_schema_qualified_select_from_target_is_rejected() {
     let err = Pg2Sqlite::default()
         .sql(

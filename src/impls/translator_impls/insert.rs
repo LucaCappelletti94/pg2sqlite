@@ -21,7 +21,10 @@ use sqlparser::ast::{Insert, SelectItem, SetExpr, TableObject};
 use super::helpers::Forward;
 use crate::{
     impls::{
-        object_name::{last_ident, last_ident_value_or_display, resolve_translation_table},
+        object_name::{
+            last_ident, last_ident_value_or_display,
+            normalize_schema_qualified_object_name_for_sqlite, resolve_translation_table,
+        },
         shared_helpers::{
             ColumnReferences, ColumnRewrites, carries_default_keyword, extract_columns_from_expr,
             is_default_keyword, scale_literal_for_column, substituted_assignment_default,
@@ -230,6 +233,17 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         if matches!(insert.on, Some(sqlparser::ast::OnInsert::OnConflict(_))) {
             disambiguate_upsert_source(&mut insert);
         }
+
+        // SQLite has no schemas, and a qualified name on a write inside a
+        // trigger body is a parse error at CREATE TRIGGER, so the emitted
+        // target carries the object part alone. This runs last because every
+        // lookup above resolves the name the schema declared.
+        if let TableObject::TableName(name) = &insert.table {
+            insert.table = TableObject::TableName(
+                normalize_schema_qualified_object_name_for_sqlite(schema, name)?,
+            );
+        }
+
         Ok(insert)
     }
 }
