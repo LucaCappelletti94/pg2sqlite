@@ -44,7 +44,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
         &self,
         name: &str,
     ) -> Result<Option<(BeginEndStatements, PlPgSqlContext)>, Error> {
-        let Some(function) = self.function(name) else {
+        let Some(function) = self.function(None, name) else {
             return Ok(None);
         };
         let Some(function_body) = function.body() else {
