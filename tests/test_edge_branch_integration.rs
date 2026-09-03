@@ -324,8 +324,15 @@ fn create_trigger_translation_rejects_unsupported_shapes_and_handles_missing_fun
 
 #[test]
 fn schema_function_body_covers_missing_and_error_paths() {
+    let function_name =
+        |value: &str| sqlparser::ast::ObjectName::from(vec![Ident::new(value.to_owned())]);
     let missing = empty_schema();
-    assert!(missing.function_body("does_not_exist").expect("lookup should succeed").is_none());
+    assert!(
+        missing
+            .function_body(&function_name("does_not_exist"))
+            .expect("lookup should succeed")
+            .is_none()
+    );
 
     let mut no_body_stmt = parse_statement(
         "CREATE FUNCTION no_body() RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;",
@@ -337,30 +344,35 @@ fn schema_function_body_covers_missing_and_error_paths() {
     }
     let no_body_schema = ParserDB::from_statements(vec![no_body_stmt], "test".to_string())
         .expect("schema should build");
-    assert!(no_body_schema.function_body("no_body").expect("lookup should succeed").is_none());
+    assert!(
+        no_body_schema
+            .function_body(&function_name("no_body"))
+            .expect("lookup should succeed")
+            .is_none()
+    );
 
     let no_begin_schema = schema_from_sql(
         "CREATE FUNCTION no_begin() RETURNS TRIGGER AS $$ SELECT 1; $$ LANGUAGE plpgsql;",
     );
-    let err = no_begin_schema.function_body("no_begin").unwrap_err();
+    let err = no_begin_schema.function_body(&function_name("no_begin")).unwrap_err();
     assert!(unsupported_message(err).contains("must contain BEGIN...END block"));
 
     let no_end_schema = schema_from_sql(
         "CREATE FUNCTION no_end() RETURNS TRIGGER AS $$ BEGIN SELECT 1; $$ LANGUAGE plpgsql;",
     );
-    let err = no_end_schema.function_body("no_end").unwrap_err();
+    let err = no_end_schema.function_body(&function_name("no_end")).unwrap_err();
     assert!(unsupported_message(err).contains("must end with END"));
 
     let tokenize_error_schema = schema_from_sql(
         "CREATE FUNCTION bad_tokens() RETURNS TRIGGER AS $$ BEGIN SELECT 'unterminated; END; $$ LANGUAGE plpgsql;",
     );
-    let err = tokenize_error_schema.function_body("bad_tokens").unwrap_err();
+    let err = tokenize_error_schema.function_body(&function_name("bad_tokens")).unwrap_err();
     assert!(unsupported_message(err).contains("Failed to tokenize trigger function"));
 
     let parse_error_schema = schema_from_sql(
         "CREATE FUNCTION bad_parse() RETURNS TRIGGER AS $$ BEGIN SELECT FROM; END; $$ LANGUAGE plpgsql;",
     );
-    let err = parse_error_schema.function_body("bad_parse").unwrap_err();
+    let err = parse_error_schema.function_body(&function_name("bad_parse")).unwrap_err();
     assert!(unsupported_message(err).contains("Failed to parse trigger function"));
 
     let return_strip_schema = schema_from_sql(
@@ -374,7 +386,7 @@ fn schema_function_body_covers_missing_and_error_paths() {
         "#,
     );
     let body = return_strip_schema
-        .function_body("strip_return")
+        .function_body(&function_name("strip_return"))
         .expect("function body should parse")
         .expect("body should exist");
     assert_eq!(body.statements.len(), 1, "RETURN NEW should be stripped");

@@ -18,9 +18,9 @@ libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
 pg2sqlite = { path = "..", features = ["arbitrary"] }
 arbitrary = { version = "1", features = ["derive"] }
 # Needed so the reverse fuzz target can name `ParserDB` in the static
-# context type. Track the same `main` branch pg2sqlite does; the two
-# committed lockfiles keep both copies on one commit so the trait
-# bounds line up.
+# context type. Track the same `main` branch pg2sqlite does: no lockfile is
+# committed, so both copies resolve to the same current commit on a fresh
+# build and the trait bounds line up.
 sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", branch = "main", default-features = false, features = ["std"] }
 # Direct dep so the round-trip harness can name `Statement` for its
 # render helper. Routed through the `[patch.crates-io]` block at the
@@ -30,7 +30,7 @@ sqlparser = "0.62"
 # fuzzer build is self-contained and doesn't depend on the host's
 # libsqlite3 version, which could otherwise mask or shift dialect
 # behaviour between developers.
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [profile.release]
 debug = 1

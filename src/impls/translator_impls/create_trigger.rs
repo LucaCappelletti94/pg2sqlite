@@ -244,10 +244,8 @@ fn generate_standard_trigger_body(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Option<sqlparser::ast::BeginEndStatements>, crate::errors::Error> {
-    let function_name = exec_body.func_desc.name.clone();
-    if let Some((mut body, mut context)) =
-        schema.function_body_with_context(&function_name.to_string())?
-    {
+    let function_name = &exec_body.func_desc.name;
+    if let Some((mut body, mut context)) = schema.function_body_with_context(function_name)? {
         // Seed trigger-specific context so the body translator can
         // constant-fold TG_OP and TG_TABLE_NAME references.
         context.trigger_events = events

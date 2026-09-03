@@ -42,9 +42,10 @@ jobs:
       - name: Install dioxus-cli
         uses: taiki-e/install-action@v2
         with:
-          # Pinned to match the dioxus library version in
-          # examples/web-playground/Cargo.lock. A floating dx can diverge from
-          # the library and break the build.
+          # A floating dx can diverge from the dioxus library and break the
+          # build, so the CLI is pinned to a version tested against it. No
+          # lockfile is committed, so the library resolves to the current
+          # 0.7 release on every build.
           tool: dioxus-cli@0.7.9
 
       - name: Install wasm-bindgen-cli

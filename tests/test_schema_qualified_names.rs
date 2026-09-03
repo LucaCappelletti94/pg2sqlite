@@ -351,6 +351,41 @@ fn non_public_schema_qualified_delete_target_is_unqualified_when_schema_resolves
 }
 
 #[test]
+fn schema_qualified_insert_target_is_unqualified() {
+    let output = translated_sql(
+        "
+        CREATE TABLE public.users (id INT PRIMARY KEY, name TEXT);
+        INSERT INTO public.users (id, name) VALUES (1, 'a');
+        ",
+    );
+    assert!(
+        output.contains("INSERT INTO users"),
+        "expected INSERT target to be unqualified, got: {output}"
+    );
+    execute_as_sqlite(
+        "
+        CREATE TABLE public.users (id INT PRIMARY KEY, name TEXT);
+        INSERT INTO public.users (id, name) VALUES (1, 'a');
+        ",
+    );
+}
+
+#[test]
+fn non_public_schema_qualified_insert_target_is_unqualified_when_schema_resolves() {
+    let sql = "
+        CREATE SCHEMA IF NOT EXISTS my_custom_app;
+        CREATE TABLE my_custom_app.users (id INT PRIMARY KEY, name TEXT);
+        INSERT INTO my_custom_app.users (id, name) VALUES (1, 'a');
+    ";
+    let output = translated_sql(sql);
+    assert!(
+        !output.contains("my_custom_app."),
+        "schema qualifier should be removed for SQLite, got: {output}"
+    );
+    execute_as_sqlite(sql);
+}
+
+#[test]
 fn non_public_schema_qualified_select_from_target_is_rejected() {
     let err = Pg2Sqlite::default()
         .sql(
@@ -570,4 +605,183 @@ fn translated_schema_qualified_sql_executes_in_sqlite() -> Result<(), Box<dyn st
     }
 
     Ok(())
+}
+
+/// Applies every translated statement, inserts one row into `docs` so the
+/// trigger fires, and answers `query` against what the body left behind.
+fn audit_after_one_insert(pg_sql: &str, query: &str) -> i64 {
+    let translated = translate(pg_sql).expect("translation should succeed");
+    let conn = Connection::open_in_memory().expect("open in-memory SQLite");
+    for statement in &translated {
+        conn.execute_batch(&format!("{statement};"))
+            .unwrap_or_else(|e| panic!("translated SQL failed in SQLite: {e}\nSQL: {statement}"));
+    }
+    conn.execute_batch("INSERT INTO docs (id) VALUES (1);")
+        .expect("insert should fire the trigger");
+    conn.query_row(query, [], |row| row.get(0)).expect("query should succeed")
+}
+
+/// Applies every translated statement, inserts one row into `docs`, and
+/// reports how many rows the trigger body appended to `audit`.
+fn rows_audited_after_one_insert(pg_sql: &str) -> i64 {
+    audit_after_one_insert(pg_sql, "SELECT COUNT(*) FROM audit")
+}
+
+/// A trigger function named with its own schema is the same function, so the
+/// body has to be found and inlined rather than reported missing.
+#[test]
+fn schema_qualified_trigger_function_body_is_found() {
+    let sql = r#"
+        CREATE SCHEMA app;
+        CREATE TABLE docs (id INT PRIMARY KEY);
+        CREATE TABLE audit (doc INT);
+        CREATE FUNCTION app.log_doc() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO audit (doc) VALUES (NEW.id);
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER docs_ai
+        AFTER INSERT ON docs
+        FOR EACH ROW
+        EXECUTE FUNCTION app.log_doc();
+    "#;
+    assert_eq!(rows_audited_after_one_insert(sql), 1);
+}
+
+/// A function declared without a schema resides in `public`, so writing that
+/// qualifier at the call site names the same function.
+#[test]
+fn public_qualified_trigger_function_body_is_found() {
+    let sql = r#"
+        CREATE TABLE docs (id INT PRIMARY KEY);
+        CREATE TABLE audit (doc INT);
+        CREATE FUNCTION log_doc() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO audit (doc) VALUES (NEW.id);
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER docs_ai
+        AFTER INSERT ON docs
+        FOR EACH ROW
+        EXECUTE FUNCTION public.log_doc();
+    "#;
+    assert_eq!(rows_audited_after_one_insert(sql), 1);
+}
+
+/// A quoted qualifier is case sensitive on both sides, so the schema the
+/// function was declared in has to be matched exactly.
+#[test]
+fn quoted_schema_qualified_trigger_function_body_is_found() {
+    let sql = r#"
+        CREATE SCHEMA "MyApp";
+        CREATE TABLE docs (id INT PRIMARY KEY);
+        CREATE TABLE audit (doc INT);
+        CREATE FUNCTION "MyApp".log_doc() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO audit (doc) VALUES (NEW.id);
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER docs_ai
+        AFTER INSERT ON docs
+        FOR EACH ROW
+        EXECUTE FUNCTION "MyApp".log_doc();
+    "#;
+    assert_eq!(rows_audited_after_one_insert(sql), 1);
+}
+
+/// A function named under a schema it was not declared in is a different
+/// function, and the refusal has to say the name did not resolve rather than
+/// blame the batch.
+#[test]
+fn trigger_function_named_under_the_wrong_schema_is_refused() {
+    let err = Pg2Sqlite::default()
+        .sql(
+            r#"
+            CREATE SCHEMA app;
+            CREATE TABLE docs (id INT PRIMARY KEY);
+            CREATE FUNCTION log_doc() RETURNS trigger AS $$
+            BEGIN
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            CREATE TRIGGER docs_ai
+            AFTER INSERT ON docs
+            FOR EACH ROW
+            EXECUTE FUNCTION app.log_doc();
+            "#,
+        )
+        .expect("sql should parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("a function in another schema should not answer this call");
+
+    let message = err.to_string();
+    assert!(message.contains("app.log_doc"), "refusal should name the written name: {message}");
+}
+
+/// SQLite refuses a qualified table name on any of `INSERT`, `UPDATE` and
+/// `DELETE` inside a trigger body at `CREATE TRIGGER` time, so each of the
+/// three has to lose the qualifier like every other emitted statement.
+#[test]
+fn schema_qualified_write_inside_a_trigger_body_is_unqualified() {
+    let sql = r#"
+        CREATE SCHEMA app;
+        CREATE TABLE docs (id INT PRIMARY KEY);
+        CREATE TABLE app.audit (doc INT);
+        CREATE FUNCTION log_doc() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO app.audit (doc) VALUES (NEW.id);
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER docs_ai
+        AFTER INSERT ON docs
+        FOR EACH ROW
+        EXECUTE FUNCTION log_doc();
+    "#;
+    assert_eq!(rows_audited_after_one_insert(sql), 1);
+}
+
+#[test]
+fn schema_qualified_update_inside_a_trigger_body_is_unqualified() {
+    let sql = r#"
+        CREATE SCHEMA app;
+        CREATE TABLE docs (id INT PRIMARY KEY);
+        CREATE TABLE app.audit (doc INT);
+        INSERT INTO app.audit (doc) VALUES (0);
+        CREATE FUNCTION log_doc() RETURNS trigger AS $$
+        BEGIN
+            UPDATE app.audit SET doc = NEW.id;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER docs_ai
+        AFTER INSERT ON docs
+        FOR EACH ROW
+        EXECUTE FUNCTION log_doc();
+    "#;
+    assert_eq!(audit_after_one_insert(sql, "SELECT COUNT(*) FROM audit WHERE doc = 1"), 1);
+}
+
+#[test]
+fn schema_qualified_delete_inside_a_trigger_body_is_unqualified() {
+    let sql = r#"
+        CREATE SCHEMA app;
+        CREATE TABLE docs (id INT PRIMARY KEY);
+        CREATE TABLE app.audit (doc INT);
+        INSERT INTO app.audit (doc) VALUES (0);
+        CREATE FUNCTION log_doc() RETURNS trigger AS $$
+        BEGIN
+            DELETE FROM app.audit WHERE doc = 0;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER docs_ai
+        AFTER INSERT ON docs
+        FOR EACH ROW
+        EXECUTE FUNCTION log_doc();
+    "#;
+    assert_eq!(audit_after_one_insert(sql, "SELECT COUNT(*) FROM audit"), 0);
 }

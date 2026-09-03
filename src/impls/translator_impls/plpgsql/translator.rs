@@ -2570,15 +2570,18 @@ mod tests {
                     args: vec![],
                 }),
             ]));
-        let translated = PlPgSqlTranslator::translate_insert_statement(
+        let err = PlPgSqlTranslator::translate_insert_statement(
             &insert_fn_table,
             &mut ctx,
             &schema,
             &options,
             &mut |_| {},
         )
-        .expect("function-style table object should still translate");
-        assert!(!translated.is_empty(), "the body should translate into at least one statement");
+        .expect_err("a target built by a call names no table SQLite can write");
+        assert!(
+            err.to_string().contains("table segment must be an identifier"),
+            "unexpected error: {err}"
+        );
 
         let Statement::Insert(mut insert_table_source) =
             parse_statement("INSERT INTO users(id) VALUES (v_id)")
