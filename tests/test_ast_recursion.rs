@@ -139,24 +139,27 @@ fn a_lateral_view_clause_is_refused() {
     assert!(message.contains("LATERAL VIEW"), "the refusal should name the clause: {message}");
 }
 
-/// `CLUSTER BY`, `DISTRIBUTE BY`, and `SORT BY` are the neighbouring Hive
-/// clauses at the same translation site, measured passing through into
-/// `near "BY": syntax error` while fixing R122, so they are refused with it.
+/// Flipped 2026-09-03, after sqlparser `48e8617b` (upstream #2479) let a
+/// non-reserved keyword stand as a table alias under `PostgreSqlDialect`.
+/// `CLUSTER`, `DISTRIBUTE` and `SORT` are now read as `t`'s alias, so the
+/// trailing `BY` never parses. PostgreSQL 18 answers the same way, measured
+/// as `syntax error at or near "BY"` for all three, so the earlier rejection
+/// is a correction rather than a regression. The translator's refusals are
+/// pinned over synthetic ASTs in `src/impls/translator_impls/query.rs`,
+/// which is where the only reachable path to those arms now lives.
 #[test]
-fn the_hive_ordering_clauses_are_refused() {
-    for (clause, tail) in [
-        ("CLUSTER BY", "SELECT id FROM t CLUSTER BY id;"),
-        ("DISTRIBUTE BY", "SELECT id FROM t DISTRIBUTE BY id;"),
-        ("SORT BY", "SELECT id FROM t SORT BY id;"),
+fn the_hive_ordering_clauses_do_not_parse_as_postgresql() {
+    for tail in [
+        "SELECT id FROM t CLUSTER BY id;",
+        "SELECT id FROM t DISTRIBUTE BY id;",
+        "SELECT id FROM t SORT BY id;",
     ] {
         let sql = format!("{SCHEMA}\n{tail}");
-        let err = Pg2Sqlite::default()
+        let message = Pg2Sqlite::default()
             .sql(&sql)
-            .unwrap()
-            .translate(&Pg2SqliteOptions::default())
-            .expect_err("a Hive ordering clause has no SQLite grammar");
-        let message = err.to_string();
-        assert!(message.contains(clause), "the refusal should name {clause}: {message}");
+            .expect_err("a Hive ordering clause is not PostgreSQL grammar")
+            .to_string();
+        assert!(message.contains("found: BY"), "the parse should stop at BY: {message}");
     }
 }
 

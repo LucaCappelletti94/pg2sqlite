@@ -236,3 +236,23 @@ fn collate_rtrim_refused_in_reverse() {
         result
     );
 }
+
+/// The three Hive ordering clauses are live code in the shared refusal, not a
+/// defensive leftover: measured at sqlparser `5c974dd1`, `SQLiteDialect` still
+/// parses `CLUSTER BY`, `DISTRIBUTE BY` and `SORT BY` into `Select`, so plain
+/// SQLite text reaches them through this direction. `PostgreSqlDialect` reads
+/// the keyword as a table alias since upstream #2479 and stops at `BY`, which
+/// removed only the forward parse path.
+#[test]
+fn the_hive_ordering_clauses_are_refused_in_reverse() {
+    for (clause, sqlite_sql) in [
+        ("CLUSTER BY", "SELECT id FROM t CLUSTER BY id"),
+        ("DISTRIBUTE BY", "SELECT id FROM t DISTRIBUTE BY id"),
+        ("SORT BY", "SELECT id FROM t SORT BY id"),
+    ] {
+        let message = reverse_result(SCHEMA, sqlite_sql)
+            .expect_err("a Hive ordering clause has no PostgreSQL grammar")
+            .to_string();
+        assert!(message.contains(clause), "the refusal should name {clause}: {message}");
+    }
+}
