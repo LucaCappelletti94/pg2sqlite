@@ -139,14 +139,12 @@ fn a_lateral_view_clause_is_refused() {
     assert!(message.contains("LATERAL VIEW"), "the refusal should name the clause: {message}");
 }
 
-/// Flipped 2026-09-03, after sqlparser `48e8617b` (upstream #2479) let a
-/// non-reserved keyword stand as a table alias under `PostgreSqlDialect`.
-/// `CLUSTER`, `DISTRIBUTE` and `SORT` are now read as `t`'s alias, so the
-/// trailing `BY` never parses. PostgreSQL 18 answers the same way, measured
-/// as `syntax error at or near "BY"` for all three, so the earlier rejection
-/// is a correction rather than a regression. The translator's refusals are
-/// pinned over synthetic ASTs in `src/impls/translator_impls/query.rs`,
-/// which is where the only reachable path to those arms now lives.
+/// Upstream #2479 lets a non-reserved keyword stand as a table alias, so
+/// `PostgreSqlDialect` now reads `CLUSTER` as `t`'s alias and stops at the
+/// trailing `BY`, exactly as PostgreSQL 18 does. Only the forward parse path
+/// is gone: the shared arms in `reject_foreign_select_clauses` are still
+/// reached through reverse translation, pinned by
+/// `the_hive_ordering_clauses_are_refused_in_reverse`.
 #[test]
 fn the_hive_ordering_clauses_do_not_parse_as_postgresql() {
     for tail in [
