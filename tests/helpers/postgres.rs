@@ -22,13 +22,14 @@
 use std::{
     process::Command,
     sync::{
-        LazyLock, Mutex, PoisonError,
+        LazyLock,
         atomic::{AtomicU32, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use diesel::{connection::SimpleConnection, prelude::*, sql_types::BigInt};
+use parking_lot::Mutex;
 use testcontainers::{Container, ImageExt, runners::SyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
@@ -103,7 +104,7 @@ unsafe extern "C" {
 /// runs no destructors; a normal finish, a failed test and a panic all pass
 /// here. `SIGKILL` does not, which is what the sweep is for.
 extern "C" fn remove_container_at_exit() {
-    let handle = CONTAINER.lock().unwrap_or_else(PoisonError::into_inner).take();
+    let handle = CONTAINER.lock().take();
     drop(handle);
 }
 
@@ -144,7 +145,7 @@ pub fn sweep_abandoned_containers() {
         if now.saturating_sub(started) < STALE_AFTER.as_secs() {
             continue;
         }
-        let _ = Command::new("docker").args(["rm", "-f", id]).output();
+        let _ = Command::new("docker").args(["rm", "-f", "-v", id]).output();
     }
 }
 
@@ -179,7 +180,7 @@ impl Server {
         // `start` runs once per process, so it is registered once.
         let registered = unsafe { atexit(remove_container_at_exit) };
         assert_eq!(registered, 0, "register the container removal at exit");
-        *CONTAINER.lock().unwrap_or_else(PoisonError::into_inner) = Some(container);
+        *CONTAINER.lock() = Some(container);
 
         Self { id, port, next_database: AtomicU32::new(0) }
     }
