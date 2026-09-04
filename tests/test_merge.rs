@@ -99,3 +99,15 @@ fn merge_deleting_unmatched_target_rows_is_rejected() {
     ));
     assert!(error.contains("MERGE"), "the error must name the statement, got: {error}");
 }
+
+/// `WHEN MATCHED THEN DO NOTHING` only became parseable in sqlparser
+/// `f68211b6` (upstream #2468), which added `MergeAction::DoNothing`. It used
+/// to die at parse, so nothing pinned that the new action reaches the
+/// whole-statement refusal rather than slipping through.
+#[test]
+fn merge_with_a_do_nothing_action_is_rejected() {
+    let error = rejection(&format!(
+        "{BASE} MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DO NOTHING;"
+    ));
+    assert!(error.contains("MERGE"), "the error must name the statement, got: {error}");
+}

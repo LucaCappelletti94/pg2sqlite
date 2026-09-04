@@ -139,24 +139,25 @@ fn a_lateral_view_clause_is_refused() {
     assert!(message.contains("LATERAL VIEW"), "the refusal should name the clause: {message}");
 }
 
-/// `CLUSTER BY`, `DISTRIBUTE BY`, and `SORT BY` are the neighbouring Hive
-/// clauses at the same translation site, measured passing through into
-/// `near "BY": syntax error` while fixing R122, so they are refused with it.
+/// Upstream #2479 lets a non-reserved keyword stand as a table alias, so
+/// `PostgreSqlDialect` now reads `CLUSTER` as `t`'s alias and stops at the
+/// trailing `BY`, exactly as PostgreSQL 18 does. Only the forward parse path
+/// is gone: the shared arms in `reject_foreign_select_clauses` are still
+/// reached through reverse translation, pinned by
+/// `the_hive_ordering_clauses_are_refused_in_reverse`.
 #[test]
-fn the_hive_ordering_clauses_are_refused() {
-    for (clause, tail) in [
-        ("CLUSTER BY", "SELECT id FROM t CLUSTER BY id;"),
-        ("DISTRIBUTE BY", "SELECT id FROM t DISTRIBUTE BY id;"),
-        ("SORT BY", "SELECT id FROM t SORT BY id;"),
+fn the_hive_ordering_clauses_do_not_parse_as_postgresql() {
+    for tail in [
+        "SELECT id FROM t CLUSTER BY id;",
+        "SELECT id FROM t DISTRIBUTE BY id;",
+        "SELECT id FROM t SORT BY id;",
     ] {
         let sql = format!("{SCHEMA}\n{tail}");
-        let err = Pg2Sqlite::default()
+        let message = Pg2Sqlite::default()
             .sql(&sql)
-            .unwrap()
-            .translate(&Pg2SqliteOptions::default())
-            .expect_err("a Hive ordering clause has no SQLite grammar");
-        let message = err.to_string();
-        assert!(message.contains(clause), "the refusal should name {clause}: {message}");
+            .expect_err("a Hive ordering clause is not PostgreSQL grammar")
+            .to_string();
+        assert!(message.contains("found: BY"), "the parse should stop at BY: {message}");
     }
 }
 
