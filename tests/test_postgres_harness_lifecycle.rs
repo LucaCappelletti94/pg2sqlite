@@ -67,8 +67,13 @@ impl Drop for Cleanup {
     }
 }
 
+/// The probe child's server start runs the sweep, which would race the sweep
+/// test's setup under the parallel runner; the two tests take turns.
+static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 #[test]
 fn container_is_removed_when_the_binary_exits() {
+    let _serial = SERIAL.lock();
     let output = Command::new(std::env::current_exe().expect("own path"))
         .args(["--ignored", "--exact", "probe_starts_server_and_exits", "--nocapture"])
         .output()
@@ -100,11 +105,10 @@ fn sweep_removes_abandoned_containers_and_keeps_live_ones() {
         assert!(out.status.success(), "docker create: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     };
-    let abandoned = create("0");
-    let cleanup = Cleanup {
-        volumes: volumes_of(&abandoned),
-        containers: vec![abandoned, create(&postgres_harness::now_secs().to_string())],
-    };
+    let _serial = SERIAL.lock();
+    let mut cleanup = Cleanup { containers: vec![create("0")], volumes: Vec::new() };
+    cleanup.volumes = volumes_of(&cleanup.containers[0]);
+    cleanup.containers.push(create(&postgres_harness::now_secs().to_string()));
     let [abandoned, live] = cleanup.containers.as_slice() else { unreachable!("two ids") };
     assert!(!cleanup.volumes.is_empty(), "the image declares a volume; none was created");
 
