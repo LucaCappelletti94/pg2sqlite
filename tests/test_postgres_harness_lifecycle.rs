@@ -34,6 +34,39 @@ fn container_exists(id: &str) -> bool {
     docker(&["inspect", "--format", "{{.Id}}", id]).status.success()
 }
 
+/// The anonymous volumes the image's `VOLUME` declaration gave a container.
+fn volumes_of(id: &str) -> Vec<String> {
+    let out = docker(&[
+        "inspect",
+        "--format",
+        "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}} {{end}}{{end}}",
+        id,
+    ]);
+    String::from_utf8_lossy(&out.stdout).split_whitespace().map(str::to_owned).collect()
+}
+
+fn volume_exists(name: &str) -> bool {
+    docker(&["volume", "inspect", name]).status.success()
+}
+
+/// Removes containers and volumes when dropped, so a failed assertion cannot
+/// strand what the suite exists to prevent. `Drop` is infallible.
+struct Cleanup {
+    containers: Vec<String>,
+    volumes: Vec<String>,
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for c in &self.containers {
+            let _ = Command::new("docker").args(["rm", "-f", "-v", c]).output();
+        }
+        for v in &self.volumes {
+            let _ = Command::new("docker").args(["volume", "rm", "-f", v]).output();
+        }
+    }
+}
+
 #[test]
 fn container_is_removed_when_the_binary_exits() {
     let output = Command::new(std::env::current_exe().expect("own path"))
@@ -68,16 +101,23 @@ fn sweep_removes_abandoned_containers_and_keeps_live_ones() {
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     };
     let abandoned = create("0");
-    let live = create(&postgres_harness::now_secs().to_string());
+    let cleanup = Cleanup {
+        volumes: volumes_of(&abandoned),
+        containers: vec![abandoned, create(&postgres_harness::now_secs().to_string())],
+    };
+    let [abandoned, live] = cleanup.containers.as_slice() else { unreachable!("two ids") };
+    assert!(!cleanup.volumes.is_empty(), "the image declares a volume; none was created");
 
     postgres_harness::sweep_abandoned_containers();
 
-    let live_survived = container_exists(&live);
-    let abandoned_survived = container_exists(&abandoned);
-    let _ = docker(&["rm", "-f", &live, &abandoned]);
-    assert!(!abandoned_survived, "a container stamped at the epoch was not swept");
+    assert!(!container_exists(abandoned), "a container stamped at the epoch was not swept");
+    let stranded: Vec<&String> = cleanup.volumes.iter().filter(|v| volume_exists(v)).collect();
     assert!(
-        live_survived,
+        stranded.is_empty(),
+        "the sweep left the swept container's volume behind: {stranded:?}"
+    );
+    assert!(
+        container_exists(live),
         "a container stamped just now was swept: a sibling run would lose its server"
     );
 }
