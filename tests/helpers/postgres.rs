@@ -19,9 +19,13 @@
 
 #![allow(dead_code)]
 
-use std::sync::{
-    LazyLock, Mutex,
-    atomic::{AtomicU32, Ordering},
+use std::{
+    process::Command,
+    sync::{
+        LazyLock, Mutex, PoisonError,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use diesel::{connection::SimpleConnection, prelude::*, sql_types::BigInt};
@@ -55,22 +59,107 @@ const ROLES: [&str; 4] = ["app", "app_user", "authenticated", "anon"];
 /// connection, so the harness does too.
 pub const DEFAULT_SESSION_USER: &str = "11111111-1111-1111-1111-111111111111";
 
+/// Marks every container this harness starts, and records the second it
+/// started, so the sweep can tell one a killed run abandoned from one a
+/// concurrent run is using right now.
+pub const CONTAINER_LABEL: &str = "io.pg2sqlite.harness";
+pub const STARTED_LABEL: &str = "io.pg2sqlite.harness.started";
+
+/// How old a labelled container must be before the sweep removes it. Longer
+/// than any test binary by a wide margin, because a sibling binary owns
+/// containers this one must not touch.
+const STALE_AFTER: Duration = Duration::from_secs(2 * 60 * 60);
+
 /// The container lives as long as the test binary. One start per binary, since
 /// starting it costs more than every case that uses it put together.
+///
+/// The container handle is not in [`SERVER`]: a `static` is never dropped, so
+/// a handle kept there would never run the `Drop` that removes the container,
+/// and every binary would leave one running with hundreds of `case_N`
+/// databases for autovacuum to grind through. Nothing else removes it either;
+/// testcontainers has no reaper. It lives in [`CONTAINER`], which
+/// [`remove_container_at_exit`] empties when the process exits.
 static SERVER: LazyLock<Server> = LazyLock::new(Server::start);
 
+/// The running container, taken and dropped at process exit.
+static CONTAINER: Mutex<Option<Container<Postgres>>> = Mutex::new(None);
+
 struct Server {
-    /// Held only to keep the container alive. The mutex is what lets a handle
-    /// that is merely `Send` live in a static the whole binary reads.
-    _container: Mutex<Container<Postgres>>,
+    id: String,
     port: u16,
     next_database: AtomicU32,
 }
 
+unsafe extern "C" {
+    /// libc. The callback is a plain `extern "C" fn` with no captures and
+    /// touches only Rust-owned statics, so nothing is owned across the
+    /// boundary in either direction and the pointer is valid for the whole
+    /// process.
+    fn atexit(callback: extern "C" fn()) -> i32;
+}
+
+/// Drops the container handle, which removes the container. Registered with
+/// `atexit` because the test harness leaves through `process::exit`, which
+/// runs no destructors; a normal finish, a failed test and a panic all pass
+/// here. `SIGKILL` does not, which is what the sweep is for.
+extern "C" fn remove_container_at_exit() {
+    let handle = CONTAINER.lock().unwrap_or_else(PoisonError::into_inner).take();
+    drop(handle);
+}
+
+/// Seconds since the epoch, or zero if the clock is behind it.
+pub fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs())
+}
+
+/// Remove containers an earlier run abandoned.
+///
+/// Age is what makes removal safe: a container a sibling binary is using is
+/// minutes old, never hours. A container whose stamp is missing or unreadable
+/// comes from an older build of this harness and goes.
+pub fn sweep_abandoned_containers() {
+    let Ok(listed) = Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("label={CONTAINER_LABEL}"),
+            "--format",
+            "{{.ID}} {{.Labels}}",
+        ])
+        .output()
+    else {
+        return;
+    };
+    let now = now_secs();
+    for line in String::from_utf8_lossy(&listed.stdout).lines() {
+        let Some((id, labels)) = line.split_once(' ') else {
+            continue;
+        };
+        let started = labels
+            .split(',')
+            .find_map(|label| label.strip_prefix(STARTED_LABEL)?.strip_prefix('='))
+            .and_then(|stamp| stamp.parse::<u64>().ok())
+            .unwrap_or(0);
+        if now.saturating_sub(started) < STALE_AFTER.as_secs() {
+            continue;
+        }
+        let _ = Command::new("docker").args(["rm", "-f", id]).output();
+    }
+}
+
 impl Server {
     fn start() -> Self {
-        let container =
-            Postgres::default().with_tag(IMAGE_TAG).start().expect("start a PostgreSQL container");
+        sweep_abandoned_containers();
+        let container = Postgres::default()
+            .with_tag(IMAGE_TAG)
+            .with_labels([
+                (CONTAINER_LABEL, "postgres".to_owned()),
+                (STARTED_LABEL, now_secs().to_string()),
+            ])
+            .start()
+            .expect("start a PostgreSQL container");
+        let id = container.id().to_owned();
         let port = container.get_host_port_ipv4(5432).expect("the mapped port");
 
         let mut admin = connect(port, "postgres");
@@ -82,8 +171,23 @@ impl Server {
                 .unwrap_or_else(|error| panic!("create role {role}: {error}"));
         }
 
-        Self { _container: Mutex::new(container), port, next_database: AtomicU32::new(0) }
+        // Registered before the handle leaves this frame: if registration
+        // fails, the panic unwinds `container` and removes it, instead of
+        // leaving it in the static with nothing to drop it.
+        // SAFETY: `remove_container_at_exit` is an `extern "C" fn` without
+        // captures, valid for the life of the process, as `atexit` requires.
+        // `start` runs once per process, so it is registered once.
+        let registered = unsafe { atexit(remove_container_at_exit) };
+        assert_eq!(registered, 0, "register the container removal at exit");
+        *CONTAINER.lock().unwrap_or_else(PoisonError::into_inner) = Some(container);
+
+        Self { id, port, next_database: AtomicU32::new(0) }
     }
+}
+
+/// The ID of this binary's container, for a test that checks its lifecycle.
+pub fn container_id() -> &'static str {
+    &SERVER.id
 }
 
 fn connect(port: u16, database: &str) -> PgConnection {
