@@ -26,13 +26,13 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy-1.outputs.page_url || steps.deploy-2.outputs.page_url || steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: |
             .
@@ -40,7 +40,7 @@ jobs:
           cache-targets: false
 
       - name: Install dioxus-cli
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2
         with:
           # A floating dx can diverge from the dioxus library and break the
           # build, so the CLI is pinned to a version tested against it. No
@@ -49,7 +49,7 @@ jobs:
           tool: dioxus-cli@0.7.9
 
       - name: Install wasm-bindgen-cli
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2
         with:
           tool: wasm-bindgen-cli
 
@@ -74,7 +74,7 @@ jobs:
           echo "pg2sqlite.luca.phd" > _site/CNAME
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: _site
 
@@ -83,7 +83,7 @@ jobs:
       # almost always succeeds. Retry twice before failing the job.
       - name: Deploy to GitHub Pages
         id: deploy-1
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
         continue-on-error: true
 
       - name: Wait before retrying (attempt 2)
@@ -93,7 +93,7 @@ jobs:
       - name: Deploy to GitHub Pages (retry 2)
         id: deploy-2
         if: steps.deploy-1.outcome == 'failure'
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
         continue-on-error: true
 
       - name: Wait before retrying (attempt 3)
@@ -103,4 +103,4 @@ jobs:
       - name: Deploy to GitHub Pages (retry 3)
         id: deployment
         if: steps.deploy-1.outcome == 'failure' && steps.deploy-2.outcome == 'failure'
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

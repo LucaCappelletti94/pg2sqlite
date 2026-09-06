@@ -23,7 +23,7 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The lockfile is not tracked, since committing it freezes the git
       # dependency at one commit. cargo-audit needs one, so resolve it here.
@@ -31,6 +31,6 @@ jobs:
         run: cargo generate-lockfile
 
       - name: Run security audit
-        uses: rustsec/audit-check@v2
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
