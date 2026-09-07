@@ -16,11 +16,14 @@ use sql_traits::{
     structs::{ColumnDefinition, ParserDB},
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
-use sqlparser::ast::{
-    AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
-    ExactNumberInfo, Expr, Function, Ident, Interval, JsonKeyUniqueness, JsonPredicateType,
-    ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor,
-    UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+use sqlparser::{
+    ast::{
+        AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
+        ExactNumberInfo, Expr, Function, Ident, Interval, JsonKeyUniqueness, JsonPredicateType,
+        ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor,
+        UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+    },
+    tokenizer::Span,
 };
 
 use crate::{
@@ -2263,12 +2266,17 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
             }
             Expr::Like { negated, any, expr, pattern, escape_char } => {
                 rebuild(|| -> Result<Expr, crate::errors::Error> {
+                    let translated_escape = escape_char
+                        .as_deref()
+                        .map(|escape| escape.translate_with_warnings(schema, options, emit))
+                        .transpose()?
+                        .map(Box::new);
                     Ok(Expr::Like {
                         negated: *negated,
                         any: *any,
                         expr: Box::new(expr.translate_with_warnings(schema, options, emit)?),
                         pattern: Box::new(pattern.translate_with_warnings(schema, options, emit)?),
-                        escape_char: sqlite_like_escape(escape_char.clone()),
+                        escape_char: sqlite_like_escape(translated_escape),
                     })
                 })?
             }
@@ -2277,7 +2285,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
                     let translated_pattern =
                         pattern.translate_with_warnings(schema, options, emit)?;
-                    let escape = sqlite_like_escape(lowered_ilike_escape(escape_char.as_ref())?);
+                    let escape = sqlite_like_escape(lowered_ilike_escape(escape_char.as_deref())?);
                     if let Some(fold_fn) = options.get_ilike_fold_function() {
                         // Use the caller-provided fold function instead of
                         // lower().
@@ -2521,6 +2529,26 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
     }
 }
 
+/// The single-quoted string an escape names, with any `Expr::Nested`
+/// parentheses peeled off.
+///
+/// sqlparser parses `ESCAPE <expr>`, so `ESCAPE ('#')` reaches the translator
+/// wrapped in parentheses and `ESCAPE chr(35)` as a function call. Only a
+/// string literal, bare or parenthesized, names an escape character this
+/// translator can reason about; anything else returns `None`.
+fn escape_string_literal(escape: &Expr) -> Option<(&str, Span)> {
+    let mut current = escape;
+    while let Expr::Nested(inner) = current {
+        current = inner.as_ref();
+    }
+    match current {
+        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), span }) => {
+            Some((text.as_str(), *span))
+        }
+        _ => None,
+    }
+}
+
 /// Lowers an `ILIKE` escape character with the operands.
 ///
 /// The `ILIKE` rewrite folds both operands through `lower()`, so a letter
@@ -2528,20 +2556,32 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
 /// escaping: an escaped literal becomes a live wildcard and the reverse, with
 /// no error anywhere, measured on both databases under `ESCAPE 'X'`. A
 /// character whose lowering is not exactly one character would shift the
-/// pattern instead of escaping in it, so it is refused. Anything that is not
-/// a one-character single-quoted string is left verbatim: PostgreSQL rejects
-/// it at run time and SQLite rejects the emission the same way, unchanged by
-/// this fold.
+/// pattern instead of escaping in it, so it is refused.
+///
+/// The escape must be a string literal, bare or parenthesized. A non-literal
+/// expression cannot be case-folded to stay consistent with the lowered
+/// pattern, so it is refused rather than left to change the result silently.
+/// An empty or multi-character literal is normalized (parentheses removed) and
+/// left for [`sqlite_like_escape`], which drops the empty spelling.
 fn lowered_ilike_escape(
-    escape_char: Option<&ValueWithSpan>,
-) -> Result<Option<ValueWithSpan>, crate::errors::Error> {
+    escape_char: Option<&Expr>,
+) -> Result<Option<Box<Expr>>, crate::errors::Error> {
     let Some(escape) = escape_char else { return Ok(None) };
-    let Value::SingleQuotedString(original) = &escape.value else {
-        return Ok(Some(escape.clone()));
+    let Some((original, span)) = escape_string_literal(escape) else {
+        return Err(crate::errors::Error::forward_refusal(
+            "ILIKE ... ESCAPE cannot be translated when the escape is a non-literal expression: \
+             ILIKE becomes LIKE over lower()ed operands, and an expression escape cannot be \
+             case-folded to stay consistent with the lowered pattern. Use a single-character \
+             string literal such as a backslash."
+                .to_string(),
+        ));
     };
     let mut characters = original.chars();
     let (Some(_), None) = (characters.next(), characters.next()) else {
-        return Ok(Some(escape.clone()));
+        return Ok(Some(Box::new(Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(original.to_string()),
+            span,
+        }))));
     };
 
     let lowered = original.to_lowercase();
@@ -2554,7 +2594,10 @@ fn lowered_ilike_escape(
         )));
     }
 
-    Ok(Some(ValueWithSpan { value: Value::SingleQuotedString(lowered), span: escape.span }))
+    Ok(Some(Box::new(Expr::Value(ValueWithSpan {
+        value: Value::SingleQuotedString(lowered),
+        span,
+    }))))
 }
 
 /// True when `expr` is a string literal containing at least one character that
@@ -2584,16 +2627,20 @@ fn has_non_ascii_alpha_literal(expr: &Expr) -> bool {
 /// PostgreSQL spells "no escape character" as `ESCAPE ''`, which is what
 /// SQLite's bare `LIKE` already means, so that clause is dropped rather than
 /// forwarded: SQLite refuses the empty spelling with `ESCAPE expression must
-/// be a single character`.
-fn sqlite_like_escape(escape_char: Option<ValueWithSpan>) -> Option<ValueWithSpan> {
+/// be a single character`. A parenthesized `ESCAPE ('')` means the same and is
+/// dropped too. Any other escape, a non-empty literal or a translated
+/// expression such as `char(35)`, is forwarded unchanged.
+fn sqlite_like_escape(escape_char: Option<Box<Expr>>) -> Option<Box<Expr>> {
     match &escape_char {
         None => {
-            Some(ValueWithSpan {
+            Some(Box::new(Expr::Value(ValueWithSpan {
                 value: Value::SingleQuotedString("\\".to_string()),
-                span: sqlparser::tokenizer::Span::empty(),
-            })
+                span: Span::empty(),
+            })))
         }
-        Some(escape) if escape.value == Value::SingleQuotedString(String::new()) => None,
+        Some(escape) if escape_string_literal(escape).is_some_and(|(text, _)| text.is_empty()) => {
+            None
+        }
         Some(_) => escape_char,
     }
 }

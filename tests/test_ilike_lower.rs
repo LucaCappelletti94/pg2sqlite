@@ -180,6 +180,54 @@ fn an_escape_whose_lowering_grows_is_refused() {
     assert!(error.contains("escape"), "the refusal must name the construct: {error}");
 }
 
+/// The escape reaches the translator parenthesized after the sqlparser change,
+/// as `Expr::Nested` around the literal. It must still be lowered with the
+/// pattern: `'aXbc' ILIKE 'aXb_' ESCAPE ('X')` is false in PostgreSQL because
+/// `X` escapes the `b`. Left unwrapped the escape stayed `X` while the pattern
+/// lowered, so the escape stopped matching and the row wrongly counted.
+#[test]
+fn a_parenthesized_letter_escape_is_lowered_with_the_pattern() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         INSERT INTO t (id, s) VALUES (1, 'aXbc');
+         SELECT count(*) FROM t WHERE s ILIKE 'aXb_' ESCAPE ('X');",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("0".to_string())], "the escaped b must stay a literal");
+}
+
+/// A parenthesized empty escape switches escaping off through the lowering
+/// too, so the clause is dropped rather than emitted for a SQLite that rejects
+/// the empty spelling.
+#[test]
+fn a_parenthesized_empty_ilike_escape_drops_the_clause() {
+    let rows = run_translated_helper::run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, s TEXT);
+         INSERT INTO t (id, s) VALUES (1, 'a\\b');
+         SELECT count(*) FROM t WHERE s ILIKE 'A\\B' ESCAPE ('');",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("1".to_string())],
+        "the backslash is a literal once escaping is off"
+    );
+}
+
+/// An ILIKE escape that is a non-literal expression cannot be case-folded to
+/// match the lowered pattern, so it is refused rather than silently changing
+/// the result: `ESCAPE upper('x')` yields `X` while the pattern lowers to `x`.
+#[test]
+fn a_function_valued_ilike_escape_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql("SELECT 'a' ILIKE 'a' ESCAPE upper('x');")
+        .unwrap()
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect_err("a non-literal ILIKE escape cannot be folded")
+        .to_string();
+    assert!(error.contains("escape"), "the refusal must name the construct: {error}");
+}
+
 // ── M7: ILIKE with non-ASCII pattern literal ─────────────────────────────────
 
 /// M7: SQLite lower() folds ASCII only. A literal pattern with non-ASCII
