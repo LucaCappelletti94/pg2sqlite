@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Codecov](https://codecov.io/gh/LucaCappelletti94/pg2sqlite/branch/main/graph/badge.svg)](https://codecov.io/gh/LucaCappelletti94/pg2sqlite)
 [![Pages](https://github.com/LucaCappelletti94/pg2sqlite/workflows/Pages/badge.svg)](https://github.com/LucaCappelletti94/pg2sqlite/actions/workflows/pages.yml)
+[![Codacy](https://app.codacy.com/project/badge/Grade/6ce868dac96b4e0ab920a45dbe1dfe10)](https://app.codacy.com/gh/LucaCappelletti94/pg2sqlite/dashboard)
 
 A Rust library that translates PostgreSQL SQL into valid, runnable SQLite SQL. It parses PostgreSQL-dialect statements with [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and emits semantically equivalent SQLite, going well beyond type and syntax rewriting.
 
