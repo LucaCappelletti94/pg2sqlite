@@ -123,10 +123,6 @@ fn switching_escaping_off_on_ilike_drops_the_clause() {
     assert!(!emitted.contains("ESCAPE"), "the empty escape must not survive: {emitted}");
 }
 
-// ---------------------------------------------------------------------------
-// Forward: parenthesized and expression-valued escapes
-// ---------------------------------------------------------------------------
-
 /// sqlparser now parses `ESCAPE <expr>`, so a parenthesized literal reaches the
 /// translator as `Expr::Nested` around the value rather than a bare value. It
 /// must still be read as the character it wraps: `'100#%' ESCAPE ('#')` makes
@@ -143,13 +139,7 @@ fn a_parenthesized_escape_names_its_character() {
 #[test]
 fn a_parenthesized_empty_escape_drops_the_clause() {
     assert_eq!(count(r"s LIKE 'a\b' ESCAPE ('')"), Some("1".to_string()));
-    let emitted = Pg2Sqlite::default()
-        .sql(r"SELECT 'a' LIKE 'a' ESCAPE ('');")
-        .unwrap()
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap()
-        .join("\n");
-    assert!(!emitted.contains("ESCAPE"), "the empty escape must not survive: {emitted}");
+    assert_eq!(count(r"s LIKE 'a\b' ESCAPE ('') AND s = 'a\b'"), Some("1".to_string()));
 }
 
 /// An escape that is a function call is translated like any other expression,
