@@ -16,6 +16,12 @@ updates:
         exclude-patterns:
           - "sqlparser"
           - "sql-traits"
+    ignore:
+      # testcontainers-modules 0.15 is the newest release and requires
+      # testcontainers ^0.27, so 0.28 cannot resolve at all. Drop this entry
+      # once a testcontainers-modules release supports 0.28.
+      - dependency-name: testcontainers
+        versions: [">=0.28, <0.29"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
