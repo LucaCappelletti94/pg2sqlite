@@ -124,6 +124,44 @@ fn switching_escaping_off_on_ilike_drops_the_clause() {
 }
 
 // ---------------------------------------------------------------------------
+// Forward: parenthesized and expression-valued escapes
+// ---------------------------------------------------------------------------
+
+/// sqlparser now parses `ESCAPE <expr>`, so a parenthesized literal reaches the
+/// translator as `Expr::Nested` around the value rather than a bare value. It
+/// must still be read as the character it wraps: `'100#%' ESCAPE ('#')` makes
+/// the percent literal, so only the row holding `100%` matches.
+#[test]
+fn a_parenthesized_escape_names_its_character() {
+    assert_eq!(count("s LIKE '100#%' ESCAPE ('#')"), Some("1".to_string()));
+}
+
+/// A parenthesized empty escape is still "no escape at all", so the clause is
+/// dropped rather than forwarded to a SQLite that rejects the empty spelling.
+/// The nested shape bypassed the empty check and the emitted `ESCAPE ('')` did
+/// not even prepare.
+#[test]
+fn a_parenthesized_empty_escape_drops_the_clause() {
+    assert_eq!(count(r"s LIKE 'a\b' ESCAPE ('')"), Some("1".to_string()));
+    let emitted = Pg2Sqlite::default()
+        .sql(r"SELECT 'a' LIKE 'a' ESCAPE ('');")
+        .unwrap()
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .unwrap()
+        .join("\n");
+    assert!(!emitted.contains("ESCAPE"), "the empty escape must not survive: {emitted}");
+}
+
+/// An escape that is a function call is translated like any other expression,
+/// so PostgreSQL `chr(35)` becomes SQLite `char(35)` and still names `#`.
+/// Passed through untranslated it named a function SQLite does not have and
+/// failed to execute.
+#[test]
+fn a_function_valued_escape_is_translated() {
+    assert_eq!(count("s LIKE '100#%' ESCAPE chr(35)"), Some("1".to_string()));
+}
+
+// ---------------------------------------------------------------------------
 // Reverse
 // ---------------------------------------------------------------------------
 
