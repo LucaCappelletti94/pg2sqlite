@@ -2277,7 +2277,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
                     let translated_pattern =
                         pattern.translate_with_warnings(schema, options, emit)?;
-                    let escape = sqlite_like_escape(lowered_ilike_escape(escape_char.as_ref())?);
+                    let escape = sqlite_like_escape(lowered_ilike_escape(escape_char.as_deref())?);
                     if let Some(fold_fn) = options.get_ilike_fold_function() {
                         // Use the caller-provided fold function instead of
                         // lower().
@@ -2533,15 +2533,16 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
 /// it at run time and SQLite rejects the emission the same way, unchanged by
 /// this fold.
 fn lowered_ilike_escape(
-    escape_char: Option<&ValueWithSpan>,
-) -> Result<Option<ValueWithSpan>, crate::errors::Error> {
+    escape_char: Option<&Expr>,
+) -> Result<Option<Box<Expr>>, crate::errors::Error> {
     let Some(escape) = escape_char else { return Ok(None) };
-    let Value::SingleQuotedString(original) = &escape.value else {
-        return Ok(Some(escape.clone()));
+    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(original), span }) = escape
+    else {
+        return Ok(Some(Box::new(escape.clone())));
     };
     let mut characters = original.chars();
     let (Some(_), None) = (characters.next(), characters.next()) else {
-        return Ok(Some(escape.clone()));
+        return Ok(Some(Box::new(escape.clone())));
     };
 
     let lowered = original.to_lowercase();
@@ -2554,7 +2555,10 @@ fn lowered_ilike_escape(
         )));
     }
 
-    Ok(Some(ValueWithSpan { value: Value::SingleQuotedString(lowered), span: escape.span }))
+    Ok(Some(Box::new(Expr::Value(ValueWithSpan {
+        value: Value::SingleQuotedString(lowered),
+        span: *span,
+    }))))
 }
 
 /// True when `expr` is a string literal containing at least one character that
@@ -2585,15 +2589,23 @@ fn has_non_ascii_alpha_literal(expr: &Expr) -> bool {
 /// SQLite's bare `LIKE` already means, so that clause is dropped rather than
 /// forwarded: SQLite refuses the empty spelling with `ESCAPE expression must
 /// be a single character`.
-fn sqlite_like_escape(escape_char: Option<ValueWithSpan>) -> Option<ValueWithSpan> {
+fn sqlite_like_escape(escape_char: Option<Box<Expr>>) -> Option<Box<Expr>> {
     match &escape_char {
         None => {
-            Some(ValueWithSpan {
+            Some(Box::new(Expr::Value(ValueWithSpan {
                 value: Value::SingleQuotedString("\\".to_string()),
                 span: sqlparser::tokenizer::Span::empty(),
-            })
+            })))
         }
-        Some(escape) if escape.value == Value::SingleQuotedString(String::new()) => None,
+        Some(escape)
+            if matches!(
+                escape.as_ref(),
+                Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(empty), .. })
+                    if empty.is_empty()
+            ) =>
+        {
+            None
+        }
         Some(_) => escape_char,
     }
 }

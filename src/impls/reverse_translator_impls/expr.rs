@@ -98,10 +98,10 @@ fn translate_glob_to_like(
     let (like_pat, needs_escape) = glob_pattern_to_like(glob_pat)?;
     let translated_expr = ReverseTranslator::reverse_translate(left, schema, options)?;
     let escape_char = if needs_escape {
-        Some(ValueWithSpan {
+        Some(Box::new(Expr::Value(ValueWithSpan {
             value: Value::SingleQuotedString("\\".to_string()),
             span: Span::empty(),
-        })
+        })))
     } else {
         None
     };
@@ -120,8 +120,12 @@ fn translate_glob_to_like(
 /// True when `escape` names a backslash, the character PostgreSQL's `LIKE`
 /// escapes with when the statement names none, and so the one the forward
 /// direction attaches to every `LIKE` it emits.
-fn is_backslash_escape(escape: &ValueWithSpan) -> bool {
-    matches!(&escape.value, Value::SingleQuotedString(character) if character == "\\")
+fn is_backslash_escape(escape: &Expr) -> bool {
+    matches!(
+        escape,
+        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(character), .. })
+            if character == "\\"
+    )
 }
 
 impl ReverseTranslator for Expr {
@@ -239,7 +243,7 @@ impl ReverseTranslator for Expr {
             // ESCAPE 'X', `'aXbc' ILIKE 'aXb_'` is false while the lowered
             // form is true.
             Expr::Like { negated, any, expr, pattern, escape_char }
-                if escape_char.as_ref().is_none_or(is_backslash_escape) =>
+                if escape_char.as_ref().is_none_or(|escape| is_backslash_escape(escape)) =>
             {
                 match (forward_lower_argument(expr), forward_lower_argument(pattern)) {
                     (Some(subject), Some(target)) => {
