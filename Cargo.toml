@@ -13,7 +13,7 @@ keywords = ["postgresql", "sqlite", "sql", "translation", "migration"]
 categories = ["database", "parser-implementations"]
 
 [dependencies]
-sqlparser = { version = "0.62", default-features = false, features = ["visitor"] }
+sqlparser = { version = "0.63", default-features = false, features = ["visitor"] }
 sqlparser-plpgsql = { git = "https://github.com/LucaCappelletti94/sqlparser-plpgsql", branch = "main", features = ["body-parse"] }
 sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", branch = "main", default-features = false }
 git2 = { version = "0.21", optional = true }
