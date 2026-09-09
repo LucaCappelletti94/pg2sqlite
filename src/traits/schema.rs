@@ -13,7 +13,7 @@ use alloc::{
 };
 
 use sql_traits::{
-    structs::TargetName,
+    structs::{IdentifierCase, TargetName},
     traits::{DatabaseLike, FunctionLike},
 };
 use sqlparser::ast::{BeginEndStatements, CreateFunction, CreateTable, ObjectName, ObjectNamePart};
@@ -53,7 +53,8 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
         let Some(target) = function_lookup_target(name) else {
             return Ok(None);
         };
-        let Some(function) = self.resolve_target_function(target)? else {
+        let Some(function) = self.resolve_target_function(target, IdentifierCase::AsWritten)?
+        else {
             return Ok(None);
         };
         let Some(function_body) = function.body() else {
