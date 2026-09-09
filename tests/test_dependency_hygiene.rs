@@ -2,7 +2,7 @@
 //!
 //! Now that sqlparser ships releases on crates.io that we can consume
 //! directly (and that sql-traits' no_std refactor also pins via
-//! `sqlparser = { version = "0.62", default-features = false }`), we no
+//! `sqlparser = { version = "0.63", default-features = false }`), we no
 //! longer need to track upstream `main`. The invariant we want to keep is
 //! that there's exactly one sqlparser version in the dep graph so AST
 //! types unify between this crate and sql-traits.
@@ -27,7 +27,7 @@ fn lockfile_has_single_sqlparser_version() {
 }
 
 #[test]
-fn cargo_toml_pins_sqlparser_to_062() {
+fn cargo_toml_pins_sqlparser_to_063() {
     let cargo_toml = include_str!("../Cargo.toml");
     let sqlparser_line = cargo_toml
         .lines()
@@ -35,8 +35,8 @@ fn cargo_toml_pins_sqlparser_to_062() {
         .expect("Cargo.toml must declare sqlparser dependency");
 
     assert!(
-        sqlparser_line.contains("version = \"0.62\""),
-        "sqlparser dependency must stay version-locked to 0.62 to match \
+        sqlparser_line.contains("version = \"0.63\""),
+        "sqlparser dependency must stay version-locked to 0.63 to match \
          the sql-traits no_std baseline; line was: {sqlparser_line}"
     );
 }
