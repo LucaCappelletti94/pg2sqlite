@@ -39,7 +39,7 @@ use alloc::{
 };
 
 use sql_traits::{
-    structs::ParserDB,
+    structs::{IdentifierCase, ParserDB, TargetName},
     traits::{DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
@@ -416,6 +416,20 @@ fn drop_label(object_type: ObjectType) -> &'static str {
     }
 }
 
+/// Resolves the schema's own node for a `CREATE TABLE`, matching the name it
+/// wrote part for part under PostgreSQL's quoting rule.
+fn resolve_declared_table<'a>(
+    schema: &'a ParserDB,
+    create_table: &sqlparser::ast::CreateTable,
+) -> Result<Option<&'a sqlparser::ast::CreateTable>, sql_traits::errors::LookupError> {
+    let target = TargetName::new(create_table.table_name(), create_table.table_name_is_quoted());
+    let target = match create_table.table_schema() {
+        Some(schema_name) => target.with_schema(schema_name, create_table.table_schema_is_quoted()),
+        None => target,
+    };
+    schema.table_by_target(target, IdentifierCase::AsWritten)
+}
+
 fn translate_create_table(
     create_table: &sqlparser::ast::CreateTable,
     schema: &ParserDB,
@@ -435,9 +449,7 @@ fn translate_create_table(
     // raw node degrades the wrapper to deny-by-default. The asymmetry is
     // written up in docs/sql_traits_policies_on_stale_node.md. The role arm
     // below already resolves the same way.
-    let table = schema
-        .table(create_table.table_schema(), create_table.table_name())
-        .unwrap_or(create_table);
+    let table = resolve_declared_table(schema, create_table)?.unwrap_or(create_table);
     if table.has_row_level_security(schema)? {
         validate_table_policies(table, schema, options)?;
         let rls_statements = generate_rls_statements_with_context(table, schema, options, emit)?;
@@ -462,7 +474,7 @@ fn translate_create_table_for_role(
     let Some(role) = resolve_session_role(schema, options) else {
         return Ok(None);
     };
-    let Some(table) = schema.table(create_table.table_schema(), create_table.table_name()) else {
+    let Some(table) = resolve_declared_table(schema, create_table)? else {
         return Ok(None);
     };
 

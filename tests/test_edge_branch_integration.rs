@@ -92,7 +92,13 @@ fn reverse_expr_in_table(
     table: &str,
 ) -> Result<Expr, pg2sqlite::errors::Error> {
     use sql_traits::traits::DatabaseLike;
-    let relation = schema.table(None, table).expect("the fixture declares the table");
+    let relation = schema
+        .table_by_target(
+            sql_traits::structs::TargetName::new(table, false),
+            sql_traits::structs::IdentifierCase::AsWritten,
+        )
+        .expect("table lookup should succeed")
+        .expect("the fixture declares the table");
     let scope = sql_traits::structs::ColumnScope::for_table(relation, schema);
     let base = pg2sqlite::options::TranslationContext::new(options);
     let context = base.with_scope(&scope);
