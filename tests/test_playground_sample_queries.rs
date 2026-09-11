@@ -31,11 +31,10 @@
 
 #![allow(clippy::too_many_lines)]
 
-use std::sync::Once;
+mod helpers;
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
-use rusqlite::{Connection, ffi::sqlite3_auto_extension};
-use sqlite_vec::sqlite3_vec_init;
+use rusqlite::Connection;
 use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,22 +60,8 @@ struct CannedQuery {
     expectation: Expectation,
 }
 
-fn install_sqlite_vec() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::ffi::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> std::ffi::c_int,
-        >(sqlite3_vec_init as *const ())));
-    });
-}
-
 fn open_connection() -> Connection {
-    install_sqlite_vec();
+    helpers::register_sqlite_vec_once();
     Connection::open_in_memory().expect("open in-memory sqlite")
 }
 

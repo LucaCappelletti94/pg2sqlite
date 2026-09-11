@@ -5,6 +5,7 @@
 //! Standalone INTERVAL stays unsupported (no SQLite target).
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
 
 fn translate(sql: &str) -> String {
     Pg2Sqlite::default()
@@ -155,19 +156,7 @@ fn interval_column_stays_text() {
 }
 
 /// Translates `pg` and executes every emitted statement against in-memory
-/// SQLite. Translated DDL/DQL cannot be expressed via diesel's typed DSL, so
-/// sql_query is used here to prove the emitted SQL is accepted by SQLite.
+/// SQLite.
 fn execute_translated(pg: &str) {
-    use diesel::prelude::*;
-    let stmts = Pg2Sqlite::default()
-        .sql(pg)
-        .expect("parse")
-        .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
-    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
-    for s in &stmts {
-        diesel::sql_query(s.to_string())
-            .execute(&mut conn)
-            .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{s}"));
-    }
+    helpers::execute_all(pg, &Pg2SqliteOptions::default());
 }

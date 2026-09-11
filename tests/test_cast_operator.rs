@@ -6,35 +6,11 @@
 
 mod helpers;
 
-use std::sync::Once;
-
 use diesel::{
     QueryableByName, connection::SimpleConnection, prelude::*, sql_query, sql_types::Text,
 };
 use helpers::{establish_connection, translate_pg};
 use pg2sqlite::prelude::{Pg2SqliteOptions, UuidRepresentation};
-use sqlite_vec::sqlite3_vec_init;
-
-/// Register sqlite-vec once per process so connections opened by any test in
-/// this binary have the extension loaded.
-///
-/// SAFETY: `sqlite3_vec_init` is the sqlite-vec C entry point with signature
-/// `(db, pzErrMsg, pApi) -> int`. The transmute restores that type.
-/// rusqlite is used here because diesel does not expose
-/// `sqlite3_auto_extension`.
-fn register_sqlite_vec_once() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::os::raw::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite3_vec_init as *const ())));
-    });
-}
 
 /// Text-bound scalar result for the apply test.
 #[derive(QueryableByName)]
@@ -195,7 +171,7 @@ fn sqlite_accepts(sql: &str) {
 /// Registers sqlite-vec globally so the functions are available, then runs the
 /// emitted script.
 fn sqlite_syntax_check(sql: &str) {
-    register_sqlite_vec_once();
+    helpers::register_sqlite_vec_once();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE t (id INTEGER, a TEXT, embedding BLOB);").unwrap();
     conn.execute_batch(&format!("{sql};"))

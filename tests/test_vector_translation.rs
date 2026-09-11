@@ -13,120 +13,9 @@
 
 #![allow(dead_code)]
 
-use std::sync::Once;
+mod helpers;
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use rusqlite::{Connection, functions::FunctionFlags};
-use sqlite_vec::sqlite3_vec_init;
-
-/// Register sqlite-vec once per process via `sqlite3_auto_extension`.
-///
-/// SAFETY: `sqlite3_vec_init` is the sqlite-vec C entry point whose signature
-/// is `(db, pzErrMsg, pApi) -> int`. The transmute restores that type so the
-/// C API can store and call it. `Once` makes the registration single-shot.
-fn register_sqlite_vec_once() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::os::raw::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite3_vec_init as *const ())));
-    });
-}
-
-/// Convert a single `f32` to a 2-byte little-endian IEEE 754 half-precision
-/// value. Used to implement `vec_f16`, which sqlite-vec 0.1.9 does not ship.
-#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn f32_to_f16_le(x: f32) -> [u8; 2] {
-    let b: u32 = x.to_bits();
-    // Extract sign (1 bit), biased exponent (8 bits), mantissa (23 bits).
-    // The masked sub-fields are provably bounded; debug_asserts document that.
-    let sign: u16 = {
-        debug_assert!(b >> 31 <= 1);
-        (b >> 31) as u16 // deliberate: single-bit extraction, value 0 or 1
-    } << 15;
-    let exp32: i32 = {
-        let e = (b >> 23) & 0xFF;
-        debug_assert!(e <= 255);
-        e as i32 // deliberate: 8-bit field, always 0..=255, fits i32
-    };
-    let mantissa: u32 = b & 0x7F_FFFF;
-    let bits: u16 = if exp32 == 0xFF {
-        let top10: u16 = {
-            let m = mantissa >> 13;
-            debug_assert!(m <= 0x3FF);
-            m as u16 // deliberate: top-10 mantissa bits, value <= 0x3FF
-        };
-        if mantissa != 0 { 0x7E00 | sign | top10 } else { 0x7C00 | sign }
-    } else if exp32 == 0 {
-        sign
-    } else {
-        let e = exp32 - 127 + 15;
-        if e >= 31 {
-            0x7C00 | sign
-        } else if e <= 0 {
-            sign
-        } else {
-            debug_assert!(e > 0 && e <= 30);
-            debug_assert!(mantissa >> 13 <= 0x3FF);
-            let e16: u16 = e as u16; // deliberate: proven 1..=30, fits u16
-            let m16: u16 = (mantissa >> 13) as u16; // deliberate: <= 0x3FF, fits u16
-            sign | (e16 << 10) | m16
-        }
-    };
-    bits.to_le_bytes()
-}
-
-/// Register a `vec_f16` scalar function on `conn`.
-///
-/// sqlite-vec 0.1.9 does not provide this function. We supply it here so tests
-/// that verify halfvec translation can also execute the emitted SQL.
-/// rusqlite is used directly because diesel does not expose
-/// `create_scalar_function`.
-fn register_vec_f16(conn: &Connection) {
-    conn.create_scalar_function(
-        "vec_f16",
-        1,
-        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            use rusqlite::types::ValueRef;
-            match ctx.get_raw(0) {
-                ValueRef::Null => Ok(rusqlite::types::Value::Null),
-                ValueRef::Text(t) => {
-                    let text = String::from_utf8_lossy(t);
-                    let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']');
-                    let bytes: Vec<u8> = trimmed
-                        .split(',')
-                        .filter_map(|s| s.trim().parse::<f32>().ok())
-                        .flat_map(f32_to_f16_le)
-                        .collect();
-                    Ok(rusqlite::types::Value::Blob(bytes))
-                }
-                _ => {
-                    Err(rusqlite::Error::InvalidFunctionParameterType(
-                        0,
-                        rusqlite::types::Type::Text,
-                    ))
-                }
-            }
-        },
-    )
-    .expect("register vec_f16");
-}
-
-/// Open an in-memory SQLite connection with sqlite-vec loaded and `vec_f16`
-/// registered. rusqlite is used directly because extension registration and
-/// custom function registration require APIs that diesel does not expose.
-fn open_vec_conn() -> Connection {
-    register_sqlite_vec_once();
-    let conn = Connection::open_in_memory().expect("in-memory SQLite");
-    register_vec_f16(&conn);
-    conn
-}
 
 #[test]
 fn test_vector_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
@@ -219,7 +108,7 @@ fn test_l2_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
     );
     // Execute all emitted statements with sqlite-vec loaded so vec_distance_L2
     // is available at prepare time.
-    let conn = open_vec_conn();
+    let conn = helpers::vec_connection();
     for stmt in &translated {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("SQLite rejected statement: {e}\n{stmt}"));
@@ -252,7 +141,7 @@ fn test_cosine_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
         "<=> should translate to vec_distance_cosine(), got: {select_stmt}"
     );
     // Execute all emitted statements with sqlite-vec loaded.
-    let conn = open_vec_conn();
+    let conn = helpers::vec_connection();
     for stmt in &translated {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("SQLite rejected statement: {e}\n{stmt}"));
@@ -286,7 +175,7 @@ fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
     );
     // Execute all emitted statements with sqlite-vec loaded so vec_f32 is
     // available.
-    let conn = open_vec_conn();
+    let conn = helpers::vec_connection();
     for stmt in &translated {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("SQLite rejected statement: {e}\n{stmt}"));
@@ -325,7 +214,7 @@ fn test_halfvec_cast_to_vec_f16() -> Result<(), Box<dyn std::error::Error>> {
         "::halfvec cast should not translate to vec_f32(), got: {select_stmt}"
     );
     // Execute all emitted statements with sqlite-vec and vec_f16 loaded.
-    let conn = open_vec_conn();
+    let conn = helpers::vec_connection();
     for stmt in &translated {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("SQLite rejected statement: {e}\n{stmt}"));
@@ -355,7 +244,7 @@ fn qualified_vector_cast_lowers_to_vec_f32() -> Result<(), Box<dyn std::error::E
         "the CAST AS BLOB fallback stores text bytes as the vector, got: {select_stmt}"
     );
     // Execute the standalone SELECT with sqlite-vec loaded so vec_f32 is known.
-    open_vec_conn()
+    helpers::vec_connection()
         .execute_batch(&format!("{select_stmt};"))
         .unwrap_or_else(|e| panic!("SQLite rejected SELECT: {e}\n{select_stmt}"));
     Ok(())
@@ -374,7 +263,7 @@ fn qualified_halfvec_cast_lowers_to_vec_f16() -> Result<(), Box<dyn std::error::
         "a qualified ::halfvec cast should lower to vec_f16(), got: {select_stmt}"
     );
     // Execute the standalone SELECT with vec_f16 registered so it is known.
-    open_vec_conn()
+    helpers::vec_connection()
         .execute_batch(&format!("{select_stmt};"))
         .unwrap_or_else(|e| panic!("SQLite rejected SELECT: {e}\n{select_stmt}"));
     Ok(())
@@ -551,7 +440,7 @@ fn test_distance_with_cast() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(select_stmt.contains("vec_f32"), "Should contain vec_f32, got: {select_stmt}");
     // Execute all emitted statements with sqlite-vec loaded.
-    let conn = open_vec_conn();
+    let conn = helpers::vec_connection();
     for stmt in &translated {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("SQLite rejected statement: {e}\n{stmt}"));
@@ -586,7 +475,7 @@ fn test_order_by_distance() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(select_stmt.contains("LIMIT 10"), "Should preserve LIMIT, got: {select_stmt}");
     // Execute all emitted statements with sqlite-vec loaded.
-    let conn = open_vec_conn();
+    let conn = helpers::vec_connection();
     for stmt in &translated {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("SQLite rejected statement: {e}\n{stmt}"));

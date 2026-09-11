@@ -5,11 +5,12 @@
 #[cfg(feature = "sqlitegis")]
 pub mod sqlitegis;
 
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::Once};
 
 use diesel::{prelude::*, sqlite::SqliteConnection};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rosetta_uuid::Uuid;
+use sqlite_vec::sqlite3_vec_init;
 use sqlparser::ast::Statement;
 
 /// Translates `pg` SQL through
@@ -347,4 +348,168 @@ pub fn reverse_translate_sql(sql: &str) -> Result<String, String> {
     let options = Pg2SqliteOptions::default();
     let stmts = translator.reverse_sql(sql, &schema, &options).map_err(|e| e.to_string())?;
     Ok(stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
+}
+
+/// Translates `pg` and executes every emitted statement in a fresh in-memory
+/// SQLite.
+///
+/// The proof an emitted script is valid SQLite: the panic names the statement
+/// that was rejected and the error SQLite gave for it.
+///
+/// # Panics
+///
+/// Panics when translation fails or when an emitted statement will not
+/// execute.
+pub fn execute_all(pg: &str, options: &Pg2SqliteOptions) {
+    let statements = translate_pg(pg, options).expect("translation should succeed");
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in &statements {
+        connection.execute_batch(&format!("{statement};")).unwrap_or_else(|error| {
+            panic!("emitted statement must execute in SQLite: {error}\n{statement}")
+        });
+    }
+}
+
+/// Applies everything `pg` emits except the query under test, then returns
+/// that query once SQLite has accepted it.
+///
+/// The query is picked with [`user_statement_of`], so a `SELECT
+/// CreateSpatialIndex(...)` emitted by a GiST index is applied as setup
+/// rather than mistaken for the query the test asserts on.
+///
+/// # Panics
+///
+/// Panics when translation fails, when no user `SELECT` is emitted, or when
+/// SQLite rejects any emitted statement.
+pub fn prepared_user_select(pg: &str, options: &Pg2SqliteOptions) -> String {
+    let statements = translate_pg(pg, options).expect("translation should succeed");
+    let select = statements
+        .iter()
+        .position(|statement| is_user_statement(statement, "SELECT"))
+        .unwrap_or_else(|| panic!("no user SELECT in:\n{}", statements.join("\n")));
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for (index, statement) in statements.iter().enumerate() {
+        if index == select {
+            continue;
+        }
+        connection.execute_batch(&format!("{statement};")).unwrap_or_else(|error| {
+            panic!("emitted statement must execute in SQLite: {error}\n{statement}")
+        });
+    }
+    connection.prepare(&statements[select]).unwrap_or_else(|error| {
+        panic!("SQLite must accept the query: {error}\n{}", statements[select])
+    });
+
+    statements[select].clone()
+}
+
+/// Registers sqlite-vec once per process, so every later connection has it.
+pub fn register_sqlite_vec_once() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: `sqlite3_vec_init` is sqlite-vec's C entry point, whose
+        // signature is `(db, pzErrMsg, pApi) -> int`; the transmute restores
+        // that type so the C API can store and call it.
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut std::os::raw::c_char,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(
+                sqlite3_vec_init as *const ()
+            )));
+        }
+    });
+}
+
+/// One `f32` as the 2 bytes of a little-endian IEEE 754 half.
+#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn f32_to_f16_le(x: f32) -> [u8; 2] {
+    let b: u32 = x.to_bits();
+    let sign: u16 = {
+        debug_assert!(b >> 31 <= 1);
+        (b >> 31) as u16 // deliberate: single-bit extraction, value 0 or 1
+    } << 15;
+    let exp32: i32 = {
+        let e = (b >> 23) & 0xFF;
+        debug_assert!(e <= 255);
+        e as i32 // deliberate: 8-bit field, always 0..=255, fits i32
+    };
+    let mantissa: u32 = b & 0x7F_FFFF;
+    let bits: u16 = if exp32 == 0xFF {
+        let top10: u16 = {
+            let m = mantissa >> 13;
+            debug_assert!(m <= 0x3FF);
+            m as u16 // deliberate: top-10 mantissa bits, value <= 0x3FF
+        };
+        if mantissa != 0 { 0x7E00 | sign | top10 } else { 0x7C00 | sign }
+    } else if exp32 == 0 {
+        sign
+    } else {
+        let e = exp32 - 127 + 15;
+        if e >= 31 {
+            0x7C00 | sign
+        } else if e <= 0 {
+            sign
+        } else {
+            debug_assert!(e > 0 && e <= 30);
+            debug_assert!(mantissa >> 13 <= 0x3FF);
+            let e16: u16 = e as u16; // deliberate: proven 1..=30, fits u16
+            let m16: u16 = (mantissa >> 13) as u16; // deliberate: <= 0x3FF, fits u16
+            sign | (e16 << 10) | m16
+        }
+    };
+    bits.to_le_bytes()
+}
+
+/// Registers `vec_f16` on `conn`, which sqlite-vec 0.1.9 does not ship.
+///
+/// Produces true 2-byte halves, which is what a `::halfvec` cast means. A
+/// test that inserts into a `vec0` table needs its own float32-encoding shim
+/// instead, because vec0 0.1.9 stores `float16[]` as float32 and rejects a
+/// blob whose length is not divisible by four.
+///
+/// rusqlite directly, because diesel exposes neither `sqlite3_auto_extension`
+/// nor `create_scalar_function`.
+pub fn register_vec_f16(conn: &rusqlite::Connection) {
+    conn.create_scalar_function(
+        "vec_f16",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            match ctx.get_raw(0) {
+                rusqlite::types::ValueRef::Null => Ok(rusqlite::types::Value::Null),
+                rusqlite::types::ValueRef::Text(t) => {
+                    let text = String::from_utf8_lossy(t);
+                    let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']');
+                    let bytes: Vec<u8> = trimmed
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<f32>().ok())
+                        .flat_map(f32_to_f16_le)
+                        .collect();
+                    Ok(rusqlite::types::Value::Blob(bytes))
+                }
+                _ => {
+                    Err(rusqlite::Error::InvalidFunctionParameterType(
+                        0,
+                        rusqlite::types::Type::Text,
+                    ))
+                }
+            }
+        },
+    )
+    .expect("register vec_f16");
+}
+
+/// A fresh in-memory connection with sqlite-vec loaded and `vec_f16` present.
+pub fn vec_connection() -> rusqlite::Connection {
+    register_sqlite_vec_once();
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    register_vec_f16(&conn);
+    conn
 }

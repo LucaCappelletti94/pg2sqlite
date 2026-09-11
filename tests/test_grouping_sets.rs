@@ -1,30 +1,9 @@
 //! Tests for GROUPING SETS, ROLLUP, and CUBE expansion to UNION ALL.
 
+mod helpers;
+
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use sqlparser::ast::Statement;
-
-fn translate(sql: &str) -> Result<Vec<Statement>, Box<dyn std::error::Error>> {
-    Ok(Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?)
-}
-
-fn query_sql(translated: &[Statement]) -> String {
-    translated
-        .iter()
-        .find(|stmt| matches!(stmt, Statement::Query(_)))
-        .expect("expected translated SELECT query")
-        .to_string()
-}
-
-fn execute_ddl(
-    translated: &[Statement],
-    conn: &mut SqliteConnection,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for stmt in translated.iter().filter(|stmt| !matches!(stmt, Statement::Query(_))) {
-        diesel::sql_query(stmt.to_string()).execute(conn)?;
-    }
-    Ok(())
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, QueryableByName)]
 struct AggregateRow {
@@ -59,7 +38,7 @@ fn load_sales_data(conn: &mut SqliteConnection) -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn grouping_sets_rewrites_to_union_all() -> Result<(), Box<dyn std::error::Error>> {
+fn grouping_sets_rewrites_to_union_all() {
     let sql = format!(
         "{}\nSELECT region, product, SUM(amount) AS total
          FROM sales
@@ -67,21 +46,12 @@ fn grouping_sets_rewrites_to_union_all() -> Result<(), Box<dyn std::error::Error
         sales_fixture_sql()
     );
 
-    let translated = translate(&sql)?;
-    let query = query_sql(&translated);
+    let options = Pg2SqliteOptions::default();
+    let query = helpers::prepared_user_select(&sql, &options);
     let upper = query.to_uppercase();
 
     assert!(!upper.contains("GROUPING SETS"), "GROUPING SETS should be rewritten: {query}");
     assert!(upper.contains("UNION ALL"), "Expected UNION ALL expansion: {query}");
-    {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        for stmt in translated.iter().filter(|s| !matches!(s, Statement::Query(_))) {
-            conn.execute_batch(&format!("{stmt};")).unwrap();
-        }
-        conn.prepare(&query).unwrap();
-    }
-
-    Ok(())
 }
 
 #[test]
@@ -92,11 +62,15 @@ fn grouping_sets_semantic() -> Result<(), Box<dyn std::error::Error>> {
          GROUP BY GROUPING SETS ((region, product), (region), ());",
         sales_fixture_sql()
     );
-    let translated = translate(&sql)?;
-    let query = query_sql(&translated);
-
+    let options = Pg2SqliteOptions::default();
+    let stmts = helpers::translate_pg(&sql, &options).unwrap();
+    let query = helpers::user_statement_of(&stmts, "SELECT").clone();
     let mut conn = SqliteConnection::establish(":memory:")?;
-    execute_ddl(&translated, &mut conn)?;
+    // Dynamically-generated DDL; the table schema is ephemeral and has no
+    // table! macro.
+    for s in stmts.iter().filter(|s| !helpers::is_user_statement(s, "SELECT")) {
+        diesel::sql_query(s.as_str()).execute(&mut conn)?;
+    }
     load_sales_data(&mut conn)?;
 
     let mut rows = diesel::sql_query(query).load::<AggregateRow>(&mut conn)?;
@@ -136,11 +110,15 @@ fn rollup_semantic() -> Result<(), Box<dyn std::error::Error>> {
          GROUP BY ROLLUP(region, product);",
         sales_fixture_sql()
     );
-    let translated = translate(&sql)?;
-    let query = query_sql(&translated);
-
+    let options = Pg2SqliteOptions::default();
+    let stmts = helpers::translate_pg(&sql, &options).unwrap();
+    let query = helpers::user_statement_of(&stmts, "SELECT").clone();
     let mut conn = SqliteConnection::establish(":memory:")?;
-    execute_ddl(&translated, &mut conn)?;
+    // Dynamically-generated DDL; the table schema is ephemeral and has no
+    // table! macro.
+    for s in stmts.iter().filter(|s| !helpers::is_user_statement(s, "SELECT")) {
+        diesel::sql_query(s.as_str()).execute(&mut conn)?;
+    }
     load_sales_data(&mut conn)?;
 
     let mut rows = diesel::sql_query(query).load::<AggregateRow>(&mut conn)?;
@@ -180,11 +158,15 @@ fn cube_semantic() -> Result<(), Box<dyn std::error::Error>> {
          GROUP BY CUBE(region, product);",
         sales_fixture_sql()
     );
-    let translated = translate(&sql)?;
-    let query = query_sql(&translated);
-
+    let options = Pg2SqliteOptions::default();
+    let stmts = helpers::translate_pg(&sql, &options).unwrap();
+    let query = helpers::user_statement_of(&stmts, "SELECT").clone();
     let mut conn = SqliteConnection::establish(":memory:")?;
-    execute_ddl(&translated, &mut conn)?;
+    // Dynamically-generated DDL; the table schema is ephemeral and has no
+    // table! macro.
+    for s in stmts.iter().filter(|s| !helpers::is_user_statement(s, "SELECT")) {
+        diesel::sql_query(s.as_str()).execute(&mut conn)?;
+    }
     load_sales_data(&mut conn)?;
 
     let mut rows = diesel::sql_query(query).load::<AggregateRow>(&mut conn)?;
@@ -226,11 +208,15 @@ fn rollup_with_prefix_group_key_semantic() -> Result<(), Box<dyn std::error::Err
          GROUP BY region, ROLLUP(product);",
         sales_fixture_sql()
     );
-    let translated = translate(&sql)?;
-    let query = query_sql(&translated);
-
+    let options = Pg2SqliteOptions::default();
+    let stmts = helpers::translate_pg(&sql, &options).unwrap();
+    let query = helpers::user_statement_of(&stmts, "SELECT").clone();
     let mut conn = SqliteConnection::establish(":memory:")?;
-    execute_ddl(&translated, &mut conn)?;
+    // Dynamically-generated DDL; the table schema is ephemeral and has no
+    // table! macro.
+    for s in stmts.iter().filter(|s| !helpers::is_user_statement(s, "SELECT")) {
+        diesel::sql_query(s.as_str()).execute(&mut conn)?;
+    }
     load_sales_data(&mut conn)?;
 
     let mut rows = diesel::sql_query(query).load::<AggregateRow>(&mut conn)?;

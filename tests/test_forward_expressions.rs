@@ -1,8 +1,10 @@
 //! Tests for forward expression translation covering FTS and other paths
 //! in `src/impls/translator_impls/expr.rs`.
 
+mod helpers;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
+use pg2sqlite::prelude::Pg2SqliteOptions;
 use translate_helpers::translate_default as translate;
 
 const SCHEMA: &str = "
@@ -211,20 +213,6 @@ fn view_with_chained_json_access_operators() {
 
 /// Translates `pg` with default options and executes every emitted statement
 /// against an in-memory SQLite connection.
-/// Translated DDL cannot be expressed via diesel's typed DSL, so sql_query is
-/// used here to prove the emitted SQL is accepted by SQLite.
 fn apply_translated_pg(pg: &str) {
-    use diesel::prelude::*;
-    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-    let stmts = Pg2Sqlite::default()
-        .sql(pg)
-        .expect("parse")
-        .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
-    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("in-memory connection");
-    for s in &stmts {
-        diesel::sql_query(s.to_string())
-            .execute(&mut conn)
-            .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{s}"));
-    }
+    helpers::execute_all(pg, &Pg2SqliteOptions::default());
 }

@@ -3,24 +3,17 @@
 //! Covers integer, float, numeric, binary, text, bit, and temporal type
 //! aliases, typed string literals, and a Diesel end-to-end integration test.
 
+mod helpers;
 use diesel::prelude::*;
+use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-fn translate(sql: &str) -> Result<String, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-        .map_err(|e| e.to_string())
-}
-
 fn translate_ok(sql: &str) -> String {
-    translate(sql).expect("should translate")
+    translate_sql(sql, &Pg2SqliteOptions::default()).expect("should translate")
 }
 
 fn translate_err(sql: &str) -> String {
-    translate(sql).expect_err("should fail")
+    translate_sql(sql, &Pg2SqliteOptions::default()).expect_err("should fail")
 }
 
 mod schema {

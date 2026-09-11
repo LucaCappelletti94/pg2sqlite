@@ -9,39 +9,10 @@
 //!   Timestamp
 //! - Unknown custom type error
 
-use std::sync::Once;
+mod helpers;
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
-use sqlite_vec::sqlite3_vec_init;
-
-/// Register sqlite-vec once so connections opened by any test in this binary
-/// have vec0 available. rusqlite FFI is the only path to this API.
-///
-/// SAFETY: `sqlite3_vec_init` has the C signature `(db, pzErrMsg, pApi) ->
-/// int`; the transmute restores that type for `sqlite3_auto_extension`.
-fn register_sqlite_vec_once() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::os::raw::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite3_vec_init as *const ())));
-    });
-}
-
-/// Helper: translate SQL and return the output string.
-fn translate(sql: &str, options: &Pg2SqliteOptions) -> Result<String, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(options)
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-        .map_err(|e| e.to_string())
-}
+use helpers::translate_sql as translate;
+use pg2sqlite::prelude::{Pg2SqliteOptions, UuidRepresentation};
 
 #[test]
 fn array_type_without_representation_produces_error() {
@@ -296,7 +267,7 @@ fn blob_passes_through() {
 /// rusqlite is used directly because diesel does not expose
 /// `sqlite3_auto_extension`.
 fn parse_sqlite(sql: &str) {
-    register_sqlite_vec_once();
+    helpers::register_sqlite_vec_once();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     for stmt in sql.lines().filter(|l| !l.trim().is_empty()) {
         conn.execute_batch(&format!("{stmt};"))

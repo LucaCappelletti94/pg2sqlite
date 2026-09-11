@@ -3,18 +3,15 @@
 //! Verifies that PG functions inside the AS SELECT subquery are translated
 //! (e.g. `now()` → `datetime('now')`), not cloned verbatim.
 
+mod helpers;
 use diesel::{Connection, RunQueryDsl, SqliteConnection, connection::SimpleConnection};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-
-fn translate(sql: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let stmts = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
-    Ok(stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-}
+use helpers::translate_sql;
+use pg2sqlite::prelude::Pg2SqliteOptions;
 
 #[test]
 fn create_table_as_select_translates_functions() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE snapshots AS SELECT id, now() AS created_at FROM source;";
-    let output = translate(sql)?;
+    let output = translate_sql(sql, &Pg2SqliteOptions::default())?;
 
     assert!(
         output.contains("datetime('now')"),
@@ -40,7 +37,7 @@ fn create_table_as_select_basic() -> Result<(), Box<dyn std::error::Error>> {
     // scope declares is refused rather than guessed.
     let sql = "CREATE TABLE users (id INT, name TEXT, active BOOLEAN); \
                CREATE TABLE archive AS SELECT id, name FROM users WHERE active = true;";
-    let output = translate(sql)?;
+    let output = translate_sql(sql, &Pg2SqliteOptions::default())?;
     let output = output.lines().last().expect("the batch emits the CTAS").to_string();
 
     assert!(output.contains("CREATE TABLE"), "Should contain CREATE TABLE");

@@ -6,6 +6,7 @@
 //! DELETE, SetOperation in query body, inject_condition_into_statement
 //! (UPDATE/DELETE).
 
+mod helpers;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
@@ -27,23 +28,12 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
 /// Translates `sql` with default options and executes every emitted statement
 /// in an in-memory SQLite connection, verifying the output is valid SQLite.
 fn execute_trigger_ddl(sql: &str) {
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in &stmts {
-        conn.execute_batch(&format!("{stmt};"))
-            .expect("translated trigger DDL must execute in SQLite");
-    }
+    helpers::execute_all(sql, &Pg2SqliteOptions::default());
 }
 
 /// Like `execute_trigger_ddl` but uses caller-supplied options.
 fn execute_trigger_ddl_with_opts(sql: &str, options: &Pg2SqliteOptions) {
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(options).unwrap();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in &stmts {
-        conn.execute_batch(&format!("{stmt};"))
-            .expect("translated trigger DDL must execute in SQLite");
-    }
+    helpers::execute_all(sql, options);
 }
 
 #[test]

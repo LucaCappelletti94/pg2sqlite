@@ -1,31 +1,9 @@
 //! Tests for DISTINCT ON rewrite to ROW_NUMBER window function.
 
+mod helpers;
+
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use rusqlite::Connection as SqliteConn;
-use sqlparser::ast::Statement;
-
-fn translate(sql: &str) -> Result<Vec<Statement>, Box<dyn std::error::Error>> {
-    Ok(Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?)
-}
-
-fn query_sql(translated: &[Statement]) -> String {
-    translated
-        .iter()
-        .find(|stmt| matches!(stmt, Statement::Query(_)))
-        .expect("expected translated SELECT query")
-        .to_string()
-}
-
-fn execute_ddl(
-    translated: &[Statement],
-    conn: &mut SqliteConnection,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for stmt in translated.iter().filter(|stmt| !matches!(stmt, Statement::Query(_))) {
-        diesel::sql_query(stmt.to_string()).execute(conn)?;
-    }
-    Ok(())
-}
 
 #[derive(Debug, QueryableByName)]
 struct DistinctOnRow {
@@ -38,7 +16,7 @@ struct DistinctOnRow {
 }
 
 #[test]
-fn distinct_on_rewrites_to_window_filter() -> Result<(), Box<dyn std::error::Error>> {
+fn distinct_on_rewrites_to_window_filter() {
     let sql = "
         CREATE TABLE events (
             id INTEGER PRIMARY KEY,
@@ -51,25 +29,12 @@ fn distinct_on_rewrites_to_window_filter() -> Result<(), Box<dyn std::error::Err
         ORDER BY user_id, ts DESC;
     ";
 
-    let translated = translate(sql)?;
-    let query = query_sql(&translated);
+    let options = Pg2SqliteOptions::default();
+    let query = helpers::prepared_user_select(sql, &options);
     let upper = query.to_uppercase();
 
     assert!(!upper.contains("DISTINCT ON"), "DISTINCT ON should be rewritten: {query}");
     assert!(upper.contains("ROW_NUMBER"), "Expected ROW_NUMBER rewrite: {query}");
-
-    // Execute DDL then prepare the SELECT to prove real SQLite accepts it.
-    let conn = SqliteConn::open_in_memory()?;
-    let ddl_script = translated
-        .iter()
-        .filter(|s| !matches!(s, Statement::Query(_)))
-        .map(|s| format!("{s};"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    conn.execute_batch(&ddl_script)?;
-    conn.prepare(&query)?;
-
-    Ok(())
 }
 
 #[test]
@@ -86,11 +51,15 @@ fn distinct_on_semantic_highest_per_partition() -> Result<(), Box<dyn std::error
         ORDER BY user_id, ts DESC;
     ";
 
-    let translated = translate(sql)?;
-    let query = query_sql(&translated);
-
+    let options = Pg2SqliteOptions::default();
+    let stmts = helpers::translate_pg(sql, &options).unwrap();
+    let query = helpers::user_statement_of(&stmts, "SELECT").clone();
     let mut conn = SqliteConnection::establish(":memory:")?;
-    execute_ddl(&translated, &mut conn)?;
+    // Dynamically-generated DDL; the table schema is ephemeral and has no
+    // table! macro.
+    for s in stmts.iter().filter(|s| !helpers::is_user_statement(s, "SELECT")) {
+        diesel::sql_query(s.as_str()).execute(&mut conn)?;
+    }
 
     diesel::sql_query(
         "INSERT INTO events (id, user_id, ts, payload) VALUES
@@ -154,10 +123,16 @@ struct Latest {
 /// returns its rows. The emitted SQL is the artifact under test, so it is
 /// applied as generated text.
 fn latest_per_sensor(query: &str) -> Result<Vec<Latest>, Box<dyn std::error::Error>> {
-    let translated = translate(&format!("{READINGS} {query};"))?;
+    let options = Pg2SqliteOptions::default();
+    let stmts = helpers::translate_pg(&format!("{READINGS} {query};"), &options).unwrap();
+    let select = helpers::user_statement_of(&stmts, "SELECT").clone();
     let mut conn = SqliteConnection::establish(":memory:")?;
-    execute_ddl(&translated, &mut conn)?;
-    Ok(diesel::sql_query(query_sql(&translated)).load(&mut conn)?)
+    // Dynamically-generated DDL/DML; the table schema is ephemeral and has no
+    // table! macro.
+    for s in stmts.iter().filter(|s| !helpers::is_user_statement(s, "SELECT")) {
+        diesel::sql_query(s.as_str()).execute(&mut conn)?;
+    }
+    Ok(diesel::sql_query(select).load(&mut conn)?)
 }
 
 fn expected() -> Vec<Latest> {

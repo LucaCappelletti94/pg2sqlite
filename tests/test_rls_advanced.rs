@@ -9,6 +9,7 @@
 //! InList/Between in transform_outer_table_refs.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
+mod helpers;
 
 fn make_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -61,20 +62,12 @@ fn update_trigger(output: &str) -> &str {
 /// Executes every translated statement in an in-memory SQLite connection.
 /// Uses the standard RLS options from make_options().
 fn execute_rls_ddl(pg_sql: &str) {
-    let stmts = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&make_options()).unwrap();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in &stmts {
-        conn.execute_batch(&format!("{stmt};")).expect("translated RLS DDL must execute in SQLite");
-    }
+    helpers::execute_all(pg_sql, &make_options());
 }
 
 /// Like execute_rls_ddl but uses caller-supplied options.
 fn execute_rls_ddl_with_opts(pg_sql: &str, options: &Pg2SqliteOptions) {
-    let stmts = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(options).unwrap();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in &stmts {
-        conn.execute_batch(&format!("{stmt};")).expect("translated RLS DDL must execute in SQLite");
-    }
+    helpers::execute_all(pg_sql, options);
 }
 
 #[test]

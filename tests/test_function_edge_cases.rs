@@ -11,18 +11,15 @@
 //! - strpos -> INSTR
 //! - chr -> char
 
+mod helpers;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
+use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection as SqliteConn;
 
 /// Helper: translate SQL and return the output or error string.
 fn translate(sql: &str) -> Result<String, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-        .map_err(|e| e.to_string())
+    translate_sql(sql, &Pg2SqliteOptions::default())
 }
 
 fn translate_ok(sql: &str) -> String {

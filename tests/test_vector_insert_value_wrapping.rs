@@ -8,6 +8,7 @@
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use translate_helpers::translate_default as translate;
+mod helpers;
 
 fn find_insert(out: &str) -> String {
     out.lines()
@@ -276,58 +277,31 @@ fn tuple_update_on_vector_column_wraps_text_literal_with_vec_f32() {
 /// requires the raw FFI layer that diesel does not expose.
 fn apply_vector_sql(pg: &str) {
     use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-    use rusqlite::functions::FunctionFlags;
-    static INIT_SQLITE_VEC: std::sync::Once = std::sync::Once::new();
-    INIT_SQLITE_VEC.call_once(|| {
-        // SAFETY: `sqlite3_vec_init` is the sqlite-vec extension entry point
-        // whose real C signature is `(db, pzErrMsg, pApi) -> int`. The crate
-        // declares it with an opaque signature, so the transmute restores the
-        // one `sqlite3_auto_extension` expects, the same pattern
-        // `test_vector_semantic.rs` uses. `Once` keeps the registration
-        // single-shot.
-        unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-                *const (),
-                unsafe extern "C" fn(
-                    *mut rusqlite::ffi::sqlite3,
-                    *mut *mut std::os::raw::c_char,
-                    *const rusqlite::ffi::sqlite3_api_routines,
-                ) -> i32,
-            >(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
-        }
-    });
+    helpers::register_sqlite_vec_once();
     let stmts = Pg2Sqlite::default()
         .sql(pg)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate");
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    // sqlite-vec 0.1.9 does not provide vec_f16. We register it here.
-    // vec0 0.1.9 stores float16[N] columns as float32 blobs internally (its
-    // data validation always requires blobs whose length is divisible by
-    // 4). So our vec_f16 shim returns the same float32 encoding that
-    // vec_f32 would produce. rusqlite is used directly because diesel does
-    // not expose create_scalar_function.
+    // vec0 0.1.9 requires float16[] blobs divisible by 4 (it stores them as
+    // float32 internally). helpers::register_vec_f16 produces true 2-byte f16
+    // values which vec0 rejects; register a float32-encoding shim instead.
     conn.create_scalar_function(
         "vec_f16",
         1,
-        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| {
-            use rusqlite::types::ValueRef;
             match ctx.get_raw(0) {
-                ValueRef::Null => Ok(rusqlite::types::Value::Null),
-                ValueRef::Text(t) => {
+                rusqlite::types::ValueRef::Null => Ok(rusqlite::types::Value::Null),
+                rusqlite::types::ValueRef::Text(t) => {
                     let text = String::from_utf8_lossy(t);
                     let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']');
-                    // Return float32 little-endian bytes: vec0 0.1.9 requires
-                    // blobs divisible by 4 even for
-                    // float16[N] columns.
                     let bytes: Vec<u8> = trimmed
                         .split(',')
                         .filter_map(|s| s.trim().parse::<f32>().ok())
-                        .flat_map(|f| f.to_le_bytes())
+                        .flat_map(f32::to_le_bytes)
                         .collect();
                     Ok(rusqlite::types::Value::Blob(bytes))
                 }
@@ -340,7 +314,7 @@ fn apply_vector_sql(pg: &str) {
             }
         },
     )
-    .expect("register vec_f16");
+    .expect("register vec_f16 float32-compat shim");
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
             .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{s}"));

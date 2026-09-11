@@ -1,13 +1,13 @@
 //! Tests for forward index translation covering FTS and other index types
 //! in `src/impls/translator_impls/create_index.rs`.
 
+mod helpers;
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use run_translated_helper::run_translated_with;
-use rusqlite::Connection as SqliteConn;
 use translate_helpers::translate_default as translate;
 
 fn translate_result(sql: &str) -> Result<Vec<String>, String> {
@@ -23,12 +23,7 @@ fn translate_result(sql: &str) -> Result<Vec<String>, String> {
 /// SQLite. Used after substring asserts to prove the translated output runs
 /// without error.
 fn execute_translated(sql: &str) {
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
-    let conn = SqliteConn::open_in_memory().unwrap();
-    let script = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
-    conn.execute_batch(&script)
-        .unwrap_or_else(|e| panic!("translated SQL must execute in SQLite: {e}\n{script}"));
+    helpers::execute_all(sql, &Pg2SqliteOptions::default());
 }
 
 #[test]

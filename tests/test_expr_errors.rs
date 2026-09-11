@@ -10,46 +10,15 @@
 //! - Vector operators: <#>, <+>, <%> -> errors; <->, <=> -> vec_distance
 //!   functions
 
-use std::sync::Once;
+mod helpers;
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use sqlite_vec::sqlite3_vec_init;
-
-/// Register sqlite-vec once per process so connections opened by
-/// `sqlite_accepts` have vec0 and vec_distance_* available.
-///
-/// SAFETY: `sqlite3_vec_init` has the C signature `(db, pzErrMsg, pApi) ->
-/// int`; the transmute restores it for `sqlite3_auto_extension`. rusqlite FFI
-/// is the only path to this API.
-fn register_sqlite_vec_once() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::os::raw::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite3_vec_init as *const ())));
-    });
-}
-/// Helper: translate a full SQL statement and return the output or error
-/// string.
-fn translate(sql: &str) -> Result<String, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-        .map_err(|e| e.to_string())
-}
 
 #[test]
 fn any_eq_subquery_translates_to_in() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val = ANY(SELECT id FROM t);";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(output.contains("IN"), "= ANY(subquery) should translate to IN, got: {output}");
     sqlite_accepts(sql);
 }
@@ -58,7 +27,7 @@ fn any_eq_subquery_translates_to_in() {
 fn any_eq_array_literal_translates_to_in_list() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val = ANY(ARRAY[1, 2, 3]);";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(
         output.contains("IN (1, 2, 3)"),
         "= ANY(ARRAY[..]) should translate to IN list, got: {output}"
@@ -75,7 +44,7 @@ fn any_eq_array_literal_translates_to_in_list() {
 fn any_gt_subquery_translates_to_exists() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val > ANY(SELECT id FROM t);";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(
         output.contains("EXISTS"),
         "> ANY(subquery) should translate via EXISTS, got: {output}"
@@ -91,7 +60,7 @@ fn any_gt_subquery_translates_to_exists() {
 fn any_gt_array_literal_translates_to_or_chain() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val > ANY(ARRAY[1, 2, 3]);";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(output.contains(" OR "), "> ANY(array) should translate to OR chain, got: {output}");
     assert!(!output.contains(" ANY"), "ANY keyword should be removed, got: {output}");
     sqlite_accepts(sql);
@@ -101,7 +70,7 @@ fn any_gt_array_literal_translates_to_or_chain() {
 fn all_neq_subquery_translates_to_not_in() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val <> ALL(SELECT id FROM t);";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(
         output.contains("NOT IN"),
         "<> ALL(subquery) should translate to NOT IN, got: {output}"
@@ -113,7 +82,7 @@ fn all_neq_subquery_translates_to_not_in() {
 fn all_neq_array_literal_translates_to_not_in_list() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val <> ALL(ARRAY[1, 2, 3]);";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(
         output.contains("NOT IN (1, 2, 3)"),
         "<> ALL(ARRAY[..]) should translate to NOT IN list, got: {output}"
@@ -126,7 +95,7 @@ fn all_neq_array_literal_translates_to_not_in_list() {
 fn all_gt_subquery_translates_to_not_exists() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val > ALL(SELECT id FROM t);";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(
         output.contains("NOT EXISTS"),
         "> ALL(subquery) should translate via NOT EXISTS, got: {output}"
@@ -176,7 +145,7 @@ fn quantifier_survivors(sql: &str) -> Vec<i64> {
 fn all_gt_array_literal_translates_to_and_chain() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, val INT);
                SELECT * FROM t WHERE val > ALL(ARRAY[1, 2, 3]);";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(output.contains(" AND "), "> ALL(array) should translate to AND chain, got: {output}");
     assert!(!output.contains(" ALL"), "ALL keyword should be removed, got: {output}");
     sqlite_accepts(sql);
@@ -186,7 +155,7 @@ fn all_gt_array_literal_translates_to_and_chain() {
 fn similar_to_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
                SELECT * FROM t WHERE name SIMILAR TO '%test%';";
-    let result = translate(sql);
+    let result = helpers::translate_sql(sql, &Pg2SqliteOptions::default());
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("SIMILAR TO"), "Expected SIMILAR TO error, got: {err}");
@@ -196,7 +165,7 @@ fn similar_to_produces_error() {
 fn is_normalized_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
                SELECT * FROM t WHERE name IS NORMALIZED;";
-    let result = translate(sql);
+    let result = helpers::translate_sql(sql, &Pg2SqliteOptions::default());
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("IS NORMALIZED"), "Expected IS NORMALIZED error, got: {err}");
@@ -206,7 +175,7 @@ fn is_normalized_produces_error() {
 fn at_at_without_tsvector_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
                SELECT * FROM t WHERE name @@ 'test';";
-    let result = translate(sql);
+    let result = helpers::translate_sql(sql, &Pg2SqliteOptions::default());
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("@@"), "Expected @@ error, got: {err}");
@@ -216,7 +185,7 @@ fn at_at_without_tsvector_produces_error() {
 fn vector_l2_distance_translates() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, embedding vector(3));
                SELECT * FROM t ORDER BY embedding <-> '[1,2,3]';";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(
         output.contains("vec_distance_L2"),
         "<-> should translate to vec_distance_L2, got: {output}"
@@ -228,7 +197,7 @@ fn vector_l2_distance_translates() {
 fn vector_cosine_distance_translates() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, embedding vector(3));
                SELECT * FROM t ORDER BY embedding <=> '[1,2,3]';";
-    let output = translate(sql).unwrap();
+    let output = helpers::translate_sql(sql, &Pg2SqliteOptions::default()).unwrap();
     assert!(
         output.contains("vec_distance_cosine"),
         "<=> should translate to vec_distance_cosine, got: {output}"
@@ -240,7 +209,7 @@ fn vector_cosine_distance_translates() {
 fn vector_negative_inner_product_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, embedding vector(3));
                SELECT * FROM t ORDER BY embedding <#> '[1,2,3]';";
-    let result = translate(sql);
+    let result = helpers::translate_sql(sql, &Pg2SqliteOptions::default());
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("<#>"), "Expected <#> error, got: {err}");
@@ -250,7 +219,7 @@ fn vector_negative_inner_product_produces_error() {
 fn vector_manhattan_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, embedding vector(3));
                SELECT * FROM t ORDER BY embedding <+> '[1,2,3]';";
-    let result = translate(sql);
+    let result = helpers::translate_sql(sql, &Pg2SqliteOptions::default());
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("<+>"), "Expected <+> error, got: {err}");
@@ -260,7 +229,7 @@ fn vector_manhattan_produces_error() {
 fn vector_jaccard_produces_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, embedding vector(3));
                SELECT * FROM t ORDER BY embedding <%> '[1,2,3]';";
-    let result = translate(sql);
+    let result = helpers::translate_sql(sql, &Pg2SqliteOptions::default());
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("<%>"), "Expected <%> error, got: {err}");
@@ -270,7 +239,10 @@ fn vector_jaccard_produces_error() {
 fn at_time_zone_named_zone_still_errors() {
     // Named timezones like 'Europe/Brussels' are not supported; only
     // UTC/local/fixed offsets are.
-    let result = translate("SELECT col AT TIME ZONE 'Europe/Brussels' FROM t;");
+    let result = helpers::translate_sql(
+        "SELECT col AT TIME ZONE 'Europe/Brussels' FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
     assert!(result.is_err(), "Expected error for named AT TIME ZONE");
     let err = result.unwrap_err();
     assert!(!err.is_empty(), "Expected error for named AT TIME ZONE, got empty");
@@ -282,7 +254,7 @@ fn at_time_zone_named_zone_still_errors() {
 /// rusqlite is used directly because diesel does not expose
 /// `sqlite3_auto_extension`.
 fn sqlite_accepts(pg: &str) {
-    register_sqlite_vec_once();
+    helpers::register_sqlite_vec_once();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     let stmts = Pg2Sqlite::default()
         .sql(pg)

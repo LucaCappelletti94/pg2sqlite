@@ -7,7 +7,7 @@
 
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use rusqlite::Connection as SqliteConn;
+mod helpers;
 
 diesel::table! {
     /// Test table for items with categories (used in IN list tests).
@@ -176,7 +176,7 @@ struct Log {
 }
 
 #[test]
-fn test_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_in_list_translation() {
     let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
@@ -186,30 +186,9 @@ fn test_in_list_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(select_stmt.contains("IN ("), "Should contain IN clause, got: {select_stmt}");
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.contains("IN ("), "Should contain IN clause, got: {query}");
 }
 
 #[test]
@@ -268,7 +247,7 @@ fn test_in_list_semantic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_in_subquery_translation() {
     let sql = "
         CREATE TABLE users (
             id INTEGER PRIMARY KEY,
@@ -282,33 +261,9 @@ fn test_in_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(
-        select_stmt.contains("IN (SELECT"),
-        "Should contain IN (SELECT ...), got: {select_stmt}"
-    );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.contains("IN (SELECT"), "Should contain IN (SELECT ...), got: {query}");
 }
 
 #[test]
@@ -376,7 +331,7 @@ fn test_in_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_between_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_between_translation() {
     let sql = "
         CREATE TABLE products (
             id INTEGER PRIMARY KEY,
@@ -386,30 +341,9 @@ fn test_between_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(select_stmt.contains("BETWEEN"), "Should contain BETWEEN, got: {select_stmt}");
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.contains("BETWEEN"), "Should contain BETWEEN, got: {query}");
 }
 
 #[test]
@@ -474,7 +408,7 @@ fn test_between_semantic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_case_translation() {
     let sql = "
         CREATE TABLE items (
             id INTEGER PRIMARY KEY,
@@ -489,32 +423,11 @@ fn test_case_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(select_stmt.contains("CASE"), "Should contain CASE, got: {select_stmt}");
-    assert!(select_stmt.contains("WHEN"), "Should contain WHEN, got: {select_stmt}");
-    assert!(select_stmt.contains("END"), "Should contain END, got: {select_stmt}");
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.contains("CASE"), "Should contain CASE, got: {query}");
+    assert!(query.contains("WHEN"), "Should contain WHEN, got: {query}");
+    assert!(query.contains("END"), "Should contain END, got: {query}");
 }
 
 #[test]
@@ -586,7 +499,7 @@ fn test_case_searched_semantic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_scalar_subquery_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_scalar_subquery_translation() {
     let sql = "
         CREATE TABLE orders (
             id INTEGER PRIMARY KEY,
@@ -596,30 +509,9 @@ fn test_scalar_subquery_translation() -> Result<(), Box<dyn std::error::Error>> 
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(select_stmt.contains("(SELECT"), "Should contain scalar subquery, got: {select_stmt}");
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.contains("(SELECT"), "Should contain scalar subquery, got: {query}");
 }
 
 #[test]
@@ -692,7 +584,7 @@ fn test_scalar_subquery_semantic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_extract_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_extract_translation() {
     let sql = "
         CREATE TABLE events (
             id INTEGER PRIMARY KEY,
@@ -702,38 +594,11 @@ fn test_extract_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     // Should contain strftime, not EXTRACT
-    assert!(
-        select_stmt.contains("strftime"),
-        "EXTRACT should translate to strftime, got: {select_stmt}"
-    );
-    assert!(
-        !select_stmt.to_uppercase().contains("EXTRACT"),
-        "Should not contain EXTRACT, got: {select_stmt}"
-    );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.contains("strftime"), "EXTRACT should translate to strftime, got: {query}");
+    assert!(!query.to_uppercase().contains("EXTRACT"), "Should not contain EXTRACT, got: {query}");
 }
 
 #[test]
