@@ -139,8 +139,8 @@ fn declare_default_values_are_available_without_assignment() {
 
     let output = translate(sql);
     assert!(
-        output.contains("v_log_id.val") && output.contains("v_msg.val"),
-        "DECLARE defaults should be bound through generated CTE values: {output}"
+        output.contains("(SELECT val FROM v_log_id)") && output.contains("(SELECT val FROM v_msg)"),
+        "DECLARE defaults should be read out of the generated CTE values: {output}"
     );
     assert!(
         !output.contains("VALUES (v_log_id, v_msg)"),

@@ -15,12 +15,13 @@ use alloc::{
 };
 
 use sqlparser::ast::{
-    Cte, Expr, Ident, SelectItem, SetExpr, TableAlias, TableAliasColumnDef, With,
-    helpers::attached_token::AttachedToken,
+    Cte, Expr, Ident, ObjectName, ObjectNamePart, SelectItem, SetExpr, TableAlias,
+    TableAliasColumnDef, With, helpers::attached_token::AttachedToken,
 };
 
-use super::VariableBinding;
-use crate::impls::query_builder::{make_query, make_simple_select};
+use crate::impls::query_builder::{
+    from_relation, make_query, make_simple_select, plain_table_factor,
+};
 
 /// Builder for constructing CTEs from variable bindings.
 pub struct CteBuilder;
@@ -34,24 +35,19 @@ impl CteBuilder {
     ///
     /// Transforms `variable := expression` into:
     /// ```sql
-    /// variable(val) AS (SELECT expression FROM <dependencies>)
+    /// variable(val) AS (SELECT expression)
     /// ```
     ///
-    /// `from` names the variable CTEs the expression itself reads, which is
-    /// what lets one variable be defined in terms of another. Left empty the
-    /// body reads no relation, which is right for a literal or a `NEW`
-    /// reference.
+    /// The body reads no relation: a variable this one is defined in terms of
+    /// is read through [`Self::variable_reference`], which is a scalar
+    /// subquery and so needs nothing in the `FROM` clause.
     #[must_use]
-    pub fn create_variable_cte(
-        binding: &VariableBinding,
-        expr: Expr,
-        from: Vec<sqlparser::ast::TableWithJoins>,
-    ) -> Cte {
-        let select = make_simple_select(vec![SelectItem::UnnamedExpr(expr)], from, None);
+    pub fn create_variable_cte(name: &str, expr: Expr) -> Cte {
+        let select = make_simple_select(vec![SelectItem::UnnamedExpr(expr)], Vec::new(), None);
         let query = make_query(None, SetExpr::Select(Box::new(select)));
         Cte {
             alias: TableAlias {
-                name: Ident::new(binding.name.clone()),
+                name: Ident::new(name.to_string()),
                 columns: vec![TableAliasColumnDef::from_name(VARIABLE_VALUE_COLUMN)],
                 explicit: false,
                 at: None,
@@ -73,23 +69,24 @@ impl CteBuilder {
         }
     }
 
-    /// Creates a reference expression to a CTE column.
+    /// Reads a variable CTE's value, as `(SELECT val FROM v_id)`.
     ///
-    /// For a CTE named "`v_id`" with column "val", returns `v_id.val`
-    #[must_use]
-    pub fn cte_column_reference(cte_name: &str, column_name: &str) -> Expr {
-        Expr::CompoundIdentifier(vec![
-            Ident::new(cte_name.to_string()),
-            Ident::new(column_name.to_string()),
-        ])
-    }
-
-    /// Creates a reference to a variable CTE's value.
-    ///
-    /// For a variable CTE named "`v_id`", returns `v_id.val`
+    /// A scalar subquery rather than a `v_id.val` column reference, because a
+    /// column reference only resolves where the CTE is in the `FROM` clause of
+    /// that same query level. The subquery resolves anywhere the CTE is in
+    /// scope, which is every expression position of the statement carrying the
+    /// `WITH`, nested derived tables and `ORDER BY` included, and it leaves the
+    /// row shape of the query it appears in alone.
     #[must_use]
     pub fn variable_reference(var_name: &str) -> Expr {
-        Self::cte_column_reference(var_name, VARIABLE_VALUE_COLUMN)
+        let select = make_simple_select(
+            vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(VARIABLE_VALUE_COLUMN)))],
+            from_relation(plain_table_factor(ObjectName(vec![ObjectNamePart::Identifier(
+                Ident::new(var_name.to_string()),
+            )]))),
+            None,
+        );
+        Expr::Subquery(Box::new(make_query(None, SetExpr::Select(Box::new(select)))))
     }
 }
 
@@ -97,20 +94,18 @@ impl CteBuilder {
 mod tests {
     use sqlparser::ast::{Expr, Value, ValueWithSpan};
 
-    use super::{CteBuilder, VariableBinding};
+    use super::CteBuilder;
 
     #[test]
     fn create_ctes_and_references_work() {
-        let binding =
-            VariableBinding { name: "v_id".to_string(), expression: "uuidv7()".to_string() };
         let expr = Expr::Value(ValueWithSpan::from(Value::Number("1".to_string(), false)));
 
-        let cte = CteBuilder::create_variable_cte(&binding, expr.clone(), Vec::new());
+        let cte = CteBuilder::create_variable_cte("v_id", expr.clone());
         assert_eq!(cte.alias.name.value, "v_id");
         assert_eq!(cte.alias.columns.len(), 1);
+        assert_eq!(cte.query.to_string(), "SELECT 1");
 
-        let second = VariableBinding { name: "v_simple".to_string(), expression: "1".to_string() };
-        let simple = CteBuilder::create_variable_cte(&second, expr, Vec::new());
+        let simple = CteBuilder::create_variable_cte("v_simple", expr);
         assert_eq!(simple.alias.name.value, "v_simple");
 
         let with_none = CteBuilder::combine_ctes(Vec::new());
@@ -119,7 +114,9 @@ mod tests {
         let with_some = CteBuilder::combine_ctes(vec![cte, simple]).unwrap();
         assert_eq!(with_some.cte_tables.len(), 2);
 
-        assert_eq!(CteBuilder::cte_column_reference("v_id", "val").to_string(), "v_id.val");
-        assert_eq!(CteBuilder::variable_reference("v_simple").to_string(), "v_simple.val");
+        assert_eq!(
+            CteBuilder::variable_reference("v_simple").to_string(),
+            "(SELECT val FROM v_simple)"
+        );
     }
 }

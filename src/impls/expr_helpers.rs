@@ -726,18 +726,6 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
     }
 }
 
-/// Return `true` if `predicate` returns `true` for any direct child [`Expr`]
-/// inside `expr`.
-pub(crate) fn any_child_expr(expr: &Expr, predicate: &impl Fn(&Expr) -> bool) -> bool {
-    let mut found = false;
-    for_each_child_expr(expr, &mut |child| {
-        if !found && predicate(child) {
-            found = true;
-        }
-    });
-    found
-}
-
 /// Calls `f` on every direct child `&mut Expr`, mutating in place.
 ///
 /// Adapter over [`try_map_expr_children`], the single variant table: each
@@ -877,18 +865,6 @@ mod tests {
     }
 
     #[test]
-    fn any_child_expr_finds_match() {
-        let expr = Expr::Between {
-            expr: Box::new(ident_expr("x")),
-            negated: false,
-            low: Box::new(num_expr("1")),
-            high: Box::new(ident_expr("target")),
-        };
-        assert!(any_child_expr(&expr, &|e| e.to_string() == "target"));
-        assert!(!any_child_expr(&expr, &|e| e.to_string() == "missing"));
-    }
-
-    #[test]
     fn mutate_expr_children_transforms_in_place() {
         let mut expr = Expr::Tuple(vec![ident_expr("a"), ident_expr("b")]);
         mutate_expr_children(&mut expr, &mut |e| {
@@ -1015,22 +991,7 @@ mod tests {
             );
 
             // for_each_child_expr does not panic
-            let mut count = 0;
-            for_each_child_expr(&expr, &mut |_| count += 1);
-
-            // any_child_expr with always-false returns false (unless leaf has
-            // no children, in which case it also returns false). Always-true
-            // is true iff there is at least one child.
-            let any_true = any_child_expr(&expr, &|_| true);
-            assert_eq!(
-                any_true,
-                count > 0,
-                "{label}: any_child_expr(true) disagrees with for_each_child_expr count",
-            );
-            assert!(
-                !any_child_expr(&expr, &|_| false),
-                "{label}: any_child_expr(false) returned true",
-            );
+            for_each_child_expr(&expr, &mut |_| {});
 
             // mutate_expr_children with no-op = same Display
             let mut mutated = expr.clone();
