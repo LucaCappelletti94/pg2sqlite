@@ -14,8 +14,9 @@ use alloc::{
 
 use sqlparser::ast::OrderByExpr;
 
-crate::traits::translator::impl_contextual_translator!(OrderByExpr => OrderByExpr);
 impl crate::traits::translator::TranslatorWithContext for OrderByExpr {
+    type SQLiteEntry = OrderByExpr;
+
     /// Only the `CREATE INDEX` column path reaches this. A query's `ORDER BY`
     /// goes through `shared_helpers::translate_order_by_expr`, where the
     /// `NULLS` qualifier is legal in SQLite and decides which rows come
@@ -23,7 +24,7 @@ impl crate::traits::translator::TranslatorWithContext for OrderByExpr {
     /// rule.
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

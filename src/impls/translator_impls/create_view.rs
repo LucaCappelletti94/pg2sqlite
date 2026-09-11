@@ -25,11 +25,12 @@ use crate::{
     },
 };
 
-crate::traits::translator::impl_contextual_translator!(CreateView => CreateView);
 impl crate::traits::translator::TranslatorWithContext for CreateView {
+    type SQLiteEntry = CreateView;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

@@ -14,13 +14,12 @@ use alloc::{
 
 use sqlparser::ast::ReferentialAction;
 
-crate::traits::translator::impl_contextual_translator!(
-    ReferentialAction => ReferentialAction
-);
 impl crate::traits::translator::TranslatorWithContext for ReferentialAction {
+    type SQLiteEntry = ReferentialAction;
+
     fn translate_with_warnings(
         &self,
-        _schema: &Self::Schema,
+        _schema: &sql_traits::structs::ParserDB,
         _options: &crate::options::TranslationContext<'_>,
         _emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

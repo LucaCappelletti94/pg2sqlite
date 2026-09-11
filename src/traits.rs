@@ -13,7 +13,7 @@ use alloc::{
 };
 
 pub mod translator;
-pub use translator::Translator;
+pub use translator::{Translator, TranslatorWithContext};
 pub mod reverse_translator;
 pub use reverse_translator::ReverseTranslator;
 pub mod schema;

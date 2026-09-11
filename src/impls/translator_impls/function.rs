@@ -1577,12 +1577,13 @@ fn build_concat_ws_expression(separator: &Expr, values: Vec<Expr>) -> Option<Exp
     build_concatenation(pieces)
 }
 
-crate::traits::translator::impl_contextual_translator!(Function => Expr);
 impl crate::traits::translator::TranslatorWithContext for Function {
+    type SQLiteEntry = Expr;
+
     #[allow(clippy::too_many_lines)]
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

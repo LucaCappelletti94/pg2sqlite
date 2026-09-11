@@ -2153,12 +2153,13 @@ fn unwrap_pg_catalog_operator(parts: &[String]) -> Option<BinaryOperator> {
     })
 }
 
-crate::traits::translator::impl_contextual_translator!(Expr => Expr);
 impl crate::traits::translator::TranslatorWithContext for Expr {
+    type SQLiteEntry = Expr;
+
     #[allow(clippy::too_many_lines)]
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

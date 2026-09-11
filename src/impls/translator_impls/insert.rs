@@ -74,7 +74,6 @@ impl<'schema> ResolvedInsertTarget<'schema> {
     }
 }
 
-crate::traits::translator::impl_contextual_translator!(Insert => Insert);
 /// The relation an `INSERT` names, whose columns a default, an `ON CONFLICT`
 /// clause or a `RETURNING` item resolves against.
 pub(crate) fn insert_target_scope<'db>(
@@ -95,9 +94,11 @@ pub(crate) fn insert_target_scope<'db>(
 }
 
 impl crate::traits::translator::TranslatorWithContext for Insert {
+    type SQLiteEntry = Insert;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

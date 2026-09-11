@@ -20,7 +20,6 @@ use crate::impls::{
     translator_impls::postgis,
 };
 
-crate::traits::translator::impl_contextual_translator!(Delete => Statement);
 /// Every relation a `DELETE` lists, so a reference qualified by a `USING`
 /// relation resolves as well as one naming the target.
 pub(crate) fn delete_scope_query(delete: &Delete) -> sqlparser::ast::Query {
@@ -34,9 +33,11 @@ pub(crate) fn delete_scope_query(delete: &Delete) -> sqlparser::ast::Query {
 }
 
 impl crate::traits::translator::TranslatorWithContext for Delete {
+    type SQLiteEntry = Statement;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

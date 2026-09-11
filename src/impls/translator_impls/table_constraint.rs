@@ -29,16 +29,15 @@ use crate::{
     traits::translator::TranslatorWithContext,
 };
 
-crate::traits::translator::impl_contextual_translator!(
-    TableConstraint => Vec<TableConstraint>
-);
 /// A constraint can translate to none, as a dropped CHECK does, to one, or
 /// to several: a composite `MATCH FULL` foreign key needs a CHECK beside
 /// it because SQLite ignores the MATCH clause.
 impl crate::traits::translator::TranslatorWithContext for TableConstraint {
+    type SQLiteEntry = Vec<TableConstraint>;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

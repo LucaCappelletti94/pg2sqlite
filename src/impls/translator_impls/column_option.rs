@@ -43,14 +43,13 @@ pub(crate) fn warn_no_inherit_dropped(
     }
 }
 
-crate::traits::translator::impl_contextual_translator!(
-    ColumnOptionDef => Option<ColumnOptionDef>
-);
 impl crate::traits::translator::TranslatorWithContext for ColumnOptionDef {
+    type SQLiteEntry = Option<ColumnOptionDef>;
+
     #[allow(clippy::too_many_lines)]
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
