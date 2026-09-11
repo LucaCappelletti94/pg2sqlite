@@ -2714,61 +2714,52 @@ pub(crate) fn map_join_operator<E>(
     })
 }
 
+/// The [`JoinConstraint`] arms, written once for both borrow kinds.
+///
+/// A macro because stable Rust cannot abstract over the mutability of a
+/// reference, and there are 21 variants to classify: match ergonomics carry
+/// the borrow kind through the shared patterns, so a variant added upstream
+/// has to be placed here exactly once instead of in two lists that can
+/// disagree without a compile error.
+macro_rules! join_constraint_arms {
+    ($op:expr) => {
+        match $op {
+            JoinOperator::Join(c)
+            | JoinOperator::Inner(c)
+            | JoinOperator::Left(c)
+            | JoinOperator::LeftOuter(c)
+            | JoinOperator::Right(c)
+            | JoinOperator::RightOuter(c)
+            | JoinOperator::FullOuter(c)
+            | JoinOperator::CrossJoin(c)
+            | JoinOperator::Semi(c)
+            | JoinOperator::LeftSemi(c)
+            | JoinOperator::RightSemi(c)
+            | JoinOperator::Anti(c)
+            | JoinOperator::LeftAnti(c)
+            | JoinOperator::RightAnti(c)
+            | JoinOperator::StraightJoin(c)
+            | JoinOperator::AsOf { constraint: c, .. } => Some(c),
+            JoinOperator::CrossApply
+            | JoinOperator::OuterApply
+            | JoinOperator::ArrayJoin
+            | JoinOperator::LeftArrayJoin
+            | JoinOperator::InnerArrayJoin => None,
+        }
+    };
+}
+
 /// Immutable reference to the [`JoinConstraint`] inside any variant that
 /// carries one. Returns `None` for `CrossApply` / `OuterApply`.
 #[must_use]
 pub(crate) fn join_constraint_ref(op: &JoinOperator) -> Option<&JoinConstraint> {
-    match op {
-        JoinOperator::Join(c)
-        | JoinOperator::Inner(c)
-        | JoinOperator::Left(c)
-        | JoinOperator::LeftOuter(c)
-        | JoinOperator::Right(c)
-        | JoinOperator::RightOuter(c)
-        | JoinOperator::FullOuter(c)
-        | JoinOperator::CrossJoin(c)
-        | JoinOperator::Semi(c)
-        | JoinOperator::LeftSemi(c)
-        | JoinOperator::RightSemi(c)
-        | JoinOperator::Anti(c)
-        | JoinOperator::LeftAnti(c)
-        | JoinOperator::RightAnti(c)
-        | JoinOperator::StraightJoin(c)
-        | JoinOperator::AsOf { constraint: c, .. } => Some(c),
-        JoinOperator::CrossApply
-        | JoinOperator::OuterApply
-        | JoinOperator::ArrayJoin
-        | JoinOperator::LeftArrayJoin
-        | JoinOperator::InnerArrayJoin => None,
-    }
+    join_constraint_arms!(op)
 }
 
 /// Mutable reference to the [`JoinConstraint`] inside any variant that
 /// carries one. Returns `None` for `CrossApply` / `OuterApply`.
 pub(crate) fn join_constraint_mut(op: &mut JoinOperator) -> Option<&mut JoinConstraint> {
-    match op {
-        JoinOperator::Join(c)
-        | JoinOperator::Inner(c)
-        | JoinOperator::Left(c)
-        | JoinOperator::LeftOuter(c)
-        | JoinOperator::Right(c)
-        | JoinOperator::RightOuter(c)
-        | JoinOperator::FullOuter(c)
-        | JoinOperator::CrossJoin(c)
-        | JoinOperator::Semi(c)
-        | JoinOperator::LeftSemi(c)
-        | JoinOperator::RightSemi(c)
-        | JoinOperator::Anti(c)
-        | JoinOperator::LeftAnti(c)
-        | JoinOperator::RightAnti(c)
-        | JoinOperator::StraightJoin(c)
-        | JoinOperator::AsOf { constraint: c, .. } => Some(c),
-        JoinOperator::CrossApply
-        | JoinOperator::OuterApply
-        | JoinOperator::ArrayJoin
-        | JoinOperator::LeftArrayJoin
-        | JoinOperator::InnerArrayJoin => None,
-    }
+    join_constraint_arms!(op)
 }
 
 pub(crate) fn translate_join_operator<D: TranslationDirection>(

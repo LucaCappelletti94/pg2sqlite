@@ -33,7 +33,7 @@ use crate::{
         expr_helpers::case_when,
         function_helpers::{
             extract_exactly, integer_literal, integer_literal_value, number_literal,
-            simple_function_expr, single_quoted_literal, string_literal,
+            positional_arity, simple_function_expr, single_quoted_literal, string_literal,
         },
         object_name::last_ident,
         session_variable,
@@ -42,7 +42,9 @@ use crate::{
             function_argument_exprs, numeric_scale, referenced_column_name, rescale_minor_units,
             translate_function_arguments,
         },
-        temporal_arithmetic::{epoch_of_temporal_difference, subsecond_timestamp_from_epoch},
+        temporal_arithmetic::{
+            epoch_of_temporal_difference, subsecond_timestamp_from_epoch, trim_trailing_zeros,
+        },
     },
     prelude::Pg2SqliteOptions,
     traits::{SessionVariablePattern, translator::TranslatorWithContext},
@@ -1035,7 +1037,7 @@ fn classify_unrecognised_function(
     }
 
     if options.is_sqlitegis_enabled() {
-        if let Some(arity) = function_arg_count(args) {
+        if let Some(arity) = positional_arity(args) {
             if postgis::is_sqlitegis_function(name, arity) {
                 return FunctionTranslation::PassThrough;
             }
@@ -1075,17 +1077,6 @@ fn declares_function_by_option(name: &str, options: &Pg2SqliteOptions) -> bool {
         || options.get_uuid_v7_function_name().is_some_and(matches)
         || options.get_uuid_text_to_blob_function_name().is_some_and(matches)
         || options.get_session_variables().iter().any(|m| matches(&m.sqlite_function))
-}
-
-/// Returns the positional arg count when it can be determined from the
-/// `FunctionArguments` shape, or `None` for subquery-shaped arguments
-/// where positional arity isn't meaningful.
-fn function_arg_count(args: &FunctionArguments) -> Option<i32> {
-    match args {
-        FunctionArguments::List(list) => i32::try_from(list.args.len()).ok(),
-        FunctionArguments::None => Some(0),
-        FunctionArguments::Subquery(_) => None,
-    }
 }
 
 /// True when `expr` already carries JSON, so `to_json` has nothing to convert.
@@ -1332,13 +1323,6 @@ fn json_path_not_literal(label: &str, path: &Expr) -> crate::errors::Error {
          converted to the JSONPath SQLite takes, and {path} cannot be converted at translation \
          time."
     ))
-}
-
-/// `rtrim(rtrim(x, '0'), '.')`, which turns `09.500` into `09.5` and `09.000`
-/// into `09`.
-fn trim_trailing_zeros(rendered: Expr) -> Expr {
-    let without_zeros = simple_function_expr("rtrim", vec![rendered, string_literal("0")], None);
-    simple_function_expr("rtrim", vec![without_zeros, string_literal(".")], None)
 }
 
 /// `make_date`, `make_time` and `make_timestamp` over their already-translated

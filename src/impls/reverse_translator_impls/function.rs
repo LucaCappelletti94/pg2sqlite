@@ -26,7 +26,7 @@ use crate::{
         datetime_helpers::{datetime_field_from_strftime_format, strftime_format_to_pg_to_char},
         function_helpers::{
             extract_exactly_reverse as extract_exactly, function_arg_expr_or_err, integer_literal,
-            simple_function_expr, string_literal,
+            positional_arity, simple_function_expr, string_literal,
         },
         idioms::{
             extract_json_group_array_nullif, extract_json_group_object_nullif,
@@ -830,14 +830,34 @@ pub(crate) fn sqlite_only_reason(name: &str) -> Option<String> {
         .map(|index| format!("{}: {}", SQLITE_ONLY[index].0, SQLITE_ONLY[index].1))
 }
 
-/// The positional argument count, or `None` for a shape where arity says
-/// nothing.
-fn positional_arity(args: &FunctionArguments) -> Option<i32> {
-    match args {
-        FunctionArguments::List(list) => i32::try_from(list.args.len()).ok(),
-        FunctionArguments::None => Some(0),
-        FunctionArguments::Subquery(_) => None,
+/// `vec_f32(x)` back to `x::vector`, and `vec_f16(x)` to `x::halfvec`.
+///
+/// `sqlite_name` names the call in the refusal, `pg_type` is the pgvector type
+/// the cast lands on; the two element widths differ in nothing else.
+fn reverse_element_cast(
+    sqlite_name: &str,
+    pg_type: &str,
+    func: &Function,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    if let FunctionArguments::List(list) = &func.args
+        && list.args.len() == 1
+    {
+        let expr = function_arg_expr_or_err(&list.args[0])?;
+        let reversed = crate::prelude::ReverseTranslator::reverse_translate(expr, schema, options)?;
+
+        return Ok(Expr::Cast {
+            expr: Box::new(reversed),
+            data_type: sqlparser::ast::DataType::Custom(
+                ObjectName(vec![ObjectNamePart::Identifier(Ident::new(pg_type))]),
+                vec![],
+            ),
+            format: None,
+            kind: sqlparser::ast::CastKind::DoubleColon,
+        });
     }
+    Err(Error::reverse_refusal(format!("{sqlite_name} requires exactly 1 argument")))
 }
 
 /// `value #> '{a,b}'`, PostgreSQL's reading of a SQLite JSON path.
@@ -1112,46 +1132,10 @@ pub fn reverse_translate_function(
             ))
         }
         FunctionReversal::ToVectorCast => {
-            // vec_f32(expr) -> expr::vector
-            if let FunctionArguments::List(list) = &func.args
-                && list.args.len() == 1
-            {
-                let expr = function_arg_expr_or_err(&list.args[0])?;
-                let reversed_expr =
-                    crate::prelude::ReverseTranslator::reverse_translate(expr, schema, options)?;
-
-                return Ok(Expr::Cast {
-                    expr: Box::new(reversed_expr),
-                    data_type: sqlparser::ast::DataType::Custom(
-                        ObjectName(vec![ObjectNamePart::Identifier(Ident::new("vector"))]),
-                        vec![],
-                    ),
-                    format: None,
-                    kind: sqlparser::ast::CastKind::DoubleColon,
-                });
-            }
-            Err(Error::reverse_refusal("vec_f32 requires exactly 1 argument".to_string()))
+            reverse_element_cast("vec_f32", "vector", func, schema, options)
         }
         FunctionReversal::ToHalfvecCast => {
-            // vec_f16(expr) -> expr::halfvec
-            if let FunctionArguments::List(list) = &func.args
-                && list.args.len() == 1
-            {
-                let expr = function_arg_expr_or_err(&list.args[0])?;
-                let reversed_expr =
-                    crate::prelude::ReverseTranslator::reverse_translate(expr, schema, options)?;
-
-                return Ok(Expr::Cast {
-                    expr: Box::new(reversed_expr),
-                    data_type: sqlparser::ast::DataType::Custom(
-                        ObjectName(vec![ObjectNamePart::Identifier(Ident::new("halfvec"))]),
-                        vec![],
-                    ),
-                    format: None,
-                    kind: sqlparser::ast::CastKind::DoubleColon,
-                });
-            }
-            Err(Error::reverse_refusal("vec_f16 requires exactly 1 argument".to_string()))
+            reverse_element_cast("vec_f16", "halfvec", func, schema, options)
         }
         FunctionReversal::ToChr => {
             build_reverse_function(ObjectName::from(vec![Ident::new("chr")]), func, schema, options)

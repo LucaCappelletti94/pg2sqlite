@@ -1497,31 +1497,6 @@ fn transform_function_arg_with(
 ) -> FunctionArguments {
     match args {
         FunctionArguments::List(arg_list) => {
-            let transform_arg_expr = |arg_expr: &FunctionArgExpr| -> FunctionArgExpr {
-                match arg_expr {
-                    FunctionArgExpr::Expr(e) => FunctionArgExpr::Expr(transform_expr_fn(e)),
-                    other => other.clone(),
-                }
-            };
-            let transform_arg = |arg: &FunctionArg| -> FunctionArg {
-                match arg {
-                    FunctionArg::Named { name, arg, operator } => {
-                        FunctionArg::Named {
-                            name: name.clone(),
-                            arg: transform_arg_expr(arg),
-                            operator: operator.clone(),
-                        }
-                    }
-                    FunctionArg::ExprNamed { name, arg, operator } => {
-                        FunctionArg::ExprNamed {
-                            name: name.clone(),
-                            arg: transform_arg_expr(arg),
-                            operator: operator.clone(),
-                        }
-                    }
-                    FunctionArg::Unnamed(arg) => FunctionArg::Unnamed(transform_arg_expr(arg)),
-                }
-            };
             let transform_clause = |clause: &FunctionArgumentClause| -> FunctionArgumentClause {
                 match clause {
                     FunctionArgumentClause::OrderBy(order_by_exprs) => {
@@ -1547,7 +1522,11 @@ fn transform_function_arg_with(
             };
             FunctionArguments::List(FunctionArgumentList {
                 duplicate_treatment: arg_list.duplicate_treatment,
-                args: arg_list.args.iter().map(transform_arg).collect(),
+                args: arg_list
+                    .args
+                    .iter()
+                    .map(|arg| transform_function_arg_with_rls(arg, transform_expr_fn))
+                    .collect(),
                 clauses: arg_list.clauses.iter().map(transform_clause).collect(),
             })
         }

@@ -146,7 +146,7 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         // be rejected at apply time. Only direct VALUES rows are
         // rewritten. INSERT INTO ... SELECT carries arbitrary row shapes
         // through a subquery and is left untouched.
-        wrap_vector_text_literals(&mut insert, target.optional(), schema);
+        wrap_vector_text_literals(&mut insert, target.optional(), schema)?;
 
         // Same shape for UUID-Blob columns: PG accepts text literals via
         // the `uuid` type's input function, but the translated BLOB
@@ -396,6 +396,24 @@ fn substitute_do_update_defaults(
     Ok(Some(sqlparser::ast::DoUpdate { assignments, selection: do_update.selection.clone() }))
 }
 
+/// The target column names of `insert`, in the order its values are written.
+///
+/// The explicit column list when there is one, otherwise the table's declared
+/// order, which is what PostgreSQL fills an omitted list from. Comparison
+/// against these names is case-insensitive at every caller, to match
+/// PostgreSQL's identifier folding.
+fn insert_column_names(
+    insert: &Insert,
+    table: &ParserTable,
+    schema: &ParserDB,
+) -> Result<Vec<String>, crate::errors::Error> {
+    if insert.columns.is_empty() {
+        Ok(table.columns(schema)?.map(|column| column.column_name().to_owned()).collect())
+    } else {
+        Ok(insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect())
+    }
+}
+
 /// Replaces every `DEFAULT` in a `VALUES` row with the column's declared
 /// default, since SQLite accepts the keyword only in `INSERT INTO t DEFAULT
 /// VALUES` and rejects it inside a row with `near "DEFAULT": syntax error`.
@@ -430,11 +448,7 @@ fn substitute_default_values(
         return Err(unknown_default_table(table_name));
     };
 
-    let column_names: Vec<String> = if insert.columns.is_empty() {
-        table.columns(schema)?.map(|column| column.column_name().to_owned()).collect()
-    } else {
-        insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
-    };
+    let column_names = insert_column_names(insert, table, schema)?;
 
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
     let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
@@ -566,34 +580,34 @@ fn unknown_default_column(table: &str, column_name: &str) -> crate::errors::Erro
     ))
 }
 
-/// Rewrite each text-literal value at a vector-column position in a
-/// `VALUES` source so that the BLOB STRICT main table accepts it. The
-/// schema, table, or column shape can fail to resolve for many benign
-/// reasons (target table not declared yet, table function source, INSERT
-/// INTO ... SELECT); in those cases the function silently returns and
-/// leaves the insert verbatim, which preserves the prior behaviour for
-/// every non-vector path.
-fn wrap_vector_text_literals(insert: &mut Insert, table: Option<&ParserTable>, schema: &ParserDB) {
-    let Some(table) = table else { return };
-    // A table absent from the schema has no vector columns to wrap, so this
-    // leaves the insert verbatim exactly as the lookup above does.
-    let Ok(vector_cols) = vector_columns_of_table(table, schema) else { return };
+/// Rewrite each text-literal value at a vector-column position in a `VALUES`
+/// source so that the BLOB STRICT main table accepts it.
+///
+/// Shapes that carry no vector literal to rewrite leave the insert verbatim:
+/// an undeclared target, a table function source, an `INSERT INTO ... SELECT`.
+/// A schema lookup that fails is reported instead, since the column list is
+/// what decides which value is at a vector position and a wrong answer there
+/// emits text into a BLOB column. `Table::columns` fails only for a table
+/// absent from the database it is asked about, and every caller resolves the
+/// table from this same schema, so no input reaches it today.
+fn wrap_vector_text_literals(
+    insert: &mut Insert,
+    table: Option<&ParserTable>,
+    schema: &ParserDB,
+) -> Result<(), crate::errors::Error> {
+    let Some(table) = table else { return Ok(()) };
+    let vector_cols = vector_columns_of_table(table, schema)?;
     if vector_cols.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Column order for matching values: the explicit list when present,
-    // otherwise the natural table order. Comparison is
-    // case-insensitive to match PostgreSQL's default identifier folding.
-    let column_names: Vec<String> = if insert.columns.is_empty() {
-        let Ok(columns) = table.columns(schema) else { return };
-        columns.map(|c| c.column_name().to_string()).collect()
-    } else {
-        insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
-    };
+    // otherwise the natural table order. Comparison is case-insensitive to
+    // match PostgreSQL's default identifier folding.
+    let column_names = insert_column_names(insert, table, schema)?;
 
-    let Some(source) = insert.source.as_deref_mut() else { return };
-    let SetExpr::Values(values) = source.body.as_mut() else { return };
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
 
     for row in &mut values.rows {
         for (idx, expr) in row.content.iter_mut().enumerate() {
@@ -609,14 +623,17 @@ fn wrap_vector_text_literals(insert: &mut Insert, table: Option<&ParserTable>, s
             }
         }
     }
+    Ok(())
 }
 
 /// Rewrite every decimal literal targeting a `NUMERIC` column as the integer
 /// count of minor units the column now holds.
 ///
-/// Bails out on the same unresolvable shapes as its vector and UUID siblings,
-/// leaving the insert verbatim. Both source forms are handled: a VALUES row
-/// and a SELECT projection map position to target column the same way.
+/// A target that is not a declared table leaves the insert verbatim, and a
+/// schema lookup that fails is reported: the column list is what puts a
+/// literal on a `NUMERIC` column's scale, so a wrong answer writes unscaled
+/// money. Both source forms are handled, since a VALUES row and a SELECT
+/// projection map position to target column the same way.
 fn scale_numeric_literals(
     insert: &mut Insert,
     table: Option<&ParserTable>,
@@ -628,12 +645,7 @@ fn scale_numeric_literals(
     }
     let Some(table) = table else { return Ok(()) };
 
-    let column_names: Vec<String> = if insert.columns.is_empty() {
-        let Ok(columns) = table.columns(schema) else { return Ok(()) };
-        columns.map(|c| c.column_name().to_string()).collect()
-    } else {
-        insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
-    };
+    let column_names = insert_column_names(insert, table, schema)?;
 
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
     scale_insert_source_body(source.body.as_mut(), &column_names, scales)
@@ -839,10 +851,12 @@ fn database_filled_column(
 }
 
 /// Rewrite each text-literal value at a UUID-column position in a `VALUES`
-/// source so that the BLOB STRICT main table accepts it. Same defensive
-/// posture as `wrap_vector_text_literals`: silently skip on any lookup
-/// failure (table not in schema, table function source,
-/// INSERT INTO ... SELECT).
+/// source so that the BLOB STRICT main table accepts it.
+///
+/// Reports a failed schema lookup for the reason `wrap_vector_text_literals`
+/// does: the column list decides which value sits at a UUID position, and a
+/// wrong answer writes text into a BLOB column. The shapes with nothing to
+/// rewrite still leave the insert verbatim.
 fn wrap_uuid_text_literals(
     insert: &mut Insert,
     table: Option<&ParserTable>,
@@ -850,19 +864,12 @@ fn wrap_uuid_text_literals(
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), crate::errors::Error> {
     let Some(table) = table else { return Ok(()) };
-    // A table absent from the schema has no UUID columns to wrap, so this
-    // leaves the insert verbatim exactly as the lookup above does.
-    let Ok(uuid_cols) = uuid_columns_of_table(table, schema) else { return Ok(()) };
+    let uuid_cols = uuid_columns_of_table(table, schema)?;
     if uuid_cols.is_empty() {
         return Ok(());
     }
 
-    let column_names: Vec<String> = if insert.columns.is_empty() {
-        let Ok(columns) = table.columns(schema) else { return Ok(()) };
-        columns.map(|c| c.column_name().to_string()).collect()
-    } else {
-        insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect()
-    };
+    let column_names = insert_column_names(insert, table, schema)?;
 
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
     let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };

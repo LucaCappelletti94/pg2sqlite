@@ -120,6 +120,19 @@ pub(crate) fn function_arg_expr_or_err(arg: &FunctionArg) -> Result<&Expr, Error
     }
 }
 
+/// The positional argument count, or `None` for a shape where arity says
+/// nothing.
+///
+/// `FunctionArguments::None` is the argument-less spelling, so zero, while a
+/// subquery-shaped argument list has no positional count to report.
+pub(crate) fn positional_arity(args: &FunctionArguments) -> Option<i32> {
+    match args {
+        FunctionArguments::List(list) => i32::try_from(list.args.len()).ok(),
+        FunctionArguments::None => Some(0),
+        FunctionArguments::Subquery(_) => None,
+    }
+}
+
 /// Extract exactly `count` expression references from function arguments,
 /// returning an error naming `func_name` if the count doesn't match.
 pub(crate) fn extract_exactly<'a>(
