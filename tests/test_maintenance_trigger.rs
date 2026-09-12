@@ -174,8 +174,12 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
         .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
         .expect("translated trigger statement should exist");
     assert!(
-        trigger_sql.contains("UPDATE OF id, name ON brands"),
-        "maintenance trigger should exclude maintenance columns from UPDATE event: {trigger_sql}"
+        trigger_sql.contains("AFTER UPDATE ON brands"),
+        "maintenance trigger must be AFTER UPDATE: {trigger_sql}"
+    );
+    assert!(
+        trigger_sql.contains("WHEN"),
+        "maintenance trigger must carry a recursion-guard WHEN clause: {trigger_sql}"
     );
 
     let mut connection = SqliteConnection::establish(":memory:")?;
@@ -292,8 +296,12 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
         .find(|stmt| stmt.contains("CREATE TRIGGER trigger_upsert_brands_edited_at "))
         .expect("translated BEFORE UPDATE trigger should exist");
     assert!(
-        update_trigger_sql.contains("BEFORE UPDATE OF id, name ON brands"),
-        "maintenance update branch should remain BEFORE UPDATE: {update_trigger_sql}"
+        update_trigger_sql.contains("AFTER UPDATE ON brands"),
+        "maintenance update branch must be AFTER UPDATE: {update_trigger_sql}"
+    );
+    assert!(
+        update_trigger_sql.contains("WHEN"),
+        "maintenance update branch must carry a recursion-guard WHEN clause: {update_trigger_sql}"
     );
 
     let insert_trigger_sql = translated_sql
@@ -334,12 +342,14 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
         .set(brands::edited_at.eq("manual"))
         .execute(&mut connection)?;
 
+    // PostgreSQL fires the trigger even when the caller updates the
+    // maintained column directly: the WHEN clause stops the recursion and
+    // still lets the trigger run once.
     let updated =
         brands::table.filter(brands::id.eq(1)).select(Brand::as_select()).first(&mut connection)?;
-    assert_eq!(
-        updated.edited_at.as_deref(),
-        Some("manual"),
-        "UPDATE branch should exclude maintenance column to avoid self-recursion"
+    assert!(
+        updated.edited_at.as_deref() != Some("manual"),
+        "trigger must fire and override the manual value (PostgreSQL behaviour)"
     );
 
     Ok(())
@@ -394,8 +404,13 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
         .find(|trigger| trigger.name == "trigger_upsert_brands_edited_at")
         .expect("translated BEFORE UPDATE trigger should exist");
     assert!(
-        update_trigger.sql.contains("BEFORE UPDATE OF id, name ON brands"),
-        "maintenance update branch should remain BEFORE UPDATE: {}",
+        update_trigger.sql.contains("AFTER UPDATE ON brands"),
+        "maintenance update branch must be AFTER UPDATE: {}",
+        update_trigger.sql
+    );
+    assert!(
+        update_trigger.sql.contains("WHEN"),
+        "maintenance update branch must carry WHEN clause: {}",
         update_trigger.sql
     );
 
@@ -448,8 +463,12 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
         .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
         .expect("translated trigger statement should exist");
     assert!(
-        trigger_sql.contains("UPDATE OF id, name ON brands_rls"),
-        "maintenance trigger should target RLS table and exclude maintenance columns: {trigger_sql}"
+        trigger_sql.contains("AFTER UPDATE ON brands_rls"),
+        "maintenance trigger must be AFTER UPDATE on backing table: {trigger_sql}"
+    );
+    assert!(
+        trigger_sql.contains("WHEN"),
+        "maintenance trigger must carry a recursion-guard WHEN clause: {trigger_sql}"
     );
 
     let mut connection = SqliteConnection::establish(":memory:")?;
@@ -590,8 +609,12 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
         .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
         .expect("translated trigger statement should exist");
     assert!(
-        trigger_sql.contains("UPDATE OF id, name ON brands_rls"),
-        "maintenance trigger should target the backing table: {trigger_sql}"
+        trigger_sql.contains("AFTER UPDATE ON brands_rls"),
+        "maintenance trigger must target the backing table as AFTER UPDATE: {trigger_sql}"
+    );
+    assert!(
+        trigger_sql.contains("WHEN"),
+        "maintenance trigger must carry a WHEN clause: {trigger_sql}"
     );
 
     let mut connection = SqliteConnection::establish(":memory:")?;

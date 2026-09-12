@@ -2500,9 +2500,11 @@ mod tests {
         let all_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
         assert!(
             all_sql.contains(
-                "CREATE TRIGGER trigger_upsert_brands_edited_at BEFORE UPDATE OF id, name ON brands"
+                "CREATE TRIGGER trigger_upsert_brands_edited_at AFTER UPDATE ON brands FOR EACH \
+                 ROW WHEN"
             ),
-            "split update trigger should preserve BEFORE UPDATE semantics: {all_sql}"
+            "the update half fires on every update and guards its own write with a WHEN: \
+             {all_sql}"
         );
         assert!(
             all_sql.contains(

@@ -1,6 +1,5 @@
 ---
 source: tests/test_fts5.rs
-assertion_line: 115
 expression: translated_sql
 ---
 CREATE TABLE documents (id INTEGER PRIMARY KEY NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL) STRICT
