@@ -41,7 +41,7 @@ pub(crate) enum TemporalKind {
 
 /// Resolve the temporal type of `expr` from its own spelling or from the
 /// declared type of the column it names.
-fn temporal_kind(
+pub(crate) fn temporal_kind(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
@@ -66,6 +66,23 @@ fn temporal_kind(
         Expr::BinaryOp { left, op, right } => binary_result_kind(left, op, right, schema, options)?,
         _ => None,
     })
+}
+
+/// The temporal type of `expr`, with a reference this cannot resolve
+/// answering no type rather than failing the translation.
+///
+/// Asking whether an expression is a date is a question about a type, and a
+/// reference whose relation is not in the translation batch has no answer.
+/// The refusal for a reference that genuinely cannot be translated is raised
+/// where the expression itself is translated, so a probe that failed here
+/// would refuse statements needing no temporal rewrite at all, `NEW.col` in a
+/// trigger body among them.
+pub(crate) fn temporal_kind_of(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<TemporalKind> {
+    temporal_kind(expr, schema, options).ok().flatten()
 }
 
 fn kind_of_data_type(data_type: &DataType) -> Option<TemporalKind> {
