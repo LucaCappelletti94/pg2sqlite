@@ -154,3 +154,136 @@ fn bool_or_refusal_advice_is_null_safe() {
     assert!(!err.contains("ELSE 0"), "advice must not use ELSE 0: {err}");
     assert!(err.contains("WHEN NOT"), "advice must use WHEN NOT for the false branch: {err}");
 }
+
+// ── RANGE frame bounds that are not scaled (shared_helpers.rs other arm) ─────
+
+/// CURRENT ROW hits the `other` arm in translate_window_frame_bound — no
+/// scaling is applied. PostgreSQL: running sum from current row to end.
+/// Measured: docker postgres:17-alpine.
+#[test]
+fn range_frame_current_row_bound_passthrough() {
+    let (query, mut conn) = setup_and_query(
+        "
+        CREATE TABLE rnge (id INTEGER PRIMARY KEY, amount NUMERIC(10,2) NOT NULL);
+        INSERT INTO rnge VALUES (1,1.00),(2,2.00),(3,3.00);
+        SELECT id,
+               sum(id) OVER (ORDER BY amount RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+               AS total
+        FROM rnge ORDER BY id;
+    ",
+    );
+    // CURRENT ROW and UNBOUNDED FOLLOWING both hit the `other` arm (no literal
+    // to scale). Window function requires diesel::sql_query.
+    let rows = diesel::sql_query(&query).load::<WindowRow>(&mut conn).unwrap();
+    // id=1 (amount 1.00): rows from 1.00 forward → 1+2+3=6
+    // id=2 (amount 2.00): rows from 2.00 forward → 2+3=5
+    // id=3 (amount 3.00): rows from 3.00 forward → 3
+    assert_eq!(rows, [(1, 6), (2, 5), (3, 3)].map(|(id, total)| WindowRow { id, total }).to_vec());
+}
+
+/// UNBOUNDED PRECEDING also hits the `other` arm; running sum up to current
+/// row. Measured: docker postgres:17-alpine.
+#[test]
+fn range_frame_unbounded_preceding_passthrough() {
+    let (query, mut conn) = setup_and_query(
+        "
+        CREATE TABLE rnge2 (id INTEGER PRIMARY KEY, amount NUMERIC(10,2) NOT NULL);
+        INSERT INTO rnge2 VALUES (1,1.00),(2,2.00),(3,3.00);
+        SELECT id,
+               sum(id) OVER (ORDER BY amount RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+               AS total
+        FROM rnge2 ORDER BY id;
+    ",
+    );
+    // Window function requires diesel::sql_query.
+    let rows = diesel::sql_query(&query).load::<WindowRow>(&mut conn).unwrap();
+    // Running sum: 1, 1+2=3, 1+2+3=6.
+    assert_eq!(rows, [(1, 1), (2, 3), (3, 6)].map(|(id, total)| WindowRow { id, total }).to_vec());
+}
+
+/// A RANGE frame over an INTEGER ORDER BY key has no NUMERIC scale, so the
+/// bound passes through unscaled (range_numeric_scale = None → line 2024 early
+/// return). Measured: docker postgres:17-alpine.
+#[test]
+fn range_frame_on_integer_key_has_no_scale_applied() {
+    let (query, mut conn) = setup_and_query(
+        "
+        CREATE TABLE scores (id INTEGER PRIMARY KEY, score INTEGER NOT NULL);
+        INSERT INTO scores VALUES (1,1),(2,2),(3,10);
+        SELECT id,
+               sum(id) OVER (ORDER BY score RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS total
+        FROM scores ORDER BY id;
+    ",
+    );
+    // Window function requires diesel::sql_query.
+    let rows = diesel::sql_query(&query).load::<WindowRow>(&mut conn).unwrap();
+    // score 1 and 2 are within 1 of each other; score 10 is alone → sum=3 each.
+    assert_eq!(rows, [(1, 3), (2, 3), (3, 3)].map(|(id, total)| WindowRow { id, total }).to_vec());
+}
+
+// ── DISTINCT ON: ORDER BY shorter than DISTINCT ON list (query.rs line 521) ──
+
+/// When `ORDER BY` has fewer terms than `DISTINCT ON`, PostgreSQL rejects it;
+/// pg2sqlite must refuse it too.
+#[test]
+fn distinct_on_refuses_when_order_by_shorter_than_partition_list() {
+    let err = translate_err(
+        "CREATE TABLE t2 (a TEXT, b TEXT, c TEXT);
+         SELECT DISTINCT ON (a, b) a, b, c FROM t2 ORDER BY a;",
+    );
+    assert!(
+        err.contains("DISTINCT ON expressions must match initial ORDER BY expressions"),
+        "expected prefix-check refusal, got: {err}"
+    );
+}
+
+// ── DISTINCT ON: no ORDER BY at all (query.rs line 514 None arm) ─────────────
+
+#[derive(QueryableByName, Debug)]
+struct GrpOnly {
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    grp: Option<String>,
+}
+
+/// PostgreSQL accepts `DISTINCT ON (x)` without ORDER BY; pg2sqlite must also
+/// accept it and produce one row per partition group. The row picked per group
+/// is arbitrary, so only the count is asserted.
+#[test]
+fn distinct_on_without_order_by_runs() {
+    let (query, mut conn) = setup_and_query(
+        "
+        CREATE TABLE unordered (id INTEGER PRIMARY KEY, grp TEXT);
+        INSERT INTO unordered VALUES (1,'a'),(2,'a'),(3,'b');
+        SELECT DISTINCT ON (grp) grp FROM unordered;
+    ",
+    );
+    // DISTINCT ON rewrite uses ROW_NUMBER; diesel::sql_query required.
+    let rows = diesel::sql_query(&query).load::<GrpOnly>(&mut conn).unwrap();
+    let grps: Vec<Option<&str>> = rows.iter().map(|r| r.grp.as_deref()).collect();
+    assert_eq!(grps.len(), 2, "two distinct groups expected");
+    assert!(grps.contains(&Some("a")), "group 'a' must appear: {grps:?}");
+    assert!(grps.contains(&Some("b")), "group 'b' must appear: {grps:?}");
+}
+
+// ── DISTINCT ON: ORDER BY already names the output alias (query.rs 616-619) ──
+
+/// When the outer ORDER BY already uses the projected alias (`grp AS g`
+/// ordered `BY g`), `alias_for_expr_in_projection` hits the
+/// alias-equality branch at line 616-619 rather than the expression-equality
+/// branch at line 612.
+#[test]
+fn distinct_on_order_by_alias_name_runs() {
+    let (query, mut conn) = setup_and_query(
+        "
+        CREATE TABLE aliased (id INTEGER PRIMARY KEY, grp TEXT, lbl TEXT);
+        INSERT INTO aliased VALUES (1,'a','z'),(2,'a','m'),(3,'b','p');
+        SELECT DISTINCT ON (grp) grp AS g, lbl FROM aliased ORDER BY g, lbl;
+    ",
+    );
+    // Window function rewrite; diesel::sql_query required.
+    let rows = diesel::sql_query(&query).load::<CategoryRow>(&mut conn).unwrap();
+    assert_eq!(rows.len(), 2, "two distinct groups expected");
+    // grp 'a' → first by lbl = 'm'; grp 'b' → 'p'.
+    assert!(rows.iter().any(|r| r.g.as_deref() == Some("a") && r.lbl == "m"));
+    assert!(rows.iter().any(|r| r.g.as_deref() == Some("b") && r.lbl == "p"));
+}

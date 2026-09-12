@@ -464,3 +464,60 @@ fn tsvector_column_warns_about_lexeme_loss() {
     });
     assert!(has_ts_warn, "tsvector column must emit a LossyDowngrade warning, got: {ws:?}");
 }
+
+// ── INSERT ... SELECT into bytea column (for_each_insert_position Select
+// branch) ──
+
+#[test]
+fn bytea_insert_select_executes() {
+    // INSERT ... SELECT must convert \x literals at bytea-column positions just
+    // as VALUES does; exercises the SetExpr::Select branch in
+    // for_each_insert_position.
+    run(
+        "CREATE TABLE t (b bytea);
+         INSERT INTO t (b) SELECT '\\x414243';",
+        &default_opts(),
+    );
+}
+
+// ── Bytea literal without \\x prefix (maybe_convert_bytea_hex_literal line
+// 992) ──
+
+#[test]
+fn bytea_literal_without_hex_prefix_is_refused() {
+    // A raw string with no \\x prefix cannot be decoded as hex bytea.
+    expect_refusal(
+        "CREATE TABLE t (col bytea);
+         INSERT INTO t VALUES ('ABC');",
+        &default_opts(),
+        "hex format",
+    );
+}
+
+// ── Bytea literal with non-hex characters (line 1003-1007) ───────────────────
+
+#[test]
+fn bytea_non_hex_chars_after_prefix_are_refused() {
+    // \\xGG has a valid \\x prefix but G is not a hex digit.
+    expect_refusal(
+        "CREATE TABLE t (col bytea);
+         INSERT INTO t VALUES ('\\xGG');",
+        &default_opts(),
+        "non-hex",
+    );
+}
+
+// ── Multi-row VALUES where only a later row carries the literal ──────────────
+
+#[test]
+fn bytea_multi_row_values_later_row_is_converted() {
+    // The second row carries the hex literal; the first row has NULL.
+    // All rows must be processed, not just the first.
+    let rows = query_rows(
+        "CREATE TABLE t (id INTEGER, b bytea);
+         INSERT INTO t VALUES (1, NULL), (2, '\\x414243');
+         SELECT lower(hex(b)) FROM t WHERE id = 2;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("414243".to_string())]);
+}

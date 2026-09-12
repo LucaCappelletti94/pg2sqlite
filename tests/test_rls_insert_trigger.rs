@@ -115,3 +115,182 @@ fn direct_backing_update_denied_without_update_policy() {
         diesel::sql_query("UPDATE rts_rls SET tag = 'evil' WHERE id = 1").execute(&mut conn);
     assert!(result.is_err(), "direct backing UPDATE must be denied when no UPDATE policy exists");
 }
+
+// ── Two-column BEFORE INSERT maintenance trigger → OR exemption (rls.rs
+// 2266-2284) ──
+
+diesel::table! {
+    items (id) {
+        id -> Integer,
+        tag -> Nullable<Text>,
+        slug -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    items_rls (id) {
+        id -> Integer,
+        tag -> Nullable<Text>,
+        slug -> Nullable<Text>,
+    }
+}
+
+#[derive(Queryable, Selectable, Debug)]
+#[diesel(table_name = items_rls)]
+struct ItemRow {
+    tag: Option<String>,
+    slug: Option<String>,
+}
+
+/// SELECT and INSERT policies; BEFORE INSERT trigger maintains two columns (tag
+/// and slug).
+const ITEMS_SCHEMA: &str = "
+    CREATE TABLE items (id INT PRIMARY KEY, tag TEXT, slug TEXT);
+    ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY items_sel ON items FOR SELECT USING (true);
+    CREATE POLICY items_ins ON items FOR INSERT WITH CHECK (true);
+    CREATE FUNCTION items_maintain() RETURNS TRIGGER AS $$
+    BEGIN
+        NEW.tag := NEW.tag || '!';
+        NEW.slug := upper(NEW.slug);
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    CREATE TRIGGER items_maint_trg BEFORE INSERT ON items
+    FOR EACH ROW EXECUTE FUNCTION items_maintain();
+";
+
+fn apply_items(pg: &str) -> SqliteConnection {
+    let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+    let stmts =
+        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&opts).expect("translate");
+    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
+    for stmt in &stmts {
+        diesel::sql_query(stmt.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("DDL: {e}\n{stmt}"));
+    }
+    conn
+}
+
+/// Two maintained columns produce an OR-joined exemption WHEN clause with two
+/// IS DISTINCT FROM conditions (rls.rs lines 2266-2284).  The INSERT must
+/// succeed because the maintenance update passes the WHEN clause.
+#[test]
+fn rls_two_column_maintenance_trigger_exemption_fires() {
+    // Verify the exemption clause has two IS DISTINCT FROM conditions.
+    let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+    let stmts = Pg2Sqlite::default()
+        .sql(ITEMS_SCHEMA)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate");
+    let update_check = stmts
+        .iter()
+        .map(ToString::to_string)
+        .find(|s| s.contains("update_check"))
+        .expect("update-check trigger must be emitted");
+    assert_eq!(
+        update_check.matches("IS DISTINCT FROM").count(),
+        2,
+        "two maintained columns must produce two IS DISTINCT FROM clauses: {update_check}"
+    );
+    assert!(update_check.contains(" OR "), "conditions must be joined by OR: {update_check}");
+
+    // Execute: INSERT through the view must succeed.
+    let mut conn = apply_items(ITEMS_SCHEMA);
+    diesel::insert_into(items::table)
+        .values((items::id.eq(1_i32), items::tag.eq("hello"), items::slug.eq("world")))
+        .execute(&mut conn)
+        .expect("INSERT through RLS view must succeed");
+    let row = items_rls::table
+        .filter(items_rls::id.eq(1))
+        .select(ItemRow::as_select())
+        .first(&mut conn)
+        .expect("row must be readable from backing table");
+    assert_eq!(row.tag.as_deref(), Some("hello!"), "tag must be maintained");
+    assert_eq!(row.slug.as_deref(), Some("WORLD"), "slug must be maintained");
+}
+
+// ── Non-maintenance BEFORE INSERT trigger → continue at rls.rs 2263 ──────────
+
+diesel::table! {
+    notes (id) {
+        id -> Integer,
+        body -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    notes_rls (id) {
+        id -> Integer,
+        body -> Nullable<Text>,
+    }
+}
+
+#[derive(Queryable, Selectable, Debug)]
+#[diesel(table_name = notes_rls)]
+struct NoteRow {
+    body: Option<String>,
+}
+
+/// RLS table with a BEFORE INSERT trigger that does NOT assign to NEW — not a
+/// maintenance trigger.  `build_maintenance_insert_exemption` hits the
+/// `continue` at rls.rs:2263 and returns None (no exemption in the
+/// update-check trigger).  INSERT through the view must still succeed.
+const NOTES_SCHEMA: &str = "
+    CREATE TABLE notes (id INT PRIMARY KEY, body TEXT);
+    ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY notes_sel ON notes FOR SELECT USING (true);
+    CREATE POLICY notes_ins ON notes FOR INSERT WITH CHECK (true);
+    CREATE FUNCTION notes_passthru() RETURNS TRIGGER AS $$
+    BEGIN
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    CREATE TRIGGER notes_trg BEFORE INSERT ON notes
+    FOR EACH ROW EXECUTE FUNCTION notes_passthru();
+";
+
+/// The non-maintenance trigger is skipped in the exemption builder; no
+/// IS DISTINCT FROM appears in the update-check trigger, and INSERT succeeds.
+#[test]
+fn rls_non_maintenance_before_insert_trigger_has_no_exemption() {
+    let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+    let stmts = Pg2Sqlite::default()
+        .sql(NOTES_SCHEMA)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate");
+    let update_check = stmts
+        .iter()
+        .map(ToString::to_string)
+        .find(|s| s.contains("update_check"))
+        .expect("update-check trigger must be emitted");
+    assert!(
+        !update_check.contains("IS DISTINCT FROM"),
+        "non-maintenance trigger must not produce an IS DISTINCT FROM exemption: {update_check}"
+    );
+
+    let mut conn = {
+        let mut c = SqliteConnection::establish(":memory:").expect("connect");
+        diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut c).expect("pragma");
+        for stmt in &stmts {
+            diesel::sql_query(stmt.as_str())
+                .execute(&mut c)
+                .unwrap_or_else(|e| panic!("DDL: {e}\n{stmt}"));
+        }
+        c
+    };
+    diesel::insert_into(notes::table)
+        .values((notes::id.eq(1_i32), notes::body.eq("hello")))
+        .execute(&mut conn)
+        .expect("INSERT must succeed");
+    let row = notes_rls::table
+        .filter(notes_rls::id.eq(1))
+        .select(NoteRow::as_select())
+        .first(&mut conn)
+        .expect("row must be readable");
+    assert_eq!(row.body.as_deref(), Some("hello"), "body must be stored as-is");
+}

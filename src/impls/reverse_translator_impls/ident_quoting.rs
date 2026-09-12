@@ -106,12 +106,12 @@ pub(crate) fn is_postgres_pseudo_expression(name: &str) -> bool {
 /// which sqlparser represents as a bare identifier, is also skipped.
 /// Identifiers inside subqueries have their own scope and are not touched.
 pub(crate) fn qualify_do_update_column_refs(do_update: &mut DoUpdate, table_name: &str) {
-    let mut v = DoUpdateQualifier { table_name, subquery_depth: 0 };
+    let mut qualifier = DoUpdateQualifier { table_name, subquery_depth: 0 };
     for assignment in &mut do_update.assignments {
-        assignment.value.visit(&mut v);
+        let _: ControlFlow<Infallible> = assignment.value.visit(&mut qualifier);
     }
     if let Some(selection) = &mut do_update.selection {
-        selection.visit(&mut v);
+        let _: ControlFlow<Infallible> = selection.visit(&mut qualifier);
     }
 }
 

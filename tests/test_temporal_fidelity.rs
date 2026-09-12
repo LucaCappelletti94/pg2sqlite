@@ -293,3 +293,87 @@ fn to_timestamp_zero_matches_utc_epoch() {
         .expect("to_timestamp(0) must not be NULL");
     assert_eq!(result, "1970-01-01 00:00:00", "to_timestamp(0) must be Unix epoch in UTC");
 }
+
+// ── INSERT ... SELECT into TIMESTAMPTZ column (for_each_insert_position Select
+// branch) ──
+
+/// INSERT ... SELECT at a TIMESTAMPTZ-column position normalises the offset
+/// just as VALUES does; exercises SetExpr::Select in for_each_insert_position.
+#[test]
+fn timestamptz_insert_select_normalises_offset() {
+    let result = run_translated_with(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, tsz TIMESTAMPTZ);
+         INSERT INTO t (id, tsz) SELECT 1, '2024-01-15 10:30:45+02';
+         SELECT EXTRACT(EPOCH FROM tsz) FROM t WHERE id = 1;",
+        &Pg2SqliteOptions::default(),
+    )
+    .remove(0)
+    .expect("EXTRACT(EPOCH) must not be NULL after offset normalisation via SELECT");
+    // 2024-01-15 10:30:45 UTC+2 = 08:30:45 UTC = 1705307445. Measured.
+    let epoch: f64 = result.parse().expect("epoch must be numeric");
+    assert!((epoch - 1_705_307_445.0).abs() < 2.0, "epoch should be ~1705307445, got {epoch}");
+}
+
+// ── DATE compared with TIMESTAMP promotes the date side (expr.rs 2276-2288) ──
+
+/// `date_col < timestamp_col` must promote the date to midnight so the text
+/// representations compare correctly. Date on left, Timestamp on right.
+#[test]
+fn date_column_less_than_timestamp_column_promotes_date() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (d DATE NOT NULL, ts TIMESTAMP NOT NULL);
+         INSERT INTO t VALUES ('2024-01-15', '2024-01-15 00:00:01');
+         SELECT CASE WHEN d < ts THEN 'yes' ELSE 'no' END FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    // date '2024-01-15' at midnight is before timestamp '2024-01-15 00:00:01'.
+    assert_eq!(rows, vec![Some("yes".to_string())]);
+}
+
+/// `timestamp_col < date_col` covers the rk=Date branch (right side promoted).
+#[test]
+fn timestamp_column_less_than_date_column_promotes_date_rhs() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (d DATE NOT NULL, ts TIMESTAMP NOT NULL);
+         INSERT INTO t VALUES ('2024-01-15', '2024-01-14 23:59:59');
+         SELECT CASE WHEN ts < d THEN 'yes' ELSE 'no' END FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    // timestamp '2024-01-14 23:59:59' is before date '2024-01-15' at midnight.
+    assert_eq!(rows, vec![Some("yes".to_string())]);
+}
+
+// ── CAST(date AS TIMESTAMP) adds midnight (expr.rs 2530) ─────────────────────
+
+/// `CAST(d AS TIMESTAMP)` must produce a TIMESTAMP at midnight so it is
+/// stored in a form comparable with other TIMESTAMP values.
+#[test]
+fn cast_date_column_to_timestamp_adds_midnight() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (d DATE NOT NULL);
+         INSERT INTO t VALUES ('2024-01-15');
+         SELECT CAST(d AS TIMESTAMP) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    let val = rows.into_iter().next().expect("one row").expect("non-null");
+    assert!(val.contains("2024-01-15"), "must contain the date: {val}");
+    assert!(val.contains("00:00:00"), "must have midnight time added: {val}");
+}
+
+// ── CAST(literal AS TIMESTAMP WITH TIME ZONE) normalises offset (expr.rs 2550)
+// ──
+
+/// The `data_type.translate_with_warnings` at line 2550 inside the CAST
+/// TIMESTAMPTZ branch runs even when the data type is spelled out in full.
+#[test]
+fn cast_string_with_bare_offset_to_timestamp_with_time_zone_normalises() {
+    let result = run_translated_with(
+        "SELECT EXTRACT(EPOCH FROM CAST('2024-01-15 10:30:45+03' AS TIMESTAMP WITH TIME ZONE));",
+        &Pg2SqliteOptions::default(),
+    )
+    .remove(0)
+    .expect("epoch must not be NULL");
+    // 2024-01-15 10:30:45 UTC+3 = 07:30:45 UTC = 1705303845. Measured.
+    let epoch: f64 = result.parse().expect("epoch must be numeric");
+    assert!((epoch - 1_705_303_845.0).abs() < 2.0, "epoch should be ~1705303845, got {epoch}");
+}
