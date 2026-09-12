@@ -112,9 +112,10 @@ pub enum FunctionReversal {
     /// SQLite's total always returns 0 for no rows; SUM returns NULL, so the
     /// COALESCE is required for a faithful round-trip.
     ToTotal,
-    /// Translate json_type(expr) to json_typeof(expr) or jsonb_typeof(expr)
-    /// based on the argument's declared column type. The choice is deferred to
-    /// `reverse_translate_function` because that stage has schema access.
+    /// `json_type(x, path)` does path extraction; `json_type(x)` is refused
+    /// because PostgreSQL's vocabulary (`number`, `string`, `boolean`)
+    /// collapses SQLite's six type names (`integer`, `real`, `text`,
+    /// `true`, `false`, `null`).
     JsonTypeOf,
     /// Translate json_array_length(expr) to json_array_length(expr) or
     /// jsonb_array_length(expr) based on the argument's declared column type.
@@ -1334,16 +1335,6 @@ pub fn reverse_translate_function(
             })
         }
         FunctionReversal::JsonTypeOf => {
-            // json_type(x) -> json_typeof(x) or jsonb_typeof(x) depending on
-            // the argument's declared column type. PostgreSQL's
-            // json_typeof takes json, jsonb_typeof takes jsonb; the
-            // wrong variant fails at the server.
-            //
-            // Fallback when the argument is not a column reference:
-            // json_typeof, preserving the original rename behaviour
-            // as the conservative choice. A reference the relations
-            // in scope cannot resolve refuses rather than guessing,
-            // since the wrong spelling fails at the server.
             let exprs = function_argument_exprs(&func.args);
             let arg = exprs.first().copied();
             let is_jsonb = match arg {
@@ -1355,24 +1346,22 @@ pub fn reverse_translate_function(
                 None => false,
             };
             let func_name = if is_jsonb { "jsonb_typeof" } else { "json_typeof" };
-
-            // json_type(x, '$.a') asks for the type at a path, and both
-            // PostgreSQL spellings take one argument, so the path becomes an
-            // extraction around the value. This is the shape the forward
-            // direction emits for the `?`, `?|` and `?&` existence operators,
-            // so without it a script this crate wrote could not be
-            // read back.
+            // Two-argument form: type at a path; the path moves outside the
+            // call.
             if let [value, path] = exprs.as_slice() {
                 let extracted = json_path_extraction(value, path, "json_type", schema, options)?;
                 return Ok(simple_function_expr(func_name, vec![extracted], None));
             }
-
-            build_reverse_function(
-                ObjectName::from(vec![Ident::new(func_name)]),
-                func,
-                schema,
-                options,
-            )
+            // One-argument form: PostgreSQL's vocabulary ('number', 'string',
+            // 'boolean') collapses SQLite's six names; no readable
+            // static rewrite is faithful.
+            Err(Error::reverse_refusal(
+                "json_type(x) cannot reverse faithfully: PostgreSQL's jsonb_typeof returns \
+                 'number' for both 'integer' and 'real', and 'boolean' for both 'true' and \
+                 'false'. Use jsonb_typeof(x) directly if the collapsed vocabulary is \
+                 acceptable, or write a CASE expression to restore all six names."
+                    .to_string(),
+            ))
         }
         FunctionReversal::JsonArrayLength => {
             // The declared type chooses the overload, while unresolved columns
@@ -1448,16 +1437,27 @@ pub fn reverse_translate_function(
             Ok(simple_function_expr("decode", vec![inner, string_literal("hex")], None))
         }
         FunctionReversal::ToExtractEpoch => {
-            // unixepoch(x) and unixepoch(x, 'subsec') -> EXTRACT(EPOCH FROM x).
-            // The forward direction emits the second form, since the first
-            // drops the fraction.
             let exprs = function_argument_exprs(&func.args);
             let value = match exprs.as_slice() {
-                // unixepoch() is the current time, and SQLite answers it as
-                // whole seconds, which is why the floor and the cast are here:
-                // `extract(epoch from now())` carries a fraction.
+                // No argument: current time as whole seconds; extract carries a fraction.
                 [] => return Ok(current_epoch_seconds()),
-                [value] => value,
+                // One argument: SQLite truncates toward zero, same as floor.
+                [value] => {
+                    let inner = crate::prelude::ReverseTranslator::reverse_translate(
+                        *value, schema, options,
+                    )?;
+                    let extract = Expr::Extract {
+                        field: DateTimeField::Epoch,
+                        syntax: ExtractSyntax::From,
+                        expr: Box::new(inner),
+                    };
+                    return Ok(Expr::Cast {
+                        expr: Box::new(simple_function_expr("floor", vec![extract], None)),
+                        data_type: DataType::BigInt(None),
+                        format: None,
+                        kind: CastKind::DoubleColon,
+                    });
+                }
                 [
                     value,
                     Expr::Value(ValueWithSpan {

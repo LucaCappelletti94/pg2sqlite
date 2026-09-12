@@ -88,24 +88,26 @@ fn reverse_insert_basic() {
 }
 
 #[test]
-fn reverse_update_uses_target_scope_for_json_type() {
-    let pg = reverse(JSON_SCHEMA, "UPDATE docs SET id = id WHERE json_type(payload) = 'object';");
-    assert!(pg.contains("jsonb_typeof(payload)"), "expected JSONB spelling: {pg}");
+fn reverse_update_json_type_one_arg_is_refused() {
+    // json_type(x) is refused; the WHERE clause cannot be translated.
+    let err =
+        reverse_err(JSON_SCHEMA, "UPDATE docs SET id = id WHERE json_type(payload) = 'object';");
+    assert!(err.contains("number"), "refusal must name 'number': {err}");
 }
 
 #[test]
-fn reverse_delete_uses_target_scope_for_json_type() {
-    let pg = reverse(JSON_SCHEMA, "DELETE FROM docs WHERE json_type(payload) = 'object';");
-    assert!(pg.contains("jsonb_typeof(payload)"), "expected JSONB spelling: {pg}");
+fn reverse_delete_json_type_one_arg_is_refused() {
+    let err = reverse_err(JSON_SCHEMA, "DELETE FROM docs WHERE json_type(payload) = 'object';");
+    assert!(err.contains("number"), "refusal must name 'number': {err}");
 }
 
 #[test]
-fn reverse_insert_returning_uses_target_scope_for_json_type() {
-    let pg = reverse(
+fn reverse_insert_returning_json_type_one_arg_is_refused() {
+    let err = reverse_err(
         JSON_SCHEMA,
         "INSERT INTO docs (id, payload) VALUES (1, '{}') RETURNING json_type(payload);",
     );
-    assert!(pg.contains("jsonb_typeof(payload)"), "expected JSONB spelling: {pg}");
+    assert!(err.contains("number"), "refusal must name 'number': {err}");
 }
 
 #[test]

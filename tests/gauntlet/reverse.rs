@@ -132,13 +132,12 @@ const ACCEPT_CASES: &[(&str, &str)] = &[
     ("SELECT time() FROM t", "date_and_time"),
     // --- json functions (test_reverse_json_functions.rs,
     // test_reverse_output_is_valid_postgres.rs)
-    // json_set and json_insert now wrap the value in to_jsonb(); json_type
-    // chooses jsonb_typeof for JSONB columns; hex casts the argument to bytea.
+    // json_set and json_insert wrap the value in to_jsonb(); hex casts the argument to bytea.
+    // json_type(x) is now refused (vocabulary mismatch); json_type(x, path) still works.
     ("SELECT json(s) FROM t", "json_functions"),
     ("SELECT json_set(payload, '$.a', 1) FROM t", "json_functions"),
     ("SELECT json_insert(payload, '$.a', 1) FROM t", "json_functions"),
     ("SELECT json_set(payload, '$.a.b', 1) FROM t", "json_functions"),
-    ("SELECT json_type(payload) FROM t", "json_functions"),
     ("SELECT json_remove(payload, '$.a') FROM t", "json_functions"),
     ("SELECT json_extract(payload, '$.a') FROM t", "json_functions"),
     ("SELECT json_quote(s) FROM t", "json_functions"),

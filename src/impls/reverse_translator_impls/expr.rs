@@ -22,10 +22,11 @@ use super::{function::reverse_translate_function, helpers::Reverse};
 use crate::{
     errors::Error,
     impls::{
-        function_helpers::{simple_function_expr, single_quoted_literal},
+        function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
         idioms::{ascii_code_point_argument, forward_lower_argument, is_uniform_random_float},
         shared_helpers::translate_expr_recursive,
         temporal_arithmetic::reverse_temporal_arithmetic,
+        translator_impls::expr::sqlite_json_path_to_pg_text_path,
     },
     prelude::ReverseTranslator,
 };
@@ -283,9 +284,50 @@ impl ReverseTranslator for Expr {
                 translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {})
             }
 
+            // SQLite uses JSONPath ('$.a'), PostgreSQL uses text-array ('{a}'); convert.
+            Expr::BinaryOp {
+                op: op @ (BinaryOperator::HashArrow | BinaryOperator::HashLongArrow),
+                left,
+                right,
+            } => reverse_json_path_operator(op, left, right, schema, options),
+
             _ => translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {}),
         }
     }
+}
+
+/// Rewrites `#>` and `#>>` from SQLite's JSONPath right operand onto
+/// PostgreSQL's `text[]` one.
+///
+/// The same text means different paths in the two engines: SQLite reads
+/// `'$.a'` as the key `a`, and PostgreSQL reads it as a one-element array
+/// holding the three characters, so the lookup finds nothing and answers
+/// NULL. A path this cannot read is refused rather than passed through.
+fn reverse_json_path_operator(
+    op: &BinaryOperator,
+    left: &Expr,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let operator = if *op == BinaryOperator::HashLongArrow { "#>>" } else { "#>" };
+    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(path), .. }) = right else {
+        return Err(Error::reverse_refusal(format!(
+            "{operator} needs its right operand as a string literal; non-literal paths cannot be \
+             converted at translation time"
+        )));
+    };
+    let pg_path = sqlite_json_path_to_pg_text_path(path).ok_or_else(|| {
+        Error::reverse_refusal(format!(
+            "{operator} path '{path}' cannot be converted: only simple dotted paths like '$.a' or \
+             '$.a.b' are supported"
+        ))
+    })?;
+    Ok(Expr::BinaryOp {
+        left: Box::new(left.reverse_translate(schema, options)?),
+        op: op.clone(),
+        right: Box::new(string_literal(&pg_path)),
+    })
 }
 
 /// Builds PostgreSQL's POSIX regex match, `~` or `!~`.

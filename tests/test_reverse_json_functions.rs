@@ -131,17 +131,19 @@ fn json_patch_becomes_concat_operator() {
 // --- simple renames (regression guards) ---
 
 #[test]
-fn json_type_with_jsonb_column_uses_jsonb_typeof() {
-    // payload is declared as JSONB in the schema, so json_type should become
-    // jsonb_typeof rather than json_typeof.
-    assert_emits("SELECT json_type(payload) FROM t", "jsonb_typeof(payload)");
+fn json_type_one_arg_is_refused_with_vocabulary_explanation() {
+    // PostgreSQL's vocabulary collapses SQLite's six type names; no static
+    // rewrite is faithful.
+    let err =
+        rev("SELECT json_type(payload) FROM t").expect_err("json_type one-arg must be refused");
+    assert!(err.to_string().contains("number"), "error must name 'number': {err}");
 }
 
 #[test]
-fn json_type_with_non_jsonb_column_falls_back_to_json_typeof() {
-    // A non-JSON column (INT) has no JSONB type, so the fallback is
-    // json_typeof.
-    assert_emits("SELECT json_type(n) FROM t", "json_typeof(n)");
+fn json_type_one_arg_non_jsonb_column_is_also_refused() {
+    let err = rev("SELECT json_type(n) FROM t")
+        .expect_err("json_type one-arg must be refused regardless of column type");
+    assert!(err.to_string().contains("number"), "error must name 'number': {err}");
 }
 
 /// The two-argument form asks for the type at a path, and PostgreSQL's
