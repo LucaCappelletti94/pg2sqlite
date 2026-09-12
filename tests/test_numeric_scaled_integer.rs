@@ -203,6 +203,94 @@ fn signed_decimal_literals_are_scaled_in_comparisons() {
     assert_eq!(rows, vec![Some("2".to_string())]);
 }
 
+/// The same scaling where the comparison is against an aggregate, which keeps
+/// its operand's scale. Left unscaled, `sum(price) > 19.98` compares 1999
+/// against 19.98 and answers every row.
+#[test]
+fn a_literal_is_scaled_against_a_scale_preserving_aggregate() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 19.99);
+         SELECT count(*) FROM (SELECT id FROM t GROUP BY id
+                               HAVING sum(price) = 19.99 AND max(price) > 19.98
+                                  AND min(price) < 20);",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("1".to_string())]);
+}
+
+/// An `IN` list is a comparison spelled another way.
+#[test]
+fn a_literal_is_scaled_in_an_in_list() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 19.99), (2, 5.00);
+         SELECT count(*) FROM t WHERE price IN (19.99, 1.25);",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("1".to_string())]);
+}
+
+#[test]
+fn literals_are_scaled_in_a_between() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 19.99), (2, 5.00);
+         SELECT count(*) FROM t WHERE price BETWEEN 19.00 AND 20.00;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("1".to_string())]);
+}
+
+/// A literal beside a scaled column inside a scale-preserving call is on that
+/// column's scale too: `coalesce(price, 9.99)` answers 9.99, which is 999
+/// minor units, not 9.99 of them.
+#[test]
+fn a_literal_argument_is_scaled_inside_a_scale_preserving_call() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, NULL);
+         SELECT coalesce(price, 9.99) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![Some("999".to_string())]);
+}
+
+#[test]
+fn a_literal_argument_is_scaled_in_nullif_and_greatest() {
+    let rows = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 1.50);
+         SELECT nullif(price, 1.50) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(rows, vec![None], "1.50 equals the stored value, so the answer is NULL");
+
+    let greatest = run_translated_with(
+        "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+         INSERT INTO t VALUES (1, 1.50);
+         SELECT greatest(price, 2.50) FROM t;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(greatest, vec![Some("250".to_string())], "2.50, which is 250 minor units");
+}
+
+/// The refusal division already carries for two columns. A literal divisor
+/// used to slip past it and emit `price / 200`, which truncates to zero.
+#[test]
+fn dividing_a_numeric_by_a_literal_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));
+              SELECT price / 2 FROM t;",
+        )
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("division has no faithful form, whatever the divisor is")
+        .to_string();
+    assert!(error.contains("scale"), "the error must explain why, got: {error}");
+}
+
 /// A literal carrying more decimals than the column can hold is a translation
 /// error rather than a silent round, since PostgreSQL would round and the
 /// author probably meant a different scale.
@@ -521,7 +609,12 @@ fn null_and_unscaled_defaults_are_untouched() {
          SELECT coalesce(a, -1) || '|' || b || '|' || c FROM t;",
         &Pg2SqliteOptions::default(),
     );
-    assert_eq!(rows, vec![Some("-1|5|7".to_string())], "NULL, 5 and 7 exactly as declared");
+    assert_eq!(
+        rows,
+        vec![Some("-100|5|7".to_string())],
+        "the column kept its NULL, and the coalesce fallback reads at that column's scale, so \
+         -1 is -1.00, which is -100 minor units; 5 and 7 take no scaling"
+    );
 }
 
 /// A default the translator cannot land as one number at the column's scale is

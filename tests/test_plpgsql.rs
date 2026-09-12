@@ -653,3 +653,47 @@ fn raise_info_single_space_is_dropped() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(rows[0].logged_val, 42, "logged_val must match inserted val");
     Ok(())
 }
+
+/// A statement the dispatch does not name still sits inside its `IF`. The
+/// `TRUNCATE` arm reached the ordinary translator, which turns it into a
+/// `DELETE`, and the enclosing condition was never attached, so the emitted
+/// trigger emptied the table on every row.
+#[test]
+fn a_guarded_truncate_keeps_its_condition() {
+    let sql = "
+        CREATE TABLE trash (id INTEGER PRIMARY KEY);
+        CREATE TABLE t (id INTEGER PRIMARY KEY, val INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          IF NEW.val > 0 THEN
+            TRUNCATE trash;
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO trash (id) VALUES (1), (2), (3);").expect("rows");
+
+    connection.execute_batch("INSERT INTO t (id, val) VALUES (1, -5);").expect("guard is false");
+    let surviving: i64 = connection
+        .query_row("SELECT count(*) FROM trash", [], |row| row.get(0))
+        .expect("count after the false guard");
+    assert_eq!(surviving, 3, "a false condition must leave the table alone");
+
+    connection.execute_batch("INSERT INTO t (id, val) VALUES (2, 5);").expect("guard is true");
+    let emptied: i64 = connection
+        .query_row("SELECT count(*) FROM trash", [], |row| row.get(0))
+        .expect("count after the true guard");
+    assert_eq!(emptied, 0, "a true condition must run the statement");
+}

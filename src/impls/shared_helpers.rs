@@ -651,11 +651,27 @@ pub(crate) fn declared_numeric_precision(
     Ok(numeric_precision_and_scale_of(expr, schema, options)?.map(|(precision, _)| precision))
 }
 
+/// Calls that answer on their operands' scale, so a literal beside one of
+/// their arguments is on that scale too.
+///
+/// PostgreSQL gives each of these the common type of its arguments, and none
+/// of them divides or averages, which is where a result scale would be chosen
+/// rather than carried.
+const SCALE_PRESERVING_CALLS: [&str; 7] =
+    ["coalesce", "greatest", "least", "max", "min", "nullif", "sum"];
+
+/// True when `function` answers on the scale of its NUMERIC arguments.
+pub(crate) fn is_scale_preserving_call(function: &Function) -> bool {
+    crate::impls::object_name::last_ident(&function.name).is_some_and(|name| {
+        SCALE_PRESERVING_CALLS.contains(&name.value.to_ascii_lowercase().as_str())
+    })
+}
+
 fn numeric_precision_and_scale_of(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
-) -> Result<Option<(u64, u32)>, crate::errors::Error> {
+) -> Result<Option<(u64, u32)>, Error> {
     let read = |data_type: &DataType| {
         let info = crate::impls::translator_impls::data_type::exact_numeric_info(data_type)?;
         crate::impls::translator_impls::data_type::numeric_precision_and_scale(info).ok()
@@ -671,6 +687,21 @@ fn numeric_precision_and_scale_of(
             Ok(u64::try_from(digits.len()).ok().map(|precision| (precision, 0)))
         }
         Expr::Cast { data_type, .. } => Ok(read(data_type)),
+        Expr::Function(function) if is_scale_preserving_call(function) => {
+            // The first argument that resolves decides, since PostgreSQL gives
+            // the call the common type of its arguments. An argument this
+            // cannot resolve, `NEW.col` in a trigger body among them, decides
+            // nothing rather than failing the translation: the caller reads a
+            // missing scale as "not a minor-unit value".
+            for argument in function_argument_exprs(&function.args) {
+                if let Ok(Some(found)) = numeric_precision_and_scale_of(argument, schema, options)
+                    && found.1 > 0
+                {
+                    return Ok(Some(found));
+                }
+            }
+            Ok(None)
+        }
         _ => declared_in_scope(expr, schema, options, read, numeric_precision_and_scale_of),
     }
 }

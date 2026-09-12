@@ -156,7 +156,19 @@ impl PlPgSqlTranslator {
                 Self::translate_return_statement(ret.value.as_ref(), context, schema, options, emit)
             }
 
-            other => other.translate_with_warnings(schema, options, emit),
+            other => {
+                let mut translated = other.translate_with_warnings(schema, options, emit)?;
+                // A shape this dispatch does not name still sits inside its
+                // `IF`. `TRUNCATE` is the one that mattered: it translates
+                // into a `DELETE`, which takes a guard, and emitting it
+                // unguarded emptied the table on every row.
+                if let Some(condition) = context.current_condition() {
+                    for t_stmt in &mut translated {
+                        Self::inject_condition_into_statement(t_stmt, &condition)?;
+                    }
+                }
+                Ok(translated)
+            }
         }
     }
 
