@@ -36,8 +36,8 @@ use sqlparser::{
         FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
         FunctionArguments, HavingBound, Ident, JoinConstraint, JoinOperator, ListAggOnOverflow,
         ObjectName, ObjectNamePart, Owner, SelectItem, SetExpr, Statement, TableAlias, TableFactor,
-        TriggerEvent, TriggerPeriod, UnaryOperator, Value, ValueWithSpan, VisitMut, VisitorMut,
-        WindowType,
+        TriggerEvent, TriggerPeriod, UnaryOperator, Value, ValueWithSpan, Visit, VisitMut, Visitor,
+        VisitorMut, WindowType,
     },
     tokenizer::{Token, Word},
 };
@@ -52,6 +52,7 @@ use crate::{
         query_builder::{
             from_relation, make_query, make_simple_select, plain_table_factor, single_expr_query,
         },
+        replay::{is_replayable, reject_duplicated_operand},
         session_variable,
         shared_helpers::{
             join_constraint_mut, join_constraint_ref, minor_unit_scale, relations_scope_query,
@@ -513,6 +514,90 @@ fn collect_pk_column_names(
     Ok(table.primary_key_columns(schema)?.map(|c| c.column_name().to_string()).collect())
 }
 
+/// True when `expr` contains a bare or compound identifier whose last part
+/// matches `name`.
+fn expr_contains_identifier(expr: &Expr, name: &str) -> bool {
+    struct IdentFinder<'a> {
+        found: bool,
+        name: &'a str,
+    }
+    impl Visitor for IdentFinder<'_> {
+        type Break = ();
+        fn post_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+            let found = match expr {
+                Expr::Identifier(ident) => ident.value.eq_ignore_ascii_case(self.name),
+                Expr::CompoundIdentifier(parts) => {
+                    parts.last().is_some_and(|i| i.value.eq_ignore_ascii_case(self.name))
+                }
+                _ => false,
+            };
+            if found {
+                self.found = true;
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut finder = IdentFinder { found: false, name };
+    let _: ControlFlow<()> = expr.visit(&mut finder);
+    finder.found
+}
+
+/// True when the expression the INSERT guard uses (WITH CHECK or its USING
+/// fallback) names `column_name`.
+fn any_insert_policy_reads_column(
+    policies: &[&CreatePolicy],
+    schema: &ParserDB,
+    column_name: &str,
+) -> bool {
+    policies.iter().any(|policy| {
+        policy
+            .check_expression(schema)
+            .or_else(|| policy.using_expression(schema))
+            .is_some_and(|expr| expr_contains_identifier(expr, column_name))
+    })
+}
+
+/// Returns `expr` with session-variable calls, subqueries, and caller-declared
+/// functions replaced by replayable placeholders, so `is_replayable` focuses
+/// on scalar volatile calls rather than flagging these stable constructs.
+fn scrub_policy_stable_exprs(
+    expr: &Expr,
+    options: &crate::options::TranslationContext<'_>,
+) -> Expr {
+    struct Scrubber<'a, 'o> {
+        options: &'a crate::options::TranslationContext<'o>,
+    }
+    impl VisitorMut for Scrubber<'_, '_> {
+        type Break = ();
+        fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+            match expr {
+                Expr::Subquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } => {
+                    *expr = Expr::Value(ValueWithSpan::from(Value::Boolean(true)));
+                }
+                Expr::Function(func)
+                    if session_variable::pattern_of_function(func).is_some()
+                        || last_ident(&func.name).is_some_and(|n| {
+                            self.options.declares_user_defined_function(&n.value)
+                                || self
+                                    .options
+                                    .get_session_variables()
+                                    .iter()
+                                    .any(|m| m.sqlite_function.eq_ignore_ascii_case(&n.value))
+                        }) =>
+                {
+                    *expr = Expr::Identifier(Ident::new("__sv__"));
+                }
+                _ => {}
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut copy = expr.clone();
+    let _: ControlFlow<()> = VisitMut::visit(&mut copy, &mut Scrubber { options });
+    copy
+}
+
 /// Builds the write-guard predicate context for one DML event.
 ///
 /// Returns `(columns, using, check)` where `using` is `None` for INSERT
@@ -527,6 +612,61 @@ fn build_write_guard(
 ) -> Result<(Vec<TriggerColumn>, Option<PolicyPredicate>, PolicyPredicate), Error> {
     let columns = trigger_columns(table, schema, options)?;
     let subs = guard_substitutions(&columns, kind, options, table, schema)?;
+    let table_name = table.table_name();
+    // D1: volatile column default, INSERT only — appears in both the guard
+    // substitution and the forwarding INSERT VALUES, two independent draws.
+    if kind == GuardKind::Insert {
+        for column in &columns {
+            let Some(guard_default) = &column.guard_default else { continue };
+            if !is_replayable(guard_default, options)
+                && any_insert_policy_reads_column(policies, schema, &column.name)
+            {
+                return Err(reject_duplicated_operand(
+                    &format!(
+                        "column \"{}\" DEFAULT in the RLS insert path of table \"{}\"",
+                        column.name, table_name
+                    ),
+                    guard_default,
+                ));
+            }
+        }
+    }
+    // D2: volatile policy predicate — appears in trigger guard and forwarding
+    // WHERE or backing check trigger WHEN, two independent draws.
+    for policy in policies {
+        if kind == GuardKind::Update
+            && let Some(using) = policy.using_expression(schema)
+            && !is_replayable(&scrub_policy_stable_exprs(using, options), options)
+        {
+            return Err(reject_duplicated_operand(
+                &format!(
+                    "policy \"{}\" USING predicate on table \"{}\"",
+                    policy.name(),
+                    table_name
+                ),
+                using,
+            ));
+        }
+        let check_expr =
+            policy.check_expression(schema).or_else(|| policy.using_expression(schema));
+        if let Some(check) = check_expr
+            && !is_replayable(&scrub_policy_stable_exprs(check, options), options)
+        {
+            let clause = if policy.check_expression(schema).is_some() {
+                "WITH CHECK"
+            } else {
+                "USING (as WITH CHECK)"
+            };
+            return Err(reject_duplicated_operand(
+                &format!(
+                    "policy \"{}\" {clause} predicate on table \"{}\"",
+                    policy.name(),
+                    table_name
+                ),
+                check,
+            ));
+        }
+    }
     let using = if kind == GuardKind::Update {
         Some(combine_policy_predicates(
             policies,

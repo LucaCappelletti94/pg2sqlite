@@ -3,10 +3,10 @@ source: tests/test_rls_self_referential.rs
 expression: translated_sql
 ---
 CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
-CREATE TABLE app_users_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, email TEXT NOT NULL UNIQUE, display_name TEXT, settings TEXT) STRICT
+CREATE TABLE app_users_rls (id BLOB PRIMARY KEY NOT NULL CHECK (length(id) = 16), email TEXT NOT NULL UNIQUE, display_name TEXT, settings TEXT) STRICT
 CREATE VIEW app_users AS SELECT id, email, display_name, settings FROM app_users_rls WHERE (id = current_app_user())
-CREATE TRIGGER app_users_insert_trigger INSTEAD OF INSERT ON app_users FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE ((COALESCE(NEW.id, uuidv7()) = current_app_user())) IS NOT TRUE; INSERT INTO app_users_rls (id, email, display_name, settings) VALUES (COALESCE(NEW.id, uuidv7()), NEW.email, NEW.display_name, NEW.settings); END
-CREATE TRIGGER app_users_rls_insert_check BEFORE INSERT ON app_users_rls FOR EACH ROW WHEN ((COALESCE(NEW.id, uuidv7()) = current_app_user())) IS NOT TRUE BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy'); END
+CREATE TRIGGER app_users_insert_trigger INSTEAD OF INSERT ON app_users FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE ((NEW.id = current_app_user())) IS NOT TRUE; INSERT INTO app_users_rls (id, email, display_name, settings) VALUES (NEW.id, NEW.email, NEW.display_name, NEW.settings); END
+CREATE TRIGGER app_users_rls_insert_check BEFORE INSERT ON app_users_rls FOR EACH ROW WHEN ((NEW.id = current_app_user())) IS NOT TRUE BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy'); END
 CREATE TRIGGER app_users_rls_update_check BEFORE UPDATE ON app_users_rls FOR EACH ROW WHEN ((OLD.id = current_app_user())) IS NOT TRUE OR ((NEW.id = current_app_user())) IS NOT TRUE BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy'); END
 CREATE TRIGGER app_users_update_trigger INSTEAD OF UPDATE ON app_users FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'new row violates row-level security policy') WHERE ((OLD.id = current_app_user())) AND ((NEW.id = current_app_user())) IS NOT TRUE; UPDATE app_users_rls SET id = NEW.id, email = NEW.email, display_name = NEW.display_name, settings = NEW.settings WHERE (id = OLD.id) AND ((OLD.id = current_app_user())); END
 CREATE TRIGGER app_users_delete_trigger INSTEAD OF DELETE ON app_users FOR EACH ROW BEGIN SELECT NULL; END
