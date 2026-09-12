@@ -274,6 +274,16 @@ impl PlPgSqlTranslator {
         .is_break()
     }
 
+    /// Translates an `IF` chain into one guarded statement per branch.
+    ///
+    /// PostgreSQL scopes a variable to the block that declares it, so an
+    /// assignment made before the `IF` is visible inside every branch, and an
+    /// assignment made inside a branch is not visible to a sibling branch.
+    /// Both are arranged here by restoring the enclosing block's assignments
+    /// before each branch runs. What a branch assigned reaches the statements
+    /// after the `IF` as a `CASE` over the branch conditions, since the
+    /// emitted trigger has no control flow to make the value conditional any
+    /// other way.
     fn translate_if_statement(
         if_stmt: &sqlparser::ast::IfStatement,
         context: &mut PlPgSqlContext,
@@ -283,6 +293,8 @@ impl PlPgSqlTranslator {
     ) -> Result<Vec<Statement>, Error> {
         let mut result = Vec::new();
         let mut negated_conditions: Vec<String> = Vec::new();
+        let outer_scoped = Self::scoped_bindings(context);
+        let mut branches: Vec<(Option<String>, Vec<VariableBinding>)> = Vec::new();
         let bindings: Vec<_> = context.bindings().cloned().collect();
 
         let if_condition = Self::translate_plpgsql_condition(
@@ -295,7 +307,7 @@ impl PlPgSqlTranslator {
         )?;
 
         context.push_condition(if_condition.clone());
-        context.clear_scoped_bindings();
+        Self::restore_scoped_bindings(context, &outer_scoped);
         context.clear_uuid_first_use();
 
         for stmt in if_stmt.if_block.statements() {
@@ -304,9 +316,14 @@ impl PlPgSqlTranslator {
         }
 
         context.pop_condition();
+        branches.push((
+            if_stmt.if_block.condition.as_ref().map(ToString::to_string),
+            Self::assignments_made(context, &outer_scoped),
+        ));
         negated_conditions.push(format!("NOT ({if_condition})"));
 
         for elseif_block in &if_stmt.elseif_blocks {
+            Self::restore_scoped_bindings(context, &outer_scoped);
             let bindings: Vec<_> = context.bindings().cloned().collect();
             let elseif_condition = Self::translate_plpgsql_condition(
                 elseif_block.condition.as_ref(),
@@ -325,7 +342,7 @@ impl PlPgSqlTranslator {
                 format!("{} AND ({})", negated_conditions.join(" AND "), elseif_condition);
 
             context.push_condition(combined);
-            context.clear_scoped_bindings();
+            Self::restore_scoped_bindings(context, &outer_scoped);
             context.clear_uuid_first_use();
 
             for stmt in elseif_block.statements() {
@@ -334,13 +351,17 @@ impl PlPgSqlTranslator {
             }
 
             context.pop_condition();
+            branches.push((
+                elseif_block.condition.as_ref().map(ToString::to_string),
+                Self::assignments_made(context, &outer_scoped),
+            ));
             negated_conditions.push(format!("NOT ({elseif_condition})"));
         }
 
         if let Some(else_block) = &if_stmt.else_block {
             let else_condition = negated_conditions.join(" AND ");
             context.push_condition(else_condition);
-            context.clear_scoped_bindings();
+            Self::restore_scoped_bindings(context, &outer_scoped);
             context.clear_uuid_first_use();
 
             for stmt in else_block.statements() {
@@ -349,9 +370,104 @@ impl PlPgSqlTranslator {
             }
 
             context.pop_condition();
+            branches.push((None, Self::assignments_made(context, &outer_scoped)));
         }
 
+        Self::restore_scoped_bindings(context, &outer_scoped);
+        Self::bind_branch_assignments(context, &outer_scoped, &branches);
+
         Ok(result)
+    }
+
+    /// The assignments the enclosing block made, lifted out of the context.
+    ///
+    /// The context keeps an assignment separately from a `SELECT ... INTO`
+    /// binding but exposes neither set on its own, so the two are told apart
+    /// by clearing the assignments and reading what survives.
+    fn scoped_bindings(context: &mut PlPgSqlContext) -> Vec<VariableBinding> {
+        let visible: Vec<VariableBinding> = context.bindings().cloned().collect();
+        context.clear_scoped_bindings();
+        let surviving: Vec<VariableBinding> = context.bindings().cloned().collect();
+        let scoped: Vec<VariableBinding> = visible
+            .into_iter()
+            .filter(|binding| !surviving.iter().any(|other| same_binding(other, binding)))
+            .collect();
+        Self::restore_scoped_bindings(context, &scoped);
+        scoped
+    }
+
+    /// Puts the context's assignments back to `scoped`.
+    fn restore_scoped_bindings(context: &mut PlPgSqlContext, scoped: &[VariableBinding]) {
+        context.clear_scoped_bindings();
+        for binding in scoped {
+            context.add_binding(binding.clone());
+        }
+    }
+
+    /// What the branch just translated assigned, against the enclosing
+    /// block's assignments.
+    fn assignments_made(
+        context: &mut PlPgSqlContext,
+        outer: &[VariableBinding],
+    ) -> Vec<VariableBinding> {
+        Self::scoped_bindings(context)
+            .into_iter()
+            .filter(|binding| !outer.iter().any(|other| same_binding(other, binding)))
+            .collect()
+    }
+
+    /// Binds each variable a branch assigned to a `CASE` over the branch
+    /// conditions, so a read after the `IF` answers what the branch that ran
+    /// assigned, and the enclosing block's value, or `NULL`, when none ran.
+    ///
+    /// The conditions and the assigned expressions are the PostgreSQL ones,
+    /// not the emitted SQLite ones, because the binding is translated where
+    /// it is read, exactly as a hand-written `v := CASE ... END` would be.
+    fn bind_branch_assignments(
+        context: &mut PlPgSqlContext,
+        outer: &[VariableBinding],
+        branches: &[(Option<String>, Vec<VariableBinding>)],
+    ) {
+        let mut names: Vec<&str> = Vec::new();
+        for (_, assignments) in branches {
+            for binding in assignments {
+                if !names.contains(&binding.name.as_str()) {
+                    names.push(&binding.name);
+                }
+            }
+        }
+
+        let mut bound: Vec<VariableBinding> = Vec::new();
+        for name in names {
+            let mut arms = String::new();
+            let mut otherwise = outer
+                .iter()
+                .find(|binding| binding.name == name)
+                .map_or_else(|| "NULL".to_string(), |binding| binding.expression.clone());
+
+            for (condition, assignments) in branches {
+                let Some(assigned) = assignments.iter().find(|binding| binding.name == name) else {
+                    continue;
+                };
+                match condition {
+                    Some(condition) => {
+                        use core::fmt::Write as _;
+                        let expression = &assigned.expression;
+                        let _ = write!(arms, " WHEN ({condition}) THEN ({expression})");
+                    }
+                    None => otherwise.clone_from(&assigned.expression),
+                }
+            }
+
+            bound.push(VariableBinding {
+                name: name.to_string(),
+                expression: format!("CASE{arms} ELSE ({otherwise}) END"),
+            });
+        }
+
+        for binding in bound {
+            context.add_binding(binding);
+        }
     }
 
     /// Translates a single PL/pgSQL IF or ELSIF condition expression.
@@ -1603,6 +1719,12 @@ impl VisitorMut for VariableSubstituter<'_> {
         }
         ControlFlow::Continue(())
     }
+}
+
+/// True when two bindings name the same variable and hold the same
+/// expression. `VariableBinding` carries no `PartialEq`.
+fn same_binding(left: &VariableBinding, right: &VariableBinding) -> bool {
+    left.name == right.name && left.expression == right.expression
 }
 
 /// Rewrites every read of a bound variable anywhere inside `node`.
