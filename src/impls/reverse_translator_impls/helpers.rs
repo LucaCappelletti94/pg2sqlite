@@ -20,7 +20,12 @@ use sqlparser::{
 
 use crate::{
     errors::Error,
-    impls::{direction_wrappers::define_direction_wrappers, shared_helpers::TranslationDirection},
+    impls::{
+        direction_wrappers::define_direction_wrappers,
+        object_name::validate_schema_qualified_object_name_for_sqlite,
+        reverse_translator_impls::ident_quoting::refuse_sqlite_specific_names,
+        shared_helpers::TranslationDirection,
+    },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
 
@@ -84,6 +89,23 @@ impl TranslationDirection for Reverse {
         _emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Delete, Error> {
         delete.reverse_translate(schema, options)
+    }
+
+    /// Refuses SQLite-specific database qualifiers and system catalog names,
+    /// then validates any schema qualification against the translation schema.
+    ///
+    /// SQLite's `main` and `temp` prefixes and the `sqlite_master` /
+    /// `sqlite_schema` tables have no PostgreSQL equivalent. Any other
+    /// schema qualifier that does not resolve in the translation schema is also
+    /// refused, for consistency with the INSERT path.
+    fn translate_object_name(
+        name: &sqlparser::ast::ObjectName,
+        schema: &ParserDB,
+        _options: &crate::options::TranslationContext<'_>,
+    ) -> Result<sqlparser::ast::ObjectName, Error> {
+        refuse_sqlite_specific_names(name)?;
+        validate_schema_qualified_object_name_for_sqlite(schema, name)?;
+        Ok(name.clone())
     }
 }
 

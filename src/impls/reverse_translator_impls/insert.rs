@@ -28,6 +28,9 @@ use crate::{
     errors::Error,
     impls::{
         object_name::{last_ident, resolve_translation_table},
+        reverse_translator_impls::ident_quoting::{
+            qualify_do_update_column_refs, refuse_sqlite_specific_names,
+        },
         shared_helpers::{
             numeric_minor_unit_scales_of_table, translate_on_conflict_do_update,
             translate_returning,
@@ -284,6 +287,37 @@ fn unscale_numeric_literals(
     })
 }
 
+/// Refuses `INSERT ... DEFAULT VALUES` when a `NOT NULL` column has no
+/// declared default.
+///
+/// SQLite fills the primary key from its implicit rowid, which PostgreSQL has
+/// no counterpart for, so the emitted statement would fail at the server with
+/// a not-null violation.
+fn refuse_default_values_without_defaults(insert: &Insert, schema: &ParserDB) -> Result<(), Error> {
+    if insert.source.is_some() || !insert.columns.is_empty() || !insert.assignments.is_empty() {
+        return Ok(());
+    }
+    let TableObject::TableName(name) = &insert.table else { return Ok(()) };
+    let Ok(Some(target)) = resolve_translation_table(schema, name) else { return Ok(()) };
+    let without_default = target.columns(schema).ok().and_then(|mut columns| {
+        columns.find(|column| {
+            column.is_nullable(schema).is_ok_and(|nullable| !nullable)
+                && column.default_value().is_none()
+        })
+    });
+    match without_default {
+        Some(column) => {
+            Err(Error::reverse_refusal(format!(
+                "INSERT DEFAULT VALUES into '{name}' requires a PostgreSQL default for every NOT \
+             NULL column; column '{}' has none. SQLite fills the primary key from its implicit \
+             rowid, which has no PostgreSQL equivalent. Use an explicit VALUES clause instead.",
+                column.column_name()
+            )))
+        }
+        None => Ok(()),
+    }
+}
+
 impl ReverseTranslator for Insert {
     type Schema = ParserDB;
     type PostgresEntry = Insert;
@@ -294,6 +328,13 @@ impl ReverseTranslator for Insert {
         schema: &Self::Schema,
         options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
+        // Refuse SQLite database qualifiers (main.t, temp.t) and system tables.
+        if let TableObject::TableName(name) = &self.table {
+            refuse_sqlite_specific_names(name)?;
+        }
+
+        refuse_default_values_without_defaults(self, schema)?;
+
         let target_scope = insert_target_scope(self, schema)?;
         let scoped = target_scope.as_ref().map(|scope| options.with_scope(scope));
         let options = scoped.as_ref().unwrap_or(options);
@@ -432,20 +473,27 @@ impl ReverseTranslator for Insert {
             }
         }
 
-        // Reverse translate ON CONFLICT expressions if present
+        // Qualify bare DO UPDATE column refs so PostgreSQL resolves them to the
+        // target row.
         if let Some(OnInsert::OnConflict(on_conflict)) = &self.on
             && let OnConflictAction::DoUpdate(do_update) = &on_conflict.action
         {
-            insert.on = Some(translate_on_conflict_do_update::<Reverse>(
+            let mut translated = translate_on_conflict_do_update::<Reverse>(
                 on_conflict,
                 do_update,
                 schema,
                 options,
-                // The ON CONFLICT DO UPDATE list is translated by the shared
-                // helper; no column-typed rewrites apply on the reverse path.
                 &crate::impls::shared_helpers::ColumnRewrites::default(),
                 &mut |_| {},
-            )?);
+            )?;
+            if let OnInsert::OnConflict(on_conflict) = &mut translated
+                && let OnConflictAction::DoUpdate(do_update) = &mut on_conflict.action
+                && let TableObject::TableName(target) = &self.table
+                && let Some(target) = last_ident(target)
+            {
+                qualify_do_update_column_refs(do_update, &target.value);
+            }
+            insert.on = Some(translated);
         }
 
         // Unscale integer literals in VALUES rows at NUMERIC column positions.
