@@ -530,15 +530,17 @@ fn translate_catalog_function(
     }
 
     match original_name {
-    // bool_and / bool_or / every
+    // bool_and / bool_or / every: ELSE 0 turns NULL into 0, collapsing NULL
+    // rows to false. WHEN NOT col THEN 0 with no ELSE lets NULL propagate
+    // through MIN/MAX, matching PostgreSQL's NULL-ignoring aggregate semantics.
     "bool_and" | "every" => FunctionTranslation::Unsupported(
         "bool_and/every is not supported in SQLite. \
-         Rewrite as: MIN(CASE WHEN col THEN 1 ELSE 0 END) = 1"
+         Rewrite as: MIN(CASE WHEN col THEN 1 WHEN NOT col THEN 0 END) = 1"
             .to_string(),
     ),
     "bool_or" => FunctionTranslation::Unsupported(
         "bool_or is not supported in SQLite. \
-         Rewrite as: MAX(CASE WHEN col THEN 1 ELSE 0 END) = 1"
+         Rewrite as: MAX(CASE WHEN col THEN 1 WHEN NOT col THEN 0 END) = 1"
             .to_string(),
     ),
     "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => {
@@ -678,9 +680,22 @@ fn translate_catalog_function(
     "json_typeof" | "jsonb_typeof" => FunctionTranslation::JsonTypeof,
     // json_agg / jsonb_agg: a JSON element needs parsing, not quoting.
     "json_agg" | "jsonb_agg" => FunctionTranslation::JsonAgg,
-    // json_object_agg / jsonb_object_agg: bare rename returns '{}' over no
-    // rows where PostgreSQL returns NULL. Wrapped in NULLIF(..., '{}').
-    "json_object_agg" | "jsonb_object_agg" => FunctionTranslation::JsonObjectAgg,
+    // json_object_agg: PostgreSQL preserves duplicate keys in JSON text output,
+    // matching json_group_object's behaviour. Wrapped in NULLIF(..., '{}').
+    "json_object_agg" => FunctionTranslation::JsonObjectAgg,
+    // jsonb_object_agg keeps the last value per duplicate key (JSONB normalises
+    // to a unique-key object). SQLite's json_group_object keeps every value,
+    // producing invalid JSON. No single-pass aggregate reproduces last-value
+    // semantics without naming each argument twice (unsafe for volatile exprs).
+    // Deduplicate before aggregating: SELECT json_group_object(k, v) FROM
+    // (SELECT DISTINCT ON (k) k, v FROM t ORDER BY k) s
+    "jsonb_object_agg" => FunctionTranslation::Unsupported(
+        "jsonb_object_agg keeps the last value per duplicate key; SQLite's \
+         json_group_object keeps every value, producing invalid JSON with duplicate \
+         keys. Deduplicate the input first: SELECT json_group_object(k, v) FROM \
+         (SELECT DISTINCT ON (k) k, v FROM t ORDER BY k) s"
+            .to_string(),
+    ),
     // greatest / least ignore NULLs, MAX / MIN do not.
     "greatest" => FunctionTranslation::Extremum { greatest: true },
     "least" => FunctionTranslation::Extremum { greatest: false },
