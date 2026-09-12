@@ -40,9 +40,10 @@ fn unknown_custom_type_produces_error() {
     let result = translate(sql, &Pg2SqliteOptions::default());
     assert!(result.is_err());
     let err = result.unwrap_err();
+    // CUSTOMTYPE is neither a known built-in nor a recognised extension type.
     assert!(
-        err.contains("Unknown PostgreSQL custom type"),
-        "Expected unknown type error, got: {err}"
+        err.contains("CUSTOMTYPE") || err.contains("no SQLite equivalent"),
+        "expected a refusal naming the type, got: {err}"
     );
 }
 

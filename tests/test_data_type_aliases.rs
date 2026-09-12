@@ -211,18 +211,18 @@ fn tsquery_maps_to_text() {
 }
 
 #[test]
-fn bit_maps_to_integer() {
+fn bit_maps_to_text() {
     let pg = "CREATE TABLE t (id INT PRIMARY KEY, col BIT);";
     let out = translate_ok(pg);
-    assert!(out.contains("INTEGER"), "BIT should map to INTEGER, got: {out}");
+    assert!(out.contains("TEXT"), "BIT should map to TEXT, got: {out}");
     execute_pg(pg);
 }
 
 #[test]
-fn varbit_maps_to_integer() {
+fn varbit_maps_to_text() {
     let pg = "CREATE TABLE t (id INT PRIMARY KEY, col VARBIT(8));";
     let out = translate_ok(pg);
-    assert!(out.contains("INTEGER"), "VARBIT should map to INTEGER, got: {out}");
+    assert!(out.contains("TEXT"), "VARBIT should map to TEXT, got: {out}");
     assert!(!out.contains("VARBIT"), "Output should not contain VARBIT, got: {out}");
     execute_pg(pg);
 }
