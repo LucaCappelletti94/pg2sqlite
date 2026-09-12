@@ -364,3 +364,65 @@ fn mutual_unaliased_read_policies_refused_at_translation() {
         "error message must name both tables; got: {msg}"
     );
 }
+
+/// The same cycle with one half hidden inside a function argument. A call is
+/// a node of the predicate like any other, so the reference through it closes
+/// the cycle just as a bare `EXISTS` does. Left unwalked, both views were
+/// emitted and SQLite answered `view a is circularly defined` at query time.
+#[test]
+fn a_mutual_cycle_through_a_function_argument_is_refused_at_translation() {
+    const SQL: &str = r#"
+        CREATE TABLE a (id INTEGER PRIMARY KEY, b_id INTEGER);
+        ALTER TABLE a ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY a_p ON a
+            USING (coalesce((SELECT 1 FROM b WHERE b.id = a.b_id), 0) > 0);
+
+        CREATE TABLE b (id INTEGER PRIMARY KEY, a_id INTEGER);
+        ALTER TABLE b ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY b_p ON b
+            USING (EXISTS (SELECT 1 FROM a WHERE a.id = b.a_id));
+    "#;
+
+    let err = Pg2Sqlite::default()
+        .sql(SQL)
+        .expect("parse")
+        .translate(&base_opts())
+        .expect_err("a cycle through a function argument must be refused at translation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("on a") && msg.contains("on b"),
+        "error message must name both tables; got: {msg}"
+    );
+}
+
+/// A reference to the guarded table inside a window clause. The `WHERE` half
+/// of this predicate was rewritten and the `PARTITION BY` half was not, so the
+/// emitted trigger named `documents.team_id`, which SQLite answers with `no
+/// such column`.
+#[test]
+fn an_outer_reference_inside_a_window_clause_is_rewritten() {
+    const SQL: &str = r"
+        CREATE TABLE assignments (id INTEGER PRIMARY KEY, group_id INTEGER);
+        CREATE TABLE documents (id INTEGER PRIMARY KEY, team_id INTEGER);
+        ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY p ON documents FOR INSERT WITH CHECK (
+            EXISTS (SELECT rank() OVER (PARTITION BY documents.team_id) FROM assignments
+                    WHERE assignments.group_id = documents.team_id));
+    ";
+
+    let emitted = Pg2Sqlite::default()
+        .sql(SQL)
+        .expect("parse")
+        .translate_to_sql(&base_opts())
+        .expect("translate")
+        .join("\n");
+
+    assert!(
+        !emitted.contains("documents.team_id"),
+        "every reference to the guarded table must be rewritten: {emitted}"
+    );
+    assert!(
+        emitted.contains("PARTITION BY NEW.team_id"),
+        "the window clause must read the row being written: {emitted}"
+    );
+}

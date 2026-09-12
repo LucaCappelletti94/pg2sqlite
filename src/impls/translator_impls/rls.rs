@@ -1484,56 +1484,6 @@ fn transform_join_operator_for_subquery(
     }
 }
 
-/// Transforms references to the outer table to use the prefix (OLD/NEW) or
-/// rename.
-///
-/// - If prefix is Some("OLD") or Some("NEW"): `ownables.id` -> `OLD.id` or
-///   `NEW.id`
-/// - If prefix is None: `ownables.id` -> `ownables_rls.id` (using
-///   renamed_table)
-fn transform_function_arg_with(
-    args: &FunctionArguments,
-    transform_expr_fn: &impl Fn(&Expr) -> Expr,
-) -> FunctionArguments {
-    match args {
-        FunctionArguments::List(arg_list) => {
-            let transform_clause = |clause: &FunctionArgumentClause| -> FunctionArgumentClause {
-                match clause {
-                    FunctionArgumentClause::OrderBy(order_by_exprs) => {
-                        FunctionArgumentClause::OrderBy(
-                            order_by_exprs
-                                .iter()
-                                .map(|ob| {
-                                    let mut t = ob.clone();
-                                    t.expr = transform_expr_fn(&ob.expr);
-                                    t
-                                })
-                                .collect(),
-                        )
-                    }
-                    FunctionArgumentClause::Limit(e) => {
-                        FunctionArgumentClause::Limit(transform_expr_fn(e))
-                    }
-                    FunctionArgumentClause::Having(HavingBound(kind, e)) => {
-                        FunctionArgumentClause::Having(HavingBound(*kind, transform_expr_fn(e)))
-                    }
-                    other => other.clone(),
-                }
-            };
-            FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: arg_list.duplicate_treatment,
-                args: arg_list
-                    .args
-                    .iter()
-                    .map(|arg| transform_function_arg_with_rls(arg, transform_expr_fn))
-                    .collect(),
-                clauses: arg_list.clauses.iter().map(transform_clause).collect(),
-            })
-        }
-        other => other.clone(),
-    }
-}
-
 fn transform_function_arg_with_rls(
     arg: &FunctionArg,
     transform_fn: &impl Fn(&Expr) -> Expr,
@@ -1590,20 +1540,11 @@ fn transform_outer_table_refs(
             Expr::CompoundIdentifier(idents.clone())
         }
 
-        Expr::Function(func) => {
-            let transformed_args = transform_function_arg_with(&func.args, &recurse);
-            Expr::Function(Function {
-                name: func.name.clone(),
-                args: transformed_args,
-                filter: func.filter.as_ref().map(|e| Box::new(recurse(e))),
-                null_treatment: func.null_treatment,
-                over: func.over.clone(),
-                within_group: func.within_group.clone(),
-                parameters: func.parameters.clone(),
-                uses_odbc_syntax: func.uses_odbc_syntax,
-            })
-        }
-
+        // A call falls through: `map_expr_children` walks every expression it
+        // carries, arguments, `FILTER`, `WITHIN GROUP` and the `OVER` window
+        // alike. The arm that used to stand here rewrote the first two and
+        // cloned the rest, so an outer reference inside `PARTITION BY`
+        // survived into the trigger.
         other => map_expr_children(other, &recurse),
     }
 }
