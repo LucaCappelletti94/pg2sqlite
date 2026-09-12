@@ -95,16 +95,17 @@ fn json_remove_nested_path() {
     assert_emits("SELECT json_remove(payload, '$.a.b') FROM t", "#- '{a,b}'");
 }
 
-// --- json_extract(j, '$.path') -> j #> '{path}' ---
+// --- json_extract(j, '$.path') is refused (E2) ---
+// Neither #> nor #>> preserves all SQLite value types faithfully.
 
 #[test]
-fn json_extract_single_key() {
-    assert_emits("SELECT json_extract(payload, '$.a') FROM t", "#> '{a}'");
+fn json_extract_is_refused() {
+    assert_rejected_with("SELECT json_extract(payload, '$.a') FROM t", "json_extract");
 }
 
 #[test]
-fn json_extract_nested_path() {
-    assert_emits("SELECT json_extract(payload, '$.a.b') FROM t", "#> '{a,b}'");
+fn json_extract_nested_path_is_also_refused() {
+    assert_rejected_with("SELECT json_extract(payload, '$.a.b') FROM t", "json_extract");
 }
 
 // --- json_quote(x) -> to_jsonb(x) ---
@@ -189,7 +190,7 @@ fn json_set_with_non_literal_path_is_rejected() {
 
 #[test]
 fn json_extract_with_array_index_path_is_rejected() {
-    assert_rejected_with("SELECT json_extract(payload, '$[0]') FROM t", "simple dotted literal");
+    assert_rejected_with("SELECT json_extract(payload, '$[0]') FROM t", "json_extract");
 }
 
 #[test]

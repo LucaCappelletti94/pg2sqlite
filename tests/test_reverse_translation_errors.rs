@@ -630,7 +630,7 @@ fn reverse_translate_non_dml_produces_error() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("Reverse translation only supports DML"),
+        err.contains("Reverse translation supports DML"),
         "Expected unsupported reverse statement error, got: {err}"
     );
 }

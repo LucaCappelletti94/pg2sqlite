@@ -139,14 +139,12 @@ const ACCEPT_CASES: &[(&str, &str)] = &[
     ("SELECT json_insert(payload, '$.a', 1) FROM t", "json_functions"),
     ("SELECT json_set(payload, '$.a.b', 1) FROM t", "json_functions"),
     ("SELECT json_remove(payload, '$.a') FROM t", "json_functions"),
-    ("SELECT json_extract(payload, '$.a') FROM t", "json_functions"),
     ("SELECT json_quote(s) FROM t", "json_functions"),
     ("SELECT json_valid(s) FROM t", "json_functions"),
     ("SELECT json_patch(payload, payload) FROM t", "json_functions"),
     ("SELECT json_array_length(payload) FROM t", "json_functions"),
     ("SELECT json_group_array(s) FROM t", "json_functions"),
     ("SELECT json_array(s) FROM t", "json_functions"),
-    ("SELECT json_extract(payload, '$.a.b') FROM t", "json_functions"),
     ("SELECT json_remove(payload, '$.a.b') FROM t", "json_functions"),
     // --- scalar functions (test_reverse_scalar_functions.rs,
     // test_reverse_output_is_valid_postgres.rs)
@@ -155,8 +153,6 @@ const ACCEPT_CASES: &[(&str, &str)] = &[
     ("SELECT unhex(s) FROM t", "scalar_functions"),
     ("SELECT instr(s, 'a') FROM t", "scalar_functions"),
     ("SELECT unicode(s) FROM t", "scalar_functions"),
-    ("SELECT min(n, 1) FROM t", "scalar_functions"),
-    ("SELECT max(n, 1) FROM t", "scalar_functions"),
     ("SELECT nullif(n, 0) FROM t", "scalar_functions"),
     ("SELECT group_concat(s, ',') FROM t", "scalar_functions"),
     ("SELECT group_concat(s) FROM t", "scalar_functions"),
@@ -433,6 +429,25 @@ const KNOWN_REFUSALS: &[(&str, &str)] = &[
     ("SELECT * FROM events WHERE created_at > INTERVAL '1' DAY", "does not exist"),
 ];
 
+/// Cases the translator itself refuses, each with a fragment of the refusal.
+///
+/// A refusal is the designed outcome where no PostgreSQL form answers what
+/// the SQLite input answered, so these sit beside the accepted cases rather
+/// than among the failures: the corpus records that the refusal is deliberate
+/// and that its message still says why.
+const TRANSLATOR_REFUSALS: &[(&str, &str)] = &[
+    // SQLite's json_extract unwraps a scalar, so a string arrives without
+    // quotes and a boolean as 1. PostgreSQL's #> answers jsonb, quotes and
+    // all, and #>> answers text for every kind, so neither preserves what the
+    // replica answered.
+    ("SELECT json_extract(payload, '$.a') FROM t", "json_extract"),
+    ("SELECT json_extract(payload, '$.a.b') FROM t", "json_extract"),
+    // A multi-argument min or max over a column that may be NULL: SQLite
+    // answers NULL and PostgreSQL's LEAST and GREATEST skip the NULL.
+    ("SELECT min(n, 1) FROM t", "LEAST"),
+    ("SELECT max(n, 1) FROM t", "GREATEST"),
+];
+
 #[test]
 fn reverse_output_runs_in_postgres() {
     let schema = build_schema();
@@ -524,6 +539,22 @@ fn reverse_output_runs_in_postgres() {
                     "[known_refusal] PostgreSQL accepted {sqlite_input:?} which was expected to be refused\n  translated: {pg_sql}\n  to fix: move this to ACCEPT_CASES"
                 ));
             }
+        }
+        n += 1;
+    }
+
+    // --- Refusals the translator makes on purpose -------------------------
+    for &(sqlite_input, fragment) in TRANSLATOR_REFUSALS {
+        refusal_count += 1;
+        match Pg2Sqlite::default().reverse_sql(sqlite_input, &schema, &options) {
+            Err(error) if error.to_string().contains(fragment) => {}
+            Err(error) => failures.push(format!(
+                "[translator_refusal] {sqlite_input:?} was refused with an unexpected message\n  expected fragment: {fragment:?}\n  actual error: {error}"
+            )),
+            Ok(statements) => failures.push(format!(
+                "[translator_refusal] {sqlite_input:?} was translated, and this corpus says it cannot be\n  translated: {}",
+                statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+            )),
         }
         n += 1;
     }

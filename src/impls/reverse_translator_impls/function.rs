@@ -96,8 +96,6 @@ pub enum FunctionReversal {
     ToJsonbPathFunc(String),
     /// Transform json_remove(j, '$.path') to j #- '{path}'
     ToJsonPathRemove,
-    /// Transform json_extract(j, '$.path') to j #> '{path}'
-    ToJsonPathExtract,
     /// Transform json_valid(x) to x IS JSON
     ToIsJson,
     /// Transform json_patch(a, b) to a || b (jsonb concatenation)
@@ -306,6 +304,35 @@ fn at_time_zone_for_modifier(
     }
 }
 
+/// True when a multi-argument `min` or `max` cannot become `LEAST` or
+/// `GREATEST` without changing what NULL does.
+///
+/// SQLite answers NULL when any argument is NULL and PostgreSQL skips the
+/// NULL arguments, so the two agree exactly when no argument can be NULL. A
+/// literal is the one argument this can prove non-NULL from the call alone.
+fn multi_argument_extremum_diverges(args: &FunctionArguments) -> bool {
+    let FunctionArguments::List(list) = args else { return false };
+    if list.args.len() < 2 {
+        return false;
+    }
+    !list.args.iter().all(|argument| {
+        let (FunctionArg::Named { arg, .. }
+        | FunctionArg::ExprNamed { arg, .. }
+        | FunctionArg::Unnamed(arg)) = argument;
+        matches!(
+            arg,
+            FunctionArgExpr::Expr(Expr::Value(ValueWithSpan { value, .. }))
+                if !matches!(value, Value::Null)
+        )
+    })
+}
+
+/// True when the call carries more than one argument, which is what tells
+/// SQLite's scalar `min` and `max` from their aggregate namesakes.
+fn multi_argument(args: &FunctionArguments) -> bool {
+    matches!(args, FunctionArguments::List(list) if list.args.len() > 1)
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn reverse_function(
     name: &ObjectName,
@@ -442,22 +469,42 @@ pub fn reverse_function(
         "instr" => FunctionReversal::ToPosition,
         // unicode(x) -> NULLIF(ascii(x), 0), NULL for the empty string.
         "unicode" => FunctionReversal::ToAsciiNullif,
-        // min(a, b, ...) -> LEAST(a, b, ...)
-        // Keep aggregate MIN(x) unchanged (single-arg form).
+        // Single-argument MIN(x) is the aggregate form; pass through unchanged.
+        // Multi-argument min returns NULL when any argument is NULL (SQLite),
+        // while LEAST ignores NULLs (PostgreSQL), so the two agree only when
+        // no argument can be NULL. A guard that restores SQLite's rule names
+        // each argument twice, which is the operand duplication this crate
+        // refuses to introduce.
         "min" => {
-            if let FunctionArguments::List(list) = args
-                && list.args.len() > 1
-            {
+            if multi_argument_extremum_diverges(args) {
+                return FunctionReversal::Reject(
+                    "min(a, b, ...): SQLite returns NULL when any argument is NULL; \
+                     PostgreSQL's LEAST ignores NULLs and returns the minimum non-null \
+                     value. A NULL-preserving guard must name each argument twice. \
+                     Use LEAST(a, b, ...) directly if NULLs are absent, or add an \
+                     explicit IS NULL check."
+                        .to_string(),
+                );
+            }
+            if multi_argument(args) {
                 return FunctionReversal::Rename("LEAST".to_string());
             }
             FunctionReversal::PassThrough
         }
-        // max(a, b, ...) -> GREATEST(a, b, ...)
-        // Keep aggregate MAX(x) unchanged (single-arg form).
+        // Single-argument MAX(x) is the aggregate form; pass through unchanged.
+        // Multi-argument max has the same NULL divergence as min above.
         "max" => {
-            if let FunctionArguments::List(list) = args
-                && list.args.len() > 1
-            {
+            if multi_argument_extremum_diverges(args) {
+                return FunctionReversal::Reject(
+                    "max(a, b, ...): SQLite returns NULL when any argument is NULL; \
+                     PostgreSQL's GREATEST ignores NULLs and returns the maximum \
+                     non-null value. A NULL-preserving guard must name each argument \
+                     twice. Use GREATEST(a, b, ...) directly if NULLs are absent, or \
+                     add an explicit IS NULL check."
+                        .to_string(),
+                );
+            }
+            if multi_argument(args) {
                 return FunctionReversal::Rename("GREATEST".to_string());
             }
             FunctionReversal::PassThrough
@@ -536,8 +583,22 @@ pub fn reverse_function(
         "json_insert" => FunctionReversal::ToJsonbPathFunc("jsonb_insert".to_string()),
         // json_remove(j, '$.path') -> j #- '{path}'
         "json_remove" => FunctionReversal::ToJsonPathRemove,
-        // json_extract(j, '$.path') -> j #> '{path}'
-        "json_extract" => FunctionReversal::ToJsonPathExtract,
+        // Neither #> (returns JSONB: strings quoted, booleans not 1) nor #>>
+        // (returns text for all types) preserves all SQLite value kinds.
+        // The forward direction maps all four of json_extract_path,
+        // json_extract_path_text, jsonb_extract_path, and
+        // jsonb_extract_path_text onto json_extract, so the reverse cannot
+        // tell them apart. Write the PostgreSQL operator directly.
+        "json_extract" => {
+            FunctionReversal::Reject(
+                "json_extract: neither #> (returns JSONB, so strings arrive quoted and \
+             booleans as true/false rather than 1/0) nor #>> (returns text for all \
+             types, so integers and booleans lose their type) preserves the SQLite \
+             answer for every value kind. Write #>> for text and #> for JSONB \
+             directly."
+                    .to_string(),
+            )
+        }
         // json_valid(x) -> x IS JSON
         "json_valid" => FunctionReversal::ToIsJson,
         // json_patch(a, b) -> a || b
@@ -614,7 +675,6 @@ pub fn reverse_function(
                     .to_string(),
             )
         }
-
         name => classify_unreversed(name, args, options),
     }
 }
@@ -1298,16 +1358,6 @@ pub fn reverse_translate_function(
                 op: BinaryOperator::HashMinus,
                 right: Box::new(string_literal(&path_str)),
             })
-        }
-        FunctionReversal::ToJsonPathExtract => {
-            // json_extract(j, '$.a') -> j #> '{a}'
-            let exprs = function_argument_exprs(&func.args);
-            let [value, path] = exprs.as_slice() else {
-                return Err(Error::reverse_refusal(
-                    "json_extract requires exactly 2 arguments".to_string(),
-                ));
-            };
-            json_path_extraction(value, path, "json_extract", schema, options)
         }
         FunctionReversal::ToIsJson => {
             // json_valid(x) -> x IS JSON

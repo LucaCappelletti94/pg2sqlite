@@ -19,8 +19,8 @@ use sql_traits::{
     utils::identifier_resolution::{identifiers_match, parse_lookup_identifier},
 };
 use sqlparser::ast::{
-    Delete, Expr, Ident, Insert, ObjectName, Query, SetExpr, Statement, Table, TableObject, Update,
-    Visit, Visitor,
+    Delete, Expr, Ident, Insert, ObjectName, Query, SetExpr, Statement, Table, TableObject,
+    TransactionModifier, Update, Visit, Visitor,
 };
 #[cfg(all(test, feature = "std"))]
 use sqlparser::ast::{LimitClause, TableFactor};
@@ -479,7 +479,26 @@ impl ReverseTranslator for Statement {
 
                 Statement::Query(Box::new(query.reverse_translate(schema, options)?))
             }
-            // Transaction control statements pass through unchanged
+            // IMMEDIATE, DEFERRED, and EXCLUSIVE are SQLite locking hints;
+            // PostgreSQL decides locking internally and rejects the modifier.
+            // Strip it: the transaction boundaries and committed state are
+            // identical with plain BEGIN.
+            Statement::StartTransaction {
+                modifier:
+                    Some(
+                        TransactionModifier::Immediate
+                        | TransactionModifier::Deferred
+                        | TransactionModifier::Exclusive,
+                    ),
+                ..
+            } => {
+                let mut stripped = self.clone();
+                if let Statement::StartTransaction { modifier, .. } = &mut stripped {
+                    *modifier = None;
+                }
+                stripped
+            }
+            // Remaining transaction control statements pass through unchanged.
             Statement::Commit { .. }
             | Statement::Rollback { .. }
             | Statement::StartTransaction { .. }
@@ -708,7 +727,7 @@ mod tests {
 
         let non_dml = Parser::parse_sql(&PostgreSqlDialect {}, "VACUUM").unwrap().remove(0);
         let err = non_dml.reverse_translate(&schema, &options).unwrap_err();
-        assert!(err.to_string().contains("Reverse translation only supports DML statements"));
+        assert!(err.to_string().contains("DML (INSERT, UPDATE, DELETE, SELECT)"));
     }
 
     #[test]

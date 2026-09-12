@@ -13,7 +13,10 @@ use alloc::{
 };
 
 use sql_traits::structs::ParserDB;
-use sqlparser::ast::{Expr, Query, TableWithJoins, WindowType};
+use sqlparser::{
+    ast::{Expr, Query, TableWithJoins, UnaryOperator, Value, ValueWithSpan, WindowType},
+    tokenizer::Span,
+};
 
 use crate::{
     errors::Error,
@@ -82,6 +85,44 @@ impl TranslationDirection for Reverse {
     ) -> Result<sqlparser::ast::Delete, Error> {
         delete.reverse_translate(schema, options)
     }
+}
+
+/// Convert an integer literal held as minor units back to its decimal
+/// representation at `scale`.
+///
+/// The replica stores 1.50 as 150 for a NUMERIC(10,2) column, so 150 at
+/// scale 2 becomes 1.50. Digits are shifted, not divided as a float, so
+/// 101 at scale 2 is exactly 1.01. Returns `None` when the expression is
+/// not a plain integer literal (decimal point, exponent, or a non-value
+/// node): the caller should reverse-translate it normally.
+pub(crate) fn unscale_integer_literal(expr: &Expr, scale: u32) -> Option<Expr> {
+    let (negated, digits) = match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => (false, digits),
+        Expr::UnaryOp { op: op @ (UnaryOperator::Minus | UnaryOperator::Plus), expr: inner } => {
+            match inner.as_ref() {
+                Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
+                    (matches!(op, UnaryOperator::Minus), digits)
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    // A decimal point or exponent means it is not a plain integer.
+    if digits.contains('.') || digits.contains(['e', 'E']) {
+        return None;
+    }
+    let minor_units: u128 = digits.parse().ok()?;
+    let divisor: u128 = 10_u128.pow(scale);
+    let int_part = minor_units / divisor;
+    let frac_part = minor_units % divisor;
+    let scale_usize = usize::try_from(scale).unwrap_or(38);
+    let frac_str = format!("{frac_part:0>scale_usize$}");
+    let sign = if negated && (int_part > 0 || frac_part > 0) { "-" } else { "" };
+    Some(Expr::Value(ValueWithSpan {
+        value: Value::Number(format!("{sign}{int_part}.{frac_str}"), false),
+        span: Span::empty(),
+    }))
 }
 
 define_direction_wrappers! {

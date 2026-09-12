@@ -234,13 +234,15 @@ pub enum Error {
         /// Why the relations in scope cannot answer it.
         reason: String,
     },
-    /// Error when attempting to reverse translate a non-DML statement.
+    /// Error when attempting to reverse translate a non-DML or non-transaction
+    /// statement.
     #[error(
-        "Reverse translation only supports DML statements (INSERT, UPDATE, DELETE, SELECT). \
+        "Reverse translation supports DML (INSERT, UPDATE, DELETE, SELECT) and transaction \
+         control (BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, ROLLBACK TO SAVEPOINT). \
          Received: {statement_type}"
     )]
     UnsupportedReverseStatement {
-        /// The type of statement that was attempted.
+        /// The type of statement that was received.
         statement_type: String,
     },
     /// Error when reverse translation encounters a SQLite named bind
