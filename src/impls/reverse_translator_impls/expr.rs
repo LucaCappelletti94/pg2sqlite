@@ -14,18 +14,28 @@ use alloc::{
 
 use sql_traits::structs::ParserDB;
 use sqlparser::{
-    ast::{BinaryOperator, Expr, ObjectNamePart, Value, ValueWithSpan},
+    ast::{
+        BinaryOperator, CaseWhen, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+        ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan,
+        helpers::attached_token::AttachedToken,
+    },
     tokenizer::Span,
 };
 
-use super::{function::reverse_translate_function, helpers::Reverse};
+use super::{
+    function::reverse_translate_function,
+    helpers::{Reverse, unscale_integer_literal},
+};
 use crate::{
     errors::Error,
     impls::{
-        function_helpers::{simple_function_expr, single_quoted_literal},
+        function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
         idioms::{ascii_code_point_argument, forward_lower_argument, is_uniform_random_float},
-        shared_helpers::translate_expr_recursive,
+        shared_helpers::{
+            declared_type_matches, is_scale_preserving_call, scale_of, translate_expr_recursive,
+        },
         temporal_arithmetic::reverse_temporal_arithmetic,
+        translator_impls::expr::sqlite_json_path_to_pg_text_path,
     },
     prelude::ReverseTranslator,
 };
@@ -128,6 +138,124 @@ fn is_backslash_escape(escape: &Expr) -> bool {
     )
 }
 
+/// True when `op` and its operands could involve a NUMERIC column's minor
+/// units, so numeric scale lookup is worthwhile.
+fn reverse_numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bool {
+    if !matches!(
+        op,
+        BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide
+            | BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+    ) {
+        return false;
+    }
+    fn addressable(expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(_)
+            | Expr::CompoundIdentifier(_)
+            | Expr::Nested(_)
+            | Expr::Cast { .. } => true,
+            Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
+                addressable(expr)
+            }
+            Expr::Function(f) => is_scale_preserving_call(f),
+            _ => false,
+        }
+    }
+    fn numeric_candidate(expr: &Expr) -> bool {
+        match expr {
+            Expr::Value(ValueWithSpan { value: Value::Number(_, _), .. }) => true,
+            Expr::Value(_) => false,
+            Expr::Nested(inner) => numeric_candidate(inner),
+            Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
+                numeric_candidate(expr)
+            }
+            other => addressable(other),
+        }
+    }
+    (addressable(left) || addressable(right)) && numeric_candidate(left) && numeric_candidate(right)
+}
+
+/// Unscale `expr` if it is an integer literal at `scale`, otherwise
+/// reverse-translate it normally.
+fn reverse_unscale_or_translate(
+    expr: &Expr,
+    scale: Option<u32>,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    if let Some(scale) = scale.filter(|&s| s > 0)
+        && let Some(unscaled) = unscale_integer_literal(expr, scale)
+    {
+        return Ok(unscaled);
+    }
+    expr.reverse_translate(schema, options)
+}
+
+/// Rescales integer literals inside an already-translated scale-preserving
+/// call.
+fn reverse_scale_call_arguments(call: Expr, scale: u32) -> Result<Expr, Error> {
+    let Expr::Function(mut function) = call else { return Ok(call) };
+    if !is_scale_preserving_call(&function) {
+        return Ok(Expr::Function(function));
+    }
+    if let FunctionArguments::List(list) = &mut function.args {
+        for argument in &mut list.args {
+            let (FunctionArg::Named { arg, .. }
+            | FunctionArg::ExprNamed { arg, .. }
+            | FunctionArg::Unnamed(arg)) = argument;
+            let FunctionArgExpr::Expr(expr) = arg else { continue };
+            if let Some(unscaled) = unscale_integer_literal(expr, scale) {
+                *expr = unscaled;
+                continue;
+            }
+            if matches!(expr, Expr::Function(_)) {
+                let taken = core::mem::replace(expr, Expr::Wildcard(AttachedToken::empty()));
+                *expr = reverse_scale_call_arguments(taken, scale)?;
+            }
+        }
+    }
+    Ok(Expr::Function(function))
+}
+
+/// True when `expr` is definitely non-text, so `||` would fail in PostgreSQL.
+fn is_definitely_non_text(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> bool {
+    match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(_, _) | Value::Boolean(_), .. }) => true,
+        Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr: inner } => {
+            is_definitely_non_text(inner, schema, options)
+        }
+        _ => {
+            declared_type_matches(expr, schema, options, |declared| {
+                let lower = declared.to_ascii_lowercase();
+                lower.starts_with("int")
+                    || lower.starts_with("real")
+                    || lower.starts_with("float")
+                    || lower.starts_with("double")
+                    || lower.starts_with("numeric")
+                    || lower.starts_with("decimal")
+                    || lower.starts_with("bool")
+                    || lower == "bigint"
+                    || lower == "smallint"
+                    || lower == "serial"
+                    || lower == "bigserial"
+            })
+            .unwrap_or(false)
+        }
+    }
+}
+
 impl ReverseTranslator for Expr {
     type Schema = ParserDB;
     type PostgresEntry = Self;
@@ -137,33 +265,12 @@ impl ReverseTranslator for Expr {
         schema: &Self::Schema,
         options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
-        // Intercept the forward-translated random() pattern before the
-        // recursive descent would try to reverse-translate random()
-        // inside it (and reject it).
-        if is_uniform_random_float(self) {
-            return Ok(simple_function_expr("random", vec![], None));
-        }
-
-        // The forward direction lowers ascii() onto a CASE over unicode(), so
-        // the exact shape restores to ascii() rather than reversing its
-        // pieces, which would answer NULL for the empty string.
-        if let Some(argument) = ascii_code_point_argument(self) {
-            return Ok(simple_function_expr(
-                "ascii",
-                vec![argument.reverse_translate(schema, options)?],
-                None,
-            ));
-        }
-
-        // Same, for the date arithmetic the forward direction lowers onto
-        // julianday and unixepoch: those two functions have no PostgreSQL name
-        // of their own and would be rejected one at a time.
-        if let Some(restored) = reverse_temporal_arithmetic(self, schema, options) {
+        if let Some(restored) = restore_lowered_idiom(self, schema, options) {
             return restored;
         }
 
         match self {
-            Expr::Function(func) => reverse_translate_function(func, schema, options),
+            Expr::Function(func) => reverse_numeric_call(self, func, schema, options),
 
             // SQLite's FTS5 MATCH operator (`table MATCH 'query'`) has no
             // direct PostgreSQL equivalent. Reject it so callers know to
@@ -228,64 +335,325 @@ impl ReverseTranslator for Expr {
                 ))
             }
 
-            // The forward direction lowers both sides of ILIKE, so
-            // `lower(x) LIKE lower(y)` restores to `x ILIKE y`. Measured on
-            // PostgreSQL 16, the two readings agree, including on non-ASCII
-            // case and on patterns holding wildcards.
-            //
-            // A backslash escape counts as absent here, and comes back off:
-            // it is what PostgreSQL's LIKE escapes with when nothing is
-            // written, so the two spellings read the same, and it is the one
-            // the forward direction now attaches to every emitted LIKE.
-            //
-            // Any other escape blocks the restore. `lower()` folds a letter
-            // escape character, and the two readings then disagree: with
-            // ESCAPE 'X', `'aXbc' ILIKE 'aXb_'` is false while the lowered
-            // form is true.
             Expr::Like { negated, any, expr, pattern, escape_char }
                 if escape_char.as_ref().is_none_or(|escape| is_backslash_escape(escape)) =>
             {
-                match (forward_lower_argument(expr), forward_lower_argument(pattern)) {
-                    (Some(subject), Some(target)) => {
-                        Ok(Expr::ILike {
-                            negated: *negated,
-                            any: *any,
-                            expr: Box::new(subject.reverse_translate(schema, options)?),
-                            pattern: Box::new(target.reverse_translate(schema, options)?),
-                            escape_char: None,
-                        })
-                    }
-                    _ => translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {}),
-                }
+                reverse_like(self, *negated, *any, expr, pattern, schema, options)
             }
-            // `COLLATE NOCASE`, `COLLATE BINARY`, and `COLLATE RTRIM` are
-            // SQLite-only collations with no PostgreSQL equivalent. Refuse them so
-            // the reverse output is not silently rejected by the server. Unknown
-            // collation names pass through because PostgreSQL allows user-defined
-            // collations.
-            Expr::Collate { collation, .. } => {
-                let name = collation
-                    .0
-                    .last()
-                    .and_then(ObjectNamePart::as_ident)
-                    .map_or_else(|| collation.to_string(), |id| id.value.clone());
-                if name.eq_ignore_ascii_case("NOCASE")
-                    || name.eq_ignore_ascii_case("BINARY")
-                    || name.eq_ignore_ascii_case("RTRIM")
-                {
-                    return Err(Error::reverse_refusal(format!(
-                        "COLLATE {name} is a SQLite-only collation with no PostgreSQL \
-                         equivalent. Map it to a collation registered in the destination \
-                         database, or drop the COLLATE clause if byte-order ordering is \
-                         acceptable."
-                    )));
-                }
-                translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {})
+            Expr::Collate { collation, .. } => reverse_collate(self, collation, schema, options),
+
+            // SQLite uses JSONPath ('$.a'), PostgreSQL uses text-array ('{a}'); convert.
+            Expr::BinaryOp {
+                op: op @ (BinaryOperator::HashArrow | BinaryOperator::HashLongArrow),
+                left,
+                right,
+            } => reverse_json_path_operator(op, left, right, schema, options),
+
+            Expr::BinaryOp { op: BinaryOperator::StringConcat, left, right } => {
+                reverse_string_concat(self, left, right, schema, options)
+            }
+
+            Expr::BinaryOp { left, op, right } => {
+                reverse_numeric_binary_op(self, left, op, right, schema, options)
+            }
+
+            Expr::InList { expr: operand, list, negated } => {
+                let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
+                Ok(Expr::InList {
+                    expr: Box::new(operand.reverse_translate(schema, options)?),
+                    list: list
+                        .iter()
+                        .map(|item| reverse_unscale_or_translate(item, scale, schema, options))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    negated: *negated,
+                })
+            }
+
+            Expr::Between { expr: operand, negated, low, high } => {
+                let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
+                Ok(Expr::Between {
+                    expr: Box::new(operand.reverse_translate(schema, options)?),
+                    negated: *negated,
+                    low: Box::new(reverse_unscale_or_translate(low, scale, schema, options)?),
+                    high: Box::new(reverse_unscale_or_translate(high, scale, schema, options)?),
+                })
+            }
+
+            Expr::Case { case_token, end_token, operand, conditions, else_result } => {
+                reverse_numeric_case(
+                    case_token,
+                    end_token,
+                    operand.as_deref(),
+                    conditions,
+                    else_result.as_deref(),
+                    schema,
+                    options,
+                )
             }
 
             _ => translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {}),
         }
     }
+}
+
+/// Restores `lower(x) LIKE lower(y)` to `x ILIKE y`, and leaves a plain
+/// `LIKE` alone.
+///
+/// Measured on PostgreSQL 16, the two readings agree, non-ASCII case and
+/// wildcard patterns included. A plain `LIKE` needs no rewrite because the
+/// forward direction emits `PRAGMA case_sensitive_like = true`, so the
+/// replica reads `LIKE` the case-sensitive way PostgreSQL does.
+fn reverse_like(
+    whole: &Expr,
+    negated: bool,
+    any: bool,
+    expr: &Expr,
+    pattern: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    match (forward_lower_argument(expr), forward_lower_argument(pattern)) {
+        (Some(subject), Some(target)) => {
+            Ok(Expr::ILike {
+                negated,
+                any,
+                expr: Box::new(subject.reverse_translate(schema, options)?),
+                pattern: Box::new(target.reverse_translate(schema, options)?),
+                escape_char: None,
+            })
+        }
+        _ => translate_expr_recursive::<Reverse>(whole, schema, options, &mut |_| {}),
+    }
+}
+
+/// Reverses a `COLLATE`, refusing the collations only SQLite has.
+///
+/// `NOCASE`, `BINARY` and `RTRIM` name no PostgreSQL collation, so the
+/// server would reject the statement. Any other name passes through, since
+/// PostgreSQL takes user-defined collations.
+fn reverse_collate(
+    whole: &Expr,
+    collation: &ObjectName,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let name = collation
+        .0
+        .last()
+        .and_then(ObjectNamePart::as_ident)
+        .map_or_else(|| collation.to_string(), |part| part.value.clone());
+    if ["NOCASE", "BINARY", "RTRIM"].iter().any(|only| name.eq_ignore_ascii_case(only)) {
+        return Err(Error::reverse_refusal(format!(
+            "COLLATE {name} is a SQLite-only collation with no PostgreSQL equivalent. Map it to \
+             a collation registered in the destination database, or drop the COLLATE clause if \
+             byte-order ordering is acceptable."
+        )));
+    }
+    translate_expr_recursive::<Reverse>(whole, schema, options, &mut |_| {})
+}
+
+/// Reverses `||`, refusing an operand PostgreSQL will not concatenate.
+///
+/// SQLite converts any operand to text, and PostgreSQL has `text || text`
+/// and no `text || integer`, so an operand the schema shows is numeric or
+/// boolean would fail at the server.
+fn reverse_string_concat(
+    whole: &Expr,
+    left: &Expr,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    for (side, operand) in [("left", left), ("right", right)] {
+        if is_definitely_non_text(operand, schema, options) {
+            return Err(Error::reverse_refusal(format!(
+                "|| {side} operand ({operand}) is not text; PostgreSQL's || requires text on \
+                 both sides. Cast it first: ({operand})::text"
+            )));
+        }
+    }
+    translate_expr_recursive::<Reverse>(whole, schema, options, &mut |_| {})
+}
+
+/// Reverses a call, bringing the literal arguments of a scale-preserving one
+/// back from minor units: `coalesce(amount, 150)` reads `coalesce(amount,
+/// 1.50)` at the server.
+fn reverse_numeric_call(
+    whole: &Expr,
+    func: &sqlparser::ast::Function,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let translated = reverse_translate_function(func, schema, options)?;
+    match scale_of(whole, schema, options) {
+        Some(scale) if scale > 0 => reverse_scale_call_arguments(translated, scale),
+        _ => Ok(translated),
+    }
+}
+
+/// Restores a shape the forward direction lowered, before the ordinary walk
+/// can take it apart.
+///
+/// Each of these lowerings spells a PostgreSQL function with SQLite pieces
+/// that carry no PostgreSQL name of their own, so reversing the pieces one at
+/// a time would refuse the statement or, for `ascii`, answer NULL where the
+/// original answered zero.
+fn restore_lowered_idiom(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<Result<Expr, Error>> {
+    if is_uniform_random_float(expr) {
+        return Some(Ok(simple_function_expr("random", vec![], None)));
+    }
+    if let Some(argument) = ascii_code_point_argument(expr) {
+        return Some(
+            argument
+                .reverse_translate(schema, options)
+                .map(|argument| simple_function_expr("ascii", vec![argument], None)),
+        );
+    }
+    reverse_temporal_arithmetic(expr, schema, options)
+}
+
+/// Brings the literal arms of a `CASE` back to the scale its other arms
+/// carry, and the `WHEN` literals of the simple form back to the operand's.
+fn reverse_numeric_case(
+    case_token: &AttachedToken,
+    end_token: &AttachedToken,
+    operand: Option<&Expr>,
+    conditions: &[CaseWhen],
+    else_result: Option<&Expr>,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let result_scale = conditions
+        .iter()
+        .map(|arm| &arm.result)
+        .chain(else_result)
+        .filter_map(|result| scale_of(result, schema, options))
+        .filter(|&scale| scale > 0)
+        .max();
+    let operand_scale =
+        operand.and_then(|operand| scale_of(operand, schema, options)).filter(|&scale| scale > 0);
+
+    Ok(Expr::Case {
+        case_token: case_token.clone(),
+        end_token: end_token.clone(),
+        operand: operand
+            .map(|operand| operand.reverse_translate(schema, options))
+            .transpose()?
+            .map(Box::new),
+        conditions: conditions
+            .iter()
+            .map(|arm| {
+                Ok(CaseWhen {
+                    condition: reverse_unscale_or_translate(
+                        &arm.condition,
+                        operand_scale,
+                        schema,
+                        options,
+                    )?,
+                    result: reverse_unscale_or_translate(
+                        &arm.result,
+                        result_scale,
+                        schema,
+                        options,
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?,
+        else_result: else_result
+            .map(|result| reverse_unscale_or_translate(result, result_scale, schema, options))
+            .transpose()?
+            .map(Box::new),
+    })
+}
+
+/// Brings an integer literal back to the decimal PostgreSQL means when the
+/// other side of the operation is a `NUMERIC` column held as minor units.
+///
+/// Division is refused instead: the replica already truncated its integer
+/// division over minor units, and the server would answer the exact numeric
+/// quotient, so no literal adjustment makes the two agree.
+fn reverse_numeric_binary_op(
+    whole: &Expr,
+    left: &Expr,
+    op: &BinaryOperator,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    if !reverse_numeric_rules_may_apply(op, left, right) {
+        return translate_expr_recursive::<Reverse>(whole, schema, options, &mut |_| {});
+    }
+
+    let left_scale = scale_of(left, schema, options);
+    let right_scale = scale_of(right, schema, options);
+    if *op == BinaryOperator::Divide
+        && (left_scale.is_some_and(|scale| scale > 0) || right_scale.is_some_and(|scale| scale > 0))
+    {
+        return Err(Error::reverse_refusal(format!(
+            "division involving a NUMERIC column cannot be faithfully reversed ({left} / \
+             {right}): the replica performed integer division over minor units and PostgreSQL \
+             will give exact numeric division. Rewrite the query to avoid dividing a NUMERIC \
+             column on the replica."
+        )));
+    }
+
+    if let Some(scale) = left_scale.filter(|&scale| scale > 0)
+        && let Some(unscaled) = unscale_integer_literal(right, scale)
+    {
+        return Ok(Expr::BinaryOp {
+            left: Box::new(left.reverse_translate(schema, options)?),
+            op: op.clone(),
+            right: Box::new(unscaled),
+        });
+    }
+    if let Some(scale) = right_scale.filter(|&scale| scale > 0)
+        && let Some(unscaled) = unscale_integer_literal(left, scale)
+    {
+        return Ok(Expr::BinaryOp {
+            left: Box::new(unscaled),
+            op: op.clone(),
+            right: Box::new(right.reverse_translate(schema, options)?),
+        });
+    }
+    translate_expr_recursive::<Reverse>(whole, schema, options, &mut |_| {})
+}
+
+/// Rewrites `#>` and `#>>` from SQLite's JSONPath right operand onto
+/// PostgreSQL's `text[]` one.
+///
+/// The same text means different paths in the two engines: SQLite reads
+/// `'$.a'` as the key `a`, and PostgreSQL reads it as a one-element array
+/// holding the three characters, so the lookup finds nothing and answers
+/// NULL. A path this cannot read is refused rather than passed through.
+fn reverse_json_path_operator(
+    op: &BinaryOperator,
+    left: &Expr,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let operator = if *op == BinaryOperator::HashLongArrow { "#>>" } else { "#>" };
+    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(path), .. }) = right else {
+        return Err(Error::reverse_refusal(format!(
+            "{operator} needs its right operand as a string literal; non-literal paths cannot be \
+             converted at translation time"
+        )));
+    };
+    let pg_path = sqlite_json_path_to_pg_text_path(path).ok_or_else(|| {
+        Error::reverse_refusal(format!(
+            "{operator} path '{path}' cannot be converted: only simple dotted paths like '$.a' or \
+             '$.a.b' are supported"
+        ))
+    })?;
+    Ok(Expr::BinaryOp {
+        left: Box::new(left.reverse_translate(schema, options)?),
+        op: op.clone(),
+        right: Box::new(string_literal(&pg_path)),
+    })
 }
 
 /// Builds PostgreSQL's POSIX regex match, `~` or `!~`.

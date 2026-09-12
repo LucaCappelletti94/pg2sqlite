@@ -45,9 +45,9 @@ use sql_traits::{
 use sqlparser::ast::{
     AlterTable, AlterTableOperation, AlterTableType, BeginTransactionKind, BinaryOperator,
     CascadeOption, ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction,
-    CreateTableOptions, CreateView, Delete, DescribeAlias, DiscardObject, ExceptionWhen, Expr,
-    FromTable, Ident, Merge, ObjectName, ObjectNamePart, ObjectType, Query, RenameTable,
-    RenameTableNameKind, Set, SqlOption, Statement, TableFactor, TableWithJoins,
+    CreateTableOptions, CreateView, Delete, DescribeAlias, DiscardObject, DropBehavior,
+    ExceptionWhen, Expr, FromTable, Ident, Merge, ObjectName, ObjectNamePart, ObjectType, Query,
+    RenameTable, RenameTableNameKind, Set, SqlOption, Statement, TableFactor, TableWithJoins,
     TransactionAccessMode, TransactionMode, TransactionModifier, TriggerEvent, TriggerPeriod,
     Truncate, TruncateIdentityOption, UnaryOperator, VacuumStatement, ViewColumnDef,
     helpers::attached_token::AttachedToken,
@@ -343,10 +343,14 @@ fn alter_view_as_create_view(
 /// Reason shared by the publish and subscribe statements.
 const REASON_PUB_SUB: &str = "SQLite has no channel to publish on or listen to.";
 
-/// Reason shared by type and domain definitions: a translated column carries
-/// the underlying SQLite storage class, so the named wrapper has no use.
-const REASON_TYPE_DEFINITION: &str = "SQLite has no composite, enum, or domain types, and a column of one is translated to the \
-     storage class underneath it.";
+/// Reason shared by type and domain definitions.
+///
+/// A column whose type is defined this way is refused at translate time because
+/// the type is not known to the crate, so the definition carries no useful
+/// information forward.
+const REASON_TYPE_DEFINITION: &str = "SQLite has no composite, enum, or domain types, and a \
+     column that uses one is refused at translation time because the crate has no storage mapping \
+     for the named type. Define the column with a built-in PostgreSQL type instead.";
 
 /// Reason shared by foreign data and credential definitions.
 const REASON_FOREIGN_DATA: &str = "SQLite reads only its own database file, so it has no foreign data layer for the definition \
@@ -785,8 +789,31 @@ fn translate_alter_table_operation(
             reject_untranslatable_rename_target(table_name, alter_table)?;
             Ok(Some(operation.clone()))
         }
-        AlterTableOperation::RenameColumn { .. } | AlterTableOperation::DropColumn { .. } => {
-            Ok(Some(operation.clone()))
+        AlterTableOperation::RenameColumn { .. } => Ok(Some(operation.clone())),
+        AlterTableOperation::DropColumn {
+            has_column_keyword,
+            column_names,
+            if_exists,
+            drop_behavior,
+        } => {
+            if matches!(drop_behavior, Some(DropBehavior::Cascade)) {
+                return Err(Error::forward_refusal(format!(
+                    "ALTER TABLE {} DROP COLUMN {} CASCADE cannot be translated. CASCADE drops \
+                     every object that depends on the column, which SQLite cannot do. Remove \
+                     the CASCADE clause; SQLite always behaves as RESTRICT and refuses the \
+                     drop when a dependency exists.",
+                    alter_table.name,
+                    column_names.iter().map(|n| n.value.as_str()).collect::<Vec<_>>().join(", ")
+                )));
+            }
+            // RESTRICT is PostgreSQL's default behaviour spelled out; omit the
+            // keyword, which SQLite does not accept.
+            Ok(Some(AlterTableOperation::DropColumn {
+                has_column_keyword: *has_column_keyword,
+                column_names: column_names.clone(),
+                if_exists: *if_exists,
+                drop_behavior: None,
+            }))
         }
         AlterTableOperation::AddColumn {
             column_keyword,

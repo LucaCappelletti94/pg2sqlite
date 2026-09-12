@@ -77,12 +77,15 @@ fn version_renames_to_sqlite_version() {
     sqlite_accepts(&result);
 }
 
+/// `json_type` answers `integer`, `real`, `true` and `false` where
+/// `jsonb_typeof` answers `number` and `boolean`, and restoring the six names
+/// needs the document a second time, so the reverse direction refuses rather
+/// than answering a different word.
 #[test]
-fn reverse_json_type_to_json_typeof() {
-    let result = helpers::reverse_translate_sql("SELECT json_type('\"hello\"') FROM t").unwrap();
-    let lower = result.to_lowercase();
-    assert!(lower.contains("json_typeof("), "json_type should reverse to json_typeof: {result}");
-    pg_parses(&result);
+fn reverse_json_type_is_refused_over_the_vocabulary() {
+    let error = helpers::reverse_translate_sql("SELECT json_type('\"hello\"') FROM t")
+        .expect_err("json_type has no faithful PostgreSQL form");
+    assert!(error.contains("json_type"), "{error}");
 }
 
 #[test]

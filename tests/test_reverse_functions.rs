@@ -218,19 +218,15 @@ fn reverse_char_to_chr() {
 }
 
 #[test]
-fn reverse_min_two_args_to_least() {
-    let pg = reverse(SCHEMA, "SELECT MIN(id, age) FROM users;");
-    assert!(pg.contains("LEAST"), "Expected LEAST: {pg}");
-    assert!(!pg.contains("MIN("), "Should not contain scalar MIN: {pg}");
-    assert_parses_as_pg(&pg);
+fn reverse_min_two_args_is_refused() {
+    let err = reverse_err(SCHEMA, "SELECT MIN(id, age) FROM users;");
+    assert!(err.contains("NULL"), "refusal must explain the NULL divergence: {err}");
 }
 
 #[test]
-fn reverse_max_two_args_to_greatest() {
-    let pg = reverse(SCHEMA, "SELECT MAX(id, age) FROM users;");
-    assert!(pg.contains("GREATEST"), "Expected GREATEST: {pg}");
-    assert!(!pg.contains("MAX("), "Should not contain scalar MAX: {pg}");
-    assert_parses_as_pg(&pg);
+fn reverse_max_two_args_is_refused() {
+    let err = reverse_err(SCHEMA, "SELECT MAX(id, age) FROM users;");
+    assert!(err.contains("NULL"), "refusal must explain the NULL divergence: {err}");
 }
 
 #[test]

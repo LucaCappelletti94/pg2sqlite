@@ -96,8 +96,6 @@ pub enum FunctionReversal {
     ToJsonbPathFunc(String),
     /// Transform json_remove(j, '$.path') to j #- '{path}'
     ToJsonPathRemove,
-    /// Transform json_extract(j, '$.path') to j #> '{path}'
-    ToJsonPathExtract,
     /// Transform json_valid(x) to x IS JSON
     ToIsJson,
     /// Transform json_patch(a, b) to a || b (jsonb concatenation)
@@ -112,9 +110,10 @@ pub enum FunctionReversal {
     /// SQLite's total always returns 0 for no rows; SUM returns NULL, so the
     /// COALESCE is required for a faithful round-trip.
     ToTotal,
-    /// Translate json_type(expr) to json_typeof(expr) or jsonb_typeof(expr)
-    /// based on the argument's declared column type. The choice is deferred to
-    /// `reverse_translate_function` because that stage has schema access.
+    /// `json_type(x, path)` does path extraction; `json_type(x)` is refused
+    /// because PostgreSQL's vocabulary (`number`, `string`, `boolean`)
+    /// collapses SQLite's six type names (`integer`, `real`, `text`,
+    /// `true`, `false`, `null`).
     JsonTypeOf,
     /// Translate json_array_length(expr) to json_array_length(expr) or
     /// jsonb_array_length(expr) based on the argument's declared column type.
@@ -305,6 +304,35 @@ fn at_time_zone_for_modifier(
     }
 }
 
+/// True when a multi-argument `min` or `max` cannot become `LEAST` or
+/// `GREATEST` without changing what NULL does.
+///
+/// SQLite answers NULL when any argument is NULL and PostgreSQL skips the
+/// NULL arguments, so the two agree exactly when no argument can be NULL. A
+/// literal is the one argument this can prove non-NULL from the call alone.
+fn multi_argument_extremum_diverges(args: &FunctionArguments) -> bool {
+    let FunctionArguments::List(list) = args else { return false };
+    if list.args.len() < 2 {
+        return false;
+    }
+    !list.args.iter().all(|argument| {
+        let (FunctionArg::Named { arg, .. }
+        | FunctionArg::ExprNamed { arg, .. }
+        | FunctionArg::Unnamed(arg)) = argument;
+        matches!(
+            arg,
+            FunctionArgExpr::Expr(Expr::Value(ValueWithSpan { value, .. }))
+                if !matches!(value, Value::Null)
+        )
+    })
+}
+
+/// True when the call carries more than one argument, which is what tells
+/// SQLite's scalar `min` and `max` from their aggregate namesakes.
+fn multi_argument(args: &FunctionArguments) -> bool {
+    matches!(args, FunctionArguments::List(list) if list.args.len() > 1)
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn reverse_function(
     name: &ObjectName,
@@ -441,22 +469,42 @@ pub fn reverse_function(
         "instr" => FunctionReversal::ToPosition,
         // unicode(x) -> NULLIF(ascii(x), 0), NULL for the empty string.
         "unicode" => FunctionReversal::ToAsciiNullif,
-        // min(a, b, ...) -> LEAST(a, b, ...)
-        // Keep aggregate MIN(x) unchanged (single-arg form).
+        // Single-argument MIN(x) is the aggregate form; pass through unchanged.
+        // Multi-argument min returns NULL when any argument is NULL (SQLite),
+        // while LEAST ignores NULLs (PostgreSQL), so the two agree only when
+        // no argument can be NULL. A guard that restores SQLite's rule names
+        // each argument twice, which is the operand duplication this crate
+        // refuses to introduce.
         "min" => {
-            if let FunctionArguments::List(list) = args
-                && list.args.len() > 1
-            {
+            if multi_argument_extremum_diverges(args) {
+                return FunctionReversal::Reject(
+                    "min(a, b, ...): SQLite returns NULL when any argument is NULL; \
+                     PostgreSQL's LEAST ignores NULLs and returns the minimum non-null \
+                     value. A NULL-preserving guard must name each argument twice. \
+                     Use LEAST(a, b, ...) directly if NULLs are absent, or add an \
+                     explicit IS NULL check."
+                        .to_string(),
+                );
+            }
+            if multi_argument(args) {
                 return FunctionReversal::Rename("LEAST".to_string());
             }
             FunctionReversal::PassThrough
         }
-        // max(a, b, ...) -> GREATEST(a, b, ...)
-        // Keep aggregate MAX(x) unchanged (single-arg form).
+        // Single-argument MAX(x) is the aggregate form; pass through unchanged.
+        // Multi-argument max has the same NULL divergence as min above.
         "max" => {
-            if let FunctionArguments::List(list) = args
-                && list.args.len() > 1
-            {
+            if multi_argument_extremum_diverges(args) {
+                return FunctionReversal::Reject(
+                    "max(a, b, ...): SQLite returns NULL when any argument is NULL; \
+                     PostgreSQL's GREATEST ignores NULLs and returns the maximum \
+                     non-null value. A NULL-preserving guard must name each argument \
+                     twice. Use GREATEST(a, b, ...) directly if NULLs are absent, or \
+                     add an explicit IS NULL check."
+                        .to_string(),
+                );
+            }
+            if multi_argument(args) {
                 return FunctionReversal::Rename("GREATEST".to_string());
             }
             FunctionReversal::PassThrough
@@ -535,8 +583,22 @@ pub fn reverse_function(
         "json_insert" => FunctionReversal::ToJsonbPathFunc("jsonb_insert".to_string()),
         // json_remove(j, '$.path') -> j #- '{path}'
         "json_remove" => FunctionReversal::ToJsonPathRemove,
-        // json_extract(j, '$.path') -> j #> '{path}'
-        "json_extract" => FunctionReversal::ToJsonPathExtract,
+        // Neither #> (returns JSONB: strings quoted, booleans not 1) nor #>>
+        // (returns text for all types) preserves all SQLite value kinds.
+        // The forward direction maps all four of json_extract_path,
+        // json_extract_path_text, jsonb_extract_path, and
+        // jsonb_extract_path_text onto json_extract, so the reverse cannot
+        // tell them apart. Write the PostgreSQL operator directly.
+        "json_extract" => {
+            FunctionReversal::Reject(
+                "json_extract: neither #> (returns JSONB, so strings arrive quoted and \
+             booleans as true/false rather than 1/0) nor #>> (returns text for all \
+             types, so integers and booleans lose their type) preserves the SQLite \
+             answer for every value kind. Write #>> for text and #> for JSONB \
+             directly."
+                    .to_string(),
+            )
+        }
         // json_valid(x) -> x IS JSON
         "json_valid" => FunctionReversal::ToIsJson,
         // json_patch(a, b) -> a || b
@@ -613,7 +675,6 @@ pub fn reverse_function(
                     .to_string(),
             )
         }
-
         name => classify_unreversed(name, args, options),
     }
 }
@@ -1298,16 +1359,6 @@ pub fn reverse_translate_function(
                 right: Box::new(string_literal(&path_str)),
             })
         }
-        FunctionReversal::ToJsonPathExtract => {
-            // json_extract(j, '$.a') -> j #> '{a}'
-            let exprs = function_argument_exprs(&func.args);
-            let [value, path] = exprs.as_slice() else {
-                return Err(Error::reverse_refusal(
-                    "json_extract requires exactly 2 arguments".to_string(),
-                ));
-            };
-            json_path_extraction(value, path, "json_extract", schema, options)
-        }
         FunctionReversal::ToIsJson => {
             // json_valid(x) -> x IS JSON
             let exprs = extract_exactly(&func.args, 1, "json_valid")?;
@@ -1334,16 +1385,6 @@ pub fn reverse_translate_function(
             })
         }
         FunctionReversal::JsonTypeOf => {
-            // json_type(x) -> json_typeof(x) or jsonb_typeof(x) depending on
-            // the argument's declared column type. PostgreSQL's
-            // json_typeof takes json, jsonb_typeof takes jsonb; the
-            // wrong variant fails at the server.
-            //
-            // Fallback when the argument is not a column reference:
-            // json_typeof, preserving the original rename behaviour
-            // as the conservative choice. A reference the relations
-            // in scope cannot resolve refuses rather than guessing,
-            // since the wrong spelling fails at the server.
             let exprs = function_argument_exprs(&func.args);
             let arg = exprs.first().copied();
             let is_jsonb = match arg {
@@ -1355,24 +1396,22 @@ pub fn reverse_translate_function(
                 None => false,
             };
             let func_name = if is_jsonb { "jsonb_typeof" } else { "json_typeof" };
-
-            // json_type(x, '$.a') asks for the type at a path, and both
-            // PostgreSQL spellings take one argument, so the path becomes an
-            // extraction around the value. This is the shape the forward
-            // direction emits for the `?`, `?|` and `?&` existence operators,
-            // so without it a script this crate wrote could not be
-            // read back.
+            // Two-argument form: type at a path; the path moves outside the
+            // call.
             if let [value, path] = exprs.as_slice() {
                 let extracted = json_path_extraction(value, path, "json_type", schema, options)?;
                 return Ok(simple_function_expr(func_name, vec![extracted], None));
             }
-
-            build_reverse_function(
-                ObjectName::from(vec![Ident::new(func_name)]),
-                func,
-                schema,
-                options,
-            )
+            // One-argument form: PostgreSQL's vocabulary ('number', 'string',
+            // 'boolean') collapses SQLite's six names; no readable
+            // static rewrite is faithful.
+            Err(Error::reverse_refusal(
+                "json_type(x) cannot reverse faithfully: PostgreSQL's jsonb_typeof returns \
+                 'number' for both 'integer' and 'real', and 'boolean' for both 'true' and \
+                 'false'. Use jsonb_typeof(x) directly if the collapsed vocabulary is \
+                 acceptable, or write a CASE expression to restore all six names."
+                    .to_string(),
+            ))
         }
         FunctionReversal::JsonArrayLength => {
             // The declared type chooses the overload, while unresolved columns
@@ -1448,16 +1487,27 @@ pub fn reverse_translate_function(
             Ok(simple_function_expr("decode", vec![inner, string_literal("hex")], None))
         }
         FunctionReversal::ToExtractEpoch => {
-            // unixepoch(x) and unixepoch(x, 'subsec') -> EXTRACT(EPOCH FROM x).
-            // The forward direction emits the second form, since the first
-            // drops the fraction.
             let exprs = function_argument_exprs(&func.args);
             let value = match exprs.as_slice() {
-                // unixepoch() is the current time, and SQLite answers it as
-                // whole seconds, which is why the floor and the cast are here:
-                // `extract(epoch from now())` carries a fraction.
+                // No argument: current time as whole seconds; extract carries a fraction.
                 [] => return Ok(current_epoch_seconds()),
-                [value] => value,
+                // One argument: SQLite truncates toward zero, same as floor.
+                [value] => {
+                    let inner = crate::prelude::ReverseTranslator::reverse_translate(
+                        *value, schema, options,
+                    )?;
+                    let extract = Expr::Extract {
+                        field: DateTimeField::Epoch,
+                        syntax: ExtractSyntax::From,
+                        expr: Box::new(inner),
+                    };
+                    return Ok(Expr::Cast {
+                        expr: Box::new(simple_function_expr("floor", vec![extract], None)),
+                        data_type: DataType::BigInt(None),
+                        format: None,
+                        kind: CastKind::DoubleColon,
+                    });
+                }
                 [
                     value,
                     Expr::Value(ValueWithSpan {

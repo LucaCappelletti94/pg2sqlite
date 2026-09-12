@@ -642,6 +642,23 @@ pub(crate) fn numeric_scale(
     Ok(numeric_precision_and_scale_of(expr, schema, options)?.map(|(_, scale)| scale))
 }
 
+/// The scale of `expr`, with a reference this cannot resolve answering no
+/// scale rather than failing the translation.
+///
+/// Deciding how to scale a value is a question about a type, and a reference
+/// whose relation is not in the translation batch has no answer. The refusal
+/// for a reference that genuinely cannot be translated is raised where the
+/// expression itself is translated, so a probe that failed here would refuse
+/// statements that need no scaling at all, `NEW.col` in a trigger body among
+/// them.
+pub(crate) fn scale_of(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<u32> {
+    numeric_scale(expr, schema, options).ok().flatten()
+}
+
 /// The declared precision of `expr`, which D1's multiplication rule needs.
 pub(crate) fn declared_numeric_precision(
     expr: &Expr,
@@ -651,14 +668,15 @@ pub(crate) fn declared_numeric_precision(
     Ok(numeric_precision_and_scale_of(expr, schema, options)?.map(|(precision, _)| precision))
 }
 
-/// Calls that answer on their operands' scale, so a literal beside one of
-/// their arguments is on that scale too.
+/// Calls that answer on their operands' NUMERIC scale.
 ///
-/// PostgreSQL gives each of these the common type of its arguments, and none
-/// of them divides or averages, which is where a result scale would be chosen
-/// rather than carried.
-const SCALE_PRESERVING_CALLS: [&str; 7] =
-    ["coalesce", "greatest", "least", "max", "min", "nullif", "sum"];
+/// - `abs`, `round`: PostgreSQL preserves the NUMERIC type exactly.
+/// - `avg`: the stored integers average as integers; a literal beside it is on
+///   the same minor-unit scale as the column.
+/// - `coalesce`, `greatest`, `least`, `max`, `min`, `nullif`, `sum`: return the
+///   common type of their arguments.
+const SCALE_PRESERVING_CALLS: [&str; 10] =
+    ["abs", "avg", "coalesce", "greatest", "least", "max", "min", "nullif", "round", "sum"];
 
 /// True when `function` answers on the scale of its NUMERIC arguments.
 pub(crate) fn is_scale_preserving_call(function: &Function) -> bool {
@@ -688,11 +706,8 @@ fn numeric_precision_and_scale_of(
         }
         Expr::Cast { data_type, .. } => Ok(read(data_type)),
         Expr::Function(function) if is_scale_preserving_call(function) => {
-            // The widest argument decides, since PostgreSQL gives the call the
-            // common type of its arguments and a narrower one is widened to
-            // it. An argument this cannot resolve, `NEW.col` in a trigger body
-            // among them, decides nothing rather than failing the translation:
-            // the caller reads a missing scale as "not a minor-unit value".
+            // Widest argument decides; errors from unresolvable refs decide
+            // nothing.
             let mut widest: Option<(u64, u32)> = None;
             for argument in function_argument_exprs(&function.args) {
                 if let Ok(Some(found)) = numeric_precision_and_scale_of(argument, schema, options)
@@ -703,6 +718,37 @@ fn numeric_precision_and_scale_of(
                 }
             }
             Ok(widest)
+        }
+        Expr::BinaryOp { left, op: BinaryOperator::Plus | BinaryOperator::Minus, right } => {
+            // `+` and `-` carry the wider of the two operand scales.
+            let lps = numeric_precision_and_scale_of(left, schema, options).ok().flatten();
+            let rps = numeric_precision_and_scale_of(right, schema, options).ok().flatten();
+            Ok(match (lps, rps) {
+                (Some((lp, ls)), Some((rp, rs))) => Some((lp.max(rp), ls.max(rs))),
+                (Some(ps), None) | (None, Some(ps)) => Some(ps),
+                (None, None) => None,
+            })
+        }
+        Expr::BinaryOp { left, op: BinaryOperator::Multiply, right } => {
+            // `*` of two NUMERIC values lands at the sum of their scales.
+            let lps = numeric_precision_and_scale_of(left, schema, options).ok().flatten();
+            let rps = numeric_precision_and_scale_of(right, schema, options).ok().flatten();
+            Ok(match (lps, rps) {
+                (Some((lp, ls)), Some((rp, rs))) => Some((lp + rp, ls + rs)),
+                (Some(ps), None) | (None, Some(ps)) => Some(ps),
+                (None, None) => None,
+            })
+        }
+        Expr::Subquery(query) => {
+            // Infer from a single scalar-subquery projection; suppress scope
+            // errors.
+            let SetExpr::Select(select) = query.body.as_ref() else { return Ok(None) };
+            let inner = match select.projection.as_slice() {
+                [SelectItem::UnnamedExpr(e)] => e,
+                [SelectItem::ExprWithAlias { expr, .. }] => expr,
+                _ => return Ok(None),
+            };
+            Ok(numeric_precision_and_scale_of(inner, schema, options).ok().flatten())
         }
         _ => declared_in_scope(expr, schema, options, read, numeric_precision_and_scale_of),
     }
@@ -952,8 +998,11 @@ impl ColumnRewrites {
 
 /// Rewrites a literal written into `column` as minor units, in place.
 ///
-/// Anything that is not a literal is left alone, which is what stops an
-/// expression the translator already scaled from being scaled a second time.
+/// Non-literals pass through: an expression the translator already scaled must
+/// not be scaled again.  CASE arms receive the same treatment as bare literals
+/// when the expression translator could not infer the scale from the arms
+/// alone. Only decimal literals are scaled inside a CASE: an integer arm was
+/// already placed at minor-unit scale by the expression translator.
 pub(crate) fn scale_literal_for_column(
     value: &mut Expr,
     column: &str,
@@ -962,10 +1011,36 @@ pub(crate) fn scale_literal_for_column(
     let Some((_, scale)) = scales.iter().find(|(name, _)| name.eq_ignore_ascii_case(column)) else {
         return Ok(());
     };
-    if let Some(scaled) = scale_decimal_literal(value, *scale)? {
+    let scale = *scale;
+    if let Expr::Case { conditions, else_result, .. } = value {
+        for arm in conditions.iter_mut() {
+            if is_decimal_number_literal(&arm.result)
+                && let Some(scaled) = scale_decimal_literal(&arm.result, scale)?
+            {
+                arm.result = scaled;
+            }
+        }
+        if let Some(arm) = else_result.as_deref_mut()
+            && is_decimal_number_literal(arm)
+            && let Some(scaled) = scale_decimal_literal(arm, scale)?
+        {
+            *arm = scaled;
+        }
+        return Ok(());
+    }
+    if let Some(scaled) = scale_decimal_literal(value, scale)? {
         *value = scaled;
     }
     Ok(())
+}
+
+/// True when `expr` is a number literal with a decimal point.
+fn is_decimal_number_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => digits.contains('.'),
+        Expr::UnaryOp { expr: inner, .. } => is_decimal_number_literal(inner),
+        _ => false,
+    }
 }
 
 /// Translates DO UPDATE assignments and WHERE inside an ON CONFLICT clause.

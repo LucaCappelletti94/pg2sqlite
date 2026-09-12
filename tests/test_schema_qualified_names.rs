@@ -318,8 +318,7 @@ fn non_public_schema_qualified_delete_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("id cannot be resolved to a declared column")
-            && message.contains("without an inspectable definition"),
+        message.contains("my_custom_app") && message.contains("does not resolve"),
         "unexpected error: {message}"
     );
 }
@@ -464,8 +463,7 @@ fn non_public_schema_qualified_join_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.contains("u.id cannot be resolved to a declared column")
-            && message.contains("without an inspectable definition"),
+        message.contains("my_custom_app") && message.contains("does not resolve"),
         "unexpected error: {message}"
     );
 }

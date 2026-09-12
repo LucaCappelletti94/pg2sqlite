@@ -9,6 +9,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Roughly two hundred test binaries, each carrying full debug info, fill a
+  # runner's disk before the suite finishes. Line tables keep the file and
+  # line in a backtrace and drop the rest.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
 
 permissions:
   contents: read
@@ -27,6 +33,16 @@ jobs:
             rust: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # One test binary per file in tests/, each about a hundred megabytes,
+      # and there are over two hundred of them. The preinstalled toolchains
+      # a Rust job never touches are what makes room for them.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/powershell \
+            /usr/local/lib/node_modules "${AGENT_TOOLSDIRECTORY}"
+          df -h /
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -209,6 +225,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/powershell \
+            /usr/local/lib/node_modules "${AGENT_TOOLSDIRECTORY}"
+          df -h /
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly

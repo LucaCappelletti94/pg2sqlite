@@ -135,21 +135,21 @@ fn an_alias_resolves_to_the_table_it_names() {
 #[test]
 fn a_jsonb_column_reverses_to_the_jsonb_function() {
     let emitted = reverse(
-        "SELECT json_type(b.payload) FROM b",
+        "SELECT json_array_length(b.payload) FROM b",
         "CREATE TABLE a (payload JSON); CREATE TABLE b (payload JSONB);",
     )
     .expect("reverse translation should succeed");
-    assert_eq!(emitted, "SELECT jsonb_typeof(b.payload) FROM b");
+    assert_eq!(emitted, "SELECT jsonb_array_length(b.payload) FROM b");
 }
 
 #[test]
 fn a_json_column_reverses_to_the_json_function() {
     let emitted = reverse(
-        "SELECT json_type(a.payload) FROM a",
+        "SELECT json_array_length(a.payload) FROM a",
         "CREATE TABLE a (payload JSON); CREATE TABLE b (payload JSONB);",
     )
     .expect("reverse translation should succeed");
-    assert_eq!(emitted, "SELECT json_typeof(a.payload) FROM a");
+    assert_eq!(emitted, "SELECT json_array_length(a.payload) FROM a");
 }
 
 /// A constraint check has no query around it, so its columns come from the

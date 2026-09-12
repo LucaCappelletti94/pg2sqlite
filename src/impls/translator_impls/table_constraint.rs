@@ -43,24 +43,7 @@ impl crate::traits::translator::TranslatorWithContext for TableConstraint {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match self {
             Self::Check(check_constraint) => {
-                match check_constraint.expr.translate_with_warnings(schema, options, emit) {
-                    Ok(translated_expr) => {
-                        crate::impls::translator_impls::column_option::warn_no_inherit_dropped(
-                            check_constraint,
-                            emit,
-                        );
-                        Ok(vec![Self::Check(sqlparser::ast::CheckConstraint {
-                            name: check_constraint.name.clone(),
-                            expr: Box::new(translated_expr),
-                            enforced: check_constraint.enforced,
-                            no_inherit: false,
-                        })])
-                    }
-                    Err(_) if options.is_remove_unsupported_check_constraints_enabled() => {
-                        Ok(Vec::new())
-                    }
-                    Err(e) => Err(e),
-                }
+                translate_check_constraint(check_constraint, schema, options, emit)
             }
             Self::ForeignKey(fk_constraint) => {
                 let mut updated_fk = fk_constraint.clone();
@@ -98,6 +81,7 @@ impl crate::traits::translator::TranslatorWithContext for TableConstraint {
                         characteristics,
                     ));
                 }
+                updated_pk.include = drop_include("PRIMARY KEY", &pk_constraint.include, emit);
                 Ok(vec![Self::PrimaryKey(updated_pk)])
             }
             Self::Unique(unique_constraint) => {
@@ -111,6 +95,7 @@ impl crate::traits::translator::TranslatorWithContext for TableConstraint {
                 if let Some(characteristics) = unique_constraint.characteristics {
                     return Err(deferrability_outside_a_foreign_key("UNIQUE", characteristics));
                 }
+                updated_unique.include = drop_include("UNIQUE", &unique_constraint.include, emit);
                 // `NULLS DISTINCT` is the default and is what SQLite does, so
                 // the clause is dropped rather than emitted: SQLite rejects it
                 // with `near "NULLS": syntax error`.
@@ -152,6 +137,66 @@ impl crate::traits::translator::TranslatorWithContext for TableConstraint {
             }
         }
     }
+}
+
+/// Translates a table-level `CHECK`, refusing the `NOT ENFORCED` spelling.
+///
+/// `NOT ENFORCED` is MySQL's; PostgreSQL 17 rejects it, so input carrying it
+/// is not the PostgreSQL this crate translates.
+fn translate_check_constraint(
+    check_constraint: &sqlparser::ast::CheckConstraint,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Vec<TableConstraint>, crate::errors::Error> {
+    if check_constraint.enforced == Some(false) {
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "CHECK ({}) NOT ENFORCED cannot be translated. NOT ENFORCED is a MySQL clause that \
+             PostgreSQL 17 does not accept, so input containing it is not the PostgreSQL this \
+             crate translates.",
+            check_constraint.expr
+        )));
+    }
+    match check_constraint.expr.translate_with_warnings(schema, options, emit) {
+        Ok(translated_expr) => {
+            crate::impls::translator_impls::column_option::warn_no_inherit_dropped(
+                check_constraint,
+                emit,
+            );
+            Ok(vec![TableConstraint::Check(sqlparser::ast::CheckConstraint {
+                name: check_constraint.name.clone(),
+                expr: Box::new(translated_expr),
+                enforced: check_constraint.enforced,
+                no_inherit: false,
+            })])
+        }
+        Err(_) if options.is_remove_unsupported_check_constraints_enabled() => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Drops a constraint's `INCLUDE` list, reporting the loss.
+///
+/// `INCLUDE` adds non-key payload columns to the index behind the constraint
+/// and changes no constraint semantics, so dropping it is result-neutral;
+/// SQLite rejects the clause with `near "INCLUDE": syntax error`.
+fn drop_include(
+    kind: &str,
+    include: &[Ident],
+    emit: crate::warnings::WarningSink<'_>,
+) -> Vec<Ident> {
+    if !include.is_empty() {
+        emit(crate::warnings::TranslationWarning::LossyDrop {
+            construct: format!(
+                "{kind} … INCLUDE ({})",
+                include.iter().map(|column| column.value.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            reason: "INCLUDE adds non-key payload columns to the backing index and changes no \
+                     constraint semantics. SQLite has no such clause."
+                .to_owned(),
+        });
+    }
+    Vec::new()
 }
 fn translate_index_columns(
     columns: &[IndexColumn],

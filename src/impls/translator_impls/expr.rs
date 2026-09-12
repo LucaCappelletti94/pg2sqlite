@@ -46,7 +46,7 @@ use crate::{
             declared_numeric_precision, declared_type_matches,
             extract_column_references_from_function, function_argument_exprs,
             is_integral_expression, numeric_scale, referenced_column_name, rescale_minor_units,
-            scale_decimal_literal, translate_expr_recursive,
+            scale_decimal_literal, scale_of, translate_expr_recursive,
         },
         temporal_arithmetic::{epoch_of_temporal_difference, translate_temporal_binary_op},
         timezone::{
@@ -510,20 +510,14 @@ enum RoundingDirection {
     Up,
 }
 
-/// Translate PostgreSQL `FLOOR(x)` or `CEIL(x)`, neither of which SQLite has.
+/// Translates `FLOOR(x)` or `CEIL(x)` for both NUMERIC columns and plain reals.
 ///
-/// `CAST(x AS INTEGER)` truncates toward zero, so it is already the answer on
-/// one side of zero and one off on the other. Which side depends on the
-/// direction, and a value that is already integral needs no adjustment either
-/// way:
+/// For NUMERIC columns (minor-unit integers at scale s), the formula is:
+/// `floor = (x - (x % f + f) % f) / f` where `f = 10^s`.
+/// `ceil  = -((-x - ((-x) % f + f) % f) / f)`
+/// The column reference appears twice; it is stable within a row.
 ///
-/// ```text
-/// FLOOR: CASE WHEN x >= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER) ELSE CAST(x AS INTEGER) - 1 END
-/// CEIL:  CASE WHEN x <= 0 OR x = CAST(x AS INTEGER) THEN CAST(x AS INTEGER) ELSE CAST(x AS INTEGER) + 1 END
-/// ```
-///
-/// So `FLOOR(3.7)` is 3 and `FLOOR(-3.7)` is -4, `CEIL(3.2)` is 4 and
-/// `CEIL(-3.2)` is -3.
+/// For plain reals, the existing `CASE WHEN` form applies.
 fn translate_integral_rounding(
     expr: &Expr,
     direction: RoundingDirection,
@@ -531,6 +525,12 @@ fn translate_integral_rounding(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
+    if let Some(scale) = scale_of(expr, schema, options).filter(|s| *s > 0) {
+        let factor = 10_u64.pow(scale);
+        let x = expr.translate_with_warnings(schema, options, emit)?;
+        return Ok(numeric_floor_or_ceil(x, factor, direction));
+    }
+
     let (truncation_is_exact, adjustment) = match direction {
         RoundingDirection::Down => (BinaryOperator::GtEq, BinaryOperator::Minus),
         RoundingDirection::Up => (BinaryOperator::LtEq, BinaryOperator::Plus),
@@ -565,6 +565,49 @@ fn translate_integral_rounding(
     };
 
     Ok(case_when(already_correct, cast_to_int, Some(adjusted)))
+}
+
+/// Floor or ceil of a NUMERIC column stored as minor-unit integer at `factor =
+/// 10^scale`.
+fn numeric_floor_or_ceil(x: Expr, factor: u64, direction: RoundingDirection) -> Expr {
+    let flit = || number_literal(&factor.to_string());
+    // floor(x) = (x - (x % f + f) % f) / f
+    let floor = |x: Expr, x2: Expr| {
+        Expr::BinaryOp {
+            left: Box::new(Expr::Nested(Box::new(Expr::BinaryOp {
+                left: Box::new(x),
+                op: BinaryOperator::Minus,
+                right: Box::new(Expr::Nested(Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Nested(Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::Nested(Box::new(Expr::BinaryOp {
+                            left: Box::new(x2),
+                            op: BinaryOperator::Modulo,
+                            right: Box::new(flit()),
+                        }))),
+                        op: BinaryOperator::Plus,
+                        right: Box::new(flit()),
+                    }))),
+                    op: BinaryOperator::Modulo,
+                    right: Box::new(flit()),
+                }))),
+            }))),
+            op: BinaryOperator::Divide,
+            right: Box::new(flit()),
+        }
+    };
+    match direction {
+        RoundingDirection::Down => floor(x.clone(), x),
+        RoundingDirection::Up => {
+            // ceil(x) = -floor(-x)
+            let neg = |e: Expr| Expr::UnaryOp { op: UnaryOperator::Minus, expr: Box::new(e) };
+            let neg_x = neg(x.clone());
+            let neg_x2 = neg(x);
+            Expr::UnaryOp {
+                op: UnaryOperator::Minus,
+                expr: Box::new(Expr::Nested(Box::new(floor(neg_x, neg_x2)))),
+            }
+        }
+    }
 }
 
 /// Translate PostgreSQL POSITION(substr IN str) to SQLite INSTR(str, substr).
@@ -771,10 +814,8 @@ fn extract_string_array_keys(expr: &Expr) -> Option<Vec<&str>> {
     elem.iter().map(single_quoted_literal).collect()
 }
 
-/// The distinct comparisons, handed to SQLite unchanged.
-///
-/// SQLite has taken both spellings since 3.39, under the 3.46 floor. They used
-/// to be lowered onto its bare `IS`, which `sqlparser` cannot read back.
+/// Scales NUMERIC literals before forwarding `IS [NOT] DISTINCT FROM` to
+/// SQLite.
 fn translate_distinct_comparison(
     left: &Expr,
     right: &Expr,
@@ -783,8 +824,26 @@ fn translate_distinct_comparison(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let l = left.translate_with_warnings(schema, options, emit)?;
-    let r = right.translate_with_warnings(schema, options, emit)?;
+    let (l, r) = if let Some(scale) = scale_of(left, schema, options).filter(|s| *s > 0) {
+        let l = left.translate_with_warnings(schema, options, emit)?;
+        let r = match scale_decimal_literal(right, scale)? {
+            Some(scaled) => scaled,
+            None => right.translate_with_warnings(schema, options, emit)?,
+        };
+        (l, r)
+    } else if let Some(scale) = scale_of(right, schema, options).filter(|s| *s > 0) {
+        let l = match scale_decimal_literal(left, scale)? {
+            Some(scaled) => scaled,
+            None => left.translate_with_warnings(schema, options, emit)?,
+        };
+        let r = right.translate_with_warnings(schema, options, emit)?;
+        (l, r)
+    } else {
+        (
+            left.translate_with_warnings(schema, options, emit)?,
+            right.translate_with_warnings(schema, options, emit)?,
+        )
+    };
     Ok(if is_not_distinct { null_safe_eq(l, r) } else { null_safe_neq(l, r) })
 }
 
@@ -1047,7 +1106,7 @@ fn translate_numeric_cast(
     let (_, target_scale) = numeric_precision_and_scale(info)?;
     let translated = expr.translate_with_warnings(schema, options, emit)?;
 
-    if let Some(source_scale) = numeric_scale(expr, schema, options)? {
+    if let Some(source_scale) = scale_of(expr, schema, options) {
         return Ok(rescale_minor_units(translated, source_scale, target_scale));
     }
 
@@ -1212,11 +1271,12 @@ fn translate_any_all_to_in(
         });
     }
     if let Some(elements) = quantifier_elements(right) {
+        let scale = scale_of(left, schema, options).filter(|s| *s > 0);
         return Ok(Expr::InList {
             expr: Box::new(translated_left),
             list: elements
                 .iter()
-                .map(|e| e.translate_with_warnings(schema, options, emit))
+                .map(|e| scale_or_translate(e, scale, schema, options, emit))
                 .collect::<Result<Vec<_>, _>>()?,
             negated,
         });
@@ -1483,12 +1543,11 @@ fn numeric_precision(
     })
 }
 
-/// Whether the NUMERIC scale rules could bear on this operation at all.
+/// True when NUMERIC scale rules might apply to this binary operation.
 ///
-/// The rules only reach arithmetic and comparison, and only when a side could
-/// name a column or be a decimal literal. Checking that first keeps a schema
-/// lookup out of every `AND` in every predicate, which is most of the binary
-/// operators in a real query.
+/// Keeps a schema lookup out of every `AND`/`OR` in every predicate by
+/// short-circuiting on the operator first, then on obviously non-numeric
+/// literals (strings, booleans, NULLs).
 fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bool {
     if !matches!(
         op,
@@ -1505,35 +1564,18 @@ fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bo
     ) {
         return false;
     }
-    fn addressable(expr: &Expr) -> bool {
-        match expr {
-            Expr::Identifier(_)
-            | Expr::CompoundIdentifier(_)
-            | Expr::Nested(_)
-            | Expr::Cast { .. } => true,
-            Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
-                addressable(expr)
-            }
-            // `sum(price) > 19.98` is a comparison against the column's scale,
-            // since these calls answer on their operands' scale.
-            Expr::Function(function) => {
-                crate::impls::shared_helpers::is_scale_preserving_call(function)
-            }
-            _ => false,
-        }
-    }
-    fn numeric_candidate(expr: &Expr) -> bool {
+    // A non-number Value is definitively not a minor-unit value.
+    // Everything else—column refs, casts, functions, binary ops, subqueries—
+    // might carry a NUMERIC scale, so the schema lookup decides.
+    fn is_potential_numeric(expr: &Expr) -> bool {
         match expr {
             Expr::Value(ValueWithSpan { value: Value::Number(_, _), .. }) => true,
             Expr::Value(_) => false,
-            Expr::Nested(inner) => numeric_candidate(inner),
-            Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
-                numeric_candidate(expr)
-            }
-            other => addressable(other),
+            Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } => is_potential_numeric(inner),
+            _ => true,
         }
     }
-    (addressable(left) || addressable(right)) && numeric_candidate(left) && numeric_candidate(right)
+    is_potential_numeric(left) || is_potential_numeric(right)
 }
 
 /// `a @> b` (a contains b): every element of b must be in a.
@@ -1602,15 +1644,22 @@ fn translate_binary_op(
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
     if numeric_rules_may_apply(op, left, right) {
-        let scales =
-            (numeric_scale(left, schema, options)?, numeric_scale(right, schema, options)?);
-        // A NUMERIC column holds minor units, so a decimal literal beside one
-        // has to be moved onto the same scale. Missing this is silent:
-        // `price = 19.99` compares 1999 against 19.99 and returns nothing.
-        //
-        // Division is left out: scaling the divisor here answered
-        // `price / 200`, which truncates to zero, where the arithmetic rules
-        // below refuse the operation for having no faithful form.
+        let scales = (scale_of(left, schema, options), scale_of(right, schema, options));
+
+        // Refuse as soon as either operand carries a NUMERIC scale: the
+        // stored integers are minor units, and integer division truncates.
+        if *op == BinaryOperator::Divide
+            && (scales.0.is_some_and(|s| s > 0) || scales.1.is_some_and(|s| s > 0))
+        {
+            return Err(crate::errors::Error::forward_refusal(format!(
+                "dividing NUMERIC values has no faithful SQLite form: PostgreSQL chooses the \
+                 result scale from both operand precisions, answering `{left} / {right}` at a \
+                 scale neither operand has, and SQLite's integer division truncates toward zero \
+                 on top of that. Write the scale you want, as CAST({left} AS NUMERIC(18,6)) / \
+                 ..., or do the division in the application."
+            )));
+        }
+
         let scalable = *op != BinaryOperator::Divide;
         if scalable
             && let Some(scale) = scales.0.filter(|scale| *scale > 0)
@@ -1633,6 +1682,7 @@ fn translate_binary_op(
             });
         }
         if let (Some(left_scale), Some(right_scale)) = scales
+            && (left_scale > 0 || right_scale > 0)
             && let Some(combined) = translate_numeric_arithmetic(
                 left,
                 op,
@@ -1644,6 +1694,37 @@ fn translate_binary_op(
             )?
         {
             return Ok(combined);
+        }
+        // Both sides hold minor units at different scales: bring the narrower
+        // up.
+        if let (Some(left_scale), Some(right_scale)) = scales
+            && left_scale != right_scale
+            && left_scale > 0
+            && right_scale > 0
+            && matches!(
+                op,
+                BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq
+            )
+        {
+            let wider = left_scale.max(right_scale);
+            return Ok(Expr::BinaryOp {
+                left: Box::new(rescale_minor_units(
+                    left.translate_with_warnings(schema, options, emit)?,
+                    left_scale,
+                    wider,
+                )),
+                op: op.clone(),
+                right: Box::new(rescale_minor_units(
+                    right.translate_with_warnings(schema, options, emit)?,
+                    right_scale,
+                    wider,
+                )),
+            });
         }
     }
 
@@ -2179,7 +2260,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
         Ok(match self {
             Expr::Function(func) => {
                 let translated = func.translate_with_warnings(schema, options, emit)?;
-                match numeric_scale(self, schema, options)? {
+                match scale_of(self, schema, options) {
                     Some(scale) if scale > 0 => {
                         scale_call_arguments(translated, scale, schema, options)?
                     }
@@ -2188,7 +2269,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
             }
             Expr::InList { expr: operand, list, negated } => {
                 rebuild(|| {
-                    let scale = numeric_scale(operand, schema, options)?.filter(|scale| *scale > 0);
+                    let scale = scale_of(operand, schema, options).filter(|scale| *scale > 0);
                     Ok::<Expr, crate::errors::Error>(Expr::InList {
                         expr: Box::new(operand.translate_with_warnings(schema, options, emit)?),
                         list: list
@@ -2201,7 +2282,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
             }
             Expr::Between { expr: operand, negated, low, high } => {
                 rebuild(|| {
-                    let scale = numeric_scale(operand, schema, options)?.filter(|scale| *scale > 0);
+                    let scale = scale_of(operand, schema, options).filter(|scale| *scale > 0);
                     Ok::<Expr, crate::errors::Error>(Expr::Between {
                         expr: Box::new(operand.translate_with_warnings(schema, options, emit)?),
                         negated: *negated,
@@ -2275,6 +2356,30 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     }
                     let translated_type =
                         data_type.translate_with_warnings(schema, options, emit)?;
+                    // A NUMERIC column cast to text must render the decimal
+                    // PostgreSQL renders, not the stored
+                    // minor-unit integer.
+                    if matches!(translated_type, sqlparser::ast::DataType::Text)
+                        && let Some(scale) = scale_of(expr, schema, options).filter(|s| *s > 0)
+                    {
+                        let translated_expr =
+                            expr.translate_with_warnings(schema, options, emit)?;
+                        let divisor = 10_u64.pow(scale);
+                        let real_value = Expr::Nested(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Nested(Box::new(Expr::BinaryOp {
+                                left: Box::new(translated_expr),
+                                op: BinaryOperator::Multiply,
+                                right: Box::new(number_literal("1.0")),
+                            }))),
+                            op: BinaryOperator::Divide,
+                            right: Box::new(number_literal(&divisor.to_string())),
+                        }));
+                        return Ok(simple_function_expr(
+                            "printf",
+                            vec![string_literal(&format!("%.{scale}f")), real_value],
+                            None,
+                        ));
+                    }
                     // A boolean rendered as text reads `true` or `false` in
                     // PostgreSQL, and the translated integer would give `1`.
                     if matches!(translated_type, sqlparser::ast::DataType::Text)
@@ -2564,12 +2669,55 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     })
                 })?
             }
+            Expr::Case { case_token, end_token, operand, conditions, else_result } => {
+                // The widest scale its non-literal arms carry is the scale
+                // the literal arms are written at.
+                let widest_scale = conditions
+                    .iter()
+                    .map(|arm| &arm.result)
+                    .chain(else_result.as_deref())
+                    .filter_map(|arm| scale_of(arm, schema, options))
+                    .filter(|scale| *scale > 0)
+                    .max();
+                if let Some(scale) = widest_scale {
+                    rebuild(|| {
+                        Ok::<Expr, crate::errors::Error>(Expr::Case {
+                            case_token: case_token.clone(),
+                            end_token: end_token.clone(),
+                            operand: operand
+                                .as_deref()
+                                .map(|e| e.translate_with_warnings(schema, options, emit))
+                                .transpose()?
+                                .map(Box::new),
+                            conditions: conditions
+                                .iter()
+                                .map(|cw| {
+                                    Ok(CaseWhen {
+                                        condition: cw
+                                            .condition
+                                            .translate_with_warnings(schema, options, emit)?,
+                                        result: scale_or_translate(
+                                            &cw.result,
+                                            Some(scale),
+                                            schema,
+                                            options,
+                                            emit,
+                                        )?,
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, crate::errors::Error>>()?,
+                            else_result: else_result
+                                .as_deref()
+                                .map(|e| scale_or_translate(e, Some(scale), schema, options, emit))
+                                .transpose()?
+                                .map(Box::new),
+                        })
+                    })?
+                } else {
+                    translate_expr_recursive::<Forward>(self, schema, options, emit)?
+                }
+            }
             // All remaining variants: delegate structural recursion to shared helper.
-            // This covers: Identifier, CompoundIdentifier, Value, Nested,
-            // IsNull, IsNotNull, IsTrue/IsFalse/IsNotTrue/IsNotFalse, Exists,
-            // InList, InSubquery, Between, Case, Subquery, Tuple,
-            // RLike, JsonAccess, QualifiedWildcard, Struct,
-            // Named, Dictionary, Map, MemberOf, etc.
             _ => translate_expr_recursive::<Forward>(self, schema, options, emit)?,
         })
     }

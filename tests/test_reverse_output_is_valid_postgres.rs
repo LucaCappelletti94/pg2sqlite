@@ -132,11 +132,12 @@ fn json_functions_reverse_to_postgres_spellings() {
         ("SELECT json_remove(payload, '$.a') FROM t", Emits("#-")),
         ("SELECT json_quote(s) FROM t", Emits("to_jsonb")),
         ("SELECT json_valid(s) FROM t", Emits("IS JSON")),
-        ("SELECT json_extract(payload, '$.a') FROM t", Emits("#>")),
+        // json_extract unwraps a scalar where #> answers jsonb and #>> answers
+        // text, so neither gives back what SQLite answered.
+        ("SELECT json_extract(payload, '$.a') FROM t", Rejected),
         ("SELECT json_patch(payload, payload) FROM t", Emits("||")),
-        // Already correct, kept so a regression shows up here.
-        // payload is JSONB in the schema, so json_type picks jsonb_typeof.
-        ("SELECT json_type(payload) FROM t", Emits("jsonb_typeof")),
+        // json_type(x) is refused: PostgreSQL's vocabulary collapses six SQLite names.
+        ("SELECT json_type(payload) FROM t", Rejected),
         ("SELECT json_array_length(payload) FROM t", Emits("jsonb_array_length")),
         ("SELECT json_group_array(s) FROM t", Emits("json_agg")),
         ("SELECT json_array(s) FROM t", Emits("json_build_array")),
@@ -162,8 +163,12 @@ fn scalar_functions_reverse_to_postgres_spellings() {
         ("SELECT group_concat(DISTINCT s) FROM t", Emits("string_agg(DISTINCT s, ',')")),
         ("SELECT instr(s, 'a') FROM t", Emits("POSITION")),
         ("SELECT unicode(s) FROM t", Emits("ascii")),
-        ("SELECT min(n, 1) FROM t", Emits("LEAST")),
-        ("SELECT max(n, 1) FROM t", Emits("GREATEST")),
+        // A column may be NULL, where SQLite answers NULL and LEAST and
+        // GREATEST skip it. Literal arguments still take the rename.
+        ("SELECT min(n, 1) FROM t", Rejected),
+        ("SELECT max(n, 1) FROM t", Rejected),
+        ("SELECT min(3, 1) FROM t", Emits("LEAST")),
+        ("SELECT max(3, 1) FROM t", Emits("GREATEST")),
         ("SELECT nullif(n, 0) FROM t", Emits("nullif")),
     ]);
 }

@@ -241,10 +241,11 @@ pub(crate) fn translate_column_def(
         if !is_rowid_alias(&translated_type, column, primary_key_columns) {
             return Err(no_value_source(&column.name, is_serial));
         }
-
-        // INTEGER PRIMARY KEY is a rowid alias in SQLite and already
-        // auto-assigns, so the identity clause is dropped, which is exactly
-        // how a serial translates.
+        if !is_serial {
+            reject_identity_sequence_options(column)?;
+        }
+        // The identity clause is dropped; INTEGER PRIMARY KEY auto-assigns as
+        // the rowid alias.
         let translated_options = column
             .options
             .iter()
@@ -338,6 +339,36 @@ pub(crate) fn translate_column_def(
         data_type: column.data_type.translate_with_warnings(schema, options, emit)?,
         options: translated_options,
     })
+}
+
+/// Refuses an identity column whose sequence options the rowid cannot honour.
+///
+/// SQLite assigns rowid values from 1 in steps of 1, so `START WITH`,
+/// `INCREMENT BY` and their siblings would be silently ignored and every
+/// identifier the column produces would be offset from PostgreSQL's.
+fn reject_identity_sequence_options(column: &ColumnDef) -> Result<(), crate::errors::Error> {
+    for option in &column.options {
+        let ColumnOption::Generated {
+            generation_expr: None,
+            sequence_options: Some(sequence_options),
+            ..
+        } = &option.option
+        else {
+            continue;
+        };
+        if sequence_options.is_empty() {
+            continue;
+        }
+        return Err(Error::forward_refusal(format!(
+            "GENERATED AS IDENTITY ({}) on column {} cannot be translated. SQLite assigns rowid \
+             values starting from 1 with an increment of 1 and has no sequence engine, so these \
+             options cannot be honoured. Remove them and let the rowid assign values, or manage \
+             the counter in the application.",
+            sequence_options.iter().map(ToString::to_string).collect::<Vec<_>>().join(" "),
+            column.name
+        )));
+    }
+    Ok(())
 }
 
 /// True when the translated column will be SQLite's rowid alias, the one place

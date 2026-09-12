@@ -55,6 +55,14 @@ impl crate::traits::translator::TranslatorWithContext for ColumnOptionDef {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         match &self.option {
             ColumnOption::Unique(unique_constraint) => {
+                if let Some(characteristics) = unique_constraint.characteristics {
+                    return Err(
+                        crate::impls::translator_impls::constraint_characteristic::deferrability_outside_a_foreign_key(
+                            "UNIQUE",
+                            characteristics,
+                        ),
+                    );
+                }
                 Ok(Some(ColumnOptionDef {
                     name: self.name.clone(),
                     option: unique_constraint.clone().into(),
@@ -68,10 +76,29 @@ impl crate::traits::translator::TranslatorWithContext for ColumnOptionDef {
                     )),
                 }))
             }
-            ColumnOption::NotNull | ColumnOption::PrimaryKey(_) => Ok(Some(self.clone())),
+            ColumnOption::NotNull => Ok(Some(self.clone())),
+            ColumnOption::PrimaryKey(pk) => {
+                if let Some(characteristics) = pk.characteristics {
+                    return Err(
+                        crate::impls::translator_impls::constraint_characteristic::deferrability_outside_a_foreign_key(
+                            "PRIMARY KEY",
+                            characteristics,
+                        ),
+                    );
+                }
+                Ok(Some(self.clone()))
+            }
             // Translate CHECK constraints to SQLite CHECK syntax.
             // When `remove_unsupported_check_constraints` is set, silently drop them instead.
             ColumnOption::Check(check) => {
+                if check.enforced == Some(false) {
+                    return Err(crate::errors::Error::forward_refusal(format!(
+                        "CHECK ({}) NOT ENFORCED cannot be translated. NOT ENFORCED is a MySQL \
+                         clause that PostgreSQL 17 does not accept, so input containing it is \
+                         not the PostgreSQL this crate translates.",
+                        check.expr
+                    )));
+                }
                 if options.is_remove_unsupported_check_constraints_enabled() {
                     Ok(None)
                 } else {

@@ -23,13 +23,16 @@ use sqlparser::ast::{
     TableObject,
 };
 
-use super::helpers::Reverse;
+use super::helpers::{Reverse, unscale_integer_literal};
 use crate::{
     errors::Error,
     impls::{
-        object_name::resolve_translation_table,
-        shared_helpers::{translate_on_conflict_do_update, translate_returning},
-        translator_impls::insert::insert_target_scope,
+        object_name::{last_ident, resolve_translation_table},
+        shared_helpers::{
+            numeric_minor_unit_scales_of_table, translate_on_conflict_do_update,
+            translate_returning,
+        },
+        translator_impls::insert::{for_each_insert_position, insert_target_scope},
     },
     prelude::ReverseTranslator,
 };
@@ -239,6 +242,48 @@ fn build_upsert_on_conflict(
     }))
 }
 
+type ParserTable = <ParserDB as DatabaseLike>::Table;
+
+/// Column names the INSERT targets, in value order.
+fn reverse_insert_column_names(
+    insert: &Insert,
+    table: &ParserTable,
+    schema: &ParserDB,
+) -> Result<Vec<String>, Error> {
+    if insert.columns.is_empty() {
+        Ok(table.columns(schema)?.map(|c| c.column_name().to_owned()).collect())
+    } else {
+        Ok(insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect())
+    }
+}
+
+/// Unscales integer literals at NUMERIC column positions back to decimal form.
+///
+/// Mirrors the forward `scale_numeric_literals` but divides by 10^s rather than
+/// multiplying.
+fn unscale_numeric_literals(
+    insert: &mut Insert,
+    table: &ParserTable,
+    schema: &ParserDB,
+    scales: &[(String, u32)],
+) -> Result<(), Error> {
+    if scales.is_empty() {
+        return Ok(());
+    }
+    let column_names = reverse_insert_column_names(insert, table, schema)?;
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, mut expr| {
+        if let Some(column) = column_names.get(idx)
+            && let Some(scale) =
+                scales.iter().find(|(name, _)| name.eq_ignore_ascii_case(column)).map(|(_, s)| *s)
+            && let Some(unscaled) = unscale_integer_literal(&expr, scale)
+        {
+            expr = unscaled;
+        }
+        Ok(expr)
+    })
+}
+
 impl ReverseTranslator for Insert {
     type Schema = ParserDB;
     type PostgresEntry = Insert;
@@ -396,11 +441,19 @@ impl ReverseTranslator for Insert {
                 do_update,
                 schema,
                 options,
-                // Reverse never unscales a NUMERIC, so there is nothing to
-                // move here either.
+                // The ON CONFLICT DO UPDATE list is translated by the shared
+                // helper; no column-typed rewrites apply on the reverse path.
                 &crate::impls::shared_helpers::ColumnRewrites::default(),
                 &mut |_| {},
             )?);
+        }
+
+        // Unscale integer literals in VALUES rows at NUMERIC column positions.
+        if let TableObject::TableName(name) = &self.table
+            && let Ok(Some(table)) = resolve_translation_table(schema, name)
+        {
+            let scales = numeric_minor_unit_scales_of_table(table, schema);
+            unscale_numeric_literals(&mut insert, table, schema, &scales)?;
         }
 
         Ok(insert)

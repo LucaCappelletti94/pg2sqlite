@@ -643,7 +643,7 @@ fn scale_numeric_literals(
 /// Wildcards and multi-column aliases are skipped (unmappable). All three
 /// column-typed rewrites share this walk so they cover exactly the same source
 /// shapes.
-fn for_each_insert_position(
+pub(crate) fn for_each_insert_position(
     body: &mut SetExpr,
     column_names: &[String],
     f: &mut impl FnMut(
