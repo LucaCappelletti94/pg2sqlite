@@ -52,9 +52,10 @@ pub(crate) fn rebuild<E>(make: impl FnOnce() -> Result<Expr, E>) -> Result<Expr,
 /// `for_each_child_expr` is hand-written against it with a pin test, since a
 /// read-only walk cannot borrow through a rebuilding one without copying.
 ///
-/// `Function` is not walked, so callers must handle it separately (function
-/// name rewriting, argument translation, etc.). Recurses into `Subquery`,
-/// `Exists`, and `InSubquery` via `f_query`.
+/// Every expression a call carries is a child here, so a caller that matches
+/// `Expr::Function` itself must not also delegate the same node, or the
+/// arguments are transformed twice. Recurses into `Subquery`, `Exists`, and
+/// `InSubquery` via `f_query`.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(crate) fn try_map_expr_children<E>(
     expr: &Expr,
