@@ -1,0 +1,12 @@
+name: pg2sqlite CodeQL configuration
+
+# `rust/cleartext-logging` cannot be satisfied by a SQL translator. Its payload
+# is SQL text, and every refusal and warning quotes the construct it refuses so
+# the caller can find it, which the query reads as writing sensitive data to a
+# log. It flagged 26 sites the moment UUID literals gained a canonicalisation
+# path, 25 of them assertion messages in tests, and none of them a credential:
+# a UUID in a schema literal is a key, not a secret. Secrets never pass through
+# this crate; a connection string belongs to the caller's driver.
+query-filters:
+  - exclude:
+      id: rust/cleartext-logging
