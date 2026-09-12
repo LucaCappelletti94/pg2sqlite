@@ -22,6 +22,7 @@ pub(crate) mod interval;
 pub(crate) mod object_name;
 pub(crate) mod placeholder;
 pub(crate) mod query_builder;
+pub(crate) mod replay;
 pub(crate) mod returning_scope;
 pub(crate) mod reverse_translator_impls;
 pub(crate) mod session_variable;
