@@ -41,6 +41,7 @@ use crate::{
         query_builder::{
             from_relation, plain_table_factor, single_expr_query, table_function_factor,
         },
+        replay::{is_replayable, reject_duplicated_operand},
         session_variable,
         shared_helpers::{
             declared_numeric_precision, declared_type_matches,
@@ -716,6 +717,11 @@ fn translate_substring(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
+    if let (Some(from), Some(_)) = (substring_from, substring_for)
+        && !is_replayable(from, options)
+    {
+        return Err(reject_duplicated_operand("SUBSTRING(... FROM ... FOR ...)", from));
+    }
     let translated = expr.translate_with_warnings(schema, options, emit)?;
     let start = substring_from
         .map(|e| e.translate_with_warnings(schema, options, emit))
@@ -976,9 +982,13 @@ fn translate_json_path_operator(
         )));
     };
 
+    let has_numeric_step = elements.iter().any(|e| matches!(e, JsonPathElement::Numeric { .. }));
+    if has_numeric_step && !is_replayable(left, options) {
+        return Err(reject_duplicated_operand(operator, left));
+    }
+
     let mut value = left.translate_with_warnings(schema, options, emit)?;
     if elements.is_empty() {
-        // The document itself, and its text for the text form.
         if text_form {
             value = Expr::BinaryOp {
                 left: Box::new(value),
@@ -1033,6 +1043,9 @@ fn translate_overlay(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
+    if !is_replayable(expr, options) {
+        return Err(reject_duplicated_operand("OVERLAY(... PLACING ... FROM ...)", expr));
+    }
     let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
     let translated_overlay_what = overlay_what.translate_with_warnings(schema, options, emit)?;
     let translated_overlay_from = overlay_from.translate_with_warnings(schema, options, emit)?;
@@ -1261,9 +1274,8 @@ fn translate_any_all_to_in(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let translated_left = left.translate_with_warnings(schema, options, emit)?;
-
     if let Expr::Subquery(q) = right {
+        let translated_left = left.translate_with_warnings(schema, options, emit)?;
         return Ok(Expr::InSubquery {
             expr: Box::new(translated_left),
             subquery: Box::new(q.translate_with_warnings(schema, options, emit)?),
@@ -1272,6 +1284,7 @@ fn translate_any_all_to_in(
     }
     if let Some(elements) = quantifier_elements(right) {
         let scale = scale_of(left, schema, options).filter(|s| *s > 0);
+        let translated_left = left.translate_with_warnings(schema, options, emit)?;
         return Ok(Expr::InList {
             expr: Box::new(translated_left),
             list: elements
@@ -1282,6 +1295,10 @@ fn translate_any_all_to_in(
         });
     }
 
+    if !is_replayable(left, options) {
+        return Err(reject_duplicated_operand("= ANY(array column)", left));
+    }
+    let translated_left = left.translate_with_warnings(schema, options, emit)?;
     let (compare_op, quantifier) = if negated {
         (BinaryOperator::NotEq, Quantifier::All)
     } else {
@@ -2028,12 +2045,17 @@ fn translate_binary_op(
         // doc ?& ARRAY[...] -> AND chain of json_type IS NOT NULL
         BinaryOperator::QuestionPipe | BinaryOperator::QuestionAnd => {
             return rebuild(|| {
-                let translated_doc = left.translate_with_warnings(schema, options, emit)?;
                 let keys = extract_string_array_keys(right).ok_or_else(|| {
                     crate::errors::Error::forward_refusal("?| / ?& require an ARRAY literal of string literals on the right-hand side; \
                      the key list must be known at translation time to build json_type() paths."
                         .to_string())
                 })?;
+                let operator_name =
+                    if matches!(op, BinaryOperator::QuestionAnd) { "?&" } else { "?|" };
+                if keys.len() >= 2 && !is_replayable(left, options) {
+                    return Err(reject_duplicated_operand(operator_name, left));
+                }
+                let translated_doc = left.translate_with_warnings(schema, options, emit)?;
                 let is_all = matches!(op, BinaryOperator::QuestionAnd);
                 let predicates: Vec<Expr> = keys
                     .iter()
@@ -2083,6 +2105,9 @@ fn translate_binary_op(
         // LIKE translation would misread % and _ in the prefix.
         BinaryOperator::PGStartsWith => {
             return rebuild(|| {
+                if !is_replayable(right, options) {
+                    return Err(reject_duplicated_operand("^@", right));
+                }
                 let translated_left = left.translate_with_warnings(schema, options, emit)?;
                 let translated_right = right.translate_with_warnings(schema, options, emit)?;
                 let prefix_len =
@@ -2654,6 +2679,9 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                                                  Enable with .with_math_functions_available()."
                                         .to_string(),
                                 ));
+                            }
+                            if !is_replayable(expr, options) {
+                                return Err(reject_duplicated_operand("||/", expr));
                             }
                             let x = expr.translate_with_warnings(schema, options, emit)?;
                             cube_root_closed_form(x)

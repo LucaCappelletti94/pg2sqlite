@@ -36,6 +36,7 @@ use crate::{
             positional_arity, simple_function_expr, single_quoted_literal, string_literal,
         },
         object_name::last_ident,
+        replay::{is_replayable, reject_duplicated_operand},
         session_variable,
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, declared_in_scope, declared_type_matches,
@@ -1895,12 +1896,24 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 let exprs = extract_exactly(&func.args, 2, "left")?;
                 let s = exprs[0].translate_with_warnings(schema, options, emit)?;
                 let n = exprs[1].translate_with_warnings(schema, options, emit)?;
+                if !is_replayable(&n, options) {
+                    return Err(reject_duplicated_operand("left", &n));
+                }
+                if !is_replayable(&s, options) {
+                    return Err(reject_duplicated_operand("left", &s));
+                }
                 Ok(left_closed_form(s, n))
             }
             FunctionTranslation::ToSubstrRight => {
                 let exprs = extract_exactly(&func.args, 2, "right")?;
                 let s = exprs[0].translate_with_warnings(schema, options, emit)?;
                 let n = exprs[1].translate_with_warnings(schema, options, emit)?;
+                if !is_replayable(&n, options) {
+                    return Err(reject_duplicated_operand("right", &n));
+                }
+                if !is_replayable(&s, options) {
+                    return Err(reject_duplicated_operand("right", &s));
+                }
                 Ok(right_closed_form(s, n))
             }
             FunctionTranslation::ToTimestampEpoch => {
@@ -2035,6 +2048,11 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                     .iter()
                     .map(|e| e.translate_with_warnings(schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?;
+                for part in &translated {
+                    if !is_replayable(part, options) {
+                        return Err(reject_duplicated_operand(func_label, part));
+                    }
+                }
                 Ok(make_closed_form(format, &translated, fractional_seconds))
             }
             FunctionTranslation::ToJsonExtractPath => {
@@ -2169,11 +2187,15 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                     .iter()
                     .map(|expr| expr.translate_with_warnings(schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?;
-                null_ignoring_extremum(
-                    &arguments,
-                    greatest,
-                    if greatest { "greatest" } else { "least" },
-                )
+                let label = if greatest { "greatest" } else { "least" };
+                if arguments.len() >= 2 {
+                    for arg in &arguments {
+                        if !is_replayable(arg, options) {
+                            return Err(reject_duplicated_operand(label, arg));
+                        }
+                    }
+                }
+                null_ignoring_extremum(&arguments, greatest, label)
             }
             FunctionTranslation::NumericRound => {
                 let exprs = function_argument_exprs(&func.args);
@@ -2409,6 +2431,9 @@ impl crate::traits::translator::TranslatorWithContext for Function {
             }
             FunctionTranslation::AsciiCodePoint => {
                 let exprs = extract_exactly(&func.args, 1, "ascii")?;
+                if !is_replayable(exprs[0], options) {
+                    return Err(reject_duplicated_operand("ascii", exprs[0]));
+                }
                 Ok(crate::impls::idioms::ascii_code_point(
                     exprs[0].translate_with_warnings(schema, options, emit)?,
                 ))
@@ -2436,7 +2461,11 @@ impl crate::traits::translator::TranslatorWithContext for Function {
             }
             FunctionTranslation::ToCbrt => {
                 let exprs = extract_exactly(&func.args, 1, "cbrt")?;
-                Ok(cube_root_closed_form(exprs[0].translate_with_warnings(schema, options, emit)?))
+                let x = exprs[0].translate_with_warnings(schema, options, emit)?;
+                if !is_replayable(&x, options) {
+                    return Err(reject_duplicated_operand("cbrt", &x));
+                }
+                Ok(cube_root_closed_form(x))
             }
             FunctionTranslation::ToLowerHex => {
                 let exprs = extract_exactly(&func.args, 2, "encode")?;
