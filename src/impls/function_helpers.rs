@@ -52,6 +52,27 @@ pub(crate) fn single_quoted_literal(expr: &Expr) -> Option<&str> {
     }
 }
 
+/// The one expression `(SELECT <expr>)` projects, when the subquery reads
+/// nothing and answers exactly that.
+///
+/// Lets a caller see the literal behind a subquery without guessing at what a
+/// subquery over a relation would answer.
+#[must_use]
+pub(crate) fn scalar_subquery_projection(expr: &Expr) -> Option<&Expr> {
+    let Expr::Subquery(query) = expr else { return None };
+    if query.with.is_some() || query.order_by.is_some() || query.limit_clause.is_some() {
+        return None;
+    }
+    let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else { return None };
+    if !select.from.is_empty() || select.selection.is_some() {
+        return None;
+    }
+    match select.projection.as_slice() {
+        [sqlparser::ast::SelectItem::UnnamedExpr(projected)] => Some(projected),
+        _ => None,
+    }
+}
+
 /// Create a numeric literal expression from a string representation.
 #[must_use]
 pub(crate) fn number_literal(n: &str) -> Expr {

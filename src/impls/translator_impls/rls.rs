@@ -1304,47 +1304,128 @@ fn transform_query(
         lowercased_columns: facts.lowercased_columns,
     };
 
-    if let sqlparser::ast::SetExpr::Select(ref mut select) = *transformed.body {
-        let mut subquery_table_renames: Vec<(String, String)> = Vec::new();
-        for table_with_joins in &mut select.from {
-            transform_table_with_joins_for_subquery(
-                table_with_joins,
-                &context,
-                &mut subquery_table_renames,
-            );
+    *transformed.body = transform_set_expr(&query.body, &context);
+
+    // ORDER BY, LIMIT and FETCH sit at the query level, outside any SELECT's
+    // scope, so an outer reference there needs the same rewrite.
+    let Some((outer_name, renamed)) = outer_table else { return transformed };
+    let rewrite = |expr: &Expr| transform_outer_table_refs(expr, outer_name, prefix, Some(renamed));
+
+    if let Some(order_by) = &mut transformed.order_by
+        && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
+    {
+        for order_expr in exprs {
+            order_expr.expr = rewrite(&order_expr.expr);
         }
+    }
 
-        let rewrite_expr =
-            |expr: &Expr| transform_subquery_expression(expr, &context, &subquery_table_renames);
-
-        if let Some(selection) = &mut select.selection {
-            *selection = rewrite_expr(selection);
-        }
-
-        for item in &mut select.projection {
-            if let sqlparser::ast::SelectItem::UnnamedExpr(expr)
-            | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } = item
-            {
-                *expr = rewrite_expr(expr);
+    if let Some(limit_clause) = &mut transformed.limit_clause {
+        match limit_clause {
+            sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by } => {
+                if let Some(limit) = limit {
+                    *limit = rewrite(limit);
+                }
+                if let Some(offset) = offset {
+                    offset.value = rewrite(&offset.value);
+                }
+                for key in limit_by {
+                    *key = rewrite(key);
+                }
             }
-        }
-
-        if let Some(having) = &mut select.having {
-            *having = rewrite_expr(having);
-        }
-
-        if let Some(qualify) = &mut select.qualify {
-            *qualify = rewrite_expr(qualify);
-        }
-
-        if let sqlparser::ast::GroupByExpr::Expressions(group_exprs, _) = &mut select.group_by {
-            for group_expr in group_exprs {
-                *group_expr = rewrite_expr(group_expr);
+            sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
+                *offset = rewrite(offset);
+                *limit = rewrite(limit);
             }
         }
     }
 
+    if let Some(fetch) = &mut transformed.fetch
+        && let Some(quantity) = &mut fetch.quantity
+    {
+        *quantity = rewrite(quantity);
+    }
+
     transformed
+}
+
+/// Transforms every position inside a `SetExpr`: the `Select` case handles
+/// `from`, `selection`, `projection`, `having`, `qualify`, and `group_by` as
+/// before; the `SetOperation` case recurses into both arms so that an outer
+/// table reference inside any arm (e.g. a `UNION ALL`) is reached; the `Query`
+/// case calls `transform_query` on the nested query.
+fn transform_set_expr(
+    set_expr: &sqlparser::ast::SetExpr,
+    context: &SubqueryTransformContext<'_>,
+) -> sqlparser::ast::SetExpr {
+    match set_expr {
+        sqlparser::ast::SetExpr::Select(select) => {
+            let mut transformed = select.as_ref().clone();
+            let mut subquery_table_renames: Vec<(String, String)> = Vec::new();
+            for table_with_joins in &mut transformed.from {
+                transform_table_with_joins_for_subquery(
+                    table_with_joins,
+                    context,
+                    &mut subquery_table_renames,
+                );
+            }
+
+            let rewrite_expr =
+                |expr: &Expr| transform_subquery_expression(expr, context, &subquery_table_renames);
+
+            if let Some(selection) = &mut transformed.selection {
+                *selection = rewrite_expr(selection);
+            }
+
+            for item in &mut transformed.projection {
+                if let sqlparser::ast::SelectItem::UnnamedExpr(expr)
+                | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } = item
+                {
+                    *expr = rewrite_expr(expr);
+                }
+            }
+
+            if let Some(having) = &mut transformed.having {
+                *having = rewrite_expr(having);
+            }
+
+            if let Some(qualify) = &mut transformed.qualify {
+                *qualify = rewrite_expr(qualify);
+            }
+
+            if let sqlparser::ast::GroupByExpr::Expressions(group_exprs, _) =
+                &mut transformed.group_by
+            {
+                for group_expr in group_exprs {
+                    *group_expr = rewrite_expr(group_expr);
+                }
+            }
+
+            sqlparser::ast::SetExpr::Select(Box::new(transformed))
+        }
+
+        sqlparser::ast::SetExpr::SetOperation { op, set_quantifier, left, right } => {
+            sqlparser::ast::SetExpr::SetOperation {
+                op: *op,
+                set_quantifier: *set_quantifier,
+                left: Box::new(transform_set_expr(left, context)),
+                right: Box::new(transform_set_expr(right, context)),
+            }
+        }
+
+        sqlparser::ast::SetExpr::Query(inner_query) => {
+            sqlparser::ast::SetExpr::Query(Box::new(transform_query(
+                inner_query,
+                context.options,
+                context.table,
+                context.schema,
+                context.prefix,
+                context.outer_table,
+                context.facts(),
+            )))
+        }
+
+        other => other.clone(),
+    }
 }
 
 fn transform_subquery_expression(

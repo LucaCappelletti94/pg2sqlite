@@ -29,7 +29,12 @@ use sql_traits::{
 use sqlparser::ast::{BinaryOperator, DataType, Expr, Ident, Value, ValueWithSpan};
 
 use crate::{
-    impls::function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
+    impls::{
+        function_helpers::{
+            scalar_subquery_projection, simple_function_expr, single_quoted_literal, string_literal,
+        },
+        query_builder::single_expr_query,
+    },
     prelude::Pg2SqliteOptions,
     traits::UuidRepresentation,
 };
@@ -122,10 +127,20 @@ pub(crate) fn make_uuid_conversion_call(arg: Expr, options: &Pg2SqliteOptions) -
 /// A literal is validated here rather than at run time, because `unhex` answers
 /// NULL for anything it cannot read and the column's `CHECK (length(id) = 16)`
 /// passes on NULL, so a misspelled UUID used to be stored as nothing at all.
+///
+/// `(SELECT '<uuid>')` is the literal written another way, so the conversion
+/// goes inside the subquery. A subquery that reads a relation is left alone:
+/// its value may already be a BLOB, and wrapping one would convert twice.
 pub(crate) fn maybe_wrap_text_uuid_literal(
     expr: Expr,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, crate::errors::Error> {
+    if let Some(projected) = scalar_subquery_projection(&expr)
+        && single_quoted_literal(projected).is_some()
+    {
+        let wrapped = maybe_wrap_text_uuid_literal(projected.clone(), options)?;
+        return Ok(Expr::Subquery(Box::new(single_expr_query(wrapped, Vec::new(), None))));
+    }
     let Some(text) = single_quoted_literal(&expr) else {
         return Ok(expr);
     };
@@ -135,8 +150,7 @@ pub(crate) fn maybe_wrap_text_uuid_literal(
         )));
     };
 
-    // A configured UDF gets the literal as written, since it does its own
-    // parsing and may expect the canonical hyphenated spelling.
+    // UDF callers do their own parsing and may expect the hyphenated spelling.
     if options.get_uuid_text_to_blob_function_name().is_some() {
         return Ok(make_uuid_conversion_call(expr, options));
     }

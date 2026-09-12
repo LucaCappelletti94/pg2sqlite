@@ -580,16 +580,11 @@ fn unknown_default_column(table: &str, column_name: &str) -> crate::errors::Erro
     ))
 }
 
-/// Rewrite each text-literal value at a vector-column position in a `VALUES`
-/// source so that the BLOB STRICT main table accepts it.
+/// Wraps text-literal values at vector-column positions so the BLOB STRICT
+/// table accepts them.
 ///
-/// Shapes that carry no vector literal to rewrite leave the insert verbatim:
-/// an undeclared target, a table function source, an `INSERT INTO ... SELECT`.
-/// A schema lookup that fails is reported instead, since the column list is
-/// what decides which value is at a vector position and a wrong answer there
-/// emits text into a BLOB column. `Table::columns` fails only for a table
-/// absent from the database it is asked about, and every caller resolves the
-/// table from this same schema, so no input reaches it today.
+/// Schema lookup failure is reported: the column list determines position and a
+/// wrong answer emits text into a BLOB column.
 fn wrap_vector_text_literals(
     insert: &mut Insert,
     table: Option<&ParserTable>,
@@ -600,40 +595,26 @@ fn wrap_vector_text_literals(
     if vector_cols.is_empty() {
         return Ok(());
     }
-
-    // Column order for matching values: the explicit list when present,
-    // otherwise the natural table order. Comparison is case-insensitive to
-    // match PostgreSQL's default identifier folding.
+    // Explicit list when present, natural table order otherwise;
+    // case-insensitive.
     let column_names = insert_column_names(insert, table, schema)?;
-
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
-
-    for row in &mut values.rows {
-        for (idx, expr) in row.content.iter_mut().enumerate() {
-            let Some(col_name) = column_names.get(idx) else { break };
-            if let Some((_, is_halfvec)) =
-                vector_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(col_name))
-            {
-                let taken = core::mem::replace(
-                    expr,
-                    sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("__placeholder")),
-                );
-                *expr = maybe_wrap_text_vector_literal(taken, *is_halfvec);
-            }
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
+        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
+        if let Some((_, is_halfvec)) =
+            vector_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(col_name))
+        {
+            Ok(maybe_wrap_text_vector_literal(expr, *is_halfvec))
+        } else {
+            Ok(expr)
         }
-    }
-    Ok(())
+    })
 }
 
-/// Rewrite every decimal literal targeting a `NUMERIC` column as the integer
-/// count of minor units the column now holds.
+/// Rewrites decimal literals at NUMERIC-column positions as minor-unit
+/// integers.
 ///
-/// A target that is not a declared table leaves the insert verbatim, and a
-/// schema lookup that fails is reported: the column list is what puts a
-/// literal on a `NUMERIC` column's scale, so a wrong answer writes unscaled
-/// money. Both source forms are handled, since a VALUES row and a SELECT
-/// projection map position to target column the same way.
+/// Schema lookup failure is reported: wrong column order writes unscaled money.
 fn scale_numeric_literals(
     insert: &mut Insert,
     table: Option<&ParserTable>,
@@ -648,31 +629,40 @@ fn scale_numeric_literals(
     let column_names = insert_column_names(insert, table, schema)?;
 
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    scale_insert_source_body(source.body.as_mut(), &column_names, scales)
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, mut expr| {
+        if let Some(column) = column_names.get(idx) {
+            scale_literal_for_column(&mut expr, column, scales)?;
+        }
+        Ok(expr)
+    })
 }
 
-/// Applies the D1 scaling to one arm of an insert source, recursing through
-/// set operations and nested parentheses.
+/// Applies `f` at every column position in a `VALUES`/`SELECT`/set-operation
+/// source.
 ///
-/// A VALUES row and a SELECT projection map position to target column the
-/// same way, and every arm of a set operation feeds the same columns. Only a
-/// literal projection is rewritten, aliased or bare: a projected column is
-/// already in minor units and a computed projection cannot be scaled without
-/// guessing, and a projection list containing a wildcard cannot be mapped
-/// positionally, so those pass through. A fractional literal that survives
-/// unscaled fails loudly on the STRICT table rather than storing a wrong
-/// number.
-fn scale_insert_source_body(
+/// Wildcards and multi-column aliases are skipped (unmappable). All three
+/// column-typed rewrites share this walk so they cover exactly the same source
+/// shapes.
+fn for_each_insert_position(
     body: &mut SetExpr,
     column_names: &[String],
-    scales: &[(String, u32)],
+    f: &mut impl FnMut(
+        usize,
+        sqlparser::ast::Expr,
+    ) -> Result<sqlparser::ast::Expr, crate::errors::Error>,
 ) -> Result<(), crate::errors::Error> {
     match body {
         SetExpr::Values(values) => {
             for row in &mut values.rows {
-                for (index, expr) in row.content.iter_mut().enumerate() {
-                    let Some(column) = column_names.get(index) else { break };
-                    scale_literal_for_column(expr, column, scales)?;
+                for (idx, expr) in row.content.iter_mut().enumerate() {
+                    let Some(_) = column_names.get(idx) else { break };
+                    let taken = core::mem::replace(
+                        expr,
+                        sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new(
+                            "__placeholder",
+                        )),
+                    );
+                    *expr = f(idx, taken)?;
                 }
             }
         }
@@ -690,11 +680,17 @@ fn scale_insert_source_body(
             }) {
                 return Ok(());
             }
-            for (index, item) in select.projection.iter_mut().enumerate() {
-                let Some(column) = column_names.get(index) else { break };
+            for (idx, item) in select.projection.iter_mut().enumerate() {
+                let Some(_) = column_names.get(idx) else { break };
                 match item {
                     SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                        scale_literal_for_column(expr, column, scales)?;
+                        let taken = core::mem::replace(
+                            expr,
+                            sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new(
+                                "__placeholder",
+                            )),
+                        );
+                        *expr = f(idx, taken)?;
                     }
                     SelectItem::Wildcard(_)
                     | SelectItem::QualifiedWildcard(..)
@@ -703,11 +699,11 @@ fn scale_insert_source_body(
             }
         }
         SetExpr::Query(query) => {
-            scale_insert_source_body(query.body.as_mut(), column_names, scales)?;
+            for_each_insert_position(query.body.as_mut(), column_names, f)?;
         }
         SetExpr::SetOperation { left, right, .. } => {
-            scale_insert_source_body(left, column_names, scales)?;
-            scale_insert_source_body(right, column_names, scales)?;
+            for_each_insert_position(left, column_names, f)?;
+            for_each_insert_position(right, column_names, f)?;
         }
         _ => {}
     }
@@ -850,13 +846,11 @@ fn database_filled_column(
     Ok(None)
 }
 
-/// Rewrite each text-literal value at a UUID-column position in a `VALUES`
-/// source so that the BLOB STRICT main table accepts it.
+/// Wraps text-literal values at UUID-column positions so the BLOB STRICT table
+/// accepts them.
 ///
-/// Reports a failed schema lookup for the reason `wrap_vector_text_literals`
-/// does: the column list decides which value sits at a UUID position, and a
-/// wrong answer writes text into a BLOB column. The shapes with nothing to
-/// rewrite still leave the insert verbatim.
+/// Schema lookup failure is reported: the column list determines position and a
+/// wrong answer emits text into a BLOB column.
 fn wrap_uuid_text_literals(
     insert: &mut Insert,
     table: Option<&ParserTable>,
@@ -868,39 +862,27 @@ fn wrap_uuid_text_literals(
     if uuid_cols.is_empty() {
         return Ok(());
     }
-
     let column_names = insert_column_names(insert, table, schema)?;
-
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    let SetExpr::Values(values) = source.body.as_mut() else { return Ok(()) };
-
-    for row in &mut values.rows {
-        for (idx, expr) in row.content.iter_mut().enumerate() {
-            let Some(col_name) = column_names.get(idx) else { break };
-            if uuid_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name)) {
-                let taken = core::mem::replace(
-                    expr,
-                    sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("__placeholder")),
-                );
-                // Runtime placeholders (e.g. ?1 from $1) cannot be validated
-                // at translation time. Wrap them in the brace-stripping unhex
-                // call so braced and plain text binds both land as the 16-byte
-                // blob the STRICT column requires.
-                *expr = if matches!(
-                    &taken,
-                    sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan {
-                        value: sqlparser::ast::Value::Placeholder(_),
-                        ..
-                    })
-                ) {
-                    make_uuid_conversion_call(taken, options)
-                } else {
-                    maybe_wrap_text_uuid_literal(taken, options)?
-                };
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
+        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
+        if uuid_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name)) {
+            // Placeholders cannot be validated; wrap them like subqueries.
+            if matches!(
+                &expr,
+                sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan {
+                    value: sqlparser::ast::Value::Placeholder(_),
+                    ..
+                })
+            ) {
+                Ok(make_uuid_conversion_call(expr, options))
+            } else {
+                maybe_wrap_text_uuid_literal(expr, options)
             }
+        } else {
+            Ok(expr)
         }
-    }
-    Ok(())
+    })
 }
 
 #[cfg(all(test, feature = "std"))]

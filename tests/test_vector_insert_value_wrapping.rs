@@ -320,3 +320,146 @@ fn apply_vector_sql(pg: &str) {
             .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{s}"));
     }
 }
+
+/// `INSERT INTO t (vec) SELECT literal` — the literal must be wrapped with
+/// `vec_f32(...)` even though the source is a SELECT, not a VALUES row.
+#[test]
+fn insert_select_text_literal_wraps_vec_f32() {
+    let sql = "
+        CREATE TABLE items (id INTEGER PRIMARY KEY, embedding vector(3));
+        INSERT INTO items (id, embedding) SELECT 1, '[0.1, 0.2, 0.3]';
+    ";
+    let out = translate(sql);
+    let insert = find_insert(&out);
+    assert!(
+        insert.contains("vec_f32('[0.1, 0.2, 0.3]')"),
+        "INSERT...SELECT with literal must wrap with vec_f32; got: {insert}"
+    );
+    apply_vector_sql(sql);
+}
+
+/// Both arms of a UNION ALL feed the same target column, so both literals
+/// must be wrapped.
+#[test]
+fn insert_select_union_all_wraps_both_arms() {
+    let sql = "
+        CREATE TABLE items (id INTEGER PRIMARY KEY, embedding vector(3));
+        INSERT INTO items (id, embedding)
+            SELECT 1, '[0.1, 0.2, 0.3]'
+            UNION ALL
+            SELECT 2, '[0.4, 0.5, 0.6]';
+    ";
+    let out = translate(sql);
+    let insert = find_insert(&out);
+    let count = insert.matches("vec_f32(").count();
+    assert_eq!(count, 2, "both UNION ALL arms must wrap with vec_f32; got: {insert}");
+    apply_vector_sql(sql);
+}
+
+/// `UPDATE t SET vec = (SELECT literal)` — a scalar subquery delivering a
+/// text literal to a vector BLOB column must be wrapped. PostgreSQL's
+/// assignment cast does this at runtime; the translator does it at translation
+/// time by placing `vec_f32(...)` around the subquery.
+#[test]
+fn update_subquery_assignment_wraps_vec_f32() {
+    let sql = "
+        CREATE TABLE items (id INTEGER PRIMARY KEY, embedding vector(3));
+        UPDATE items SET embedding = (SELECT '[0.1, 0.2, 0.3]') WHERE id = 1;
+    ";
+    let out = translate(sql);
+    let update = find_update(&out);
+    assert!(
+        update.contains("vec_f32("),
+        "UPDATE SET via scalar subquery must wrap with vec_f32; got: {update}"
+    );
+    apply_vector_sql(sql);
+}
+
+// ---------------------------------------------------------------------------
+// UUID blob-representation shapes — same three source forms.
+// ---------------------------------------------------------------------------
+
+const INSERT_UUID_STR: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+/// Translates `sql` with the UUID blob representation enabled.
+///
+/// Translated DDL uses STRICT BLOB columns and dynamically-generated DML;
+/// diesel has no compile-time schema for translator output.
+fn translate_uuid_blob(sql: &str) -> String {
+    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
+    Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob))
+        .expect("translate")
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Translates and executes every statement in `sql` against a fresh in-memory
+/// SQLite with the UUID blob representation enabled.
+///
+/// Translated DDL uses STRICT BLOB columns and dynamically-generated DML;
+/// diesel has no compile-time schema for translator output, so rusqlite is
+/// used through the existing `helpers::execute_all` shim.
+fn apply_uuid_blob_sql(sql: &str) {
+    use pg2sqlite::prelude::{Pg2SqliteOptions, UuidRepresentation};
+    helpers::execute_all(
+        sql,
+        &Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob),
+    );
+}
+
+/// `INSERT INTO t (uuid_col) SELECT literal` — the UUID text literal must be
+/// wrapped with a binary-conversion call even though the source is a SELECT.
+#[test]
+fn insert_select_uuid_text_literal_wraps_for_blob() {
+    let sql = &format!(
+        "CREATE TABLE items (id UUID PRIMARY KEY, name TEXT NOT NULL);
+         INSERT INTO items (id, name) SELECT '{INSERT_UUID_STR}', 'hello';"
+    );
+    let out = translate_uuid_blob(sql);
+    let insert = find_insert(&out);
+    assert!(
+        insert.contains("unhex("),
+        "INSERT...SELECT with UUID literal must be wrapped with unhex; got: {insert}"
+    );
+    apply_uuid_blob_sql(sql);
+}
+
+/// Both arms of a UNION ALL must wrap the UUID literal they carry.
+#[test]
+fn insert_select_union_all_uuid_literal_wraps() {
+    let sql = &format!(
+        "CREATE TABLE items (id UUID PRIMARY KEY, name TEXT NOT NULL);
+         INSERT INTO items (id, name)
+             SELECT '{INSERT_UUID_STR}', 'hello'
+             UNION ALL
+             SELECT '660e8400-e29b-41d4-a716-446655440000', 'world';"
+    );
+    let out = translate_uuid_blob(sql);
+    let insert = find_insert(&out);
+    let count = insert.matches("unhex(").count();
+    assert_eq!(count, 2, "both UNION ALL arms must wrap UUID literal; got: {insert}");
+    apply_uuid_blob_sql(sql);
+}
+
+/// `UPDATE t SET uuid_col = (SELECT literal)` — a scalar subquery is wrapped
+/// with the binary-conversion call, as PostgreSQL's assignment cast does at
+/// runtime.
+#[test]
+fn update_uuid_subquery_assignment_wraps_for_blob() {
+    let sql = &format!(
+        "CREATE TABLE items (id UUID PRIMARY KEY, name TEXT NOT NULL);
+         UPDATE items SET id = (SELECT '{INSERT_UUID_STR}') WHERE name = 'hello';"
+    );
+    let out = translate_uuid_blob(sql);
+    let update = find_update(&out);
+    assert!(
+        update.contains("unhex("),
+        "UPDATE SET via scalar subquery must wrap UUID with binary-conversion call; got: {update}"
+    );
+    apply_uuid_blob_sql(sql);
+}

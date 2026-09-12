@@ -115,6 +115,13 @@ impl PlPgSqlTranslator {
             context.bindings().map(|binding| binding.name.clone()).collect();
         let scoped = options.with_variables(&variables);
         let options = &scoped;
+        // Folded before the dispatch, so a trigger special reads the same in
+        // a statement body as it does in an `IF` condition. Read from a body
+        // and left alone, `TG_OP` was emitted as a column reference and
+        // SQLite refused the trigger.
+        let folded = Self::fold_trigger_specials_in_statement(stmt, context)?;
+        let stmt = &folded;
+
         match stmt {
             Statement::Set(set) => {
                 Self::handle_set_statement(set, context);
@@ -376,6 +383,32 @@ impl PlPgSqlTranslator {
         Ok(translated.to_string())
     }
 
+    /// Constant-folds every trigger special a statement reads.
+    ///
+    /// Driven by the derived traversal, so a read from any position lands:
+    /// the folding itself only ever rewrote the expression it was handed, and
+    /// the one caller handed it an `IF` condition.
+    fn fold_trigger_specials_in_statement(
+        stmt: &Statement,
+        context: &PlPgSqlContext,
+    ) -> Result<Statement, Error> {
+        let mut folded = stmt.clone();
+        let mut failure = None;
+        let _: ControlFlow<()> = visit_expressions_mut(&mut folded, |expr| {
+            if failure.is_none()
+                && let Err(error) = Self::fold_trigger_specials(expr, context)
+            {
+                failure = Some(error);
+            }
+            ControlFlow::Continue(())
+        });
+
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(folded),
+        }
+    }
+
     /// Constant-folds trigger special variables in `expr`.
     ///
     /// - `TG_OP` becomes the event string literal for a single-event trigger,
@@ -464,6 +497,14 @@ impl PlPgSqlTranslator {
                 Self::transform_with_insert_to_subquery(with, insert, context, options)?
             } else if let SetExpr::Delete(Statement::Delete(delete)) = &*query.body {
                 Self::transform_with_delete_to_subquery(with, delete, context, options)
+            } else if let SetExpr::Update(update) = &*query.body {
+                let mut with = with.clone();
+                for cte in &mut with.cte_tables {
+                    Self::transform_cte_query(&mut cte.query, context, options);
+                }
+                let mut statement = update.clone();
+                Self::inline_ctes(&mut statement, &with)?;
+                vec![statement]
             } else {
                 let transformed_body = Self::transform_query_body(&query.body, context, options)?;
 
@@ -518,6 +559,29 @@ impl PlPgSqlTranslator {
         }
 
         Ok(finalized)
+    }
+
+    /// Rewrites each read of a CTE into a derived table over its body.
+    ///
+    /// SQLite's trigger body grammar takes no `WITH` before an `UPDATE`, so
+    /// the binding has to travel to where it is read. Each CTE is inlined in
+    /// turn, so one defined over another keeps working.
+    fn inline_ctes(statement: &mut Statement, with: &sqlparser::ast::With) -> Result<(), Error> {
+        if with.recursive {
+            return Err(Error::forward_refusal(
+                "WITH RECURSIVE before an UPDATE has no SQLite form inside a trigger body: the \
+                 grammar takes no WITH there, and a recursive CTE cannot be inlined as a derived \
+                 table. Write the recursion as a separate statement, or move the UPDATE out of \
+                 the trigger."
+                    .to_string(),
+            ));
+        }
+
+        for cte in &with.cte_tables {
+            let mut inliner = CteInliner { name: &cte.alias.name, body: &cte.query };
+            let _: ControlFlow<()> = statement.visit(&mut inliner);
+        }
+        Ok(())
     }
 
     /// Moves a WITH RECURSIVE CTE inside the INSERT's SELECT source as a
@@ -1496,6 +1560,35 @@ impl Visitor for VariableSearch<'_> {
 /// True when `node` reads `var_name` anywhere inside it.
 fn references_variable<N: Visit>(node: &N, var_name: &str) -> bool {
     node.visit(&mut VariableSearch(var_name)).is_break()
+}
+
+/// Replaces a read of one CTE with a derived table over its body.
+struct CteInliner<'a> {
+    name: &'a Ident,
+    body: &'a Query,
+}
+
+impl VisitorMut for CteInliner<'_> {
+    type Break = ();
+
+    fn post_visit_table_factor(&mut self, factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        if let TableFactor::Table { name, alias, .. } = factor
+            && name.0.len() == 1
+            && crate::impls::object_name::last_ident(name)
+                .is_some_and(|ident| ident.value.eq_ignore_ascii_case(&self.name.value))
+        {
+            let alias = alias.clone().unwrap_or_else(|| {
+                TableAlias { name: self.name.clone(), columns: vec![], explicit: false, at: None }
+            });
+            *factor = TableFactor::Derived {
+                lateral: false,
+                subquery: Box::new(self.body.clone()),
+                alias: Some(alias),
+                sample: None,
+            };
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 #[cfg(all(test, feature = "std"))]

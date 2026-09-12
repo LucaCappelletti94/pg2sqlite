@@ -114,6 +114,35 @@ diesel::table! {
     }
 }
 
+// Tests for ORDER BY / LIMIT / set-operation gaps (R4 remainder).
+diesel::table! {
+    /// Helper table used in the ORDER BY outer-reference test.
+    guard_members (id) {
+        /// Row id.
+        id -> Integer,
+    }
+}
+
+diesel::table! {
+    /// Backing table for the guard_docs view.
+    guard_docs_rls (id) {
+        /// Row id.
+        id -> Integer,
+        /// Sort key referenced by the EXISTS ORDER BY.
+        score -> Integer,
+    }
+}
+
+diesel::table! {
+    /// View for guard_docs with an ORDER BY outer-reference policy.
+    guard_docs (id) {
+        /// Row id.
+        id -> Integer,
+        /// Sort key referenced by the EXISTS ORDER BY.
+        score -> Integer,
+    }
+}
+
 const POLICY_VIOLATION: &str = "new row violates row-level security policy";
 
 fn base_opts() -> Pg2SqliteOptions {
@@ -424,5 +453,127 @@ fn an_outer_reference_inside_a_window_clause_is_rewritten() {
     assert!(
         emitted.contains("PARTITION BY NEW.team_id"),
         "the window clause must read the row being written: {emitted}"
+    );
+}
+
+/// An outer reference inside a query-level ORDER BY clause. Before the fix,
+/// `transform_query` skipped `query.order_by` entirely, so the trigger body
+/// retained `guard_docs.score` and SQLite answered `no such column` the
+/// moment the trigger fired.
+#[test]
+fn outer_reference_in_order_by_is_rewritten_in_trigger() {
+    const SQL: &str = r"
+        CREATE TABLE guard_members (id INTEGER PRIMARY KEY);
+        CREATE TABLE guard_docs (id INTEGER PRIMARY KEY, score INTEGER NOT NULL);
+        ALTER TABLE guard_docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY p ON guard_docs FOR INSERT WITH CHECK (
+            EXISTS (SELECT 1 FROM guard_members ORDER BY guard_docs.score LIMIT 1));
+    ";
+    let mut conn = apply(SQL, &base_opts());
+
+    diesel::insert_into(guard_members::table)
+        .values(guard_members::id.eq(1))
+        .execute(&mut conn)
+        .expect("seed helper");
+
+    // Before fix: SQLite answers "no such column: guard_docs.score" here.
+    diesel::insert_into(guard_docs::table)
+        .values((guard_docs::id.eq(1), guard_docs::score.eq(5)))
+        .execute(&mut conn)
+        .expect("policy must admit the row without a no-such-column error");
+
+    let count: i64 = guard_docs_rls::table.count().get_result(&mut conn).expect("count");
+    assert_eq!(count, 1, "admitted row must reach the backing table");
+}
+
+/// An outer reference inside a query-level LIMIT clause. Before the fix,
+/// `transform_query` skipped `query.limit_clause`, so the trigger retained
+/// `lim_docs.page_size` and SQLite answered `no such column`.
+#[test]
+fn outer_reference_in_limit_is_rewritten_in_trigger() {
+    const SQL: &str = r"
+        CREATE TABLE lim_members (id INTEGER PRIMARY KEY);
+        CREATE TABLE lim_docs (id INTEGER PRIMARY KEY, page_size INTEGER NOT NULL);
+        ALTER TABLE lim_docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY p ON lim_docs FOR INSERT WITH CHECK (
+            EXISTS (SELECT 1 FROM lim_members LIMIT lim_docs.page_size));
+    ";
+    let emitted = Pg2Sqlite::default()
+        .sql(SQL)
+        .expect("parse")
+        .translate_to_sql(&base_opts())
+        .expect("translate")
+        .join("\n");
+
+    assert!(
+        !emitted.contains("lim_docs.page_size"),
+        "outer ref in LIMIT must be rewritten: {emitted}"
+    );
+    assert!(
+        emitted.contains("NEW.page_size"),
+        "LIMIT must reference the row being written: {emitted}"
+    );
+}
+
+/// An outer reference inside a UNION ALL arm of the EXISTS subquery body,
+/// trigger path. Neither arm of the set operation was visited, so
+/// `union_docs.owner_id` survived into the trigger unchanged and SQLite
+/// answered `no such column` when the trigger fired.
+#[test]
+fn outer_reference_in_set_operation_arm_is_rewritten_in_trigger() {
+    const SQL: &str = r"
+        CREATE TABLE union_aux (id INTEGER PRIMARY KEY);
+        CREATE TABLE union_docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
+        ALTER TABLE union_docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY p ON union_docs FOR INSERT WITH CHECK (
+            EXISTS (SELECT NULL FROM union_aux WHERE 1=0
+                    UNION ALL
+                    SELECT union_docs.owner_id FROM union_aux WHERE union_aux.id = 1));
+    ";
+    let emitted = Pg2Sqlite::default()
+        .sql(SQL)
+        .expect("parse")
+        .translate_to_sql(&base_opts())
+        .expect("translate")
+        .join("\n");
+
+    assert!(
+        !emitted.contains("union_docs.owner_id"),
+        "outer ref in UNION ALL arm must be rewritten: {emitted}"
+    );
+    assert!(
+        emitted.contains("NEW.owner_id"),
+        "UNION ALL arm must reference the row being written: {emitted}"
+    );
+}
+
+/// The same gap on the read (view) path. A UNION ALL arm referencing the
+/// guarded table by name stayed unrewritten, so the view referenced itself
+/// rather than the backing table instead of `view_union_docs_rls`.
+#[test]
+fn outer_reference_in_set_operation_arm_is_rewritten_in_view() {
+    const SQL: &str = r"
+        CREATE TABLE view_union_aux (id INTEGER PRIMARY KEY);
+        CREATE TABLE view_union_docs (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
+        ALTER TABLE view_union_docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY p ON view_union_docs FOR SELECT USING (
+            EXISTS (SELECT NULL FROM view_union_aux WHERE 1=0
+                    UNION ALL
+                    SELECT view_union_docs.owner_id FROM view_union_aux));
+    ";
+    let emitted = Pg2Sqlite::default()
+        .sql(SQL)
+        .expect("parse")
+        .translate_to_sql(&base_opts())
+        .expect("translate")
+        .join("\n");
+
+    assert!(
+        !emitted.contains("view_union_docs.owner_id"),
+        "outer ref in UNION ALL arm of view must be rewritten: {emitted}"
+    );
+    assert!(
+        emitted.contains("view_union_docs_rls.owner_id"),
+        "UNION ALL arm in view must reference the backing table: {emitted}"
     );
 }
