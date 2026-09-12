@@ -2180,7 +2180,9 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
             Expr::Function(func) => {
                 let translated = func.translate_with_warnings(schema, options, emit)?;
                 match numeric_scale(self, schema, options)? {
-                    Some(scale) if scale > 0 => scale_literal_arguments(translated, scale)?,
+                    Some(scale) if scale > 0 => {
+                        scale_call_arguments(translated, scale, schema, options)?
+                    }
                     _ => translated,
                 }
             }
@@ -2589,14 +2591,24 @@ fn scale_or_translate(
     expr.translate_with_warnings(schema, options, emit)
 }
 
-/// Puts each literal argument of an already-translated scale-preserving call
-/// on `scale`, which is the scale the call answers on.
+/// Brings each argument of an already-translated scale-preserving call onto
+/// `scale`, which is the scale the call answers on.
+///
+/// A literal is written at that scale and a narrower minor-unit value is
+/// widened to it, which is what PostgreSQL does by giving the call the common
+/// type of its arguments. Without the widening, `coalesce(cents, micros)`
+/// answers cents' minor units where the caller reads micros'.
 ///
 /// Only the argument list: a literal in a `FILTER` predicate or a window
 /// clause counts rows, not minor units. A nested scale-preserving call is
 /// followed, because a `greatest` lowers to `MAX(coalesce(a, b), coalesce(b,
-/// a))` and its literals sit one level in.
-fn scale_literal_arguments(call: Expr, scale: u32) -> Result<Expr, crate::errors::Error> {
+/// a))` and its arguments sit one level in.
+fn scale_call_arguments(
+    call: Expr,
+    scale: u32,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, crate::errors::Error> {
     let Expr::Function(mut function) = call else { return Ok(call) };
     if !crate::impls::shared_helpers::is_scale_preserving_call(&function) {
         return Ok(Expr::Function(function));
@@ -2607,14 +2619,19 @@ fn scale_literal_arguments(call: Expr, scale: u32) -> Result<Expr, crate::errors
             | FunctionArg::ExprNamed { arg, .. }
             | FunctionArg::Unnamed(arg)) = argument;
             let FunctionArgExpr::Expr(expr) = arg else { continue };
+
             if let Some(scaled) = scale_decimal_literal(expr, scale)? {
                 *expr = scaled;
-            } else if matches!(expr, Expr::Function(_)) {
-                *expr = scale_literal_arguments(
-                    core::mem::replace(expr, Expr::Wildcard(AttachedToken::empty())),
-                    scale,
-                )?;
+                continue;
             }
+            let taken = core::mem::replace(expr, Expr::Wildcard(AttachedToken::empty()));
+            *expr = match numeric_scale(&taken, schema, options)? {
+                Some(held) if held < scale => rescale_minor_units(taken, held, scale),
+                _ if matches!(taken, Expr::Function(_)) => {
+                    scale_call_arguments(taken, scale, schema, options)?
+                }
+                _ => taken,
+            };
         }
     }
     Ok(Expr::Function(function))

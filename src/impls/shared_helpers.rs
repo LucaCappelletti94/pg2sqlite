@@ -688,19 +688,21 @@ fn numeric_precision_and_scale_of(
         }
         Expr::Cast { data_type, .. } => Ok(read(data_type)),
         Expr::Function(function) if is_scale_preserving_call(function) => {
-            // The first argument that resolves decides, since PostgreSQL gives
-            // the call the common type of its arguments. An argument this
-            // cannot resolve, `NEW.col` in a trigger body among them, decides
-            // nothing rather than failing the translation: the caller reads a
-            // missing scale as "not a minor-unit value".
+            // The widest argument decides, since PostgreSQL gives the call the
+            // common type of its arguments and a narrower one is widened to
+            // it. An argument this cannot resolve, `NEW.col` in a trigger body
+            // among them, decides nothing rather than failing the translation:
+            // the caller reads a missing scale as "not a minor-unit value".
+            let mut widest: Option<(u64, u32)> = None;
             for argument in function_argument_exprs(&function.args) {
                 if let Ok(Some(found)) = numeric_precision_and_scale_of(argument, schema, options)
                     && found.1 > 0
+                    && widest.is_none_or(|(_, scale)| found.1 > scale)
                 {
-                    return Ok(Some(found));
+                    widest = Some(found);
                 }
             }
-            Ok(None)
+            Ok(widest)
         }
         _ => declared_in_scope(expr, schema, options, read, numeric_precision_and_scale_of),
     }

@@ -256,6 +256,25 @@ fn a_literal_argument_is_scaled_inside_a_scale_preserving_call() {
     assert_eq!(rows, vec![Some("999".to_string())]);
 }
 
+/// Arguments held at different scales are brought to the scale the call
+/// answers on, which PostgreSQL reaches by giving the call the common type.
+/// Left alone, the coarser column's minor units are read as the finer
+/// column's and the answer is off by a factor of a hundred.
+#[test]
+fn arguments_of_a_scale_preserving_call_are_brought_to_one_scale() {
+    let rows = run_translated_with(
+        "CREATE TABLE m (id INT PRIMARY KEY, cents NUMERIC(10,2), micros NUMERIC(10,4));
+         INSERT INTO m VALUES (1, NULL, 1.5000), (2, 2.00, NULL);
+         SELECT coalesce(cents, micros) FROM m ORDER BY id;",
+        &Pg2SqliteOptions::default(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("15000".to_string()), Some("20000".to_string())],
+        "1.5 and 2.0, both at scale 4"
+    );
+}
+
 #[test]
 fn a_literal_argument_is_scaled_in_nullif_and_greatest() {
     let rows = run_translated_with(
