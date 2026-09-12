@@ -21,15 +21,17 @@ use sqlparser::{
         AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
         ExactNumberInfo, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
         Interval, JsonKeyUniqueness, JsonPredicateType, ObjectName, ObjectNamePart, Query,
-        SelectItem, SetExpr, Subscript, TableAlias, TableFactor, UnaryOperator, Value,
-        ValueWithSpan, helpers::attached_token::AttachedToken,
+        SelectItem, SetExpr, Subscript, TableAlias, TableFactor, TimezoneInfo, UnaryOperator,
+        Value, ValueWithSpan, helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
 
 use crate::{
     impls::{
-        datetime_helpers::{DatePartKey, build_date_part_expr, datetime_field_key},
+        datetime_helpers::{
+            DatePartKey, build_date_part_expr, datetime_field_key, normalize_timestamptz_offset,
+        },
         expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq, rebuild},
         function_helpers::{
             integer_literal, integer_literal_value, number_literal, simple_function_expr,
@@ -49,7 +51,10 @@ use crate::{
             is_integral_expression, numeric_scale, referenced_column_name, rescale_minor_units,
             scale_decimal_literal, scale_of, translate_expr_recursive,
         },
-        temporal_arithmetic::{epoch_of_temporal_difference, translate_temporal_binary_op},
+        temporal_arithmetic::{
+            TemporalKind, epoch_of_temporal_difference, temporal_kind_of,
+            translate_temporal_binary_op, trim_trailing_zeros,
+        },
         timezone::{
             TimestampAwareness, flipped_shifting_offset, normalize_timezone_modifier_for_sqlite,
             timestamp_awareness,
@@ -767,6 +772,18 @@ fn boolean_literal(value: bool) -> Expr {
         value: Value::Boolean(value),
         span: sqlparser::tokenizer::Span::empty(),
     })
+}
+
+/// Promotes a DATE to midnight text so text comparison with a TIMESTAMP column
+/// works.
+fn promote_date_to_midnight(date_expr: Expr) -> Expr {
+    simple_function_expr("strftime", vec![string_literal("%Y-%m-%d 00:00:00"), date_expr], None)
+}
+
+/// True when `s` has second=60 (a leap second PostgreSQL normalises, SQLite
+/// cannot represent).
+fn has_leap_second(s: &str) -> bool {
+    s.split('.').next().unwrap_or(s).ends_with(":60")
 }
 
 /// Convert a PostgreSQL text-array path literal `{a,b}` to a SQLite JSON path
@@ -2164,7 +2181,19 @@ fn translate_binary_op(
     if matches!(op, BinaryOperator::Plus | BinaryOperator::Minus) {
         let negating = matches!(op, BinaryOperator::Minus);
 
-        // Case 1: INTERVAL on the left commutes (addition only).
+        // Case 1: INTERVAL on the left commutes (addition only). Two
+        // intervals answer an interval in PostgreSQL, which SQLite has no
+        // type for, so they take the ordinary refusal rather than commuting
+        // back and forth forever.
+        if extract_interval_expr(left).is_some() && extract_interval_expr(right).is_some() {
+            return Err(crate::errors::Error::forward_refusal(
+                "INTERVAL expressions are not supported in SQLite. Adding or subtracting two \
+                 intervals answers an interval, and SQLite has no interval type to hold one. \
+                 Fold the two into a single INTERVAL literal, or apply them one after the other \
+                 to a date or a timestamp."
+                    .to_string(),
+            ));
+        }
         if *op == BinaryOperator::Plus && extract_interval_expr(left).is_some() {
             return translate_binary_op(right, op, left, schema, options, emit);
         }
@@ -2180,7 +2209,10 @@ fn translate_binary_op(
                             for modifier in modifiers {
                                 args.push(string_literal(&modifier));
                             }
-                            return Ok(simple_function_expr("datetime", args, None));
+                            args.push(string_literal("subsec"));
+                            return Ok(trim_trailing_zeros(simple_function_expr(
+                                "datetime", args, None,
+                            )));
                         }
                         None => {
                             return Err(crate::errors::Error::forward_refusal(format!(
@@ -2208,7 +2240,8 @@ fn translate_binary_op(
                     for modifier in modifiers {
                         args.push(string_literal(&modifier));
                     }
-                    return Ok(simple_function_expr("datetime", args, None));
+                    args.push(string_literal("subsec"));
+                    return Ok(trim_trailing_zeros(simple_function_expr("datetime", args, None)));
                 }
                 None => {
                     // The notation was not decoded (HH:MM:SS, ISO P-form,
@@ -2219,6 +2252,42 @@ fn translate_binary_op(
                     )));
                 }
             }
+        }
+    }
+
+    // DATE compared with TIMESTAMP: stored texts differ in length, so text
+    // comparison misses midnight timestamps. Promote the DATE side to midnight.
+    if matches!(
+        op,
+        BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+    ) {
+        let lk = temporal_kind_of(left, schema, options);
+        let rk = temporal_kind_of(right, schema, options);
+        if matches!(
+            (lk, rk),
+            (Some(TemporalKind::Date), Some(TemporalKind::Timestamp))
+                | (Some(TemporalKind::Timestamp), Some(TemporalKind::Date))
+        ) {
+            let tl = left.translate_with_warnings(schema, options, emit)?;
+            let tr = right.translate_with_warnings(schema, options, emit)?;
+            return Ok(Expr::BinaryOp {
+                left: Box::new(if matches!(lk, Some(TemporalKind::Date)) {
+                    promote_date_to_midnight(tl)
+                } else {
+                    tl
+                }),
+                op: op.clone(),
+                right: Box::new(if matches!(rk, Some(TemporalKind::Date)) {
+                    promote_date_to_midnight(tr)
+                } else {
+                    tr
+                }),
+            });
         }
     }
 
@@ -2360,6 +2429,61 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                             wrapped
                         });
                     }
+                    // SQLite's CAST('NaN' AS REAL) and CAST('Infinity' AS REAL)
+                    // answer 0.0, not the IEEE non-finite
+                    // values, because SQLite REAL is always
+                    // finite. WHERE col = 0 then matches corrupted rows
+                    // silently.
+                    if matches!(
+                        data_type,
+                        DataType::Real
+                            | DataType::Float(_)
+                            | DataType::Double(_)
+                            | DataType::DoublePrecision
+                            | DataType::Float4
+                            | DataType::Float8
+                    ) && let Some(text) = single_quoted_literal(expr)
+                        && matches!(
+                            text.to_ascii_lowercase().as_str(),
+                            "nan"
+                                | "infinity"
+                                | "-infinity"
+                                | "+infinity"
+                                | "inf"
+                                | "-inf"
+                                | "+inf"
+                        )
+                    {
+                        return Err(crate::errors::Error::forward_refusal(format!(
+                            "SQLite cannot hold {text}: CAST('{text}' AS REAL) stores 0.0, \
+                             which silently matches WHERE col = 0. Store as TEXT and handle \
+                             in the application, or exclude this column."
+                        )));
+                    }
+                    // A string literal cast to an array type stores PG array
+                    // syntax in the JSON column; every
+                    // later json_extract then errors with
+                    // "malformed JSON". Use an ARRAY[...] constructor instead.
+                    if matches!(data_type, DataType::Array(_))
+                        && single_quoted_literal(expr).is_some()
+                    {
+                        return Err(crate::errors::Error::forward_refusal(format!(
+                            "a string literal cannot be cast to {data_type}: the replica \
+                             stores arrays as JSON and has no way to parse PostgreSQL \
+                             array syntax. Use an ARRAY[...] constructor instead."
+                        )));
+                    }
+                    // '...'::uuid under Text representation: validate and
+                    // canonicalize.
+                    if matches!(data_type, DataType::Uuid)
+                        && matches!(
+                            options.get_uuid_representation(),
+                            Some(crate::traits::UuidRepresentation::Text)
+                        )
+                    {
+                        let translated = expr.translate_with_warnings(schema, options, emit)?;
+                        return crate::impls::translator_impls::uuid::maybe_canonicalize_text_uuid_literal(translated);
+                    }
                     // SQLite has no cast format, so a `FORMAT` clause cannot be
                     // honored and cloning it through produced SQL SQLite
                     // rejects at parse time.
@@ -2378,6 +2502,55 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     }
                     if let Some(info) = exact_numeric_info(data_type) {
                         return translate_numeric_cast(expr, info, schema, options, emit);
+                    }
+                    // Leap second (second=60): PostgreSQL normalises to
+                    // 24:00:00, SQLite cannot represent it.
+                    if matches!(data_type, DataType::Time(..))
+                        && let Expr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(s),
+                            ..
+                        }) = expr.as_ref()
+                        && has_leap_second(s)
+                    {
+                        return Err(crate::errors::Error::forward_refusal(format!(
+                            "TIME literal '{s}' has second=60, which PostgreSQL normalises to \
+                             24:00:00 but SQLite cannot represent. Normalise to '00:00:00' \
+                             before inserting, or store the boundary as midnight '00:00:00'."
+                        )));
+                    }
+                    // CAST(date AS TIMESTAMP): add midnight so stored text
+                    // matches TIMESTAMP format for comparisons.
+                    if matches!(
+                        data_type,
+                        DataType::Timestamp(_, TimezoneInfo::None | TimezoneInfo::WithoutTimeZone)
+                    ) && matches!(
+                        temporal_kind_of(expr, schema, options),
+                        Some(TemporalKind::Date)
+                    ) {
+                        let translated = expr.translate_with_warnings(schema, options, emit)?;
+                        return Ok(promote_date_to_midnight(translated));
+                    }
+                    // TIMESTAMPTZ literal: normalise ±HH offset to ±HH:MM so
+                    // SQLite date functions can parse the value.
+                    if matches!(
+                        data_type,
+                        DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
+                    ) && let Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString(text),
+                        span,
+                    }) = expr.as_ref()
+                    {
+                        return Ok(Expr::Cast {
+                            expr: Box::new(Expr::Value(ValueWithSpan {
+                                value: Value::SingleQuotedString(normalize_timestamptz_offset(
+                                    text,
+                                )),
+                                span: *span,
+                            })),
+                            data_type: data_type.translate_with_warnings(schema, options, emit)?,
+                            format: None,
+                            kind: CastKind::Cast,
+                        });
                     }
                     let translated_type =
                         data_type.translate_with_warnings(schema, options, emit)?;
@@ -2537,6 +2710,34 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
             }
             Expr::TypedString(typed_string) => {
                 rebuild(|| -> Result<Expr, crate::errors::Error> {
+                    if matches!(typed_string.data_type, DataType::Time(..))
+                        && let Value::SingleQuotedString(s) = &typed_string.value.value
+                        && has_leap_second(s)
+                    {
+                        return Err(crate::errors::Error::forward_refusal(format!(
+                            "TIME literal '{s}' has second=60, which PostgreSQL normalises to \
+                             24:00:00 but SQLite cannot represent. Normalise to '00:00:00' \
+                             before inserting, or store the boundary as midnight '00:00:00'."
+                        )));
+                    }
+                    if matches!(
+                        typed_string.data_type,
+                        DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
+                    ) && let Value::SingleQuotedString(s) = &typed_string.value.value
+                    {
+                        let normalized = normalize_timestamptz_offset(s);
+                        return Ok(Expr::Cast {
+                            expr: Box::new(Expr::Value(ValueWithSpan {
+                                value: Value::SingleQuotedString(normalized),
+                                span: typed_string.value.span,
+                            })),
+                            data_type: typed_string
+                                .data_type
+                                .translate_with_warnings(schema, options, emit)?,
+                            format: None,
+                            kind: sqlparser::ast::CastKind::Cast,
+                        });
+                    }
                     Ok(Expr::Cast {
                         expr: Box::new(Expr::Value(typed_string.value.clone())),
                         data_type: typed_string

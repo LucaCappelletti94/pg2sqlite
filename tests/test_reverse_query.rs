@@ -313,3 +313,29 @@ fn reverse_named_window_spec_and_reference() {
     assert!(pg.contains("WINDOW"), "Expected WINDOW clause: {pg}");
     assert!(pg.contains("w1") && pg.contains("w2"), "Expected named windows: {pg}");
 }
+
+// ─── Finding 4: LIMIT -1 dropped in reverse direction ────────────────────────
+//
+// Measured on PostgreSQL 17.3:
+//   SELECT * FROM t LIMIT -1;          → ERROR: LIMIT must not be negative
+//   SELECT * FROM t LIMIT -1 OFFSET 0; → ERROR: LIMIT must not be negative
+// SQLite treats LIMIT -1 as "no limit" (returns all rows).
+
+#[test]
+fn reverse_limit_minus_one_is_dropped() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users LIMIT -1");
+    assert!(!pg.to_uppercase().contains("LIMIT"), "LIMIT -1 must be dropped: {pg}");
+}
+
+#[test]
+fn reverse_limit_minus_one_with_offset_drops_limit_keeps_offset() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users LIMIT -1 OFFSET 5");
+    assert!(!pg.to_uppercase().contains("LIMIT"), "LIMIT must be dropped: {pg}");
+    assert!(pg.contains("OFFSET") || pg.contains("offset"), "OFFSET must be preserved: {pg}");
+}
+
+#[test]
+fn reverse_limit_positive_value_passes_through() {
+    let pg = reverse(SCHEMA, "SELECT * FROM users LIMIT 10");
+    assert!(pg.contains("10"), "positive LIMIT must pass through: {pg}");
+}

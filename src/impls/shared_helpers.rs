@@ -27,8 +27,8 @@ use sqlparser::ast::{
     SetQuantifier, Setting, Statement, SymbolDefinition, TableAlias, TableFactor,
     TableFunctionArgs, TableSample, TableSampleBucket, TableSampleKind, TableSampleQuantity,
     TableVersion, TableWithJoins, UnaryOperator, UpdateTableFromKind, Value, ValueWithSpan, Values,
-    Visit, Visitor, WindowFrame, WindowFrameBound, WindowSpec, WindowType, With, WithFill,
-    XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
+    Visit, Visitor, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType, With,
+    WithFill, XmlNamespaceDefinition, XmlPassingArgument, XmlPassingClause, XmlTableColumn,
     XmlTableColumnOption, visit_expressions,
 };
 
@@ -1844,6 +1844,22 @@ pub(crate) fn translate_order_by_clause<D: TranslationDirection>(
         .transpose()
 }
 
+/// SQLite treats negative LIMIT as "no limit"; PostgreSQL rejects it.
+fn is_negative_integer_limit(expr: &Expr) -> bool {
+    match expr {
+        Expr::UnaryOp { op: UnaryOperator::Minus, expr: inner } => {
+            matches!(
+                inner.as_ref(),
+                Expr::Value(ValueWithSpan { value: Value::Number(n, _), .. }) if !n.contains('.')
+            )
+        }
+        Expr::Value(ValueWithSpan { value: Value::Number(n, _), .. }) => {
+            n.starts_with('-') && !n.contains('.')
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn translate_limit_clause<D: TranslationDirection>(
     limit_clause: Option<&LimitClause>,
     schema: &ParserDB,
@@ -1855,10 +1871,17 @@ pub(crate) fn translate_limit_clause<D: TranslationDirection>(
             Ok(match lc {
                 LimitClause::LimitOffset { limit, offset, limit_by } => {
                     LimitClause::LimitOffset {
-                        limit: limit
-                            .as_ref()
-                            .map(|e| D::translate_expr(e, schema, options, emit))
-                            .transpose()?,
+                        limit: {
+                            let translated = limit
+                                .as_ref()
+                                .map(|value| D::translate_expr(value, schema, options, emit))
+                                .transpose()?;
+                            if D::IS_FORWARD {
+                                translated
+                            } else {
+                                translated.filter(|value| !is_negative_integer_limit(value))
+                            }
+                        },
                         offset: offset
                             .as_ref()
                             .map(|o| {
@@ -1959,7 +1982,7 @@ pub(crate) fn translate_window_spec<D: TranslationDirection>(
         window_frame: spec
             .window_frame
             .as_ref()
-            .map(|frame| translate_window_frame::<D>(frame, schema, options, emit))
+            .map(|frame| translate_window_frame::<D>(frame, schema, options, emit, &spec.order_by))
             .transpose()?,
     })
 }
@@ -1981,22 +2004,41 @@ pub(crate) fn translate_window_type<D: TranslationDirection>(
     }
 }
 
+/// Translates one bound expression, scaling it to minor units when the
+/// enclosing RANGE frame's ORDER BY key is a NUMERIC column.
+///
+/// A RANGE offset of 1 over NUMERIC(10,2) means "within 1.00 unit" = 100
+/// minor units. Non-literal bounds are refused; they may already be in
+/// minor-unit scale and double-scaling would silently corrupt results.
 fn translate_window_frame_bound<D: TranslationDirection>(
     bound: &WindowFrameBound,
     schema: &ParserDB,
     options: &D::Options<'_>,
     emit: crate::warnings::WarningSink<'_>,
+    range_numeric_scale: Option<u32>,
 ) -> Result<WindowFrameBound, Error> {
+    // `scale` does not capture `emit`; only `Copy` values are captured so
+    // calling it after moving `emit` into `translate_expr` is safe.
+    let scale =
+        |translated: Expr| -> Result<Expr, Error> {
+            let Some(s) = range_numeric_scale else { return Ok(translated) };
+            match scale_decimal_literal(&translated, s)? {
+                Some(scaled) => Ok(scaled),
+                None => Err(Error::forward_refusal(
+                    "a RANGE frame bound over a NUMERIC ORDER BY key must be a numeric literal; \
+                 write the offset at the column's natural scale (e.g. 1.00 not 1)"
+                        .to_string(),
+                )),
+            }
+        };
     Ok(match bound {
         WindowFrameBound::Preceding(Some(e)) => {
-            WindowFrameBound::Preceding(Some(Box::new(D::translate_expr(
-                e, schema, options, emit,
-            )?)))
+            let t = D::translate_expr(e, schema, options, emit)?;
+            WindowFrameBound::Preceding(Some(Box::new(scale(t)?)))
         }
         WindowFrameBound::Following(Some(e)) => {
-            WindowFrameBound::Following(Some(Box::new(D::translate_expr(
-                e, schema, options, emit,
-            )?)))
+            let t = D::translate_expr(e, schema, options, emit)?;
+            WindowFrameBound::Following(Some(Box::new(scale(t)?)))
         }
         other => other.clone(),
     })
@@ -2007,14 +2049,36 @@ fn translate_window_frame<D: TranslationDirection>(
     schema: &ParserDB,
     options: &D::Options<'_>,
     emit: crate::warnings::WarningSink<'_>,
+    order_by: &[OrderByExpr],
 ) -> Result<WindowFrame, Error> {
+    // For RANGE frames, a literal offset is a value distance, not a row count;
+    // when the ORDER BY key is NUMERIC(p,s) the distance must be in minor
+    // units.
+    let range_numeric_scale = if frame.units == WindowFrameUnits::Range {
+        D::forward_context(options).and_then(|ctx| {
+            order_by.first().and_then(|ob| {
+                let s = scale_of(&ob.expr, schema, ctx)?;
+                (s > 0).then_some(s)
+            })
+        })
+    } else {
+        None
+    };
     Ok(WindowFrame {
         units: frame.units,
-        start_bound: translate_window_frame_bound::<D>(&frame.start_bound, schema, options, emit)?,
+        start_bound: translate_window_frame_bound::<D>(
+            &frame.start_bound,
+            schema,
+            options,
+            emit,
+            range_numeric_scale,
+        )?,
         end_bound: frame
             .end_bound
             .as_ref()
-            .map(|b| translate_window_frame_bound::<D>(b, schema, options, emit))
+            .map(|b| {
+                translate_window_frame_bound::<D>(b, schema, options, emit, range_numeric_scale)
+            })
             .transpose()?,
     })
 }

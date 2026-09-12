@@ -431,3 +431,74 @@ fn reverse_insert_or_replace_multi_column_still_uses_do_update_set() {
         reverse(SCHEMA, "INSERT OR REPLACE INTO users (id, name, age) VALUES (1, 'Alice', 30);");
     assert!(pg.contains("DO UPDATE SET"), "Multi-column table should use DO UPDATE SET: {pg}");
 }
+
+// ─── Finding 2: ON CONFLICT DO UPDATE bare column refs are ambiguous in PG ───
+//
+// Measured on PostgreSQL 17.3:
+//   INSERT INTO tv (id, v) VALUES (1,'a') ON CONFLICT (id) DO UPDATE SET v = v
+// || '!';   → ERROR: column reference "v" is ambiguous
+//   With tv.v: → succeeds, row becomes 'keep!'
+
+#[test]
+fn reverse_on_conflict_do_update_bare_ref_qualified_with_table() {
+    let schema = "CREATE TABLE tv (id INT PRIMARY KEY, v TEXT);";
+    let pg = reverse(
+        schema,
+        "INSERT INTO tv (id, v) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET v = v || '!'",
+    );
+    assert!(pg.contains("tv.v"), "expected tv.v in DO UPDATE: {pg}");
+}
+
+#[test]
+fn reverse_on_conflict_do_update_where_bare_ref_qualified() {
+    // The WHERE clause of DO UPDATE suffers the same ambiguity.
+    let schema = "CREATE TABLE tv2 (id INT PRIMARY KEY, v TEXT);";
+    let pg = reverse(
+        schema,
+        "INSERT INTO tv2 (id, v) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET v = excluded.v WHERE v IS NOT NULL",
+    );
+    assert!(pg.contains("tv2.v"), "WHERE bare ref must be qualified: {pg}");
+}
+
+#[test]
+fn reverse_on_conflict_do_update_excluded_ref_unchanged() {
+    // `excluded.v` is already qualified and must pass through unchanged.
+    let schema = "CREATE TABLE tv3 (id INT PRIMARY KEY, v TEXT);";
+    let pg = reverse(
+        schema,
+        "INSERT INTO tv3 (id, v) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET v = excluded.v",
+    );
+    assert!(pg.contains("excluded.v"), "excluded.v must be preserved: {pg}");
+}
+
+// ─── Finding 3: INSERT DEFAULT VALUES → refused when NOT NULL col has no
+// default
+//
+// Measured on PostgreSQL 17.3:
+//   CREATE TABLE td (id INT PRIMARY KEY NOT NULL, v TEXT);
+//   INSERT INTO td DEFAULT VALUES;
+//   → ERROR: null value in column "id" of relation "td" violates not-null
+// constraint
+
+#[test]
+fn reverse_insert_default_values_refused_when_pk_has_no_default() {
+    let schema = "CREATE TABLE td (id INT PRIMARY KEY NOT NULL, v TEXT);";
+    let err = reverse_err(schema, "INSERT INTO td DEFAULT VALUES");
+    assert!(
+        err.to_lowercase().contains("default values") || err.contains("DEFAULT VALUES"),
+        "error must mention DEFAULT VALUES: {err}"
+    );
+    assert!(
+        err.contains("id") || err.contains("NOT NULL"),
+        "error must name the offending column or NOT NULL: {err}"
+    );
+}
+
+#[test]
+fn reverse_insert_default_values_passes_when_all_not_null_have_defaults() {
+    // If every NOT NULL column has a declared default, PostgreSQL accepts it.
+    let schema = "CREATE TABLE tddef (id INT PRIMARY KEY DEFAULT 1, v TEXT);";
+    // Should not be refused — just pass through.
+    let pg = reverse(schema, "INSERT INTO tddef DEFAULT VALUES");
+    assert!(pg.contains("DEFAULT VALUES"), "must emit DEFAULT VALUES: {pg}");
+}

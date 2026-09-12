@@ -514,7 +514,30 @@ fn try_translate_distinct_on_query(
         None => Vec::new(),
     };
 
+    // PostgreSQL rejects DISTINCT ON when the ORDER BY doesn't open with the
+    // same expressions; refuse here so the error names the cause clearly.
+    if order_by.is_some() {
+        if window_order.len() < partition_by.len() {
+            return Err(crate::errors::Error::forward_refusal(
+                "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+                    .to_string(),
+            ));
+        }
+        for (pb, ob) in partition_by.iter().zip(window_order.iter()) {
+            if &ob.expr != pb {
+                return Err(crate::errors::Error::forward_refusal(
+                    "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
     let outer_order_by = truncate_order_by_to_partition(order_by, distinct_on_exprs.len());
+    // Outer scope sees only the derived table's aliases; original names are not
+    // in scope.
+    let outer_order_by =
+        remap_outer_order_by_to_aliases(outer_order_by, &translated_inner.projection);
 
     let outer_select = distinct_on_window_select(
         translated_inner,
@@ -580,6 +603,42 @@ fn truncate_order_by_to_partition(
         exprs.truncate(partition_len);
     }
     Some(order_by)
+}
+
+/// The alias of the projection item whose expression or alias matches `expr`.
+fn alias_for_expr_in_projection(expr: &Expr, projection: &[SelectItem]) -> Option<Ident> {
+    projection.iter().find_map(|item| {
+        let SelectItem::ExprWithAlias { expr: item_expr, alias } = item else { return None };
+        if item_expr == expr {
+            return Some(alias.clone());
+        }
+        // ORDER BY may already use the output alias; keep it as-is.
+        if let Expr::Identifier(name) = expr
+            && alias.value.eq_ignore_ascii_case(&name.value)
+        {
+            return Some(alias.clone());
+        }
+        None
+    })
+}
+
+/// Replaces each ORDER BY expression with its projected alias.
+///
+/// The outer query of a DISTINCT ON rewrite sees only the derived table's
+/// aliases; original column names are out of scope.
+fn remap_outer_order_by_to_aliases(
+    order_by: Option<OrderBy>,
+    projection: &[SelectItem],
+) -> Option<OrderBy> {
+    let mut ob = order_by?;
+    if let OrderByKind::Expressions(exprs) = &mut ob.kind {
+        for item in exprs.iter_mut() {
+            if let Some(alias) = alias_for_expr_in_projection(&item.expr, projection) {
+                item.expr = Expr::Identifier(alias);
+            }
+        }
+    }
+    Some(ob)
 }
 
 #[derive(Clone, Copy)]

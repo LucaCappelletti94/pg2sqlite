@@ -1,6 +1,5 @@
 ---
 source: tests/test_drop_statements.rs
-assertion_line: 478
 expression: translated_sql
 ---
 DROP TABLE users

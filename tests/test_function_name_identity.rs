@@ -139,7 +139,7 @@ fn a_quoted_type_name_carrying_a_capital_is_not_the_extension_type() {
         &Pg2SqliteOptions::default(),
     );
     assert!(
-        message.contains("Unknown PostgreSQL custom type") && message.contains("Vector"),
+        message.contains("no SQLite equivalent") && message.contains("Vector"),
         "the refusal should name the type as written, got: {message}"
     );
 }
@@ -161,7 +161,7 @@ fn a_prefixed_type_name_still_maps() {
 fn a_quoted_serial_carrying_a_capital_is_not_the_serial_shorthand() {
     let message = refusal(r#"CREATE TABLE t (id "SERIAL");"#, &Pg2SqliteOptions::default());
     assert!(
-        message.contains("Unknown PostgreSQL custom type"),
+        message.contains("no SQLite equivalent") && message.contains("SERIAL"),
         "PostgreSQL keeps the capitals, so this is not the serial shorthand, got: {message}"
     );
 }

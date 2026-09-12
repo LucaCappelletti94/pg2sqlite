@@ -86,3 +86,34 @@ fn test_interval_in_arithmetic() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+/// Two intervals added answer an interval in PostgreSQL, and SQLite has no
+/// interval type to answer with. The commutation that moves an interval from
+/// the left of `+` to the right used to swap the two sides forever here, and
+/// the translator aborted on a stack overflow.
+#[test]
+fn adding_two_intervals_is_refused() {
+    let error = Pg2Sqlite::default()
+        .sql("SELECT INTERVAL '1 day' + INTERVAL '2 hours';")
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("two intervals added have no SQLite form");
+    assert!(error.to_string().to_lowercase().contains("interval"), "{error}");
+}
+
+/// The same for subtraction, which reached the refusal already, and for the
+/// parenthesised spelling of both.
+#[test]
+fn interval_arithmetic_between_intervals_is_refused() {
+    for sql in [
+        "SELECT INTERVAL '1 day' - INTERVAL '2 hours';",
+        "SELECT (INTERVAL '1 day') + (INTERVAL '2 hours');",
+        "SELECT INTERVAL '1 day' + INTERVAL '2 hours' + INTERVAL '3 minutes';",
+    ] {
+        let error = Pg2Sqlite::default()
+            .sql(sql)
+            .expect("parse")
+            .translate(&Pg2SqliteOptions::default())
+            .unwrap_err();
+        assert!(error.to_string().to_lowercase().contains("interval"), "{sql}: {error}");
+    }
+}

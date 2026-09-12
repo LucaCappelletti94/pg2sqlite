@@ -301,15 +301,13 @@ fn json_object_agg_translates_to_json_group_object() {
 }
 
 #[test]
-fn jsonb_object_agg_translates_to_json_group_object() {
-    let sql = format!("{SIMPLE_TABLE} SELECT jsonb_object_agg(id, val) FROM t;");
-    let out = translate_ok(&sql);
-    assert!(
-        out.contains("json_group_object"),
-        "jsonb_object_agg should become json_group_object: {out}"
-    );
-    assert!(!out.contains("jsonb_object_agg"), "Should not contain jsonb_object_agg: {out}");
-    execute_all(&sql);
+fn jsonb_object_agg_is_refused() {
+    // jsonb_object_agg deduplicates to last-value-per-key; json_group_object
+    // keeps all values producing invalid JSON. No faithful translation exists.
+    let result = translate(&format!("{SIMPLE_TABLE} SELECT jsonb_object_agg(id, val) FROM t;"));
+    assert!(result.is_err(), "jsonb_object_agg must be refused: {result:?}");
+    let err = result.unwrap_err();
+    assert!(err.contains("jsonb_object_agg"), "refusal must name the function: {err}");
 }
 
 #[test]
@@ -337,13 +335,12 @@ fn schema_qualified_now_becomes_datetime_now() {
     execute_all(sql);
 }
 
-// ── H2: json_object_agg / jsonb_object_agg over an empty set ────────────────
+// ── H2: json_object_agg over an empty set ────────────────────────────────────
 
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
 
-/// H2: PostgreSQL returns NULL when json_object_agg finds no rows. The current
-/// emission of bare json_group_object(k, v) returns '{}' instead.
+/// json_object_agg (non-jsonb) over an empty set must still return NULL.
 #[test]
 fn json_object_agg_over_empty_set_returns_null() {
     let rows = run_translated_helper::run_translated_with(
@@ -354,37 +351,13 @@ fn json_object_agg_over_empty_set_returns_null() {
     assert_eq!(rows, vec![None], "json_object_agg over empty set should be NULL, got: {rows:?}");
 }
 
-/// Same defect for the jsonb_ spelling.
-#[test]
-fn jsonb_object_agg_over_empty_set_returns_null() {
-    let rows = run_translated_helper::run_translated_with(
-        "CREATE TABLE kv (k TEXT NOT NULL, v INT NOT NULL);
-         SELECT jsonb_object_agg(k, v) FROM kv;",
-        &Pg2SqliteOptions::default(),
-    );
-    assert_eq!(rows, vec![None], "jsonb_object_agg over empty set should be NULL, got: {rows:?}");
-}
-
-/// Green companion: a non-empty set returns a JSON object containing the key.
+/// Non-empty json_object_agg returns a JSON object.
 #[test]
 fn json_object_agg_over_nonempty_set_returns_json_object() {
     let rows = run_translated_helper::run_translated_with(
         "CREATE TABLE kv (k TEXT NOT NULL, v INT NOT NULL);
          INSERT INTO kv VALUES ('answer', 42);
          SELECT json_object_agg(k, v) FROM kv;",
-        &Pg2SqliteOptions::default(),
-    );
-    let text = rows.into_iter().next().flatten().expect("non-empty result must not be NULL");
-    assert!(text.contains("answer"), "result must contain the key: {text}");
-}
-
-/// Green companion for the jsonb_ spelling.
-#[test]
-fn jsonb_object_agg_over_nonempty_set_returns_json_object() {
-    let rows = run_translated_helper::run_translated_with(
-        "CREATE TABLE kv (k TEXT NOT NULL, v INT NOT NULL);
-         INSERT INTO kv VALUES ('answer', 42);
-         SELECT jsonb_object_agg(k, v) FROM kv;",
         &Pg2SqliteOptions::default(),
     );
     let text = rows.into_iter().next().flatten().expect("non-empty result must not be NULL");

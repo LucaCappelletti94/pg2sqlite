@@ -207,7 +207,7 @@ fn the_guard_is_named_after_the_constraint() {
 #[test]
 fn match_simple_still_exempts_a_mixed_null_row() {
     let emitted = translate(&composite("MATCH SIMPLE")).join("\n");
-    assert!(!emitted.contains("CHECK"), "MATCH SIMPLE needs no guard: {emitted}");
+    assert!(!emitted.contains("match_full"), "MATCH SIMPLE needs no guard: {emitted}");
 
     let mut connection = apply(&format!(
         "{}
@@ -222,7 +222,7 @@ fn match_simple_still_exempts_a_mixed_null_row() {
 #[test]
 fn a_foreign_key_without_a_match_clause_is_untouched() {
     let emitted = translate(&composite("")).join("\n");
-    assert!(!emitted.contains("CHECK"), "no MATCH clause means no guard: {emitted}");
+    assert!(!emitted.contains("match_full"), "no MATCH clause means no guard: {emitted}");
 }
 
 /// With one column the two readings coincide, so MATCH FULL there gets no
@@ -232,7 +232,7 @@ fn a_single_column_match_full_needs_no_guard() {
     let single = "CREATE TABLE p1 (a INT PRIMARY KEY);
          CREATE TABLE c1 (x INT, FOREIGN KEY (x) REFERENCES p1 (a) MATCH FULL);";
     let emitted = translate(single).join("\n");
-    assert!(!emitted.contains("CHECK"), "one column needs no guard: {emitted}");
+    assert!(!emitted.contains("match_full"), "one column needs no guard: {emitted}");
     apply(&format!("{single}\nINSERT INTO c1 (x) VALUES (NULL);"));
 }
 
@@ -243,7 +243,7 @@ fn a_column_level_match_full_needs_no_guard() {
     let column_level = "CREATE TABLE p1 (a INT PRIMARY KEY);
          CREATE TABLE c1 (x INT REFERENCES p1 (a) MATCH FULL);";
     let emitted = translate(column_level).join("\n");
-    assert!(!emitted.contains("CHECK"), "one column needs no guard: {emitted}");
+    assert!(!emitted.contains("match_full"), "one column needs no guard: {emitted}");
     apply(&format!("{column_level}\nINSERT INTO c1 (x) VALUES (NULL);"));
 }
 

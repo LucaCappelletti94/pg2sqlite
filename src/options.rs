@@ -136,6 +136,15 @@ pub(crate) struct PrewalkCatalogs {
     fts_indexes: Vec<(String, String)>,
     declared_object_names: Vec<String>,
     trigger_function_names: Vec<String>,
+    /// Trigger names sharing a table, timing and event with another
+    /// non-split trigger, which `CreateTrigger` translation refuses.
+    conflicting_trigger_names: Vec<String>,
+    /// The table name, lower-cased, and the function name of every `BEFORE
+    /// INSERT` trigger, which the RLS backing-table update check reads to
+    /// exempt the crate's own maintenance write. Only those two strings are
+    /// kept, since holding whole trigger nodes here costs link-time drop glue
+    /// out of proportion to the two fields the check needs.
+    before_insert_trigger_fns: Vec<(String, sqlparser::ast::ObjectName)>,
 }
 
 #[derive(Clone, Copy)]
@@ -424,6 +433,34 @@ impl<'a> TranslationContext<'a> {
     pub(crate) fn has_trigger_function_name(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
         self.catalogs.trigger_function_names.contains(&name)
+    }
+
+    /// Registers `name` as a trigger whose firing order cannot be faithfully
+    /// reproduced in SQLite.
+    pub(crate) fn add_conflicting_trigger_name(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if !self.catalogs.conflicting_trigger_names.contains(&name) {
+            self.catalogs.to_mut().conflicting_trigger_names.push(name);
+        }
+    }
+
+    /// Returns whether `name` was identified as a conflicting trigger during
+    /// the pre-walk.
+    #[must_use]
+    pub(crate) fn is_conflicting_trigger_name(&self, name: &str) -> bool {
+        self.catalogs.conflicting_trigger_names.iter().any(|n| n == name)
+    }
+
+    pub(crate) fn add_before_insert_trigger_fn(
+        &mut self,
+        table_name: String,
+        fn_name: sqlparser::ast::ObjectName,
+    ) {
+        self.catalogs.to_mut().before_insert_trigger_fns.push((table_name, fn_name));
+    }
+
+    pub(crate) fn before_insert_trigger_fns(&self) -> &[(String, sqlparser::ast::ObjectName)] {
+        &self.catalogs.before_insert_trigger_fns
     }
 }
 

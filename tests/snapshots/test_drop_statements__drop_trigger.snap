@@ -1,6 +1,5 @@
 ---
 source: tests/test_drop_statements.rs
-assertion_line: 502
 expression: translated_sql
 ---
 DROP TRIGGER my_trigger

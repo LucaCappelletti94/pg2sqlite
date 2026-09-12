@@ -14,8 +14,8 @@ use alloc::{
 
 use sqlparser::{
     ast::{
-        BinaryOperator, CharLengthUnits, CharacterLength, DataType, ExactNumberInfo, Expr, Ident,
-        Value, ValueWithSpan,
+        ArrayElemTypeDef, BinaryOperator, CharLengthUnits, CharacterLength, DataType,
+        ExactNumberInfo, Expr, Ident, Value, ValueWithSpan,
     },
     tokenizer::Span,
 };
@@ -170,6 +170,72 @@ pub(crate) fn numeric_precision_bound_expr(column_name: &Ident, precision: u64) 
     }
 }
 
+/// The declared bit count and whether it is exact (`BIT(n)`) or a maximum
+/// (`BIT VARYING(n)`), or `None` when the type is not a bit type.
+pub(crate) fn bit_length(data_type: &DataType) -> Option<(bool, Option<u64>)> {
+    match data_type {
+        DataType::Bit(n) => Some((true, *n)),
+        DataType::BitVarying(n) | DataType::VarBit(n) => Some((false, *n)),
+        _ => None,
+    }
+}
+
+/// `length(<col>) = n`, the exact-width bound `BIT(n)` enforces.
+#[must_use]
+pub(crate) fn bit_exact_length_check_expr(column_name: &Ident, n: u64) -> Expr {
+    bit_length_check(column_name, n, BinaryOperator::Eq)
+}
+
+/// `length(<col>) <= n`, the maximum-width bound `BIT VARYING(n)` enforces.
+#[must_use]
+pub(crate) fn bit_max_length_check_expr(column_name: &Ident, n: u64) -> Expr {
+    bit_length_check(column_name, n, BinaryOperator::LtEq)
+}
+
+fn bit_length_check(column_name: &Ident, n: u64, op: BinaryOperator) -> Expr {
+    use crate::impls::function_helpers::simple_function_expr;
+    Expr::BinaryOp {
+        left: Box::new(simple_function_expr(
+            "length",
+            vec![Expr::Identifier(column_name.clone())],
+            None,
+        )),
+        op,
+        right: Box::new(Expr::Value(ValueWithSpan {
+            value: Value::Number(n.to_string(), false),
+            span: Span::empty(),
+        })),
+    }
+}
+
+/// `<col> BETWEEN -32768 AND 32767`, the range `smallint` enforces.
+#[must_use]
+pub(crate) fn small_int_range_bound_expr(column_name: &Ident) -> Expr {
+    integer_range_between(column_name, -32_768, 32_767)
+}
+
+/// `<col> BETWEEN -2147483648 AND 2147483647`, the range `integer` / `int4`
+/// enforces.
+#[must_use]
+pub(crate) fn regular_int_range_bound_expr(column_name: &Ident) -> Expr {
+    integer_range_between(column_name, -2_147_483_648, 2_147_483_647)
+}
+
+fn integer_range_between(column_name: &Ident, low: i64, high: i64) -> Expr {
+    let literal = |v: i64| {
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(v.to_string(), false),
+            span: Span::empty(),
+        })
+    };
+    Expr::Between {
+        expr: Box::new(Expr::Identifier(column_name.clone())),
+        negated: false,
+        low: Box::new(literal(low)),
+        high: Box::new(literal(high)),
+    }
+}
+
 impl crate::traits::translator::TranslatorWithContext for DataType {
     type SQLiteEntry = DataType;
 
@@ -244,22 +310,38 @@ DataType::JSON
 | DataType::Datetime(_)
 | DataType::Time(_, _)
 | DataType::Interval { .. } => Ok(DataType::Text),
-// Bit types map to INTEGER (SQLite has no native bit type)
+// BIT strings map to TEXT so distinct strings remain distinct. Leading
+// zeros collapse when stored as INTEGER, so '010' and '10' compare equal.
+// Length enforcement lives in column.rs as a CHECK, like CHAR(n).
 DataType::Bit(_) | DataType::BitVarying(_) | DataType::VarBit(_) => {
-    Ok(DataType::Integer(None))
+    Ok(DataType::Text)
 }
-// PostgreSQL arrays become JSON array text under
-// `ArrayRepresentation::Json`; `super::array` carries the matching
-// expression-level rewrites. pgvector embeddings are a separate
-// path: they arrive as `DataType::Custom("vector")`, not as an
-// array type, and map to BLOB below.
-DataType::Array(_) => {
+// NUMERIC(p,s)[] cannot use minor-unit storage: array elements have no
+// per-element scale context, so a scalar column and its array twin would
+// hold different representations and comparisons would silently fail.
+DataType::Array(elem) => {
+    let inner = match elem {
+        ArrayElemTypeDef::SquareBracket(t, _)
+        | ArrayElemTypeDef::AngleBracket(t)
+        | ArrayElemTypeDef::Qualified(t, _)
+        | ArrayElemTypeDef::Parenthesis(t) => Some(t.as_ref()),
+        ArrayElemTypeDef::None => None,
+    };
+    if let Some(inner) = inner
+        && let Some(info) = exact_numeric_info(inner)
+        && let Ok((_, scale)) = numeric_precision_and_scale(info)
+        && scale > 0
+    {
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "NUMERIC(p,{scale})[] cannot be translated: the scalar column stores minor units \
+             (D1) but array elements have no scale context. Store values as scaled integers in \
+             a separate table."
+        )));
+    }
     if super::array::is_json_array_representation(options) {
         Ok(DataType::Text)
     } else {
-        Err(super::array::representation_required(&format!(
-            "The array type {self}"
-        )))
+        Err(super::array::representation_required(&format!("The array type {self}")))
     }
 }
 DataType::Uuid => {
@@ -295,8 +377,7 @@ pub(crate) fn is_serial_type(data_type: &DataType) -> bool {
     })
 }
 
-/// Maps the PostgreSQL and extension types that reach the parser as a custom
-/// name rather than as a `DataType` variant of their own.
+/// Maps PostgreSQL and extension types that reach the parser as a custom name.
 fn translate_custom_type(
     name: &sqlparser::ast::ObjectName,
 ) -> Result<DataType, crate::errors::Error> {
@@ -305,25 +386,60 @@ fn translate_custom_type(
     match custom_type_name.as_deref() {
         Some("serial" | "smallserial" | "bigserial" | "largeserial") => Ok(DataType::Integer(None)),
         Some("countrycode") => Ok(DataType::Text),
-        // Three groups that all become BLOB.
-        //
-        // PostGIS `geometry` and `geography` carry EWKB produced by the
-        // SQLiteGIS extension (https://github.com/LucaCappelletti94/sqlitegis),
-        // which round-trips through the column. The blob is opaque to SQLite
-        // without the extension loaded, see
-        // `Pg2SqliteOptions::with_sqlitegis_enabled` for runtime `ST_*`
-        // function passthrough.
-        //
-        // pgvector `vector(N)` and `halfvec(N)` are stored as BLOB in the main
-        // table, with a companion vec0 virtual table for indexed KNN search.
+        // PostGIS geometry/geography: EWKB blobs via the SQLiteGIS extension.
+        // pgvector vector/halfvec: BLOB main table + companion vec0 virtual table.
         Some(
             "geometry" | "geography" | "cas" | "molecularformula" | "mediatype" | "vector"
             | "halfvec",
         ) => Ok(DataType::Blob(None)),
         _ => {
-            Err(crate::errors::Error::forward_refusal(format!(
-                "Unknown PostgreSQL custom type {name}"
-            )))
+            // Distinguish built-in PostgreSQL types (wrong storage, not
+            // obscure) from user-defined names (enum, domain,
+            // extension type) so the message is honest.
+            const POSTGRES_BUILTINS: &[&str] = &[
+                "money",
+                "oid",
+                "xid",
+                "cid",
+                "tid",
+                "inet",
+                "cidr",
+                "macaddr",
+                "macaddr8",
+                "xml",
+                "citext",
+                "hstore",
+                "int4range",
+                "int8range",
+                "numrange",
+                "tsrange",
+                "tstzrange",
+                "daterange",
+                "int4multirange",
+                "int8multirange",
+                "nummultirange",
+                "tsmultirange",
+                "tstzmultirange",
+                "datemultirange",
+                "txid_snapshot",
+                "pg_lsn",
+                "aclitem",
+                "ltree",
+                "lquery",
+                "ltxtquery",
+            ];
+            let type_name = custom_type_name.as_deref().unwrap_or_default();
+            if POSTGRES_BUILTINS.contains(&type_name) {
+                Err(crate::errors::Error::forward_refusal(format!(
+                    "{name} is a PostgreSQL built-in type with no SQLite equivalent. \
+                     Remap the column to a supported type before translating."
+                )))
+            } else {
+                Err(crate::errors::Error::forward_refusal(format!(
+                    "{name} has no SQLite equivalent. If this is an enum or domain, \
+                     remap it to a base type (TEXT or INTEGER) before translating."
+                )))
+            }
         }
     }
 }
