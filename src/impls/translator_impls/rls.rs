@@ -53,7 +53,9 @@ use crate::{
             from_relation, make_query, make_simple_select, plain_table_factor, single_expr_query,
         },
         session_variable,
-        shared_helpers::{join_constraint_mut, join_constraint_ref, relations_scope_query},
+        shared_helpers::{
+            join_constraint_mut, join_constraint_ref, minor_unit_scale, relations_scope_query,
+        },
         translator_impls::column::declared_default,
     },
     options::Pg2SqliteOptions,
@@ -68,20 +70,22 @@ use crate::{
 struct TriggerColumn {
     /// The column's name as the table declares it.
     name: String,
-    /// The `DEFAULT` the backing table declares, untranslated. `None` when the
-    /// column declares none.
+    /// The `DEFAULT` in stored minor units (scaled). Used for the forwarding
+    /// write.
     default: Option<Expr>,
-    /// The expression SQLite computes the column from, untranslated, for a
-    /// generated column. Such a column refuses to be written and the view
-    /// cannot compute it, so a guard reading it has to compute it instead.
+    /// The `DEFAULT` in original user-facing units. Used for guard
+    /// substitutions that pass through `translate_with_warnings`, which
+    /// handles NUMERIC scaling.
+    guard_default: Option<Expr>,
+    /// The expression SQLite computes the column from, for a generated column.
     generated: Option<Expr>,
 }
 
 impl TriggerColumn {
     /// The value the forwarding write hands the backing table.
     ///
-    /// A column the caller omitted arrives NULL, indistinguishable from a NULL
-    /// the caller wrote, so a declared default answers for both.
+    /// A column the caller omitted arrives NULL, so a declared default answers
+    /// for both.
     fn forwarded_value(&self) -> Expr {
         let new_value = prefixed_column_expr("NEW", &self.name);
         match &self.default {
@@ -90,9 +94,28 @@ impl TriggerColumn {
         }
     }
 
+    /// `COALESCE(NEW.col, guard_default)` for the guard substitution path.
+    ///
+    /// Uses the unscaled default so `translate_with_warnings` scales it once.
+    fn guard_coalesce(&self) -> Expr {
+        let new_value = prefixed_column_expr("NEW", &self.name);
+        match &self.guard_default {
+            Some(default) => coalesce(new_value, default.clone()),
+            None => new_value,
+        }
+    }
+
     const fn is_generated(&self) -> bool {
         self.generated.is_some()
     }
+}
+
+/// The raw `DEFAULT` expression from the column definition, without NUMERIC
+/// scaling.
+fn raw_column_default(column: &ColumnDef) -> Option<Expr> {
+    column.options.iter().find_map(|option| {
+        if let ColumnOption::Default(expr) = &option.option { Some(expr.clone()) } else { None }
+    })
 }
 
 /// Reads every column of the guarded table the way the write triggers need it.
@@ -118,9 +141,20 @@ fn trigger_columns(
                     _ => None,
                 }
             });
+            let declared = declared_default(attribute, options)?;
+            // For NUMERIC-scaled columns use the raw default in guard
+            // substitutions: translate_with_warnings will scale it
+            // once. For all other types the declared default
+            // (possibly UUID-wrapped) is already correct.
+            let guard_default = if minor_unit_scale(&attribute.data_type).is_some() {
+                raw_column_default(attribute)
+            } else {
+                declared.clone()
+            };
             Ok(TriggerColumn {
                 name: column.column_name().to_owned(),
-                default: declared_default(attribute, options)?,
+                default: declared,
+                guard_default,
                 generated,
             })
         })
@@ -205,8 +239,8 @@ fn guard_substitutions(
     let defaults: Vec<GuardSubstitution> = if kind == GuardKind::Insert {
         columns
             .iter()
-            .filter(|column| column.default.is_some())
-            .map(|column| (column.name.clone(), column.forwarded_value()))
+            .filter(|column| column.guard_default.is_some())
+            .map(|column| (column.name.clone(), column.guard_coalesce()))
             .collect()
     } else {
         Vec::new()
@@ -957,6 +991,10 @@ struct ColumnRefStrategy<'a> {
     prefix: Option<&'a str>,
     table_rename: Option<(&'a str, &'a str)>,
     lowercased_columns: &'a [String],
+    /// Columns the subquery's own FROM relations declare; bare identifiers
+    /// matching these belong to the inner scope and must not receive the
+    /// prefix.
+    inner_scope_columns: &'a [String],
 }
 
 impl<'a> ColumnRefStrategy<'a> {
@@ -974,6 +1012,10 @@ impl<'a> ColumnRefStrategy<'a> {
 
     fn has_column(&self, lowercased_name: &str) -> bool {
         self.lowercased_columns.iter().any(|column| column == lowercased_name)
+    }
+
+    fn is_inner_scope(&self, lowercased_name: &str) -> bool {
+        self.inner_scope_columns.iter().any(|col| col == lowercased_name)
     }
 }
 
@@ -1198,6 +1240,7 @@ fn transform_expr_generic(
 
             if let Some(pfx) = strategy.prefix
                 && strategy.has_column(&ident_lower)
+                && !strategy.is_inner_scope(&ident_lower)
             {
                 return Expr::CompoundIdentifier(vec![Ident::new(pfx), ident.clone()]);
             }
@@ -1281,7 +1324,12 @@ fn transform_expr(
         options,
         table,
         schema,
-        &ColumnRefStrategy { prefix, table_rename, lowercased_columns: facts.lowercased_columns },
+        &ColumnRefStrategy {
+            prefix,
+            table_rename,
+            lowercased_columns: facts.lowercased_columns,
+            inner_scope_columns: &[],
+        },
     )
 }
 
@@ -1449,9 +1497,7 @@ fn transform_subquery_expression(
 
     // Subquery table renames only rewrite table-name qualifiers; applying the
     // outer prefix here would turn `members.col` into `NEW.col`, which is
-    // wrong when `members` is the subquery's own FROM table, not the guarded
-    // outer table. The outer table was already handled by
-    // `transform_outer_table_refs` above.
+    // wrong when `members` is the subquery's own FROM table.
     for (old_name, new_name) in subquery_table_renames {
         transformed = transform_expr(
             &transformed,
@@ -1464,7 +1510,33 @@ fn transform_subquery_expression(
         );
     }
 
-    transform_expr(&transformed, options, table, schema, prefix, None, facts)
+    // Collect columns declared by the subquery's own named FROM tables. A bare
+    // identifier the inner scope declares must not receive the outer prefix.
+    let inner_scope_columns: Vec<String> = subquery_table_renames
+        .iter()
+        .flat_map(|(table_name, _)| {
+            schema
+                .tables()
+                .find(|t| t.table_name().eq_ignore_ascii_case(table_name))
+                .into_iter()
+                .flat_map(|t| {
+                    t.columns(schema).into_iter().flatten().map(|c| c.column_name().to_lowercase())
+                })
+        })
+        .collect();
+
+    transform_expr_generic(
+        &transformed,
+        options,
+        table,
+        schema,
+        &ColumnRefStrategy {
+            prefix,
+            table_rename: None,
+            lowercased_columns: facts.lowercased_columns,
+            inner_scope_columns: &inner_scope_columns,
+        },
+    )
 }
 
 struct SubqueryTransformContext<'a> {
