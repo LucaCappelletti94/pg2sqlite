@@ -1326,6 +1326,58 @@ mod tests {
         assert_eq!(visited, vec!["(SELECT 1 FROM other)", "0"]);
     }
 
+    /// Every spelling an argument can take, since each is its own arm of the
+    /// table and a missed one is a caller reading past that argument.
+    #[test]
+    fn every_argument_spelling_is_walked() {
+        for (sql, expected) in [
+            // `a => 1` is an `ExprNamed`, whose name is an expression too.
+            ("f(a => 1, b)", vec!["a", "1", "b"]),
+            ("string_agg(a, ',' ORDER BY b)", vec!["a", "','", "b"]),
+            ("percentile_cont(0.5) WITHIN GROUP (ORDER BY a)", vec!["0.5", "a"]),
+            ("count(*) FILTER (WHERE a > 1)", vec!["a > 1"]),
+            ("sum(a) OVER w", vec!["a"]),
+        ] {
+            let expr = parse_expr(sql);
+
+            let mut visited = Vec::new();
+            for_each_child_expr(&expr, &mut |child| visited.push(child.to_string()));
+            assert_eq!(visited, expected, "walking {sql}");
+
+            let mut mapped = Vec::new();
+            let rebuilt: Result<Expr, ()> = try_map_expr_children(
+                &expr,
+                &mut |child| {
+                    mapped.push(child.to_string());
+                    Ok(child.clone())
+                },
+                &mut |query| Ok(query.clone()),
+            );
+            assert_eq!(mapped, expected, "mapping {sql}");
+            assert_eq!(
+                rebuilt.expect("identity map").to_string(),
+                expr.to_string(),
+                "rebuilding {sql}"
+            );
+        }
+    }
+
+    /// A call whose argument list is a bare subquery hands that query to the
+    /// query callback, the one place a subquery is not also a child
+    /// expression.
+    #[test]
+    fn a_bare_subquery_argument_list_reaches_the_query_callback() {
+        let expr = parse_expr("ARRAY(SELECT 1 FROM other)");
+        let mut queries = 0;
+        let rebuilt: Result<Expr, ()> =
+            try_map_expr_children(&expr, &mut |child| Ok(child.clone()), &mut |query| {
+                queries += 1;
+                Ok(query.clone())
+            });
+        assert_eq!(rebuilt.expect("identity map").to_string(), expr.to_string());
+        assert_eq!(queries, 1);
+    }
+
     /// `{'k1': 1, 'k2': 2}`. Not reachable from a PostgreSQL parse, since
     /// `supports_dictionary_syntax` is false on `PostgreSqlDialect`, so the
     /// node has to be built by hand to exercise the walkers.
