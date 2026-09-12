@@ -291,3 +291,29 @@ fn a_literal_beside_an_unresolvable_column_is_left_alone() {
     let emitted = reverse("SELECT xyz > 100 FROM t").expect("an unresolvable column translates");
     assert!(emitted.contains("100"), "the literal stands as written: {emitted}");
 }
+
+/// A scale-preserving call carries minor units in its literal arguments too,
+/// and the value it answers is read at the column's scale.
+#[test]
+fn a_scale_preserving_call_unscales_its_literal_argument() {
+    let emitted = reverse("SELECT coalesce(amount, 150) FROM t").expect("coalesce reverses");
+    assert!(emitted.contains("1.50"), "the fallback reads 1.50 at the server: {emitted}");
+}
+
+/// A nested scale-preserving call carries them one level in, which is where
+/// the forward direction's own lowerings leave them.
+#[test]
+fn a_nested_scale_preserving_call_unscales_too() {
+    let emitted = reverse("SELECT coalesce(coalesce(amount, 150), 250) FROM t")
+        .expect("nested call reverses");
+    assert!(emitted.contains("1.50") && emitted.contains("2.50"), "{emitted}");
+}
+
+/// The tuple form of `SET` assigns column by column, so each value is
+/// unscaled against the column it lands in.
+#[test]
+fn a_tuple_update_unscales_the_value_of_each_column() {
+    let emitted = reverse("UPDATE t SET (amount, tag) = (150, 'x') WHERE id = 1")
+        .expect("a tuple assignment reverses");
+    assert!(emitted.contains("1.50"), "the amount reads 1.50 at the server: {emitted}");
+}

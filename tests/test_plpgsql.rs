@@ -918,3 +918,27 @@ fn a_volatile_cte_read_once_is_inlined() {
         connection.query_row("SELECT a FROM t", [], |row| row.get(0)).expect("read the row back");
     assert!((0.0..1.0).contains(&a), "a uniform random float, got {a}");
 }
+
+/// A CTE whose declared names cannot be applied to its body is refused: a
+/// derived table takes no column list, so the names have nowhere else to go.
+#[test]
+fn a_cte_naming_columns_over_a_values_body_is_refused() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH src (v) AS (VALUES (1), (2))
+          UPDATE t SET n = (SELECT v FROM src LIMIT 1) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let error = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("declared names over a VALUES body have nowhere to go");
+    assert!(error.to_string().contains("src"), "{error}");
+}
