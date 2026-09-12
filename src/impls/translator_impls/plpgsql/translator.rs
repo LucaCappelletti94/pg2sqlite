@@ -97,7 +97,11 @@ impl PlPgSqlTranslator {
         }
 
         for stmt in &body.statements {
-            let translated = Self::translate_statement(stmt, &mut context, schema, options, emit)?;
+            let mut translated =
+                Self::translate_statement(stmt, &mut context, schema, options, emit)?;
+            for statement in &mut translated {
+                let _: ControlFlow<()> = VisitMut::visit(statement, &mut UnreadCtePruner);
+            }
             result.extend(translated);
         }
 
@@ -503,7 +507,7 @@ impl PlPgSqlTranslator {
                     Self::transform_cte_query(&mut cte.query, context, options);
                 }
                 let mut statement = update.clone();
-                Self::inline_ctes(&mut statement, &with)?;
+                Self::inline_ctes(&mut statement, &with, options)?;
                 vec![statement]
             } else {
                 let transformed_body = Self::transform_query_body(&query.body, context, options)?;
@@ -564,9 +568,20 @@ impl PlPgSqlTranslator {
     /// Rewrites each read of a CTE into a derived table over its body.
     ///
     /// SQLite's trigger body grammar takes no `WITH` before an `UPDATE`, so
-    /// the binding has to travel to where it is read. Each CTE is inlined in
-    /// turn, so one defined over another keeps working.
-    fn inline_ctes(statement: &mut Statement, with: &sqlparser::ast::With) -> Result<(), Error> {
+    /// the binding has to travel to where it is read. A CTE is inlined into
+    /// the bodies of the ones declared after it before it reaches the
+    /// statement, which is what lets one be defined over another.
+    ///
+    /// A CTE read twice becomes two copies of its body, which is two
+    /// evaluations where PostgreSQL has one. That agrees for a deterministic
+    /// body and answers differently for a volatile one, so the copies are
+    /// counted and a body that would run a volatile call more often than
+    /// PostgreSQL runs it is refused.
+    fn inline_ctes(
+        statement: &mut Statement,
+        with: &sqlparser::ast::With,
+        options: &crate::options::TranslationContext<'_>,
+    ) -> Result<(), Error> {
         if with.recursive {
             return Err(Error::forward_refusal(
                 "WITH RECURSIVE before an UPDATE has no SQLite form inside a trigger body: the \
@@ -577,11 +592,73 @@ impl PlPgSqlTranslator {
             ));
         }
 
+        let volatile = VolatileCalls::new(options);
+        let mut budget = volatile.count(statement);
         for cte in &with.cte_tables {
-            let mut inliner = CteInliner { name: &cte.alias.name, body: &cte.query };
-            let _: ControlFlow<()> = statement.visit(&mut inliner);
+            budget += volatile.count(cte.query.as_ref());
+        }
+
+        let mut inlined: Vec<(Ident, Query)> = Vec::new();
+        for cte in &with.cte_tables {
+            let mut body = (*cte.query).clone();
+            for (name, earlier) in &inlined {
+                let _: ControlFlow<()> =
+                    VisitMut::visit(&mut body, &mut CteInliner { name, body: earlier });
+            }
+            let body = Self::name_cte_columns(body, &cte.alias)?;
+            let _: ControlFlow<()> =
+                statement.visit(&mut CteInliner { name: &cte.alias.name, body: &body });
+            inlined.push((cte.alias.name.clone(), body));
+        }
+
+        if volatile.count(statement) > budget {
+            return Err(Error::forward_refusal(
+                "a CTE whose body is not deterministic is read more than once before an UPDATE \
+                 in a trigger body, and SQLite takes no WITH clause there, so each read would \
+                 carry its own copy of the body and answer a different value where PostgreSQL \
+                 evaluates the CTE once. Assign the value to a variable and read the variable, \
+                 or move the UPDATE out of the trigger."
+                    .to_string(),
+            ));
         }
         Ok(())
+    }
+
+    /// Applies a CTE's declared column names to its own projection.
+    ///
+    /// A derived table cannot carry them: SQLite takes no column list on a
+    /// table alias, so `WITH src (v) AS (SELECT 99)` inlined verbatim answers
+    /// `no such column: v`.
+    fn name_cte_columns(body: Query, alias: &sqlparser::ast::TableAlias) -> Result<Query, Error> {
+        if alias.columns.is_empty() {
+            return Ok(body);
+        }
+
+        let refusal = || {
+            Error::forward_refusal(format!(
+                "the CTE {} declares column names over a body this cannot rename, and SQLite \
+                 takes no column list on the derived table it becomes inside a trigger body. \
+                 Write the names as aliases in the CTE's own projection instead.",
+                alias.name
+            ))
+        };
+
+        let mut body = body;
+        let SetExpr::Select(select) = body.body.as_mut() else { return Err(refusal()) };
+        if select.projection.len() != alias.columns.len() {
+            return Err(refusal());
+        }
+
+        for (item, column) in select.projection.iter_mut().zip(&alias.columns) {
+            let expr = match item {
+                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                    expr.clone()
+                }
+                _ => return Err(refusal()),
+            };
+            *item = SelectItem::ExprWithAlias { expr, alias: column.name.clone() };
+        }
+        Ok(body)
     }
 
     /// Moves a WITH RECURSIVE CTE inside the INSERT's SELECT source as a
@@ -1586,6 +1663,117 @@ impl VisitorMut for CteInliner<'_> {
                 alias: Some(alias),
                 sample: None,
             };
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Drops every CTE nothing reads.
+///
+/// A PL/pgSQL variable becomes a CTE before anything knows whether the
+/// statement ends up reading it, and a rewrite that reads the variable as a
+/// scalar subquery instead leaves the definition behind. SQLite evaluates a
+/// CTE lazily, so a stranded one costs nothing at runtime, but it is dead SQL
+/// in every emitted trigger. Removal repeats to a fixpoint, since a CTE read
+/// only by one just dropped is itself unread.
+struct UnreadCtePruner;
+
+impl VisitorMut for UnreadCtePruner {
+    type Break = ();
+
+    fn post_visit_query(&mut self, query: &mut Query) -> ControlFlow<Self::Break> {
+        let Some(mut with) = query.with.take() else { return ControlFlow::Continue(()) };
+
+        loop {
+            let unread = with.cte_tables.iter().position(|cte| {
+                let name = &cte.alias.name.value;
+                // The whole query with its `WITH` lifted off, since a read
+                // can sit in `ORDER BY` or `LIMIT` as easily as in the body.
+                !reads_relation(&*query, name)
+                    && !with
+                        .cte_tables
+                        .iter()
+                        .filter(|other| !core::ptr::eq(*other, cte))
+                        .any(|other| reads_relation(other.query.as_ref(), name))
+            });
+            match unread {
+                Some(index) => drop(with.cte_tables.remove(index)),
+                None => break,
+            }
+        }
+
+        query.with = (!with.cte_tables.is_empty()).then_some(with);
+        ControlFlow::Continue(())
+    }
+}
+
+/// True when `node` reads the relation `name` anywhere inside it.
+fn reads_relation<N: Visit>(node: &N, name: &str) -> bool {
+    struct RelationSearch<'a>(&'a str);
+
+    impl Visitor for RelationSearch<'_> {
+        type Break = ();
+
+        fn post_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+            if let TableFactor::Table { name, .. } = factor
+                && name.0.len() == 1
+                && crate::impls::object_name::last_ident(name)
+                    .is_some_and(|ident| ident.value.eq_ignore_ascii_case(self.0))
+            {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    node.visit(&mut RelationSearch(name)).is_break()
+}
+
+/// Counts the calls in a node that answer a different value each time they
+/// run, so a rewrite that copies a node can tell whether it changed how many
+/// times one of them runs.
+///
+/// The names are the SQLite ones, since the bodies reaching this are already
+/// translated: `random` and `randomblob` are the two built-ins SQLite
+/// re-evaluates per call, and the UUID function is whatever extension the
+/// caller named. A date or time call is not among them, since SQLite fixes
+/// the clock for the whole statement.
+struct VolatileCalls<'a> {
+    uuid: &'a str,
+}
+
+impl<'a> VolatileCalls<'a> {
+    fn new(options: &'a crate::options::TranslationContext<'_>) -> Self {
+        Self { uuid: options.get_uuid_function_name() }
+    }
+
+    fn count<N: Visit>(&self, node: &N) -> usize {
+        let mut counter = VolatileCounter { names: self, found: 0 };
+        let _: ControlFlow<()> = node.visit(&mut counter);
+        counter.found
+    }
+
+    fn names(&self, name: &str) -> bool {
+        name.eq_ignore_ascii_case("random")
+            || name.eq_ignore_ascii_case("randomblob")
+            || name.eq_ignore_ascii_case(self.uuid)
+    }
+}
+
+struct VolatileCounter<'a> {
+    names: &'a VolatileCalls<'a>,
+    found: usize,
+}
+
+impl Visitor for VolatileCounter<'_> {
+    type Break = ();
+
+    fn post_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if let Expr::Function(function) = expr
+            && crate::impls::object_name::last_ident(&function.name)
+                .is_some_and(|ident| self.names.names(&ident.value))
+        {
+            self.found += 1;
         }
         ControlFlow::Continue(())
     }

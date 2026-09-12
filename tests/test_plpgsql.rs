@@ -791,3 +791,130 @@ fn a_with_update_in_a_trigger_body_runs() {
         connection.query_row("SELECT n FROM t", [], |row| row.get(0)).expect("read the row back");
     assert_eq!(n, 99, "the CTE's value must reach the assignment");
 }
+
+/// A CTE that declares its column names. Inlining it as a derived table loses
+/// those names unless the body's projection is aliased with them, and SQLite
+/// answered `no such column: v` for the read.
+#[test]
+fn a_with_update_naming_its_cte_columns_runs() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH src (v) AS (SELECT 99)
+          UPDATE t SET n = (SELECT v FROM src) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO t (id, n) VALUES (1, 0);").expect("seed row");
+    connection.execute_batch("UPDATE t SET id = 1 WHERE id = 1;").expect("trigger fires");
+
+    let n: i64 =
+        connection.query_row("SELECT n FROM t", [], |row| row.get(0)).expect("read the row back");
+    assert_eq!(n, 99, "the declared column name must survive the inlining");
+}
+
+/// A CTE reading the one declared before it. Each is inlined into the bodies
+/// of those that follow, so the second carries the first rather than naming
+/// a relation that no longer exists by the time the statement is emitted.
+#[test]
+fn a_with_update_over_chained_ctes_runs() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH a AS (SELECT 7 AS v), b AS (SELECT v * 2 AS w FROM a)
+          UPDATE t SET n = (SELECT w FROM b) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO t (id, n) VALUES (1, 0);").expect("seed row");
+    connection.execute_batch("UPDATE t SET id = 1 WHERE id = 1;").expect("trigger fires");
+
+    let n: i64 =
+        connection.query_row("SELECT n FROM t", [], |row| row.get(0)).expect("read the row back");
+    assert_eq!(n, 14, "the second CTE must carry the first");
+}
+
+/// Inlining copies a CTE's body into each read of it, so a body that answers
+/// differently on each evaluation stops meaning what PostgreSQL means, where
+/// the CTE is evaluated once and both readers see the same value. Measured
+/// before the refusal: `a = b` came back false.
+#[test]
+fn a_volatile_cte_read_twice_is_refused() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, a REAL, b REAL);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH r AS (SELECT random() AS v)
+          UPDATE t SET a = (SELECT v FROM r), b = (SELECT v FROM r) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let error = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("a volatile CTE read twice has no faithful inlined form");
+    let message = error.to_string();
+    assert!(message.contains("more than once"), "{message}");
+}
+
+/// The same body read once is inlined, since one copy is one evaluation.
+#[test]
+fn a_volatile_cte_read_once_is_inlined() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, a REAL);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH r AS (SELECT random() AS v)
+          UPDATE t SET a = (SELECT v FROM r) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO t (id, a) VALUES (1, 0);").expect("seed row");
+    connection.execute_batch("UPDATE t SET id = 1 WHERE id = 1;").expect("trigger fires");
+
+    let a: f64 =
+        connection.query_row("SELECT a FROM t", [], |row| row.get(0)).expect("read the row back");
+    assert!((0.0..1.0).contains(&a), "a uniform random float, got {a}");
+}
