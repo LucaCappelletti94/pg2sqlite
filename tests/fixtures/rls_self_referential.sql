@@ -2,7 +2,7 @@
 -- Each user can only see and update their own record
 
 CREATE TABLE app_users (
-    id UUID PRIMARY KEY DEFAULT uuidv7(),
+    id UUID PRIMARY KEY NOT NULL,
     email TEXT NOT NULL UNIQUE,
     display_name TEXT,
     settings TEXT

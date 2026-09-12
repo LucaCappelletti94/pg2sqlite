@@ -152,11 +152,7 @@ pub(crate) fn is_now_localtime_args(args: &FunctionArguments) -> bool {
 
 /// PostgreSQL's `ascii(x)` as `CASE WHEN x = '' THEN 0 ELSE unicode(x) END`.
 ///
-/// The two functions agree on every input except the empty string, where
-/// PostgreSQL answers 0 and SQLite's `unicode` answers NULL, measured on 18
-/// and 3.51. A NULL operand falls to the ELSE branch (`NULL = ''` is NULL)
-/// and stays NULL through `unicode`. `x` is read twice, which is only
-/// observable for a volatile operand.
+/// `x` is read twice; callers refuse volatile operands before invoking this.
 #[must_use]
 pub(crate) fn ascii_code_point(expr: Expr) -> Expr {
     case_when(

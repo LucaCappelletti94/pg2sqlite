@@ -9,7 +9,7 @@ CREATE TABLE users (
 
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 CREATE POLICY users_select ON users FOR SELECT USING (true);
-CREATE POLICY users_insert ON users FOR INSERT WITH CHECK (id = current_app_user());
+CREATE POLICY users_insert ON users FOR INSERT WITH CHECK (username != '');
 
 -- Non-RLS table with FK to RLS table
 -- The FK should be updated to point to users_rls, not users (the view)

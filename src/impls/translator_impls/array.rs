@@ -55,6 +55,7 @@ use crate::{
         query_builder::{
             from_relation, make_query, make_simple_select, single_expr_query, table_function_factor,
         },
+        replay::{is_replayable, reject_duplicated_operand},
     },
     prelude::Pg2SqliteOptions,
     traits::{ArrayRepresentation, translator::TranslatorWithContext},
@@ -284,8 +285,8 @@ pub(crate) fn translate_array_literal(
 /// A literal index folds into a constant path. Any other index expression is
 /// concatenated into the path at runtime and guarded so a subscript below one
 /// yields NULL, as PostgreSQL does, instead of tripping SQLite's malformed JSON
-/// path error. The guard reads the index expression a second time, which is
-/// only observable for a volatile subscript such as `tags[1 + random()]`.
+/// path error. The guard reads the index expression a second time, so a
+/// volatile index is refused.
 pub(crate) fn translate_array_subscript(
     root: Expr,
     index: &Expr,
@@ -305,6 +306,9 @@ pub(crate) fn translate_array_subscript(
         return Ok(json_extract_call(root, string_literal(&format!("$[{}]", literal - 1))));
     }
 
+    if !is_replayable(index, options) {
+        return Err(reject_duplicated_operand("array subscript", index));
+    }
     let translated_index = index.translate_with_warnings(schema, options, emit)?;
     let zero_based = Expr::Nested(Box::new(Expr::BinaryOp {
         left: Box::new(translated_index.clone()),
@@ -437,24 +441,43 @@ pub(crate) fn translate_array_function(
     }
 
     if kind == ArrayFunction::Replace {
+        let raw = extract_exactly(args, 3, kind.name())?;
+        if !is_replayable(raw[0], options) {
+            return Err(reject_duplicated_operand(kind.name(), raw[0]));
+        }
         let [array, from, to] = translated_args(args, kind, schema, options, emit)?;
         return Ok(array_replace(array, from, to));
     }
 
     // array_cat takes two arrays; array_prepend takes (element, array).
     if kind == ArrayFunction::Cat {
+        let raw = extract_exactly(args, 2, kind.name())?;
+        if !is_replayable(raw[0], options) {
+            return Err(reject_duplicated_operand(kind.name(), raw[0]));
+        }
+        if !is_replayable(raw[1], options) {
+            return Err(reject_duplicated_operand(kind.name(), raw[1]));
+        }
         let [a, b] = translated_args(args, kind, schema, options, emit)?;
         return Ok(array_cat_expr(a, b));
     }
     if kind == ArrayFunction::Prepend {
         let [element, array] = translated_args(args, kind, schema, options, emit)?;
-        // Prepend element to array by concatenating a one-element array with
-        // the target array.  json_cat(json_array(v), a) is NULL when a is NULL,
-        // but that case returns [v] correctly because json_each(json_array(v))
-        // yields one row and json_each(NULL) yields zero rows.
+        // `json_each(NULL)` yields no rows, so NULL arrays collapse naturally.
         return Ok(array_concat(json_array_call(vec![element]), array));
     }
 
+    let raw = extract_exactly(args, 2, kind.name())?;
+    let duplicated = match kind {
+        ArrayFunction::ToString | ArrayFunction::Positions | ArrayFunction::Remove => Some(raw[0]),
+        ArrayFunction::Append => Some(raw[1]),
+        _ => None,
+    };
+    if let Some(operand) = duplicated
+        && !is_replayable(operand, options)
+    {
+        return Err(reject_duplicated_operand(kind.name(), operand));
+    }
     let [array, second] = translated_args(args, kind, schema, options, emit)?;
     match kind {
         ArrayFunction::Length | ArrayFunction::Lower | ArrayFunction::Upper => {
@@ -633,12 +656,9 @@ fn array_replace(array: Expr, from: Expr, to: Expr) -> Expr {
 
 /// `array_cat(a, b)`: route through `array_concat` with a both-NULL guard.
 ///
-/// `array_concat(NULL, x)` = x and `array_concat(x, NULL)` = x because
-/// `json_each(NULL)` yields no rows. But `array_concat(NULL, NULL)` yields
-/// `'[]'` where PostgreSQL yields NULL, so both-NULL is caught explicitly.
-/// The operands are read twice (IS NULL check and inside the concat), which
-/// is acceptable since they are row-read expressions rather than volatile
-/// calls.
+/// `array_concat(NULL, NULL)` yields `'[]'` where PostgreSQL yields NULL, so
+/// both-NULL is caught explicitly. Each operand is read twice (IS NULL check
+/// and inside the concat), so volatile operands are refused by the caller.
 #[must_use]
 fn array_cat_expr(a: Expr, b: Expr) -> Expr {
     let concat = array_concat(a.clone(), b.clone());

@@ -179,6 +179,16 @@ pub(crate) struct NameClass {
     pub postgres_only: bool,
 }
 
+impl NameClass {
+    /// True when some inventory in this module names the function.
+    ///
+    /// A name none of them carries is the caller's own, so this crate knows
+    /// nothing about what it answers or whether it answers the same twice.
+    pub(crate) const fn is_known(self) -> bool {
+        self.sqlite_builtin || self.gated_math || self.shared_with_postgres || self.postgres_only
+    }
+}
+
 /// Classify `name` against every inventory in this module.
 ///
 /// `name` must already be lower-cased, which every caller does when it reads
