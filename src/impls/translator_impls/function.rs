@@ -14,8 +14,8 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, CastKind, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
-    helpers::attached_token::AttachedToken,
+    FunctionArgExpr, FunctionArguments, Ident, ObjectName, ObjectNamePart, UnaryOperator, Value,
+    ValueWithSpan, helpers::attached_token::AttachedToken,
 };
 
 use super::{
@@ -39,7 +39,7 @@ use crate::{
         session_variable,
         shared_helpers::{
             GENERATE_SERIES_UNSUPPORTED_MESSAGE, declared_in_scope, declared_type_matches,
-            function_argument_exprs, numeric_scale, referenced_column_name, rescale_minor_units,
+            function_argument_exprs, referenced_column_name, rescale_minor_units, scale_of,
             translate_function_arguments,
         },
         temporal_arithmetic::{
@@ -81,7 +81,7 @@ enum FunctionTranslation {
     ToModulo,
     /// Transform div(a, b) to CAST(a / b AS INTEGER)
     ToIntegerDiv,
-    /// Transform trunc(x) to CAST(x AS INTEGER), trunc(x, n) to round(x, n)
+    /// `trunc(x)` and `trunc(x, n)`, scale-aware for NUMERIC columns.
     ToTrunc,
     /// Transform `encode(x, 'hex')` to `lower(hex(x))`.
     ///
@@ -168,6 +168,9 @@ enum FunctionTranslation {
     /// answers NULL. Lowered onto the
     /// [`ascii_code_point`](crate::impls::idioms::ascii_code_point) shape.
     AsciiCodePoint,
+    /// `ceiling(x)`, which sqlparser does not parse as `Expr::Ceil`.
+    /// Scale-aware for NUMERIC columns; falls back to a gated-math passthrough.
+    NumericCeil,
 }
 
 /// Simple name-only renames: `(pg_name, sqlite_name)`.
@@ -328,6 +331,50 @@ fn truncate_to_scale(
         op: BinaryOperator::Divide,
         right: Box::new(factor),
     })))
+}
+
+/// `floor` of a value held as minor units, using only integer arithmetic.
+///
+/// `(x - (x % f + f) % f) / f` where f = `factor`.
+/// `x` appears at two AST positions — only call with a non-volatile operand.
+/// Result at scale 0: `floor(amount) + 1` is plain integer addition.
+fn floor_numeric_of(x: Expr, factor: i64) -> Expr {
+    let f = || integer_literal(factor);
+    let rem = Expr::BinaryOp {
+        left: Box::new(x.clone()),
+        op: BinaryOperator::Modulo,
+        right: Box::new(f()),
+    };
+    let biased = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(rem),
+        op: BinaryOperator::Plus,
+        right: Box::new(f()),
+    }));
+    let adj_rem = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(biased),
+        op: BinaryOperator::Modulo,
+        right: Box::new(f()),
+    }));
+    let numer = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(x),
+        op: BinaryOperator::Minus,
+        right: Box::new(adj_rem),
+    }));
+    Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(numer),
+        op: BinaryOperator::Divide,
+        right: Box::new(f()),
+    }))
+}
+
+/// `ceil` of a value held as minor units, as `-floor(-x)`.
+///
+/// `-x` appears at two AST positions inside `floor_numeric_of` — non-volatile
+/// operand only.
+fn ceil_numeric_of(x: Expr, factor: i64) -> Expr {
+    let neg_x = Expr::UnaryOp { op: UnaryOperator::Minus, expr: Box::new(x) };
+    let floor_neg = floor_numeric_of(neg_x, factor);
+    Expr::UnaryOp { op: UnaryOperator::Minus, expr: Box::new(floor_neg) }
 }
 
 /// The scales `truncate_to_scale` can fold, which are properties of the
@@ -595,6 +642,8 @@ fn translate_catalog_function(
     "mod" => FunctionTranslation::ToModulo,
     "div" => FunctionTranslation::ToIntegerDiv,
     "trunc" | "truncate" => FunctionTranslation::ToTrunc,
+    // ceiling(x) is a function call (sqlparser parses only CEIL/FLOOR as Expr variants).
+    "ceiling" => FunctionTranslation::NumericCeil,
     "make_date" => FunctionTranslation::ToMakePrintf {
         format: "%04d-%02d-%02d",
         arg_count: 3,
@@ -1890,19 +1939,83 @@ impl crate::traits::translator::TranslatorWithContext for Function {
             FunctionTranslation::ToTrunc => {
                 let exprs = function_argument_exprs(&func.args);
                 match exprs.len() {
-                    // trunc(x) → CAST(x AS INTEGER)
                     1 => {
-                        let expr = exprs[0].translate_with_warnings(schema, options, emit)?;
-                        Ok(Expr::Cast {
-                            expr: Box::new(expr),
-                            data_type: DataType::Integer(None),
-                            format: None,
-                            kind: CastKind::Cast,
-                        })
+                        let operand = exprs[0];
+                        match scale_of(operand, schema, options) {
+                            Some(scale) if scale > 0 => {
+                                // scale ≤ 18 by DDL enforcement; 10^18 <
+                                // i64::MAX
+                                debug_assert!(scale <= 18);
+                                let translated =
+                                    operand.translate_with_warnings(schema, options, emit)?;
+                                // Integer division truncates toward zero,
+                                // matching trunc semantics.
+                                // Result at scale 0: trunc(amount) + 1 and
+                                // WHERE trunc(amount) = 1
+                                // work as plain integers.
+                                let factor = integer_literal(10_i64.pow(scale));
+                                Ok(Expr::Nested(Box::new(Expr::BinaryOp {
+                                    left: Box::new(translated),
+                                    op: BinaryOperator::Divide,
+                                    right: Box::new(factor),
+                                })))
+                            }
+                            _ => {
+                                let expr =
+                                    operand.translate_with_warnings(schema, options, emit)?;
+                                Ok(Expr::Cast {
+                                    expr: Box::new(expr),
+                                    data_type: DataType::Integer(None),
+                                    format: None,
+                                    kind: CastKind::Cast,
+                                })
+                            }
+                        }
                     }
                     2 => {
-                        let x = exprs[0].translate_with_warnings(schema, options, emit)?;
-                        truncate_to_scale(x, exprs[1], schema, options, emit)
+                        let operand = exprs[0];
+                        let places_expr = exprs[1];
+                        match scale_of(operand, schema, options) {
+                            Some(col_scale) if col_scale > 0 => {
+                                let Some(n) = integer_literal_value(places_expr) else {
+                                    return Err(crate::errors::Error::forward_refusal(format!(
+                                        "trunc({operand}, n) over NUMERIC(p,{col_scale}) requires \
+                                         a literal n: the scale step is folded at translation \
+                                         time. Write n as a literal, or cast the column to REAL."
+                                    )));
+                                };
+                                // scale ≤ 18 by DDL enforcement; fits i32 and
+                                // 10^scale fits i64
+                                debug_assert!(col_scale <= 18);
+                                let translated =
+                                    operand.translate_with_warnings(schema, options, emit)?;
+                                // CAST to REAL so the factor division is not
+                                // integer truncation.
+                                let factor_str =
+                                    literal_power_of_ten(i32::try_from(col_scale).unwrap_or(18));
+                                let descaled = Expr::Nested(Box::new(Expr::BinaryOp {
+                                    left: Box::new(Expr::Cast {
+                                        expr: Box::new(translated),
+                                        data_type: DataType::Real,
+                                        format: None,
+                                        kind: CastKind::Cast,
+                                    }),
+                                    op: BinaryOperator::Divide,
+                                    right: Box::new(number_literal(&factor_str)),
+                                }));
+                                // n >= col_scale: all col_scale decimal places
+                                // survive.
+                                if i64::from(col_scale) - n <= 0 {
+                                    Ok(descaled)
+                                } else {
+                                    truncate_to_scale(descaled, places_expr, schema, options, emit)
+                                }
+                            }
+                            _ => {
+                                let x = operand.translate_with_warnings(schema, options, emit)?;
+                                truncate_to_scale(x, places_expr, schema, options, emit)
+                            }
+                        }
                     }
                     _ => {
                         Err(crate::errors::Error::forward_refusal(
@@ -2077,7 +2190,7 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                         translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     ));
                 };
-                let Some(scale) = numeric_scale(value, schema, options)? else {
+                let Some(scale) = scale_of(value, schema, options) else {
                     return Ok(simple_function_expr(
                         "round",
                         vec![
@@ -2299,6 +2412,27 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 Ok(crate::impls::idioms::ascii_code_point(
                     exprs[0].translate_with_warnings(schema, options, emit)?,
                 ))
+            }
+            FunctionTranslation::NumericCeil => {
+                let exprs = extract_exactly(&func.args, 1, "ceiling")?;
+                reject_over_on_scalar(&func)?;
+                let operand = exprs[0];
+                match scale_of(operand, schema, options) {
+                    Some(scale) if scale > 0 => {
+                        // scale ≤ 18 by DDL enforcement; 10^scale fits i64
+                        debug_assert!(scale <= 18);
+                        let x = operand.translate_with_warnings(schema, options, emit)?;
+                        Ok(ceil_numeric_of(x, 10_i64.pow(scale)))
+                    }
+                    _ => {
+                        let translated = operand.translate_with_warnings(schema, options, emit)?;
+                        if options.is_math_functions_available() {
+                            Ok(simple_function_expr("ceiling", vec![translated], None))
+                        } else {
+                            Err(crate::errors::Error::forward_refusal(math_not_declared("ceiling")))
+                        }
+                    }
+                }
             }
             FunctionTranslation::ToCbrt => {
                 let exprs = extract_exactly(&func.args, 1, "cbrt")?;
