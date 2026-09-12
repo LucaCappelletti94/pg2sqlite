@@ -52,9 +52,10 @@ pub(crate) fn rebuild<E>(make: impl FnOnce() -> Result<Expr, E>) -> Result<Expr,
 /// `for_each_child_expr` is hand-written against it with a pin test, since a
 /// read-only walk cannot borrow through a rebuilding one without copying.
 ///
-/// `Function` is not walked, so callers must handle it separately (function
-/// name rewriting, argument translation, etc.). Recurses into `Subquery`,
-/// `Exists`, and `InSubquery` via `f_query`.
+/// Every expression a call carries is a child here, so a caller that matches
+/// `Expr::Function` itself must not also delegate the same node, or the
+/// arguments are transformed twice. Recurses into `Subquery`, `Exists`, and
+/// `InSubquery` via `f_query`.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(crate) fn try_map_expr_children<E>(
     expr: &Expr,
@@ -468,8 +469,192 @@ pub(crate) fn try_map_expr_children<E>(
             })?
         }
 
-        // Function is not walked. Callers must handle it separately.
-        Expr::Function(_) => expr.clone(),
+        Expr::Function(function) => {
+            rebuild(|| Ok(Expr::Function(try_map_function_children(function, f, f_query)?)))?
+        }
+    })
+}
+
+/// Maps every expression a call carries: its parameters, its arguments and
+/// their clauses, its `FILTER`, its `WITHIN GROUP` keys and its `OVER` window.
+///
+/// Every field is named, with no `..`, so a field added upstream fails to
+/// compile here rather than quietly escaping the walk. That was the shape of
+/// the defect this replaced: a call was skipped entirely, so a caller that
+/// fell through to this table never saw an argument, and both the `RETURNING`
+/// scope check and the RLS cycle detection read past one.
+fn try_map_function_children<E>(
+    function: &sqlparser::ast::Function,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+    f_query: &mut impl FnMut(&sqlparser::ast::Query) -> Result<sqlparser::ast::Query, E>,
+) -> Result<sqlparser::ast::Function, E> {
+    let sqlparser::ast::Function {
+        name,
+        uses_odbc_syntax,
+        parameters,
+        args,
+        within_group,
+        filter,
+        null_treatment,
+        over,
+    } = function;
+
+    Ok(sqlparser::ast::Function {
+        name: name.clone(),
+        uses_odbc_syntax: *uses_odbc_syntax,
+        parameters: try_map_function_arguments(parameters, f, f_query)?,
+        args: try_map_function_arguments(args, f, f_query)?,
+        within_group: try_map_order_by_exprs(within_group, f)?,
+        filter: match filter {
+            Some(predicate) => Some(Box::new(f(predicate)?)),
+            None => None,
+        },
+        null_treatment: *null_treatment,
+        over: match over {
+            Some(sqlparser::ast::WindowType::WindowSpec(spec)) => {
+                Some(sqlparser::ast::WindowType::WindowSpec(try_map_window_spec(spec, f)?))
+            }
+            Some(named @ sqlparser::ast::WindowType::NamedWindow(_)) => Some(named.clone()),
+            None => None,
+        },
+    })
+}
+
+fn try_map_function_arguments<E>(
+    arguments: &sqlparser::ast::FunctionArguments,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+    f_query: &mut impl FnMut(&sqlparser::ast::Query) -> Result<sqlparser::ast::Query, E>,
+) -> Result<sqlparser::ast::FunctionArguments, E> {
+    Ok(match arguments {
+        sqlparser::ast::FunctionArguments::None => sqlparser::ast::FunctionArguments::None,
+        sqlparser::ast::FunctionArguments::Subquery(query) => {
+            sqlparser::ast::FunctionArguments::Subquery(Box::new(f_query(query)?))
+        }
+        sqlparser::ast::FunctionArguments::List(list) => {
+            let sqlparser::ast::FunctionArgumentList { duplicate_treatment, args, clauses } = list;
+            sqlparser::ast::FunctionArguments::List(sqlparser::ast::FunctionArgumentList {
+                duplicate_treatment: *duplicate_treatment,
+                args: args
+                    .iter()
+                    .map(|arg| try_map_function_arg(arg, f))
+                    .collect::<Result<Vec<_>, E>>()?,
+                clauses: clauses
+                    .iter()
+                    .map(|clause| try_map_function_argument_clause(clause, f))
+                    .collect::<Result<Vec<_>, E>>()?,
+            })
+        }
+    })
+}
+
+fn try_map_function_arg<E>(
+    arg: &sqlparser::ast::FunctionArg,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::FunctionArg, E> {
+    Ok(match arg {
+        sqlparser::ast::FunctionArg::Named { name, arg, operator } => {
+            sqlparser::ast::FunctionArg::Named {
+                name: name.clone(),
+                arg: try_map_function_arg_expr(arg, f)?,
+                operator: operator.clone(),
+            }
+        }
+        sqlparser::ast::FunctionArg::ExprNamed { name, arg, operator } => {
+            sqlparser::ast::FunctionArg::ExprNamed {
+                name: f(name)?,
+                arg: try_map_function_arg_expr(arg, f)?,
+                operator: operator.clone(),
+            }
+        }
+        sqlparser::ast::FunctionArg::Unnamed(arg) => {
+            sqlparser::ast::FunctionArg::Unnamed(try_map_function_arg_expr(arg, f)?)
+        }
+    })
+}
+
+fn try_map_function_arg_expr<E>(
+    arg: &sqlparser::ast::FunctionArgExpr,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::FunctionArgExpr, E> {
+    Ok(match arg {
+        sqlparser::ast::FunctionArgExpr::Expr(expr) => {
+            sqlparser::ast::FunctionArgExpr::Expr(f(expr)?)
+        }
+        wildcard => wildcard.clone(),
+    })
+}
+
+fn try_map_function_argument_clause<E>(
+    clause: &sqlparser::ast::FunctionArgumentClause,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::FunctionArgumentClause, E> {
+    use sqlparser::ast::FunctionArgumentClause as Clause;
+
+    Ok(match clause {
+        Clause::Where(predicate) => Clause::Where(f(predicate)?),
+        Clause::OrderBy(keys) => Clause::OrderBy(try_map_order_by_exprs(keys, f)?),
+        Clause::Limit(limit) => Clause::Limit(f(limit)?),
+        Clause::Having(sqlparser::ast::HavingBound(kind, bound)) => {
+            Clause::Having(sqlparser::ast::HavingBound(*kind, f(bound)?))
+        }
+        // `IgnoreOrRespectNulls`, `OnOverflow`, `Separator`, and the JSON
+        // clauses carry no expression.
+        other => other.clone(),
+    })
+}
+
+fn try_map_order_by_exprs<E>(
+    keys: &[sqlparser::ast::OrderByExpr],
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<Vec<sqlparser::ast::OrderByExpr>, E> {
+    keys.iter()
+        .map(|key| {
+            Ok(sqlparser::ast::OrderByExpr {
+                expr: f(&key.expr)?,
+                options: key.options.clone(),
+                with_fill: key.with_fill.clone(),
+            })
+        })
+        .collect()
+}
+
+fn try_map_window_spec<E>(
+    spec: &sqlparser::ast::WindowSpec,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::WindowSpec, E> {
+    let sqlparser::ast::WindowSpec { window_name, partition_by, order_by, window_frame } = spec;
+
+    Ok(sqlparser::ast::WindowSpec {
+        window_name: window_name.clone(),
+        partition_by: partition_by.iter().map(&mut *f).collect::<Result<Vec<_>, E>>()?,
+        order_by: try_map_order_by_exprs(order_by, f)?,
+        window_frame: match window_frame {
+            Some(frame) => {
+                Some(sqlparser::ast::WindowFrame {
+                    units: frame.units,
+                    start_bound: try_map_window_frame_bound(&frame.start_bound, f)?,
+                    end_bound: match &frame.end_bound {
+                        Some(bound) => Some(try_map_window_frame_bound(bound, f)?),
+                        None => None,
+                    },
+                })
+            }
+            None => None,
+        },
+    })
+}
+
+fn try_map_window_frame_bound<E>(
+    bound: &sqlparser::ast::WindowFrameBound,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::WindowFrameBound, E> {
+    use sqlparser::ast::WindowFrameBound as Bound;
+
+    Ok(match bound {
+        Bound::Preceding(Some(offset)) => Bound::Preceding(Some(Box::new(f(offset)?))),
+        Bound::Following(Some(offset)) => Bound::Following(Some(Box::new(f(offset)?))),
+        // `CURRENT ROW` and the unbounded spellings carry no offset.
+        other => other.clone(),
     })
 }
 
@@ -702,8 +887,11 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             }
         }
 
-        // Function / Subquery / Exists - skip (callers handle separately)
-        Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => {}
+        Expr::Function(function) => for_each_function_child_expr(function, f),
+
+        // A subquery's expressions live under a `Query`, which this walk has
+        // no callback for; callers that need them match these two themselves.
+        Expr::Subquery(_) | Expr::Exists { .. } => {}
 
         // Remaining leaf-like variants
         // Dictionary and Map recurse into their children
@@ -726,18 +914,6 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
     }
 }
 
-/// Return `true` if `predicate` returns `true` for any direct child [`Expr`]
-/// inside `expr`.
-pub(crate) fn any_child_expr(expr: &Expr, predicate: &impl Fn(&Expr) -> bool) -> bool {
-    let mut found = false;
-    for_each_child_expr(expr, &mut |child| {
-        if !found && predicate(child) {
-            found = true;
-        }
-    });
-    found
-}
-
 /// Calls `f` on every direct child `&mut Expr`, mutating in place.
 ///
 /// Adapter over [`try_map_expr_children`], the single variant table: each
@@ -758,6 +934,83 @@ pub(crate) fn mutate_expr_children(expr: &mut Expr, f: &mut impl FnMut(&mut Expr
     match result {
         Ok(rebuilt) => *expr = rebuilt,
         Err(never) => match never {},
+    }
+}
+
+/// The read-only mirror of [`try_map_function_children`], kept beside it so
+/// the two tables are read together.
+fn for_each_function_child_expr(function: &sqlparser::ast::Function, f: &mut impl FnMut(&Expr)) {
+    let sqlparser::ast::Function {
+        name: _,
+        uses_odbc_syntax: _,
+        parameters,
+        args,
+        within_group,
+        filter,
+        null_treatment: _,
+        over,
+    } = function;
+
+    for arguments in [parameters, args] {
+        if let sqlparser::ast::FunctionArguments::List(list) = arguments {
+            for arg in &list.args {
+                if let sqlparser::ast::FunctionArg::ExprNamed { name, .. } = arg {
+                    f(name);
+                }
+                let (sqlparser::ast::FunctionArg::Named { arg, .. }
+                | sqlparser::ast::FunctionArg::ExprNamed { arg, .. }
+                | sqlparser::ast::FunctionArg::Unnamed(arg)) = arg;
+                if let sqlparser::ast::FunctionArgExpr::Expr(expr) = arg {
+                    f(expr);
+                }
+            }
+            for clause in &list.clauses {
+                for_each_function_argument_clause_expr(clause, f);
+            }
+        }
+    }
+
+    for key in within_group {
+        f(&key.expr);
+    }
+    if let Some(predicate) = filter {
+        f(predicate);
+    }
+    if let Some(sqlparser::ast::WindowType::WindowSpec(spec)) = over {
+        for key in &spec.partition_by {
+            f(key);
+        }
+        for key in &spec.order_by {
+            f(&key.expr);
+        }
+        if let Some(frame) = &spec.window_frame {
+            for bound in [Some(&frame.start_bound), frame.end_bound.as_ref()].into_iter().flatten()
+            {
+                if let sqlparser::ast::WindowFrameBound::Preceding(Some(offset))
+                | sqlparser::ast::WindowFrameBound::Following(Some(offset)) = bound
+                {
+                    f(offset);
+                }
+            }
+        }
+    }
+}
+
+fn for_each_function_argument_clause_expr(
+    clause: &sqlparser::ast::FunctionArgumentClause,
+    f: &mut impl FnMut(&Expr),
+) {
+    use sqlparser::ast::FunctionArgumentClause as Clause;
+
+    match clause {
+        Clause::Where(predicate) | Clause::Limit(predicate) => f(predicate),
+        Clause::OrderBy(keys) => {
+            for key in keys {
+                f(&key.expr);
+            }
+        }
+        Clause::Having(sqlparser::ast::HavingBound(_, bound)) => f(bound),
+        _ => {}
     }
 }
 
@@ -874,18 +1127,6 @@ mod tests {
         let mut visited = Vec::new();
         for_each_child_expr(&expr, &mut |e| visited.push(e.to_string()));
         assert_eq!(visited, vec!["x", "a", "b", "c"]);
-    }
-
-    #[test]
-    fn any_child_expr_finds_match() {
-        let expr = Expr::Between {
-            expr: Box::new(ident_expr("x")),
-            negated: false,
-            low: Box::new(num_expr("1")),
-            high: Box::new(ident_expr("target")),
-        };
-        assert!(any_child_expr(&expr, &|e| e.to_string() == "target"));
-        assert!(!any_child_expr(&expr, &|e| e.to_string() == "missing"));
     }
 
     #[test]
@@ -1015,22 +1256,7 @@ mod tests {
             );
 
             // for_each_child_expr does not panic
-            let mut count = 0;
-            for_each_child_expr(&expr, &mut |_| count += 1);
-
-            // any_child_expr with always-false returns false (unless leaf has
-            // no children, in which case it also returns false). Always-true
-            // is true iff there is at least one child.
-            let any_true = any_child_expr(&expr, &|_| true);
-            assert_eq!(
-                any_true,
-                count > 0,
-                "{label}: any_child_expr(true) disagrees with for_each_child_expr count",
-            );
-            assert!(
-                !any_child_expr(&expr, &|_| false),
-                "{label}: any_child_expr(false) returned true",
-            );
+            for_each_child_expr(&expr, &mut |_| {});
 
             // mutate_expr_children with no-op = same Display
             let mut mutated = expr.clone();
@@ -1064,15 +1290,93 @@ mod tests {
         assert_eq!(count, 4);
     }
 
+    /// Every expression a call carries is a child, in both walkers, which is
+    /// what keeps a caller that falls through from reading past an argument.
     #[test]
-    fn for_each_child_expr_counts_function_args_skip() {
-        // Function children are intentionally skipped by for_each_child_expr;
-        // callers handle the function name + args separately. The Display
-        // here just exercises the Function arm.
-        let expr = parse_expr("coalesce(a, b)");
-        let mut count = 0;
-        for_each_child_expr(&expr, &mut |_| count += 1);
-        assert_eq!(count, 0, "function children should be skipped");
+    fn a_call_yields_every_expression_it_carries() {
+        let expr = parse_expr(
+            "sum(a, b) FILTER (WHERE c > 1) OVER (PARTITION BY d ORDER BY e ROWS BETWEEN f \
+             PRECEDING AND g FOLLOWING)",
+        );
+
+        let mut visited = Vec::new();
+        for_each_child_expr(&expr, &mut |child| visited.push(child.to_string()));
+        assert_eq!(visited, vec!["a", "b", "c > 1", "d", "e", "f", "g"]);
+
+        let mut mapped = Vec::new();
+        let rebuilt: Result<Expr, ()> = try_map_expr_children(
+            &expr,
+            &mut |child| {
+                mapped.push(child.to_string());
+                Ok(child.clone())
+            },
+            &mut |query| Ok(query.clone()),
+        );
+        assert_eq!(mapped, visited, "the two tables must agree");
+        assert_eq!(rebuilt.expect("identity map").to_string(), expr.to_string());
+    }
+
+    /// A subquery written as an argument arrives at the child callback as the
+    /// `Expr::Subquery` it is, which is what lets a caller that inspects
+    /// subqueries see one hidden inside a call.
+    #[test]
+    fn a_subquery_argument_reaches_the_child_callback() {
+        let expr = parse_expr("coalesce((SELECT 1 FROM other), 0)");
+        let mut visited = Vec::new();
+        for_each_child_expr(&expr, &mut |child| visited.push(child.to_string()));
+        assert_eq!(visited, vec!["(SELECT 1 FROM other)", "0"]);
+    }
+
+    /// Every spelling an argument can take, since each is its own arm of the
+    /// table and a missed one is a caller reading past that argument.
+    #[test]
+    fn every_argument_spelling_is_walked() {
+        for (sql, expected) in [
+            // `a => 1` is an `ExprNamed`, whose name is an expression too.
+            ("f(a => 1, b)", vec!["a", "1", "b"]),
+            ("string_agg(a, ',' ORDER BY b)", vec!["a", "','", "b"]),
+            ("percentile_cont(0.5) WITHIN GROUP (ORDER BY a)", vec!["0.5", "a"]),
+            ("count(*) FILTER (WHERE a > 1)", vec!["a > 1"]),
+            ("sum(a) OVER w", vec!["a"]),
+        ] {
+            let expr = parse_expr(sql);
+
+            let mut visited = Vec::new();
+            for_each_child_expr(&expr, &mut |child| visited.push(child.to_string()));
+            assert_eq!(visited, expected, "walking {sql}");
+
+            let mut mapped = Vec::new();
+            let rebuilt: Result<Expr, ()> = try_map_expr_children(
+                &expr,
+                &mut |child| {
+                    mapped.push(child.to_string());
+                    Ok(child.clone())
+                },
+                &mut |query| Ok(query.clone()),
+            );
+            assert_eq!(mapped, expected, "mapping {sql}");
+            assert_eq!(
+                rebuilt.expect("identity map").to_string(),
+                expr.to_string(),
+                "rebuilding {sql}"
+            );
+        }
+    }
+
+    /// A call whose argument list is a bare subquery hands that query to the
+    /// query callback, the one place a subquery is not also a child
+    /// expression.
+    #[test]
+    fn a_bare_subquery_argument_list_reaches_the_query_callback() {
+        let expr = parse_expr("ARRAY(SELECT 1 FROM other)");
+        let mut queries = 0;
+        let rebuilt: Result<Expr, ()> =
+            try_map_expr_children(&expr, &mut |child| Ok(child.clone()), &mut |query| {
+                queries += 1;
+                Ok(query.clone())
+            });
+        assert_eq!(rebuilt.expect("identity map").to_string(), expr.to_string());
+        assert_eq!(queries, 1);
     }
 
     /// `{'k1': 1, 'k2': 2}`. Not reachable from a PostgreSQL parse, since

@@ -20,7 +20,6 @@ use crate::{
     impls::{returning_scope::scope_returning_to_target, shared_helpers::translate_update},
 };
 
-crate::traits::translator::impl_contextual_translator!(Update => Update);
 /// Every relation an `UPDATE` lists, so a reference qualified by a `FROM`
 /// relation resolves as well as one naming the target.
 pub(crate) fn update_scope_query(update: &Update) -> sqlparser::ast::Query {
@@ -34,9 +33,11 @@ pub(crate) fn update_scope_query(update: &Update) -> sqlparser::ast::Query {
 }
 
 impl crate::traits::translator::TranslatorWithContext for Update {
+    type SQLiteEntry = Update;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, Error> {

@@ -39,39 +39,48 @@ pub trait Translator {
     ) -> Result<Self::SQLiteEntry, crate::errors::Error>;
 }
 
-pub(crate) trait TranslatorWithContext:
-    Translator<Schema = sql_traits::structs::ParserDB, Options = Pg2SqliteOptions>
-{
+/// Translates a PostgreSQL entry with an explicit translation context, which
+/// carries the per-statement settings and the sink lossy steps are reported
+/// to.
+///
+/// Implementing this is how a type becomes a [`Translator`]: the blanket impl
+/// below supplies [`Translator::translate`] by opening a context over the
+/// options and discarding the warnings. There is no second way to get one,
+/// which is the point, since the macro this replaced had to be invoked once
+/// per type and a forgotten invocation still compiled.
+pub trait TranslatorWithContext {
+    /// Produced SQLite entry type.
+    type SQLiteEntry;
+
+    /// Translates a PostgreSQL entry, reporting lossy steps through `emit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the translation fails.
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         context: &TranslationContext<'_>,
         emit: WarningSink<'_>,
     ) -> Result<Self::SQLiteEntry, crate::errors::Error>;
 }
 
-macro_rules! impl_contextual_translator {
-    ($source:ty => $output:ty) => {
-        impl crate::traits::translator::Translator for $source {
-            type Schema = sql_traits::structs::ParserDB;
-            type Options = crate::options::Pg2SqliteOptions;
-            type SQLiteEntry = $output;
+impl<T: TranslatorWithContext> Translator for T {
+    type Schema = sql_traits::structs::ParserDB;
+    type Options = Pg2SqliteOptions;
+    type SQLiteEntry = <T as TranslatorWithContext>::SQLiteEntry;
 
-            fn translate(
-                &self,
-                schema: &Self::Schema,
-                options: &Self::Options,
-            ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-                let context = crate::options::TranslationContext::new(options);
-                <Self as crate::traits::translator::TranslatorWithContext>::translate_with_warnings(
-                    self,
-                    schema,
-                    &context,
-                    &mut |_| {},
-                )
-            }
-        }
-    };
+    fn translate(
+        &self,
+        schema: &Self::Schema,
+        options: &Self::Options,
+    ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        let context = TranslationContext::new(options);
+        <Self as TranslatorWithContext>::translate_with_warnings(
+            self,
+            schema,
+            &context,
+            &mut |_| {},
+        )
+    }
 }
-
-pub(crate) use impl_contextual_translator;

@@ -52,6 +52,27 @@ pub(crate) fn single_quoted_literal(expr: &Expr) -> Option<&str> {
     }
 }
 
+/// The one expression `(SELECT <expr>)` projects, when the subquery reads
+/// nothing and answers exactly that.
+///
+/// Lets a caller see the literal behind a subquery without guessing at what a
+/// subquery over a relation would answer.
+#[must_use]
+pub(crate) fn scalar_subquery_projection(expr: &Expr) -> Option<&Expr> {
+    let Expr::Subquery(query) = expr else { return None };
+    if query.with.is_some() || query.order_by.is_some() || query.limit_clause.is_some() {
+        return None;
+    }
+    let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else { return None };
+    if !select.from.is_empty() || select.selection.is_some() {
+        return None;
+    }
+    match select.projection.as_slice() {
+        [sqlparser::ast::SelectItem::UnnamedExpr(projected)] => Some(projected),
+        _ => None,
+    }
+}
+
 /// Create a numeric literal expression from a string representation.
 #[must_use]
 pub(crate) fn number_literal(n: &str) -> Expr {
@@ -117,6 +138,19 @@ pub(crate) fn function_arg_expr_or_err(arg: &FunctionArg) -> Result<&Expr, Error
         | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
         | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => Ok(e),
         _ => Err(Error::reverse_refusal("Expected expression argument in function".to_string())),
+    }
+}
+
+/// The positional argument count, or `None` for a shape where arity says
+/// nothing.
+///
+/// `FunctionArguments::None` is the argument-less spelling, so zero, while a
+/// subquery-shaped argument list has no positional count to report.
+pub(crate) fn positional_arity(args: &FunctionArguments) -> Option<i32> {
+    match args {
+        FunctionArguments::List(list) => i32::try_from(list.args.len()).ok(),
+        FunctionArguments::None => Some(0),
+        FunctionArguments::Subquery(_) => None,
     }
 }
 

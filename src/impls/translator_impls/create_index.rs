@@ -542,11 +542,12 @@ fn report_dropped_index_clauses(index: &CreateIndex, emit: crate::warnings::Warn
     }
 }
 
-crate::traits::translator::impl_contextual_translator!(CreateIndex => Vec<Statement>);
 impl crate::traits::translator::TranslatorWithContext for CreateIndex {
+    type SQLiteEntry = Vec<Statement>;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

@@ -17,27 +17,14 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 
+mod helpers;
+
 use std::time::Instant;
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rand::RngExt;
-use rusqlite::{Connection, Result, ffi::sqlite3_auto_extension};
-use sqlite_vec::sqlite3_vec_init;
+use rusqlite::{Connection, Result};
 use zerocopy::IntoBytes;
-
-/// Register sqlite-vec extension globally before any tests run.
-fn register_sqlite_vec() {
-    unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut i8,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite3_vec_init as *const ())));
-    }
-}
 
 /// Generate a random f32 vector of the given dimension.
 fn random_vector(dim: usize) -> Vec<f32> {
@@ -47,7 +34,7 @@ fn random_vector(dim: usize) -> Vec<f32> {
 
 #[test]
 fn test_sqlite_vec_loaded() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     let db = Connection::open_in_memory()?;
 
@@ -61,7 +48,7 @@ fn test_sqlite_vec_loaded() -> Result<()> {
 
 #[test]
 fn test_translated_vector_table_works() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     let sql = "
         CREATE TABLE items (
@@ -105,7 +92,7 @@ fn test_translated_vector_table_works() -> Result<()> {
 
 #[test]
 fn test_vec0_knn_query_correctness() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     let sql = "
         CREATE TABLE items (
@@ -168,7 +155,7 @@ fn test_vec0_knn_query_correctness() -> Result<()> {
 /// 3. Reports performance comparison (informational)
 #[test]
 fn test_vec0_indexed_knn_large_dataset() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     const NUM_VECTORS: usize = 10_000;
     const DIMENSIONS: usize = 128;
@@ -294,7 +281,7 @@ fn test_vec0_indexed_knn_large_dataset() -> Result<()> {
 /// See: https://github.com/asg017/sqlite-vec/issues/25
 #[test]
 fn test_vec0_faster_than_naive_at_scale() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     const NUM_VECTORS: usize = 100_000;
     const DIMENSIONS: usize = 64;
@@ -401,7 +388,7 @@ fn test_vec0_faster_than_naive_at_scale() -> Result<()> {
 
 #[test]
 fn test_update_trigger_syncs_to_vec0() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     let sql = "
         CREATE TABLE items (
@@ -447,7 +434,7 @@ fn test_update_trigger_syncs_to_vec0() -> Result<()> {
 /// the index.
 #[test]
 fn an_update_to_null_removes_the_row_from_the_index() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     let sql = "
         CREATE TABLE items (
@@ -485,7 +472,7 @@ fn an_update_to_null_removes_the_row_from_the_index() -> Result<()> {
 /// the index. The trigger must create the shadow row.
 #[test]
 fn a_null_row_updated_to_a_vector_joins_the_index() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     let sql = "
         CREATE TABLE items (
@@ -525,7 +512,7 @@ fn a_null_row_updated_to_a_vector_joins_the_index() -> Result<()> {
 /// row to the new key.
 #[test]
 fn a_pk_update_moves_the_indexed_row() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     let sql = "
         CREATE TABLE items (
@@ -555,7 +542,7 @@ fn a_pk_update_moves_the_indexed_row() -> Result<()> {
 
 #[test]
 fn test_delete_trigger_removes_from_vec0() -> Result<()> {
-    register_sqlite_vec();
+    helpers::register_sqlite_vec_once();
 
     let sql = "
         CREATE TABLE items (

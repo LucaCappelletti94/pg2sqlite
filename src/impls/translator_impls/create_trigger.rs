@@ -387,14 +387,13 @@ fn split_before_insert_maintenance_trigger(
     Some((insert_trigger, non_insert_trigger))
 }
 
-crate::traits::translator::impl_contextual_translator!(
-    CreateTrigger => Vec<(Option<DropTrigger>, CreateTrigger)>
-);
 impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
+    type SQLiteEntry = Vec<(Option<DropTrigger>, CreateTrigger)>;
+
     #[allow(clippy::too_many_lines)]
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

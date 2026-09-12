@@ -350,7 +350,7 @@ pub(crate) fn subsecond_timestamp_from_epoch(epoch: Expr) -> Expr {
 
 /// `rtrim(rtrim(x, '0'), '.')`, which turns `09.500` into `09.5` and `09.000`
 /// into `09`.
-fn trim_trailing_zeros(rendered: Expr) -> Expr {
+pub(crate) fn trim_trailing_zeros(rendered: Expr) -> Expr {
     let without_zeros = simple_function_expr("rtrim", vec![rendered, string_literal("0")], None);
     simple_function_expr("rtrim", vec![without_zeros, string_literal(".")], None)
 }

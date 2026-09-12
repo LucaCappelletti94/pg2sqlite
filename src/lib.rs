@@ -16,12 +16,13 @@ pub mod prelude {
     pub use crate::{
         errors::{Error, RefusalCategory, SqlParseError, TranslationDirection, TranslationRefusal},
         manifest::{ColumnManifestEntry, TableManifestEntry, WrapperKind},
-        options::Pg2SqliteOptions,
+        options::{Pg2SqliteOptions, TranslationContext},
         pg2sqlite::Pg2Sqlite,
         traits::{
             ArrayRepresentation, ReverseTranslator, Schema, SessionVariableMapping,
-            SessionVariablePattern, Translator, UuidRepresentation, UuidVersion,
+            SessionVariablePattern, Translator, TranslatorWithContext, UuidRepresentation,
+            UuidVersion,
         },
-        warnings::{TranslationReport, TranslationWarning},
+        warnings::{TranslationReport, TranslationWarning, WarningSink},
     };
 }

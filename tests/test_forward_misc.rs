@@ -5,34 +5,12 @@
 //! - Statement translation: DROP, VACUUM, transactions (statement.rs)
 //! - Forward function translation edge cases (function.rs)
 
+mod helpers;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 
-use std::sync::Once;
-
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use sqlite_vec::sqlite3_vec_init;
 use translate_helpers::translate_default as translate;
-
-/// Register sqlite-vec once per process so connections used by execute helpers
-/// have vec0 and vec_distance_* available.
-///
-/// SAFETY: `sqlite3_vec_init` has the real C signature `(db, pzErrMsg, pApi) ->
-/// int`; the transmute restores it for `sqlite3_auto_extension`. rusqlite FFI
-/// is the only path to this API; diesel does not expose it.
-fn register_sqlite_vec_once() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::os::raw::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite3_vec_init as *const ())));
-    });
-}
 
 fn translate_err(sql: &str) -> String {
     let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
@@ -1008,31 +986,14 @@ fn insert_returning_translates_expressions() {
     );
     execute_emitted(sql);
 }
-/// Execute every emitted statement against an in-memory SQLite connection.
-///
-/// Registers sqlite-vec so tests involving vector types (vec0, vec_f32,
-/// vec_distance_*) can execute the translated DDL and DML. rusqlite is used
-/// directly because diesel does not expose `sqlite3_auto_extension`.
+/// Registers sqlite-vec and executes every emitted statement in a fresh
+/// in-memory SQLite.
 fn execute_emitted(sql: &str) {
-    register_sqlite_vec_once();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    let stmts = Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap();
-    for s in &stmts {
-        conn.execute_batch(&format!("{s};"))
-            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
-    }
+    helpers::register_sqlite_vec_once();
+    helpers::execute_all(sql, &Pg2SqliteOptions::default());
 }
 
 fn execute_emitted_with_options(sql: &str, options: &Pg2SqliteOptions) {
-    register_sqlite_vec_once();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate_to_sql(options).unwrap();
-    for s in &stmts {
-        conn.execute_batch(&format!("{s};"))
-            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
-    }
+    helpers::register_sqlite_vec_once();
+    helpers::execute_all(sql, options);
 }

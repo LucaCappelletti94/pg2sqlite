@@ -267,37 +267,9 @@ pub(crate) fn interval_date_modifiers(
     interval: &Interval,
     negate: bool,
 ) -> Result<Option<Vec<String>>, Error> {
-    let Some(pairs) = unit_pairs(interval) else { return Ok(None) };
-
-    let mut fields = IntervalFields::default();
-    for (count, unit) in pairs {
-        let Some(parsed) = Decimal::parse(count) else {
-            return Err(Error::forward_refusal(format!(
-                "INTERVAL '{count} {unit}' cannot be translated: {count} is not a plain decimal \
-                 count. Write the interval as a sequence of count and unit pairs, such as \
-                 INTERVAL '1 month 2 days'."
-            )));
-        };
-        let Some(scale) = unit_scale(&unit) else {
-            return Err(Error::forward_refusal(format!(
-                "INTERVAL unit '{unit}' is not a PostgreSQL interval unit, so it has no SQLite \
-                 date modifier. The units are microsecond, millisecond, second, minute, hour, \
-                 day, week, month, year, decade, century and millennium, with their usual \
-                 abbreviations."
-            )));
-        };
-        if fields.add(&parsed, scale).is_none() {
-            return Err(Error::forward_refusal(format!(
-                "INTERVAL '{count} {unit}' is too large to translate: the count overflows the \
-                 months and microseconds PostgreSQL would hold it in."
-            )));
-        }
-    }
-
-    if negate {
-        fields.negate();
-    }
-    Ok(Some(fields.modifiers()))
+    // Scaling by one is the identity: `IntervalFields::scale` multiplies both
+    // fields with `checked_mul`, which cannot overflow at a factor of one.
+    interval_date_modifiers_scaled(interval, negate, 1)
 }
 
 /// The SQLite date modifiers for `interval * factor`, negated for subtraction.

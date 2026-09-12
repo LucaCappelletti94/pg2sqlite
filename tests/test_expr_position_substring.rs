@@ -5,6 +5,7 @@
 
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
 
 mod schema {
     diesel::table! {
@@ -32,7 +33,7 @@ struct StringData {
 }
 
 #[test]
-fn test_position_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_position_translation() {
     let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
@@ -42,33 +43,17 @@ fn test_position_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     // Should contain INSTR, not POSITION
     assert!(
-        select_stmt.to_uppercase().contains("INSTR"),
-        "POSITION should translate to INSTR, got: {select_stmt}"
+        query.to_uppercase().contains("INSTR"),
+        "POSITION should translate to INSTR, got: {query}"
     );
     assert!(
-        !select_stmt.to_uppercase().contains("POSITION"),
-        "Should not contain POSITION, got: {select_stmt}"
+        !query.to_uppercase().contains("POSITION"),
+        "Should not contain POSITION, got: {query}"
     );
-    // Apply DDL then prepare the SELECT to prove SQLite accepts the output.
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("SQLite rejected DDL: {e}\n{stmt}"));
-    }
-    conn.prepare(&select_stmt)
-        .unwrap_or_else(|e| panic!("SQLite rejected SELECT at prepare: {e}\n{select_stmt}"));
-
-    Ok(())
 }
 
 #[test]
@@ -119,7 +104,7 @@ fn test_position_semantic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_substring_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_substring_translation() {
     let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
@@ -129,29 +114,13 @@ fn test_substring_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     // Should contain SUBSTR, not SUBSTRING
     assert!(
-        select_stmt.to_uppercase().contains("SUBSTR"),
-        "SUBSTRING should translate to SUBSTR, got: {select_stmt}"
+        query.to_uppercase().contains("SUBSTR"),
+        "SUBSTRING should translate to SUBSTR, got: {query}"
     );
-    // Apply DDL then prepare the SELECT to prove SQLite accepts the output.
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("SQLite rejected DDL: {e}\n{stmt}"));
-    }
-    conn.prepare(&select_stmt)
-        .unwrap_or_else(|e| panic!("SQLite rejected SELECT at prepare: {e}\n{select_stmt}"));
-
-    Ok(())
 }
 
 #[test]
@@ -194,7 +163,7 @@ fn test_substring_semantic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_substring_no_length_translation() -> Result<(), Box<dyn std::error::Error>> {
+fn test_substring_no_length_translation() {
     let sql = "
         CREATE TABLE strings (
             id INTEGER PRIMARY KEY,
@@ -204,28 +173,12 @@ fn test_substring_no_length_translation() -> Result<(), Box<dyn std::error::Erro
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     assert!(
-        select_stmt.to_uppercase().contains("SUBSTR"),
-        "SUBSTRING should translate to SUBSTR, got: {select_stmt}"
+        query.to_uppercase().contains("SUBSTR"),
+        "SUBSTRING should translate to SUBSTR, got: {query}"
     );
-    // Apply DDL then prepare the SELECT to prove SQLite accepts the output.
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    for stmt in translated.iter().filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_))) {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("SQLite rejected DDL: {e}\n{stmt}"));
-    }
-    conn.prepare(&select_stmt)
-        .unwrap_or_else(|e| panic!("SQLite rejected SELECT at prepare: {e}\n{select_stmt}"));
-
-    Ok(())
 }
 
 #[test]
@@ -285,31 +238,6 @@ struct OverlaySample {
     text_val: String,
 }
 
-fn translate_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
-    Ok(translated)
-}
-
-fn find_select_sql(translated: &[sqlparser::ast::Statement]) -> String {
-    translated
-        .iter()
-        .find(|stmt| matches!(stmt, sqlparser::ast::Statement::Query(_)))
-        .expect("should contain a SELECT query")
-        .to_string()
-}
-
-fn execute_non_query_stmts(
-    translated: &[sqlparser::ast::Statement],
-    conn: &mut diesel::SqliteConnection,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for stmt in
-        translated.iter().filter(|stmt| !matches!(stmt, sqlparser::ast::Statement::Query(_)))
-    {
-        diesel::sql_query(stmt.to_string()).execute(conn)?;
-    }
-    Ok(())
-}
-
 #[derive(Debug, QueryableByName)]
 struct OverlayRow {
     #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -319,7 +247,7 @@ struct OverlayRow {
 }
 
 #[test]
-fn test_overlay_with_for_semantic() -> Result<(), Box<dyn std::error::Error>> {
+fn test_overlay_with_for_semantic() {
     let sql = "
         CREATE TABLE overlay_samples (
             id INTEGER PRIMARY KEY,
@@ -330,38 +258,46 @@ fn test_overlay_with_for_semantic() -> Result<(), Box<dyn std::error::Error>> {
         ORDER BY id;
     ";
 
-    let translated = translate_sql(sql)?;
-    let query = find_select_sql(&translated);
+    let options = Pg2SqliteOptions::default();
+    let stmts = helpers::translate_pg(sql, &options).expect("translation failed");
+    let query = helpers::user_statement_of(&stmts, "SELECT").clone();
     assert!(
         !query.to_uppercase().contains("OVERLAY("),
         "OVERLAY should be rewritten, got: {query}"
     );
     assert!(query.to_uppercase().contains("SUBSTR"), "Expected SUBSTR rewrite, got: {query}");
 
-    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
-    execute_non_query_stmts(&translated, &mut conn)?;
+    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("establish");
+    // Translated DDL: runtime string from the translator, cannot use the typed
+    // DSL.
+    for stmt in &stmts {
+        if !helpers::is_user_statement(stmt, "SELECT") {
+            diesel::sql_query(stmt.as_str()).execute(&mut conn).expect("DDL failed");
+        }
+    }
 
     diesel::insert_into(overlay_samples::table)
         .values(&[
             OverlaySample { id: 1, text_val: "abcdef".to_string() },
             OverlaySample { id: 2, text_val: "123456".to_string() },
         ])
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .expect("insert failed");
 
-    let rows: Vec<OverlayRow> = diesel::sql_query(query).load(&mut conn)?;
+    // Translated SELECT: runtime string from the translator, cannot use the
+    // typed DSL.
+    let rows: Vec<OverlayRow> = diesel::sql_query(&query).load(&mut conn).expect("load failed");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].out_text, "abZZef");
     assert_eq!(rows[1].id, 2);
     assert_eq!(rows[1].out_text, "12ZZ56");
-
-    Ok(())
 }
 
 /// Test OVERLAY without FOR (replacement length defaults to length of
 /// replacement string).
 #[test]
-fn test_overlay_without_for_semantic() -> Result<(), Box<dyn std::error::Error>> {
+fn test_overlay_without_for_semantic() {
     let sql = "
         CREATE TABLE overlay_samples (
             id INTEGER PRIMARY KEY,
@@ -372,25 +308,33 @@ fn test_overlay_without_for_semantic() -> Result<(), Box<dyn std::error::Error>>
         ORDER BY id;
     ";
 
-    let translated = translate_sql(sql)?;
-    let query = find_select_sql(&translated);
+    let options = Pg2SqliteOptions::default();
+    let stmts = helpers::translate_pg(sql, &options).expect("translation failed");
+    let query = helpers::user_statement_of(&stmts, "SELECT").clone();
     assert!(
         !query.to_uppercase().contains("OVERLAY("),
         "OVERLAY should be rewritten, got: {query}"
     );
     assert!(query.to_uppercase().contains("SUBSTR"), "Expected SUBSTR rewrite, got: {query}");
 
-    let mut conn = diesel::SqliteConnection::establish(":memory:")?;
-    execute_non_query_stmts(&translated, &mut conn)?;
+    let mut conn = diesel::SqliteConnection::establish(":memory:").expect("establish");
+    // Translated DDL: runtime string from the translator, cannot use the typed
+    // DSL.
+    for stmt in &stmts {
+        if !helpers::is_user_statement(stmt, "SELECT") {
+            diesel::sql_query(stmt.as_str()).execute(&mut conn).expect("DDL failed");
+        }
+    }
 
     diesel::insert_into(overlay_samples::table)
         .values(&[OverlaySample { id: 1, text_val: "hello world".to_string() }])
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .expect("insert failed");
 
-    let rows: Vec<OverlayRow> = diesel::sql_query(query).load(&mut conn)?;
+    // Translated SELECT: runtime string from the translator, cannot use the
+    // typed DSL.
+    let rows: Vec<OverlayRow> = diesel::sql_query(&query).load(&mut conn).expect("load failed");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].out_text, "hello sqlite");
-
-    Ok(())
 }

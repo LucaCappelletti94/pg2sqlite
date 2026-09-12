@@ -14,9 +14,6 @@ use alloc::{
 
 use sqlparser::ast::ConstraintCharacteristics;
 
-crate::traits::translator::impl_contextual_translator!(
-    ConstraintCharacteristics => ConstraintCharacteristics
-);
 /// Translates the characteristics of a FOREIGN KEY constraint.
 ///
 /// SQLite honours deferred foreign keys, so `DEFERRABLE` and `INITIALLY` pass
@@ -24,9 +21,11 @@ crate::traits::translator::impl_contextual_translator!(
 /// but a foreign key clause, so the `PRIMARY KEY` and `UNIQUE` call sites
 /// refuse before reaching here, through `deferrability_outside_a_foreign_key`.
 impl crate::traits::translator::TranslatorWithContext for ConstraintCharacteristics {
+    type SQLiteEntry = ConstraintCharacteristics;
+
     fn translate_with_warnings(
         &self,
-        _schema: &Self::Schema,
+        _schema: &sql_traits::structs::ParserDB,
         _options: &crate::options::TranslationContext<'_>,
         _emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

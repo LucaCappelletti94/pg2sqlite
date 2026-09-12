@@ -19,16 +19,10 @@
 //! Types take the quoting half of that rule and not the prefix half, because an
 //! extension may be installed into a named schema, which is why
 //! `public.vector` maps to `BLOB` and must keep doing so.
-
-use pg2sqlite::{
-    errors::Error,
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-};
+mod helpers;
+use helpers::translate_pg as translate;
+use pg2sqlite::prelude::Pg2SqliteOptions;
 use rusqlite::Connection;
-
-fn translate(pg: &str, options: &Pg2SqliteOptions) -> Result<Vec<String>, Error> {
-    Pg2Sqlite::default().sql(pg).and_then(|loaded| loaded.translate_to_sql(options))
-}
 
 fn refusal(pg: &str, options: &Pg2SqliteOptions) -> String {
     match translate(pg, options) {

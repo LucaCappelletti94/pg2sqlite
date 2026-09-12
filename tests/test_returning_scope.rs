@@ -140,6 +140,34 @@ fn a_using_column_inside_an_expression_is_refused() {
     assert!(error.contains("r3"), "{error}");
 }
 
+/// The same reference inside a function call. The scope check walks the
+/// expression tree, and a call is a node on it like any other: leaving the
+/// argument unexamined emitted `length(tag)`, which SQLite answers with `no
+/// such column: tag`.
+#[test]
+fn a_using_column_inside_a_function_call_is_refused() {
+    let error =
+        translate_err("DELETE FROM t3 USING r3 WHERE t3.link = r3.id RETURNING length(tag);");
+    assert!(error.contains("tag"), "{error}");
+}
+
+#[test]
+fn a_using_column_inside_a_function_call_nested_in_a_case_is_refused() {
+    let error = translate_err(
+        "DELETE FROM t3 USING r3 WHERE t3.link = r3.id RETURNING CASE WHEN TRUE THEN \
+         length(tag) ELSE 0 END;",
+    );
+    assert!(error.contains("tag"), "{error}");
+}
+
+#[test]
+fn an_updates_from_column_inside_a_function_call_is_refused() {
+    let error = translate_err(
+        "UPDATE t3 SET link = 1 FROM r3 WHERE t3.link = r3.id RETURNING length(tag);",
+    );
+    assert!(error.contains("tag"), "{error}");
+}
+
 #[test]
 fn a_using_relation_is_recognised_by_its_alias() {
     let error =

@@ -16,21 +16,17 @@ use alloc::{
 use core::ops::ControlFlow;
 
 use sql_traits::structs::ParserDB;
-use sqlparser::{
-    ast::{
-        BeginEndStatements, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-        GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, ReturnStatementValue, Select,
-        SelectItem, Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
-        ValueWithSpan, visit_expressions, visit_expressions_mut,
-    },
-    tokenizer::Span,
+use sqlparser::ast::{
+    BeginEndStatements, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+    GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, ReturnStatementValue, Select,
+    SelectItem, Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
+    ValueWithSpan, Visit, VisitMut, Visitor, VisitorMut, visit_expressions, visit_expressions_mut,
 };
 
 use super::{PlPgSqlContext, VariableBinding, cte_builder::CteBuilder};
 use crate::{
     errors::Error,
     impls::{
-        expr_helpers::{any_child_expr, map_expr_children},
         function_helpers::simple_function_expr,
         query_builder::{make_query, make_simple_select, single_expr_query},
         translator_impls::condition_injection::inject_condition_into_dml_statement,
@@ -101,7 +97,11 @@ impl PlPgSqlTranslator {
         }
 
         for stmt in &body.statements {
-            let translated = Self::translate_statement(stmt, &mut context, schema, options, emit)?;
+            let mut translated =
+                Self::translate_statement(stmt, &mut context, schema, options, emit)?;
+            for statement in &mut translated {
+                let _: ControlFlow<()> = VisitMut::visit(statement, &mut UnreadCtePruner);
+            }
             result.extend(translated);
         }
 
@@ -119,6 +119,13 @@ impl PlPgSqlTranslator {
             context.bindings().map(|binding| binding.name.clone()).collect();
         let scoped = options.with_variables(&variables);
         let options = &scoped;
+        // Folded before the dispatch, so a trigger special reads the same in
+        // a statement body as it does in an `IF` condition. Read from a body
+        // and left alone, `TG_OP` was emitted as a column reference and
+        // SQLite refused the trigger.
+        let folded = Self::fold_trigger_specials_in_statement(stmt, context)?;
+        let stmt = &folded;
+
         match stmt {
             Statement::Set(set) => {
                 Self::handle_set_statement(set, context);
@@ -138,7 +145,16 @@ impl PlPgSqlTranslator {
             }
 
             Statement::Update(_) | Statement::Delete(_) => {
+                let bindings: Vec<_> = context.bindings().cloned().collect();
                 let mut translated = stmt.translate_with_warnings(schema, options, emit)?;
+                // SQLite parses no `WITH` before an `UPDATE` or a `DELETE`
+                // inside a trigger body, so the value is embedded at each
+                // read rather than bound by a CTE.
+                let (_, scope) =
+                    Self::bound_values(&bindings, ReferenceForm::Inline, schema, options, emit)?;
+                for t_stmt in &mut translated {
+                    substitute_variables(t_stmt, &scope);
+                }
                 if let Some(condition) = context.current_condition() {
                     for t_stmt in &mut translated {
                         Self::inject_condition_into_statement(t_stmt, &condition)?;
@@ -151,7 +167,19 @@ impl PlPgSqlTranslator {
                 Self::translate_return_statement(ret.value.as_ref(), context, schema, options, emit)
             }
 
-            other => other.translate_with_warnings(schema, options, emit),
+            other => {
+                let mut translated = other.translate_with_warnings(schema, options, emit)?;
+                // A shape this dispatch does not name still sits inside its
+                // `IF`. `TRUNCATE` is the one that mattered: it translates
+                // into a `DELETE`, which takes a guard, and emitting it
+                // unguarded emptied the table on every row.
+                if let Some(condition) = context.current_condition() {
+                    for t_stmt in &mut translated {
+                        Self::inject_condition_into_statement(t_stmt, &condition)?;
+                    }
+                }
+                Ok(translated)
+            }
         }
     }
 
@@ -346,17 +374,43 @@ impl PlPgSqlTranslator {
         let mut transformed = cond.clone();
         Self::transform_expr(&mut transformed, context, options);
         Self::fold_trigger_specials(&mut transformed, context)?;
-        let translated = transformed.translate_with_warnings(schema, options, emit)?;
-        let s = translated.to_string();
+        let mut translated = transformed.translate_with_warnings(schema, options, emit)?;
         if bindings.is_empty() {
-            return Ok(s);
+            return Ok(translated.to_string());
         }
-        // Inline-substitute declared variable bindings so the condition works
-        // as a SQLite WHERE clause guard on UPDATE/DELETE, which have no WITH
-        // scope.
-        Ok(Self::parse_expression(&s)
-            .map(|expr| Self::substitute_variables_inline(&expr, bindings).to_string())
-            .unwrap_or(s))
+        // Embedded rather than read out of a CTE: the condition guards an
+        // UPDATE or a DELETE, and SQLite gives those no WITH scope inside a
+        // trigger body.
+        let (_, scope) =
+            Self::bound_values(bindings, ReferenceForm::Inline, schema, options, emit)?;
+        substitute_variables(&mut translated, &scope);
+        Ok(translated.to_string())
+    }
+
+    /// Constant-folds every trigger special a statement reads.
+    ///
+    /// Driven by the derived traversal, so a read from any position lands:
+    /// the folding itself only ever rewrote the expression it was handed, and
+    /// the one caller handed it an `IF` condition.
+    fn fold_trigger_specials_in_statement(
+        stmt: &Statement,
+        context: &PlPgSqlContext,
+    ) -> Result<Statement, Error> {
+        let mut folded = stmt.clone();
+        let mut failure = None;
+        let _: ControlFlow<()> = visit_expressions_mut(&mut folded, |expr| {
+            if failure.is_none()
+                && let Err(error) = Self::fold_trigger_specials(expr, context)
+            {
+                failure = Some(error);
+            }
+            ControlFlow::Continue(())
+        });
+
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(folded),
+        }
     }
 
     /// Constant-folds trigger special variables in `expr`.
@@ -419,28 +473,6 @@ impl PlPgSqlTranslator {
         Ok(())
     }
 
-    /// Substitutes declared variable bindings inline as scalar subqueries.
-    ///
-    /// Unlike `substitute_variables`, which creates CTE table references
-    /// (`v.val`) that require a WITH clause, this embeds the binding's
-    /// expression directly: `v_cnt` becomes `(SELECT count(*) FROM ...)`.
-    /// That form is valid in a SQLite UPDATE/DELETE WHERE clause without
-    /// any CTE setup.
-    fn substitute_variables_inline(expr: &Expr, bindings: &[VariableBinding]) -> Expr {
-        let recurse = |e: &Expr| Self::substitute_variables_inline(e, bindings);
-        match expr {
-            Expr::Identifier(ident) => {
-                if let Some(binding) = bindings.iter().find(|b| b.name == ident.value)
-                    && let Ok(inner) = Self::parse_expression(&binding.expression)
-                {
-                    return Expr::Nested(Box::new(inner));
-                }
-                expr.clone()
-            }
-            other => map_expr_children(other, &recurse),
-        }
-    }
-
     /// SQLite does not support WITH clauses in trigger bodies; this wraps the
     /// CTE inside the INSERT's SELECT source or the DELETE's IN subquery.
     fn translate_query_statement(
@@ -469,6 +501,14 @@ impl PlPgSqlTranslator {
                 Self::transform_with_insert_to_subquery(with, insert, context, options)?
             } else if let SetExpr::Delete(Statement::Delete(delete)) = &*query.body {
                 Self::transform_with_delete_to_subquery(with, delete, context, options)
+            } else if let SetExpr::Update(update) = &*query.body {
+                let mut with = with.clone();
+                for cte in &mut with.cte_tables {
+                    Self::transform_cte_query(&mut cte.query, context, options);
+                }
+                let mut statement = update.clone();
+                Self::inline_ctes(&mut statement, &with, options)?;
+                vec![statement]
             } else {
                 let transformed_body = Self::transform_query_body(&query.body, context, options)?;
 
@@ -523,6 +563,102 @@ impl PlPgSqlTranslator {
         }
 
         Ok(finalized)
+    }
+
+    /// Rewrites each read of a CTE into a derived table over its body.
+    ///
+    /// SQLite's trigger body grammar takes no `WITH` before an `UPDATE`, so
+    /// the binding has to travel to where it is read. A CTE is inlined into
+    /// the bodies of the ones declared after it before it reaches the
+    /// statement, which is what lets one be defined over another.
+    ///
+    /// A CTE read twice becomes two copies of its body, which is two
+    /// evaluations where PostgreSQL has one. That agrees for a deterministic
+    /// body and answers differently for a volatile one, so the copies are
+    /// counted and a body that would run a volatile call more often than
+    /// PostgreSQL runs it is refused.
+    fn inline_ctes(
+        statement: &mut Statement,
+        with: &sqlparser::ast::With,
+        options: &crate::options::TranslationContext<'_>,
+    ) -> Result<(), Error> {
+        if with.recursive {
+            return Err(Error::forward_refusal(
+                "WITH RECURSIVE before an UPDATE has no SQLite form inside a trigger body: the \
+                 grammar takes no WITH there, and a recursive CTE cannot be inlined as a derived \
+                 table. Write the recursion as a separate statement, or move the UPDATE out of \
+                 the trigger."
+                    .to_string(),
+            ));
+        }
+
+        let volatile = VolatileCalls::new(options);
+        let mut budget = volatile.count(statement);
+        for cte in &with.cte_tables {
+            budget += volatile.count(cte.query.as_ref());
+        }
+
+        let mut inlined: Vec<(Ident, Query)> = Vec::new();
+        for cte in &with.cte_tables {
+            let mut body = (*cte.query).clone();
+            for (name, earlier) in &inlined {
+                let _: ControlFlow<()> =
+                    VisitMut::visit(&mut body, &mut CteInliner { name, body: earlier });
+            }
+            let body = Self::name_cte_columns(body, &cte.alias)?;
+            let _: ControlFlow<()> =
+                statement.visit(&mut CteInliner { name: &cte.alias.name, body: &body });
+            inlined.push((cte.alias.name.clone(), body));
+        }
+
+        if volatile.count(statement) > budget {
+            return Err(Error::forward_refusal(
+                "a CTE whose body is not deterministic is read more than once before an UPDATE \
+                 in a trigger body, and SQLite takes no WITH clause there, so each read would \
+                 carry its own copy of the body and answer a different value where PostgreSQL \
+                 evaluates the CTE once. Assign the value to a variable and read the variable, \
+                 or move the UPDATE out of the trigger."
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Applies a CTE's declared column names to its own projection.
+    ///
+    /// A derived table cannot carry them: SQLite takes no column list on a
+    /// table alias, so `WITH src (v) AS (SELECT 99)` inlined verbatim answers
+    /// `no such column: v`.
+    fn name_cte_columns(body: Query, alias: &sqlparser::ast::TableAlias) -> Result<Query, Error> {
+        if alias.columns.is_empty() {
+            return Ok(body);
+        }
+
+        let refusal = || {
+            Error::forward_refusal(format!(
+                "the CTE {} declares column names over a body this cannot rename, and SQLite \
+                 takes no column list on the derived table it becomes inside a trigger body. \
+                 Write the names as aliases in the CTE's own projection instead.",
+                alias.name
+            ))
+        };
+
+        let mut body = body;
+        let SetExpr::Select(select) = body.body.as_mut() else { return Err(refusal()) };
+        if select.projection.len() != alias.columns.len() {
+            return Err(refusal());
+        }
+
+        for (item, column) in select.projection.iter_mut().zip(&alias.columns) {
+            let expr = match item {
+                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                    expr.clone()
+                }
+                _ => return Err(refusal()),
+            };
+            *item = SelectItem::ExprWithAlias { expr, alias: column.name.clone() };
+        }
+        Ok(body)
     }
 
     /// Moves a WITH RECURSIVE CTE inside the INSERT's SELECT source as a
@@ -1129,9 +1265,7 @@ impl PlPgSqlTranslator {
                     {
                         let row = &values.rows[0];
                         for (i, expr) in row.iter().enumerate() {
-                            if Self::expr_references_variable(expr, &binding.name)
-                                && i < column_names.len()
-                            {
+                            if references_variable(expr, &binding.name) && i < column_names.len() {
                                 uuid_var_to_column
                                     .push((binding.name.clone(), column_names[i].clone()));
                             }
@@ -1153,44 +1287,23 @@ impl PlPgSqlTranslator {
 
         let mut new_insert = insert.clone();
 
-        // Dependencies first. A variable may be defined in terms of another,
-        // and a CTE can only read one declared before it, so the ones that
-        // reference nothing are emitted first and each later body substitutes
-        // and reads the ones already in scope. Left unordered and
-        // unsubstituted, `v := (other * NEW.x)` emitted a bare `other` and the
-        // trigger failed with `no such column`.
-        let ordered = Self::order_bindings_by_dependency(&modified_bindings);
-
-        let mut ctes = Vec::new();
-        let mut in_scope: Vec<VariableBinding> = Vec::new();
-        for binding in &ordered {
-            let translated_expr = Self::translate_uuid_function(&binding.expression, options);
-            let expr = Self::parse_expression(&translated_expr)?;
-            let expr = expr.translate_with_warnings(schema, options, emit).unwrap_or(expr);
-            let expr = Self::substitute_variables(&expr, &in_scope);
-            let referenced: Vec<VariableBinding> = in_scope
-                .iter()
-                .filter(|earlier| Self::expr_references_variable(&expr, &earlier.name))
-                .cloned()
-                .collect();
-            ctes.push(CteBuilder::create_variable_cte(
-                binding,
-                expr,
-                Self::variable_cte_tables(&referenced),
-            ));
-            in_scope.push(binding.clone());
-        }
+        // One CTE per bound variable, in dependency order: a variable may be
+        // defined in terms of one declared before it, and a CTE can only read
+        // one that precedes it.
+        let (values, scope) =
+            Self::bound_values(&modified_bindings, ReferenceForm::Cte, schema, options, emit)?;
+        let ctes = values
+            .into_iter()
+            .map(|(name, value)| CteBuilder::create_variable_cte(&name, value))
+            .collect();
 
         let condition = context.current_condition();
 
         if let Some(source) = &insert.source {
             match &*source.body {
                 SetExpr::Values(values) => {
-                    let new_source = Self::transform_values_to_select(
-                        values,
-                        &modified_bindings,
-                        condition.as_deref(),
-                    )?;
+                    let new_source =
+                        Self::transform_values_to_select(values, &scope, condition.as_deref())?;
 
                     new_insert.source =
                         Some(Box::new(make_query(CteBuilder::combine_ctes(ctes), new_source)));
@@ -1198,30 +1311,12 @@ impl PlPgSqlTranslator {
                 SetExpr::Select(select) => {
                     let mut new_select = select.as_ref().clone();
 
-                    // The CTEs below bind the variables, but a reference to one
-                    // still has to be rewritten to the CTE's column and the CTE
-                    // brought into scope. The VALUES arm does both through
-                    // `transform_values_to_select`, and this arm used to do
-                    // neither, so the emitted trigger named a bare variable and
-                    // failed with `no such column`.
-                    for item in &mut new_select.projection {
-                        if let SelectItem::UnnamedExpr(expr) = item {
-                            *expr = Self::substitute_variables(expr, &modified_bindings);
-                        } else if let SelectItem::ExprWithAlias { expr, .. } = item {
-                            *expr = Self::substitute_variables(expr, &modified_bindings);
-                        }
-                    }
-                    if let Some(selection) = &new_select.selection {
-                        new_select.selection =
-                            Some(Self::substitute_variables(selection, &modified_bindings));
-                    }
-                    new_select.from.extend(Self::variable_cte_tables(&modified_bindings));
                     if let Some(cond) = &condition {
                         let cond_expr = Self::parse_expression(cond)?;
-                        new_select.selection = match &new_select.selection {
+                        new_select.selection = match new_select.selection.take() {
                             Some(existing) => {
                                 Some(Expr::BinaryOp {
-                                    left: Box::new(existing.clone()),
+                                    left: Box::new(existing),
                                     op: BinaryOperator::And,
                                     right: Box::new(cond_expr),
                                 })
@@ -1230,11 +1325,18 @@ impl PlPgSqlTranslator {
                         };
                     }
 
-                    new_insert.source = Some(Box::new(Query {
-                        with: CteBuilder::combine_ctes(ctes),
+                    // Substituted before the `WITH` is attached, so the CTE
+                    // bodies, which already read the variables they depend on,
+                    // are not walked a second time.
+                    let mut new_source = Query {
+                        with: None,
                         body: Box::new(SetExpr::Select(Box::new(new_select))),
                         ..source.as_ref().clone()
-                    }));
+                    };
+                    substitute_variables(&mut new_source, &scope);
+                    new_source.with = CteBuilder::combine_ctes(ctes);
+
+                    new_insert.source = Some(Box::new(new_source));
                 }
                 _ => {
                     return Statement::Insert(insert.clone())
@@ -1248,7 +1350,7 @@ impl PlPgSqlTranslator {
         // trigger failed with `no such column`, which is what an ELSIF branch
         // reading a variable the other branch assigned used to do.
         if let Some(source) = &mut new_insert.source {
-            Self::null_unbound_declarations(source, context, &ordered);
+            Self::null_unbound_declarations(source, context, &modified_bindings);
         }
 
         Statement::Insert(new_insert).translate_with_warnings(schema, options, emit)
@@ -1274,234 +1376,6 @@ impl PlPgSqlTranslator {
             }
             ControlFlow::Continue(())
         });
-    }
-
-    fn function_arg_references_variable(arg: &FunctionArg, var_name: &str) -> bool {
-        match arg {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(inner))
-            | FunctionArg::Named { arg: FunctionArgExpr::Expr(inner), .. }
-            | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(inner), .. } => {
-                Self::expr_references_variable(inner, var_name)
-            }
-            _ => false,
-        }
-    }
-
-    fn function_references_variable(func: &sqlparser::ast::Function, var_name: &str) -> bool {
-        let args_have_var = match &func.args {
-            FunctionArguments::List(arg_list) => {
-                arg_list
-                    .args
-                    .iter()
-                    .any(|arg| Self::function_arg_references_variable(arg, var_name))
-            }
-            _ => false,
-        };
-        let filter_has_var = func
-            .filter
-            .as_ref()
-            .is_some_and(|filter| Self::expr_references_variable(filter, var_name));
-        let over_has_var = matches!(&func.over, Some(sqlparser::ast::WindowType::WindowSpec(window_spec))
-            if window_spec
-                .partition_by
-                .iter()
-                .any(|expr| Self::expr_references_variable(expr, var_name))
-                || window_spec
-                    .order_by
-                    .iter()
-                    .any(|order| Self::expr_references_variable(&order.expr, var_name)));
-        let within_group_has_var = func
-            .within_group
-            .iter()
-            .any(|order| Self::expr_references_variable(&order.expr, var_name));
-
-        args_have_var || filter_has_var || over_has_var || within_group_has_var
-    }
-
-    fn expr_references_variable(expr: &Expr, var_name: &str) -> bool {
-        match expr {
-            Expr::Identifier(ident) => ident.value == var_name,
-            Expr::CompoundIdentifier(idents) => idents.iter().any(|i| i.value == var_name),
-            Expr::Function(func) => Self::function_references_variable(func, var_name),
-            Expr::Subquery(subquery) | Expr::Exists { subquery, .. } => {
-                Self::query_references_variable_expr(subquery, var_name)
-            }
-            Expr::InSubquery { expr: inner, subquery, .. } => {
-                Self::expr_references_variable(inner, var_name)
-                    || Self::query_references_variable_expr(subquery, var_name)
-            }
-            _ => any_child_expr(expr, &|child| Self::expr_references_variable(child, var_name)),
-        }
-    }
-
-    fn query_references_variable_expr(query: &Query, var_name: &str) -> bool {
-        let body_has_var = Self::set_expr_references_variable_expr(&query.body, var_name);
-        let order_by_has_var = query.order_by.as_ref().is_some_and(|order_by| {
-            let kind_has_var = match &order_by.kind {
-                sqlparser::ast::OrderByKind::Expressions(exprs) => {
-                    exprs.iter().any(|order_expr| {
-                        Self::expr_references_variable(&order_expr.expr, var_name)
-                            || order_expr.with_fill.as_ref().is_some_and(|with_fill| {
-                                with_fill.from.as_ref().is_some_and(|expr| {
-                                    Self::expr_references_variable(expr, var_name)
-                                }) || with_fill.to.as_ref().is_some_and(|expr| {
-                                    Self::expr_references_variable(expr, var_name)
-                                }) || with_fill.step.as_ref().is_some_and(|expr| {
-                                    Self::expr_references_variable(expr, var_name)
-                                })
-                            })
-                    })
-                }
-                sqlparser::ast::OrderByKind::All(_) => false,
-            };
-            let interpolate_has_var = order_by.interpolate.as_ref().is_some_and(|interpolate| {
-                interpolate.exprs.as_ref().is_some_and(|exprs| {
-                    exprs.iter().any(|interpolate_expr| {
-                        interpolate_expr
-                            .expr
-                            .as_ref()
-                            .is_some_and(|expr| Self::expr_references_variable(expr, var_name))
-                    })
-                })
-            });
-
-            kind_has_var || interpolate_has_var
-        });
-        let limit_has_var = query.limit_clause.as_ref().is_some_and(|limit_clause| {
-            match limit_clause {
-                sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by } => {
-                    limit
-                        .as_ref()
-                        .is_some_and(|expr| Self::expr_references_variable(expr, var_name))
-                        || offset.as_ref().is_some_and(|offset_expr| {
-                            Self::expr_references_variable(&offset_expr.value, var_name)
-                        })
-                        || limit_by
-                            .iter()
-                            .any(|expr| Self::expr_references_variable(expr, var_name))
-                }
-                sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
-                    Self::expr_references_variable(offset, var_name)
-                        || Self::expr_references_variable(limit, var_name)
-                }
-            }
-        });
-        let fetch_has_var = query.fetch.as_ref().is_some_and(|fetch| {
-            fetch
-                .quantity
-                .as_ref()
-                .is_some_and(|expr| Self::expr_references_variable(expr, var_name))
-        });
-
-        body_has_var || order_by_has_var || limit_has_var || fetch_has_var
-    }
-
-    fn set_expr_references_variable_expr(set_expr: &SetExpr, var_name: &str) -> bool {
-        match set_expr {
-            SetExpr::Select(select) => {
-                let projection_has_var = select.projection.iter().any(|item| {
-                    match item {
-                        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                            Self::expr_references_variable(expr, var_name)
-                        }
-                        _ => false,
-                    }
-                });
-                let selection_has_var = select
-                    .selection
-                    .as_ref()
-                    .is_some_and(|expr| Self::expr_references_variable(expr, var_name));
-                let having_has_var = select
-                    .having
-                    .as_ref()
-                    .is_some_and(|expr| Self::expr_references_variable(expr, var_name));
-                let group_by_has_var = match &select.group_by {
-                    GroupByExpr::All(_) => false,
-                    GroupByExpr::Expressions(exprs, _) => {
-                        exprs.iter().any(|expr| Self::expr_references_variable(expr, var_name))
-                    }
-                };
-                let from_has_var = select
-                    .from
-                    .iter()
-                    .any(|table| Self::table_with_joins_references_variable(table, var_name));
-
-                projection_has_var
-                    || selection_has_var
-                    || having_has_var
-                    || group_by_has_var
-                    || from_has_var
-            }
-            SetExpr::Values(values) => {
-                values.rows.iter().any(|row| {
-                    row.iter().any(|expr| Self::expr_references_variable(expr, var_name))
-                })
-            }
-            SetExpr::SetOperation { left, right, .. } => {
-                Self::set_expr_references_variable_expr(left, var_name)
-                    || Self::set_expr_references_variable_expr(right, var_name)
-            }
-            SetExpr::Query(query) => Self::query_references_variable_expr(query, var_name),
-            _ => false,
-        }
-    }
-
-    fn table_with_joins_references_variable(table: &TableWithJoins, var_name: &str) -> bool {
-        Self::table_factor_references_variable(&table.relation, var_name)
-            || table.joins.iter().any(|join| {
-                Self::table_factor_references_variable(&join.relation, var_name) || {
-                    let constraint_refs = matches!(
-                        crate::impls::shared_helpers::join_constraint_ref(&join.join_operator),
-                        Some(sqlparser::ast::JoinConstraint::On(expr))
-                            if Self::expr_references_variable(expr, var_name)
-                    );
-                    let match_refs = matches!(
-                        &join.join_operator,
-                        sqlparser::ast::JoinOperator::AsOf { match_condition, .. }
-                            if Self::expr_references_variable(match_condition, var_name)
-                    );
-                    constraint_refs || match_refs
-                }
-            })
-    }
-
-    fn table_factor_references_variable(factor: &TableFactor, var_name: &str) -> bool {
-        match factor {
-            TableFactor::Derived { subquery, .. } => {
-                Self::query_references_variable_expr(subquery, var_name)
-            }
-            _ => false,
-        }
-    }
-
-    /// One `FROM` entry per variable CTE, so a reference to `<var>.val`
-    /// resolves.
-    ///
-    /// Shared by the VALUES and the SELECT source arms, which both attach the
-    /// same CTEs and so both need them in scope.
-    fn variable_cte_tables(bindings: &[VariableBinding]) -> Vec<TableWithJoins> {
-        bindings
-            .iter()
-            .map(|binding| {
-                TableWithJoins {
-                    relation: TableFactor::Table {
-                        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-                            binding.name.clone(),
-                        ))]),
-                        alias: None,
-                        args: None,
-                        with_hints: vec![],
-                        version: None,
-                        partitions: vec![],
-                        json_path: None,
-                        sample: None,
-                        index_hints: vec![],
-                        with_ordinality: false,
-                    },
-                    joins: vec![],
-                }
-            })
-            .collect()
     }
 
     /// Reorders bindings so one referenced by another comes first.
@@ -1538,14 +1412,17 @@ impl PlPgSqlTranslator {
 
     /// True when `expression` names `variable` as a whole word.
     fn expression_names_variable(expression: &str, variable: &str) -> bool {
-        Self::parse_expression(expression)
-            .is_ok_and(|expr| Self::expr_references_variable(&expr, variable))
+        Self::parse_expression(expression).is_ok_and(|expr| references_variable(&expr, variable))
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// The one-row `VALUES` of a trigger `INSERT`, as the `SELECT` that can
+    /// carry the enclosing `IF` condition in a `WHERE` clause.
+    ///
+    /// No `FROM` clause: a variable is read through a scalar subquery, so
+    /// nothing has to be in scope for the row to be built.
     fn transform_values_to_select(
         values: &sqlparser::ast::Values,
-        bindings: &[VariableBinding],
+        scope: &VariableScope,
         condition: Option<&str>,
     ) -> Result<SetExpr, Error> {
         if values.rows.len() != 1 {
@@ -1554,235 +1431,47 @@ impl PlPgSqlTranslator {
             ));
         }
 
-        let row = &values.rows[0];
-        let mut projections = Vec::new();
-
-        for expr in &row.content {
-            let substituted = Self::substitute_variables(expr, bindings);
-            projections.push(SelectItem::UnnamedExpr(substituted));
-        }
-
-        let mut from_tables = Self::variable_cte_tables(bindings);
-
-        if from_tables.is_empty() {
-            from_tables.push(TableWithJoins {
-                relation: TableFactor::Derived {
-                    lateral: false,
-                    sample: None,
-                    subquery: Box::new(make_query(
-                        None,
-                        SetExpr::Select(Box::new(make_simple_select(
-                            vec![SelectItem::UnnamedExpr(Expr::Value(ValueWithSpan {
-                                value: Value::Number("1".to_string(), false),
-                                span: Span::empty(),
-                            }))],
-                            vec![],
-                            None,
-                        ))),
-                    )),
-                    alias: Some(TableAlias {
-                        name: Ident::new("_dummy".to_string()),
-                        columns: vec![],
-                        explicit: false,
-                        at: None,
-                    }),
-                },
-                joins: vec![],
-            });
-        }
-
+        let projections = values.rows[0]
+            .content
+            .iter()
+            .map(|expr| SelectItem::UnnamedExpr(expr.clone()))
+            .collect();
         let selection =
             if let Some(cond) = condition { Some(Self::parse_expression(cond)?) } else { None };
 
-        Ok(SetExpr::Select(Box::new(make_simple_select(projections, from_tables, selection))))
+        let mut body =
+            SetExpr::Select(Box::new(make_simple_select(projections, Vec::new(), selection)));
+        substitute_variables(&mut body, scope);
+        Ok(body)
     }
 
-    fn substitute_bound_variable(name: &str, bindings: &[VariableBinding]) -> Option<Expr> {
-        bindings
-            .iter()
-            .any(|binding| name == binding.name)
-            .then(|| CteBuilder::variable_reference(name))
-    }
-
-    fn substitute_function(func: &sqlparser::ast::Function, bindings: &[VariableBinding]) -> Expr {
-        let mut rewritten = func.clone();
-        if let FunctionArguments::List(arg_list) = &mut rewritten.args {
-            for arg in &mut arg_list.args {
-                match arg {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(inner))
-                    | FunctionArg::Named { arg: FunctionArgExpr::Expr(inner), .. }
-                    | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(inner), .. } => {
-                        *inner = Self::substitute_variables(inner, bindings);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some(filter) = &mut rewritten.filter {
-            **filter = Self::substitute_variables(filter, bindings);
-        }
-        if let Some(over) = &mut rewritten.over
-            && let sqlparser::ast::WindowType::WindowSpec(window_spec) = over
-        {
-            for partition_expr in &mut window_spec.partition_by {
-                *partition_expr = Self::substitute_variables(partition_expr, bindings);
-            }
-            for order_by_expr in &mut window_spec.order_by {
-                order_by_expr.expr = Self::substitute_variables(&order_by_expr.expr, bindings);
-            }
-        }
-        for order_by_expr in &mut rewritten.within_group {
-            order_by_expr.expr = Self::substitute_variables(&order_by_expr.expr, bindings);
-        }
-        Expr::Function(rewritten)
-    }
-
-    fn substitute_variables(expr: &Expr, bindings: &[VariableBinding]) -> Expr {
-        let recurse = |e: &Expr| Self::substitute_variables(e, bindings);
-
-        match expr {
-            Expr::Identifier(ident) => {
-                Self::substitute_bound_variable(&ident.value, bindings)
-                    .unwrap_or_else(|| expr.clone())
-            }
-            Expr::CompoundIdentifier(idents) if idents.len() == 1 => {
-                Self::substitute_bound_variable(&idents[0].value, bindings)
-                    .unwrap_or_else(|| expr.clone())
-            }
-            Expr::Function(func) => Self::substitute_function(func, bindings),
-            Expr::InSubquery { expr: inner, subquery, negated } => {
-                Expr::InSubquery {
-                    expr: Box::new(recurse(inner)),
-                    subquery: Box::new(Self::substitute_variables_in_query(subquery, bindings)),
-                    negated: *negated,
-                }
-            }
-            Expr::Subquery(subquery) => {
-                Expr::Subquery(Box::new(Self::substitute_variables_in_query(subquery, bindings)))
-            }
-            Expr::Exists { subquery, negated } => {
-                Expr::Exists {
-                    subquery: Box::new(Self::substitute_variables_in_query(subquery, bindings)),
-                    negated: *negated,
-                }
-            }
-            other => map_expr_children(other, &recurse),
-        }
-    }
-
-    fn substitute_variables_in_query(query: &Query, bindings: &[VariableBinding]) -> Query {
-        let mut rewritten = query.clone();
-        rewritten.body = Box::new(Self::substitute_variables_in_set_expr(&query.body, bindings));
-        if let Some(order_by) = &mut rewritten.order_by {
-            match &mut order_by.kind {
-                sqlparser::ast::OrderByKind::Expressions(exprs) => {
-                    for order_expr in exprs {
-                        order_expr.expr = Self::substitute_variables(&order_expr.expr, bindings);
-                        if let Some(with_fill) = &mut order_expr.with_fill {
-                            if let Some(from) = &mut with_fill.from {
-                                *from = Self::substitute_variables(from, bindings);
-                            }
-                            if let Some(to) = &mut with_fill.to {
-                                *to = Self::substitute_variables(to, bindings);
-                            }
-                            if let Some(step) = &mut with_fill.step {
-                                *step = Self::substitute_variables(step, bindings);
-                            }
-                        }
-                    }
-                }
-                sqlparser::ast::OrderByKind::All(_) => {}
-            }
-            if let Some(interpolate) = &mut order_by.interpolate
-                && let Some(exprs) = &mut interpolate.exprs
-            {
-                for interpolate_expr in exprs {
-                    if let Some(expr) = &mut interpolate_expr.expr {
-                        *expr = Self::substitute_variables(expr, bindings);
-                    }
-                }
-            }
-        }
-        if let Some(limit_clause) = &mut rewritten.limit_clause {
-            match limit_clause {
-                sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by } => {
-                    if let Some(limit_expr) = limit {
-                        *limit_expr = Self::substitute_variables(limit_expr, bindings);
-                    }
-                    if let Some(offset_expr) = offset {
-                        offset_expr.value =
-                            Self::substitute_variables(&offset_expr.value, bindings);
-                    }
-                    for expr in limit_by {
-                        *expr = Self::substitute_variables(expr, bindings);
-                    }
-                }
-                sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
-                    *offset = Self::substitute_variables(offset, bindings);
-                    *limit = Self::substitute_variables(limit, bindings);
-                }
-            }
-        }
-        if let Some(fetch) = &mut rewritten.fetch
-            && let Some(quantity) = &mut fetch.quantity
-        {
-            *quantity = Self::substitute_variables(quantity, bindings);
-        }
-        rewritten
-    }
-
-    fn substitute_variables_in_set_expr(
-        set_expr: &SetExpr,
+    /// The value each binding holds, in dependency order, with a scope that
+    /// reads them back in `form`.
+    ///
+    /// A binding may be defined in terms of one declared before it, so each
+    /// expression has the ones already resolved substituted into it before it
+    /// becomes readable itself.
+    fn bound_values(
         bindings: &[VariableBinding],
-    ) -> SetExpr {
-        match set_expr {
-            SetExpr::Select(select) => {
-                let mut rewritten = (**select).clone();
-                for item in &mut rewritten.projection {
-                    if let SelectItem::UnnamedExpr(inner)
-                    | SelectItem::ExprWithAlias { expr: inner, .. } = item
-                    {
-                        *inner = Self::substitute_variables(inner, bindings);
-                    }
-                }
-                if let Some(selection) = &mut rewritten.selection {
-                    *selection = Self::substitute_variables(selection, bindings);
-                }
-                if let Some(having) = &mut rewritten.having {
-                    *having = Self::substitute_variables(having, bindings);
-                }
-                match &mut rewritten.group_by {
-                    GroupByExpr::All(_) => {}
-                    GroupByExpr::Expressions(exprs, _) => {
-                        for expr in exprs {
-                            *expr = Self::substitute_variables(expr, bindings);
-                        }
-                    }
-                }
-                SetExpr::Select(Box::new(rewritten))
-            }
-            SetExpr::Values(values) => {
-                let mut rewritten = values.clone();
-                for row in &mut rewritten.rows {
-                    for expr in &mut row.content {
-                        *expr = Self::substitute_variables(expr, bindings);
-                    }
-                }
-                SetExpr::Values(rewritten)
-            }
-            SetExpr::SetOperation { op, set_quantifier, left, right } => {
-                SetExpr::SetOperation {
-                    op: *op,
-                    set_quantifier: *set_quantifier,
-                    left: Box::new(Self::substitute_variables_in_set_expr(left, bindings)),
-                    right: Box::new(Self::substitute_variables_in_set_expr(right, bindings)),
-                }
-            }
-            SetExpr::Query(query) => {
-                SetExpr::Query(Box::new(Self::substitute_variables_in_query(query, bindings)))
-            }
-            other => other.clone(),
+        form: ReferenceForm,
+        schema: &ParserDB,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
+    ) -> Result<(Vec<(String, Expr)>, VariableScope), Error> {
+        let ordered = Self::order_bindings_by_dependency(bindings);
+        let mut values = Vec::with_capacity(ordered.len());
+        let mut scope = VariableScope::default();
+
+        for binding in &ordered {
+            let renamed = Self::translate_uuid_function(&binding.expression, options);
+            let parsed = Self::parse_expression(&renamed)?;
+            let mut value = parsed.translate_with_warnings(schema, options, emit).unwrap_or(parsed);
+            substitute_variables(&mut value, &scope);
+            scope.bind(&binding.name, form.reference(&binding.name, &value));
+            values.push((binding.name.clone(), value));
         }
+
+        Ok((values, scope))
     }
 
     fn translate_uuid_function(
@@ -1833,16 +1522,275 @@ impl PlPgSqlTranslator {
     }
 }
 
+/// How a bound PL/pgSQL variable is read back in emitted SQL.
+///
+/// Both forms are scalar subqueries. SQLite evaluates a subquery that reads
+/// nothing from the enclosing row once per statement, even when it calls a
+/// non-deterministic function, which is what a PL/pgSQL variable assigned once
+/// and read many times means.
+#[derive(Clone, Copy)]
+enum ReferenceForm {
+    /// `(SELECT val FROM v)`, for a statement that carries the variable CTEs.
+    Cte,
+    /// `(SELECT <value>)`, for a trigger-body `UPDATE` or `DELETE`, which
+    /// SQLite will not let carry a `WITH` clause at all.
+    Inline,
+}
+
+impl ReferenceForm {
+    /// The expression a reader of `name` is rewritten to.
+    fn reference(self, name: &str, value: &Expr) -> Expr {
+        match self {
+            Self::Cte => CteBuilder::variable_reference(name),
+            Self::Inline => {
+                match value {
+                    // Already a subquery, so wrapping it adds a level and no
+                    // meaning.
+                    Expr::Subquery(_) => value.clone(),
+                    other => {
+                        Expr::Subquery(Box::new(single_expr_query(other.clone(), Vec::new(), None)))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What each bound variable is read as, in the order the bindings resolve.
+#[derive(Default)]
+struct VariableScope {
+    replacements: Vec<(String, Expr)>,
+}
+
+impl VariableScope {
+    fn bind(&mut self, name: &str, reference: Expr) {
+        self.replacements.push((name.to_string(), reference));
+    }
+
+    fn replacement(&self, name: &str) -> Option<&Expr> {
+        self.replacements.iter().find_map(|(bound, reference)| (bound == name).then_some(reference))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.replacements.is_empty()
+    }
+}
+
+/// The name a bare identifier reads, or `None` for anything qualified.
+///
+/// A single-segment compound identifier is what `(v_n)` parses to in some
+/// positions, and it names the same variable as the bare form.
+fn bare_identifier_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.as_str()),
+        Expr::CompoundIdentifier(idents) if idents.len() == 1 => Some(idents[0].value.as_str()),
+        _ => None,
+    }
+}
+
+struct VariableSubstituter<'a>(&'a VariableScope);
+
+impl VisitorMut for VariableSubstituter<'_> {
+    type Break = ();
+
+    /// Post-order, so the replacement subquery is not walked into again: its
+    /// own `val` column would otherwise be a candidate for a variable of that
+    /// name.
+    fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+        let replacement = bare_identifier_name(expr).and_then(|name| self.0.replacement(name));
+        if let Some(replacement) = replacement.cloned() {
+            *expr = replacement;
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Rewrites every read of a bound variable anywhere inside `node`.
+///
+/// Driven by the derived traversal rather than one arm per AST node, because
+/// the hand-written walk this replaced reached a projection item and a `WHERE`
+/// predicate and nothing else, so a variable read from `HAVING`, `GROUP BY`,
+/// `ORDER BY`, `LIMIT`, a derived table or a join constraint stayed a bare
+/// identifier and SQLite answered `no such column`.
+fn substitute_variables<N: VisitMut>(node: &mut N, scope: &VariableScope) {
+    if scope.is_empty() {
+        return;
+    }
+    let _: ControlFlow<()> = node.visit(&mut VariableSubstituter(scope));
+}
+
+struct VariableSearch<'a>(&'a str);
+
+impl Visitor for VariableSearch<'_> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        let names = match expr {
+            Expr::Identifier(ident) => ident.value == self.0,
+            Expr::CompoundIdentifier(idents) => idents.iter().any(|ident| ident.value == self.0),
+            _ => false,
+        };
+        if names { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    }
+}
+
+/// True when `node` reads `var_name` anywhere inside it.
+fn references_variable<N: Visit>(node: &N, var_name: &str) -> bool {
+    node.visit(&mut VariableSearch(var_name)).is_break()
+}
+
+/// Replaces a read of one CTE with a derived table over its body.
+struct CteInliner<'a> {
+    name: &'a Ident,
+    body: &'a Query,
+}
+
+impl VisitorMut for CteInliner<'_> {
+    type Break = ();
+
+    fn post_visit_table_factor(&mut self, factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        if let TableFactor::Table { name, alias, .. } = factor
+            && name.0.len() == 1
+            && crate::impls::object_name::last_ident(name)
+                .is_some_and(|ident| ident.value.eq_ignore_ascii_case(&self.name.value))
+        {
+            let alias = alias.clone().unwrap_or_else(|| {
+                TableAlias { name: self.name.clone(), columns: vec![], explicit: false, at: None }
+            });
+            *factor = TableFactor::Derived {
+                lateral: false,
+                subquery: Box::new(self.body.clone()),
+                alias: Some(alias),
+                sample: None,
+            };
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Drops every CTE nothing reads.
+///
+/// A PL/pgSQL variable becomes a CTE before anything knows whether the
+/// statement ends up reading it, and a rewrite that reads the variable as a
+/// scalar subquery instead leaves the definition behind. SQLite evaluates a
+/// CTE lazily, so a stranded one costs nothing at runtime, but it is dead SQL
+/// in every emitted trigger. Removal repeats to a fixpoint, since a CTE read
+/// only by one just dropped is itself unread.
+struct UnreadCtePruner;
+
+impl VisitorMut for UnreadCtePruner {
+    type Break = ();
+
+    fn post_visit_query(&mut self, query: &mut Query) -> ControlFlow<Self::Break> {
+        let Some(mut with) = query.with.take() else { return ControlFlow::Continue(()) };
+
+        loop {
+            let unread = with.cte_tables.iter().position(|cte| {
+                let name = &cte.alias.name.value;
+                // The whole query with its `WITH` lifted off, since a read
+                // can sit in `ORDER BY` or `LIMIT` as easily as in the body.
+                !reads_relation(&*query, name)
+                    && !with
+                        .cte_tables
+                        .iter()
+                        .filter(|other| !core::ptr::eq(*other, cte))
+                        .any(|other| reads_relation(other.query.as_ref(), name))
+            });
+            match unread {
+                Some(index) => drop(with.cte_tables.remove(index)),
+                None => break,
+            }
+        }
+
+        query.with = (!with.cte_tables.is_empty()).then_some(with);
+        ControlFlow::Continue(())
+    }
+}
+
+/// True when `node` reads the relation `name` anywhere inside it.
+fn reads_relation<N: Visit>(node: &N, name: &str) -> bool {
+    struct RelationSearch<'a>(&'a str);
+
+    impl Visitor for RelationSearch<'_> {
+        type Break = ();
+
+        fn post_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+            if let TableFactor::Table { name, .. } = factor
+                && name.0.len() == 1
+                && crate::impls::object_name::last_ident(name)
+                    .is_some_and(|ident| ident.value.eq_ignore_ascii_case(self.0))
+            {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    node.visit(&mut RelationSearch(name)).is_break()
+}
+
+/// Counts the calls in a node that answer a different value each time they
+/// run, so a rewrite that copies a node can tell whether it changed how many
+/// times one of them runs.
+///
+/// The names are the SQLite ones, since the bodies reaching this are already
+/// translated: `random` and `randomblob` are the two built-ins SQLite
+/// re-evaluates per call, and the UUID function is whatever extension the
+/// caller named. A date or time call is not among them, since SQLite fixes
+/// the clock for the whole statement.
+struct VolatileCalls<'a> {
+    uuid: &'a str,
+}
+
+impl<'a> VolatileCalls<'a> {
+    fn new(options: &'a crate::options::TranslationContext<'_>) -> Self {
+        Self { uuid: options.get_uuid_function_name() }
+    }
+
+    fn count<N: Visit>(&self, node: &N) -> usize {
+        let mut counter = VolatileCounter { names: self, found: 0 };
+        let _: ControlFlow<()> = node.visit(&mut counter);
+        counter.found
+    }
+
+    fn names(&self, name: &str) -> bool {
+        name.eq_ignore_ascii_case("random")
+            || name.eq_ignore_ascii_case("randomblob")
+            || name.eq_ignore_ascii_case(self.uuid)
+    }
+}
+
+struct VolatileCounter<'a> {
+    names: &'a VolatileCalls<'a>,
+    found: usize,
+}
+
+impl Visitor for VolatileCounter<'_> {
+    type Break = ();
+
+    fn post_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if let Expr::Function(function) = expr
+            && crate::impls::object_name::last_ident(&function.name)
+                .is_some_and(|ident| self.names.names(&ident.value))
+        {
+            self.found += 1;
+        }
+        ControlFlow::Continue(())
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::{
-        ast::{Expr, Query, SetExpr, Statement, TableFactor},
+        ast::{Expr, Query, SetExpr, Statement},
         dialect::PostgreSqlDialect,
         parser::Parser,
     };
 
-    use super::PlPgSqlTranslator;
+    use super::{
+        PlPgSqlTranslator, ReferenceForm, VariableScope, references_variable, substitute_variables,
+    };
     use crate::{
         impls::translator_impls::plpgsql::{PlPgSqlContext, VariableBinding},
         prelude::Pg2SqliteOptions,
@@ -1931,18 +1879,22 @@ mod tests {
     }
 
     #[test]
-    fn transform_values_to_select_handles_empty_bindings_and_rejects_multi_row_values() {
+    fn transform_values_to_select_handles_empty_scope_and_rejects_multi_row_values() {
         let query = parse_query("VALUES (1)");
         let SetExpr::Values(values) = query.body.as_ref() else {
             panic!("expected values");
         };
 
-        let transformed =
-            PlPgSqlTranslator::transform_values_to_select(values, &[], Some("TRUE")).unwrap();
+        let transformed = PlPgSqlTranslator::transform_values_to_select(
+            values,
+            &VariableScope::default(),
+            Some("TRUE"),
+        )
+        .unwrap();
         let SetExpr::Select(select) = transformed else {
             panic!("expected select output");
         };
-        assert!(matches!(select.from[0].relation, TableFactor::Derived { .. }));
+        assert!(select.from.is_empty(), "a scalar-subquery read needs no relation in scope");
         let selection = select.selection.as_ref().map(ToString::to_string).unwrap();
         assert!(selection.eq_ignore_ascii_case("true"), "unexpected selection: {selection}");
 
@@ -1950,27 +1902,47 @@ mod tests {
         let SetExpr::Values(multi_values) = multi.body.as_ref() else {
             panic!("expected values");
         };
-        let err =
-            PlPgSqlTranslator::transform_values_to_select(multi_values, &[], None).unwrap_err();
+        let err = PlPgSqlTranslator::transform_values_to_select(
+            multi_values,
+            &VariableScope::default(),
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Multi-row VALUES in trigger not supported"));
     }
 
+    /// A scope built for one form reads every bound name back in that form,
+    /// and leaves an unbound name alone.
     #[test]
-    fn substitute_variables_and_reference_detection_cover_nested_shapes() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "42".to_string() }];
-        let expr = parse_expr("(v_id + 1) * 2");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert!(substituted.to_string().contains("v_id.val"));
+    fn a_scope_rewrites_bound_names_only() {
+        let mut scope = VariableScope::default();
+        scope.bind("v_id", ReferenceForm::Cte.reference("v_id", &parse_expr("42")));
 
-        assert!(PlPgSqlTranslator::expr_references_variable(&parse_expr("v_id"), "v_id"));
-        assert!(PlPgSqlTranslator::expr_references_variable(&parse_expr("t.v_id"), "v_id"));
-        assert!(!PlPgSqlTranslator::expr_references_variable(&parse_expr("other"), "v_id"));
+        let mut expr = parse_expr("(v_id + 1) * other");
+        substitute_variables(&mut expr, &scope);
+        assert_eq!(expr.to_string(), "((SELECT val FROM v_id) + 1) * other");
+
+        let mut inline = VariableScope::default();
+        inline.bind("v_id", ReferenceForm::Inline.reference("v_id", &parse_expr("count(*)")));
+        let mut expr = parse_expr("v_id + 1");
+        substitute_variables(&mut expr, &inline);
+        assert_eq!(expr.to_string(), "(SELECT count(*)) + 1");
+
+        // An expression that is already a subquery is read as it stands.
+        let mut nested = VariableScope::default();
+        nested.bind("v_id", ReferenceForm::Inline.reference("v_id", &parse_expr("(SELECT 1)")));
+        let mut expr = parse_expr("v_id");
+        substitute_variables(&mut expr, &nested);
+        assert_eq!(expr.to_string(), "(SELECT 1)");
     }
 
     #[test]
-    fn expr_references_variable_does_not_match_identifier_substrings() {
-        assert!(!PlPgSqlTranslator::expr_references_variable(&parse_expr("other_id + 1"), "id"));
+    fn a_variable_search_matches_whole_identifiers_only() {
+        assert!(references_variable(&parse_expr("v_id"), "v_id"));
+        assert!(references_variable(&parse_expr("t.v_id"), "v_id"));
+        assert!(references_variable(&parse_expr("f(1, v_id) OVER (PARTITION BY x)"), "v_id"));
+        assert!(!references_variable(&parse_expr("other"), "v_id"));
+        assert!(!references_variable(&parse_expr("other_id + 1"), "id"));
     }
 
     /// The two shapes that cannot take a guard now report it rather than
@@ -2639,97 +2611,35 @@ mod tests {
         assert!(sql.contains("NEW.kind = 'a'"));
     }
 
+    /// One case per expression shape that nests another expression, because
+    /// the walk this replaced had to name each of them and missed several.
     #[test]
-    fn substitute_variables_leaves_unbound_identifiers_and_handles_unary_ops() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
-        let expr = parse_expr("-other");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert_eq!(substituted.to_string(), "-other");
-    }
+    fn substitution_reaches_every_nesting_shape() {
+        let mut scope = VariableScope::default();
+        scope.bind("v_id", ReferenceForm::Cte.reference("v_id", &parse_expr("1")));
+        let read = "(SELECT val FROM v_id)";
 
-    #[test]
-    fn substitute_variables_rewrites_function_arguments() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
-        let expr = parse_expr("COALESCE(v_id, 0)");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert!(
-            substituted.to_string().contains("v_id.val"),
-            "Expected bound variable inside function args to be rewritten: {substituted}"
-        );
-    }
-
-    #[test]
-    fn substitute_variables_rewrites_case_expressions() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
-        let expr = parse_expr("CASE WHEN v_id > 0 THEN v_id ELSE 0 END");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert!(
-            substituted.to_string().contains("v_id.val"),
-            "Expected bound variable inside CASE to be rewritten: {substituted}"
-        );
-    }
-
-    #[test]
-    fn substitute_variables_rewrites_subquery_projections() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
-        let expr = parse_expr("(SELECT v_id)");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert!(
-            substituted.to_string().contains("v_id.val"),
-            "Expected bound variable inside subquery projection to be rewritten: {substituted}"
-        );
-    }
-
-    #[test]
-    fn substitute_variables_rewrites_tuple_items() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
-        let expr = parse_expr("(v_id, 1)");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert!(
-            substituted.to_string().contains("v_id.val"),
-            "Expected bound variable inside tuple to be rewritten: {substituted}"
-        );
-    }
-
-    #[test]
-    fn substitute_variables_rewrites_array_items() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
-        let expr = parse_expr("ARRAY[v_id, 1]");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert!(
-            substituted.to_string().contains("v_id.val"),
-            "Expected bound variable inside array literal to be rewritten: {substituted}"
-        );
-    }
-
-    #[test]
-    fn substitute_variables_rewrites_exists_subqueries() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
-        let expr = parse_expr("EXISTS (SELECT v_id)");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert!(
-            substituted.to_string().contains("v_id.val"),
-            "Expected bound variable inside EXISTS subquery to be rewritten: {substituted}"
-        );
-    }
-
-    #[test]
-    fn substitute_variables_rewrites_subquery_order_by_expressions() {
-        let bindings =
-            vec![VariableBinding { name: "v_id".to_string(), expression: "1".to_string() }];
-        let expr = parse_expr("(SELECT 1 ORDER BY v_id)");
-        let substituted = PlPgSqlTranslator::substitute_variables(&expr, &bindings);
-        assert!(
-            substituted.to_string().contains("v_id.val"),
-            "Expected bound variable inside subquery ORDER BY to be rewritten: {substituted}"
-        );
+        for (input, expected) in [
+            ("-other".to_string(), "-other".to_string()),
+            ("COALESCE(v_id, 0)".to_string(), format!("COALESCE({read}, 0)")),
+            (
+                "CASE WHEN v_id > 0 THEN v_id ELSE 0 END".to_string(),
+                format!("CASE WHEN {read} > 0 THEN {read} ELSE 0 END"),
+            ),
+            ("(SELECT v_id)".to_string(), format!("(SELECT {read})")),
+            ("(v_id, 1)".to_string(), format!("({read}, 1)")),
+            ("ARRAY[v_id, 1]".to_string(), format!("ARRAY[{read}, 1]")),
+            ("EXISTS (SELECT v_id)".to_string(), format!("EXISTS (SELECT {read})")),
+            ("(SELECT 1 ORDER BY v_id)".to_string(), format!("(SELECT 1 ORDER BY {read})")),
+            (
+                "sum(x) FILTER (WHERE v_id > 0)".to_string(),
+                format!("sum(x) FILTER (WHERE {read} > 0)"),
+            ),
+        ] {
+            let mut expr = parse_expr(&input);
+            substitute_variables(&mut expr, &scope);
+            assert_eq!(expr.to_string(), expected, "substituting {input}");
+        }
     }
 
     #[test]

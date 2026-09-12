@@ -170,11 +170,12 @@ pub(crate) fn numeric_precision_bound_expr(column_name: &Ident, precision: u64) 
     }
 }
 
-crate::traits::translator::impl_contextual_translator!(DataType => DataType);
 impl crate::traits::translator::TranslatorWithContext for DataType {
+    type SQLiteEntry = DataType;
+
     fn translate_with_warnings(
         &self,
-        _schema: &Self::Schema,
+        _schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         _emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

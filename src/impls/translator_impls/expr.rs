@@ -19,9 +19,10 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
-        ExactNumberInfo, Expr, Function, Ident, Interval, JsonKeyUniqueness, JsonPredicateType,
-        ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor,
-        UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+        ExactNumberInfo, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+        Interval, JsonKeyUniqueness, JsonPredicateType, ObjectName, ObjectNamePart, Query,
+        SelectItem, SetExpr, Subscript, TableAlias, TableFactor, UnaryOperator, Value,
+        ValueWithSpan, helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
@@ -1513,6 +1514,11 @@ fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bo
             Expr::UnaryOp { op: UnaryOperator::Minus | UnaryOperator::Plus, expr } => {
                 addressable(expr)
             }
+            // `sum(price) > 19.98` is a comparison against the column's scale,
+            // since these calls answer on their operands' scale.
+            Expr::Function(function) => {
+                crate::impls::shared_helpers::is_scale_preserving_call(function)
+            }
             _ => false,
         }
     }
@@ -1601,7 +1607,13 @@ fn translate_binary_op(
         // A NUMERIC column holds minor units, so a decimal literal beside one
         // has to be moved onto the same scale. Missing this is silent:
         // `price = 19.99` compares 1999 against 19.99 and returns nothing.
-        if let Some(scale) = scales.0.filter(|scale| *scale > 0)
+        //
+        // Division is left out: scaling the divisor here answered
+        // `price / 200`, which truncates to zero, where the arithmetic rules
+        // below refuse the operation for having no faithful form.
+        let scalable = *op != BinaryOperator::Divide;
+        if scalable
+            && let Some(scale) = scales.0.filter(|scale| *scale > 0)
             && let Some(scaled) = scale_decimal_literal(right, scale)?
         {
             return Ok(Expr::BinaryOp {
@@ -1610,7 +1622,8 @@ fn translate_binary_op(
                 right: Box::new(scaled),
             });
         }
-        if let Some(scale) = scales.1.filter(|scale| *scale > 0)
+        if scalable
+            && let Some(scale) = scales.1.filter(|scale| *scale > 0)
             && let Some(scaled) = scale_decimal_literal(left, scale)?
         {
             return Ok(Expr::BinaryOp {
@@ -2153,17 +2166,50 @@ fn unwrap_pg_catalog_operator(parts: &[String]) -> Option<BinaryOperator> {
     })
 }
 
-crate::traits::translator::impl_contextual_translator!(Expr => Expr);
 impl crate::traits::translator::TranslatorWithContext for Expr {
+    type SQLiteEntry = Expr;
+
     #[allow(clippy::too_many_lines)]
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         Ok(match self {
-            Expr::Function(func) => func.translate_with_warnings(schema, options, emit)?,
+            Expr::Function(func) => {
+                let translated = func.translate_with_warnings(schema, options, emit)?;
+                match numeric_scale(self, schema, options)? {
+                    Some(scale) if scale > 0 => {
+                        scale_call_arguments(translated, scale, schema, options)?
+                    }
+                    _ => translated,
+                }
+            }
+            Expr::InList { expr: operand, list, negated } => {
+                rebuild(|| {
+                    let scale = numeric_scale(operand, schema, options)?.filter(|scale| *scale > 0);
+                    Ok::<Expr, crate::errors::Error>(Expr::InList {
+                        expr: Box::new(operand.translate_with_warnings(schema, options, emit)?),
+                        list: list
+                            .iter()
+                            .map(|item| scale_or_translate(item, scale, schema, options, emit))
+                            .collect::<Result<Vec<_>, crate::errors::Error>>()?,
+                        negated: *negated,
+                    })
+                })?
+            }
+            Expr::Between { expr: operand, negated, low, high } => {
+                rebuild(|| {
+                    let scale = numeric_scale(operand, schema, options)?.filter(|scale| *scale > 0);
+                    Ok::<Expr, crate::errors::Error>(Expr::Between {
+                        expr: Box::new(operand.translate_with_warnings(schema, options, emit)?),
+                        negated: *negated,
+                        low: Box::new(scale_or_translate(low, scale, schema, options, emit)?),
+                        high: Box::new(scale_or_translate(high, scale, schema, options, emit)?),
+                    })
+                })?
+            }
             Expr::BinaryOp { left, op, right } => {
                 translate_binary_op(left, op, right, schema, options, emit)?
             }
@@ -2527,6 +2573,68 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
             _ => translate_expr_recursive::<Forward>(self, schema, options, emit)?,
         })
     }
+}
+
+/// A literal on `scale`, or the ordinary translation when it is not one.
+fn scale_or_translate(
+    expr: &Expr,
+    scale: Option<u32>,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Expr, crate::errors::Error> {
+    if let Some(scale) = scale
+        && let Some(scaled) = scale_decimal_literal(expr, scale)?
+    {
+        return Ok(scaled);
+    }
+    expr.translate_with_warnings(schema, options, emit)
+}
+
+/// Brings each argument of an already-translated scale-preserving call onto
+/// `scale`, which is the scale the call answers on.
+///
+/// A literal is written at that scale and a narrower minor-unit value is
+/// widened to it, which is what PostgreSQL does by giving the call the common
+/// type of its arguments. Without the widening, `coalesce(cents, micros)`
+/// answers cents' minor units where the caller reads micros'.
+///
+/// Only the argument list: a literal in a `FILTER` predicate or a window
+/// clause counts rows, not minor units. A nested scale-preserving call is
+/// followed, because a `greatest` lowers to `MAX(coalesce(a, b), coalesce(b,
+/// a))` and its arguments sit one level in.
+fn scale_call_arguments(
+    call: Expr,
+    scale: u32,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, crate::errors::Error> {
+    let Expr::Function(mut function) = call else { return Ok(call) };
+    if !crate::impls::shared_helpers::is_scale_preserving_call(&function) {
+        return Ok(Expr::Function(function));
+    }
+    if let FunctionArguments::List(list) = &mut function.args {
+        for argument in &mut list.args {
+            let (FunctionArg::Named { arg, .. }
+            | FunctionArg::ExprNamed { arg, .. }
+            | FunctionArg::Unnamed(arg)) = argument;
+            let FunctionArgExpr::Expr(expr) = arg else { continue };
+
+            if let Some(scaled) = scale_decimal_literal(expr, scale)? {
+                *expr = scaled;
+                continue;
+            }
+            let taken = core::mem::replace(expr, Expr::Wildcard(AttachedToken::empty()));
+            *expr = match numeric_scale(&taken, schema, options)? {
+                Some(held) if held < scale => rescale_minor_units(taken, held, scale),
+                _ if matches!(taken, Expr::Function(_)) => {
+                    scale_call_arguments(taken, scale, schema, options)?
+                }
+                _ => taken,
+            };
+        }
+    }
+    Ok(Expr::Function(function))
 }
 
 /// The single-quoted string an escape names, with any `Expr::Nested`

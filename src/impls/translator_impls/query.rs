@@ -38,11 +38,12 @@ use crate::{
 pub(crate) const DISTINCT_ON_DERIVED_ALIAS: &str = "__pg2sqlite_distinct_on";
 pub(crate) const DISTINCT_ON_ROWNUM_ALIAS: &str = "__pg2sqlite_rn";
 
-crate::traits::translator::impl_contextual_translator!(Query => Query);
 impl crate::traits::translator::TranslatorWithContext for Query {
+    type SQLiteEntry = Query;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
@@ -928,11 +929,12 @@ fn try_translate_grouping_query(
     )))
 }
 
-crate::traits::translator::impl_contextual_translator!(SetExpr => SetExpr);
 impl crate::traits::translator::TranslatorWithContext for SetExpr {
+    type SQLiteEntry = SetExpr;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
@@ -969,11 +971,12 @@ impl crate::traits::translator::TranslatorWithContext for SetExpr {
     }
 }
 
-crate::traits::translator::impl_contextual_translator!(Select => Select);
 impl crate::traits::translator::TranslatorWithContext for Select {
+    type SQLiteEntry = Select;
+
     fn translate_with_warnings(
         &self,
-        schema: &Self::Schema,
+        schema: &sql_traits::structs::ParserDB,
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {

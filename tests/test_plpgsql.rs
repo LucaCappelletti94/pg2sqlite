@@ -6,6 +6,7 @@
 //! DELETE, SetOperation in query body, inject_condition_into_statement
 //! (UPDATE/DELETE).
 
+mod helpers;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
@@ -27,23 +28,12 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
 /// Translates `sql` with default options and executes every emitted statement
 /// in an in-memory SQLite connection, verifying the output is valid SQLite.
 fn execute_trigger_ddl(sql: &str) {
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in &stmts {
-        conn.execute_batch(&format!("{stmt};"))
-            .expect("translated trigger DDL must execute in SQLite");
-    }
+    helpers::execute_all(sql, &Pg2SqliteOptions::default());
 }
 
 /// Like `execute_trigger_ddl` but uses caller-supplied options.
 fn execute_trigger_ddl_with_opts(sql: &str, options: &Pg2SqliteOptions) {
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(options).unwrap();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in &stmts {
-        conn.execute_batch(&format!("{stmt};"))
-            .expect("translated trigger DDL must execute in SQLite");
-    }
+    helpers::execute_all(sql, options);
 }
 
 #[test]
@@ -139,8 +129,8 @@ fn declare_default_values_are_available_without_assignment() {
 
     let output = translate(sql);
     assert!(
-        output.contains("v_log_id.val") && output.contains("v_msg.val"),
-        "DECLARE defaults should be bound through generated CTE values: {output}"
+        output.contains("(SELECT val FROM v_log_id)") && output.contains("(SELECT val FROM v_msg)"),
+        "DECLARE defaults should be read out of the generated CTE values: {output}"
     );
     assert!(
         !output.contains("VALUES (v_log_id, v_msg)"),
@@ -662,4 +652,269 @@ fn raise_info_single_space_is_dropped() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(rows.len(), 1, "Trigger must have fired and inserted one log row");
     assert_eq!(rows[0].logged_val, 42, "logged_val must match inserted val");
     Ok(())
+}
+
+/// A statement the dispatch does not name still sits inside its `IF`. The
+/// `TRUNCATE` arm reached the ordinary translator, which turns it into a
+/// `DELETE`, and the enclosing condition was never attached, so the emitted
+/// trigger emptied the table on every row.
+#[test]
+fn a_guarded_truncate_keeps_its_condition() {
+    let sql = "
+        CREATE TABLE trash (id INTEGER PRIMARY KEY);
+        CREATE TABLE t (id INTEGER PRIMARY KEY, val INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          IF NEW.val > 0 THEN
+            TRUNCATE trash;
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO trash (id) VALUES (1), (2), (3);").expect("rows");
+
+    connection.execute_batch("INSERT INTO t (id, val) VALUES (1, -5);").expect("guard is false");
+    let surviving: i64 = connection
+        .query_row("SELECT count(*) FROM trash", [], |row| row.get(0))
+        .expect("count after the false guard");
+    assert_eq!(surviving, 3, "a false condition must leave the table alone");
+
+    connection.execute_batch("INSERT INTO t (id, val) VALUES (2, 5);").expect("guard is true");
+    let emptied: i64 = connection
+        .query_row("SELECT count(*) FROM trash", [], |row| row.get(0))
+        .expect("count after the true guard");
+    assert_eq!(emptied, 0, "a true condition must run the statement");
+}
+
+/// `TG_OP` is folded to the event literal wherever it is read, not only in an
+/// `IF` condition. Emitted bare it is a column reference, and SQLite answers
+/// `no such column: TG_OP` when the trigger is created.
+#[test]
+fn a_trigger_special_is_folded_in_a_statement_body() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY);
+        CREATE TABLE log (id INTEGER PRIMARY KEY, op TEXT, tbl TEXT);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          INSERT INTO log (op, tbl) VALUES (TG_OP, TG_TABLE_NAME);
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO t (id) VALUES (1);").expect("trigger fires");
+
+    let logged: (String, String) = connection
+        .query_row("SELECT op, tbl FROM log", [], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("the trigger logged a row");
+    assert_eq!(logged, ("INSERT".to_string(), "t".to_string()));
+}
+
+/// The refusal an unknown `TG_*` already carries inside an `IF` condition
+/// applies wherever it is read: emitting it leaves SQLite to reject the
+/// trigger with a message about a column nobody wrote.
+#[test]
+fn an_unknown_trigger_special_in_a_statement_body_is_refused() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY);
+        CREATE TABLE log (id INTEGER PRIMARY KEY, n INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          INSERT INTO log (n) VALUES (TG_NARG);
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let error = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("TG_NARG has no SQLite equivalent")
+        .to_string();
+    assert!(error.contains("TG_NARG"), "the refusal must name the variable: {error}");
+}
+
+/// SQLite's trigger body grammar takes no `WITH` before an `UPDATE`, so the
+/// CTE has to become a derived table where it is read. Emitted as written,
+/// `CREATE TRIGGER` failed with a syntax error at `UPDATE`.
+#[test]
+fn a_with_update_in_a_trigger_body_runs() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH src AS (SELECT 99 AS new_n)
+          UPDATE t SET n = (SELECT new_n FROM src) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO t (id, n) VALUES (1, 0);").expect("seed row");
+    connection.execute_batch("UPDATE t SET id = 1 WHERE id = 1;").expect("trigger fires");
+
+    let n: i64 =
+        connection.query_row("SELECT n FROM t", [], |row| row.get(0)).expect("read the row back");
+    assert_eq!(n, 99, "the CTE's value must reach the assignment");
+}
+
+/// A CTE that declares its column names. Inlining it as a derived table loses
+/// those names unless the body's projection is aliased with them, and SQLite
+/// answered `no such column: v` for the read.
+#[test]
+fn a_with_update_naming_its_cte_columns_runs() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH src (v) AS (SELECT 99)
+          UPDATE t SET n = (SELECT v FROM src) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO t (id, n) VALUES (1, 0);").expect("seed row");
+    connection.execute_batch("UPDATE t SET id = 1 WHERE id = 1;").expect("trigger fires");
+
+    let n: i64 =
+        connection.query_row("SELECT n FROM t", [], |row| row.get(0)).expect("read the row back");
+    assert_eq!(n, 99, "the declared column name must survive the inlining");
+}
+
+/// A CTE reading the one declared before it. Each is inlined into the bodies
+/// of those that follow, so the second carries the first rather than naming
+/// a relation that no longer exists by the time the statement is emitted.
+#[test]
+fn a_with_update_over_chained_ctes_runs() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH a AS (SELECT 7 AS v), b AS (SELECT v * 2 AS w FROM a)
+          UPDATE t SET n = (SELECT w FROM b) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO t (id, n) VALUES (1, 0);").expect("seed row");
+    connection.execute_batch("UPDATE t SET id = 1 WHERE id = 1;").expect("trigger fires");
+
+    let n: i64 =
+        connection.query_row("SELECT n FROM t", [], |row| row.get(0)).expect("read the row back");
+    assert_eq!(n, 14, "the second CTE must carry the first");
+}
+
+/// Inlining copies a CTE's body into each read of it, so a body that answers
+/// differently on each evaluation stops meaning what PostgreSQL means, where
+/// the CTE is evaluated once and both readers see the same value. Measured
+/// before the refusal: `a = b` came back false.
+#[test]
+fn a_volatile_cte_read_twice_is_refused() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, a REAL, b REAL);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH r AS (SELECT random() AS v)
+          UPDATE t SET a = (SELECT v FROM r), b = (SELECT v FROM r) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let error = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("a volatile CTE read twice has no faithful inlined form");
+    let message = error.to_string();
+    assert!(message.contains("more than once"), "{message}");
+}
+
+/// The same body read once is inlined, since one copy is one evaluation.
+#[test]
+fn a_volatile_cte_read_once_is_inlined() {
+    let sql = "
+        CREATE TABLE t (id INTEGER PRIMARY KEY, a REAL);
+        CREATE OR REPLACE FUNCTION f() RETURNS TRIGGER AS $$
+        BEGIN
+          WITH r AS (SELECT random() AS v)
+          UPDATE t SET a = (SELECT v FROM r) WHERE id = NEW.id;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER tr AFTER UPDATE OF id ON t FOR EACH ROW EXECUTE FUNCTION f();
+    ";
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+    {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+    connection.execute_batch("INSERT INTO t (id, a) VALUES (1, 0);").expect("seed row");
+    connection.execute_batch("UPDATE t SET id = 1 WHERE id = 1;").expect("trigger fires");
+
+    let a: f64 =
+        connection.query_row("SELECT a FROM t", [], |row| row.get(0)).expect("read the row back");
+    assert!((0.0..1.0).contains(&a), "a uniform random float, got {a}");
 }

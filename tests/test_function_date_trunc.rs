@@ -9,10 +9,6 @@ use helpers::translate_sql;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use run_translated_helper::run_translated_with;
 
-fn translate(sql: &str) -> Result<String, String> {
-    translate_sql(sql, &Pg2SqliteOptions::default())
-}
-
 /// Measured on PostgreSQL 16 over `2024-03-15 10:20:30.456`. Every unit
 /// returns a full timestamp, which is the point of the item: the three coarse
 /// ones used to return a bare date.
@@ -124,7 +120,7 @@ fn date_trunc_ignores_the_case_of_the_granularity() {
 fn date_trunc_unsupported_granularity_produces_helpful_error() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);
                SELECT date_trunc('fortnight', ts) FROM t;";
-    let result = translate(sql);
+    let result = translate_sql(sql, &Pg2SqliteOptions::default());
     assert!(result.is_err(), "date_trunc('fortnight', ...) should produce an error");
     let err = result.unwrap_err();
     for granularity in ["second", "week", "quarter", "century", "millennium"] {
@@ -224,9 +220,10 @@ fn a_window_aggregate_over_partition_still_translates() {
 /// truncation unchanged.
 #[test]
 fn milliseconds_granularity_translates_and_truncates_correctly() {
-    let result = translate(
+    let result = translate_sql(
         "CREATE TABLE t (id INT PRIMARY KEY, ts TEXT);
          SELECT date_trunc('milliseconds', ts) FROM t;",
+        &Pg2SqliteOptions::default(),
     );
     assert!(
         result.is_ok(),
@@ -250,8 +247,11 @@ fn milliseconds_granularity_translates_and_truncates_correctly() {
 /// claim it is not a PostgreSQL granularity.
 #[test]
 fn microseconds_refusal_does_not_misrepresent_postgresql() {
-    let err = translate("CREATE TABLE t (ts TEXT); SELECT date_trunc('microseconds', ts) FROM t;")
-        .expect_err("microseconds is not yet supported and must fail");
+    let err = translate_sql(
+        "CREATE TABLE t (ts TEXT); SELECT date_trunc('microseconds', ts) FROM t;",
+        &Pg2SqliteOptions::default(),
+    )
+    .expect_err("microseconds is not yet supported and must fail");
     assert!(
         !err.contains("is not a PostgreSQL granularity"),
         "refusal must not claim microseconds is not PostgreSQL: {err}"

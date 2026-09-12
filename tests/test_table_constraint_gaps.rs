@@ -4,6 +4,7 @@
 //! characteristics consistently with column-level FK (column_option.rs).
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
 
 fn translate(sql: &str) -> Result<String, String> {
     Pg2Sqlite::default()
@@ -50,8 +51,8 @@ fn fk_deferrable_initially_deferred_translates_consistently() {
         column_level.contains("DEFERRABLE INITIALLY DEFERRED"),
         "column-level FK should keep the deferral: {column_level}"
     );
-    execute_translated_stmts(sql);
-    execute_translated_stmts(
+    helpers::execute_all(sql, &Pg2SqliteOptions::default());
+    helpers::execute_all(
         r#"
         CREATE TABLE parent (id INTEGER PRIMARY KEY);
         CREATE TABLE child (
@@ -59,6 +60,7 @@ fn fk_deferrable_initially_deferred_translates_consistently() {
             parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
         );
     "#,
+        &Pg2SqliteOptions::default(),
     );
 }
 
@@ -83,18 +85,5 @@ fn fk_basic_without_characteristics_works() {
     let output = result.unwrap();
     assert!(output.contains("FOREIGN KEY"), "FK should be preserved in output");
     assert!(output.contains("REFERENCES"), "REFERENCES should be preserved in output");
-    execute_translated_stmts(sql);
-}
-
-fn execute_translated_stmts(sql: &str) {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    let stmts = Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap();
-    for s in &stmts {
-        conn.execute_batch(&format!("{s};"))
-            .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));
-    }
+    helpers::execute_all(sql, &Pg2SqliteOptions::default());
 }

@@ -16,6 +16,7 @@ use rusqlite::Connection as SqliteConn;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use translate_helpers::translate_default_err as translate_err;
+mod helpers;
 
 diesel::table! {
     /// Test table for items (used in ROW_NUMBER and NTILE tests).
@@ -201,7 +202,7 @@ struct Transaction {
 }
 
 #[test]
-fn test_row_number() -> Result<(), Box<dyn std::error::Error>> {
+fn test_row_number() {
     let sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
@@ -211,45 +212,21 @@ fn test_row_number() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     assert!(
-        select_stmt.to_uppercase().contains("ROW_NUMBER()"),
-        "ROW_NUMBER() should pass through, got: {select_stmt}"
+        query.to_uppercase().contains("ROW_NUMBER()"),
+        "ROW_NUMBER() should pass through, got: {query}"
     );
+    assert!(query.to_uppercase().contains("OVER"), "OVER clause should be present, got: {query}");
     assert!(
-        select_stmt.to_uppercase().contains("OVER"),
-        "OVER clause should be present, got: {select_stmt}"
+        query.to_uppercase().contains("ORDER BY"),
+        "ORDER BY should be present in OVER clause, got: {query}"
     );
-    assert!(
-        select_stmt.to_uppercase().contains("ORDER BY"),
-        "ORDER BY should be present in OVER clause, got: {select_stmt}"
-    );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
 }
 
 #[test]
-fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rank_with_partition() {
     let sql = "
         CREATE TABLE employees (
             id SERIAL PRIMARY KEY,
@@ -262,45 +239,18 @@ fn test_rank_with_partition() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
+    assert!(query.to_uppercase().contains("RANK()"), "RANK() should pass through, got: {query}");
     assert!(
-        select_stmt.to_uppercase().contains("RANK()"),
-        "RANK() should pass through, got: {select_stmt}"
+        query.to_uppercase().contains("PARTITION BY"),
+        "PARTITION BY should be present, got: {query}"
     );
-    assert!(
-        select_stmt.to_uppercase().contains("PARTITION BY"),
-        "PARTITION BY should be present, got: {select_stmt}"
-    );
-    assert!(
-        select_stmt.to_uppercase().contains("ORDER BY"),
-        "ORDER BY should be present, got: {select_stmt}"
-    );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.to_uppercase().contains("ORDER BY"), "ORDER BY should be present, got: {query}");
 }
 
 #[test]
-fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
+fn test_dense_rank() {
     let sql = "
         CREATE TABLE scores (
             id SERIAL PRIMARY KEY,
@@ -312,37 +262,16 @@ fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     assert!(
-        select_stmt.to_uppercase().contains("DENSE_RANK()"),
-        "DENSE_RANK() should pass through, got: {select_stmt}"
+        query.to_uppercase().contains("DENSE_RANK()"),
+        "DENSE_RANK() should pass through, got: {query}"
     );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
 }
 
 #[test]
-fn test_ntile() -> Result<(), Box<dyn std::error::Error>> {
+fn test_ntile() {
     let sql = "
         CREATE TABLE items (
             id SERIAL PRIMARY KEY,
@@ -352,37 +281,13 @@ fn test_ntile() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(
-        select_stmt.to_uppercase().contains("NTILE"),
-        "NTILE() should pass through, got: {select_stmt}"
-    );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.to_uppercase().contains("NTILE"), "NTILE() should pass through, got: {query}");
 }
 
 #[test]
-fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
+fn test_lag_lead() {
     let sql = "
         CREATE TABLE time_series (
             id SERIAL PRIMARY KEY,
@@ -396,41 +301,14 @@ fn test_lag_lead() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(
-        select_stmt.to_uppercase().contains("LAG"),
-        "LAG() should pass through, got: {select_stmt}"
-    );
-    assert!(
-        select_stmt.to_uppercase().contains("LEAD"),
-        "LEAD() should pass through, got: {select_stmt}"
-    );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.to_uppercase().contains("LAG"), "LAG() should pass through, got: {query}");
+    assert!(query.to_uppercase().contains("LEAD"), "LEAD() should pass through, got: {query}");
 }
 
 #[test]
-fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
+fn test_first_last_value() {
     let sql = "
         CREATE TABLE readings (
             id SERIAL PRIMARY KEY,
@@ -444,41 +322,20 @@ fn test_first_last_value() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     assert!(
-        select_stmt.to_uppercase().contains("FIRST_VALUE"),
-        "FIRST_VALUE() should pass through, got: {select_stmt}"
+        query.to_uppercase().contains("FIRST_VALUE"),
+        "FIRST_VALUE() should pass through, got: {query}"
     );
     assert!(
-        select_stmt.to_uppercase().contains("LAST_VALUE"),
-        "LAST_VALUE() should pass through, got: {select_stmt}"
+        query.to_uppercase().contains("LAST_VALUE"),
+        "LAST_VALUE() should pass through, got: {query}"
     );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
 }
 
 #[test]
-fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
+fn test_nth_value() {
     let sql = "
         CREATE TABLE rankings (
             id SERIAL PRIMARY KEY,
@@ -491,37 +348,16 @@ fn test_nth_value() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     assert!(
-        select_stmt.to_uppercase().contains("NTH_VALUE"),
-        "NTH_VALUE() should pass through, got: {select_stmt}"
+        query.to_uppercase().contains("NTH_VALUE"),
+        "NTH_VALUE() should pass through, got: {query}"
     );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
 }
 
 #[test]
-fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
+fn test_aggregate_as_window() {
     let sql = "
         CREATE TABLE orders (
             id SERIAL PRIMARY KEY,
@@ -536,45 +372,15 @@ fn test_aggregate_as_window() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let query = helpers::prepared_user_select(sql, &options);
 
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(
-        select_stmt.to_uppercase().contains("SUM("),
-        "SUM() should pass through, got: {select_stmt}"
-    );
-    assert!(
-        select_stmt.to_uppercase().contains("AVG("),
-        "AVG() should pass through, got: {select_stmt}"
-    );
-    assert!(
-        select_stmt.to_uppercase().contains("COUNT("),
-        "COUNT() should pass through, got: {select_stmt}"
-    );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
+    assert!(query.to_uppercase().contains("SUM("), "SUM() should pass through, got: {query}");
+    assert!(query.to_uppercase().contains("AVG("), "AVG() should pass through, got: {query}");
+    assert!(query.to_uppercase().contains("COUNT("), "COUNT() should pass through, got: {query}");
 }
 
 #[test]
-fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rows_between_frame() {
     let sql = "
         CREATE TABLE transactions (
             id SERIAL PRIMARY KEY,
@@ -587,41 +393,20 @@ fn test_rows_between_frame() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     assert!(
-        select_stmt.to_uppercase().contains("ROWS BETWEEN"),
-        "ROWS BETWEEN should pass through, got: {select_stmt}"
+        query.to_uppercase().contains("ROWS BETWEEN"),
+        "ROWS BETWEEN should pass through, got: {query}"
     );
     assert!(
-        select_stmt.to_uppercase().contains("UNBOUNDED PRECEDING"),
-        "UNBOUNDED PRECEDING should be present, got: {select_stmt}"
+        query.to_uppercase().contains("UNBOUNDED PRECEDING"),
+        "UNBOUNDED PRECEDING should be present, got: {query}"
     );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
 }
 
 #[test]
-fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
+fn test_range_between_frame() {
     let sql = "
         CREATE TABLE data (
             id SERIAL PRIMARY KEY,
@@ -633,33 +418,12 @@ fn test_range_between_frame() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
+    let query = helpers::prepared_user_select(sql, &options);
 
     assert!(
-        select_stmt.to_uppercase().contains("RANGE BETWEEN"),
-        "RANGE BETWEEN should pass through, got: {select_stmt}"
+        query.to_uppercase().contains("RANGE BETWEEN"),
+        "RANGE BETWEEN should pass through, got: {query}"
     );
-
-    // Execute DDL then prepare SELECT to prove real SQLite accepts the
-    // translated SQL.
-    {
-        let conn = SqliteConn::open_in_memory()?;
-        let ddl = translated
-            .iter()
-            .filter(|s| !matches!(s, sqlparser::ast::Statement::Query(_)))
-            .map(|s| format!("{s};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        conn.execute_batch(&ddl)?;
-        conn.prepare(&select_stmt)?;
-    }
-    Ok(())
 }
 
 #[test]

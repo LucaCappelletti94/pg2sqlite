@@ -19,15 +19,13 @@
 //! definition belongs to, and a reference the scope cannot answer is refused
 //! rather than guessed.
 
+mod helpers;
+use helpers::translate_pg as translate;
 use pg2sqlite::{
     errors::Error,
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
 };
 use rusqlite::Connection;
-
-fn translate(pg: &str, options: &Pg2SqliteOptions) -> Result<Vec<String>, Error> {
-    Pg2Sqlite::default().sql(pg).and_then(|loaded| loaded.translate_to_sql(options))
-}
 
 fn refusal(pg: &str) -> String {
     match translate(pg, &Pg2SqliteOptions::default()) {

@@ -77,7 +77,11 @@ pub enum TranslationWarning {
     },
 }
 
-pub(crate) type WarningSink<'a> = &'a mut dyn FnMut(TranslationWarning);
+/// Where a translation reports the steps that lost something.
+///
+/// Named by [`TranslatorWithContext::translate_with_warnings`](crate::traits::TranslatorWithContext::translate_with_warnings),
+/// so it is public for the same reason that trait is.
+pub type WarningSink<'a> = &'a mut dyn FnMut(TranslationWarning);
 
 impl core::fmt::Display for TranslationWarning {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

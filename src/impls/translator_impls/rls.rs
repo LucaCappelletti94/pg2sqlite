@@ -1304,47 +1304,128 @@ fn transform_query(
         lowercased_columns: facts.lowercased_columns,
     };
 
-    if let sqlparser::ast::SetExpr::Select(ref mut select) = *transformed.body {
-        let mut subquery_table_renames: Vec<(String, String)> = Vec::new();
-        for table_with_joins in &mut select.from {
-            transform_table_with_joins_for_subquery(
-                table_with_joins,
-                &context,
-                &mut subquery_table_renames,
-            );
+    *transformed.body = transform_set_expr(&query.body, &context);
+
+    // ORDER BY, LIMIT and FETCH sit at the query level, outside any SELECT's
+    // scope, so an outer reference there needs the same rewrite.
+    let Some((outer_name, renamed)) = outer_table else { return transformed };
+    let rewrite = |expr: &Expr| transform_outer_table_refs(expr, outer_name, prefix, Some(renamed));
+
+    if let Some(order_by) = &mut transformed.order_by
+        && let sqlparser::ast::OrderByKind::Expressions(exprs) = &mut order_by.kind
+    {
+        for order_expr in exprs {
+            order_expr.expr = rewrite(&order_expr.expr);
         }
+    }
 
-        let rewrite_expr =
-            |expr: &Expr| transform_subquery_expression(expr, &context, &subquery_table_renames);
-
-        if let Some(selection) = &mut select.selection {
-            *selection = rewrite_expr(selection);
-        }
-
-        for item in &mut select.projection {
-            if let sqlparser::ast::SelectItem::UnnamedExpr(expr)
-            | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } = item
-            {
-                *expr = rewrite_expr(expr);
+    if let Some(limit_clause) = &mut transformed.limit_clause {
+        match limit_clause {
+            sqlparser::ast::LimitClause::LimitOffset { limit, offset, limit_by } => {
+                if let Some(limit) = limit {
+                    *limit = rewrite(limit);
+                }
+                if let Some(offset) = offset {
+                    offset.value = rewrite(&offset.value);
+                }
+                for key in limit_by {
+                    *key = rewrite(key);
+                }
             }
-        }
-
-        if let Some(having) = &mut select.having {
-            *having = rewrite_expr(having);
-        }
-
-        if let Some(qualify) = &mut select.qualify {
-            *qualify = rewrite_expr(qualify);
-        }
-
-        if let sqlparser::ast::GroupByExpr::Expressions(group_exprs, _) = &mut select.group_by {
-            for group_expr in group_exprs {
-                *group_expr = rewrite_expr(group_expr);
+            sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
+                *offset = rewrite(offset);
+                *limit = rewrite(limit);
             }
         }
     }
 
+    if let Some(fetch) = &mut transformed.fetch
+        && let Some(quantity) = &mut fetch.quantity
+    {
+        *quantity = rewrite(quantity);
+    }
+
     transformed
+}
+
+/// Transforms every position inside a `SetExpr`: the `Select` case handles
+/// `from`, `selection`, `projection`, `having`, `qualify`, and `group_by` as
+/// before; the `SetOperation` case recurses into both arms so that an outer
+/// table reference inside any arm (e.g. a `UNION ALL`) is reached; the `Query`
+/// case calls `transform_query` on the nested query.
+fn transform_set_expr(
+    set_expr: &sqlparser::ast::SetExpr,
+    context: &SubqueryTransformContext<'_>,
+) -> sqlparser::ast::SetExpr {
+    match set_expr {
+        sqlparser::ast::SetExpr::Select(select) => {
+            let mut transformed = select.as_ref().clone();
+            let mut subquery_table_renames: Vec<(String, String)> = Vec::new();
+            for table_with_joins in &mut transformed.from {
+                transform_table_with_joins_for_subquery(
+                    table_with_joins,
+                    context,
+                    &mut subquery_table_renames,
+                );
+            }
+
+            let rewrite_expr =
+                |expr: &Expr| transform_subquery_expression(expr, context, &subquery_table_renames);
+
+            if let Some(selection) = &mut transformed.selection {
+                *selection = rewrite_expr(selection);
+            }
+
+            for item in &mut transformed.projection {
+                if let sqlparser::ast::SelectItem::UnnamedExpr(expr)
+                | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } = item
+                {
+                    *expr = rewrite_expr(expr);
+                }
+            }
+
+            if let Some(having) = &mut transformed.having {
+                *having = rewrite_expr(having);
+            }
+
+            if let Some(qualify) = &mut transformed.qualify {
+                *qualify = rewrite_expr(qualify);
+            }
+
+            if let sqlparser::ast::GroupByExpr::Expressions(group_exprs, _) =
+                &mut transformed.group_by
+            {
+                for group_expr in group_exprs {
+                    *group_expr = rewrite_expr(group_expr);
+                }
+            }
+
+            sqlparser::ast::SetExpr::Select(Box::new(transformed))
+        }
+
+        sqlparser::ast::SetExpr::SetOperation { op, set_quantifier, left, right } => {
+            sqlparser::ast::SetExpr::SetOperation {
+                op: *op,
+                set_quantifier: *set_quantifier,
+                left: Box::new(transform_set_expr(left, context)),
+                right: Box::new(transform_set_expr(right, context)),
+            }
+        }
+
+        sqlparser::ast::SetExpr::Query(inner_query) => {
+            sqlparser::ast::SetExpr::Query(Box::new(transform_query(
+                inner_query,
+                context.options,
+                context.table,
+                context.schema,
+                context.prefix,
+                context.outer_table,
+                context.facts(),
+            )))
+        }
+
+        other => other.clone(),
+    }
 }
 
 fn transform_subquery_expression(
@@ -1484,77 +1565,6 @@ fn transform_join_operator_for_subquery(
     }
 }
 
-/// Transforms references to the outer table to use the prefix (OLD/NEW) or
-/// rename.
-///
-/// - If prefix is Some("OLD") or Some("NEW"): `ownables.id` -> `OLD.id` or
-///   `NEW.id`
-/// - If prefix is None: `ownables.id` -> `ownables_rls.id` (using
-///   renamed_table)
-fn transform_function_arg_with(
-    args: &FunctionArguments,
-    transform_expr_fn: &impl Fn(&Expr) -> Expr,
-) -> FunctionArguments {
-    match args {
-        FunctionArguments::List(arg_list) => {
-            let transform_arg_expr = |arg_expr: &FunctionArgExpr| -> FunctionArgExpr {
-                match arg_expr {
-                    FunctionArgExpr::Expr(e) => FunctionArgExpr::Expr(transform_expr_fn(e)),
-                    other => other.clone(),
-                }
-            };
-            let transform_arg = |arg: &FunctionArg| -> FunctionArg {
-                match arg {
-                    FunctionArg::Named { name, arg, operator } => {
-                        FunctionArg::Named {
-                            name: name.clone(),
-                            arg: transform_arg_expr(arg),
-                            operator: operator.clone(),
-                        }
-                    }
-                    FunctionArg::ExprNamed { name, arg, operator } => {
-                        FunctionArg::ExprNamed {
-                            name: name.clone(),
-                            arg: transform_arg_expr(arg),
-                            operator: operator.clone(),
-                        }
-                    }
-                    FunctionArg::Unnamed(arg) => FunctionArg::Unnamed(transform_arg_expr(arg)),
-                }
-            };
-            let transform_clause = |clause: &FunctionArgumentClause| -> FunctionArgumentClause {
-                match clause {
-                    FunctionArgumentClause::OrderBy(order_by_exprs) => {
-                        FunctionArgumentClause::OrderBy(
-                            order_by_exprs
-                                .iter()
-                                .map(|ob| {
-                                    let mut t = ob.clone();
-                                    t.expr = transform_expr_fn(&ob.expr);
-                                    t
-                                })
-                                .collect(),
-                        )
-                    }
-                    FunctionArgumentClause::Limit(e) => {
-                        FunctionArgumentClause::Limit(transform_expr_fn(e))
-                    }
-                    FunctionArgumentClause::Having(HavingBound(kind, e)) => {
-                        FunctionArgumentClause::Having(HavingBound(*kind, transform_expr_fn(e)))
-                    }
-                    other => other.clone(),
-                }
-            };
-            FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: arg_list.duplicate_treatment,
-                args: arg_list.args.iter().map(transform_arg).collect(),
-                clauses: arg_list.clauses.iter().map(transform_clause).collect(),
-            })
-        }
-        other => other.clone(),
-    }
-}
-
 fn transform_function_arg_with_rls(
     arg: &FunctionArg,
     transform_fn: &impl Fn(&Expr) -> Expr,
@@ -1611,20 +1621,11 @@ fn transform_outer_table_refs(
             Expr::CompoundIdentifier(idents.clone())
         }
 
-        Expr::Function(func) => {
-            let transformed_args = transform_function_arg_with(&func.args, &recurse);
-            Expr::Function(Function {
-                name: func.name.clone(),
-                args: transformed_args,
-                filter: func.filter.as_ref().map(|e| Box::new(recurse(e))),
-                null_treatment: func.null_treatment,
-                over: func.over.clone(),
-                within_group: func.within_group.clone(),
-                parameters: func.parameters.clone(),
-                uses_odbc_syntax: func.uses_odbc_syntax,
-            })
-        }
-
+        // A call falls through: `map_expr_children` walks every expression it
+        // carries, arguments, `FILTER`, `WITHIN GROUP` and the `OVER` window
+        // alike. The arm that used to stand here rewrote the first two and
+        // cloned the rest, so an outer reference inside `PARTITION BY`
+        // survived into the trigger.
         other => map_expr_children(other, &recurse),
     }
 }

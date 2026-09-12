@@ -48,9 +48,11 @@ use crate::{
     errors::Error,
     impls::{
         ast_builder,
-        function_helpers::{simple_function_expr, single_quoted_literal},
+        function_helpers::{
+            scalar_subquery_projection, simple_function_expr, single_quoted_literal,
+        },
         object_name::{last_ident, quote_identifier, quoted_ident, resolve_translation_table},
-        query_builder::{make_query, make_simple_select},
+        query_builder::{make_query, make_simple_select, single_expr_query},
         translator_impls::rls::resolve_trigger_table_name,
     },
     prelude::Pg2SqliteOptions,
@@ -330,10 +332,21 @@ fn make_vec_conversion_call(arg: Expr, is_halfvec: bool) -> Expr {
 /// If `expr` is a single-quoted string literal, wrap it with the matching
 /// sqlite-vec conversion function so SQLite STRICT tables accept it in the
 /// BLOB column. Other expression shapes pass through unchanged. NULL,
-/// DEFAULT, identifiers, casts, and existing function calls (including
-/// the `vec_f32` / `vec_f16` calls the cast translator already lowers
+/// DEFAULT, identifiers, casts, and existing function calls (including the
+/// `vec_f32` / `vec_f16` calls the cast translator already lowers
 /// `'[...]'::vector` to) are left alone, so this helper is idempotent.
+///
+/// `(SELECT '[1,2,3]')` is the literal written another way, so the conversion
+/// goes inside the subquery. A subquery that reads a relation is left alone:
+/// its value may already be a vector BLOB, and wrapping one would convert
+/// twice.
 pub(crate) fn maybe_wrap_text_vector_literal(expr: Expr, is_halfvec: bool) -> Expr {
+    if let Some(projected) = scalar_subquery_projection(&expr)
+        && single_quoted_literal(projected).is_some()
+    {
+        let wrapped = make_vec_conversion_call(projected.clone(), is_halfvec);
+        return Expr::Subquery(Box::new(single_expr_query(wrapped, Vec::new(), None)));
+    }
     if single_quoted_literal(&expr).is_some() {
         make_vec_conversion_call(expr, is_halfvec)
     } else {

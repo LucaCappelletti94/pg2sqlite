@@ -2,20 +2,14 @@
 //! typed translation refusal rather than silently passing through
 //! to SQLite (where it would fail at runtime with "no such table").
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-
-fn translate(sql: &str) -> Result<Vec<String>, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect())
-        .map_err(|e| e.to_string())
-}
+mod helpers;
+use helpers::translate_sql;
+use pg2sqlite::prelude::Pg2SqliteOptions;
 
 #[test]
 fn generate_series_in_from_produces_error() {
-    let result = translate("SELECT * FROM generate_series(1, 10)");
+    let result =
+        translate_sql("SELECT * FROM generate_series(1, 10)", &Pg2SqliteOptions::default());
     assert!(result.is_err(), "Expected error for generate_series, got: {result:?}");
     let err = result.unwrap_err();
     assert!(
@@ -26,7 +20,8 @@ fn generate_series_in_from_produces_error() {
 
 #[test]
 fn generate_series_with_alias_produces_error() {
-    let result = translate("SELECT n FROM generate_series(1, 5) AS g(n)");
+    let result =
+        translate_sql("SELECT n FROM generate_series(1, 5) AS g(n)", &Pg2SqliteOptions::default());
     assert!(result.is_err(), "Expected error for generate_series with alias, got: {result:?}");
     let err = result.unwrap_err();
     assert!(
