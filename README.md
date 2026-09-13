@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(sqlite_statements.len(), 2);
     assert_eq!(
         sqlite_statements[0].to_string(),
-        "CREATE TABLE users (id INTEGER PRIMARY KEY NOT NULL, username TEXT NOT NULL) STRICT"
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, username TEXT NOT NULL) STRICT"
     );
     assert_eq!(
         sqlite_statements[1].to_string(),
@@ -98,6 +98,8 @@ SELECT 'a' < 'B';
 ```
 
 Declaring the PostgreSQL column or database `C` collation makes PostgreSQL compare byte by byte too, which is what SQLite already does.
+
+A `SERIAL` or `IDENTITY` key becomes `INTEGER PRIMARY KEY AUTOINCREMENT`, so SQLite counts from the table's high-water mark and never reissues the key of a deleted row, which is what a PostgreSQL sequence does. Two differences remain, both reported as warnings. A value an insert supplies moves the counter, where a sequence ignores one and keeps handing out the values it was going to, and a rolled back insert consumes no key, where a sequence has already advanced. Three statements are refused instead of being emitted with a different meaning: an insert that supplies a value for a `GENERATED ALWAYS AS IDENTITY` column, which PostgreSQL refuses too and which the emitted schema cannot catch for itself, an update that assigns such a column, and an update that sets any generated key to `DEFAULT`, which in PostgreSQL takes the next sequence value and in SQLite has nothing to stand for.
 
 `now()` becomes `datetime('now')`, which answers UTC text with whole seconds. PostgreSQL answers a `timestamp with time zone` with microseconds, so the zone, the sub-second part and the type all differ. `CURRENT_TIMESTAMP` is passed through and answers the same UTC text.
 
