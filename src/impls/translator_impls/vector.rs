@@ -91,7 +91,7 @@ pub(crate) fn is_halfvec_data_type(data_type: &DataType) -> bool {
 }
 
 /// Extract dimension count from a vector type like vector(384).
-fn extract_dimensions(data_type: &DataType) -> Option<u32> {
+pub(crate) fn extract_dimensions(data_type: &DataType) -> Option<u32> {
     // The modifier list carries the type arguments, so `vector(384)` arrives
     // as the single modifier "384".
     if let DataType::Custom(_, modifiers) = data_type

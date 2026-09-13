@@ -15,7 +15,9 @@ pub mod warnings;
 pub mod prelude {
     pub use crate::{
         errors::{Error, RefusalCategory, SqlParseError, TranslationDirection, TranslationRefusal},
-        manifest::{ColumnManifestEntry, TableManifestEntry, WrapperKind},
+        manifest::{
+            ColumnManifestEntry, ColumnStorage, TableManifestEntry, VectorElement, WrapperKind,
+        },
         options::{Pg2SqliteOptions, TranslationContext},
         pg2sqlite::Pg2Sqlite,
         traits::{

@@ -10,7 +10,6 @@
 use alloc::{string::String, vec::Vec};
 
 /// How the translation wrapped one table.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrapperKind {
     /// Translated one to one. The logical name is a real table.
@@ -24,7 +23,6 @@ pub enum WrapperKind {
 }
 
 /// One table's translation outcome.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableManifestEntry {
     /// The table name in the source (PostgreSQL) schema.
@@ -33,26 +31,65 @@ pub struct TableManifestEntry {
     pub physical: String,
     /// The wrapper generated around the physical table.
     pub wrapper: WrapperKind,
-    /// How each column is physically represented, one entry per column, with
-    /// `minor_unit_scale` populated only where the representation cannot be
-    /// inferred from the emitted type alone.
+    /// How each column is physically represented, one entry per column in
+    /// declaration order.
     pub columns: Vec<ColumnManifestEntry>,
 }
 
 /// How one column is physically represented.
-///
-/// `NUMERIC(p,s)` is stored as an INTEGER of minor units (19.99 as 1999);
-/// divide by `10^s` to recover the decimal when reading back. Bind parameters
-/// carry the PostgreSQL decimal; the emitted SQL scales them, so do not scale
-/// a bound value manually.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnManifestEntry {
     /// The column name, as declared in the source schema.
     pub name: String,
-    /// The power of ten the stored integer is scaled by, for a `NUMERIC` or
-    /// `DECIMAL` column, and `None` for every other type.
-    pub minor_unit_scale: Option<u32>,
+    /// What the stored value is, for a reader that has to turn it back into
+    /// the value PostgreSQL would have given it.
+    pub storage: ColumnStorage,
+}
+
+/// What a column's stored value is, where that is not the value PostgreSQL
+/// holds.
+///
+/// Only the read direction needs this. A caller binds and writes what
+/// PostgreSQL takes, and the emitted SQL performs whatever conversion the
+/// column's storage needs, so nothing here is applied to a value on its way
+/// in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnStorage {
+    /// The stored value is the value, and the emitted SQLite type says what
+    /// it is.
+    Direct,
+    /// An `INTEGER` of minor units, which a `NUMERIC(p,s)` column stores:
+    /// `19.99` at scale 2 is stored as `1999`, so dividing by `10^scale`
+    /// recovers the decimal.
+    MinorUnits {
+        /// The power of ten the stored integer is scaled by.
+        scale: u32,
+    },
+    /// Sixteen bytes of `BLOB`, the UUID in its own byte order, which is the
+    /// `Blob` UUID representation.
+    UuidBlob,
+    /// Canonical lowercase hyphenated UUID text, which is the `Text` UUID
+    /// representation.
+    UuidText,
+    /// JSON array text, which is how an array column is stored under the
+    /// JSON array representation: PostgreSQL's `{1,2}` is held as `[1,2]`.
+    JsonArray,
+    /// Packed floats in a `BLOB`, which is what `sqlite-vec` reads.
+    Vector {
+        /// The declared width, or `None` when the column declared none.
+        dimensions: Option<u32>,
+        /// The width of one element.
+        element: VectorElement,
+    },
+}
+
+/// The element type of a stored vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorElement {
+    /// Four bytes per element, little endian, which `vector` uses.
+    Float32,
+    /// Two bytes per element, little endian, which `halfvec` uses.
+    Float16,
 }
 
 #[cfg(all(test, feature = "std"))]
