@@ -48,6 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Semantic differences
 
+Two things are connection state in SQLite rather than database state, and the emitted script sets both for the connection it is applied to: `PRAGMA foreign_keys = 1` where the schema declares a foreign key, because SQLite enforces one only while that pragma is on and it is off by default, and `PRAGMA case_sensitive_like = 1` where a statement carries a `LIKE`. A script cannot reach any other connection, so **every connection that writes to the replica has to set `foreign_keys` too**: without it the delete PostgreSQL refuses leaves an orphan row and says nothing. The translation reports this as a warning whenever it emits a foreign key.
+
 SQLite folds case for ASCII letters only, so `lower` and `upper` answer differently from PostgreSQL whenever the text is not ASCII. PostgreSQL folds by the database collation, which under a UTF-8 locale covers the whole of Unicode. For `ILIKE` the translator refuses a pattern literal carrying a non-ASCII letter rather than emitting a comparison that silently answers false, and `with_ilike_fold_function` names a Unicode-aware folding function (an ICU build's `lower`, or one the application registers) that `ILIKE` then runs through instead of `lower`.
 
 ```sql

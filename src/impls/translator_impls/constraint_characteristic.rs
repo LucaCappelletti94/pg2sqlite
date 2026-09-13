@@ -31,8 +31,10 @@ impl crate::traits::translator::TranslatorWithContext for ConstraintCharacterist
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         if self.enforced.is_some() {
             return Err(crate::errors::Error::forward_refusal(format!(
-                "{self} cannot be translated. SQLite has no ENFORCED clause and enforces every \
-                 constraint it accepts, so the clause has no form to take."
+                "{self} cannot be translated. ENFORCED is a MySQL clause that PostgreSQL 17 does \
+                 not accept, answering `syntax error at or near \"ENFORCED\"`, so input carrying \
+                 it is not the PostgreSQL this crate translates. SQLite has no such clause \
+                 either, and enforces every constraint it accepts."
             )));
         }
 
@@ -49,16 +51,29 @@ impl crate::traits::translator::TranslatorWithContext for ConstraintCharacterist
 
 /// Reports deferrability on a constraint that is not a foreign key.
 ///
-/// SQLite's grammar carries `DEFERRABLE` and `INITIALLY` only on a foreign key
-/// clause. On a `PRIMARY KEY`, `UNIQUE`, or `CHECK` constraint it answers
-/// `near "DEFERRABLE": syntax error`, so there is nothing to emit.
+/// PostgreSQL 17 accepts the clause and means it: measured over a `UNIQUE
+/// DEFERRABLE INITIALLY DEFERRED` column, two rows holding the same value
+/// coexist inside one transaction and the `COMMIT` answers `duplicate key
+/// value violates unique constraint`. SQLite's grammar carries `DEFERRABLE`
+/// and `INITIALLY` only on a foreign key clause, where it defers for real,
+/// and on a `PRIMARY KEY`, `UNIQUE` or `CHECK` constraint it answers `near
+/// "DEFERRABLE": syntax error`.
+///
+/// So the clause is refused rather than dropped: dropping it moves the check
+/// from the commit to the statement, and a transaction PostgreSQL accepts,
+/// one that holds a duplicate only in the middle of its work, would then be
+/// refused.
 pub(crate) fn deferrability_outside_a_foreign_key(
     constraint: &str,
     characteristics: ConstraintCharacteristics,
 ) -> crate::errors::Error {
     crate::errors::Error::forward_refusal(format!(
-        "{characteristics} on a {constraint} constraint cannot be translated. SQLite carries \
-         DEFERRABLE and INITIALLY only on a foreign key clause. Move the deferral to the \
-         foreign key that needs it, or drop it."
+        "{characteristics} on a {constraint} constraint cannot be translated. PostgreSQL checks \
+         such a constraint at the commit, and SQLite carries DEFERRABLE and INITIALLY only on a \
+         foreign key clause, so the replica would check it at the statement instead: a \
+         transaction that holds a duplicate in the middle of its work is accepted by the server \
+         and would be refused here. Drop the deferral only if every statement inside a \
+         transaction can satisfy the constraint on its own, or move the work the deferral covers \
+         into one statement."
     ))
 }

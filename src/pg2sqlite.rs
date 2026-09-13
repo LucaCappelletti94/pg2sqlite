@@ -160,16 +160,67 @@ fn populate_spatial_index_catalog(
     }
 }
 
-/// `PRAGMA case_sensitive_like = ON`, which makes SQLite's `LIKE` match
+/// `PRAGMA case_sensitive_like = 1`, which makes SQLite's `LIKE` match
 /// PostgreSQL's case-sensitive behaviour.
+///
+/// The value is written as a number rather than as `true`: SQLite takes both,
+/// and `sqlparser`'s SQLite dialect answers `Expected: number or string or ?
+/// placeholder, found: true` for the keyword, so the emitted statement could
+/// not be read back by the same parser that produced it.
 fn case_sensitive_like_pragma() -> Statement {
+    pragma_on("case_sensitive_like")
+}
+
+/// `PRAGMA <name> = 1`.
+fn pragma_on(name: &str) -> Statement {
     Statement::Pragma {
-        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("case_sensitive_like"))]),
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
         value: Some(ValueWithSpan {
-            value: Value::Boolean(true),
+            value: Value::Number(String::from("1"), false),
             span: sqlparser::tokenizer::Span::empty(),
         }),
         is_eq: true,
+    }
+}
+
+/// `PRAGMA foreign_keys = 1`, which is what makes SQLite enforce a foreign
+/// key at all.
+fn foreign_keys_pragma() -> Statement {
+    pragma_on("foreign_keys")
+}
+
+/// True when `statement` declares a foreign key, in a column's `REFERENCES`
+/// clause or in a table constraint.
+fn statement_declares_foreign_key(statement: &Statement) -> bool {
+    let Statement::CreateTable(create_table) = statement else { return false };
+    create_table
+        .constraints
+        .iter()
+        .any(|constraint| matches!(constraint, sqlparser::ast::TableConstraint::ForeignKey(_)))
+        || create_table.columns.iter().any(|column| {
+            column.options.iter().any(|option| {
+                matches!(option.option, sqlparser::ast::ColumnOption::ForeignKey { .. })
+            })
+        })
+}
+
+/// The warning a schema carrying a foreign key earns.
+///
+/// The pragma the script emits covers the connection the script runs on and
+/// no other, and a foreign key SQLite does not enforce is silent: the delete
+/// PostgreSQL refuses leaves an orphan row instead.
+fn foreign_key_pragma_warning() -> crate::warnings::TranslationWarning {
+    crate::warnings::TranslationWarning::LossyDowngrade {
+        construct: "FOREIGN KEY".to_string(),
+        from: "always enforced".to_string(),
+        to: "enforced under PRAGMA foreign_keys".to_string(),
+        location: "every connection that writes".to_string(),
+        reason: "SQLite enforces a foreign key only while the connection carries PRAGMA \
+                 foreign_keys = ON, which is off by default and is connection state rather than \
+                 database state. The emitted script sets it for the connection it is applied to; \
+                 every other connection that writes to the replica has to set it too, or the \
+                 delete PostgreSQL refuses will leave an orphan row with no error."
+            .to_string(),
     }
 }
 
@@ -658,7 +709,7 @@ impl Pg2Sqlite {
         initial_schema: Option<&ParserDB>,
     ) -> Result<PreparedTranslation, crate::errors::Error> {
         let prepared = self.prepare_schema(options, initial_schema)?;
-        let PreparedStatements { schema: _, options: _, statements, audit_table, warnings } =
+        let PreparedStatements { schema: _, options: _, statements, audit_table, mut warnings } =
             self.translate_prepared(prepared, |_| true)?;
 
         let mut result: Vec<Statement> = statements.into_iter().flatten().collect();
@@ -687,6 +738,15 @@ impl Pg2Sqlite {
             result.insert(0, case_sensitive_like_pragma());
         }
 
+        // A foreign key SQLite does not enforce is worse than one it refuses:
+        // the delete PostgreSQL rejects leaves an orphan row and says nothing.
+        // Enforcement is connection state, off by default, so the script sets
+        // it where it can and the warning names what a script cannot reach.
+        if result.iter().any(statement_declares_foreign_key) {
+            result.insert(0, foreign_keys_pragma());
+            warnings.push(foreign_key_pragma_warning());
+        }
+
         Ok(PreparedTranslation { statements: result, warnings })
     }
 
@@ -697,6 +757,13 @@ impl Pg2Sqlite {
     /// direction, and
     /// [`translation_manifest`](Self::translation_manifest) answers what each
     /// column holds.
+    ///
+    /// The script leads with `PRAGMA foreign_keys = 1` where the schema
+    /// declares a foreign key, since SQLite enforces one only while that
+    /// pragma is on and it is off by default. A pragma is connection state,
+    /// so every other connection that writes to the replica has to set it
+    /// too, or a delete PostgreSQL refuses will leave an orphan row with no
+    /// error.
     ///
     /// Warnings about dropped or downgraded constructs are discarded on this
     /// path. Use [`translate_with_report`](Self::translate_with_report) to
