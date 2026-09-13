@@ -169,6 +169,9 @@ enum FunctionTranslation {
     /// answers NULL. Lowered onto the
     /// [`ascii_code_point`](crate::impls::idioms::ascii_code_point) shape.
     AsciiCodePoint,
+    /// `chr`, whose code point 0 PostgreSQL refuses while SQLite's `char`
+    /// answers a one-byte NUL string that `length` then reads as empty.
+    Chr,
     /// `json_build_object`, whose keys PostgreSQL coerces to text where
     /// SQLite's `json_object` answers `labels must be TEXT` when the query
     /// runs.
@@ -204,7 +207,8 @@ pub(crate) const FORWARD_RENAMES: &[(&str, &str)] = &[
     // string_agg is NOT a rename: SQLite takes no separator argument beside
     // DISTINCT. See `FunctionTranslation::StringAgg`.
     ("strpos", "INSTR"),
-    ("chr", "char"),
+    // chr is NOT a rename: PostgreSQL refuses code point 0 where SQLite's
+    // char makes a one-byte NUL string. See `FunctionTranslation::Chr`.
     ("json_build_array", "json_array"),
     // json_build_object is NOT a rename: PostgreSQL coerces a key to text
     // where SQLite answers `json_object() labels must be TEXT`. See
@@ -702,6 +706,7 @@ fn translate_catalog_function(
     "to_char" => FunctionTranslation::ToChar,
     // json_build_array(v, ...) -> json_array(v, ...) (handle remaining jsonb_build_*)
     "jsonb_build_array" => FunctionTranslation::Rename("json_array".to_string()),
+    "chr" => FunctionTranslation::Chr,
     "json_build_object" | "jsonb_build_object" => FunctionTranslation::JsonBuildObject,
     "json_array_length" | "jsonb_array_length" => FunctionTranslation::JsonArrayLength,
     // localtimestamp -> datetime('now', 'localtime')
@@ -1685,7 +1690,18 @@ fn build_concat_ws_expression(separator: &Expr, values: Vec<Expr>) -> Option<Exp
         prior_values.push(value);
     }
 
-    build_concatenation(pieces)
+    // PostgreSQL answers NULL whenever the separator is NULL, whatever the
+    // values are, and the piecewise rewrite answered an empty string once
+    // every value was NULL too.
+    let concatenated = build_concatenation(pieces)?;
+    Some(crate::impls::expr_helpers::case_when(
+        Expr::IsNull(Box::new(separator.clone())),
+        Expr::Value(sqlparser::ast::ValueWithSpan {
+            value: Value::Null,
+            span: sqlparser::tokenizer::Span::empty(),
+        }),
+        Some(concatenated),
+    ))
 }
 
 impl crate::traits::translator::TranslatorWithContext for Function {
@@ -2203,6 +2219,23 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                         value,
                     ],
                     None,
+                ))
+            }
+            FunctionTranslation::Chr => {
+                let exprs = extract_exactly(&func.args, 1, "chr")?;
+                if crate::impls::function_helpers::integer_literal_value(exprs[0]) == Some(0) {
+                    return Err(crate::errors::Error::forward_refusal(
+                        "chr(0) has no answer: PostgreSQL refuses it with `null character not \
+                         permitted`, since a NUL cannot live in a text value there, while \
+                         SQLite's char(0) makes a one-byte string that length() then reads as \
+                         empty. Write the code point you meant."
+                            .to_string(),
+                    ));
+                }
+                Ok(simple_function_expr(
+                    "char",
+                    vec![exprs[0].translate_with_warnings(schema, options, emit)?],
+                    translate_window_type(func.over.as_ref(), schema, options, emit)?,
                 ))
             }
             FunctionTranslation::JsonBuildObject => {

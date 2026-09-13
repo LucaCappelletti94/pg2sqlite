@@ -164,6 +164,69 @@ pub(crate) fn array_overlap(left: Expr, right: Expr) -> Expr {
     }
 }
 
+/// `subject LIKE ANY (array)` as an `EXISTS` over `json_each`.
+///
+/// PostgreSQL answers true when any element matches, and the emitted `LIKE
+/// ANY (...)` answered `no such function: ANY` instead, since SQLite has no
+/// quantified comparison. `negated` carries `NOT LIKE ANY`, which PostgreSQL
+/// reads as "some element does not match", so the negation goes inside the
+/// `EXISTS` rather than around it.
+///
+/// An empty array yields no rows, so the answer is false, which is what
+/// PostgreSQL answers for it as well.
+pub(crate) fn pattern_matches_any_element(
+    subject: Expr,
+    array: Expr,
+    escape_char: Option<Box<Expr>>,
+    negated: bool,
+) -> Expr {
+    let matches_element = Expr::Like {
+        negated,
+        any: false,
+        expr: Box::new(subject),
+        pattern: Box::new(json_each_column(VALUE_COLUMN)),
+        escape_char,
+    };
+    Expr::Exists {
+        subquery: Box::new(single_expr_query(
+            integer_literal(1),
+            from_relation(json_each_factor(array)),
+            Some(matches_element),
+        )),
+        negated: false,
+    }
+}
+
+/// `subject ILIKE ANY (array)`, with each element folded the same way the
+/// subject was.
+pub(crate) fn pattern_matches_any_element_folded(
+    subject: Expr,
+    array: Expr,
+    escape_char: Option<Box<Expr>>,
+    negated: bool,
+    fold_function: Option<&str>,
+) -> Expr {
+    let element = match fold_function {
+        Some(name) => simple_function_expr(name, vec![json_each_column(VALUE_COLUMN)], None),
+        None => simple_function_expr("lower", vec![json_each_column(VALUE_COLUMN)], None),
+    };
+    let matches_element = Expr::Like {
+        negated,
+        any: false,
+        expr: Box::new(subject),
+        pattern: Box::new(element),
+        escape_char,
+    };
+    Expr::Exists {
+        subquery: Box::new(single_expr_query(
+            integer_literal(1),
+            from_relation(json_each_factor(array)),
+            Some(matches_element),
+        )),
+        negated: false,
+    }
+}
+
 /// `a || b` over arrays, as
 /// `(SELECT json_group_array(value ORDER BY side, key) FROM (SELECT 0 AS side,
 /// key, value FROM json_each(a) UNION ALL SELECT 1 AS side, key, value FROM
