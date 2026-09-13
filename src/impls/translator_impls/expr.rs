@@ -46,10 +46,10 @@ use crate::{
         replay::{is_replayable, reject_duplicated_operand},
         session_variable,
         shared_helpers::{
-            declared_numeric_precision, declared_type_matches,
-            extract_column_references_from_function, function_argument_exprs,
+            declared_in_scope, declared_numeric_precision, declared_type_matches,
+            extract_column_references_from_function, function_argument_exprs, is_bound_parameter,
             is_integral_expression, numeric_scale, referenced_column_name, rescale_minor_units,
-            scale_decimal_literal, scale_of, translate_expr_recursive,
+            scale_decimal_literal, scale_of, scale_parameter, translate_expr_recursive,
         },
         temporal_arithmetic::{
             TemporalKind, epoch_of_temporal_difference, temporal_kind_of,
@@ -68,6 +68,7 @@ use crate::{
             data_type::{MAX_NUMERIC_PRECISION, exact_numeric_info, numeric_precision_and_scale},
             function::cube_root_closed_form,
             helpers::Forward,
+            vector::is_vector_data_type,
         },
     },
     traits::translator::TranslatorWithContext,
@@ -837,8 +838,8 @@ fn extract_string_array_keys(expr: &Expr) -> Option<Vec<&str>> {
     elem.iter().map(single_quoted_literal).collect()
 }
 
-/// Scales NUMERIC literals before forwarding `IS [NOT] DISTINCT FROM` to
-/// SQLite.
+/// Scales NUMERIC literals/parameters and converts UUID/vector values before
+/// forwarding `IS [NOT] DISTINCT FROM` to SQLite.
 fn translate_distinct_comparison(
     left: &Expr,
     right: &Expr,
@@ -849,23 +850,32 @@ fn translate_distinct_comparison(
 ) -> Result<Expr, crate::errors::Error> {
     let (l, r) = if let Some(scale) = scale_of(left, schema, options).filter(|s| *s > 0) {
         let l = left.translate_with_warnings(schema, options, emit)?;
-        let r = match scale_decimal_literal(right, scale)? {
-            Some(scaled) => scaled,
-            None => right.translate_with_warnings(schema, options, emit)?,
+        let r = right.translate_with_warnings(schema, options, emit)?;
+        let r = if let Some(scaled) = scale_decimal_literal(right, scale)? {
+            scaled
+        } else if is_bound_parameter(&r) {
+            scale_parameter(r, scale)
+        } else {
+            r
         };
         (l, r)
     } else if let Some(scale) = scale_of(right, schema, options).filter(|s| *s > 0) {
-        let l = match scale_decimal_literal(left, scale)? {
-            Some(scaled) => scaled,
-            None => left.translate_with_warnings(schema, options, emit)?,
+        let l = left.translate_with_warnings(schema, options, emit)?;
+        let l = if let Some(scaled) = scale_decimal_literal(left, scale)? {
+            scaled
+        } else if is_bound_parameter(&l) {
+            scale_parameter(l, scale)
+        } else {
+            l
         };
         let r = right.translate_with_warnings(schema, options, emit)?;
         (l, r)
     } else {
-        (
-            left.translate_with_warnings(schema, options, emit)?,
-            right.translate_with_warnings(schema, options, emit)?,
-        )
+        let tl = left.translate_with_warnings(schema, options, emit)?;
+        let tr = right.translate_with_warnings(schema, options, emit)?;
+        let tl = convert_beside_column_expr(right, tl, schema, options)?;
+        let tr = convert_beside_column_expr(left, tr, schema, options)?;
+        (tl, tr)
     };
     Ok(if is_not_distinct { null_safe_eq(l, r) } else { null_safe_neq(l, r) })
 }
@@ -1667,6 +1677,27 @@ fn scalar_times_interval(expr: &Expr) -> Option<(&Expr, &Interval)> {
     None
 }
 
+/// Converts `value` to the storage type of `column_expr` (already translated).
+fn convert_beside_column_expr(
+    column_expr: &Expr,
+    value: Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, crate::errors::Error> {
+    use crate::impls::shared_helpers::convert_value_for_column_type;
+    // Resolve the column's declared PostgreSQL type from scope, then delegate.
+    // Errors mean the reference cannot be resolved (no refusal: not our
+    // position).
+    let data_type =
+        declared_in_scope(column_expr, schema, options, |dt| Some(dt.clone()), |_, _, _| Ok(None))
+            .ok()
+            .flatten();
+    match data_type {
+        Some(dt) => convert_value_for_column_type(&dt, value, options),
+        None => Ok(value),
+    }
+}
+
 /// Translate a binary operation expression.
 #[allow(clippy::too_many_lines)]
 fn translate_binary_op(
@@ -1715,6 +1746,32 @@ fn translate_binary_op(
                 right: Box::new(right.translate_with_warnings(schema, options, emit)?),
             });
         }
+        if scalable
+            && let Some(scale) = scales.0.filter(|scale| *scale > 0)
+            && is_bound_parameter(right)
+        {
+            return Ok(Expr::BinaryOp {
+                left: Box::new(left.translate_with_warnings(schema, options, emit)?),
+                op: op.clone(),
+                right: Box::new(scale_parameter(
+                    right.translate_with_warnings(schema, options, emit)?,
+                    scale,
+                )),
+            });
+        }
+        if scalable
+            && let Some(scale) = scales.1.filter(|scale| *scale > 0)
+            && is_bound_parameter(left)
+        {
+            return Ok(Expr::BinaryOp {
+                left: Box::new(scale_parameter(
+                    left.translate_with_warnings(schema, options, emit)?,
+                    scale,
+                )),
+                op: op.clone(),
+                right: Box::new(right.translate_with_warnings(schema, options, emit)?),
+            });
+        }
         if let (Some(left_scale), Some(right_scale)) = scales
             && (left_scale > 0 || right_scale > 0)
             && let Some(combined) = translate_numeric_arithmetic(
@@ -1758,6 +1815,57 @@ fn translate_binary_op(
                     right_scale,
                     wider,
                 )),
+            });
+        }
+    }
+    // UUID/vector comparison: wrap the non-column side (literal or parameter).
+    // Pre-check which side is a typed column to avoid double translation.
+    if matches!(
+        op,
+        BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+    ) {
+        let col_check = |e: &Expr| {
+            declared_type_matches(e, schema, options, |t| t.eq_ignore_ascii_case("uuid"))
+                .unwrap_or(false)
+                || declared_in_scope(
+                    e,
+                    schema,
+                    options,
+                    |dt| {
+                        if is_vector_data_type(dt) || matches!(dt, DataType::Array(_)) {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    },
+                    |_, _, _| Ok(None),
+                )
+                .ok()
+                .flatten()
+                .is_some()
+        };
+        let left_is_col = col_check(left);
+        let right_is_col = col_check(right);
+        if left_is_col || right_is_col {
+            let tl = left.translate_with_warnings(schema, options, emit)?;
+            let tr = right.translate_with_warnings(schema, options, emit)?;
+            return Ok(Expr::BinaryOp {
+                left: Box::new(if right_is_col {
+                    convert_beside_column_expr(right, tl, schema, options)?
+                } else {
+                    tl
+                }),
+                op: op.clone(),
+                right: Box::new(if left_is_col {
+                    convert_beside_column_expr(left, tr, schema, options)?
+                } else {
+                    tr
+                }),
             });
         }
     }
@@ -2368,7 +2476,14 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         expr: Box::new(operand.translate_with_warnings(schema, options, emit)?),
                         list: list
                             .iter()
-                            .map(|item| scale_or_translate(item, scale, schema, options, emit))
+                            .map(|item| {
+                                let v = scale_or_translate(item, scale, schema, options, emit)?;
+                                if scale.is_none() {
+                                    convert_beside_column_expr(operand, v, schema, options)
+                                } else {
+                                    Ok(v)
+                                }
+                            })
                             .collect::<Result<Vec<_>, crate::errors::Error>>()?,
                         negated: *negated,
                     })
@@ -2377,11 +2492,21 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
             Expr::Between { expr: operand, negated, low, high } => {
                 rebuild(|| {
                     let scale = scale_of(operand, schema, options).filter(|scale| *scale > 0);
+                    let low_v = scale_or_translate(low, scale, schema, options, emit)?;
+                    let high_v = scale_or_translate(high, scale, schema, options, emit)?;
+                    let (low_v, high_v) = if scale.is_none() {
+                        (
+                            convert_beside_column_expr(operand, low_v, schema, options)?,
+                            convert_beside_column_expr(operand, high_v, schema, options)?,
+                        )
+                    } else {
+                        (low_v, high_v)
+                    };
                     Ok::<Expr, crate::errors::Error>(Expr::Between {
                         expr: Box::new(operand.translate_with_warnings(schema, options, emit)?),
                         negated: *negated,
-                        low: Box::new(scale_or_translate(low, scale, schema, options, emit)?),
-                        high: Box::new(scale_or_translate(high, scale, schema, options, emit)?),
+                        low: Box::new(low_v),
+                        high: Box::new(high_v),
                     })
                 })?
             }
@@ -2952,7 +3077,8 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
     }
 }
 
-/// A literal on `scale`, or the ordinary translation when it is not one.
+/// A literal or parameter scaled to `scale`, or the ordinary translation when
+/// `scale` is `None` or `expr` is neither.
 fn scale_or_translate(
     expr: &Expr,
     scale: Option<u32>,
@@ -2960,10 +3086,16 @@ fn scale_or_translate(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    if let Some(scale) = scale
-        && let Some(scaled) = scale_decimal_literal(expr, scale)?
-    {
-        return Ok(scaled);
+    if let Some(scale) = scale {
+        if let Some(scaled) = scale_decimal_literal(expr, scale)? {
+            return Ok(scaled);
+        }
+        // Bound parameter: emit CAST(ROUND(?1 * 10^s) AS INTEGER) so the
+        // caller binds a decimal and SQLite converts to minor units.
+        if is_bound_parameter(expr) {
+            let translated = expr.translate_with_warnings(schema, options, emit)?;
+            return Ok(scale_parameter(translated, scale));
+        }
     }
     expr.translate_with_warnings(schema, options, emit)
 }
@@ -2999,6 +3131,12 @@ fn scale_call_arguments(
 
             if let Some(scaled) = scale_decimal_literal(expr, scale)? {
                 *expr = scaled;
+                continue;
+            }
+            // Bound parameter: wrap with CAST(ROUND(…) AS INTEGER).
+            if is_bound_parameter(expr) {
+                let taken = core::mem::replace(expr, Expr::Wildcard(AttachedToken::empty()));
+                *expr = scale_parameter(taken, scale);
                 continue;
             }
             let taken = core::mem::replace(expr, Expr::Wildcard(AttachedToken::empty()));
