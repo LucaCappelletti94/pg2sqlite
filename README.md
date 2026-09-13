@@ -93,6 +93,8 @@ A `NUMERIC(p,s)` column is the exception to the third: it is stored as a scaled 
 
 Writing needs no knowledge of any of that, but reading does: a stored value is not always the value PostgreSQL would have handed back. `translation_manifest` answers what each column holds, as a `ColumnStorage`: an integer of minor units with its scale, sixteen bytes or canonical text for a UUID depending on the representation in force, JSON array text for an array column, packed floats with their width for a vector column, and `Direct` for every column whose emitted SQLite type already says what it is.
 
+A compound `SELECT` resolves one type per output column in PostgreSQL and none at all in SQLite, which decides per value. `SELECT 1 UNION SELECT '1'` is one row on the server, where the unknown literal becomes an integer and the branches deduplicate, and two rows in the replica, one integer and one text; `SELECT 'a' UNION SELECT 1` is an error there and two rows here; and `SELECT 1.0 UNION SELECT 1` answers `1.0` there and `1` here. Fixing this needs a type system the translation does not have, so the divergence is recorded rather than translated: give the branches an explicit cast when the type matters.
+
 Text comparison follows the collation. PostgreSQL uses the database's, which under a UTF-8 locale orders case-insensitively for the purpose of ranking letters, while SQLite's default `BINARY` collation compares byte by byte, so every upper-case letter sorts before every lower-case one. This reaches `ORDER BY`, `<`, `>`, `BETWEEN`, `MIN` and `MAX`, not only explicit comparisons.
 
 ```sql
