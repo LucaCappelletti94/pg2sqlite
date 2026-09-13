@@ -1193,7 +1193,44 @@ pub(crate) fn convert_value_for_column_type(
     if matches!(data_type, DataType::Interval { .. }) {
         return normalize_interval_literal_expr(expr);
     }
+    if matches!(data_type, DataType::JSON | DataType::JSONB) {
+        return check_json_document_literal(data_type, expr);
+    }
     Ok(expr)
+}
+
+/// Refuses a literal a JSON column cannot hold.
+///
+/// PostgreSQL types the value: `INSERT INTO t (j) VALUES (1)` over a `jsonb`
+/// column answers `column "j" is of type jsonb but expression is of type
+/// integer`, where the replica's column is `TEXT` and took the number. And a
+/// `jsonb` document carrying `\u0000` is answered `unsupported Unicode escape
+/// sequence`, because the escape has no text form, while the replica stored a
+/// raw NUL byte.
+pub(crate) fn check_json_document_literal(data_type: &DataType, expr: Expr) -> Result<Expr, Error> {
+    let Expr::Value(ValueWithSpan { value, .. }) = &expr else { return Ok(expr) };
+    match value {
+        Value::SingleQuotedString(text) => {
+            if matches!(data_type, DataType::JSONB) && text.to_ascii_lowercase().contains("\\u0000")
+            {
+                return Err(Error::forward_refusal(format!(
+                    "the document {text} carries a \\u0000 escape, which PostgreSQL refuses for a \
+                     jsonb column, answering `unsupported Unicode escape sequence`: a NUL has no \
+                     text form there. Remove it, or declare the column json, which does keep it."
+                )));
+            }
+            Ok(expr)
+        }
+        Value::Null | Value::Placeholder(_) => Ok(expr),
+        other => {
+            Err(Error::forward_refusal(format!(
+                "{other} is not a document a {data_type} column can hold: PostgreSQL answers \
+                 `column is of type {data_type} but expression is of type ...` for a value that \
+                 is not JSON text, where the replica's TEXT column would take it. Write the \
+                 document as a string, as '{other}'."
+            )))
+        }
+    }
 }
 
 /// Rewrites a string literal in an interval column position to the text
@@ -1290,6 +1327,8 @@ pub(crate) fn literal_checks_apply(data_type: &DataType) -> bool {
             | DataType::Float8
             | DataType::Array(_)
             | DataType::Interval { .. }
+            | DataType::JSON
+            | DataType::JSONB
     ) || crate::impls::translator_impls::data_type::bit_length(data_type).is_some()
         || crate::impls::temporal_literals::temporal_literal_kind(data_type).is_some()
 }

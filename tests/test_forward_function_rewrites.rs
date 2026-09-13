@@ -41,7 +41,7 @@ fn localtime_to_time_localtime() {
 /// `tests/test_to_json.rs`, so this only pins the shape.
 #[test]
 fn to_json_converts_rather_than_reinterprets() {
-    let sql = "SELECT to_json('hello')";
+    let sql = "SELECT to_json('hello'::text)";
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(
@@ -54,7 +54,7 @@ fn to_json_converts_rather_than_reinterprets() {
 /// Inverted from `to_jsonb_renames_to_json`, for the same reason.
 #[test]
 fn to_jsonb_converts_rather_than_reinterprets() {
-    let sql = "SELECT to_jsonb('hello')";
+    let sql = "SELECT to_jsonb('hello'::text)";
     let result = translate_sql(sql, &default_opts()).unwrap();
     let lower = result.to_lowercase();
     assert!(

@@ -169,6 +169,13 @@ enum FunctionTranslation {
     /// answers NULL. Lowered onto the
     /// [`ascii_code_point`](crate::impls::idioms::ascii_code_point) shape.
     AsciiCodePoint,
+    /// `json_build_object`, whose keys PostgreSQL coerces to text where
+    /// SQLite's `json_object` answers `labels must be TEXT` when the query
+    /// runs.
+    JsonBuildObject,
+    /// `json_array_length`, which PostgreSQL raises over a non-array where
+    /// SQLite answers 0.
+    JsonArrayLength,
     /// `ceiling(x)`, which sqlparser does not parse as `Expr::Ceil`.
     /// Scale-aware for NUMERIC columns; falls back to a gated-math passthrough.
     NumericCeil,
@@ -199,9 +206,12 @@ pub(crate) const FORWARD_RENAMES: &[(&str, &str)] = &[
     ("strpos", "INSTR"),
     ("chr", "char"),
     ("json_build_array", "json_array"),
-    ("json_build_object", "json_object"),
+    // json_build_object is NOT a rename: PostgreSQL coerces a key to text
+    // where SQLite answers `json_object() labels must be TEXT`. See
+    // `FunctionTranslation::JsonBuildObject`.
     ("btrim", "trim"),
-    ("jsonb_array_length", "json_array_length"),
+    // jsonb_array_length is NOT a rename: SQLite answers 0 for a non-array
+    // where PostgreSQL raises. See `FunctionTranslation::JsonArrayLength`.
     ("version", "sqlite_version"),
     // to_json and to_jsonb are NOT renames: `json()` reads its argument as JSON
     // where they convert a value into JSON. See `FunctionTranslation::ToJson`.
@@ -692,7 +702,8 @@ fn translate_catalog_function(
     "to_char" => FunctionTranslation::ToChar,
     // json_build_array(v, ...) -> json_array(v, ...) (handle remaining jsonb_build_*)
     "jsonb_build_array" => FunctionTranslation::Rename("json_array".to_string()),
-    "jsonb_build_object" => FunctionTranslation::Rename("json_object".to_string()),
+    "json_build_object" | "jsonb_build_object" => FunctionTranslation::JsonBuildObject,
+    "json_array_length" | "jsonb_array_length" => FunctionTranslation::JsonArrayLength,
     // localtimestamp -> datetime('now', 'localtime')
     "localtimestamp" => FunctionTranslation::WithArgs {
         name: "datetime".to_string(),
@@ -1231,6 +1242,12 @@ fn is_already_json(expr: &Expr) -> bool {
 
     match expr {
         Expr::Array(_) => true,
+        // `'{"a":1}'::jsonb` is a document as much as `json('{"a":1}')` is,
+        // and reading it as text made `d - 1` subtract and `d || d` glue two
+        // documents together.
+        Expr::Cast { data_type, .. } => {
+            matches!(data_type, sqlparser::ast::DataType::JSON | sqlparser::ast::DataType::JSONB)
+        }
         Expr::Function(func) => {
             func.name.0.last().and_then(ObjectNamePart::as_ident).is_some_and(|name| {
                 JSON_VALUED.iter().any(|json| name.value.eq_ignore_ascii_case(json))
@@ -1311,7 +1328,7 @@ fn resolves_to_non_textual_column(
 /// thing that separates a document from its own text. An unqualified name is
 /// accepted only when every column with that name in the schema agrees, since
 /// guessing between the two is wrong half the time in either direction.
-fn carries_json(
+pub(crate) fn carries_json(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
@@ -1416,28 +1433,12 @@ fn json_path_from_text_array(path: &Expr, label: &str) -> Result<String, crate::
 
     let mut json_path = String::from("$");
     for element in &elements {
-        if element.parse::<i64>().is_ok() {
-            return Err(crate::errors::Error::forward_refusal(format!(
-                "{label} cannot translate the path element {element}, because PostgreSQL decides \
-                 at run time whether it indexes an array or names an object key, and JSONPath has \
-                 to choose one. Use json_set with an explicit $.a[0] path against the SQLite \
-                 database instead."
-            )));
+        if crate::impls::translator_impls::expr::is_numeric_path_element(element) {
+            return Err(crate::impls::translator_impls::expr::numeric_json_path_element(
+                label, element,
+            ));
         }
-        if element.contains('"') {
-            return Err(json_path_not_literal(label, path));
-        }
-        // A key that is not a bare identifier has to be quoted in JSONPath.
-        if element.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && !element.starts_with(|c: char| c.is_ascii_digit())
-        {
-            json_path.push('.');
-            json_path.push_str(element);
-        } else {
-            json_path.push_str(".\"");
-            json_path.push_str(element);
-            json_path.push('"');
-        }
+        json_path.push_str(&crate::impls::translator_impls::expr::sqlite_json_path_key(element));
     }
 
     Ok(json_path)
@@ -2155,22 +2156,18 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                                 .to_string(),
                         ));
                     };
-                    // Quote any key that is not a plain identifier: a dot,
-                    // space, or other metacharacter would
-                    // otherwise be treated as a path
-                    // separator or special JSONPath syntax by SQLite's
-                    // json_extract.
-                    let is_plain_identifier = !key.is_empty()
-                        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                        && !key.starts_with(|c: char| c.is_ascii_digit());
-                    if is_plain_identifier {
-                        path.push('.');
-                        path.push_str(key);
-                    } else {
-                        path.push_str(".\"");
-                        path.push_str(key);
-                        path.push('"');
+                    // A numeric element is the one shape a JSON path cannot
+                    // read the way PostgreSQL reads it, so it is refused
+                    // rather than written as a key.
+                    if crate::impls::translator_impls::expr::is_numeric_path_element(key) {
+                        return Err(
+                            crate::impls::translator_impls::expr::numeric_json_path_element(
+                                "json_extract_path",
+                                key,
+                            ),
+                        );
                     }
+                    path.push_str(&crate::impls::translator_impls::expr::sqlite_json_path_key(key));
                 }
                 Ok(simple_function_expr(
                     "json_extract",
@@ -2208,9 +2205,99 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                     None,
                 ))
             }
+            FunctionTranslation::JsonBuildObject => {
+                // PostgreSQL answers {"1" : 2} for json_build_object(1, 2),
+                // coercing the key, where SQLite answers `json_object()
+                // labels must be TEXT` at run time. Every key position is
+                // cast; the values are left alone.
+                let exprs = function_argument_exprs(&func.args);
+                if !exprs.len().is_multiple_of(2) {
+                    return Err(crate::errors::Error::forward_refusal(
+                        "json_build_object takes an even number of arguments, a key and a value \
+                         for each pair, which PostgreSQL enforces too."
+                            .to_string(),
+                    ));
+                }
+                let mut arguments = Vec::with_capacity(exprs.len());
+                for (index, argument) in exprs.iter().enumerate() {
+                    let translated = argument.translate_with_warnings(schema, options, emit)?;
+                    arguments.push(if index.is_multiple_of(2) {
+                        Expr::Cast {
+                            expr: Box::new(translated),
+                            data_type: DataType::Text,
+                            format: None,
+                            kind: CastKind::Cast,
+                        }
+                    } else {
+                        translated
+                    });
+                }
+                Ok(simple_function_expr(
+                    "json_object",
+                    arguments,
+                    translate_window_type(func.over.as_ref(), schema, options, emit)?,
+                ))
+            }
+            FunctionTranslation::JsonArrayLength => {
+                // PostgreSQL answers `cannot get array length of a non-array`
+                // where SQLite's json_array_length answers 0. SQLite cannot
+                // raise inside an expression, so the guard answers NULL,
+                // which is the shape division by zero already takes.
+                let exprs = extract_exactly(&func.args, 1, "json_array_length")?;
+                let translated = exprs[0].translate_with_warnings(schema, options, emit)?;
+                if !is_replayable(&translated, options) {
+                    return Err(reject_duplicated_operand("json_array_length", &translated));
+                }
+                let is_array = Expr::BinaryOp {
+                    left: Box::new(simple_function_expr(
+                        "json_type",
+                        vec![translated.clone()],
+                        None,
+                    )),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(string_literal("array")),
+                };
+                Ok(crate::impls::expr_helpers::case_when(
+                    is_array,
+                    simple_function_expr("json_array_length", vec![translated], None),
+                    None,
+                ))
+            }
             FunctionTranslation::ToJson => {
                 let exprs = extract_exactly(&func.args, 1, "to_json")?;
                 let argument = exprs[0];
+
+                // PostgreSQL answers `could not determine polymorphic type
+                // because input has type unknown` for an untyped literal, so
+                // `to_jsonb('x')` and `to_jsonb(NULL)` are not statements it
+                // runs at all.
+                if matches!(
+                    argument,
+                    Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString(_) | Value::Null,
+                        ..
+                    })
+                ) {
+                    return Err(crate::errors::Error::forward_refusal(format!(
+                        "to_json({argument}) has no type to convert: PostgreSQL answers `could \
+                         not determine polymorphic type because input has type unknown` for an \
+                         untyped literal, so this is not a statement the server runs. Write the \
+                         type, as {argument}::text."
+                    )));
+                }
+
+                // A boolean converts to the JSON words, which PostgreSQL
+                // writes as `true` and `false` where the translated integer
+                // gave 1 and 0.
+                if crate::impls::translator_impls::expr::is_boolean_expression(
+                    argument, schema, options,
+                )? {
+                    let rendered = crate::impls::translator_impls::expr::render_boolean_as_text(
+                        argument, schema, options, emit,
+                    )?;
+                    return Ok(simple_function_expr("json", vec![rendered], None));
+                }
+
                 let translated = argument.translate_with_warnings(schema, options, emit)?;
 
                 // An argument that is already JSON needs reading, not

@@ -1636,6 +1636,12 @@ mod tests {
         // COALESCE is a name both engines share, so the forward direction
         // passes it through.
         ("ifnull", "the shared name COALESCE needs no forward rename"),
+        // json_build_object forwards with its keys cast to text, since
+        // PostgreSQL coerces a key and SQLite refuses one that is not text.
+        ("json_object", "FunctionTranslation::JsonBuildObject"),
+        // json_array_length forwards under a json_type guard, since SQLite
+        // answers 0 for a non-array where PostgreSQL raises.
+        ("json_array_length", "FunctionTranslation::JsonArrayLength"),
     ];
 
     /// Every plain rename must invert: for a forward `(pg, sqlite)` pair the
