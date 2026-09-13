@@ -12,7 +12,7 @@ mod helpers;
 
 use diesel::{RunQueryDsl, prelude::*};
 use helpers::establish_connection;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation};
 
 mod schema {
     // Direct table: NUMERIC(10,2) translates to INTEGER minor units in SQLite.
@@ -24,16 +24,31 @@ mod schema {
     }
 
     // Backing table that the RLS view writes through.
-    // Read directly in tests so assertions see what the trigger stored.
     diesel::table! {
         pay_rls (id) {
             id -> Integer,
             amount -> BigInt,
         }
     }
+
+    // UUID-as-blob column: translated to BLOB by the Blob representation.
+    diesel::table! {
+        items (id) {
+            id -> Integer,
+            uid -> Binary,
+        }
+    }
+
+    // Plain TEXT column: no type-level rewrite, parameter passes through.
+    diesel::table! {
+        notes (id) {
+            id -> Integer,
+            content -> Text,
+        }
+    }
 }
 
-use schema::{ledger, pay_rls};
+use schema::{items, ledger, notes, pay_rls};
 
 /// Translates `pg`, applies every emitted statement but the last to a fresh
 /// in-memory connection, and returns (connection, last_statement_string).
@@ -64,6 +79,10 @@ fn default_opts() -> Pg2SqliteOptions {
 
 fn rls_opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit")
+}
+
+fn uuid_blob_opts() -> Pg2SqliteOptions {
+    Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob)
 }
 
 const LEDGER_DDL: &str =
@@ -258,4 +277,72 @@ fn rls_update_numeric_param_is_scaled() {
         .first(&mut conn)
         .expect("row must exist in backing table after update");
     assert_eq!(stored, 325, "3.25 through RLS view must update to 325 minor units");
+}
+
+// ---------------------------------------------------------------------------
+// ColumnRewrites::finish_value — UPDATE paths for UUID blob, array, and
+// plain columns (shared_helpers.rs lines 957–991).
+// ---------------------------------------------------------------------------
+
+const ITEMS_DDL: &str = "CREATE TABLE items (id INT PRIMARY KEY, uid UUID NOT NULL);";
+const NOTES_DDL: &str = "CREATE TABLE notes (id INT PRIMARY KEY, content TEXT NOT NULL);";
+
+/// UPDATE a UUID-as-blob column with a parameter goes through
+/// `ColumnRewrites::finish_value` → `make_uuid_conversion_call` (line 979).
+#[test]
+fn update_uuid_blob_param_goes_through_finish_value() {
+    let seed = "INSERT INTO items VALUES (1, '550e8400-e29b-41d4-a716-446655440000');";
+    let pg = format!("{ITEMS_DDL}{seed}UPDATE items SET uid = $1 WHERE id = 1;");
+    let (mut conn, update_sql) = setup_for_dml(&pg, &uuid_blob_opts());
+    // sql_query is required: we must execute the translator's emitted string
+    // (containing unhex(replace(…))) to verify finish_value wrapped the param.
+    diesel::sql_query(&update_sql)
+        .bind::<diesel::sql_types::Text, _>("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+        .execute(&mut conn)
+        .expect("UUID blob param UPDATE must succeed");
+    let uid: Vec<u8> = items::table
+        .select(items::uid)
+        .filter(items::id.eq(1_i32))
+        .first(&mut conn)
+        .expect("row must exist");
+    assert_eq!(uid.len(), 16, "UUID must be stored as a 16-byte blob");
+}
+
+/// UPDATE an array column with a bound parameter is refused: SQLite cannot
+/// parse PostgreSQL array text at run time.
+#[test]
+fn update_array_col_param_refused_via_finish_value() {
+    use pg2sqlite::prelude::ArrayRepresentation;
+    let opt = Pg2SqliteOptions::default().with_array_representation(ArrayRepresentation::Json);
+    let pg = "CREATE TABLE arr (id INT, tags INT[]);\
+              UPDATE arr SET tags = $1 WHERE id = 1;";
+    let err = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate(&opt)
+        .expect_err("array param UPDATE must be refused")
+        .to_string();
+    assert!(err.to_lowercase().contains("array"), "error must mention array: {err}");
+}
+
+/// UPDATE a plain TEXT column with a bound parameter passes through
+/// `finish_value` unchanged — the numeric-scale if-let returns None so no
+/// conversion is applied (shared_helpers.rs line 991).
+#[test]
+fn update_plain_col_param_passes_through_finish_value() {
+    let seed = "INSERT INTO notes VALUES (1, 'hello');";
+    let pg = format!("{NOTES_DDL}{seed}UPDATE notes SET content = $1 WHERE id = 1;");
+    let (mut conn, update_sql) = setup_for_dml(&pg, &default_opts());
+    // sql_query is required: executing the translator's emitted string is the
+    // assertion that finish_value produced a valid statement.
+    diesel::sql_query(&update_sql)
+        .bind::<diesel::sql_types::Text, _>("world")
+        .execute(&mut conn)
+        .expect("plain text param UPDATE must succeed");
+    let stored: String = notes::table
+        .select(notes::content)
+        .filter(notes::id.eq(1_i32))
+        .first(&mut conn)
+        .expect("row must exist");
+    assert_eq!(stored, "world");
 }

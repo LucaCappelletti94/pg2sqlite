@@ -102,6 +102,19 @@ fn numeric_param_comparison_eq() {
 }
 
 #[test]
+fn numeric_param_on_left_of_binary_op() {
+    let conn = rusqlite_apply(&format!("{NUMERIC_SCHEMA}{NUMERIC_SEED}"), &opts());
+    // $1 < price: right carries the NUMERIC scale; param on the left is scaled.
+    let q = translate_query(
+        NUMERIC_SCHEMA,
+        "SELECT id FROM amounts WHERE $1 < price ORDER BY id;",
+        &opts(),
+    );
+    let rows = run_with(&conn, &q, rusqlite::params![1.5_f64]);
+    assert_eq!(rows, vec![Some("1".into())], "only price=19.99 exceeds 1.5");
+}
+
+#[test]
 fn numeric_param_negative() {
     let conn = rusqlite_apply(&format!("{NUMERIC_SCHEMA}{NUMERIC_SEED}"), &opts());
     let q = translate_query(NUMERIC_SCHEMA, "SELECT id FROM amounts WHERE price = $1;", &opts());
@@ -229,6 +242,21 @@ fn uuid_blob_param_is_distinct_from() {
     assert_eq!(rows, vec![Some("0".into())], "IS DISTINCT FROM same UUID → 0 distinct rows");
 }
 
+#[test]
+fn uuid_blob_param_on_left_of_eq() {
+    let conn = rusqlite_apply(&format!("{UUID_BLOB_SCHEMA}{UUID_BLOB_SEED}"), &uuid_blob_opts());
+    // $1 = id: UUID column on the right triggers convert_beside_column_expr on
+    // the left param; the right column passes through unchanged (line
+    // 1867).
+    let q = translate_query(
+        UUID_BLOB_SCHEMA,
+        "SELECT label FROM uids WHERE $1 = id;",
+        &uuid_blob_opts(),
+    );
+    let rows = run_with(&conn, &q, rusqlite::params![UUID_STR]);
+    assert_eq!(rows, vec![Some("alice".into())], "param-on-left UUID eq must find the row");
+}
+
 // ---------------------------------------------------------------------------
 // UUID under Text representation — literal canonicalized; parameter
 // passthrough.
@@ -330,4 +358,98 @@ fn round_trip_exact_f64_values_agree_with_postgresql() {
             "f64 {val} → {expected_minor_units} minor units"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// IS DISTINCT FROM — NUMERIC column on the right (Branch 2 of
+// translate_distinct_comparison) and non-literal/non-param right-hand sides.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn numeric_param_is_distinct_from_col_on_right() {
+    let conn = rusqlite_apply(&format!("{NUMERIC_SCHEMA}{NUMERIC_SEED}"), &opts());
+    // $1 IS DISTINCT FROM price: right carries the NUMERIC scale, param is
+    // scaled.
+    let q = translate_query(
+        NUMERIC_SCHEMA,
+        "SELECT id FROM amounts WHERE $1 IS DISTINCT FROM price ORDER BY id;",
+        &opts(),
+    );
+    let rows = run_with(&conn, &q, rusqlite::params![1.5_f64]);
+    assert_eq!(rows, vec![Some("1".into()), Some("3".into())]);
+}
+
+#[test]
+fn numeric_literal_is_distinct_from_col_on_right() {
+    let conn = rusqlite_apply(&format!("{NUMERIC_SCHEMA}{NUMERIC_SEED}"), &opts());
+    // 1.50 IS DISTINCT FROM price: right carries the scale, literal is scaled.
+    let q = translate_query(
+        NUMERIC_SCHEMA,
+        "SELECT id FROM amounts WHERE 1.50 IS DISTINCT FROM price ORDER BY id;",
+        &opts(),
+    );
+    let rows = run_with(&conn, &q, []);
+    assert_eq!(rows, vec![Some("1".into()), Some("3".into())]);
+}
+
+#[test]
+fn numeric_col_is_distinct_from_unscaled_col() {
+    let conn = rusqlite_apply(&format!("{NUMERIC_SCHEMA}{NUMERIC_SEED}"), &opts());
+    // price IS DISTINCT FROM id: right is a column ref — neither literal nor
+    // param — so the else-branch of Branch 1 passes it through unscaled.
+    let q = translate_query(
+        NUMERIC_SCHEMA,
+        "SELECT id FROM amounts WHERE price IS DISTINCT FROM id ORDER BY id;",
+        &opts(),
+    );
+    // Minor-unit prices (1999, 150, -5) are all distinct from ids (1, 2, 3).
+    let rows = run_with(&conn, &q, []);
+    assert_eq!(rows, vec![Some("1".into()), Some("2".into()), Some("3".into())]);
+}
+
+#[test]
+fn unscaled_col_is_distinct_from_numeric_col() {
+    let conn = rusqlite_apply(&format!("{NUMERIC_SCHEMA}{NUMERIC_SEED}"), &opts());
+    // id IS DISTINCT FROM price: left is a column ref — neither literal nor
+    // param — so the else-branch of Branch 2 passes it through unscaled.
+    let q = translate_query(
+        NUMERIC_SCHEMA,
+        "SELECT id FROM amounts WHERE id IS DISTINCT FROM price ORDER BY id;",
+        &opts(),
+    );
+    let rows = run_with(&conn, &q, []);
+    assert_eq!(rows, vec![Some("1".into()), Some("2".into()), Some("3".into())]);
+}
+
+// ---------------------------------------------------------------------------
+// Vector — UPDATE via ColumnRewrites::finish_value wraps the param.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vector_param_update_wraps_with_vec_f32() {
+    helpers::register_sqlite_vec_once();
+    let opt = Pg2SqliteOptions::default();
+    let schema = "CREATE TABLE vecs (id INT PRIMARY KEY, emb vector(3));";
+    let seed = "INSERT INTO vecs VALUES (1, '[1.0,2.0,3.0]');";
+
+    let conn = {
+        let stmts = Pg2Sqlite::default()
+            .sql(&format!("{schema}{seed}"))
+            .expect("parse")
+            .translate_to_sql(&opt)
+            .expect("translate");
+        let conn = helpers::vec_connection();
+        for s in &stmts {
+            conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("setup: {e}\n{s}"));
+        }
+        conn
+    };
+
+    // finish_value wraps the param with vec_f32 for UPDATE; verify by WHERE
+    // comparison.
+    let update_q = translate_query(schema, "UPDATE vecs SET emb = $1 WHERE id = 1;", &opt);
+    conn.execute(&update_q, rusqlite::params!["[4.0,5.0,6.0]"])
+        .unwrap_or_else(|e| panic!("vector param UPDATE: {e}\n{update_q}"));
+    let found = run_with(&conn, "SELECT id FROM vecs WHERE emb = vec_f32('[4.0,5.0,6.0]');", []);
+    assert_eq!(found, vec![Some("1".into())], "updated vector must round-trip through vec_f32");
 }
