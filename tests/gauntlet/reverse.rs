@@ -108,6 +108,13 @@ CREATE TABLE callers (
     owner      TEXT,
     owner_uuid UUID
 );
+CREATE TABLE stored (
+    id  INTEGER PRIMARY KEY,
+    u   UUID,
+    raw BYTEA,
+    xs  INTEGER[],
+    doc JSONB
+);
 ";
 
 fn build_schema() -> ParserDB {
@@ -123,6 +130,18 @@ fn build_schema() -> ParserDB {
 ///
 /// Format: (sqlite_input, source_file_hint)
 const ACCEPT_CASES: &[(&str, &str)] = &[
+    // --- storage wrappers over a column whose PostgreSQL type is not the
+    // storage type (test_reverse_storage_wrappers.rs). Mapping the wrapper by
+    // name alone named the storage type and the server refused the statement:
+    // `operator does not exist: uuid = bytea`, `cannot cast type uuid to
+    // bytea`, `column "xs" is of type integer[] but expression is of type
+    // json`, `function json_array_length(integer[]) does not exist`.
+    ("SELECT hex(u) FROM stored", "storage_wrappers"),
+    ("SELECT xs FROM stored WHERE xs = json_array(1, 2)", "storage_wrappers"),
+    ("SELECT json_array_length(xs) FROM stored", "storage_wrappers"),
+    ("SELECT hex(raw) FROM stored", "storage_wrappers"),
+    ("SELECT raw FROM stored WHERE raw = unhex('00ff')", "storage_wrappers"),
+    ("SELECT json_array_length(doc) FROM stored", "storage_wrappers"),
     // --- the date and time parts, which cross as casts because PostgreSQL
     // refuses `time(x)`, `time` being a type name there
     // (test_reverse_unknown_functions.rs)
@@ -436,6 +455,13 @@ const KNOWN_REFUSALS: &[(&str, &str)] = &[
 /// than among the failures: the corpus records that the refusal is deliberate
 /// and that its message still says why.
 const TRANSLATOR_REFUSALS: &[(&str, &str)] = &[
+    // A hex blob compared with a uuid column: whether it reverses at all
+    // depends on how the translation holds a uuid, and these options name no
+    // representation, which is also why the forward direction refuses a uuid
+    // column outright. The blob form's reversal is pinned by
+    // `reversed_storage_wrappers_answer_what_the_replica_answered`, which sets
+    // one.
+    ("SELECT u FROM stored WHERE u = unhex('550e8400e29b41d4a716446655440000')", "uuid"),
     // SQLite's json_extract unwraps a scalar, so a string arrives without
     // quotes and a boolean as 1. PostgreSQL's #> answers jsonb, quotes and
     // all, and #>> answers text for every kind, so neither preserves what the
@@ -850,5 +876,116 @@ fn the_reverse_of_unicode_agrees_with_sqlite_on_the_empty_string() {
     assert_eq!(
         rows[0].val, None,
         "SQLite answers NULL for unicode(''), the reverse output must too: {pg_sql}"
+    );
+}
+
+/// One scalar answer read as text, whichever engine answered it.
+#[derive(QueryableByName, Debug)]
+struct ScalarText {
+    /// The value the expression answered, NULL included.
+    #[diesel(sql_type = Nullable<Text>)]
+    answer: Option<String>,
+}
+
+/// The PostgreSQL table the parity check reads, holding one column per storage
+/// wrapper the reverse direction has to undo.
+const STORED_DDL: &str = "CREATE TABLE stored (\
+     id INT PRIMARY KEY, u UUID, raw BYTEA, xs INT[], doc JSONB);";
+
+/// Two rows, the second one empty where emptiness is what diverges: SQLite
+/// answers 0 for the length of an empty array and PostgreSQL's `array_length`
+/// answers NULL.
+const STORED_ROWS: &str = "\
+     INSERT INTO stored (id, u, raw, xs, doc) VALUES \
+     (1, '550e8400-e29b-41d4-a716-446655440000'::uuid, '\\x00ff'::bytea, ARRAY[1,2], '[1,2,3]'::jsonb); \
+     INSERT INTO stored (id, u, raw, xs, doc) VALUES \
+     (2, '660e8400-e29b-41d4-a716-446655440000'::uuid, '\\x'::bytea, ARRAY[]::int[], '[]'::jsonb);";
+
+/// SQLite expressions over `stored`, each one a storage wrapper whose
+/// PostgreSQL form depends on the column's declared type rather than on the
+/// wrapper's name.
+const STORAGE_WRAPPER_PARITY: &[&str] = &[
+    "SELECT CAST(hex(u) AS TEXT) AS answer FROM stored ORDER BY id",
+    "SELECT CAST(hex(raw) AS TEXT) AS answer FROM stored ORDER BY id",
+    "SELECT CAST(json_array_length(xs) AS TEXT) AS answer FROM stored ORDER BY id",
+    "SELECT CAST(json_array_length(doc) AS TEXT) AS answer FROM stored ORDER BY id",
+    "SELECT CAST(count(*) AS TEXT) AS answer FROM stored \
+     WHERE u = unhex('550e8400e29b41d4a716446655440000')",
+    "SELECT CAST(count(*) AS TEXT) AS answer FROM stored WHERE raw = unhex('00ff')",
+    "SELECT CAST(count(*) AS TEXT) AS answer FROM stored WHERE xs = json_array(1, 2)",
+];
+
+/// The reverse direction has to answer what the replica answered, not merely
+/// produce something the server accepts.
+///
+/// The replica is built by this crate's own forward translation of the same
+/// schema and rows, so the two sides are the pair a caller really has: a
+/// PostgreSQL table and the SQLite one it was translated into.
+#[test]
+fn reversed_storage_wrappers_answer_what_the_replica_answered() {
+    let options = Pg2SqliteOptions::default()
+        .with_uuid_representation(pg2sqlite::prelude::UuidRepresentation::Blob)
+        .with_array_representation(pg2sqlite::prelude::ArrayRepresentation::Json);
+
+    let replica = Pg2Sqlite::default()
+        .sql(&format!("{STORED_DDL}{STORED_ROWS}"))
+        .expect("the fixture parses")
+        .translate_to_sql(&options)
+        .expect("the fixture translates");
+    let mut sqlite = SqliteConnection::establish(":memory:").expect("SQLite opens");
+    for statement in &replica {
+        sql_query(statement).execute(&mut sqlite).expect("the emitted fixture applies");
+    }
+
+    let mut postgres = fresh_database();
+    apply(&mut postgres, &format!("{STORED_DDL}{STORED_ROWS}")).expect("the fixture applies");
+
+    let schema = Pg2Sqlite::default()
+        .sql(STORED_DDL)
+        .expect("the schema parses")
+        .build_schema()
+        .expect("the schema builds");
+
+    let mut failures = Vec::new();
+    for &sqlite_sql in STORAGE_WRAPPER_PARITY {
+        let replica_answer: Vec<Option<String>> = sql_query(sqlite_sql)
+            .load::<ScalarText>(&mut sqlite)
+            .expect("the replica answers")
+            .into_iter()
+            .map(|row| row.answer)
+            .collect();
+
+        let reversed = match Pg2Sqlite::default().reverse_sql(sqlite_sql, &schema, &options) {
+            Ok(statements) => {
+                statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+            }
+            Err(error) => {
+                failures.push(format!("{sqlite_sql:?} was refused: {error}"));
+                continue;
+            }
+        };
+        match sql_query(&reversed).load::<ScalarText>(&mut postgres) {
+            Ok(rows) => {
+                let server_answer: Vec<Option<String>> =
+                    rows.into_iter().map(|row| row.answer).collect();
+                if server_answer != replica_answer {
+                    failures.push(format!(
+                        "{sqlite_sql:?}\n  reversed: {reversed}\n  replica: {replica_answer:?}\n  server:  {server_answer:?}"
+                    ));
+                }
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "{sqlite_sql:?}\n  reversed: {reversed}\n  server refused: {error}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} case(s) diverged:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
     );
 }

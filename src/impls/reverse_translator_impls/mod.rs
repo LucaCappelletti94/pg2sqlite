@@ -21,4 +21,5 @@ mod ident_quoting;
 mod insert;
 mod query;
 mod statement;
+pub(crate) mod storage_shape;
 mod update;

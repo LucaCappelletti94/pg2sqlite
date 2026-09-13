@@ -22,10 +22,8 @@ use sqlparser::ast::{
 
 use super::helpers::Forward;
 use crate::{
-    errors::Error,
     impls::{
         datetime_helpers::normalize_timestamptz_offset,
-        function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
         object_name::{
             last_ident, last_ident_value_or_display,
             normalize_schema_qualified_object_name_for_sqlite, resolve_translation_table,
@@ -144,7 +142,6 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         });
         // One pass for all column-type conversions: literals and parameters.
         apply_column_type_conversions(&mut insert, target.optional(), schema, options)?;
-        wrap_bytea_hex_literals(&mut insert, target.optional(), schema)?;
         normalize_timestamptz_literals(&mut insert, target.optional(), schema)?;
 
         if let Some(on_insert) = &self.on {
@@ -913,66 +910,6 @@ fn normalize_timestamptz_literals(
             }));
         }
         Ok(expr)
-    })
-}
-
-/// True when `data_type` is PostgreSQL's `bytea` binary type.
-fn is_bytea_data_type(data_type: &DataType) -> bool {
-    matches!(data_type, DataType::Bytea)
-}
-
-/// Converts `'\xHEX'` literals into `unhex('HEX')` for BLOB STRICT columns.
-///
-/// SQLite rejects TEXT values in BLOB STRICT columns; the `\x` hex prefix is
-/// PostgreSQL's bytea input function convention, not a SQLite hex literal.
-fn maybe_convert_bytea_hex_literal(expr: Expr) -> Result<Expr, Error> {
-    let Some(text) = single_quoted_literal(&expr) else { return Ok(expr) };
-    // Only the PostgreSQL hex-format bytea literal is unambiguously decodable.
-    let Some(hex) = text.strip_prefix("\\x") else {
-        return Err(Error::forward_refusal(format!(
-            "bytea literal '{text}' is not in the PostgreSQL hex format (\\x<hex>). \
-             Use the hex format: E.g., '\\x414243' for the bytes 'ABC'."
-        )));
-    };
-    if hex.len() % 2 != 0 {
-        return Err(Error::forward_refusal(format!(
-            "bytea literal '\\x{hex}' has an odd number of nibbles. \
-             PostgreSQL requires pairs of hex digits."
-        )));
-    }
-    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(Error::forward_refusal(format!(
-            "bytea literal '\\x{hex}' contains a non-hex character."
-        )));
-    }
-    Ok(simple_function_expr("unhex", vec![string_literal(hex)], None))
-}
-
-/// Rewrites bytea hex literals at bytea-column positions to `unhex()` calls.
-fn wrap_bytea_hex_literals(
-    insert: &mut Insert,
-    table: Option<&ParserTable>,
-    schema: &ParserDB,
-) -> Result<(), Error> {
-    let Some(table) = table else { return Ok(()) };
-    let bytea_cols: Vec<String> = table
-        .columns(schema)
-        .map_err(|e| Error::forward_refusal(format!("schema lookup failed: {e}")))?
-        .filter(|column| is_bytea_data_type(&column.attribute().data_type))
-        .map(|column| column.column_name().to_string())
-        .collect();
-    if bytea_cols.is_empty() {
-        return Ok(());
-    }
-    let column_names = insert_column_names(insert, table, schema)?;
-    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
-        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
-        if bytea_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name)) {
-            maybe_convert_bytea_hex_literal(expr)
-        } else {
-            Ok(expr)
-        }
     })
 }
 

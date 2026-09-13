@@ -3027,6 +3027,16 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                             wrapped
                         });
                     }
+                    // PG `'\x00ff'::bytea` is two bytes, and the text it
+                    // is written as is six characters, which is what the
+                    // generic cast path stored: measured, `hex(raw)` then
+                    // answered 5C7830306666 where the server answers 00FF.
+                    // The literal decodes here, the same way it does at a
+                    // bytea column position.
+                    if matches!(data_type, DataType::Bytea) {
+                        let translated = expr.translate_with_warnings(schema, options, emit)?;
+                        return crate::impls::shared_helpers::convert_bytea_hex_literal(translated);
+                    }
                     // SQLite's CAST('NaN' AS REAL) and CAST('Infinity' AS REAL)
                     // answer 0.0, not the IEEE non-finite
                     // values, because SQLite REAL is always
