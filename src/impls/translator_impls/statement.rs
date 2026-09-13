@@ -853,10 +853,14 @@ fn translate_alter_table_operation(
         | AlterTableOperation::NoForceRowLevelSecurity => Ok(None),
         other => {
             Err(Error::forward_refusal(format!(
-                "ALTER TABLE {} {other} has no SQLite equivalent. SQLite can only rename a table or \
-                     column, add a column, and drop a column, so this operation cannot be applied to an \
-                     existing table without rebuilding it. Express the intent in the table's CREATE TABLE \
-                     definition instead.",
+                "ALTER TABLE {} {other} has no SQLite equivalent. SQLite can only rename a table \
+                 or column, add a column, and drop a column, so this operation cannot be applied \
+                 to an existing table without rebuilding it. Express the intent in the table's \
+                 CREATE TABLE definition instead. Two tables whose foreign keys reference each \
+                 other have no such definition, since a referenced table must already exist when \
+                 the referencing one is created, in PostgreSQL as here: a circular pair is \
+                 expressible on the server only through this statement, so in the replica it has \
+                 to be dropped or enforced by a trigger.",
                 alter_table.name
             )))
         }

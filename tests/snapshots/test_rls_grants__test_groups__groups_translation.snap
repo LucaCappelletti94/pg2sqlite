@@ -2,6 +2,7 @@
 source: tests/test_groups.rs
 expression: translated_sql
 ---
+PRAGMA foreign_keys = 1
 CREATE TABLE owners (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL) STRICT
 CREATE TABLE groups (id BLOB PRIMARY KEY REFERENCES owners (id) ON DELETE CASCADE CHECK (length(id) = 16) NOT NULL, parent_group_id BLOB REFERENCES groups (id) ON DELETE CASCADE CHECK (length(parent_group_id) = 16), name TEXT NOT NULL) STRICT
 CREATE TRIGGER groups_insert_trigger BEFORE INSERT ON groups FOR EACH ROW BEGIN INSERT INTO owners (id) VALUES (NEW.id); END
