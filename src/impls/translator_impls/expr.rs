@@ -848,7 +848,18 @@ fn translate_distinct_comparison(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
-    let (l, r) = if let Some(scale) = scale_of(left, schema, options).filter(|s| *s > 0) {
+    let scales = (scale_of(left, schema, options), scale_of(right, schema, options));
+    if let Some((left_aligned, right_aligned)) =
+        align_minor_units(left, right, scales, schema, options, emit)?
+    {
+        return Ok(if is_not_distinct {
+            null_safe_eq(left_aligned, right_aligned)
+        } else {
+            null_safe_neq(left_aligned, right_aligned)
+        });
+    }
+
+    let (l, r) = if let Some(scale) = scales.0.filter(|scale| *scale > 0) {
         let l = left.translate_with_warnings(schema, options, emit)?;
         let r = right.translate_with_warnings(schema, options, emit)?;
         let r = if let Some(scaled) = scale_decimal_literal(right, scale)? {
@@ -859,7 +870,7 @@ fn translate_distinct_comparison(
             r
         };
         (l, r)
-    } else if let Some(scale) = scale_of(right, schema, options).filter(|s| *s > 0) {
+    } else if let Some(scale) = scales.1.filter(|scale| *scale > 0) {
         let l = left.translate_with_warnings(schema, options, emit)?;
         let l = if let Some(scaled) = scale_decimal_literal(left, scale)? {
             scaled
@@ -1698,6 +1709,52 @@ fn convert_beside_column_expr(
     }
 }
 
+/// Brings two sides of a comparison onto one scale when at least one holds
+/// minor units, or answers `None` when neither does.
+///
+/// A value with no scale of its own is a plain number, which PostgreSQL
+/// promotes to the scaled type: `1.50 > 2` is false there, where the stored
+/// `150 > 2` is true. A side that is not a number at all, text against a
+/// scaled column say, is left for the ordinary translation and its own
+/// resolution error.
+fn align_minor_units(
+    left: &Expr,
+    right: &Expr,
+    scales: (Option<u32>, Option<u32>),
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Option<(Expr, Expr)>, crate::errors::Error> {
+    let (left_scale, right_scale) = scales;
+    let widest = left_scale.unwrap_or(0).max(right_scale.unwrap_or(0));
+    if widest == 0 {
+        return Ok(None);
+    }
+
+    let numeric_side = |expr: &Expr, scale: Option<u32>| -> Result<bool, crate::errors::Error> {
+        Ok(scale.is_some() || is_integral_expression(expr, schema, options)?)
+    };
+    if !numeric_side(left, left_scale)? || !numeric_side(right, right_scale)? {
+        return Ok(None);
+    }
+    if left_scale.unwrap_or(0) == widest && right_scale.unwrap_or(0) == widest {
+        return Ok(None);
+    }
+
+    Ok(Some((
+        rescale_minor_units(
+            left.translate_with_warnings(schema, options, emit)?,
+            left_scale.unwrap_or(0),
+            widest,
+        ),
+        rescale_minor_units(
+            right.translate_with_warnings(schema, options, emit)?,
+            right_scale.unwrap_or(0),
+            widest,
+        ),
+    )))
+}
+
 /// Translate a binary operation expression.
 #[allow(clippy::too_many_lines)]
 fn translate_binary_op(
@@ -1786,35 +1843,25 @@ fn translate_binary_op(
         {
             return Ok(combined);
         }
-        // Both sides hold minor units at different scales: bring the narrower
-        // up.
-        if let (Some(left_scale), Some(right_scale)) = scales
-            && left_scale != right_scale
-            && left_scale > 0
-            && right_scale > 0
-            && matches!(
-                op,
-                BinaryOperator::Eq
-                    | BinaryOperator::NotEq
-                    | BinaryOperator::Lt
-                    | BinaryOperator::LtEq
-                    | BinaryOperator::Gt
-                    | BinaryOperator::GtEq
-            )
+        // One side holds minor units and the other a plain number, so the
+        // plain one is brought onto the same scale. PostgreSQL promotes the
+        // integer, answering `1.50 > 2` false, where the stored `150 > 2`
+        // answers true.
+        if matches!(
+            op,
+            BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq
+        ) && let Some((left_scaled, right_scaled)) =
+            align_minor_units(left, right, scales, schema, options, emit)?
         {
-            let wider = left_scale.max(right_scale);
             return Ok(Expr::BinaryOp {
-                left: Box::new(rescale_minor_units(
-                    left.translate_with_warnings(schema, options, emit)?,
-                    left_scale,
-                    wider,
-                )),
+                left: Box::new(left_scaled),
                 op: op.clone(),
-                right: Box::new(rescale_minor_units(
-                    right.translate_with_warnings(schema, options, emit)?,
-                    right_scale,
-                    wider,
-                )),
+                right: Box::new(right_scaled),
             });
         }
     }

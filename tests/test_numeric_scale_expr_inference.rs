@@ -210,3 +210,28 @@ fn numeric_cast_to_text_filters_correctly() {
          SELECT count(*) FROM t WHERE amount::text = '1.50';");
     assert_eq!(rows, vec![Some("1".to_string())]);
 }
+
+/// A scaled column compared against an unscaled numeric one: PostgreSQL
+/// promotes the integer, so `1.50 > 2` is false and `1.50 = 150` is false.
+/// The stored minor units make both true unless the other side is brought
+/// onto the same scale.
+#[test]
+fn a_scaled_column_compared_against_an_integer_column() {
+    let setup = "CREATE TABLE t (id INT PRIMARY KEY, amount NUMERIC(10,2), n INT);
+         INSERT INTO t VALUES (1, 1.50, 2), (2, 1.50, 150);";
+    assert_eq!(
+        run(&format!("{setup}\nSELECT count(*) FROM t WHERE amount > n;")),
+        vec![Some("0".to_string())],
+        "1.50 is greater than neither 2 nor 150"
+    );
+    assert_eq!(
+        run(&format!("{setup}\nSELECT count(*) FROM t WHERE amount = n;")),
+        vec![Some("0".to_string())],
+        "1.50 equals neither 2 nor 150"
+    );
+    assert_eq!(
+        run(&format!("{setup}\nSELECT count(*) FROM t WHERE amount IS DISTINCT FROM n;")),
+        vec![Some("2".to_string())],
+        "both rows differ"
+    );
+}
