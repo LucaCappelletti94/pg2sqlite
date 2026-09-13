@@ -3184,6 +3184,47 @@ fn translate_select_with_from<D: TranslationDirection>(
     Ok(translated)
 }
 
+/// Removes the parentheses PostgreSQL allows around an operand of a set
+/// operation, which SQLite has no form of.
+///
+/// `(SELECT a FROM t) UNION (SELECT a FROM t)` was emitted as written and
+/// answered `near "(": syntax error`, where PostgreSQL answers 1, 2. A bare
+/// parenthesised branch loses nothing when the parentheses go: the operand is
+/// the query inside. A branch carrying its own ordering or limit, which
+/// PostgreSQL also allows and which SQLite cannot take as an operand either,
+/// becomes a select over it as a derived table, so `(SELECT a FROM t ORDER BY
+/// a LIMIT 1) UNION (SELECT b FROM t ORDER BY b DESC LIMIT 1)` keeps
+/// answering 1, 30.
+fn unparenthesize_compound_operand(operand: sqlparser::ast::SetExpr) -> sqlparser::ast::SetExpr {
+    use sqlparser::ast::SetExpr;
+
+    let SetExpr::Query(query) = operand else { return operand };
+    let carries_its_own_clauses = query.with.is_some()
+        || query.order_by.is_some()
+        || query.limit_clause.is_some()
+        || query.fetch.is_some()
+        || query.settings.is_some()
+        || query.format_clause.is_some()
+        || query.for_clause.is_some()
+        || !query.locks.is_empty()
+        || !query.pipe_operators.is_empty();
+    if !carries_its_own_clauses {
+        return unparenthesize_compound_operand(*query.body);
+    }
+    SetExpr::Select(Box::new(crate::impls::query_builder::make_simple_select(
+        vec![sqlparser::ast::SelectItem::Wildcard(
+            sqlparser::ast::WildcardAdditionalOptions::default(),
+        )],
+        crate::impls::query_builder::from_relation(sqlparser::ast::TableFactor::Derived {
+            lateral: false,
+            subquery: query,
+            alias: None,
+            sample: None,
+        }),
+        None,
+    )))
+}
+
 /// Shared `SetExpr` translation. Forward errors on `Table` and `Merge`.
 pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
     set_expr: &sqlparser::ast::SetExpr,
@@ -3225,11 +3266,18 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
                              Use {op} without the ALL quantifier for the deduplicating form."
                 )));
             }
+            let mut translated_left = translate_set_expr_shared::<D>(left, schema, options, emit)?;
+            let mut translated_right =
+                translate_set_expr_shared::<D>(right, schema, options, emit)?;
+            if D::IS_FORWARD {
+                translated_left = unparenthesize_compound_operand(translated_left);
+                translated_right = unparenthesize_compound_operand(translated_right);
+            }
             SetExpr::SetOperation {
                 op: *op,
                 set_quantifier: *set_quantifier,
-                left: Box::new(translate_set_expr_shared::<D>(left, schema, options, emit)?),
-                right: Box::new(translate_set_expr_shared::<D>(right, schema, options, emit)?),
+                left: Box::new(translated_left),
+                right: Box::new(translated_right),
             }
         }
         SetExpr::Values(values) => {

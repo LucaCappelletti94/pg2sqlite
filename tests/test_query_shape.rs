@@ -141,3 +141,71 @@ fn a_compound_select_ordered_by_an_output_column_still_works() {
         vec![Some("2".to_string()), Some("3".to_string())]
     );
 }
+
+#[test]
+fn every_writing_cte_is_refused_not_only_the_inserting_one() {
+    for (body, statement) in [
+        ("UPDATE t SET b = 1 RETURNING a", "UPDATE"),
+        ("DELETE FROM t RETURNING a", "DELETE"),
+        ("MERGE INTO t USING t s ON t.a = s.a WHEN MATCHED THEN DELETE RETURNING t.a", "MERGE"),
+    ] {
+        let message = refusal(&format!("{ROWS} WITH x AS ({body}) SELECT a FROM x;"));
+        assert!(message.contains(statement), "{statement}: {message}");
+    }
+}
+
+#[test]
+fn distinct_over_a_wildcard_orders_by_any_column() {
+    // The wildcard puts every column in the select list, so PostgreSQL
+    // accepts the ordering and answers 1/10, 2/20, 1/30.
+    assert_eq!(
+        answer(&format!("{ROWS} SELECT DISTINCT * FROM t ORDER BY b;")),
+        vec![Some("1".to_string()), Some("2".to_string()), Some("1".to_string())]
+    );
+}
+
+#[test]
+fn a_compound_select_orders_by_a_position() {
+    // An ordinal names an output column, so the branches may project
+    // different input columns: PostgreSQL answers 1, 2, 10, 20, 30.
+    assert_eq!(
+        answer(&format!("{ROWS} SELECT a FROM t UNION SELECT b FROM t ORDER BY 1;")),
+        vec![
+            Some("1".to_string()),
+            Some("2".to_string()),
+            Some("10".to_string()),
+            Some("20".to_string()),
+            Some("30".to_string())
+        ]
+    );
+}
+
+#[test]
+fn a_compound_select_orders_by_the_name_a_qualified_column_carries() {
+    // `t.a` names the output column `a`, and parenthesised branches carry the
+    // same names: PostgreSQL answers 1, 2 for both spellings.
+    for compound in [
+        "SELECT t.a FROM t UNION SELECT t.a FROM t ORDER BY a",
+        "(SELECT a FROM t) UNION (SELECT a FROM t) ORDER BY a",
+    ] {
+        assert_eq!(
+            answer(&format!("{ROWS} {compound};")),
+            vec![Some("1".to_string()), Some("2".to_string())],
+            "{compound}"
+        );
+    }
+}
+
+#[test]
+fn a_compound_branch_may_carry_its_own_ordering_and_limit() {
+    // SQLite takes neither a parenthesised operand nor one ending in LIMIT,
+    // so the branch becomes a select over a derived table. PostgreSQL answers
+    // 1, 30.
+    assert_eq!(
+        answer(&format!(
+            "{ROWS} (SELECT a FROM t ORDER BY a LIMIT 1) \
+             UNION (SELECT b FROM t ORDER BY b DESC LIMIT 1);"
+        )),
+        vec![Some("1".to_string()), Some("30".to_string())]
+    );
+}
