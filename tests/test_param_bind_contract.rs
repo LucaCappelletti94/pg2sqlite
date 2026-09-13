@@ -104,7 +104,9 @@ mod numeric {
 
         let entry = manifest.iter().find(|e| e.logical == "t").expect("table t");
         let col = entry.columns.iter().find(|c| c.name == "amount").expect("amount");
-        let scale = col.minor_unit_scale.expect("NUMERIC must carry minor_unit_scale");
+        let pg2sqlite::manifest::ColumnStorage::MinorUnits { scale } = col.storage else {
+            panic!("a NUMERIC column must publish its scale, got {:?}", col.storage);
+        };
         assert_eq!(scale, 2_u32);
 
         let all = stmts(

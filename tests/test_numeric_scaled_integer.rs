@@ -12,7 +12,10 @@
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::{
+    manifest::ColumnStorage,
+    prelude::{Pg2Sqlite, Pg2SqliteOptions},
+};
 use run_translated_helper::run_translated_with;
 
 fn translate(pg: &str) -> String {
@@ -451,7 +454,12 @@ fn the_manifest_publishes_the_scale() {
     let scaled: Vec<_> = table
         .columns
         .iter()
-        .filter_map(|column| column.minor_unit_scale.map(|scale| (column.name.as_str(), scale)))
+        .filter_map(|column| {
+            match column.storage {
+                ColumnStorage::MinorUnits { scale } => Some((column.name.as_str(), scale)),
+                _ => None,
+            }
+        })
         .collect();
     assert_eq!(scaled, vec![("price", 2)], "only the NUMERIC column carries a scale");
 }
@@ -794,7 +802,12 @@ fn the_manifest_publishes_a_dec_scale() {
     let scaled: Vec<_> = table
         .columns
         .iter()
-        .filter_map(|column| column.minor_unit_scale.map(|scale| (column.name.as_str(), scale)))
+        .filter_map(|column| {
+            match column.storage {
+                ColumnStorage::MinorUnits { scale } => Some((column.name.as_str(), scale)),
+                _ => None,
+            }
+        })
         .collect();
     assert_eq!(scaled, vec![("price", 2)], "only the DEC column carries a scale");
 }

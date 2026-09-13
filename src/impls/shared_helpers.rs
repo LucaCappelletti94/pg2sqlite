@@ -1194,6 +1194,55 @@ pub(crate) fn normalize_temporal_literal_expr(
     Ok(Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(normalized), span: *span }))
 }
 
+/// What a column of this type stores, for the translation manifest.
+///
+/// Only the read direction needs it: a caller binds and writes what
+/// PostgreSQL takes and the emitted SQL converts, so this describes what
+/// comes back out rather than what goes in. A type a reader can decode from
+/// the emitted SQLite type alone answers `Direct`.
+///
+/// # Errors
+///
+/// Returns an error when a `NUMERIC` column's precision and scale cannot be
+/// read, which is the same refusal its translation gives.
+pub(crate) fn column_storage(
+    data_type: &DataType,
+    options: &Pg2SqliteOptions,
+) -> Result<crate::manifest::ColumnStorage, Error> {
+    use crate::manifest::{ColumnStorage, VectorElement};
+
+    if let Some(info) = crate::impls::translator_impls::data_type::exact_numeric_info(data_type) {
+        let (_, scale) =
+            crate::impls::translator_impls::data_type::numeric_precision_and_scale(info)?;
+        return Ok(ColumnStorage::MinorUnits { scale });
+    }
+    if crate::impls::translator_impls::uuid::is_uuid_data_type(data_type) {
+        return Ok(match options.get_uuid_representation() {
+            Some(crate::traits::UuidRepresentation::Blob) => ColumnStorage::UuidBlob,
+            Some(crate::traits::UuidRepresentation::Text) => ColumnStorage::UuidText,
+            // A UUID column with no representation does not translate, so
+            // there is no storage to describe.
+            None => ColumnStorage::Direct,
+        });
+    }
+    if is_vector_data_type(data_type) {
+        return Ok(ColumnStorage::Vector {
+            dimensions: crate::impls::translator_impls::vector::extract_dimensions(data_type),
+            element: if is_halfvec_data_type(data_type) {
+                VectorElement::Float16
+            } else {
+                VectorElement::Float32
+            },
+        });
+    }
+    if matches!(data_type, DataType::Array(_))
+        && crate::impls::translator_impls::array::is_json_array_representation(options)
+    {
+        return Ok(ColumnStorage::JsonArray);
+    }
+    Ok(ColumnStorage::Direct)
+}
+
 /// Whether a literal written into a column of this type has to be read
 /// before it is emitted.
 ///
@@ -4344,6 +4393,20 @@ mod tests {
         assert_eq!(
             extract_columns_from_expr(&Expr::Function(named_func)),
             ColumnReferences::Complete(vec!["col".to_string()])
+        );
+    }
+    /// A UUID column with no representation does not translate, so the
+    /// manifest never sees one through `translation_manifest`. The storage
+    /// answer is still defined, and this is the only way to ask for it.
+    #[test]
+    fn a_uuid_column_without_a_representation_has_nothing_to_describe() {
+        assert_eq!(
+            super::column_storage(
+                &sqlparser::ast::DataType::Uuid,
+                &crate::options::Pg2SqliteOptions::default(),
+            )
+            .expect("no numeric scale to read"),
+            crate::manifest::ColumnStorage::Direct
         );
     }
 }

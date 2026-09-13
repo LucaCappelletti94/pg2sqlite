@@ -693,7 +693,10 @@ impl Pg2Sqlite {
     /// Translates loaded PostgreSQL statements to SQLite.
     ///
     /// Bind parameters carry the PostgreSQL value; the emitted SQL performs any
-    /// re-representation conversion.
+    /// re-representation conversion. Reading a value back is the other
+    /// direction, and
+    /// [`translation_manifest`](Self::translation_manifest) answers what each
+    /// column holds.
     ///
     /// Warnings about dropped or downgraded constructs are discarded on this
     /// path. Use [`translate_with_report`](Self::translate_with_report) to
@@ -786,7 +789,10 @@ impl Pg2Sqlite {
     /// Convenience method: translates to a `Vec<String>` of SQL strings.
     ///
     /// Bind parameters carry the PostgreSQL value; the emitted SQL performs any
-    /// re-representation conversion.
+    /// re-representation conversion. Reading a value back is the other
+    /// direction, and
+    /// [`translation_manifest`](Self::translation_manifest) answers what each
+    /// column holds.
     ///
     /// Equivalent to `translate()` followed by mapping each statement to its
     /// `to_string()` representation.
@@ -876,22 +882,25 @@ impl Pg2Sqlite {
     /// ```
     ///
     /// A `NUMERIC(p, s)` column stores minor units, so reading it back gives
-    /// 1999 where PostgreSQL gave 19.99. The manifest publishes the scale and
-    /// the consumer applies it when presenting the value:
+    /// 1999 where PostgreSQL gave 19.99. The manifest publishes what the
+    /// stored value is and the consumer turns it back:
     ///
     /// ```
-    /// # use pg2sqlite::{pg2sqlite::Pg2Sqlite, options::Pg2SqliteOptions};
+    /// # use pg2sqlite::{pg2sqlite::Pg2Sqlite, options::Pg2SqliteOptions, manifest::ColumnStorage};
     /// let manifest = Pg2Sqlite::default()
     ///     .sql("CREATE TABLE prices (id INT PRIMARY KEY, amount NUMERIC(10, 2));")
     ///     .unwrap()
     ///     .translation_manifest(&Pg2SqliteOptions::default())
     ///     .unwrap();
     /// let amount = manifest[0].columns.iter().find(|c| c.name == "amount").unwrap();
-    /// assert_eq!(amount.minor_unit_scale, Some(2));
+    /// let ColumnStorage::MinorUnits { scale } = amount.storage else {
+    ///     panic!("a scaled column publishes its scale");
+    /// };
+    /// assert_eq!(scale, 2);
     ///
     /// let stored = 1999_i64;
-    /// let scale = 10_i64.pow(amount.minor_unit_scale.unwrap());
-    /// assert_eq!(format!("{}.{:02}", stored / scale, stored % scale), "19.99");
+    /// let divisor = 10_i64.pow(scale);
+    /// assert_eq!(format!("{}.{:02}", stored / divisor, stored % divisor), "19.99");
     /// ```
     pub fn translation_manifest(
         &self,
@@ -934,22 +943,18 @@ impl Pg2Sqlite {
                 WrapperKind::Plain
             };
 
-            // Only NUMERIC carries a representation a consumer cannot read off
-            // the emitted type, so every other column reports None rather than
-            // being omitted, which keeps the list a faithful column order.
+            // Every column is listed, in declaration order, with the ones a
+            // reader can decode from the emitted type alone reporting
+            // `Direct`.
             let columns = table
                 .columns(schema)?
                 .map(|column| {
-                    let minor_unit_scale =
-                        crate::impls::translator_impls::data_type::exact_numeric_info(
-                            &column.attribute().data_type,
-                        )
-                        .map(crate::impls::translator_impls::data_type::numeric_precision_and_scale)
-                        .transpose()?
-                        .map(|(_, scale)| scale);
                     Ok(ColumnManifestEntry {
                         name: column.column_name().to_string(),
-                        minor_unit_scale,
+                        storage: crate::impls::shared_helpers::column_storage(
+                            &column.attribute().data_type,
+                            options,
+                        )?,
                     })
                 })
                 .collect::<Result<Vec<_>, crate::errors::Error>>()?;

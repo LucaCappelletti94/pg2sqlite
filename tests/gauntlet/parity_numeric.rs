@@ -17,7 +17,10 @@
 
 use diesel::{pg::PgConnection, prelude::*, sqlite::SqliteConnection};
 use helpers::establish_connection;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, TableManifestEntry};
+use pg2sqlite::{
+    manifest::ColumnStorage,
+    prelude::{Pg2Sqlite, Pg2SqliteOptions, TableManifestEntry},
+};
 
 use crate::{helpers, postgres_harness};
 
@@ -61,16 +64,18 @@ fn base_translator() -> Pg2Sqlite {
 /// Minor-unit scale for a named column in the amounts table, read from the
 /// manifest. Panics when the column is not present.
 fn column_scale(manifest: &[TableManifestEntry], column: &str) -> u32 {
-    manifest
+    let entry = manifest
         .iter()
         .find(|t| t.logical == "amounts")
         .unwrap_or_else(|| panic!("amounts not in manifest"))
         .columns
         .iter()
         .find(|c| c.name == column)
-        .unwrap_or_else(|| panic!("{column} not in amounts manifest"))
-        .minor_unit_scale
-        .unwrap_or(0)
+        .unwrap_or_else(|| panic!("{column} not in amounts manifest"));
+    match entry.storage {
+        ColumnStorage::MinorUnits { scale } => scale,
+        _ => 0,
+    }
 }
 
 /// Convert a PostgreSQL decimal text representation to the minor-unit integer

@@ -89,6 +89,8 @@ SELECT 9223372036854775807 + 1;
 
 A `NUMERIC(p,s)` column is the exception to the third: it is stored as a scaled integer under a `CHECK` that bounds it, so `NUMERIC(10,2)` emits `CHECK (amount BETWEEN -9999999999 AND 9999999999)` and overflowing it fails. An `INTEGER` or `BIGINT` column carries no such bound. Bind parameters carry the PostgreSQL value; the emitted SQL performs any re-representation conversion.
 
+Writing needs no knowledge of any of that, but reading does: a stored value is not always the value PostgreSQL would have handed back. `translation_manifest` answers what each column holds, as a `ColumnStorage`: an integer of minor units with its scale, sixteen bytes or canonical text for a UUID depending on the representation in force, JSON array text for an array column, packed floats with their width for a vector column, and `Direct` for every column whose emitted SQLite type already says what it is.
+
 Text comparison follows the collation. PostgreSQL uses the database's, which under a UTF-8 locale orders case-insensitively for the purpose of ranking letters, while SQLite's default `BINARY` collation compares byte by byte, so every upper-case letter sorts before every lower-case one. This reaches `ORDER BY`, `<`, `>`, `BETWEEN`, `MIN` and `MAX`, not only explicit comparisons.
 
 ```sql
