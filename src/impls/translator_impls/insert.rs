@@ -32,18 +32,10 @@ use crate::{
         },
         shared_helpers::{
             ColumnReferences, ColumnRewrites, carries_default_keyword, extract_columns_from_expr,
-            is_default_keyword, scale_literal_for_column, substituted_assignment_default,
-            translate_on_conflict_do_update, translate_returning,
+            is_default_keyword, substituted_assignment_default, translate_on_conflict_do_update,
+            translate_returning,
         },
-        translator_impls::{
-            rls,
-            uuid::{
-                is_blob_uuid_representation, make_uuid_conversion_call,
-                maybe_canonicalize_text_uuid_literal, maybe_wrap_text_uuid_literal,
-                uuid_columns_of_table,
-            },
-            vector::{maybe_wrap_text_vector_literal, vector_columns_of_table},
-        },
+        translator_impls::rls,
     },
     traits::translator::TranslatorWithContext,
 };
@@ -146,43 +138,13 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         // keep going through the view's INSTEAD OF trigger.
         let mut target = rewrite_rls_view_insert(&mut insert, schema, options, emit)?;
 
-        // Wrap text-literal values targeting `vector` / `halfvec` columns
-        // with `vec_f32(...)` / `vec_f16(...)`. The main backing table is
-        // BLOB STRICT, so a raw `'[0.1, 0.2, 0.3]'` text would otherwise
-        // be rejected at apply time. Only direct VALUES rows are
-        // rewritten. INSERT INTO ... SELECT carries arbitrary row shapes
-        // through a subquery and is left untouched.
-        wrap_vector_text_literals(&mut insert, target.optional(), schema)?;
-
-        // Same shape for UUID-Blob columns.
-        if is_blob_uuid_representation(options) {
-            wrap_uuid_text_literals(&mut insert, target.optional(), schema, options)?;
-        } else if matches!(
-            options.get_uuid_representation(),
-            Some(crate::traits::UuidRepresentation::Text)
-        ) {
-            // Text representation: validate and canonicalize to PostgreSQL's
-            // lowercase hyphenated form so equality against canonical literals
-            // holds.
-            canonicalize_uuid_text_literals(&mut insert, target.optional(), schema)?;
-        }
-
-        // bytea hex literals ('\x414243') reach a BLOB STRICT column as TEXT,
-        // which SQLite rejects. Convert them to unhex() calls here.
-        wrap_bytea_hex_literals(&mut insert, target.optional(), schema)?;
-
-        // TIMESTAMPTZ-column literals: normalise minute-less offsets (+HH →
-        // +HH:MM) so SQLite date functions can parse the stored values.
-        normalize_timestamptz_literals(&mut insert, target.optional(), schema)?;
-
-        // A NUMERIC column is an INTEGER of minor units, so a decimal literal
-        // has to be moved onto that scale before it reaches a STRICT table.
-        // The full rewrite set serves the DO UPDATE list below, which writes
-        // into the same columns the insert does.
         let rewrites = target.optional().map_or_else(ColumnRewrites::default, |table| {
             ColumnRewrites::of_table(table, schema, options)
         });
-        scale_numeric_literals(&mut insert, target.optional(), schema, &rewrites.numeric_scales)?;
+        // One pass for all column-type conversions: literals and parameters.
+        apply_column_type_conversions(&mut insert, target.optional(), schema, options)?;
+        wrap_bytea_hex_literals(&mut insert, target.optional(), schema)?;
+        normalize_timestamptz_literals(&mut insert, target.optional(), schema)?;
 
         if let Some(on_insert) = &self.on {
             match on_insert {
@@ -599,60 +561,33 @@ fn unknown_default_column(table: &str, column_name: &str) -> crate::errors::Erro
     ))
 }
 
-/// Wraps text-literal values at vector-column positions so the BLOB STRICT
-/// table accepts them.
+/// Applies every column-type conversion at every INSERT source position.
 ///
-/// Schema lookup failure is reported: the column list determines position and a
-/// wrong answer emits text into a BLOB column.
-fn wrap_vector_text_literals(
+/// Builds a name → DataType map and calls `convert_value_for_column_type` per
+/// position, covering NUMERIC scaling, UUID-blob/text, vector, and array
+/// refusal for both literals and bound parameters.
+fn apply_column_type_conversions(
     insert: &mut Insert,
     table: Option<&ParserTable>,
     schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
 ) -> Result<(), crate::errors::Error> {
     let Some(table) = table else { return Ok(()) };
-    let vector_cols = vector_columns_of_table(table, schema)?;
-    if vector_cols.is_empty() {
-        return Ok(());
-    }
-    // Explicit list when present, natural table order otherwise;
-    // case-insensitive.
     let column_names = insert_column_names(insert, table, schema)?;
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    let col_types: Vec<(String, DataType)> = table
+        .columns(schema)?
+        .map(|col| (col.column_name().to_string(), col.attribute().data_type.clone()))
+        .collect();
     for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
         let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
-        if let Some((_, is_halfvec)) =
-            vector_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(col_name))
+        if let Some((_, data_type)) =
+            col_types.iter().find(|(name, _)| name.eq_ignore_ascii_case(col_name))
         {
-            Ok(maybe_wrap_text_vector_literal(expr, *is_halfvec))
+            crate::impls::shared_helpers::convert_value_for_column_type(data_type, expr, options)
         } else {
             Ok(expr)
         }
-    })
-}
-
-/// Rewrites decimal literals at NUMERIC-column positions as minor-unit
-/// integers.
-///
-/// Schema lookup failure is reported: wrong column order writes unscaled money.
-fn scale_numeric_literals(
-    insert: &mut Insert,
-    table: Option<&ParserTable>,
-    schema: &ParserDB,
-    scales: &[(String, u32)],
-) -> Result<(), crate::errors::Error> {
-    if scales.is_empty() {
-        return Ok(());
-    }
-    let Some(table) = table else { return Ok(()) };
-
-    let column_names = insert_column_names(insert, table, schema)?;
-
-    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, mut expr| {
-        if let Some(column) = column_names.get(idx) {
-            scale_literal_for_column(&mut expr, column, scales)?;
-        }
-        Ok(expr)
     })
 }
 
@@ -865,45 +800,6 @@ fn database_filled_column(
     Ok(None)
 }
 
-/// Wraps text-literal values at UUID-column positions so the BLOB STRICT table
-/// accepts them.
-///
-/// Schema lookup failure is reported: the column list determines position and a
-/// wrong answer emits text into a BLOB column.
-fn wrap_uuid_text_literals(
-    insert: &mut Insert,
-    table: Option<&ParserTable>,
-    schema: &ParserDB,
-    options: &crate::options::TranslationContext<'_>,
-) -> Result<(), crate::errors::Error> {
-    let Some(table) = table else { return Ok(()) };
-    let uuid_cols = uuid_columns_of_table(table, schema)?;
-    if uuid_cols.is_empty() {
-        return Ok(());
-    }
-    let column_names = insert_column_names(insert, table, schema)?;
-    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
-        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
-        if uuid_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name)) {
-            // Placeholders cannot be validated; wrap them like subqueries.
-            if matches!(
-                &expr,
-                sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan {
-                    value: sqlparser::ast::Value::Placeholder(_),
-                    ..
-                })
-            ) {
-                Ok(make_uuid_conversion_call(expr, options))
-            } else {
-                maybe_wrap_text_uuid_literal(expr, options)
-            }
-        } else {
-            Ok(expr)
-        }
-    })
-}
-
 /// The names of a table's `TIMESTAMPTZ` columns, whose literals need their
 /// offset normalising.
 fn timestamptz_columns_of_table(
@@ -948,31 +844,6 @@ fn normalize_timestamptz_literals(
             }));
         }
         Ok(expr)
-    })
-}
-
-/// Validates and canonicalises UUID text literals at UUID-column positions
-/// under the Text representation, so stored values match PostgreSQL's canonical
-/// form.
-fn canonicalize_uuid_text_literals(
-    insert: &mut Insert,
-    table: Option<&ParserTable>,
-    schema: &ParserDB,
-) -> Result<(), crate::errors::Error> {
-    let Some(table) = table else { return Ok(()) };
-    let uuid_cols = uuid_columns_of_table(table, schema)?;
-    if uuid_cols.is_empty() {
-        return Ok(());
-    }
-    let column_names = insert_column_names(insert, table, schema)?;
-    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
-        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
-        if uuid_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name)) {
-            maybe_canonicalize_text_uuid_literal(expr)
-        } else {
-            Ok(expr)
-        }
     })
 }
 

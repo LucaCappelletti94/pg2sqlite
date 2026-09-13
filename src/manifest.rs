@@ -41,11 +41,10 @@ pub struct TableManifestEntry {
 
 /// How one column is physically represented.
 ///
-/// A `NUMERIC(p,s)` column is emitted as an INTEGER holding minor units, so
-/// reading it back gives 1999 where PostgreSQL gave 19.99. Dividing by `10^s`
-/// in the projection would put the value back into a float and undo the point
-/// of the representation, so the scale is published here and the consumer
-/// applies it deliberately.
+/// `NUMERIC(p,s)` is stored as an INTEGER of minor units (19.99 as 1999);
+/// divide by `10^s` to recover the decimal when reading back. Bind parameters
+/// carry the PostgreSQL decimal; the emitted SQL scales them, so do not scale
+/// a bound value manually.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnManifestEntry {

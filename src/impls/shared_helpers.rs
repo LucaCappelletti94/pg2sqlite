@@ -18,7 +18,7 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, BinaryOperator, DataType, Expr, ExprWithAlias,
+    Assignment, AssignmentTarget, BinaryOperator, CastKind, DataType, Expr, ExprWithAlias,
     ExprWithAliasAndOrderBy, Fetch, FromTable, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentClause, FunctionArgumentList, FunctionArguments, GroupByExpr, HavingBound,
     Ident, Join, JoinConstraint, JoinOperator, LimitClause, ListAggOnOverflow, Measure,
@@ -39,9 +39,14 @@ use crate::{
         query_builder::{from_relation, make_query, make_simple_select},
         translator_impls::{
             uuid::{
-                is_blob_uuid_representation, maybe_wrap_text_uuid_literal, uuid_columns_of_table,
+                is_blob_uuid_representation, make_uuid_conversion_call,
+                maybe_canonicalize_text_uuid_literal, maybe_wrap_text_uuid_literal,
+                uuid_columns_of_table,
             },
-            vector::{maybe_wrap_text_vector_literal, vector_columns_of_table},
+            vector::{
+                is_halfvec_data_type, is_vector_data_type, maybe_wrap_text_vector_literal,
+                vector_columns_of_table,
+            },
         },
     },
     prelude::Pg2SqliteOptions,
@@ -882,13 +887,12 @@ pub(crate) fn numeric_minor_unit_scales_of_table(
 /// scaling, R115 found two still missing the wraps.
 #[derive(Default)]
 pub(crate) struct ColumnRewrites {
-    /// Vector columns, each with whether it is a halfvec.
     vector_cols: Vec<(String, bool)>,
-    /// UUID columns, collected only under the blob representation, so an
-    /// empty list already encodes the option.
     uuid_cols: Vec<String>,
-    /// Scaled `NUMERIC` columns and their minor-unit scales.
     pub(crate) numeric_scales: Vec<(String, u32)>,
+    /// Array columns under the JSON representation; a bound parameter here is
+    /// refused.
+    array_cols: Vec<String>,
 }
 
 impl ColumnRewrites {
@@ -898,6 +902,18 @@ impl ColumnRewrites {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Self {
+        let array_cols =
+            if crate::impls::translator_impls::array::is_json_array_representation(options) {
+                table
+                    .columns(schema)
+                    .into_iter()
+                    .flatten()
+                    .filter(|col| matches!(col.attribute().data_type, DataType::Array(_)))
+                    .map(|col| col.column_name().to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            };
         Self {
             vector_cols: vector_columns_of_table(table, schema).unwrap_or_default(),
             uuid_cols: if is_blob_uuid_representation(options) {
@@ -906,12 +922,11 @@ impl ColumnRewrites {
                 Vec::new()
             },
             numeric_scales: numeric_minor_unit_scales_of_table(table, schema),
+            array_cols,
         }
     }
 
-    /// The rewrites for the named table, or none when it does not resolve,
-    /// which leaves the caller emitting what it was handed rather than
-    /// rewriting against a guess.
+    /// The rewrites for the named table, or none when it does not resolve.
     pub(crate) fn for_named_table(
         schema: &ParserDB,
         table_name: &ObjectName,
@@ -924,33 +939,59 @@ impl ColumnRewrites {
     }
 
     fn is_empty(&self) -> bool {
-        self.vector_cols.is_empty() && self.uuid_cols.is_empty() && self.numeric_scales.is_empty()
+        self.vector_cols.is_empty()
+            && self.uuid_cols.is_empty()
+            && self.numeric_scales.is_empty()
+            && self.array_cols.is_empty()
     }
 
-    /// Finishes a translated value written into `column`.
-    ///
-    /// Each rewrite touches only a literal and leaves every other shape
-    /// alone, so `excluded.col`, an already-wrapped call, and an expression
-    /// the translator already scaled all pass through unchanged.
+    /// Finishes a translated value written into `column`, handling both
+    /// literals and parameters.
     pub(crate) fn finish_value(
         &self,
         column: &str,
         value: Expr,
         options: &Pg2SqliteOptions,
     ) -> Result<Expr, Error> {
+        let is_param = is_bound_parameter(&value);
+        if is_param && self.array_cols.iter().any(|col| col.eq_ignore_ascii_case(column)) {
+            return Err(Error::forward_refusal(
+                "a bound parameter in an array column position cannot be translated: SQLite \
+                 stores arrays as JSON and has no way to parse PostgreSQL array text at run \
+                 time. Bind JSON text (e.g., '[1,2,3]') or use an ARRAY[…] constructor."
+                    .to_string(),
+            ));
+        }
         let mut value = if let Some(is_halfvec) = self
             .vector_cols
             .iter()
             .find(|(col, _)| col.eq_ignore_ascii_case(column))
             .map(|(_, is_halfvec)| *is_halfvec)
         {
-            maybe_wrap_text_vector_literal(value, is_halfvec)
+            if is_param {
+                let func = if is_halfvec { "vec_f16" } else { "vec_f32" };
+                crate::impls::function_helpers::simple_function_expr(func, vec![value], None)
+            } else {
+                maybe_wrap_text_vector_literal(value, is_halfvec)
+            }
         } else if self.uuid_cols.iter().any(|col| col.eq_ignore_ascii_case(column)) {
-            maybe_wrap_text_uuid_literal(value, options)?
+            if is_param {
+                make_uuid_conversion_call(value, options)
+            } else {
+                maybe_wrap_text_uuid_literal(value, options)?
+            }
         } else {
             value
         };
-        scale_literal_for_column(&mut value, column, &self.numeric_scales)?;
+        if is_param {
+            if let Some((_, scale)) =
+                self.numeric_scales.iter().find(|(name, _)| name.eq_ignore_ascii_case(column))
+            {
+                value = scale_parameter(value, *scale);
+            }
+        } else {
+            scale_literal_for_column(&mut value, column, &self.numeric_scales)?;
+        }
         Ok(value)
     }
 
@@ -994,6 +1035,102 @@ impl ColumnRewrites {
             }
         }
     }
+}
+
+/// True when `expr` is a bound parameter (`$1`, `?1`, etc.).
+#[must_use]
+pub(crate) fn is_bound_parameter(expr: &Expr) -> bool {
+    matches!(expr, Expr::Value(ValueWithSpan { value: Value::Placeholder(_), .. }))
+}
+
+/// Emits `CAST(ROUND(expr * 10^scale) AS INTEGER)` for a NUMERIC column
+/// parameter.
+///
+/// Rounding note: SQLite uses float arithmetic; PostgreSQL converts the bound
+/// `f64` via its shortest decimal string first, so `1.005_f64 → 100` here but
+/// `101` in PostgreSQL.  Bind the pre-computed minor-unit integer for exact
+/// matching on such half-boundary values.
+pub(crate) fn scale_parameter(expr: Expr, scale: u32) -> Expr {
+    let factor = 10_u64.pow(scale);
+    let multiplied = Expr::Nested(Box::new(Expr::BinaryOp {
+        left: Box::new(expr),
+        op: BinaryOperator::Multiply,
+        right: Box::new(crate::impls::function_helpers::number_literal(&factor.to_string())),
+    }));
+    let rounded =
+        crate::impls::function_helpers::simple_function_expr("ROUND", vec![multiplied], None);
+    Expr::Cast {
+        expr: Box::new(rounded),
+        data_type: DataType::Integer(None),
+        format: None,
+        kind: CastKind::Cast,
+    }
+}
+
+/// Applies the storage-representation conversion for a typed column position.
+///
+/// Takes the column's declared PostgreSQL `DataType` and the expression
+/// filling that position (already translated).  Sibling slices call this from
+/// INSERT/UPDATE/RLS; expression-position code uses
+/// `convert_beside_column_expr`.
+///
+/// Conversions: NUMERIC parameter → `CAST(ROUND(… * 10^s) AS INTEGER)`; UUID
+/// Blob → `unhex(replace(…))` or UDF; UUID Text literal → canonicalize,
+/// parameter passthrough; vector/halfvec → `vec_f32`/`vec_f16`; array
+/// parameter → refused (SQLite cannot parse PostgreSQL array text at run time).
+pub(crate) fn convert_value_for_column_type(
+    data_type: &DataType,
+    expr: Expr,
+    options: &Pg2SqliteOptions,
+) -> Result<Expr, Error> {
+    if let Some(scale) = minor_unit_scale(data_type) {
+        if is_bound_parameter(&expr) {
+            return Ok(scale_parameter(expr, scale));
+        }
+        if let Some(scaled) = scale_decimal_literal(&expr, scale)? {
+            return Ok(scaled);
+        }
+        return Ok(expr);
+    }
+    if matches!(data_type, DataType::Uuid) {
+        match options.get_uuid_representation() {
+            Some(crate::traits::UuidRepresentation::Blob) => {
+                if is_bound_parameter(&expr) {
+                    return Ok(make_uuid_conversion_call(expr, options));
+                }
+                return maybe_wrap_text_uuid_literal(expr, options);
+            }
+            Some(crate::traits::UuidRepresentation::Text) => {
+                // Parameter passthrough: caller binds the canonical form.
+                if !is_bound_parameter(&expr) {
+                    return maybe_canonicalize_text_uuid_literal(expr);
+                }
+                return Ok(expr);
+            }
+            None => return Ok(expr),
+        }
+    }
+    if is_vector_data_type(data_type) {
+        let is_halfvec = is_halfvec_data_type(data_type);
+        let func = if is_halfvec { "vec_f16" } else { "vec_f32" };
+        if is_bound_parameter(&expr) {
+            return Ok(crate::impls::function_helpers::simple_function_expr(
+                func,
+                vec![expr],
+                None,
+            ));
+        }
+        return Ok(maybe_wrap_text_vector_literal(expr, is_halfvec));
+    }
+    if matches!(data_type, DataType::Array(_)) && is_bound_parameter(&expr) {
+        return Err(Error::forward_refusal(
+            "a bound parameter in an array position cannot be translated: SQLite stores arrays \
+             as JSON and has no way to parse PostgreSQL array text at run time. Bind JSON text \
+             (e.g., '[1,2,3]') or use an ARRAY[…] constructor."
+                .to_string(),
+        ));
+    }
+    Ok(expr)
 }
 
 /// Rewrites a literal written into `column` as minor units, in place.
