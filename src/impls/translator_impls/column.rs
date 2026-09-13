@@ -15,14 +15,14 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Ident, ObjectName,
-    TimezoneInfo, UnaryOperator, Value, ValueWithSpan,
+    PrimaryKeyConstraint, TimezoneInfo, UnaryOperator, Value, ValueWithSpan,
 };
 
 use crate::{
     errors::Error,
     impls::{
         object_name::last_ident_value_or_display,
-        shared_helpers::{minor_unit_scale, scale_decimal_literal},
+        shared_helpers::{declares_identity, minor_unit_scale, scale_decimal_literal},
         translator_impls::{
             data_type::{
                 bit_exact_length_check_expr, bit_length, bit_max_length_check_expr,
@@ -212,9 +212,11 @@ fn round_literal_to_integer(expr: &Expr) -> Option<Expr> {
 /// column does not identify it: two tables may both have a `created_at`. Both
 /// callers, `CREATE TABLE` and `ALTER TABLE ADD COLUMN`, know the name.
 ///
-/// `primary_key_columns` is the table's primary key as its table constraints
-/// declare it, which the column alone cannot see and which decides whether the
-/// column is SQLite's rowid alias. `ALTER TABLE ADD COLUMN` passes none, since
+/// `table_primary_key` is the table's `PRIMARY KEY` constraints, which the
+/// column alone cannot see and which decide whether it is SQLite's rowid
+/// alias. A single plain constraint naming only this column is folded into
+/// the column, since `AUTOINCREMENT` is a column-level option in SQLite and
+/// the key has to carry it. `ALTER TABLE ADD COLUMN` passes none, since
 /// SQLite cannot add a primary key that way.
 ///
 /// This is a free function rather than a
@@ -224,7 +226,7 @@ fn round_literal_to_integer(expr: &Expr) -> Option<Expr> {
 pub(crate) fn translate_column_def(
     column: &ColumnDef,
     table: &ObjectName,
-    primary_key_columns: &[String],
+    table_primary_key: &[&PrimaryKeyConstraint],
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
@@ -232,31 +234,38 @@ pub(crate) fn translate_column_def(
     // Both an identity column and a serial ask SQLite to supply values, which
     // it does only through the rowid alias, so both need the translated type
     // and the table's key before anything else is decided.
-    let has_identity = column
-        .options
-        .iter()
-        .any(|o| matches!(&o.option, ColumnOption::Generated { generation_expr: None, .. }));
+    let has_identity = declares_identity(&column.options);
     let is_serial = is_serial_type(&column.data_type);
 
     if has_identity || is_serial {
         let translated_type = column.data_type.translate_with_warnings(schema, options, emit)?;
-        if !is_rowid_alias(&translated_type, column, primary_key_columns) {
+        if !is_rowid_alias(&translated_type, column, table_primary_key) {
             return Err(no_value_source(&column.name, is_serial));
         }
         if !is_serial {
             reject_identity_sequence_options(column)?;
         }
-        // The identity clause is dropped; INTEGER PRIMARY KEY auto-assigns as
-        // the rowid alias.
-        let translated_options = column
-            .options
-            .iter()
-            .filter(|o| !matches!(o.option, ColumnOption::Generated { generation_expr: None, .. }))
-            .map(|o| o.translate_with_warnings(schema, options, emit))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+        // The identity clause is dropped, since `INTEGER PRIMARY KEY`
+        // assigns for itself, and `AUTOINCREMENT` follows the key so the
+        // assignment is a high-water mark rather than `max(rowid) + 1`: a
+        // PostgreSQL sequence never hands out the key of a deleted row, and
+        // a bare rowid does.
+        let mut translated_options: Vec<ColumnOptionDef> = Vec::new();
+        for option in &column.options {
+            if matches!(option.option, ColumnOption::Generated { generation_expr: None, .. }) {
+                continue;
+            }
+            let is_primary_key = matches!(option.option, ColumnOption::PrimaryKey(_));
+            translated_options.extend(option.translate_with_warnings(schema, options, emit)?);
+            if is_primary_key {
+                translated_options.push(autoincrement_option());
+            }
+        }
+        if let Some(folded) = folded_primary_key(column, table_primary_key) {
+            translated_options.push(folded);
+            translated_options.push(autoincrement_option());
+        }
+        report_rowid_sequence_divergence(column, table, is_serial, emit);
         return Ok(ColumnDef {
             name: column.name.clone(),
             data_type: translated_type,
@@ -361,6 +370,20 @@ fn integer_range_bound(column: &ColumnDef) -> Option<Expr> {
     }
 }
 
+/// SQLite's `AUTOINCREMENT`, as a column option to follow the primary key.
+///
+/// It is dialect-specific in the AST, so it carries its keyword as a token
+/// and must be emitted immediately after `PRIMARY KEY`, which is the only
+/// place SQLite's grammar takes it.
+fn autoincrement_option() -> ColumnOptionDef {
+    ColumnOptionDef {
+        name: None,
+        option: ColumnOption::DialectSpecific(vec![sqlparser::tokenizer::Token::make_keyword(
+            "AUTOINCREMENT",
+        )]),
+    }
+}
+
 /// Refuses an identity column whose sequence options the rowid cannot honour.
 ///
 /// SQLite assigns rowid values from 1 in steps of 1, so `START WITH`,
@@ -403,13 +426,95 @@ fn reject_identity_sequence_options(column: &ColumnDef) -> Result<(), crate::err
 fn is_rowid_alias(
     translated_type: &DataType,
     column: &ColumnDef,
-    primary_key_columns: &[String],
+    table_primary_key: &[&PrimaryKeyConstraint],
 ) -> bool {
     if !matches!(translated_type, DataType::Integer(None)) {
         return false;
     }
     column.options.iter().any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)))
-        || matches!(primary_key_columns, [only] if only.eq_ignore_ascii_case(&column.name.value))
+        || matches!(primary_key_column_names(table_primary_key).as_slice(),
+            [only] if only.eq_ignore_ascii_case(&column.name.value))
+}
+
+/// The columns the table's `PRIMARY KEY` constraints name, in order.
+pub(crate) fn primary_key_column_names(table_primary_key: &[&PrimaryKeyConstraint]) -> Vec<String> {
+    table_primary_key
+        .iter()
+        .flat_map(|primary_key| primary_key.columns.iter())
+        .map(|column| column.column.to_string())
+        .collect()
+}
+
+/// Reports what the rowid cannot promise where a PostgreSQL sequence can.
+///
+/// `AUTOINCREMENT` keeps the high-water mark, so a deleted row's key is not
+/// handed out again, and that is as close as SQLite gets. Two differences
+/// remain, both verified on PostgreSQL 17: a supplied value moves the rowid
+/// counter, where a sequence is untouched by one and keeps handing out the
+/// values it was going to, and a rolled back insert consumes no rowid, where
+/// a sequence has already advanced. Both make the next generated key differ
+/// from PostgreSQL's, which a caller comparing keys across the two databases
+/// has to know.
+fn report_rowid_sequence_divergence(
+    column: &ColumnDef,
+    table: &ObjectName,
+    is_serial: bool,
+    emit: crate::warnings::WarningSink<'_>,
+) {
+    let construct = if is_serial { "SERIAL" } else { "GENERATED AS IDENTITY" };
+    emit(crate::warnings::TranslationWarning::LossyDowngrade {
+        construct: construct.to_string(),
+        from: construct.to_string(),
+        to: "INTEGER PRIMARY KEY AUTOINCREMENT".to_string(),
+        location: format!("{}.{}", last_ident_value_or_display(table), column.name.value),
+        reason: "SQLite counts from the table's high-water mark rather than from a sequence, \
+                 so a deleted key is not reissued but two differences remain: a value supplied \
+                 by an insert moves the counter, where a sequence ignores one, and a rolled \
+                 back insert consumes no key, where a sequence has already advanced."
+            .to_string(),
+    });
+}
+
+/// The `PRIMARY KEY` option a table constraint becomes when it is folded onto
+/// the identity column it names, or `None` when it stays a table constraint.
+///
+/// SQLite takes `AUTOINCREMENT` only directly after a column-level `PRIMARY
+/// KEY`, so a generated key declared as a table constraint would otherwise
+/// keep the plain rowid and hand out the key of a deleted row. Folding is
+/// refused for anything the column-level option cannot carry, which leaves
+/// such a table with the rowid it has today. The constraint's name moves with
+/// it, since SQLite takes `CONSTRAINT <name> PRIMARY KEY` on a column.
+pub(crate) fn folded_primary_key(
+    column: &ColumnDef,
+    table_primary_key: &[&PrimaryKeyConstraint],
+) -> Option<ColumnOptionDef> {
+    let [primary_key] = table_primary_key else { return None };
+    if !(is_serial_type(&column.data_type) || declares_identity(&column.options)) {
+        return None;
+    }
+    if column.options.iter().any(|o| matches!(o.option, ColumnOption::PrimaryKey(_))) {
+        return None;
+    }
+    if primary_key.index_name.is_some()
+        || primary_key.index_type.is_some()
+        || !primary_key.include.is_empty()
+        || !primary_key.index_options.is_empty()
+        || primary_key.characteristics.is_some()
+    {
+        return None;
+    }
+    let [only] = primary_key.columns.as_slice() else { return None };
+    if !only.column.to_string().eq_ignore_ascii_case(&column.name.value) {
+        return None;
+    }
+    Some(ColumnOptionDef {
+        name: primary_key.name.clone(),
+        option: ColumnOption::PrimaryKey(PrimaryKeyConstraint {
+            name: None,
+            columns: Vec::new(),
+            ..(*primary_key).clone()
+        }),
+    })
 }
 
 /// Reports a column that asks SQLite to supply its values where SQLite cannot.

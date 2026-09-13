@@ -15,13 +15,13 @@ use alloc::{
 
 use sqlparser::ast::{
     ColumnOption, ColumnOptionDef, CreateTable, CreateTableOptions, HiveDistributionStyle,
-    OnCommit, TableConstraint, WithData,
+    OnCommit, PrimaryKeyConstraint, TableConstraint, WithData,
 };
 
 use crate::{
     impls::{
         object_name::normalize_schema_qualified_object_name_for_sqlite,
-        translator_impls::column::translate_column_def,
+        translator_impls::column::{folded_primary_key, translate_column_def},
     },
     warnings::TranslationWarning,
 };
@@ -164,18 +164,22 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
         // on its own cannot see and which decides whether it is SQLite's rowid
         // alias. A column that spells `PRIMARY KEY` inline is recognised by
         // `translate_column_def` itself.
-        let primary_key_columns: Vec<String> = self
+        let table_primary_key: Vec<&PrimaryKeyConstraint> = self
             .constraints
             .iter()
             .filter_map(|constraint| {
                 match constraint {
-                    TableConstraint::PrimaryKey(primary_key) => Some(&primary_key.columns),
+                    TableConstraint::PrimaryKey(primary_key) => Some(primary_key),
                     _ => None,
                 }
             })
-            .flatten()
-            .map(|column| column.column.to_string())
             .collect();
+        // A key folded onto its identity column so it can carry
+        // `AUTOINCREMENT` must not also stay a table constraint.
+        let folded_key = self
+            .columns
+            .iter()
+            .any(|column| folded_primary_key(column, &table_primary_key).is_some());
 
         // Every field is named so a field added upstream fails to compile here
         // instead of leaking through a spread, the defect this rebuild fixes.
@@ -186,12 +190,13 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
                 .columns
                 .iter()
                 .map(|c| {
-                    translate_column_def(c, &self.name, &primary_key_columns, schema, options, emit)
+                    translate_column_def(c, &self.name, &table_primary_key, schema, options, emit)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             constraints: self
                 .constraints
                 .iter()
+                .filter(|c| !(folded_key && matches!(c, TableConstraint::PrimaryKey(_))))
                 .map(|c| c.translate_with_warnings(schema, options, emit))
                 .collect::<Result<Vec<Vec<TableConstraint>>, _>>()?
                 .into_iter()
