@@ -53,6 +53,9 @@ struct Case {
 /// Declares the table almost every case refers to.
 const TABLE: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT);";
 
+/// The same table with a transaction opened after it.
+const TABLE_IN_TRANSACTION: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT); BEGIN;";
+
 /// Same, plus a schema, a role, a function, and a policy, for the cases that
 /// alter or drop one of those.
 const SCHEMA: &str = "CREATE SCHEMA s;";
@@ -70,6 +73,14 @@ const TABLE_ROLE_AND_GRANT: &str =
 
 const fn emitted(sql: &'static str) -> Case {
     Case { setup: TABLE, sql, outcome: Outcome::Emitted }
+}
+
+/// Same, plus an open transaction, for the statements PostgreSQL takes only
+/// inside a transaction block. Outside one it answers `can only be used in
+/// transaction blocks` for a savepoint and warns that there is no transaction
+/// in progress for a commit, and `test_transaction_blocks.rs` pins both.
+const fn emitted_in_transaction(sql: &'static str) -> Case {
+    Case { setup: TABLE_IN_TRANSACTION, sql, outcome: Outcome::Emitted }
 }
 
 const fn warned(sql: &'static str) -> Case {
@@ -116,10 +127,10 @@ const CASES: &[Case] = &[
     emitted("ATTACH DATABASE 'other.db' AS other"),
     emitted("VACUUM"),
     emitted("START TRANSACTION"),
-    emitted("COMMIT"),
-    emitted("ROLLBACK"),
-    emitted("SAVEPOINT sp"),
-    emitted("RELEASE SAVEPOINT sp"),
+    emitted_in_transaction("COMMIT"),
+    emitted_in_transaction("ROLLBACK"),
+    emitted_in_transaction("SAVEPOINT sp"),
+    emitted_in_transaction("RELEASE SAVEPOINT sp"),
     // Consumed by the translation schema.
     consumed(TABLE, POLICY),
     consumed(

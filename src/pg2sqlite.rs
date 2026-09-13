@@ -663,6 +663,7 @@ impl Pg2Sqlite {
             TranslationContext::new(&options)
         };
         populate_prewalk_catalogs(statements, &mut context);
+        let dispositions = crate::impls::transaction_blocks::analyse(statements)?;
 
         let mut warnings = Vec::new();
         let mut translated = Vec::with_capacity(statements.len());
@@ -672,16 +673,30 @@ impl Pg2Sqlite {
                 &epoch.schema,
                 &mut context,
             );
-            for statement in &statements[epoch.start..epoch.end] {
-                if should_translate(statement) {
-                    let mut emit = |warning| warnings.push(warning);
-                    translated.push(statement.translate_with_warnings(
-                        &epoch.schema,
-                        &context,
-                        &mut emit,
-                    )?);
-                } else {
+            for (offset, statement) in statements[epoch.start..epoch.end].iter().enumerate() {
+                if !should_translate(statement) {
                     translated.push(Vec::new());
+                    continue;
+                }
+                let mut emit = |warning| warnings.push(warning);
+                match dispositions[epoch.start + offset] {
+                    crate::impls::transaction_blocks::Disposition::DropNoOp {
+                        construct,
+                        reason,
+                    } => {
+                        emit(crate::warnings::TranslationWarning::LossyDrop {
+                            construct: construct.to_string(),
+                            reason: reason.to_string(),
+                        });
+                        translated.push(Vec::new());
+                    }
+                    crate::impls::transaction_blocks::Disposition::Translate => {
+                        translated.push(statement.translate_with_warnings(
+                            &epoch.schema,
+                            &context,
+                            &mut emit,
+                        )?);
+                    }
                 }
             }
         }

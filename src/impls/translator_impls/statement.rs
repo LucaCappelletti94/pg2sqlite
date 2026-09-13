@@ -1578,6 +1578,63 @@ fn is_enabled(values: &[Expr]) -> bool {
     ["on", "true", "yes", "1"].iter().any(|enabled| enabled.eq_ignore_ascii_case(rendered))
 }
 
+/// Translates `SET TRANSACTION` and `SET SESSION CHARACTERISTICS AS
+/// TRANSACTION`, which set a transaction characteristic rather than a
+/// configuration parameter.
+///
+/// An isolation level goes the way [`translate_start_transaction`] sends the
+/// one `BEGIN` carries, and for the same reason: SQLite serialises writers, so
+/// it is at least as strict as any level PostgreSQL can name. `READ WRITE` is
+/// the default and goes with it. Outside a transaction block PostgreSQL
+/// answers `SET TRANSACTION can only be used in transaction blocks` and does
+/// nothing, which emitting nothing also reproduces.
+///
+/// `READ ONLY` is refused, exactly as `BEGIN READ ONLY` is: measured on 17.3,
+/// an `INSERT` under it earns `cannot execute INSERT in a read-only
+/// transaction` and the table stays empty, so dropping the clause would turn
+/// that error into a write that succeeds. The session form is refused for the
+/// same reason, over every later transaction rather than one.
+///
+/// `SET TRANSACTION SNAPSHOT` is refused because the transaction is asking to
+/// read exactly what another one reads.
+fn translate_set_transaction(
+    statement: &Statement,
+    modes: &[TransactionMode],
+    snapshot: bool,
+    session: bool,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Vec<Statement>, Error> {
+    if snapshot {
+        return Err(reject_unsupported_statement(
+            statement,
+            "It makes the transaction read exactly what another transaction reads, and SQLite has \
+             no way to join another connection's snapshot, so the transaction would read its own \
+             instead.",
+        ));
+    }
+
+    if modes.contains(&TransactionMode::AccessMode(TransactionAccessMode::ReadOnly)) {
+        return Err(reject_unsupported_statement(
+            statement,
+            if session {
+                "SQLite has no read-only transaction, so every write PostgreSQL would reject for \
+                 the rest of the session would succeed here. Set the connection read-only with \
+                 PRAGMA query_only = 1 instead."
+            } else {
+                "SQLite has no read-only transaction, so a write PostgreSQL would reject inside \
+                 one would succeed here. Set the connection read-only with PRAGMA query_only = 1 \
+                 instead."
+            },
+        ));
+    }
+
+    Ok(drop_with_warning(
+        if session { "SET SESSION CHARACTERISTICS" } else { "SET TRANSACTION" },
+        REASON_TRANSACTION_CHARACTERISTICS,
+        emit,
+    ))
+}
+
 /// Drops a `SET` of a setting listed in [`RESULT_NEUTRAL_SETTINGS`], refuses
 /// every other form.
 ///
@@ -1593,6 +1650,10 @@ fn translate_set(
     set: &Set,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
+    if let Set::SetTransaction { modes, snapshot, session } = set {
+        return translate_set_transaction(statement, modes, snapshot.is_some(), *session, emit);
+    }
+
     if let Set::SingleAssignment { variable, values, .. } = set
         && let Some(setting) = last_ident(variable)
     {

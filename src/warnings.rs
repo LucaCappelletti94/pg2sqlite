@@ -30,7 +30,10 @@ use sqlparser::ast::Statement;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TranslationWarning {
-    /// A PostgreSQL construct has no SQLite equivalent and was dropped.
+    /// A construct was dropped: either PostgreSQL has it and SQLite has no
+    /// equivalent, or PostgreSQL itself performs it as a no-op where it stands,
+    /// as it does for a `BEGIN` inside an open transaction, so that emitting
+    /// nothing is what reproduces the server.
     ///
     /// Fields are owned so a warning can name the object it concerns. A
     /// `&'static str` could only ever name the construct kind, which left the
