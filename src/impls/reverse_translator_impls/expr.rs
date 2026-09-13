@@ -15,8 +15,8 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
-        BinaryOperator, CaseWhen, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
-        ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan,
+        BinaryOperator, CaseWhen, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+        Ident, ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan,
         helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
@@ -25,6 +25,7 @@ use sqlparser::{
 use super::{
     function::reverse_translate_function,
     helpers::{Reverse, unscale_integer_literal},
+    storage_shape::{declared_data_type, retype_against_peer, retype_for_declared},
 };
 use crate::{
     errors::Error,
@@ -299,6 +300,89 @@ fn reverse_pseudo_expression_name(
     )))
 }
 
+/// Retypes each operand of a reversed comparison for the column the other one
+/// names.
+///
+/// A storage wrapper carries no column of its own, so the type it has to match
+/// is the one on the other side: `u = unhex(...)` reverses against the `uuid`
+/// column `u`, and `json_array(...) = xs` against the array column `xs`.
+fn retype_binary_operands(
+    reversed: Expr,
+    left: &Expr,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let Expr::BinaryOp { left: reversed_left, op, right: reversed_right } = reversed else {
+        return Ok(reversed);
+    };
+    Ok(Expr::BinaryOp {
+        left: Box::new(retype_against_peer(*reversed_left, right, schema, options)?),
+        op,
+        right: Box::new(retype_against_peer(*reversed_right, left, schema, options)?),
+    })
+}
+
+/// Retypes `value` when the position's column type is known.
+fn retype_for_column(
+    value: Expr,
+    declared: Option<&DataType>,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    match declared {
+        Some(declared) => retype_for_declared(value, declared, options),
+        None => Ok(value),
+    }
+}
+
+/// Reverses an `IN` list, bringing each item onto the operand's column both in
+/// scale and in shape.
+fn reverse_in_list(
+    operand: &Expr,
+    list: &[Expr],
+    negated: bool,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
+    let declared = declared_data_type(operand, schema, options);
+    Ok(Expr::InList {
+        expr: Box::new(operand.reverse_translate(schema, options)?),
+        list: list
+            .iter()
+            .map(|item| {
+                let reversed = reverse_unscale_or_translate(item, scale, schema, options)?;
+                retype_for_column(reversed, declared.as_ref(), options)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        negated,
+    })
+}
+
+/// Reverses a `BETWEEN`, bringing both bounds onto the operand's column the
+/// same way.
+fn reverse_between(
+    operand: &Expr,
+    negated: bool,
+    low: &Expr,
+    high: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
+    let declared = declared_data_type(operand, schema, options);
+    let bound = |bound: &Expr| {
+        let reversed = reverse_unscale_or_translate(bound, scale, schema, options)?;
+        retype_for_column(reversed, declared.as_ref(), options)
+    };
+    Ok(Expr::Between {
+        expr: Box::new(operand.reverse_translate(schema, options)?),
+        negated,
+        low: Box::new(bound(low)?),
+        high: Box::new(bound(high)?),
+    })
+}
+
 impl ReverseTranslator for Expr {
     type Schema = ParserDB;
     type PostgresEntry = Self;
@@ -403,29 +487,16 @@ impl ReverseTranslator for Expr {
             }
 
             Expr::BinaryOp { left, op, right } => {
-                reverse_numeric_binary_op(self, left, op, right, schema, options)
+                let reversed = reverse_numeric_binary_op(self, left, op, right, schema, options)?;
+                retype_binary_operands(reversed, left, right, schema, options)
             }
 
             Expr::InList { expr: operand, list, negated } => {
-                let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
-                Ok(Expr::InList {
-                    expr: Box::new(operand.reverse_translate(schema, options)?),
-                    list: list
-                        .iter()
-                        .map(|item| reverse_unscale_or_translate(item, scale, schema, options))
-                        .collect::<Result<Vec<_>, _>>()?,
-                    negated: *negated,
-                })
+                reverse_in_list(operand, list, *negated, schema, options)
             }
 
             Expr::Between { expr: operand, negated, low, high } => {
-                let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
-                Ok(Expr::Between {
-                    expr: Box::new(operand.reverse_translate(schema, options)?),
-                    negated: *negated,
-                    low: Box::new(reverse_unscale_or_translate(low, scale, schema, options)?),
-                    high: Box::new(reverse_unscale_or_translate(high, scale, schema, options)?),
-                })
+                reverse_between(operand, *negated, low, high, schema, options)
             }
 
             Expr::Case { case_token, end_token, operand, conditions, else_result } => {

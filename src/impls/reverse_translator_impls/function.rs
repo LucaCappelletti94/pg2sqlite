@@ -19,7 +19,10 @@ use sqlparser::ast::{
     TrimWhereField, Value, ValueWithSpan,
 };
 
-use super::helpers::{Reverse, reverse_translate_window_type};
+use super::{
+    helpers::{Reverse, reverse_translate_window_type},
+    storage_shape::{declared_data_type, is_array_type},
+};
 use crate::{
     errors::Error,
     impls::{
@@ -1418,6 +1421,26 @@ pub fn reverse_translate_function(
             // refuse.
             let exprs = function_argument_exprs(&func.args);
             let arg = exprs.first().copied();
+            // An array column is not JSON at all on the server, where
+            // `json_array_length(integer[])` does not exist. Its length is
+            // `array_length(xs, 1)`, which answers NULL for an empty array
+            // where SQLite answers 0, so the zero is restored: measured, the
+            // replica answers 2 and 0 over `{1,2}` and `{}`.
+            if let Some(argument) = arg
+                && let Some(declared) = declared_data_type(argument, schema, options)
+                && is_array_type(&declared)
+            {
+                let inner = crate::prelude::ReverseTranslator::reverse_translate(
+                    argument, schema, options,
+                )?;
+                let length =
+                    simple_function_expr("array_length", vec![inner, integer_literal(1)], None);
+                return Ok(simple_function_expr(
+                    "coalesce",
+                    vec![length, integer_literal(0)],
+                    None,
+                ));
+            }
             let is_jsonb = match arg {
                 Some(argument) => {
                     declared_type_matches(argument, schema, options, |declared| {
@@ -1467,10 +1490,51 @@ pub fn reverse_translate_function(
             // and PostgreSQL's encode answers lowercase, both measured, so the
             // bare call would quietly change the case of every digit.
             let exprs = extract_exactly(&func.args, 1, "hex")?;
+            let declared = declared_data_type(exprs[0], schema, options);
             let inner =
                 crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
+            // A uuid the replica holds as a blob is the 16 raw bytes, so its
+            // hex is the uuid's own digits without the dashes, in upper case:
+            // measured, both engines answer
+            // 550E8400E29B41D4A716446655440000. The server refuses the bytea
+            // cast outright with `cannot cast type uuid to bytea`.
+            if matches!(declared, Some(DataType::Uuid))
+                && matches!(
+                    options.get_uuid_representation(),
+                    Some(crate::prelude::UuidRepresentation::Blob)
+                )
+            {
+                let text = Expr::Cast {
+                    expr: Box::new(inner),
+                    data_type: DataType::Text,
+                    format: None,
+                    kind: CastKind::DoubleColon,
+                };
+                let undashed = simple_function_expr(
+                    "replace",
+                    vec![text, string_literal("-"), string_literal("")],
+                    None,
+                );
+                return Ok(simple_function_expr("upper", vec![undashed], None));
+            }
+            // Every other declared type, including a uuid held as text, is
+            // hexed by SQLite as the bytes of its text, which the server
+            // reaches through text rather than through a direct cast: measured
+            // on a uuid held as text, both answer
+            // 35353065383430302D...343030.
+            let castable = match &declared {
+                Some(DataType::Bytea) | None => inner,
+                Some(_) => {
+                    Expr::Cast {
+                        expr: Box::new(inner),
+                        data_type: DataType::Text,
+                        format: None,
+                        kind: CastKind::DoubleColon,
+                    }
+                }
+            };
             let bytea_cast = Expr::Cast {
-                expr: Box::new(inner),
+                expr: Box::new(castable),
                 data_type: DataType::Bytea,
                 format: None,
                 kind: CastKind::DoubleColon,

@@ -1184,6 +1184,9 @@ pub(crate) fn convert_value_for_column_type(
     {
         return Err(array_text_literal_refusal(data_type));
     }
+    if matches!(data_type, DataType::Bytea) {
+        return convert_bytea_hex_literal(expr);
+    }
     if crate::impls::translator_impls::data_type::bit_length(data_type).is_some() {
         return convert_bit_literal(expr);
     }
@@ -1197,6 +1200,49 @@ pub(crate) fn convert_value_for_column_type(
         return check_json_document_literal(data_type, expr);
     }
     Ok(expr)
+}
+
+/// Converts PostgreSQL's hex-format `bytea` literal into the bytes it names.
+///
+/// `'\x00ff'` is two bytes on the server, and the text it is written as is
+/// six characters. Casting the text is not the same thing: measured,
+/// `CAST('\x00ff' AS BLOB)` stores those six characters, so `hex(raw)`
+/// answered 5C7830306666 where the server answers 00FF, and a comparison with
+/// the real bytes never matched. `unhex` decodes the digits instead.
+///
+/// The escape format is refused rather than decoded, since the same text is
+/// also a perfectly ordinary string and this cannot tell which was meant.
+///
+/// # Errors
+///
+/// Returns [`Error::TranslationRefusal`] for a literal that is not in the hex
+/// format, carries an odd number of nibbles, or holds a non-hex character.
+pub(crate) fn convert_bytea_hex_literal(expr: Expr) -> Result<Expr, Error> {
+    let Some(text) = crate::impls::function_helpers::single_quoted_literal(&expr) else {
+        return Ok(expr);
+    };
+    let Some(hex) = text.strip_prefix("\\x") else {
+        return Err(Error::forward_refusal(format!(
+            "bytea literal '{text}' is not in the PostgreSQL hex format (\\x<hex>). \
+             Use the hex format: E.g., '\\x414243' for the bytes 'ABC'."
+        )));
+    };
+    if hex.len() % 2 != 0 {
+        return Err(Error::forward_refusal(format!(
+            "bytea literal '\\x{hex}' has an odd number of nibbles. \
+             PostgreSQL requires pairs of hex digits."
+        )));
+    }
+    if !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(Error::forward_refusal(format!(
+            "bytea literal '\\x{hex}' contains a non-hex character."
+        )));
+    }
+    Ok(crate::impls::function_helpers::simple_function_expr(
+        "unhex",
+        vec![crate::impls::function_helpers::string_literal(hex)],
+        None,
+    ))
 }
 
 /// Refuses a literal a JSON column cannot hold.
@@ -1329,6 +1375,7 @@ pub(crate) fn literal_checks_apply(data_type: &DataType) -> bool {
             | DataType::Interval { .. }
             | DataType::JSON
             | DataType::JSONB
+            | DataType::Bytea
     ) || crate::impls::translator_impls::data_type::bit_length(data_type).is_some()
         || crate::impls::temporal_literals::temporal_literal_kind(data_type).is_some()
 }
