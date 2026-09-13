@@ -90,6 +90,58 @@ fn populate_prewalk_catalogs(statements: &[Statement], context: &mut Translation
         if let Statement::CreateIndex(create_index) = statement {
             register_fts_index(create_index, context);
         }
+        if let Statement::CreateTrigger(trigger) = statement {
+            use sqlparser::ast::{TriggerEvent, TriggerPeriod};
+            if matches!(trigger.period, Some(TriggerPeriod::Before))
+                && trigger.events.iter().any(|e| matches!(e, TriggerEvent::Insert))
+                && let Some(exec_body) = &trigger.exec_body
+            {
+                let table_name = last_ident_value_or_display(&trigger.table_name).to_lowercase();
+                let fn_name = exec_body.func_desc.name.clone();
+                context.add_before_insert_trigger_fn(table_name, fn_name);
+            }
+        }
+    }
+    register_trigger_conflicts(statements, context);
+}
+
+/// Marks trigger names whose (table, timing, event) key is shared by another
+/// trigger.  Uses two cheap linear passes; allocates nothing when no table
+/// carries two triggers on the same event.
+fn register_trigger_conflicts(statements: &[Statement], context: &mut TranslationContext<'_>) {
+    use alloc::collections::BTreeMap;
+
+    use sqlparser::ast::{TriggerEvent, TriggerPeriod};
+
+    let mut groups: BTreeMap<(String, u8, u8), Vec<String>> = BTreeMap::new();
+
+    for statement in statements {
+        let Statement::CreateTrigger(trigger) = statement else { continue };
+        let period: u8 = match trigger.period {
+            Some(TriggerPeriod::Before) => 0,
+            Some(TriggerPeriod::After) => 1,
+            _ => continue,
+        };
+        let table = crate::impls::object_name::last_ident(&trigger.table_name)
+            .map(|ident| ident.value.to_lowercase())
+            .unwrap_or_default();
+        let name = crate::impls::object_name::last_ident(&trigger.name)
+            .map(|ident| ident.value.clone())
+            .unwrap_or_default();
+        for event in &trigger.events {
+            let event_kind: u8 = match event {
+                TriggerEvent::Insert => 0,
+                TriggerEvent::Update(_) => 1,
+                TriggerEvent::Delete => 2,
+                TriggerEvent::Truncate => continue,
+            };
+            groups.entry((table.clone(), period, event_kind)).or_default().push(name.clone());
+        }
+    }
+    for names in groups.values().filter(|v| v.len() >= 2) {
+        for name in names {
+            context.add_conflicting_trigger_name(name);
+        }
     }
 }
 
@@ -744,7 +796,10 @@ impl Pg2Sqlite {
     /// let sql = Pg2Sqlite::default()
     ///     .sql("CREATE TABLE t (a INT);")?
     ///     .translate_to_sql(&Pg2SqliteOptions::default())?;
-    /// assert_eq!(sql, ["CREATE TABLE t (a INTEGER) STRICT"]);
+    /// assert_eq!(
+    ///     sql,
+    ///     ["CREATE TABLE t (a INTEGER CHECK (a BETWEEN -2147483648 AND 2147483647)) STRICT"]
+    /// );
     /// # Ok::<(), Error>(())
     /// ```
     pub fn translate_to_sql(

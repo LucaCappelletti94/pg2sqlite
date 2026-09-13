@@ -118,7 +118,9 @@ fn a_declared_table_named_like_a_backing_table_is_emitted_under_that_name() {
         .expect("a plain table translates");
     assert_eq!(
         emitted,
-        ["CREATE TABLE audit_rls (id INTEGER PRIMARY KEY NOT NULL, note TEXT) STRICT"]
+        [
+            "CREATE TABLE audit_rls (id INTEGER PRIMARY KEY CHECK (id BETWEEN -2147483648 AND 2147483647) NOT NULL, note TEXT) STRICT"
+        ]
     );
 }
 

@@ -459,3 +459,28 @@ pub(crate) fn build_date_trunc_year_span_call(value_expr: Expr, span: i64, offse
         None,
     )
 }
+
+/// Normalise a TIMESTAMPTZ literal body so its UTC offset includes minutes.
+///
+/// SQLite date functions refuse `±HH` offsets and return NULL; `±HH:MM` is
+/// accepted. Appending `:00` is lossless — a PostgreSQL offset without minutes
+/// carries zero extra minutes.
+#[must_use]
+pub(crate) fn normalize_timestamptz_offset(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    // ±HH suffix: sign at position ≥ 19 (after "YYYY-MM-DD HH:MM:SS"), total
+    // length ≥ 22.
+    if len >= 22
+        && bytes[len - 2].is_ascii_digit()
+        && bytes[len - 1].is_ascii_digit()
+        && (bytes[len - 3] == b'+' || bytes[len - 3] == b'-')
+        && (len - 3) >= 19
+    {
+        let mut result = s.to_string();
+        result.push_str(":00");
+        result
+    } else {
+        s.to_string()
+    }
+}

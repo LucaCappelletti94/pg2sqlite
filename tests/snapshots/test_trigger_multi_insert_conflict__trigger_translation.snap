@@ -2,8 +2,8 @@
 source: tests/test_trigger_multi_insert_conflict.rs
 expression: generated_sql
 ---
-CREATE TABLE procedure_template_asset_models (id INTEGER PRIMARY KEY NOT NULL, name TEXT, procedure_template_id INTEGER, based_on_id INTEGER, asset_model_id INTEGER) STRICT
-CREATE TABLE parent_procedure_templates (parent_id INTEGER NOT NULL, child_id INTEGER NOT NULL, PRIMARY KEY (parent_id, child_id)) STRICT
-CREATE TABLE next_procedure_templates (parent_id INTEGER NOT NULL, predecessor_id INTEGER NOT NULL, successor_id INTEGER NOT NULL, PRIMARY KEY (parent_id, predecessor_id, successor_id)) STRICT
+CREATE TABLE procedure_template_asset_models (id INTEGER PRIMARY KEY NOT NULL, name TEXT, procedure_template_id INTEGER CHECK (procedure_template_id BETWEEN -2147483648 AND 2147483647), based_on_id INTEGER CHECK (based_on_id BETWEEN -2147483648 AND 2147483647), asset_model_id INTEGER CHECK (asset_model_id BETWEEN -2147483648 AND 2147483647)) STRICT
+CREATE TABLE parent_procedure_templates (parent_id INTEGER NOT NULL CHECK (parent_id BETWEEN -2147483648 AND 2147483647), child_id INTEGER NOT NULL CHECK (child_id BETWEEN -2147483648 AND 2147483647), PRIMARY KEY (parent_id, child_id)) STRICT
+CREATE TABLE next_procedure_templates (parent_id INTEGER NOT NULL CHECK (parent_id BETWEEN -2147483648 AND 2147483647), predecessor_id INTEGER NOT NULL CHECK (predecessor_id BETWEEN -2147483648 AND 2147483647), successor_id INTEGER NOT NULL CHECK (successor_id BETWEEN -2147483648 AND 2147483647), PRIMARY KEY (parent_id, predecessor_id, successor_id)) STRICT
 CREATE TRIGGER before_insert_next_procedure_templates BEFORE INSERT ON next_procedure_templates FOR EACH ROW BEGIN INSERT INTO parent_procedure_templates (parent_id, child_id) VALUES (NEW.parent_id, NEW.predecessor_id) ON CONFLICT(parent_id, child_id) DO NOTHING; INSERT INTO parent_procedure_templates (parent_id, child_id) VALUES (NEW.parent_id, NEW.successor_id) ON CONFLICT(parent_id, child_id) DO NOTHING; END
 CREATE TRIGGER trg_inherit_procedure_template_asset_models AFTER INSERT ON parent_procedure_templates FOR EACH ROW BEGIN INSERT INTO procedure_template_asset_models (name, procedure_template_id, based_on_id, asset_model_id) SELECT pam.name, NEW.parent_id, pam.id, pam.asset_model_id FROM procedure_template_asset_models pam WHERE pam.procedure_template_id = NEW.child_id; END

@@ -15,7 +15,7 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
-        BinaryOperator, CaseWhen, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+        BinaryOperator, CaseWhen, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
         ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan,
         helpers::attached_token::AttachedToken,
     },
@@ -31,8 +31,10 @@ use crate::{
     impls::{
         function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
         idioms::{ascii_code_point_argument, forward_lower_argument, is_uniform_random_float},
+        reverse_translator_impls::ident_quoting::is_postgres_pseudo_expression,
         shared_helpers::{
-            declared_type_matches, is_scale_preserving_call, scale_of, translate_expr_recursive,
+            declared_in_scope, declared_type_matches, is_scale_preserving_call, scale_of,
+            translate_expr_recursive,
         },
         temporal_arithmetic::reverse_temporal_arithmetic,
         translator_impls::expr::sqlite_json_path_to_pg_text_path,
@@ -256,6 +258,47 @@ fn is_definitely_non_text(
     }
 }
 
+/// A brief description of what a PostgreSQL pseudo-expression returns, for use
+/// in error messages.
+fn pseudo_expression_kind(name: &str) -> &'static str {
+    match name.to_ascii_lowercase().as_str() {
+        "user" | "session_user" | "current_user" => "the current role",
+        "current_schema" => "the current schema name",
+        "current_date" => "today's date",
+        "current_time" | "localtime" => "the current time",
+        "current_timestamp" | "localtimestamp" => "the current timestamp",
+        _ => "a server-side value",
+    }
+}
+
+/// Quotes a column whose name PostgreSQL reads as an expression.
+///
+/// `SELECT user FROM t` answers the stored value on the replica and the
+/// current role at the server, so a name the schema confirms is a column is
+/// emitted quoted. A name the schema cannot confirm is refused rather than
+/// guessed at, since quoting an actual pseudo-expression would turn a
+/// server-side value into a missing column.
+fn reverse_pseudo_expression_name(
+    whole: &Expr,
+    ident: &Ident,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    if declared_in_scope(whole, schema, options, |_| Some(()), |_, _, _| Ok(Some(())))
+        .is_ok_and(|declared| declared.is_some())
+    {
+        return Ok(Expr::Identifier(Ident::with_quote('"', &ident.value)));
+    }
+    Err(Error::reverse_refusal(format!(
+        "bare '{}' is a PostgreSQL pseudo-expression returning {}; quote it as \"{}\" to \
+         reference a column, or include the table in the translation batch so the schema can \
+         confirm it is a column.",
+        ident.value,
+        pseudo_expression_kind(&ident.value),
+        ident.value,
+    )))
+}
+
 impl ReverseTranslator for Expr {
     type Schema = ParserDB;
     type PostgresEntry = Self;
@@ -333,6 +376,12 @@ impl ReverseTranslator for Expr {
                  use an explicit INTEGER PRIMARY KEY column instead"
                         .to_string(),
                 ))
+            }
+
+            Expr::Identifier(ident)
+                if ident.quote_style.is_none() && is_postgres_pseudo_expression(&ident.value) =>
+            {
+                reverse_pseudo_expression_name(self, ident, schema, options)
             }
 
             Expr::Like { negated, any, expr, pattern, escape_char }

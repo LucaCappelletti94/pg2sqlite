@@ -74,9 +74,10 @@ fn test_check_constraint_removed_with_option() {
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
+    // The user-declared CHECK calling the unsupported function is removed.
     assert!(
-        !sql_output.contains("CHECK"),
-        "CHECK constraint should be removed when option is set, got: {sql_output}"
+        !sql_output.contains("array_length"),
+        "unsupported user CHECK should be removed, got: {sql_output}"
     );
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
@@ -136,9 +137,11 @@ fn test_nested_function_check_constraint_removed_with_option() {
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
+    // The user-declared nested CHECK calling the unsupported function is
+    // removed.
     assert!(
-        !sql_output.contains("CHECK"),
-        "Nested function CHECK constraint should be removed when option is set, got: {sql_output}"
+        !sql_output.contains("array_length"),
+        "nested unsupported user CHECK should be removed, got: {sql_output}"
     );
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
@@ -183,9 +186,11 @@ fn test_column_level_check_is_dropped_with_option() {
     let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
+    // The user-declared column-level CHECK is dropped; translator-added range
+    // bounds (e.g. for INTEGER) are not user-declared and are kept.
     assert!(
-        !sql_output.contains("CHECK"),
-        "Column-level CHECK should be dropped when option is set, got: {sql_output}"
+        !sql_output.contains("price > 0"),
+        "user column-level CHECK should be dropped, got: {sql_output}"
     );
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.

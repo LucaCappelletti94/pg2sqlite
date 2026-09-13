@@ -27,17 +27,18 @@ use core::ops::ControlFlow;
 use sql_traits::{
     errors::LookupError,
     structs::{IdentifierCase, ParserDB, TargetName},
-    traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike, TriggerLike},
 };
 use sqlparser::{
     ast::{
         Assignment, AssignmentTarget, BinaryOperator, ColumnDef, ColumnOption, ColumnOptionDef,
-        CreatePolicy, CreatePolicyCommand, CreatePolicyType, CreateTable, DataType, Expr, Function,
-        FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
-        FunctionArguments, HavingBound, Ident, JoinConstraint, JoinOperator, ListAggOnOverflow,
-        ObjectName, ObjectNamePart, Owner, SelectItem, SetExpr, Statement, TableAlias, TableFactor,
-        TriggerEvent, TriggerPeriod, UnaryOperator, Value, ValueWithSpan, Visit, VisitMut, Visitor,
-        VisitorMut, WindowType,
+        CreatePolicy, CreatePolicyCommand, CreatePolicyType, CreateTable, CreateTrigger, DataType,
+        Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
+        FunctionArguments, FunctionDesc, HavingBound, Ident, JoinConstraint, JoinOperator,
+        ListAggOnOverflow, ObjectName, ObjectNamePart, Owner, SelectItem, SetExpr, Statement,
+        TableAlias, TableFactor, TriggerEvent, TriggerExecBody, TriggerExecBodyType, TriggerObject,
+        TriggerObjectKind, TriggerPeriod, UnaryOperator, Value, ValueWithSpan, Visit, VisitMut,
+        Visitor, VisitorMut, WindowType,
     },
     tokenizer::{Token, Word},
 };
@@ -2205,6 +2206,99 @@ fn generate_insert_check_trigger_sql(
     )))
 }
 
+/// Builds the WHEN condition that lets an internal maintenance UPDATE through
+/// the backing-table BEFORE UPDATE deny guard.
+///
+/// A BEFORE INSERT maintenance trigger is converted to an AFTER INSERT trigger
+/// whose body does `UPDATE backing SET col = expr(NEW_at_insert)`. The BEFORE
+/// UPDATE guard fires on that UPDATE. To allow it through while still denying
+/// caller UPDATEs, the guard fires only when `NEW.col IS DISTINCT FROM
+/// expr(OLD)` — FALSE for the maintenance UPDATE (which sets col to exactly
+/// that value) and TRUE for unrelated UPDATEs.
+///
+/// The prewalk stores (table_name, fn_name) for each BEFORE INSERT trigger so
+/// this function can reach the maintenance assignments through the epoch schema
+/// (which has functions and tables but not triggers). A synthetic CreateTrigger
+/// carrying only the table and function fields lets TriggerLike do the lookup.
+fn build_maintenance_insert_exemption(
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Option<Expr> {
+    let table_name = table.table_name().to_lowercase();
+    let mut any_trigger_match: Option<Expr> = None;
+
+    for (trig_table, fn_name) in options.before_insert_trigger_fns() {
+        if trig_table != &table_name {
+            continue;
+        }
+
+        // Synthetic trigger: only table_name and exec_body matter for
+        // TriggerLike; the rest are inert defaults. The local drop
+        // stays in this compilation unit (rls.rs), which already
+        // handles CreateTable and its sub-types.
+        let synthetic = CreateTrigger {
+            or_alter: false,
+            temporary: false,
+            or_replace: false,
+            is_constraint: false,
+            name: ObjectName(Vec::new()),
+            period: Some(TriggerPeriod::Before),
+            period_before_table: true,
+            events: vec![TriggerEvent::Insert],
+            table_name: table.name.clone(),
+            referenced_table_name: None,
+            referencing: Vec::new(),
+            trigger_object: Some(TriggerObjectKind::ForEach(TriggerObject::Row)),
+            condition: None,
+            exec_body: Some(TriggerExecBody {
+                exec_type: TriggerExecBodyType::Function,
+                func_desc: FunctionDesc { name: fn_name.clone(), args: None },
+            }),
+            statements_as: false,
+            statements: None,
+            characteristics: None,
+        };
+        if !synthetic.is_maintenance_trigger(schema).unwrap_or(false) {
+            continue;
+        }
+
+        let per_trigger: Vec<Expr> = synthetic
+            .maintenance_assignments(schema)
+            .ok()?
+            .map(|(col, raw_expr)| {
+                let old_expr =
+                    crate::impls::translator_impls::create_trigger::substitute_new_with_old(
+                        &raw_expr,
+                    );
+                let new_col = Expr::CompoundIdentifier(vec![
+                    Ident::new("NEW"),
+                    Ident::new(col.column_name()),
+                ]);
+                Expr::IsDistinctFrom(Box::new(new_col), Box::new(old_expr))
+            })
+            .collect();
+
+        let trigger_matches = per_trigger.into_iter().reduce(|a, b| {
+            Expr::BinaryOp { left: Box::new(a), op: BinaryOperator::Or, right: Box::new(b) }
+        });
+
+        if let Some(cond) = trigger_matches {
+            any_trigger_match = Some(match any_trigger_match {
+                None => cond,
+                Some(prev) => {
+                    Expr::BinaryOp {
+                        left: Box::new(prev),
+                        op: BinaryOperator::And,
+                        right: Box::new(cond),
+                    }
+                }
+            });
+        }
+    }
+    any_trigger_match
+}
+
 fn generate_update_check_trigger_sql(
     table: &CreateTable,
     schema: &ParserDB,
@@ -2214,7 +2308,10 @@ fn generate_update_check_trigger_sql(
     let ctx = RlsTriggerContext::new(table, options);
     let policies = filter_policies(table, schema, &[CreatePolicyCommand::Update], options)?;
     let violation = if policies.is_empty() {
-        None
+        // No UPDATE policies: deny all caller UPDATEs. A maintenance exemption
+        // narrows the guard so the crate's own AFTER INSERT trigger UPDATEs
+        // still succeed; see `build_maintenance_insert_exemption`.
+        build_maintenance_insert_exemption(table, schema, options)
     } else {
         let (_, using, check) =
             build_write_guard(&policies, GuardKind::Update, table, schema, options, emit)?;

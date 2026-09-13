@@ -1,4 +1,3 @@
-use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::{
@@ -11,9 +10,8 @@ use alloc::{
 };
 
 use sql_traits::{
-    errors::LookupError,
     structs::ParserDB,
-    traits::{ColumnLike, TableLike, TriggerLike},
+    traits::{ColumnLike, TriggerLike},
 };
 use sqlparser::{
     ast::{
@@ -29,6 +27,7 @@ use sqlparser::{
 
 use crate::{
     impls::{
+        expr_helpers::map_expr_children,
         object_name::{
             append_suffix, normalize_schema_qualified_object_name_for_sqlite,
             resolve_translation_table, translation_table_has_rls,
@@ -278,71 +277,63 @@ fn generate_standard_trigger_body(
     }
 }
 
-fn collect_non_maintenance_update_columns(
-    trigger: &CreateTrigger,
-    schema: &ParserDB,
-    maintenance_columns: &BTreeSet<String>,
-) -> Result<Vec<Ident>, LookupError> {
-    let Ok(Some(table)) = resolve_translation_table(schema, &trigger.table_name) else {
-        return Ok(vec![]);
-    };
-
-    Ok(table
-        .columns(schema)?
-        .filter_map(|column| {
-            let name = column.column_name();
-            (!maintenance_columns.contains(&name.to_lowercase())).then(|| Ident::new(name))
-        })
-        .collect())
+/// Replaces `NEW` with `OLD` in compound identifiers so the WHEN clause can
+/// compare the current NEW value against what the maintenance expression
+/// computes from OLD, the value the recursion UPDATE would already have set.
+pub(crate) fn substitute_new_with_old(expr: &Expr) -> Expr {
+    if let Expr::CompoundIdentifier(parts) = expr
+        && parts.first().is_some_and(|part| part.value.eq_ignore_ascii_case("NEW"))
+    {
+        let mut renamed = parts.clone();
+        renamed[0] = Ident::new("OLD");
+        return Expr::CompoundIdentifier(renamed);
+    }
+    map_expr_children(expr, &substitute_new_with_old)
 }
 
-fn rewrite_maintenance_update_events(
+/// WHEN clause for AFTER UPDATE maintenance triggers that prevents re-firing
+/// on the trigger's own UPDATE (recursion guard).
+///
+/// Fires when ANY maintained column's NEW value differs from what the
+/// maintenance expression computes from OLD — the recursion case always has
+/// every column already at its maintained value, so the clause is false there.
+fn build_maintenance_recursion_when_clause(
     trigger: &CreateTrigger,
-    events: Vec<TriggerEvent>,
     schema: &ParserDB,
-) -> Result<Vec<TriggerEvent>, LookupError> {
-    let maintenance_columns = trigger
-        .maintenance_assignments(schema)?
-        .map(|(column, _)| column.column_name().to_lowercase())
-        .collect::<BTreeSet<_>>();
-
-    if maintenance_columns.is_empty() {
-        return Ok(events);
-    }
-
-    let non_maintenance_columns =
-        collect_non_maintenance_update_columns(trigger, schema, &maintenance_columns)?;
-
-    Ok(events
-        .into_iter()
-        .map(|event| {
-            match event {
-                TriggerEvent::Update(columns) if columns.is_empty() => {
-                    if non_maintenance_columns.is_empty() {
-                        TriggerEvent::Update(columns)
-                    } else {
-                        TriggerEvent::Update(non_maintenance_columns.clone())
-                    }
-                }
-                TriggerEvent::Update(columns) => {
-                    let filtered_columns = columns
-                        .iter()
-                        .filter(|column| {
-                            !maintenance_columns.contains(&column.value.to_lowercase())
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-
-                    if filtered_columns.is_empty() {
-                        TriggerEvent::Update(columns)
-                    } else {
-                        TriggerEvent::Update(filtered_columns)
-                    }
-                }
-                other => other,
-            }
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Option<Expr> {
+    let conditions: Vec<Expr> = trigger
+        .maintenance_assignments(schema)
+        .ok()?
+        .filter_map(|(col, raw_expr)| {
+            let old_expr = substitute_new_with_old(&raw_expr);
+            let translated = old_expr.translate_with_warnings(schema, options, emit).ok()?;
+            let new_col =
+                Expr::CompoundIdentifier(vec![Ident::new("NEW"), Ident::new(col.column_name())]);
+            Some(Expr::IsDistinctFrom(Box::new(new_col), Box::new(translated)))
         })
-        .collect())
+        .collect();
+
+    conditions.into_iter().reduce(|a, b| {
+        Expr::BinaryOp { left: Box::new(a), op: BinaryOperator::Or, right: Box::new(b) }
+    })
+}
+
+/// ANDs two optional conditions; used to attach the recursion guard to any
+/// existing WHEN clause from the source trigger.
+fn merge_conditions(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            Some(Expr::BinaryOp {
+                left: Box::new(Expr::Nested(Box::new(a))),
+                op: BinaryOperator::And,
+                right: Box::new(Expr::Nested(Box::new(b))),
+            })
+        }
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
 }
 
 fn maintenance_trigger_has_insert_event(events: &[TriggerEvent]) -> bool {
@@ -532,17 +523,34 @@ impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
         let mut period = period;
         let is_maintenance_trigger =
             can_use_trigger_traits && trigger_for_helpers.is_maintenance_trigger(schema)?;
-        let events = if is_maintenance_trigger {
-            rewrite_maintenance_update_events(&trigger_for_helpers, events, schema)?
-        } else {
-            events
-        };
+
+        if !is_maintenance_trigger {
+            let self_name = crate::impls::object_name::last_ident(&self.name)
+                .map_or("", |ident| ident.value.as_str());
+            if options.is_conflicting_trigger_name(self_name) {
+                let table = crate::impls::object_name::last_ident(&trigger_for_helpers.table_name)
+                    .map_or("?", |ident| ident.value.as_str());
+                return Err(crate::errors::Error::forward_refusal(format!(
+                    "multiple BEFORE/AFTER row triggers share the same event and timing on \
+                     table `{table}`: PostgreSQL fires them in name order but SQLite fires \
+                     in reverse creation order. Merge the trigger bodies into a single trigger."
+                )));
+            }
+        }
+
         let maintenance_insert_event =
             is_maintenance_trigger && maintenance_trigger_has_insert_event(&events);
+        let maintenance_update_event =
+            is_maintenance_trigger && events.iter().any(|e| matches!(e, TriggerEvent::Update(_)));
         if maintenance_insert_event && matches!(period, Some(TriggerPeriod::Before)) {
-            // SQLite cannot apply row maintenance updates for INSERT in BEFORE
-            // timing because the row does not exist yet; translate
-            // to AFTER to preserve final-row semantics.
+            // Row does not exist yet in BEFORE INSERT; AFTER preserves
+            // final-row semantics.
+            period = Some(TriggerPeriod::After);
+        }
+        // BEFORE UPDATE maintenance triggers are overwritten by the original
+        // UPDATE; AFTER ensures the maintenance write is the last
+        // write.
+        if maintenance_update_event && matches!(period, Some(TriggerPeriod::Before)) {
             period = Some(TriggerPeriod::After);
         }
 
@@ -643,10 +651,23 @@ impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
                 trigger_object,
                 period_before_table,
                 statements_as,
-                condition: condition
-                    .as_ref()
-                    .map(|cond| cond.translate_with_warnings(schema, options, emit))
-                    .transpose()?,
+                condition: {
+                    let translated_cond = condition
+                        .as_ref()
+                        .map(|cond| cond.translate_with_warnings(schema, options, emit))
+                        .transpose()?;
+                    let recursion_guard = (is_maintenance_trigger && maintenance_update_event)
+                        .then(|| {
+                            build_maintenance_recursion_when_clause(
+                                &trigger_for_helpers,
+                                schema,
+                                options,
+                                emit,
+                            )
+                        })
+                        .flatten();
+                    merge_conditions(translated_cond, recursion_guard)
+                },
                 exec_body: None,
                 statements: Some(ConditionalStatements::BeginEnd(function_body)),
                 characteristics: None,
@@ -763,10 +784,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            sql.contains(
-                "CREATE TRIGGER trigger_upsert_brands_edited_at BEFORE UPDATE OF id, name ON brands"
-            ),
-            "missing BEFORE UPDATE branch: {sql}"
+            sql.contains("CREATE TRIGGER trigger_upsert_brands_edited_at AFTER UPDATE ON brands"),
+            "missing AFTER UPDATE branch: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN"),
+            "UPDATE branch must carry a recursion-guard WHEN clause: {sql}"
         );
         assert!(
             sql.contains("CREATE TRIGGER trigger_upsert_brands_edited_at_pg2sqlite_insert AFTER INSERT ON brands"),

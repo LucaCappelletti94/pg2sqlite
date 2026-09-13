@@ -16,11 +16,16 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, IndexLike, TableLike, UniqueIndexLike},
 };
-use sqlparser::ast::{Insert, SelectItem, SetExpr, TableObject};
+use sqlparser::ast::{
+    DataType, Expr, Insert, SelectItem, SetExpr, TableObject, TimezoneInfo, Value, ValueWithSpan,
+};
 
 use super::helpers::Forward;
 use crate::{
+    errors::Error,
     impls::{
+        datetime_helpers::normalize_timestamptz_offset,
+        function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
         object_name::{
             last_ident, last_ident_value_or_display,
             normalize_schema_qualified_object_name_for_sqlite, resolve_translation_table,
@@ -34,7 +39,8 @@ use crate::{
             rls,
             uuid::{
                 is_blob_uuid_representation, make_uuid_conversion_call,
-                maybe_wrap_text_uuid_literal, uuid_columns_of_table,
+                maybe_canonicalize_text_uuid_literal, maybe_wrap_text_uuid_literal,
+                uuid_columns_of_table,
             },
             vector::{maybe_wrap_text_vector_literal, vector_columns_of_table},
         },
@@ -148,13 +154,26 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         // through a subquery and is left untouched.
         wrap_vector_text_literals(&mut insert, target.optional(), schema)?;
 
-        // Same shape for UUID-Blob columns: PG accepts text literals via
-        // the `uuid` type's input function, but the translated BLOB
-        // STRICT column does not. Wrap with the configured text-to-blob
-        // expression (default `unhex(replace(literal, '-', ''))`).
+        // Same shape for UUID-Blob columns.
         if is_blob_uuid_representation(options) {
             wrap_uuid_text_literals(&mut insert, target.optional(), schema, options)?;
+        } else if matches!(
+            options.get_uuid_representation(),
+            Some(crate::traits::UuidRepresentation::Text)
+        ) {
+            // Text representation: validate and canonicalize to PostgreSQL's
+            // lowercase hyphenated form so equality against canonical literals
+            // holds.
+            canonicalize_uuid_text_literals(&mut insert, target.optional(), schema)?;
         }
+
+        // bytea hex literals ('\x414243') reach a BLOB STRICT column as TEXT,
+        // which SQLite rejects. Convert them to unhex() calls here.
+        wrap_bytea_hex_literals(&mut insert, target.optional(), schema)?;
+
+        // TIMESTAMPTZ-column literals: normalise minute-less offsets (+HH →
+        // +HH:MM) so SQLite date functions can parse the stored values.
+        normalize_timestamptz_literals(&mut insert, target.optional(), schema)?;
 
         // A NUMERIC column is an INTEGER of minor units, so a decimal literal
         // has to be moved onto that scale before it reaches a STRICT table.
@@ -879,6 +898,138 @@ fn wrap_uuid_text_literals(
             } else {
                 maybe_wrap_text_uuid_literal(expr, options)
             }
+        } else {
+            Ok(expr)
+        }
+    })
+}
+
+/// The names of a table's `TIMESTAMPTZ` columns, whose literals need their
+/// offset normalising.
+fn timestamptz_columns_of_table(
+    table: &ParserTable,
+    schema: &ParserDB,
+) -> Result<Vec<String>, crate::errors::Error> {
+    Ok(table
+        .columns(schema)?
+        .filter(|column| {
+            matches!(
+                column.attribute().data_type,
+                DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
+            )
+        })
+        .map(|column| column.column_name().to_owned())
+        .collect())
+}
+
+/// Normalises minute-less UTC offsets in TIMESTAMPTZ-column literals so every
+/// SQLite date function can parse them (`+02` → `+02:00`).
+fn normalize_timestamptz_literals(
+    insert: &mut Insert,
+    table: Option<&ParserTable>,
+    schema: &ParserDB,
+) -> Result<(), crate::errors::Error> {
+    let Some(table) = table else { return Ok(()) };
+    let tstz_cols = timestamptz_columns_of_table(table, schema)?;
+    if tstz_cols.is_empty() {
+        return Ok(());
+    }
+    let column_names = insert_column_names(insert, table, schema)?;
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
+        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
+        if tstz_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name))
+            && let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), span }) =
+                expr
+        {
+            return Ok(Expr::Value(ValueWithSpan {
+                value: Value::SingleQuotedString(normalize_timestamptz_offset(&text)),
+                span,
+            }));
+        }
+        Ok(expr)
+    })
+}
+
+/// Validates and canonicalises UUID text literals at UUID-column positions
+/// under the Text representation, so stored values match PostgreSQL's canonical
+/// form.
+fn canonicalize_uuid_text_literals(
+    insert: &mut Insert,
+    table: Option<&ParserTable>,
+    schema: &ParserDB,
+) -> Result<(), crate::errors::Error> {
+    let Some(table) = table else { return Ok(()) };
+    let uuid_cols = uuid_columns_of_table(table, schema)?;
+    if uuid_cols.is_empty() {
+        return Ok(());
+    }
+    let column_names = insert_column_names(insert, table, schema)?;
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
+        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
+        if uuid_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name)) {
+            maybe_canonicalize_text_uuid_literal(expr)
+        } else {
+            Ok(expr)
+        }
+    })
+}
+
+/// True when `data_type` is PostgreSQL's `bytea` binary type.
+fn is_bytea_data_type(data_type: &DataType) -> bool {
+    matches!(data_type, DataType::Bytea)
+}
+
+/// Converts `'\xHEX'` literals into `unhex('HEX')` for BLOB STRICT columns.
+///
+/// SQLite rejects TEXT values in BLOB STRICT columns; the `\x` hex prefix is
+/// PostgreSQL's bytea input function convention, not a SQLite hex literal.
+fn maybe_convert_bytea_hex_literal(expr: Expr) -> Result<Expr, Error> {
+    let Some(text) = single_quoted_literal(&expr) else { return Ok(expr) };
+    // Only the PostgreSQL hex-format bytea literal is unambiguously decodable.
+    let Some(hex) = text.strip_prefix("\\x") else {
+        return Err(Error::forward_refusal(format!(
+            "bytea literal '{text}' is not in the PostgreSQL hex format (\\x<hex>). \
+             Use the hex format: E.g., '\\x414243' for the bytes 'ABC'."
+        )));
+    };
+    if hex.len() % 2 != 0 {
+        return Err(Error::forward_refusal(format!(
+            "bytea literal '\\x{hex}' has an odd number of nibbles. \
+             PostgreSQL requires pairs of hex digits."
+        )));
+    }
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::forward_refusal(format!(
+            "bytea literal '\\x{hex}' contains a non-hex character."
+        )));
+    }
+    Ok(simple_function_expr("unhex", vec![string_literal(hex)], None))
+}
+
+/// Rewrites bytea hex literals at bytea-column positions to `unhex()` calls.
+fn wrap_bytea_hex_literals(
+    insert: &mut Insert,
+    table: Option<&ParserTable>,
+    schema: &ParserDB,
+) -> Result<(), Error> {
+    let Some(table) = table else { return Ok(()) };
+    let bytea_cols: Vec<String> = table
+        .columns(schema)
+        .map_err(|e| Error::forward_refusal(format!("schema lookup failed: {e}")))?
+        .filter(|column| is_bytea_data_type(&column.attribute().data_type))
+        .map(|column| column.column_name().to_string())
+        .collect();
+    if bytea_cols.is_empty() {
+        return Ok(());
+    }
+    let column_names = insert_column_names(insert, table, schema)?;
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
+        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
+        if bytea_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name)) {
+            maybe_convert_bytea_hex_literal(expr)
         } else {
             Ok(expr)
         }

@@ -208,3 +208,35 @@ pub(crate) fn uuid_blob_length_check_expr(column_name: &Ident) -> Expr {
         })),
     }
 }
+
+/// The canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` form of a UUID, or
+/// `None` when the text is not a valid UUID spelling.
+pub(crate) fn canonical_uuid_hyphenated(text: &str) -> Option<String> {
+    let hex = canonical_uuid_hex(text)?.to_ascii_lowercase();
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32],
+    ))
+}
+
+/// If `expr` is a single-quoted string literal, validate and canonicalize it
+/// for TEXT UUID storage, matching what PostgreSQL stores.
+///
+/// Non-literals pass through. An invalid literal is refused.
+pub(crate) fn maybe_canonicalize_text_uuid_literal(
+    expr: Expr,
+) -> Result<Expr, crate::errors::Error> {
+    let Some(text) = single_quoted_literal(&expr) else { return Ok(expr) };
+    match canonical_uuid_hyphenated(text) {
+        None => {
+            Err(crate::errors::Error::forward_refusal(format!(
+                "invalid input syntax for type uuid: \"{text}\""
+            )))
+        }
+        Some(canonical) => Ok(string_literal(&canonical)),
+    }
+}

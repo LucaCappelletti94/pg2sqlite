@@ -18,6 +18,58 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    /// Two-column table used in multi-assignment maintenance trigger tests.
+    widgets (id) {
+        /// Widget ID.
+        id -> Integer,
+        /// Maintenance-target text field.
+        tag -> Nullable<Text>,
+        /// Second maintenance-target field.
+        slug -> Nullable<Text>,
+    }
+}
+
+#[derive(Queryable, Selectable, Debug)]
+#[diesel(table_name = widgets)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct Widget {
+    tag: Option<String>,
+    slug: Option<String>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = widgets)]
+struct NewWidget {
+    id: i32,
+    tag: Option<String>,
+    slug: Option<String>,
+}
+
+diesel::table! {
+    /// Single-assignment table for the WHEN-clause merge test.
+    w2 (id) {
+        /// Row ID.
+        id -> Integer,
+        /// Tag field maintained by the trigger under test.
+        tag -> Nullable<Text>,
+    }
+}
+
+#[derive(Queryable, Selectable, Debug)]
+#[diesel(table_name = w2)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct W2Row {
+    tag: Option<String>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = w2)]
+struct NewW2 {
+    id: i32,
+    tag: Option<String>,
+}
+
 /// A brand record with auto-updated edit timestamp.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = brands)]
@@ -174,8 +226,12 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
         .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
         .expect("translated trigger statement should exist");
     assert!(
-        trigger_sql.contains("UPDATE OF id, name ON brands"),
-        "maintenance trigger should exclude maintenance columns from UPDATE event: {trigger_sql}"
+        trigger_sql.contains("AFTER UPDATE ON brands"),
+        "maintenance trigger must be AFTER UPDATE: {trigger_sql}"
+    );
+    assert!(
+        trigger_sql.contains("WHEN"),
+        "maintenance trigger must carry a recursion-guard WHEN clause: {trigger_sql}"
     );
 
     let mut connection = SqliteConnection::establish(":memory:")?;
@@ -292,8 +348,12 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
         .find(|stmt| stmt.contains("CREATE TRIGGER trigger_upsert_brands_edited_at "))
         .expect("translated BEFORE UPDATE trigger should exist");
     assert!(
-        update_trigger_sql.contains("BEFORE UPDATE OF id, name ON brands"),
-        "maintenance update branch should remain BEFORE UPDATE: {update_trigger_sql}"
+        update_trigger_sql.contains("AFTER UPDATE ON brands"),
+        "maintenance update branch must be AFTER UPDATE: {update_trigger_sql}"
+    );
+    assert!(
+        update_trigger_sql.contains("WHEN"),
+        "maintenance update branch must carry a recursion-guard WHEN clause: {update_trigger_sql}"
     );
 
     let insert_trigger_sql = translated_sql
@@ -334,12 +394,14 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
         .set(brands::edited_at.eq("manual"))
         .execute(&mut connection)?;
 
+    // PostgreSQL fires the trigger even when the caller updates the
+    // maintained column directly: the WHEN clause stops the recursion and
+    // still lets the trigger run once.
     let updated =
         brands::table.filter(brands::id.eq(1)).select(Brand::as_select()).first(&mut connection)?;
-    assert_eq!(
-        updated.edited_at.as_deref(),
-        Some("manual"),
-        "UPDATE branch should exclude maintenance column to avoid self-recursion"
+    assert!(
+        updated.edited_at.as_deref() != Some("manual"),
+        "trigger must fire and override the manual value (PostgreSQL behaviour)"
     );
 
     Ok(())
@@ -394,8 +456,13 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
         .find(|trigger| trigger.name == "trigger_upsert_brands_edited_at")
         .expect("translated BEFORE UPDATE trigger should exist");
     assert!(
-        update_trigger.sql.contains("BEFORE UPDATE OF id, name ON brands"),
-        "maintenance update branch should remain BEFORE UPDATE: {}",
+        update_trigger.sql.contains("AFTER UPDATE ON brands"),
+        "maintenance update branch must be AFTER UPDATE: {}",
+        update_trigger.sql
+    );
+    assert!(
+        update_trigger.sql.contains("WHEN"),
+        "maintenance update branch must carry WHEN clause: {}",
         update_trigger.sql
     );
 
@@ -448,8 +515,12 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
         .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
         .expect("translated trigger statement should exist");
     assert!(
-        trigger_sql.contains("UPDATE OF id, name ON brands_rls"),
-        "maintenance trigger should target RLS table and exclude maintenance columns: {trigger_sql}"
+        trigger_sql.contains("AFTER UPDATE ON brands_rls"),
+        "maintenance trigger must be AFTER UPDATE on backing table: {trigger_sql}"
+    );
+    assert!(
+        trigger_sql.contains("WHEN"),
+        "maintenance trigger must carry a recursion-guard WHEN clause: {trigger_sql}"
     );
 
     let mut connection = SqliteConnection::establish(":memory:")?;
@@ -590,8 +661,12 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
         .find(|sql| sql.contains("CREATE TRIGGER trigger_update_brands_edited_at"))
         .expect("translated trigger statement should exist");
     assert!(
-        trigger_sql.contains("UPDATE OF id, name ON brands_rls"),
-        "maintenance trigger should target the backing table: {trigger_sql}"
+        trigger_sql.contains("AFTER UPDATE ON brands_rls"),
+        "maintenance trigger must target the backing table as AFTER UPDATE: {trigger_sql}"
+    );
+    assert!(
+        trigger_sql.contains("WHEN"),
+        "maintenance trigger must carry a WHEN clause: {trigger_sql}"
     );
 
     let mut connection = SqliteConnection::establish(":memory:")?;
@@ -611,4 +686,132 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
     assert_eq!(updated.name, "Nike");
 
     Ok(())
+}
+
+// ── Two-column maintenance trigger → OR condition in WHEN clause ─────────────
+
+/// A maintenance trigger that assigns to two columns emits a WHEN clause with
+/// two IS DISTINCT FROM conditions joined by OR (create_trigger.rs 318-320).
+/// One update changes both columns; recursion must not fire a second time.
+#[test]
+fn maintenance_trigger_two_columns_when_clause_uses_or() {
+    let sql = "
+CREATE TABLE widgets (id INT PRIMARY KEY, tag TEXT, slug TEXT);
+
+CREATE OR REPLACE FUNCTION widgets_maintain() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.tag := NEW.tag || '!';
+    NEW.slug := upper(NEW.slug);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER widgets_maint BEFORE UPDATE ON widgets
+FOR EACH ROW EXECUTE FUNCTION widgets_maintain();
+";
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate");
+
+    let trigger_sql = stmts
+        .iter()
+        .map(ToString::to_string)
+        .find(|s| s.contains("AFTER UPDATE"))
+        .expect("maintenance trigger must be in output");
+    assert!(
+        trigger_sql.matches("IS DISTINCT FROM").count() >= 2,
+        "two maintained columns must produce two IS DISTINCT FROM clauses: {trigger_sql}"
+    );
+    assert!(trigger_sql.contains(" OR "), "two conditions must be joined by OR: {trigger_sql}");
+
+    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
+    for stmt in &stmts {
+        diesel::sql_query(stmt.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("DDL: {e}\n{stmt}"));
+    }
+    diesel::insert_into(widgets::table)
+        .values(&NewWidget { id: 1, tag: Some("hello".into()), slug: Some("world".into()) })
+        .execute(&mut conn)
+        .expect("insert");
+    // Trigger fires on UPDATE: tag gets '!', slug gets uppercased.
+    diesel::update(widgets::table.filter(widgets::id.eq(1)))
+        .set((widgets::tag.eq("hello"), widgets::slug.eq("world")))
+        .execute(&mut conn)
+        .expect("update");
+    let w = widgets::table
+        .filter(widgets::id.eq(1))
+        .select(Widget::as_select())
+        .first(&mut conn)
+        .expect("select");
+    assert_eq!(w.tag.as_deref(), Some("hello!"), "tag must have '!' appended by maintenance");
+    assert_eq!(w.slug.as_deref(), Some("WORLD"), "slug must be uppercased by maintenance");
+}
+
+// ── Maintenance trigger with a source WHEN clause → AND merge ────────────────
+
+/// When the source trigger already has a WHEN clause, the recursion guard
+/// appended by the translation is ANDed with it (create_trigger.rs 327-332,
+/// line 657).  The merged clause must contain both predicates.
+#[test]
+fn maintenance_trigger_with_source_when_clause_merges_recursion_guard() {
+    let sql = "
+CREATE TABLE w2 (id INT PRIMARY KEY, tag TEXT);
+
+CREATE OR REPLACE FUNCTION w2_maintain() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.tag := NEW.tag || '!';
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER w2_maint BEFORE UPDATE ON w2
+FOR EACH ROW WHEN (OLD.id > 0) EXECUTE FUNCTION w2_maintain();
+";
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate");
+
+    let trigger_sql = stmts
+        .iter()
+        .map(ToString::to_string)
+        .find(|s| s.contains("AFTER UPDATE"))
+        .expect("maintenance trigger must be in output");
+    // Source WHEN (OLD.id > 0) merged with recursion guard using AND.
+    assert!(trigger_sql.contains(" AND "), "merged WHEN clause must use AND: {trigger_sql}");
+    assert!(
+        trigger_sql.contains("OLD.id"),
+        "source WHEN predicate must survive the merge: {trigger_sql}"
+    );
+    assert!(
+        trigger_sql.contains("IS DISTINCT FROM"),
+        "recursion guard must be present: {trigger_sql}"
+    );
+    // Execute: trigger fires only when OLD.id > 0, which is always true here.
+    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
+    for stmt in &stmts {
+        diesel::sql_query(stmt.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("DDL: {e}\n{stmt}"));
+    }
+    // Typed Diesel DSL for DML; translator-emitted DDL above uses sql_query
+    // (dynamic schema).
+    diesel::insert_into(w2::table)
+        .values(&NewW2 { id: 1, tag: Some("hi".into()) })
+        .execute(&mut conn)
+        .expect("insert");
+    diesel::update(w2::table.filter(w2::id.eq(1)))
+        .set(w2::tag.eq("hi"))
+        .execute(&mut conn)
+        .expect("update");
+    // After UPDATE the maintenance trigger fires and appends '!'.
+    let row =
+        w2::table.filter(w2::id.eq(1)).select(W2Row::as_select()).first(&mut conn).expect("select");
+    assert_eq!(row.tag.as_deref(), Some("hi!"), "maintenance trigger must have appended '!'");
 }

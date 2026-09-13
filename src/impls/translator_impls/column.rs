@@ -25,8 +25,10 @@ use crate::{
         shared_helpers::{minor_unit_scale, scale_decimal_literal},
         translator_impls::{
             data_type::{
+                bit_exact_length_check_expr, bit_length, bit_max_length_check_expr,
                 character_length, character_length_bound_expr, exact_numeric_info, is_serial_type,
                 numeric_precision_and_scale, numeric_precision_bound_expr,
+                regular_int_range_bound_expr, small_int_range_bound_expr,
             },
             uuid::{
                 is_blob_uuid_representation, is_uuid_data_type, uuid_blob_length_check_expr,
@@ -287,45 +289,12 @@ pub(crate) fn translate_column_def(
         .flatten()
         .collect();
 
-    // Belt-and-braces for UUID-Blob columns: a column-level
-    // `CHECK (length(<col>) = 16)` so parameterised inserts (which
-    // bypass the translate-time text-literal wrap) still get
-    // rejected by SQLite when the bound value is not 16 bytes.
-    if is_uuid_data_type(&column.data_type) && is_blob_uuid_representation(options) {
+    for bound in declared_bound_checks(column, options)? {
         translated_options.push(ColumnOptionDef {
             name: None,
             option: ColumnOption::Check(CheckConstraint {
                 name: None,
-                expr: Box::new(uuid_blob_length_check_expr(&column.name)),
-                enforced: None,
-                no_inherit: false,
-            }),
-        });
-    }
-
-    // SQLite promotes an overflowing integer to REAL with no error, so
-    // without this bound an out-of-range value becomes a float.
-    if let Some(info) = exact_numeric_info(&column.data_type) {
-        let (precision, _) = numeric_precision_and_scale(info)?;
-        translated_options.push(ColumnOptionDef {
-            name: None,
-            option: ColumnOption::Check(CheckConstraint {
-                name: None,
-                expr: Box::new(numeric_precision_bound_expr(&column.name, precision)),
-                enforced: None,
-                no_inherit: false,
-            }),
-        });
-    }
-
-    // PostgreSQL refuses a value longer than a declared character length,
-    // so the bound travels as a CHECK rather than disappearing into TEXT.
-    if let Some(length) = character_length(&column.data_type)? {
-        translated_options.push(ColumnOptionDef {
-            name: None,
-            option: ColumnOption::Check(CheckConstraint {
-                name: None,
-                expr: Box::new(character_length_bound_expr(&column.name, length)),
+                expr: Box::new(bound),
                 enforced: None,
                 no_inherit: false,
             }),
@@ -339,6 +308,57 @@ pub(crate) fn translate_column_def(
         data_type: column.data_type.translate_with_warnings(schema, options, emit)?,
         options: translated_options,
     })
+}
+
+/// Every bound PostgreSQL enforces through the column's declared type, as
+/// `CHECK` expressions SQLite can enforce for itself.
+///
+/// SQLite's `INTEGER` is 64 bits and its `TEXT` is unbounded, and it promotes
+/// an overflowing integer to `REAL` rather than failing, so without these a
+/// replica would hold values PostgreSQL refuses. The UUID bound is here for
+/// the same reason it is a `CHECK` rather than a translate-time rewrite: a
+/// bound parameter never passes through the literal rewrites.
+fn declared_bound_checks(
+    column: &ColumnDef,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Vec<Expr>, crate::errors::Error> {
+    let mut bounds = Vec::new();
+    if is_uuid_data_type(&column.data_type) && is_blob_uuid_representation(options) {
+        bounds.push(uuid_blob_length_check_expr(&column.name));
+    }
+    if let Some(info) = exact_numeric_info(&column.data_type) {
+        let (precision, _) = numeric_precision_and_scale(info)?;
+        bounds.push(numeric_precision_bound_expr(&column.name, precision));
+    }
+    if let Some(bound) = integer_range_bound(column) {
+        bounds.push(bound);
+    }
+    if let Some(length) = character_length(&column.data_type)? {
+        bounds.push(character_length_bound_expr(&column.name, length));
+    }
+    if let Some((fixed, Some(n))) = bit_length(&column.data_type) {
+        bounds.push(if fixed {
+            bit_exact_length_check_expr(&column.name, n)
+        } else {
+            bit_max_length_check_expr(&column.name, n)
+        });
+    }
+    Ok(bounds)
+}
+
+/// The `CHECK` bound a narrower PostgreSQL integer needs.
+///
+/// SQLite's `INTEGER` is 64 bits, so a `smallint` or an `integer` column
+/// would hold values PostgreSQL refuses outright, and a replica that then
+/// replayed the row against the server would fail there instead.
+fn integer_range_bound(column: &ColumnDef) -> Option<Expr> {
+    match column.data_type {
+        DataType::SmallInt(_) | DataType::Int2(_) => Some(small_int_range_bound_expr(&column.name)),
+        DataType::Int(_) | DataType::Integer(_) | DataType::Int4(_) => {
+            Some(regular_int_range_bound_expr(&column.name))
+        }
+        _ => None,
+    }
 }
 
 /// Refuses an identity column whose sequence options the rowid cannot honour.
@@ -413,9 +433,8 @@ fn no_value_source(column: &Ident, is_serial: bool) -> Error {
 
 /// Reports what a column's declared type loses on the way to SQLite.
 ///
-/// Only losses the emitted schema cannot make good. A declared character
-/// length is not here, because it survives as a `CHECK`, and `NUMERIC` is not
-/// here because D1 maps it exactly.
+/// Declared character length and NUMERIC are excluded: both survive as CHECKs
+/// or minor-unit storage (D1).
 fn report_column_downgrades(
     column: &ColumnDef,
     table: &ObjectName,
@@ -436,9 +455,8 @@ fn report_column_downgrades(
         });
     }
 
-    // SQLite has no zone-aware temporal type. The column becomes TEXT holding
-    // whatever offset the writer put in it, and nothing converts or compares
-    // it as an instant, so the zone is the caller's to carry from here.
+    // SQLite has no zone-aware temporal type; values compare as text, not as
+    // instants.
     if matches!(
         column.data_type,
         DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
@@ -448,9 +466,39 @@ fn report_column_downgrades(
             construct: "WITH TIME ZONE".to_string(),
             from: column.data_type.to_string(),
             to: "TEXT".to_string(),
+            location: location.clone(),
+            reason: "SQLite has no zone-aware temporal type, so the value is stored as text. \
+                     Equality and ordering compare text, not instants: two values that name the \
+                     same moment in different offsets (+02:00 vs +00:00) compare unequal."
+                .to_string(),
+        });
+    }
+
+    // jsonb normalises key order, whitespace, and duplicate keys on write; TEXT
+    // stores verbatim.
+    if matches!(column.data_type, DataType::JSONB) {
+        emit(crate::warnings::TranslationWarning::LossyDowngrade {
+            construct: "JSONB".to_string(),
+            from: "JSONB".to_string(),
+            to: "TEXT".to_string(),
+            location: location.clone(),
+            reason: "PostgreSQL normalises key order and removes duplicate keys on write; \
+                     the replica stores the value verbatim, so ::text projections and \
+                     equality against a normalised literal diverge."
+                .to_string(),
+        });
+    }
+
+    // tsvector parses input into sorted, deduplicated lexemes; TEXT stores the
+    // raw string.
+    if matches!(column.data_type, DataType::TsVector) {
+        emit(crate::warnings::TranslationWarning::LossyDowngrade {
+            construct: "TSVECTOR".to_string(),
+            from: "TSVECTOR".to_string(),
+            to: "TEXT".to_string(),
             location,
-            reason: "SQLite has no zone-aware temporal type, so the value is stored as written \
-                     and no longer names an instant on its own."
+            reason: "PostgreSQL parses tsvector input into normalised lexemes on write; \
+                     the replica stores the raw string, so ::text projections differ."
                 .to_string(),
         });
     }

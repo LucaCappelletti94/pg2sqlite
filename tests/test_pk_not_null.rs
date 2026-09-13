@@ -10,7 +10,8 @@ fn test_pk_simple_int_nullable() {
     assert_eq!(translated.len(), 1);
     assert_eq!(
         translated[0].to_string(),
-        "CREATE TABLE test_int (id INTEGER PRIMARY KEY NOT NULL) STRICT"
+        "CREATE TABLE test_int (id INTEGER PRIMARY KEY CHECK (id BETWEEN -2147483648 AND \
+         2147483647) NOT NULL) STRICT"
     );
 }
 
@@ -22,7 +23,8 @@ fn test_pk_simple_int_not_null() {
     assert_eq!(translated.len(), 1);
     assert_eq!(
         translated[0].to_string(),
-        "CREATE TABLE test_int_nn (id INTEGER PRIMARY KEY NOT NULL) STRICT"
+        "CREATE TABLE test_int_nn (id INTEGER PRIMARY KEY NOT NULL CHECK (id BETWEEN \
+         -2147483648 AND 2147483647)) STRICT"
     );
 }
 
@@ -59,6 +61,7 @@ fn test_pk_composite() {
     assert_eq!(translated.len(), 1);
     assert_eq!(
         translated[0].to_string(),
-        "CREATE TABLE test_composite (id1 INTEGER NOT NULL, id2 TEXT NOT NULL, PRIMARY KEY (id1, id2)) STRICT"
+        "CREATE TABLE test_composite (id1 INTEGER CHECK (id1 BETWEEN -2147483648 AND \
+         2147483647) NOT NULL, id2 TEXT NOT NULL, PRIMARY KEY (id1, id2)) STRICT"
     );
 }
