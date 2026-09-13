@@ -29,5 +29,6 @@ pub(crate) mod session_variable;
 pub(crate) mod shared_helpers;
 pub(crate) mod sqlite_functions;
 pub(crate) mod temporal_arithmetic;
+pub(crate) mod temporal_literals;
 pub(crate) mod timezone;
 pub(crate) mod translator_impls;

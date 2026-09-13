@@ -112,6 +112,42 @@ fn finite_float_is_accepted() {
     );
 }
 
+#[test]
+fn nan_written_into_a_double_column_is_refused() {
+    // No cast: the column's own type is what makes 'NaN' a float here, and
+    // the emitted INSERT used to die at apply with "cannot store TEXT value
+    // in REAL column".
+    expect_refusal(
+        "CREATE TABLE t (col double precision);
+         INSERT INTO t (col) VALUES ('NaN');",
+        &default_opts(),
+        "NaN",
+    );
+}
+
+#[test]
+fn infinity_compared_against_a_double_column_is_refused() {
+    // `col = 'Infinity'` compares a REAL against TEXT in SQLite, which is
+    // never equal, where PostgreSQL matches every infinite row.
+    expect_refusal(
+        "CREATE TABLE t (col double precision);
+         SELECT * FROM t WHERE col = 'Infinity';",
+        &default_opts(),
+        "Infinity",
+    );
+}
+
+#[test]
+fn a_finite_string_literal_in_a_double_column_still_translates() {
+    let rows = query_rows(
+        "CREATE TABLE t (col double precision);
+         INSERT INTO t (col) VALUES ('1.5');
+         SELECT col FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("1.5".to_string())]);
+}
+
 // ── Finding 2: BIT / BIT VARYING → TEXT with length CHECK ───────────────────
 
 #[test]
@@ -176,6 +212,62 @@ fn bit_varying_n_accepts_at_boundary_and_rejects_past_it() {
     let err = conn
         .execute_batch("INSERT INTO t VALUES ('1010');")
         .expect_err("4-bit value into bit varying(3) must fail");
+    assert!(err.to_string().contains("CHECK"), "rejection must come from CHECK, got: {err}");
+}
+
+#[test]
+fn a_bit_string_literal_is_translated_to_its_digits() {
+    // B'010' is PostgreSQL's own spelling of a bit string; emitted verbatim
+    // it is a syntax error in SQLite.
+    let rows = query_rows(
+        "CREATE TABLE t (col bit varying(8));
+         INSERT INTO t (col) VALUES (B'010');
+         SELECT col FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("010".to_string())]);
+}
+
+#[test]
+fn a_hex_bit_literal_is_expanded_to_bits() {
+    // PostgreSQL answers '00011010' for X'1A'::text, four bits per digit.
+    let rows = query_rows(
+        "CREATE TABLE t (col bit(8));
+         INSERT INTO t (col) VALUES (X'1A');
+         SELECT col FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("00011010".to_string())]);
+}
+
+#[test]
+fn a_non_binary_digit_in_a_bit_column_is_refused() {
+    // PostgreSQL answers `"2" is not a valid binary digit`; the replica
+    // stored '012' because the CHECK counted length only.
+    expect_refusal(
+        "CREATE TABLE t (col bit(3));
+         INSERT INTO t (col) VALUES ('012');",
+        &default_opts(),
+        "binary digit",
+    );
+}
+
+#[test]
+fn a_non_binary_value_written_later_fails_the_check() {
+    // A write the translator never sees must fail in the replica too.
+    let conn = Connection::open_in_memory().unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql("CREATE TABLE t (col bit(3));")
+        .expect("parse")
+        .translate_to_sql(&default_opts())
+        .expect("translate");
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("DDL failed: {e}\n{s}"));
+    }
+    conn.execute_batch("INSERT INTO t VALUES ('010');").expect("three binary digits");
+    let err = conn
+        .execute_batch("INSERT INTO t VALUES ('012');")
+        .expect_err("a non-binary digit must fail the CHECK");
     assert!(err.to_string().contains("CHECK"), "rejection must come from CHECK, got: {err}");
 }
 
@@ -332,6 +424,30 @@ fn string_cast_to_integer_array_is_refused() {
     );
 }
 
+#[test]
+fn a_string_literal_written_into_an_array_column_is_refused() {
+    // No cast: the column's type is what makes '{1,2}' an array here, and
+    // the replica stored PostgreSQL array text in a column holding JSON, so
+    // every later array operation failed with "malformed JSON".
+    expect_refusal(
+        "CREATE TABLE t (col integer[]);
+         INSERT INTO t (col) VALUES ('{1,2}');",
+        &array_opts(),
+        "ARRAY",
+    );
+}
+
+#[test]
+fn an_array_constructor_still_translates() {
+    let rows = query_rows(
+        "CREATE TABLE t (col integer[]);
+         INSERT INTO t (col) VALUES (ARRAY[1,2]);
+         SELECT col FROM t;",
+        &array_opts(),
+    );
+    assert_eq!(rows, vec![Some("[1,2]".to_string())]);
+}
+
 // ── Finding 7: UUID Text representation neither validates nor canonicalises
 // ───
 
@@ -382,6 +498,537 @@ fn uuid_text_bare_invalid_in_insert_is_refused() {
         &text_uuid_opts(),
         "invalid input syntax for type uuid",
     );
+}
+
+// ── Finding 8: temporal literals unvalidated and un-normalised ───────────────
+
+#[test]
+fn a_month_out_of_range_is_refused() {
+    // PostgreSQL: date/time field value out of range: "2024-13-01".
+    expect_refusal(
+        "CREATE TABLE t (d date);
+         INSERT INTO t (d) VALUES ('2024-13-01');",
+        &default_opts(),
+        "2024-13-01",
+    );
+}
+
+#[test]
+fn a_day_past_the_end_of_the_month_is_refused() {
+    expect_refusal(
+        "CREATE TABLE t (d date);
+         INSERT INTO t (d) VALUES ('2024-02-30');",
+        &default_opts(),
+        "2024-02-30",
+    );
+}
+
+#[test]
+fn february_29_is_refused_outside_a_leap_year_and_kept_inside_one() {
+    expect_refusal(
+        "CREATE TABLE t (d date);
+         INSERT INTO t (d) VALUES ('2023-02-29');",
+        &default_opts(),
+        "2023-02-29",
+    );
+    let rows = query_rows(
+        "CREATE TABLE t (d date);
+         INSERT INTO t (d) VALUES ('2024-02-29');
+         SELECT d FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-02-29".to_string())]);
+}
+
+#[test]
+fn a_single_digit_month_and_day_are_padded() {
+    // PostgreSQL answers 2024-03-05, and SQLite's own date functions answer
+    // NULL for '2024-3-5', so the padding is what makes the stored value
+    // usable at all.
+    let rows = query_rows(
+        "CREATE TABLE t (d date);
+         INSERT INTO t (d) VALUES ('2024-3-5');
+         SELECT strftime('%Y/%m', d) FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024/03".to_string())]);
+}
+
+#[test]
+fn a_time_literal_is_filled_out_to_seconds() {
+    // PostgreSQL answers 02:30:00 for '2:30'::time.
+    let rows = query_rows(
+        "CREATE TABLE t (tm time);
+         INSERT INTO t (tm) VALUES ('2:30');
+         SELECT tm FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("02:30:00".to_string())]);
+}
+
+#[test]
+fn an_hour_past_the_end_of_the_day_is_refused() {
+    expect_refusal(
+        "CREATE TABLE t (tm time);
+         INSERT INTO t (tm) VALUES ('25:00:00');",
+        &default_opts(),
+        "25:00:00",
+    );
+}
+
+#[test]
+fn the_end_of_day_hour_rolls_a_timestamp_over() {
+    // PostgreSQL answers 2024-03-06 00:00:00 for a timestamp written at
+    // 24:00:00, while a time column keeps the hour.
+    let rows = query_rows(
+        "CREATE TABLE t (ts timestamp);
+         INSERT INTO t (ts) VALUES ('2024-03-05 24:00:00');
+         SELECT ts FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-03-06 00:00:00".to_string())]);
+}
+
+#[test]
+fn the_end_of_day_hour_is_accepted() {
+    // PostgreSQL takes 24:00:00 as a time and answers it back.
+    let rows = query_rows(
+        "CREATE TABLE t (tm time);
+         INSERT INTO t (tm) VALUES ('24:00:00');
+         SELECT tm FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("24:00:00".to_string())]);
+}
+
+#[test]
+fn a_sloppy_timestamp_is_normalised() {
+    // PostgreSQL answers 2024-01-02 03:04:00.
+    let rows = query_rows(
+        "CREATE TABLE t (ts timestamp);
+         INSERT INTO t (ts) VALUES ('2024-1-2 3:4');
+         SELECT ts FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-01-02 03:04:00".to_string())]);
+}
+
+#[test]
+fn an_iso_t_separator_becomes_a_space() {
+    // PostgreSQL prints a space, and the replica's text has to match so a
+    // row written through either database compares equal.
+    let rows = query_rows(
+        "CREATE TABLE t (ts timestamp);
+         INSERT INTO t (ts) VALUES ('2024-03-05T14:07:09');
+         SELECT ts FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-03-05 14:07:09".to_string())]);
+}
+
+#[test]
+fn a_fractional_second_is_kept() {
+    let rows = query_rows(
+        "CREATE TABLE t (ts timestamp);
+         INSERT INTO t (ts) VALUES ('2024-03-05 14:07:09.123');
+         SELECT ts FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-03-05 14:07:09.123".to_string())]);
+}
+
+#[test]
+fn a_style_dependent_date_is_refused() {
+    // '1/2/2024' is 2 January under the default DateStyle and 1 February
+    // under DMY, which is server state the translator cannot read.
+    expect_refusal(
+        "CREATE TABLE t (d date);
+         INSERT INTO t (d) VALUES ('1/2/2024');",
+        &default_opts(),
+        "1/2/2024",
+    );
+}
+
+#[test]
+fn a_relative_date_keyword_is_refused() {
+    // 'today' is resolved when PostgreSQL reads it, so storing the word
+    // itself would freeze a value that was meant to be a date.
+    expect_refusal(
+        "CREATE TABLE t (d date);
+         INSERT INTO t (d) VALUES ('today');",
+        &default_opts(),
+        "today",
+    );
+}
+
+#[test]
+fn a_comparison_literal_is_normalised_too() {
+    // The stored value is padded, so an unpadded literal in a comparison
+    // would match nothing.
+    let rows = query_rows(
+        "CREATE TABLE t (d date);
+         INSERT INTO t (d) VALUES ('2024-03-05');
+         SELECT d FROM t WHERE d = '2024-3-5';",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-03-05".to_string())]);
+}
+
+#[test]
+fn a_timestamptz_offset_is_still_filled_out() {
+    let rows = query_rows(
+        "CREATE TABLE t (ts timestamptz);
+         INSERT INTO t (ts) VALUES ('2024-01-02 03:04:05+02');
+         SELECT ts FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-01-02 03:04:05+02:00".to_string())]);
+}
+
+#[test]
+fn a_cast_to_date_validates_its_literal() {
+    expect_refusal("SELECT '2024-13-01'::date;", &default_opts(), "2024-13-01");
+}
+
+#[test]
+fn a_cast_to_date_normalises_its_literal() {
+    let rows = query_rows("SELECT '2024-3-5'::date;", &default_opts());
+    assert_eq!(rows, vec![Some("2024-03-05".to_string())]);
+}
+
+#[test]
+fn an_update_assignment_normalises_its_literal() {
+    let rows = query_rows(
+        "CREATE TABLE t (id int primary key, d date);
+         INSERT INTO t (id, d) VALUES (1, '2024-01-01');
+         UPDATE t SET d = '2024-3-5' WHERE id = 1;
+         SELECT d FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-03-05".to_string())]);
+}
+
+#[test]
+fn an_update_assignment_validates_its_literal() {
+    expect_refusal(
+        "CREATE TABLE t (id int primary key, d date);
+         UPDATE t SET d = '2024-13-01' WHERE id = 1;",
+        &default_opts(),
+        "2024-13-01",
+    );
+}
+
+/// Every expected value here is what PostgreSQL 17 prints for the literal,
+/// measured in Docker under the default `IntervalStyle`.
+fn interval_text(literal: &str) -> Vec<Option<String>> {
+    query_rows(
+        &format!(
+            "CREATE TABLE t (iv interval);
+             INSERT INTO t (iv) VALUES ('{literal}');
+             SELECT iv FROM t;"
+        ),
+        &default_opts(),
+    )
+}
+
+#[test]
+fn an_iso_interval_is_printed_as_a_clock() {
+    assert_eq!(interval_text("PT15M"), vec![Some("00:15:00".to_string())]);
+}
+
+#[test]
+fn interval_minutes_carry_into_hours() {
+    assert_eq!(interval_text("90 minutes"), vec![Some("01:30:00".to_string())]);
+}
+
+#[test]
+fn interval_days_stay_apart_from_the_time_of_day() {
+    assert_eq!(interval_text("1 day 2:03:04"), vec![Some("1 day 02:03:04".to_string())]);
+    // Hours beyond a day are not folded into one, as PostgreSQL does not.
+    assert_eq!(interval_text("26 hours"), vec![Some("26:00:00".to_string())]);
+    // A written clock reading never becomes a day count either.
+    assert_eq!(interval_text("100:00:00"), vec![Some("100:00:00".to_string())]);
+    assert_eq!(interval_text("24:00:00"), vec![Some("24:00:00".to_string())]);
+}
+
+#[test]
+fn a_fraction_of_a_month_becomes_days() {
+    assert_eq!(interval_text("1.5 months"), vec![Some("1 mon 15 days".to_string())]);
+    assert_eq!(interval_text("1.05 months"), vec![Some("1 mon 1 day 12:00:00".to_string())]);
+}
+
+#[test]
+fn interval_months_carry_into_years() {
+    assert_eq!(interval_text("12 months"), vec![Some("1 year".to_string())]);
+    assert_eq!(interval_text("1-2"), vec![Some("1 year 2 mons".to_string())]);
+}
+
+#[test]
+fn an_interval_written_backwards_is_negated() {
+    assert_eq!(interval_text("2 days ago"), vec![Some("-2 days".to_string())]);
+}
+
+#[test]
+fn a_zero_interval_is_printed_as_a_zero_clock() {
+    assert_eq!(interval_text("0"), vec![Some("00:00:00".to_string())]);
+}
+
+#[test]
+fn a_bare_interval_number_counts_seconds() {
+    assert_eq!(interval_text("5"), vec![Some("00:00:05".to_string())]);
+}
+
+#[test]
+fn an_unreadable_interval_is_refused() {
+    expect_refusal(
+        "CREATE TABLE t (iv interval);
+         INSERT INTO t (iv) VALUES ('every other tuesday');",
+        &default_opts(),
+        "every other tuesday",
+    );
+}
+
+#[test]
+fn an_interval_comparison_literal_is_normalised_too() {
+    let rows = query_rows(
+        "CREATE TABLE t (iv interval);
+         INSERT INTO t (iv) VALUES ('90 minutes');
+         SELECT iv FROM t WHERE iv = 'PT1H30M';",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("01:30:00".to_string())]);
+}
+
+#[test]
+fn a_cast_to_interval_is_normalised() {
+    let rows = query_rows("SELECT 'PT15M'::interval;", &default_opts());
+    assert_eq!(rows, vec![Some("00:15:00".to_string())]);
+}
+
+/// Refuses a literal written into a temporal column of `kind`, returning the
+/// message.
+fn temporal_refusal(kind: &str, literal: &str) -> String {
+    Pg2Sqlite::default()
+        .sql(&format!(
+            "CREATE TABLE t (v {kind});
+             INSERT INTO t (v) VALUES ('{literal}');"
+        ))
+        .expect("parse")
+        .translate(&default_opts())
+        .expect_err("expected a refusal")
+        .to_string()
+}
+
+#[test]
+fn an_offset_in_a_column_without_a_zone_is_refused() {
+    // Stored as text, the offset would be kept where PostgreSQL drops it,
+    // so the two databases would disagree about the instant.
+    let message = temporal_refusal("timestamp", "2024-01-02 03:04:05+02");
+    assert!(message.contains("no time zone"), "{message}");
+}
+
+#[test]
+fn a_zoned_time_column_takes_an_offset() {
+    let rows = query_rows(
+        "CREATE TABLE t (v time with time zone);
+         INSERT INTO t (v) VALUES ('2:30+02');
+         SELECT v FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("02:30:00+02:00".to_string())]);
+}
+
+#[test]
+fn a_utc_marker_becomes_a_zero_offset() {
+    let rows = query_rows(
+        "CREATE TABLE t (v timestamptz);
+         INSERT INTO t (v) VALUES ('2024-01-02T03:04:05Z');
+         SELECT v FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-01-02 03:04:05+00:00".to_string())]);
+}
+
+#[test]
+fn an_impossible_offset_is_refused() {
+    // PostgreSQL's offsets run to ±15:59; anything past that is not a zone.
+    let message = temporal_refusal("timestamptz", "2024-01-02 03:04:05+20");
+    assert!(message.contains("out of range"), "{message}");
+    let too_many = temporal_refusal("timestamptz", "2024-01-02 03:04:05+02:00:00");
+    assert!(too_many.contains("too many parts"), "{too_many}");
+}
+
+#[test]
+fn the_other_locale_dependent_forms_are_refused() {
+    for literal in ["Jan 2 2024", "2 January 2024"] {
+        let message = temporal_refusal("date", literal);
+        assert!(message.contains("locale"), "{literal}: {message}");
+    }
+    let clock = temporal_refusal("time", "12:00:00 PM");
+    assert!(clock.contains("12-hour"), "{clock}");
+    let keyword = temporal_refusal("timestamp", "infinity");
+    assert!(keyword.contains("keyword"), "{keyword}");
+}
+
+#[test]
+fn a_date_of_the_wrong_shape_is_refused() {
+    for literal in ["2024-03", "2024-03-05-06", "2024-ab-05", "0000-01-01"] {
+        let message = temporal_refusal("date", literal);
+        assert!(message.contains(literal), "{literal}: {message}");
+    }
+}
+
+#[test]
+fn a_time_of_the_wrong_shape_is_refused() {
+    for literal in ["12", "12:00:00:00", "12:60:00", "12:00:00."] {
+        let message = temporal_refusal("time", literal);
+        assert!(message.contains(literal), "{literal}: {message}");
+    }
+    let leap = temporal_refusal("time", "23:59:60");
+    assert!(leap.contains("second=60"), "{leap}");
+}
+
+#[test]
+fn the_end_of_day_hour_rolls_the_month_and_the_year_over() {
+    let rows = query_rows(
+        "CREATE TABLE t (id int primary key, ts timestamp);
+         INSERT INTO t (id, ts) VALUES (1, '2024-02-29 24:00:00'), (2, '2024-12-31 24:00:00');
+         SELECT ts FROM t ORDER BY id;",
+        &default_opts(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("2024-03-01 00:00:00".to_string()), Some("2025-01-01 00:00:00".to_string())]
+    );
+}
+
+/// Refuses an interval literal, returning the message.
+fn interval_refusal(literal: &str) -> String {
+    Pg2Sqlite::default()
+        .sql(&format!(
+            "CREATE TABLE t (iv interval);
+             INSERT INTO t (iv) VALUES ('{literal}');"
+        ))
+        .expect("parse")
+        .translate(&default_opts())
+        .expect_err("expected a refusal")
+        .to_string()
+}
+
+#[test]
+fn an_interval_unit_postgresql_does_not_have_is_refused() {
+    let message = interval_refusal("2 fortnights");
+    assert!(message.contains("not an interval unit"), "{message}");
+}
+
+#[test]
+fn an_interval_count_without_a_unit_is_refused() {
+    let dangling = interval_refusal("2 3 days");
+    assert!(dangling.contains("names no unit"), "{dangling}");
+    let unitless = interval_refusal("days");
+    assert!(unitless.contains("has no count"), "{unitless}");
+}
+
+#[test]
+fn an_interval_clock_of_the_wrong_shape_is_refused() {
+    let message = interval_refusal("1:2:3:4");
+    assert!(message.contains("three parts at most"), "{message}");
+}
+
+#[test]
+fn an_iso_interval_of_the_wrong_shape_is_refused() {
+    let designator = interval_refusal("P1X");
+    assert!(designator.contains("designator"), "{designator}");
+    let hour_before_t = interval_refusal("P1H");
+    assert!(hour_before_t.contains("designator"), "{hour_before_t}");
+    let no_designator = interval_refusal("P1Y2");
+    assert!(no_designator.contains("unit designator"), "{no_designator}");
+}
+
+#[test]
+fn interval_counts_keep_their_own_signs() {
+    assert_eq!(interval_text("1 mon -1 day"), vec![Some("1 mon -1 days".to_string())]);
+    assert_eq!(interval_text("1 day -02:00:00"), vec![Some("1 day -02:00:00".to_string())]);
+    assert_eq!(interval_text("PT-1H"), vec![Some("-01:00:00".to_string())]);
+}
+
+#[test]
+fn an_interval_second_keeps_its_microseconds() {
+    assert_eq!(interval_text("1.000001 seconds"), vec![Some("00:00:01.000001".to_string())]);
+    assert_eq!(interval_text("1 microsecond"), vec![Some("00:00:00.000001".to_string())]);
+}
+
+#[test]
+fn an_interval_written_as_one_token_is_read() {
+    assert_eq!(interval_text("1day"), vec![Some("1 day".to_string())]);
+    assert_eq!(interval_text("@ 1 day"), vec![Some("1 day".to_string())]);
+}
+
+#[test]
+fn interval_weeks_become_days() {
+    assert_eq!(interval_text("3 weeks"), vec![Some("21 days".to_string())]);
+    assert_eq!(interval_text("P1W"), vec![Some("7 days".to_string())]);
+}
+
+#[test]
+fn an_iso_interval_reads_every_designator() {
+    assert_eq!(
+        interval_text("P1Y2M3DT4H5M6S"),
+        vec![Some("1 year 2 mons 3 days 04:05:06".to_string())]
+    );
+}
+
+#[test]
+fn a_bare_count_before_a_clock_counts_days() {
+    // PostgreSQL reads '1 12:00' as one day and twelve hours.
+    assert_eq!(interval_text("1 12:00"), vec![Some("1 day 12:00:00".to_string())]);
+}
+
+#[test]
+fn a_negative_year_month_interval_signs_both_counts() {
+    assert_eq!(interval_text("-1-2"), vec![Some("-1 years -2 mons".to_string())]);
+}
+
+#[test]
+fn an_interval_count_that_is_not_a_number_is_refused() {
+    let message = interval_refusal("1.2.3 days");
+    assert!(message.contains("not a number"), "{message}");
+}
+
+#[test]
+fn a_zoned_time_column_refuses_what_it_cannot_read() {
+    let message = temporal_refusal("time with time zone", "2:30+20");
+    assert!(message.contains("out of range"), "{message}");
+    let shape = temporal_refusal("time with time zone", "half past two+02");
+    assert!(shape.contains("half past two"), "{shape}");
+}
+
+#[test]
+fn a_month_name_in_a_timestamp_is_refused() {
+    let message = temporal_refusal("timestamp", "Jan 2 2024 10:00");
+    assert!(message.contains("locale"), "{message}");
+}
+
+#[test]
+fn a_year_too_large_to_hold_is_refused() {
+    let message = temporal_refusal("date", "99999999999999-01-01");
+    assert!(message.contains("99999999999999-01-01"), "{message}");
+}
+
+#[test]
+fn a_bound_parameter_in_a_checked_column_passes_through() {
+    // The caller binds the value PostgreSQL takes, so there is no literal to
+    // read and nothing to refuse.
+    let statements = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (d date, iv interval, v double precision);
+             INSERT INTO t (d, iv, v) VALUES ($1, $2, $3);",
+        )
+        .expect("parse")
+        .translate_to_sql(&default_opts())
+        .expect("translate");
+    let insert = statements.last().expect("two statements");
+    assert!(insert.contains("VALUES (?1, ?2, ?3)"), "{insert}");
 }
 
 // ── Finding 9: catch-all refusal message misnames built-ins and enum types ───

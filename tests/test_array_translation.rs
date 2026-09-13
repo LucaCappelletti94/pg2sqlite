@@ -661,7 +661,7 @@ fn array_prepend_translates_and_prepends() {
 fn array_cat_null_operand_returns_nonnull_side() {
     let rows_left_null = run_translated(
         "CREATE TABLE t (a INT[], b INT[]);
-         INSERT INTO t VALUES (NULL, '[3]');
+         INSERT INTO t VALUES (NULL, ARRAY[3]);
          SELECT array_cat(a, b) FROM t;",
     );
     assert_eq!(
