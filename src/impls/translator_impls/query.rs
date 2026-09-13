@@ -51,6 +51,8 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         // exposes rather than through every table of that name in the schema,
         // so the scope is attached before any expression is translated. A
         // subquery builds its own when its own `Query` is translated.
+        reject_distinct_ordered_by_an_unselected_expression(self)?;
+        reject_compound_ordered_by_an_input_expression(self)?;
         let scope_substitute = crate::impls::shared_helpers::scope_query_for(self);
         let scope_query = scope_substitute.as_ref().unwrap_or(self);
         let scope = if matches!(
@@ -164,6 +166,149 @@ fn build_query_envelope(
         pipe_operators,
     }
 }
+/// Refuses `SELECT DISTINCT ... ORDER BY x` where `x` is not in the select
+/// list.
+///
+/// PostgreSQL answers `for SELECT DISTINCT, ORDER BY expressions must appear
+/// in select list`, because the rows the ordering would need are the ones
+/// `DISTINCT` collapsed. SQLite accepts the statement and answers rows in an
+/// order it does not define: over `(1,10), (2,20), (1,30)`, `SELECT DISTINCT
+/// a FROM t ORDER BY b` picks one of the two `b` values per distinct `a` and
+/// orders by whichever it picked.
+///
+/// An ordinal, an output alias and a repeated select-list expression are all
+/// in the list, and `DISTINCT ON` has its own rule, checked where it is
+/// rewritten.
+fn reject_distinct_ordered_by_an_unselected_expression(
+    query: &Query,
+) -> Result<(), crate::errors::Error> {
+    let SetExpr::Select(select) = query.body.as_ref() else { return Ok(()) };
+    if !matches!(select.distinct, Some(Distinct::Distinct)) {
+        return Ok(());
+    }
+    let Some(order_by) = &query.order_by else { return Ok(()) };
+    let OrderByKind::Expressions(items) = &order_by.kind else { return Ok(()) };
+
+    for item in items {
+        if matches!(
+            item.expr,
+            Expr::Value(sqlparser::ast::ValueWithSpan {
+                value: sqlparser::ast::Value::Number(_, _),
+                ..
+            })
+        ) {
+            continue;
+        }
+        if select
+            .projection
+            .iter()
+            .any(|projected| order_by_term_is_projected(&item.expr, projected))
+        {
+            continue;
+        }
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "SELECT DISTINCT with ORDER BY {} cannot be translated: the expression is not in the \
+             select list, which PostgreSQL answers `for SELECT DISTINCT, ORDER BY expressions \
+             must appear in select list` for, since DISTINCT has already collapsed the rows the \
+             ordering would read. SQLite accepts it and answers an order it does not define. Add \
+             the expression to the select list, or drop it from the ORDER BY.",
+            item.expr
+        )));
+    }
+    Ok(())
+}
+
+/// Whether an `ORDER BY` term names something the projection exposes.
+fn order_by_term_is_projected(term: &Expr, projected: &SelectItem) -> bool {
+    match projected {
+        SelectItem::UnnamedExpr(expression) => expression == term,
+        SelectItem::ExprWithAlias { expr, alias } => {
+            expr == term || matches!(term, Expr::Identifier(ident) if ident.value == alias.value)
+        }
+        SelectItem::ExprWithAliases { expr, aliases } => {
+            expr == term
+                || matches!(term, Expr::Identifier(ident)
+                    if aliases.iter().any(|alias| alias.value == ident.value))
+        }
+        // A wildcard exposes every column of its relations, so anything the
+        // ordering names is in the list.
+        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => true,
+    }
+}
+
+/// Refuses `... UNION ... ORDER BY <expression>` where the expression is not
+/// an output column.
+///
+/// After a set operation only the output columns are in scope, so PostgreSQL
+/// answers `column "a" does not exist` for `ORDER BY a + 1` and `missing
+/// FROM-clause entry for table "t"` for the qualified spelling, whatever the
+/// branches project. The translation used to reach column resolution first
+/// and report that the column could not be found in the schema, which says
+/// nothing about the rule that makes the statement invalid.
+fn reject_compound_ordered_by_an_input_expression(
+    query: &Query,
+) -> Result<(), crate::errors::Error> {
+    if !matches!(query.body.as_ref(), SetExpr::SetOperation { .. }) {
+        return Ok(());
+    }
+    let Some(order_by) = &query.order_by else { return Ok(()) };
+    let OrderByKind::Expressions(items) = &order_by.kind else { return Ok(()) };
+    let outputs = compound_output_names(query.body.as_ref());
+
+    for item in items {
+        let names_an_output = match &item.expr {
+            Expr::Value(sqlparser::ast::ValueWithSpan {
+                value: sqlparser::ast::Value::Number(_, _),
+                ..
+            }) => true,
+            Expr::Identifier(ident) => {
+                outputs.iter().any(|output| output.eq_ignore_ascii_case(&ident.value))
+            }
+            _ => false,
+        };
+        if names_an_output {
+            continue;
+        }
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "ORDER BY {} after a UNION, INTERSECT or EXCEPT cannot be translated: only the \
+             output columns of the set operation are in scope there, which is why PostgreSQL \
+             answers `column does not exist` for an input column and `missing FROM-clause entry` \
+             for a qualified one, whatever the branches project. Name an output column or its \
+             position, giving the branches a matching alias if they have none.",
+            item.expr
+        )));
+    }
+    Ok(())
+}
+
+/// The output column names of a set operation, taken from its leftmost
+/// branch, which is where PostgreSQL takes them from.
+fn compound_output_names(body: &SetExpr) -> Vec<String> {
+    match body {
+        SetExpr::SetOperation { left, .. } => compound_output_names(left),
+        SetExpr::Query(inner) => compound_output_names(inner.body.as_ref()),
+        SetExpr::Select(select) => {
+            select
+                .projection
+                .iter()
+                .filter_map(|item| {
+                    match item {
+                        SelectItem::ExprWithAlias { alias, .. } => Some(alias.value.clone()),
+                        SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                            Some(ident.value.clone())
+                        }
+                        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => {
+                            parts.last().map(|ident| ident.value.clone())
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Converts a PostgreSQL FETCH/OFFSET pair into a SQLite LIMIT/OFFSET clause.
 ///
 /// SQLite accepts only `LIMIT m` and `LIMIT m OFFSET n`. It understands neither
@@ -193,8 +338,12 @@ fn forward_translate_limit_and_fetch(
     if let Some(f) = fetch {
         if f.with_ties {
             return Err(Error::forward_refusal(
-                "FETCH ... WITH TIES is not supported in SQLite. SQLite has no equivalent. \
-                         Use a window function with ROW_NUMBER() to emulate it."
+                "FETCH ... WITH TIES cannot be translated: SQLite has no WITH TIES, which asks \
+                 for the rows tying with the last one as well. RANK() OVER (ORDER BY ...) <= n \
+                 answers the same rows, since it gives every tied row the same rank; \
+                 ROW_NUMBER() does not, because it numbers the ties apart and stops at n. \
+                 Measured over 1, 2, 2: FETCH FIRST 2 ROWS WITH TIES answers 1, 2, 2, as RANK \
+                 does, where ROW_NUMBER answers 1, 2."
                     .to_string(),
             ));
         }

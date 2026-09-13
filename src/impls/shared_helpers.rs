@@ -1684,6 +1684,29 @@ pub(crate) fn declares_always_identity(options: &[sqlparser::ast::ColumnOptionDe
     })
 }
 
+/// Refuses a common table expression whose body writes rows.
+///
+/// PostgreSQL runs `WITH x AS (INSERT ... RETURNING ...) SELECT ... FROM x`
+/// and answers the rows the insert returned. SQLite has no data-modifying
+/// common table expression at all: the same text answers `near "INSERT":
+/// syntax error` when the script runs, which is what the emitted statement
+/// did, so nothing was translated and nothing said so.
+fn reject_data_modifying_cte(name: &sqlparser::ast::Ident, body: &SetExpr) -> Result<(), Error> {
+    let statement = match body {
+        SetExpr::Insert(_) => "INSERT",
+        SetExpr::Update(_) => "UPDATE",
+        SetExpr::Delete(_) => "DELETE",
+        SetExpr::Merge(_) => "MERGE",
+        _ => return Ok(()),
+    };
+    Err(Error::forward_refusal(format!(
+        "the common table expression {name} is a {statement}, which SQLite has no form of: a \
+         common table expression there may only read, so the statement would answer `near \
+         \"{statement}\": syntax error` when the script runs. Write the {statement} as its own \
+         statement and read the rows back afterwards, using RETURNING if the values are needed."
+    )))
+}
+
 /// Refuses an `UPDATE` assignment that writes a key the database generates.
 ///
 /// Two statements PostgreSQL and SQLite answer differently, both measured on
@@ -2388,6 +2411,7 @@ pub(crate) fn translate_with_clause<D: TranslationDirection>(
             .cte_tables
             .iter()
             .map(|cte| {
+                reject_data_modifying_cte(&cte.alias.name, cte.query.body.as_ref())?;
                 Ok(sqlparser::ast::Cte {
                     alias: cte.alias.clone(),
                     query: Box::new(D::translate_query(&cte.query, schema, options, emit)?),
