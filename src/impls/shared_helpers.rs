@@ -1298,6 +1298,10 @@ pub(crate) fn convert_bit_literal(expr: Expr) -> Result<Expr, Error> {
 }
 
 /// The bits `X'...'` stands for, four per hex digit, most significant first.
+///
+/// The refusal is a guard rather than a path: the tokenizer only reads an
+/// `X'...'` literal made of hexadecimal digits, so nothing that parses
+/// reaches it.
 fn expand_hex_to_bits(hex: &str) -> Result<String, Error> {
     let mut bits = String::with_capacity(hex.len() * 4);
     for digit in hex.chars() {

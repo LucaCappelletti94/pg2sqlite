@@ -805,6 +805,232 @@ fn a_cast_to_interval_is_normalised() {
     assert_eq!(rows, vec![Some("00:15:00".to_string())]);
 }
 
+/// Refuses a literal written into a temporal column of `kind`, returning the
+/// message.
+fn temporal_refusal(kind: &str, literal: &str) -> String {
+    Pg2Sqlite::default()
+        .sql(&format!(
+            "CREATE TABLE t (v {kind});
+             INSERT INTO t (v) VALUES ('{literal}');"
+        ))
+        .expect("parse")
+        .translate(&default_opts())
+        .expect_err("expected a refusal")
+        .to_string()
+}
+
+#[test]
+fn an_offset_in_a_column_without_a_zone_is_refused() {
+    // Stored as text, the offset would be kept where PostgreSQL drops it,
+    // so the two databases would disagree about the instant.
+    let message = temporal_refusal("timestamp", "2024-01-02 03:04:05+02");
+    assert!(message.contains("no time zone"), "{message}");
+}
+
+#[test]
+fn a_zoned_time_column_takes_an_offset() {
+    let rows = query_rows(
+        "CREATE TABLE t (v time with time zone);
+         INSERT INTO t (v) VALUES ('2:30+02');
+         SELECT v FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("02:30:00+02:00".to_string())]);
+}
+
+#[test]
+fn a_utc_marker_becomes_a_zero_offset() {
+    let rows = query_rows(
+        "CREATE TABLE t (v timestamptz);
+         INSERT INTO t (v) VALUES ('2024-01-02T03:04:05Z');
+         SELECT v FROM t;",
+        &default_opts(),
+    );
+    assert_eq!(rows, vec![Some("2024-01-02 03:04:05+00:00".to_string())]);
+}
+
+#[test]
+fn an_impossible_offset_is_refused() {
+    // PostgreSQL's offsets run to ±15:59; anything past that is not a zone.
+    let message = temporal_refusal("timestamptz", "2024-01-02 03:04:05+20");
+    assert!(message.contains("out of range"), "{message}");
+    let too_many = temporal_refusal("timestamptz", "2024-01-02 03:04:05+02:00:00");
+    assert!(too_many.contains("too many parts"), "{too_many}");
+}
+
+#[test]
+fn the_other_locale_dependent_forms_are_refused() {
+    for literal in ["Jan 2 2024", "2 January 2024"] {
+        let message = temporal_refusal("date", literal);
+        assert!(message.contains("locale"), "{literal}: {message}");
+    }
+    let clock = temporal_refusal("time", "12:00:00 PM");
+    assert!(clock.contains("12-hour"), "{clock}");
+    let keyword = temporal_refusal("timestamp", "infinity");
+    assert!(keyword.contains("keyword"), "{keyword}");
+}
+
+#[test]
+fn a_date_of_the_wrong_shape_is_refused() {
+    for literal in ["2024-03", "2024-03-05-06", "2024-ab-05", "0000-01-01"] {
+        let message = temporal_refusal("date", literal);
+        assert!(message.contains(literal), "{literal}: {message}");
+    }
+}
+
+#[test]
+fn a_time_of_the_wrong_shape_is_refused() {
+    for literal in ["12", "12:00:00:00", "12:60:00", "12:00:00."] {
+        let message = temporal_refusal("time", literal);
+        assert!(message.contains(literal), "{literal}: {message}");
+    }
+    let leap = temporal_refusal("time", "23:59:60");
+    assert!(leap.contains("second=60"), "{leap}");
+}
+
+#[test]
+fn the_end_of_day_hour_rolls_the_month_and_the_year_over() {
+    let rows = query_rows(
+        "CREATE TABLE t (id int primary key, ts timestamp);
+         INSERT INTO t (id, ts) VALUES (1, '2024-02-29 24:00:00'), (2, '2024-12-31 24:00:00');
+         SELECT ts FROM t ORDER BY id;",
+        &default_opts(),
+    );
+    assert_eq!(
+        rows,
+        vec![Some("2024-03-01 00:00:00".to_string()), Some("2025-01-01 00:00:00".to_string())]
+    );
+}
+
+/// Refuses an interval literal, returning the message.
+fn interval_refusal(literal: &str) -> String {
+    Pg2Sqlite::default()
+        .sql(&format!(
+            "CREATE TABLE t (iv interval);
+             INSERT INTO t (iv) VALUES ('{literal}');"
+        ))
+        .expect("parse")
+        .translate(&default_opts())
+        .expect_err("expected a refusal")
+        .to_string()
+}
+
+#[test]
+fn an_interval_unit_postgresql_does_not_have_is_refused() {
+    let message = interval_refusal("2 fortnights");
+    assert!(message.contains("not an interval unit"), "{message}");
+}
+
+#[test]
+fn an_interval_count_without_a_unit_is_refused() {
+    let dangling = interval_refusal("2 3 days");
+    assert!(dangling.contains("names no unit"), "{dangling}");
+    let unitless = interval_refusal("days");
+    assert!(unitless.contains("has no count"), "{unitless}");
+}
+
+#[test]
+fn an_interval_clock_of_the_wrong_shape_is_refused() {
+    let message = interval_refusal("1:2:3:4");
+    assert!(message.contains("three parts at most"), "{message}");
+}
+
+#[test]
+fn an_iso_interval_of_the_wrong_shape_is_refused() {
+    let designator = interval_refusal("P1X");
+    assert!(designator.contains("designator"), "{designator}");
+    let hour_before_t = interval_refusal("P1H");
+    assert!(hour_before_t.contains("designator"), "{hour_before_t}");
+    let no_designator = interval_refusal("P1Y2");
+    assert!(no_designator.contains("unit designator"), "{no_designator}");
+}
+
+#[test]
+fn interval_counts_keep_their_own_signs() {
+    assert_eq!(interval_text("1 mon -1 day"), vec![Some("1 mon -1 days".to_string())]);
+    assert_eq!(interval_text("1 day -02:00:00"), vec![Some("1 day -02:00:00".to_string())]);
+    assert_eq!(interval_text("PT-1H"), vec![Some("-01:00:00".to_string())]);
+}
+
+#[test]
+fn an_interval_second_keeps_its_microseconds() {
+    assert_eq!(interval_text("1.000001 seconds"), vec![Some("00:00:01.000001".to_string())]);
+    assert_eq!(interval_text("1 microsecond"), vec![Some("00:00:00.000001".to_string())]);
+}
+
+#[test]
+fn an_interval_written_as_one_token_is_read() {
+    assert_eq!(interval_text("1day"), vec![Some("1 day".to_string())]);
+    assert_eq!(interval_text("@ 1 day"), vec![Some("1 day".to_string())]);
+}
+
+#[test]
+fn interval_weeks_become_days() {
+    assert_eq!(interval_text("3 weeks"), vec![Some("21 days".to_string())]);
+    assert_eq!(interval_text("P1W"), vec![Some("7 days".to_string())]);
+}
+
+#[test]
+fn an_iso_interval_reads_every_designator() {
+    assert_eq!(
+        interval_text("P1Y2M3DT4H5M6S"),
+        vec![Some("1 year 2 mons 3 days 04:05:06".to_string())]
+    );
+}
+
+#[test]
+fn a_bare_count_before_a_clock_counts_days() {
+    // PostgreSQL reads '1 12:00' as one day and twelve hours.
+    assert_eq!(interval_text("1 12:00"), vec![Some("1 day 12:00:00".to_string())]);
+}
+
+#[test]
+fn a_negative_year_month_interval_signs_both_counts() {
+    assert_eq!(interval_text("-1-2"), vec![Some("-1 years -2 mons".to_string())]);
+}
+
+#[test]
+fn an_interval_count_that_is_not_a_number_is_refused() {
+    let message = interval_refusal("1.2.3 days");
+    assert!(message.contains("not a number"), "{message}");
+}
+
+#[test]
+fn a_zoned_time_column_refuses_what_it_cannot_read() {
+    let message = temporal_refusal("time with time zone", "2:30+20");
+    assert!(message.contains("out of range"), "{message}");
+    let shape = temporal_refusal("time with time zone", "half past two+02");
+    assert!(shape.contains("half past two"), "{shape}");
+}
+
+#[test]
+fn a_month_name_in_a_timestamp_is_refused() {
+    let message = temporal_refusal("timestamp", "Jan 2 2024 10:00");
+    assert!(message.contains("locale"), "{message}");
+}
+
+#[test]
+fn a_year_too_large_to_hold_is_refused() {
+    let message = temporal_refusal("date", "99999999999999-01-01");
+    assert!(message.contains("99999999999999-01-01"), "{message}");
+}
+
+#[test]
+fn a_bound_parameter_in_a_checked_column_passes_through() {
+    // The caller binds the value PostgreSQL takes, so there is no literal to
+    // read and nothing to refuse.
+    let statements = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (d date, iv interval, v double precision);
+             INSERT INTO t (d, iv, v) VALUES ($1, $2, $3);",
+        )
+        .expect("parse")
+        .translate_to_sql(&default_opts())
+        .expect("translate");
+    let insert = statements.last().expect("two statements");
+    assert!(insert.contains("VALUES (?1, ?2, ?3)"), "{insert}");
+}
+
 // ── Finding 9: catch-all refusal message misnames built-ins and enum types ───
 
 #[test]

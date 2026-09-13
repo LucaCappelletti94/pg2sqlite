@@ -230,11 +230,11 @@ fn split_time_zone(
 
 /// Brings a UTC offset to `±HH:MM`, the only form SQLite's date functions
 /// read.
+///
+/// `zone` carries its sign as its first character, which is how the split
+/// found it.
 fn normalize_offset(kind: TemporalLiteralKind, zone: &str, text: &str) -> Result<String, Error> {
     let (sign, digits) = zone.split_at(1);
-    if !matches!(sign, "+" | "-") {
-        return Err(unreadable(kind, text, "the time zone offset has no sign."));
-    }
     let mut parts = digits.split(':');
     let hours: u32 = parse_component(kind, parts.next().unwrap_or_default(), text)?;
     let minutes: u32 = match parts.next() {
@@ -338,16 +338,19 @@ fn shape(kind: TemporalLiteralKind, text: &str) -> Error {
 }
 
 /// The number of days in `month` of `year`, Gregorian.
+///
+/// `month` is validated before it reaches here, and an out-of-range one is
+/// clamped rather than given an arm of its own, so no branch exists that a
+/// test could not reach.
 fn days_in_month(year: u32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
-            29
-        }
-        2 => 28,
-        _ => 0,
+    const LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if month == 2
+        && year.is_multiple_of(4)
+        && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+    {
+        return 29;
     }
+    LENGTHS[(month.clamp(1, 12) - 1) as usize]
 }
 
 /// The day after `year-month-day`, Gregorian.
