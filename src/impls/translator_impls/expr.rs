@@ -728,6 +728,32 @@ fn translate_substring(
     {
         return Err(reject_duplicated_operand("SUBSTRING(... FROM ... FOR ...)", from));
     }
+    // `SUBSTRING(s FROM 'pattern')` is PostgreSQL's regular-expression form,
+    // answering the first match. Read as a position it answered the whole
+    // string, since SQLite coerced the pattern to 0.
+    if let Some(from) = substring_from
+        && matches!(from, Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(_), .. }))
+    {
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "SUBSTRING({expr} FROM {from}) is the regular-expression form, which answers the \
+             first match of the pattern, and SQLite has no regular-expression engine of its own: \
+             it answers `no such function: REGEXP` unless the application registers one. Extract \
+             the part with instr and substr, or register a regular-expression function and call \
+             it directly."
+        )));
+    }
+    // PostgreSQL answers `negative substring length not allowed`, where the
+    // clamped length answered an empty string.
+    if let Some(for_len) = substring_for
+        && let Some(written) = crate::impls::function_helpers::integer_literal_value(for_len)
+        && written < 0
+    {
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "SUBSTRING({expr} FOR {for_len}) asks for a negative length, which PostgreSQL \
+             answers `negative substring length not allowed` for, so the replica must not answer \
+             an empty string instead."
+        )));
+    }
     let translated = expr.translate_with_warnings(schema, options, emit)?;
     let start = substring_from
         .map(|e| e.translate_with_warnings(schema, options, emit))
@@ -756,6 +782,15 @@ fn translate_substring(
         }
         (None, Some(for_len)) => Some(for_len.translate_with_warnings(schema, options, emit)?),
         (_, None) => None,
+    };
+
+    // `SUBSTRING(s FOR n)` counts n characters from the start, and SQLite's
+    // two-argument SUBSTR reads its second argument as a position, so the
+    // length had landed where the start belongs: `substring('Tom' for 2)`
+    // answered `om` rather than `To`.
+    let start = match (start, substring_for) {
+        (None, Some(_)) => Some(integer_literal(1)),
+        (start, _) => start,
     };
 
     Ok(Expr::Substring {
@@ -1118,6 +1153,19 @@ fn translate_overlay(
 ) -> Result<Expr, crate::errors::Error> {
     if !is_replayable(expr, options) {
         return Err(reject_duplicated_operand("OVERLAY(... PLACING ... FROM ...)", expr));
+    }
+    // PostgreSQL answers `negative substring length not allowed` for a start
+    // below one, because the prefix it takes is `substring(s from 1 for
+    // start - 1)`. The replica had answered a string with the replacement
+    // glued to the front.
+    if let Some(written) = crate::impls::function_helpers::integer_literal_value(overlay_from)
+        && written < 1
+    {
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "OVERLAY({expr} PLACING {overlay_what} FROM {overlay_from}) starts before the first \
+             character, which PostgreSQL answers `negative substring length not allowed` for, \
+             since the prefix it takes is one character shorter than the start. Count from one."
+        )));
     }
     let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
     let translated_overlay_what = overlay_what.translate_with_warnings(schema, options, emit)?;
@@ -1932,6 +1980,90 @@ fn json_removal_not_a_literal(right: &Expr) -> crate::errors::Error {
          and {right} could name either a key or an index. Write the key out, or remove it in the \
          application."
     ))
+}
+
+/// `subject LIKE ANY (array)` over the JSON array representation.
+///
+/// Refused without the representation, as every other array operation is,
+/// rather than emitting a `LIKE ANY (...)` SQLite answers `no such function:
+/// ANY` for.
+fn quantified_pattern_match(
+    subject: &Expr,
+    pattern: &Expr,
+    escape: Option<Box<Expr>>,
+    negated: bool,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Expr, crate::errors::Error> {
+    if !is_json_array_representation(options) {
+        return Err(representation_required("LIKE ANY over an array"));
+    }
+    let translated_subject = subject.translate_with_warnings(schema, options, emit)?;
+    let elements = pattern.translate_with_warnings(schema, options, emit)?;
+    Ok(crate::impls::translator_impls::array::pattern_matches_any_element(
+        translated_subject,
+        elements,
+        escape,
+        negated,
+    ))
+}
+
+/// Refuses `LIKE ALL (array)`, which the parser hands over as a call to a
+/// function named `ALL`.
+///
+/// `Expr::Like` carries one flag, for `ANY`, so the `ALL` quantifier arrives
+/// as its pattern: `'a' LIKE ALL(ARRAY['a%'])` parses with the pattern
+/// `ALL(ARRAY['a%'])`, which would be emitted as a call SQLite answers `no
+/// such function: ALL` for. `ALL` is a reserved word, so nothing else wears
+/// that shape.
+fn reject_quantified_pattern_all(
+    pattern: &Expr,
+    operator: &str,
+) -> Result<(), crate::errors::Error> {
+    let Expr::Function(function) = pattern else { return Ok(()) };
+    if !crate::impls::object_name::last_ident(&function.name)
+        .is_some_and(|name| name.value.eq_ignore_ascii_case("all"))
+    {
+        return Ok(());
+    }
+    Err(crate::errors::Error::forward_refusal(format!(
+        "{operator} ALL (...) cannot be translated: SQLite has no quantified comparison, and the \
+         parser this crate reads with carries the ALL quantifier as a call to a function of that \
+         name, so the emitted statement would answer `no such function: ALL`. Write the \
+         conjunction out, as {operator} 'a%' AND {operator} 'b%'."
+    )))
+}
+
+/// Reports that `ILIKE` folds ASCII only when its pattern cannot be read.
+///
+/// A literal pattern carrying a non-ASCII letter is refused, and a pattern
+/// held in a column or a parameter cannot be inspected at all, so the caller
+/// is told that `lower` folds ASCII only and named the option that replaces
+/// it. Nothing is reported once that option is set, since the fold function
+/// is then the caller's own.
+fn warn_ascii_only_ilike_folding(
+    pattern: &Expr,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) {
+    if options.get_ilike_fold_function().is_some() {
+        return;
+    }
+    if matches!(pattern, Expr::Value(_) | Expr::Array(_)) {
+        return;
+    }
+    emit(crate::warnings::TranslationWarning::LossyDowngrade {
+        construct: "ILIKE".to_string(),
+        from: "case folding by the database collation".to_string(),
+        to: "lower(), which folds ASCII only".to_string(),
+        location: format!("ILIKE with the pattern {pattern}"),
+        reason: "the pattern is not a literal, so it cannot be read here, and SQLite's lower() \
+                 folds ASCII letters only: a pattern carrying a non-ASCII letter then matches \
+                 nothing where PostgreSQL under a UTF-8 locale matches. Name a Unicode-aware \
+                 folding function with with_ilike_fold_function to fold the whole of Unicode."
+            .to_string(),
+    });
 }
 
 /// Translate a binary operation expression.
@@ -3115,12 +3247,19 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         .map(|escape| escape.translate_with_warnings(schema, options, emit))
                         .transpose()?
                         .map(Box::new);
+                    let escape = sqlite_like_escape(translated_escape);
+                    reject_quantified_pattern_all(pattern, "LIKE")?;
+                    if *any {
+                        return quantified_pattern_match(
+                            expr, pattern, escape, *negated, schema, options, emit,
+                        );
+                    }
                     Ok(Expr::Like {
                         negated: *negated,
                         any: *any,
                         expr: Box::new(expr.translate_with_warnings(schema, options, emit)?),
                         pattern: Box::new(pattern.translate_with_warnings(schema, options, emit)?),
-                        escape_char: sqlite_like_escape(translated_escape),
+                        escape_char: escape,
                     })
                 })?
             }
@@ -3130,6 +3269,29 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     let translated_pattern =
                         pattern.translate_with_warnings(schema, options, emit)?;
                     let escape = sqlite_like_escape(lowered_ilike_escape(escape_char.as_deref())?);
+                    reject_quantified_pattern_all(pattern, "ILIKE")?;
+                    if *any {
+                        let fold: fn(Expr, &crate::options::TranslationContext<'_>) -> Expr =
+                            |expression, options| {
+                                match options.get_ilike_fold_function() {
+                                    Some(fold_fn) => {
+                                        simple_function_expr(fold_fn, vec![expression], None)
+                                    }
+                                    None => wrap_with_lower(expression),
+                                }
+                            };
+                        warn_ascii_only_ilike_folding(pattern, options, emit);
+                        let subject = fold(translated_expr, options);
+                        let elements = pattern.translate_with_warnings(schema, options, emit)?;
+                        return Ok(crate::impls::translator_impls::array::
+                            pattern_matches_any_element_folded(
+                                subject,
+                                elements,
+                                escape,
+                                *negated,
+                                options.get_ilike_fold_function(),
+                            ));
+                    }
                     if let Some(fold_fn) = options.get_ilike_fold_function() {
                         // Use the caller-provided fold function instead of
                         // lower().
@@ -3145,6 +3307,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     // No fold function. Refuse a literal pattern with non-ASCII
                     // alphabetic characters: SQLite lower() is ASCII-only and
                     // would produce silent wrong results.
+                    warn_ascii_only_ilike_folding(pattern, options, emit);
                     if has_non_ascii_alpha_literal(pattern) {
                         return Err(crate::errors::Error::forward_refusal("ILIKE with a pattern containing non-ASCII alphabetic characters \
                                          cannot translate faithfully because SQLite lower() folds ASCII \
