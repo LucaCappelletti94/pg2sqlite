@@ -591,9 +591,12 @@ fn report_column_downgrades(
             from: "JSONB".to_string(),
             to: "TEXT".to_string(),
             location: location.clone(),
-            reason: "PostgreSQL normalises key order and removes duplicate keys on write; \
-                     the replica stores the value verbatim, so ::text projections and \
-                     equality against a normalised literal diverge."
+            reason: "PostgreSQL normalises key order and removes duplicate keys on write; the \
+                     replica stores the value verbatim, so ::text projections and equality \
+                     against a normalised literal diverge. Numbers differ too: SQLite reads a \
+                     JSON number as a double, so 1e400 reads back as inf, a 30-digit integer \
+                     loses its last digits, and 1.50 reads back as 1.5, where the server keeps \
+                     all three exactly."
                 .to_string(),
         });
     }

@@ -408,7 +408,7 @@ fn boolean_literal_word(expr: &Expr) -> Option<&'static str> {
 /// and nothing downstream can tell it from a count. Anything this does not
 /// recognise is left alone, which keeps a value that merely happens to be 1
 /// from being rendered as a word.
-fn is_boolean_expression(
+pub(crate) fn is_boolean_expression(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
@@ -476,7 +476,7 @@ fn is_boolean_expression(
 /// CHECK and can hold any integer. Measured on 3.46.0: over 1, 0, NULL and 5
 /// this answers true, false, NULL and true, matching PostgreSQL's truthiness,
 /// where `CASE x WHEN 1 ... WHEN 0 ...` answers NULL for the 5.
-fn render_boolean_as_text(
+pub(crate) fn render_boolean_as_text(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
@@ -788,10 +788,11 @@ fn has_leap_second(s: &str) -> bool {
 }
 
 /// Convert a PostgreSQL text-array path literal `{a,b}` to a SQLite JSON path
-/// `$.a.b`.
+/// `$."a"."b"`.
 ///
-/// Unquoted keys are used as-is. Double-quoted keys (e.g. `"a b"`) have their
-/// outer quotes stripped. Returns `None` when the outer braces are missing.
+/// Double-quoted keys have their outer quotes stripped first, since that is
+/// how PostgreSQL writes a key carrying a comma. `None` means the outer
+/// braces are missing.
 pub(crate) fn pg_text_path_to_sqlite_json_path(s: &str) -> Option<String> {
     let inner = s.strip_prefix('{')?.strip_suffix('}')?;
     if inner.is_empty() {
@@ -805,10 +806,44 @@ pub(crate) fn pg_text_path_to_sqlite_json_path(s: &str) -> Option<String> {
         } else {
             key
         };
-        path.push('.');
-        path.push_str(key);
+        path.push_str(&sqlite_json_path_key(key));
     }
     Some(path)
+}
+
+/// One `."key"` step of a SQLite JSON path.
+///
+/// Every key is quoted and every quote inside it escaped: a key is written
+/// unquoted only while it happens to look like an identifier, and `a"b` wrote
+/// `$."a"b"`, which ends the key early and matches nothing. Measured on
+/// SQLite 3.51: `json_extract('{"a\"b":1}', '$."a\"b"')` answers 1.
+#[must_use]
+pub(crate) fn sqlite_json_path_key(key: &str) -> String {
+    format!(".\"{}\"", key.replace('"', "\\\""))
+}
+
+/// The refusal a numeric path element earns.
+///
+/// PostgreSQL reads it as an array index over an array and as a key name over
+/// an object, deciding from the value at run time, while a SQLite JSON path
+/// has to choose: `$[1]` or `$."1"`. Answering either silently is what
+/// `'[1,2,3]'::jsonb #- '{1}'` did, returning the document unchanged.
+pub(crate) fn numeric_json_path_element(construct: &str, element: &str) -> crate::errors::Error {
+    crate::errors::Error::forward_refusal(format!(
+        "{construct} cannot translate the path element {element}: PostgreSQL reads a number as an \
+         array index over an array and as a key name over an object, deciding from the value when \
+         the statement runs, and a SQLite JSON path has to choose between $[{element}] and \
+         $.\"{element}\" when the statement is translated. Write the index form against a value \
+         known to be an array, as json_remove(doc, '$[{element}]') or json_extract(doc, \
+         '$[{element}]'), or name a key that is not a number."
+    ))
+}
+
+/// True when `key` is written as a plain number, which a JSON path cannot
+/// read unambiguously.
+#[must_use]
+pub(crate) fn is_numeric_path_element(key: &str) -> bool {
+    !key.is_empty() && key.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Convert a SQLite JSON path `$.a.b` to a PostgreSQL text-array path `{a,b}`.
@@ -1843,6 +1878,62 @@ fn postgres_string_literal_text(value: &Value) -> Option<String> {
     }
 }
 
+/// The JSON paths a `jsonb - x` removes.
+///
+/// PostgreSQL takes a string as a key name, an integer as an array index, and
+/// a text array as a list of key names. Anything else is refused: the path
+/// shape is decided while the statement is translated, and a column could
+/// name either.
+fn json_removal_paths(right: &Expr) -> Result<Vec<String>, crate::errors::Error> {
+    match right {
+        Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(key), .. }) => {
+            Ok(vec![format!("${}", sqlite_json_path_key(key))])
+        }
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => {
+            Ok(vec![format!("$[{digits}]")])
+        }
+        Expr::UnaryOp { op: UnaryOperator::Minus, expr }
+            if matches!(
+                expr.as_ref(),
+                Expr::Value(ValueWithSpan { value: Value::Number(_, _), .. })
+            ) =>
+        {
+            Err(crate::errors::Error::forward_refusal(
+                "- over a JSON document with a negative index cannot be translated: PostgreSQL \
+                 counts from the end of the array and a SQLite JSON path has no such form. Write \
+                 the index from the start."
+                    .to_string(),
+            ))
+        }
+        Expr::Array(array) => {
+            array
+                .elem
+                .iter()
+                .map(|element| {
+                    match element {
+                        Expr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(key),
+                            ..
+                        }) => Ok(format!("${}", sqlite_json_path_key(key))),
+                        other => Err(json_removal_not_a_literal(other)),
+                    }
+                })
+                .collect()
+        }
+        other => Err(json_removal_not_a_literal(other)),
+    }
+}
+
+/// The refusal a non-literal right operand of `jsonb - x` earns.
+fn json_removal_not_a_literal(right: &Expr) -> crate::errors::Error {
+    crate::errors::Error::forward_refusal(format!(
+        "- over a JSON document needs the key, the index or the list of keys as a literal, since \
+         the path is written into the emitted json_remove call when the statement is translated \
+         and {right} could name either a key or an index. Write the key out, or remove it in the \
+         application."
+    ))
+}
+
 /// Translate a binary operation expression.
 #[allow(clippy::too_many_lines)]
 fn translate_binary_op(
@@ -2034,8 +2125,10 @@ fn translate_binary_op(
             return translate_fts_expression(tsvector_func, tsquery_func, schema, options, emit);
         }
         return Err(crate::errors::Error::forward_refusal(
-            "The @@ operator is only supported for to_tsvector(...) @@ to_tsquery(...) \
-             full-text search expressions."
+            "The @@ operator is supported only for to_tsvector(...) @@ to_tsquery(...) \
+             full-text search expressions. Over a JSON document it applies a JSONPath \
+             predicate, as doc @@ '$.a > 0', and SQLite's json1 has no JSONPath engine at all: \
+             write the predicate as SQL over json_extract, as json_extract(doc, '$.a') > 0."
                 .to_string(),
         ));
     }
@@ -2261,6 +2354,41 @@ fn translate_binary_op(
         }
     }
 
+    // `-` over a JSON document removes a key or an array element, where
+    // PostgreSQL reads the right operand as a key name, an index, or a list
+    // of key names. Emitted as arithmetic it answered 0 for `d - 'a'`.
+    if *op == BinaryOperator::Minus
+        && crate::impls::translator_impls::function::carries_json(left, schema, options)?
+    {
+        return rebuild(|| {
+            let document = left.translate_with_warnings(schema, options, emit)?;
+            let paths = json_removal_paths(right)?;
+            let mut arguments = vec![document];
+            arguments.extend(paths.into_iter().map(|path| string_literal(&path)));
+            Ok(simple_function_expr("json_remove", arguments, None))
+        });
+    }
+
+    // `||` over two JSON documents is PostgreSQL's shallow merge, and SQLite
+    // has nothing that answers it: `json_patch` follows RFC 7396, deleting a
+    // key whose new value is null and replacing an array rather than
+    // concatenating it, both measured. Emitted as text concatenation it
+    // answered two documents glued together, which is not JSON.
+    if *op == BinaryOperator::StringConcat
+        && crate::impls::translator_impls::function::carries_json(left, schema, options)?
+        && crate::impls::translator_impls::function::carries_json(right, schema, options)?
+    {
+        return Err(crate::errors::Error::forward_refusal(
+            "|| over two JSON documents cannot be translated. PostgreSQL merges them, keeping \
+             every key of both and preferring the right operand, and concatenates two arrays. \
+             SQLite's json_patch is RFC 7396 instead: it DELETES a key whose new value is null \
+             and REPLACES an array rather than concatenating it, so it answers a different \
+             document. Merge the documents in the application, or write the keys out with \
+             json_set."
+                .to_string(),
+        ));
+    }
+
     // Array overlap. Rewritten over `json_each` rather than passed through,
     // which emitted `json_array(1, 2) && json_array(2, 3)` and failed at the
     // `&`. Gated on the array representation like every other array operation.
@@ -2396,6 +2524,15 @@ fn translate_binary_op(
                 let translated_doc = left.translate_with_warnings(schema, options, emit)?;
                 let path = match right {
                     Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), .. }) => {
+                        if let Some(element) = s
+                            .trim_start_matches('{')
+                            .trim_end_matches('}')
+                            .split(',')
+                            .map(str::trim)
+                            .find(|element| is_numeric_path_element(element))
+                        {
+                            return Err(numeric_json_path_element("#-", element));
+                        }
                         pg_text_path_to_sqlite_json_path(s).ok_or_else(|| {
                             crate::errors::Error::forward_refusal(
                                 "#- path must be a '{key1,key2}' PostgreSQL text-array literal."
@@ -2444,9 +2581,12 @@ fn translate_binary_op(
         // operator SQLite cannot tokenise.
         BinaryOperator::AtQuestion => {
             return Err(crate::errors::Error::forward_refusal(
-                "@? (jsonpath exists) is not supported: SQLite's json1 has no jsonpath engine. \
-                     Rewrite the check as json_type(doc, '$.path') IS NOT NULL with a SQLite JSON \
-                     path."
+                "@? (jsonpath exists) cannot be translated: SQLite's json1 has no JSONPath \
+                 engine, so a path carrying a predicate, as '$.a > 0', has nothing to run it. \
+                 Where the path only names a place, json_type(doc, '$.a') IS NOT NULL answers \
+                 the same question; where it carries a predicate, write that predicate as SQL \
+                 over json_extract, as json_extract(doc, '$.a') > 0, which is not the same \
+                 statement and has to be written deliberately."
                     .to_string(),
             ));
         }

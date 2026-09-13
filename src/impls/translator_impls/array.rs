@@ -852,6 +852,42 @@ const JSON_SET_RETURNING: &[(&str, JsonSetShape, bool)] = &[
     ("jsonb_object_keys", JsonSetShape::Key, false),
 ];
 
+/// The order a `jsonb_` function answers its rows in.
+///
+/// `jsonb` stores an object's keys sorted by length and then bytewise, so
+/// `{"ab":1,"z":2,"m":3,"aaa":4}` answers `m, z, ab, aaa`, measured on
+/// PostgreSQL 17.3. The `json_` spellings keep the document's own order,
+/// which is what `json_each` already gives, so only the binary spellings are
+/// sorted. Length is taken over a blob because SQLite's `length` counts
+/// characters for text while the server compares bytes, and the keys
+/// themselves compare under SQLite's BINARY collation, which is the bytewise
+/// order `jsonb` uses.
+fn canonical_key_order() -> sqlparser::ast::OrderBy {
+    let by_byte_length = sqlparser::ast::OrderByExpr {
+        expr: simple_function_expr(
+            "length",
+            vec![Expr::Cast {
+                kind: CastKind::Cast,
+                expr: Box::new(json_each_column(KEY_COLUMN)),
+                data_type: DataType::Blob(None),
+                format: None,
+            }],
+            None,
+        ),
+        options: sqlparser::ast::OrderByOptions { sort: None, nulls_first: None },
+        with_fill: None,
+    };
+    let by_bytes = sqlparser::ast::OrderByExpr {
+        expr: json_each_column(KEY_COLUMN),
+        options: sqlparser::ast::OrderByOptions { sort: None, nulls_first: None },
+        with_fill: None,
+    };
+    sqlparser::ast::OrderBy {
+        kind: sqlparser::ast::OrderByKind::Expressions(vec![by_byte_length, by_bytes]),
+        interpolate: None,
+    }
+}
+
 /// True when `lowered` names a PostgreSQL set-returning JSON function.
 ///
 /// The scalar function path refuses these names with FROM advice, because a
@@ -968,16 +1004,20 @@ pub(crate) fn translate_set_returning_factor(
     }
 
     let translated_document = document.translate_with_warnings(schema, options, emit)?;
+    let mut subquery = make_query(
+        None,
+        SetExpr::Select(Box::new(make_simple_select(
+            projection,
+            from_relation(json_each_factor(translated_document)),
+            None,
+        ))),
+    );
+    if lowered.starts_with("jsonb_") && !matches!(shape, JsonSetShape::Value) {
+        subquery.order_by = Some(canonical_key_order());
+    }
     Ok(TableFactor::Derived {
         lateral: false,
-        subquery: Box::new(make_query(
-            None,
-            SetExpr::Select(Box::new(make_simple_select(
-                projection,
-                from_relation(json_each_factor(translated_document)),
-                None,
-            ))),
-        )),
+        subquery: Box::new(subquery),
         alias: Some(TableAlias {
             explicit: true,
             name: Ident::new(table_name),
