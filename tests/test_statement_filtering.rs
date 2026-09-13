@@ -33,21 +33,24 @@ fn vacuum_passes_through() {
 
 #[test]
 fn commit_passes_through() {
-    let output = translate("COMMIT;").unwrap();
+    // A COMMIT ending a transaction the batch opened. One with nothing to end
+    // is a no-op on the server and is dropped, pinned in
+    // `test_transaction_blocks.rs`.
+    let output = translate("BEGIN; COMMIT;").unwrap();
     assert!(output.contains("COMMIT"), "COMMIT should pass through, got: {output}");
     {
         let mut conn = SqliteConnection::establish(":memory:").unwrap();
-        conn.batch_execute(&format!("BEGIN;\n{output};")).unwrap();
+        conn.batch_execute(&output.replace('\n', ";\n")).unwrap();
     }
 }
 
 #[test]
 fn rollback_passes_through() {
-    let output = translate("ROLLBACK;").unwrap();
+    let output = translate("BEGIN; ROLLBACK;").unwrap();
     assert!(output.contains("ROLLBACK"), "ROLLBACK should pass through, got: {output}");
     {
         let mut conn = SqliteConnection::establish(":memory:").unwrap();
-        conn.batch_execute(&format!("BEGIN;\n{output};")).unwrap();
+        conn.batch_execute(&output.replace('\n', ";\n")).unwrap();
     }
 }
 
@@ -68,21 +71,24 @@ fn start_transaction_passes_through() {
 
 #[test]
 fn savepoint_passes_through() {
-    let output = translate("SAVEPOINT sp1;").unwrap();
+    // Inside a transaction block, which is the only place PostgreSQL takes a
+    // savepoint: outside one it answers `SAVEPOINT can only be used in
+    // transaction blocks`, pinned in `test_transaction_blocks.rs`.
+    let output = translate("BEGIN; SAVEPOINT sp1;").unwrap();
     assert!(output.contains("SAVEPOINT"), "SAVEPOINT should pass through, got: {output}");
     {
         let mut conn = SqliteConnection::establish(":memory:").unwrap();
-        conn.batch_execute(&format!("{output};")).unwrap();
+        conn.batch_execute(&output.replace('\n', ";\n")).unwrap();
     }
 }
 
 #[test]
 fn release_savepoint_passes_through() {
-    let output = translate("RELEASE SAVEPOINT sp1;").unwrap();
+    let output = translate("BEGIN; SAVEPOINT sp1; RELEASE SAVEPOINT sp1;").unwrap();
     assert!(output.contains("RELEASE"), "RELEASE SAVEPOINT should pass through, got: {output}");
     {
         let mut conn = SqliteConnection::establish(":memory:").unwrap();
-        conn.batch_execute(&format!("SAVEPOINT sp1;\n{output};")).unwrap();
+        conn.batch_execute(&output.replace('\n', ";\n")).unwrap();
     }
 }
 

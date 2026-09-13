@@ -120,8 +120,10 @@ fn begin_commit_passes_through() {
 fn savepoint_passes_through() {
     let sql = "
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+        BEGIN;
         SAVEPOINT sp1;
         RELEASE SAVEPOINT sp1;
+        COMMIT;
     ";
     let output = translate(sql);
     assert!(output.contains("SAVEPOINT"), "Expected SAVEPOINT: {output}");
