@@ -692,6 +692,9 @@ impl Pg2Sqlite {
 
     /// Translates loaded PostgreSQL statements to SQLite.
     ///
+    /// Bind parameters carry the PostgreSQL value; the emitted SQL performs any
+    /// re-representation conversion.
+    ///
     /// Warnings about dropped or downgraded constructs are discarded on this
     /// path. Use [`translate_with_report`](Self::translate_with_report) to
     /// collect them alongside the statements.
@@ -782,8 +785,11 @@ impl Pg2Sqlite {
 
     /// Convenience method: translates to a `Vec<String>` of SQL strings.
     ///
+    /// Bind parameters carry the PostgreSQL value; the emitted SQL performs any
+    /// re-representation conversion.
+    ///
     /// Equivalent to `translate()` followed by mapping each statement to its
-    /// `to_string()` representation. Useful when you don't need the AST.
+    /// `to_string()` representation.
     ///
     /// # Errors
     ///

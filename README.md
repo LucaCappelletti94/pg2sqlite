@@ -87,7 +87,7 @@ SELECT 9223372036854775807 + 1;
 -- SQLite:     9.2233720368547758e+18, and typeof() answers 'real'
 ```
 
-A `NUMERIC(p,s)` column is the exception to the third: it is stored as a scaled integer under a `CHECK` that bounds it, so `NUMERIC(10,2)` emits `CHECK (amount BETWEEN -9999999999 AND 9999999999)` and overflowing it fails. An `INTEGER` or `BIGINT` column carries no such bound.
+A `NUMERIC(p,s)` column is the exception to the third: it is stored as a scaled integer under a `CHECK` that bounds it, so `NUMERIC(10,2)` emits `CHECK (amount BETWEEN -9999999999 AND 9999999999)` and overflowing it fails. An `INTEGER` or `BIGINT` column carries no such bound. Bind parameters carry the PostgreSQL value; the emitted SQL performs any re-representation conversion.
 
 Text comparison follows the collation. PostgreSQL uses the database's, which under a UTF-8 locale orders case-insensitively for the purpose of ranking letters, while SQLite's default `BINARY` collation compares byte by byte, so every upper-case letter sorts before every lower-case one. This reaches `ORDER BY`, `<`, `>`, `BETWEEN`, `MIN` and `MAX`, not only explicit comparisons.
 
