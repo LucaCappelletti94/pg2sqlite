@@ -893,6 +893,10 @@ pub(crate) struct ColumnRewrites {
     /// Array columns under the JSON representation; a bound parameter here is
     /// refused.
     array_cols: Vec<String>,
+    /// Columns whose written literal has to be read before it is emitted: a
+    /// float special SQLite cannot hold, a bit string in PostgreSQL's own
+    /// spelling, or a temporal literal to validate and normalise.
+    literal_checked_cols: Vec<(String, DataType)>,
 }
 
 impl ColumnRewrites {
@@ -914,6 +918,13 @@ impl ColumnRewrites {
             } else {
                 Vec::new()
             };
+        let literal_checked_cols = table
+            .columns(schema)
+            .into_iter()
+            .flatten()
+            .filter(|col| literal_checks_apply(&col.attribute().data_type))
+            .map(|col| (col.column_name().to_string(), col.attribute().data_type.clone()))
+            .collect();
         Self {
             vector_cols: vector_columns_of_table(table, schema).unwrap_or_default(),
             uuid_cols: if is_blob_uuid_representation(options) {
@@ -923,6 +934,7 @@ impl ColumnRewrites {
             },
             numeric_scales: numeric_minor_unit_scales_of_table(table, schema),
             array_cols,
+            literal_checked_cols,
         }
     }
 
@@ -943,6 +955,7 @@ impl ColumnRewrites {
             && self.uuid_cols.is_empty()
             && self.numeric_scales.is_empty()
             && self.array_cols.is_empty()
+            && self.literal_checked_cols.is_empty()
     }
 
     /// Finishes a translated value written into `column`, handling both
@@ -991,6 +1004,11 @@ impl ColumnRewrites {
             }
         } else {
             scale_literal_for_column(&mut value, column, &self.numeric_scales)?;
+            if let Some((_, data_type)) =
+                self.literal_checked_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(column))
+            {
+                value = convert_value_for_column_type(data_type, value, options)?;
+            }
         }
         Ok(value)
     }
@@ -1130,7 +1148,170 @@ pub(crate) fn convert_value_for_column_type(
                 .to_string(),
         ));
     }
+    if let Some(refusal) = float_special_refusal(data_type, &expr) {
+        return Err(refusal);
+    }
+    if matches!(data_type, DataType::Array(_))
+        && crate::impls::function_helpers::single_quoted_literal(&expr).is_some()
+    {
+        return Err(array_text_literal_refusal(data_type));
+    }
+    if crate::impls::translator_impls::data_type::bit_length(data_type).is_some() {
+        return convert_bit_literal(expr);
+    }
+    if let Some(kind) = crate::impls::temporal_literals::temporal_literal_kind(data_type) {
+        return normalize_temporal_literal_expr(kind, expr);
+    }
+    if matches!(data_type, DataType::Interval { .. }) {
+        return normalize_interval_literal_expr(expr);
+    }
     Ok(expr)
+}
+
+/// Rewrites a string literal in an interval column position to the text
+/// PostgreSQL prints for it, or refuses what PostgreSQL refuses.
+pub(crate) fn normalize_interval_literal_expr(expr: Expr) -> Result<Expr, Error> {
+    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), span }) = &expr else {
+        return Ok(expr);
+    };
+    let normalized = crate::impls::interval::normalize_interval_literal(text)?;
+    Ok(Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(normalized), span: *span }))
+}
+
+/// Rewrites a string literal in a temporal column position to the text
+/// PostgreSQL prints for it, or refuses what PostgreSQL refuses.
+///
+/// Anything that is not a string literal passes through: a function call, a
+/// parameter or an already-translated expression carries no text to read.
+pub(crate) fn normalize_temporal_literal_expr(
+    kind: crate::impls::temporal_literals::TemporalLiteralKind,
+    expr: Expr,
+) -> Result<Expr, Error> {
+    let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), span }) = &expr else {
+        return Ok(expr);
+    };
+    let normalized = crate::impls::temporal_literals::normalize_temporal_literal(kind, text)?;
+    Ok(Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(normalized), span: *span }))
+}
+
+/// Whether a literal written into a column of this type has to be read
+/// before it is emitted.
+///
+/// The three cases are a float special SQLite cannot hold, a bit string in
+/// one of PostgreSQL's own spellings, and a temporal literal to validate and
+/// normalise. An array column joins them because PostgreSQL array text lands
+/// in a column holding JSON.
+#[must_use]
+pub(crate) fn literal_checks_apply(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Real
+            | DataType::Float(_)
+            | DataType::Double(_)
+            | DataType::DoublePrecision
+            | DataType::Float4
+            | DataType::Float8
+            | DataType::Array(_)
+            | DataType::Interval { .. }
+    ) || crate::impls::translator_impls::data_type::bit_length(data_type).is_some()
+        || crate::impls::temporal_literals::temporal_literal_kind(data_type).is_some()
+}
+
+/// The refusal a non-finite float literal earns, or `None` when the position
+/// holds anything else.
+///
+/// SQLite's `REAL` is always finite: `CAST('NaN' AS REAL)` and
+/// `CAST('Infinity' AS REAL)` both answer `0.0`, so a stored special would
+/// match `WHERE col = 0`, and the literal left as text dies at write time
+/// under `STRICT` with `cannot store TEXT value in REAL column` while a
+/// comparison against it is quietly never equal. PostgreSQL takes all of
+/// `NaN`, `Infinity`, `inf` and their signed spellings, case-insensitively.
+pub(crate) fn float_special_refusal(data_type: &DataType, expr: &Expr) -> Option<Error> {
+    if !matches!(
+        data_type,
+        DataType::Real
+            | DataType::Float(_)
+            | DataType::Double(_)
+            | DataType::DoublePrecision
+            | DataType::Float4
+            | DataType::Float8
+    ) {
+        return None;
+    }
+    let text = crate::impls::function_helpers::single_quoted_literal(expr)?;
+    if !is_float_special(text) {
+        return None;
+    }
+    Some(Error::forward_refusal(format!(
+        "SQLite cannot hold {text}: CAST('{text}' AS REAL) stores 0.0, which silently matches \
+         WHERE col = 0. Store as TEXT and handle in the application, or exclude this column."
+    )))
+}
+
+/// Whether `text` is one of the non-finite floats PostgreSQL reads.
+#[must_use]
+pub(crate) fn is_float_special(text: &str) -> bool {
+    matches!(
+        text.to_ascii_lowercase().as_str(),
+        "nan" | "infinity" | "-infinity" | "+infinity" | "inf" | "-inf" | "+inf"
+    )
+}
+
+/// The refusal a string literal in an array position earns.
+///
+/// The replica stores an array as JSON, so PostgreSQL's own array text lands
+/// in a column every later `json_extract` reads, and each one fails with
+/// `malformed JSON`.
+pub(crate) fn array_text_literal_refusal(data_type: &DataType) -> Error {
+    Error::forward_refusal(format!(
+        "a string literal cannot be written into {data_type}: the replica stores arrays as JSON \
+         and has no way to parse PostgreSQL array syntax. Use an ARRAY[...] constructor instead."
+    ))
+}
+
+/// Rewrites a bit-string literal into the digit text a bit column stores.
+///
+/// A bit column becomes `TEXT` holding the digits, so PostgreSQL's own
+/// spellings have to be brought to that form: `B'010'` is a syntax error in
+/// SQLite, and `X'1A'` is a blob there while PostgreSQL reads it as the eight
+/// bits `00011010`, four per hex digit. A plain string literal is validated,
+/// since PostgreSQL answers `"2" is not a valid binary digit` for `'012'`.
+pub(crate) fn convert_bit_literal(expr: Expr) -> Result<Expr, Error> {
+    let Expr::Value(ValueWithSpan { value, span }) = &expr else { return Ok(expr) };
+    let digits = match value {
+        Value::SingleQuotedByteStringLiteral(bits)
+        | Value::DoubleQuotedByteStringLiteral(bits)
+        | Value::SingleQuotedString(bits) => {
+            if let Some(invalid) = bits.chars().find(|c| *c != '0' && *c != '1') {
+                return Err(Error::forward_refusal(format!(
+                    "\"{invalid}\" is not a valid binary digit: a bit column is stored as its \
+                     digit text, so '{bits}' would be held where PostgreSQL refuses it. Write a \
+                     string of 0 and 1, a B'...' literal, or an X'...' literal."
+                )));
+            }
+            bits.clone()
+        }
+        Value::HexStringLiteral(hex) => expand_hex_to_bits(hex)?,
+        _ => return Ok(expr),
+    };
+    Ok(Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(digits), span: *span }))
+}
+
+/// The bits `X'...'` stands for, four per hex digit, most significant first.
+fn expand_hex_to_bits(hex: &str) -> Result<String, Error> {
+    let mut bits = String::with_capacity(hex.len() * 4);
+    for digit in hex.chars() {
+        let value = digit.to_digit(16).ok_or_else(|| {
+            Error::forward_refusal(format!(
+                "\"{digit}\" is not a valid hexadecimal digit: X'{hex}' cannot be read as a bit \
+                 string."
+            ))
+        })?;
+        for shift in (0..4).rev() {
+            bits.push(if value >> shift & 1 == 1 { '1' } else { '0' });
+        }
+    }
+    Ok(bits)
 }
 
 /// Rewrites a literal written into `column` as minor units, in place.

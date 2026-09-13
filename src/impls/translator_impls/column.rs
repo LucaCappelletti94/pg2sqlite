@@ -25,10 +25,11 @@ use crate::{
         shared_helpers::{declares_identity, minor_unit_scale, scale_decimal_literal},
         translator_impls::{
             data_type::{
-                bit_exact_length_check_expr, bit_length, bit_max_length_check_expr,
-                character_length, character_length_bound_expr, exact_numeric_info, is_serial_type,
-                numeric_precision_and_scale, numeric_precision_bound_expr,
-                regular_int_range_bound_expr, small_int_range_bound_expr,
+                bit_binary_digits_check_expr, bit_exact_length_check_expr, bit_length,
+                bit_max_length_check_expr, character_length, character_length_bound_expr,
+                exact_numeric_info, is_serial_type, numeric_precision_and_scale,
+                numeric_precision_bound_expr, regular_int_range_bound_expr,
+                small_int_range_bound_expr,
             },
             uuid::{
                 is_blob_uuid_representation, is_uuid_data_type, uuid_blob_length_check_expr,
@@ -345,12 +346,15 @@ fn declared_bound_checks(
     if let Some(length) = character_length(&column.data_type)? {
         bounds.push(character_length_bound_expr(&column.name, length));
     }
-    if let Some((fixed, Some(n))) = bit_length(&column.data_type) {
-        bounds.push(if fixed {
-            bit_exact_length_check_expr(&column.name, n)
-        } else {
-            bit_max_length_check_expr(&column.name, n)
-        });
+    if let Some((fixed, declared)) = bit_length(&column.data_type) {
+        if let Some(n) = declared {
+            bounds.push(if fixed {
+                bit_exact_length_check_expr(&column.name, n)
+            } else {
+                bit_max_length_check_expr(&column.name, n)
+            });
+        }
+        bounds.push(bit_binary_digits_check_expr(&column.name));
     }
     Ok(bounds)
 }

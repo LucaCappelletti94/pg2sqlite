@@ -192,6 +192,28 @@ pub(crate) fn bit_max_length_check_expr(column_name: &Ident, n: u64) -> Expr {
     bit_length_check(column_name, n, BinaryOperator::LtEq)
 }
 
+/// `<col> NOT GLOB '*[^01]*'`, which holds for a string of binary digits and
+/// for the empty string.
+///
+/// A bit column is stored as its digit text, and only the length was checked,
+/// so the replica held values PostgreSQL refuses with `"2" is not a valid
+/// binary digit`. `GLOB` carries the character class SQLite's `LIKE` does not
+/// have.
+#[must_use]
+pub(crate) fn bit_binary_digits_check_expr(column_name: &Ident) -> Expr {
+    Expr::UnaryOp {
+        op: sqlparser::ast::UnaryOperator::Not,
+        expr: Box::new(Expr::Nested(Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(column_name.clone())),
+            op: BinaryOperator::Glob,
+            right: Box::new(Expr::Value(ValueWithSpan {
+                value: Value::SingleQuotedString("*[^01]*".to_string()),
+                span: Span::empty(),
+            })),
+        }))),
+    }
+}
+
 fn bit_length_check(column_name: &Ident, n: u64, op: BinaryOperator) -> Expr {
     use crate::impls::function_helpers::simple_function_expr;
     Expr::BinaryOp {

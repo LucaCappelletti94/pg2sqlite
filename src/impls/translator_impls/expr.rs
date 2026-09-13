@@ -1688,6 +1688,13 @@ fn scalar_times_interval(expr: &Expr) -> Option<(&Expr, &Interval)> {
     None
 }
 
+/// Whether a literal beside a column of this type has to be examined before
+/// the comparison is emitted.
+///
+/// A float column's literal may be a non-finite special SQLite cannot hold,
+/// and a bit column's literal is either PostgreSQL's `B'...'`/`X'...'`
+/// spelling or a digit string that has to be valid. Both are decided by
+/// [`convert_value_for_column_type`](crate::impls::shared_helpers::convert_value_for_column_type).
 /// Converts `value` to the storage type of `column_expr` (already translated).
 fn convert_beside_column_expr(
     column_expr: &Expr,
@@ -1876,7 +1883,11 @@ fn translate_binary_op(
             | BinaryOperator::Gt
             | BinaryOperator::GtEq
     ) {
-        let col_check = |e: &Expr| {
+        // A column whose literals only need checking, a float or a bit
+        // column, enters this branch only when the other side is a literal:
+        // two columns compared with each other have nothing to check, and
+        // taking the branch would skip the DATE-to-midnight promotion below.
+        let col_check = |e: &Expr, sibling: &Expr| {
             declared_type_matches(e, schema, options, |t| t.eq_ignore_ascii_case("uuid"))
                 .unwrap_or(false)
                 || declared_in_scope(
@@ -1884,7 +1895,11 @@ fn translate_binary_op(
                     schema,
                     options,
                     |dt| {
-                        if is_vector_data_type(dt) || matches!(dt, DataType::Array(_)) {
+                        if is_vector_data_type(dt)
+                            || matches!(dt, DataType::Array(_))
+                            || (crate::impls::shared_helpers::literal_checks_apply(dt)
+                                && matches!(sibling, Expr::Value(_)))
+                        {
                             Some(())
                         } else {
                             None
@@ -1896,8 +1911,8 @@ fn translate_binary_op(
                 .flatten()
                 .is_some()
         };
-        let left_is_col = col_check(left);
-        let right_is_col = col_check(right);
+        let left_is_col = col_check(left, right);
+        let right_is_col = col_check(right, left);
         if left_is_col || right_is_col {
             let tl = left.translate_with_warnings(schema, options, emit)?;
             let tr = right.translate_with_warnings(schema, options, emit)?;
@@ -2606,31 +2621,36 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     // values, because SQLite REAL is always
                     // finite. WHERE col = 0 then matches corrupted rows
                     // silently.
-                    if matches!(
-                        data_type,
-                        DataType::Real
-                            | DataType::Float(_)
-                            | DataType::Double(_)
-                            | DataType::DoublePrecision
-                            | DataType::Float4
-                            | DataType::Float8
-                    ) && let Some(text) = single_quoted_literal(expr)
+                    if let Some(refusal) =
+                        crate::impls::shared_helpers::float_special_refusal(data_type, expr)
+                    {
+                        return Err(refusal);
+                    }
+                    if matches!(data_type, DataType::Interval { .. })
                         && matches!(
-                            text.to_ascii_lowercase().as_str(),
-                            "nan"
-                                | "infinity"
-                                | "-infinity"
-                                | "+infinity"
-                                | "inf"
-                                | "-inf"
-                                | "+inf"
+                            expr.as_ref(),
+                            Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(_), .. })
                         )
                     {
-                        return Err(crate::errors::Error::forward_refusal(format!(
-                            "SQLite cannot hold {text}: CAST('{text}' AS REAL) stores 0.0, \
-                             which silently matches WHERE col = 0. Store as TEXT and handle \
-                             in the application, or exclude this column."
-                        )));
+                        return crate::impls::shared_helpers::normalize_interval_literal_expr(
+                            expr.as_ref().clone(),
+                        );
+                    }
+                    // A temporal literal is validated and normalised where it
+                    // is written, since the column holds the text itself.
+                    if let Some(kind) =
+                        crate::impls::temporal_literals::temporal_literal_kind(data_type)
+                        && matches!(
+                            expr.as_ref(),
+                            Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(_), .. })
+                        )
+                    {
+                        let normalized =
+                            crate::impls::shared_helpers::normalize_temporal_literal_expr(
+                                kind,
+                                expr.as_ref().clone(),
+                            )?;
+                        return normalized.translate_with_warnings(schema, options, emit);
                     }
                     // A string literal cast to an array type stores PG array
                     // syntax in the JSON column; every
