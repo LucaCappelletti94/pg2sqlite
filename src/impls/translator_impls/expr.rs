@@ -1533,7 +1533,7 @@ fn translate_numeric_arithmetic(
 ) -> Result<Option<Expr>, crate::errors::Error> {
     let mut translated = |side: &Expr| side.translate_with_warnings(schema, options, emit);
     let combined = match op {
-        BinaryOperator::Plus | BinaryOperator::Minus => {
+        BinaryOperator::Plus | BinaryOperator::Minus | BinaryOperator::Modulo => {
             let common = left_scale.max(right_scale);
             Expr::BinaryOp {
                 left: Box::new(rescale_minor_units(translated(left)?, left_scale, common)),
@@ -1610,6 +1610,7 @@ fn numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Expr) -> bo
             | BinaryOperator::Minus
             | BinaryOperator::Multiply
             | BinaryOperator::Divide
+            | BinaryOperator::Modulo
             | BinaryOperator::Eq
             | BinaryOperator::NotEq
             | BinaryOperator::Lt
@@ -1762,6 +1763,86 @@ fn align_minor_units(
     )))
 }
 
+/// `scaled * plain`, where the plain side is a literal rather than another
+/// scaled value.
+///
+/// PostgreSQL gives a product the sum of the operand scales, so the stored
+/// minor units multiply directly: `1.50 * 2` is `3.00`, which is `150 * 2`.
+/// A decimal literal moves onto its own scale first, `0.5` becoming `5` at
+/// scale 1, so the product lands at scale 3 exactly as PostgreSQL's does.
+/// A bound parameter is left to the caller's own arm, since its scale is not
+/// known here.
+fn multiply_by_plain_operand(
+    left: &Expr,
+    right: &Expr,
+    scales: (Option<u32>, Option<u32>),
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Option<Expr>, crate::errors::Error> {
+    let plain_side = |side: &Expr, scale: Option<u32>| -> Option<()> {
+        scale.filter(|scale| *scale > 0).map_or(Some(()), |_| None).filter(|()| {
+            matches!(
+                side,
+                Expr::Value(ValueWithSpan { value: Value::Number(_, _), .. })
+                    | Expr::UnaryOp { .. }
+            )
+        })
+    };
+    let literal_at_own_scale = |side: &Expr| -> Result<Option<Expr>, crate::errors::Error> {
+        let places = decimal_literal_places(side);
+        crate::impls::shared_helpers::scale_decimal_literal(side, places)
+    };
+    if plain_side(right, scales.1).is_some()
+        && let Some(scaled) = literal_at_own_scale(right)?
+    {
+        return Ok(Some(Expr::BinaryOp {
+            left: Box::new(left.translate_with_warnings(schema, options, emit)?),
+            op: BinaryOperator::Multiply,
+            right: Box::new(scaled),
+        }));
+    }
+    if plain_side(left, scales.0).is_some()
+        && let Some(scaled) = literal_at_own_scale(left)?
+    {
+        return Ok(Some(Expr::BinaryOp {
+            left: Box::new(scaled),
+            op: BinaryOperator::Multiply,
+            right: Box::new(right.translate_with_warnings(schema, options, emit)?),
+        }));
+    }
+    Ok(None)
+}
+
+/// The decimal places a number literal is written with, and zero for anything
+/// else.
+fn decimal_literal_places(expr: &Expr) -> u32 {
+    let digits = match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => digits,
+        Expr::UnaryOp { expr, .. } => return decimal_literal_places(expr),
+        _ => return 0,
+    };
+    digits.split_once('.').map_or(0, |(_, fraction)| u32::try_from(fraction.len()).unwrap_or(0))
+}
+
+/// The text a PostgreSQL string literal stands for, when it is written in a
+/// spelling SQLite does not read.
+///
+/// `None` leaves the value alone, which is every other value including an
+/// ordinary single-quoted string. An escape string and a `U&'...'` unicode
+/// string arrive from the parser with their escapes already resolved, so the
+/// characters themselves are what SQLite is given, which is the only form it
+/// reads: rendering `U&'A'` back made SQLite answer `no such column: U`.
+fn postgres_string_literal_text(value: &Value) -> Option<String> {
+    match value {
+        Value::DollarQuotedString(quoted) => Some(quoted.value.clone()),
+        Value::NationalStringLiteral(text)
+        | Value::EscapedStringLiteral(text)
+        | Value::UnicodeStringLiteral(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
 /// Translate a binary operation expression.
 #[allow(clippy::too_many_lines)]
 fn translate_binary_op(
@@ -1789,7 +1870,19 @@ fn translate_binary_op(
             )));
         }
 
-        let scalable = *op != BinaryOperator::Divide;
+        // Multiplication is excluded: PostgreSQL gives a product the sum of
+        // the operand scales, so `1.50 * 2` is `3.00` at scale 2 and the
+        // stored `150 * 2` is already that, where taking the literal onto the
+        // column's scale answered `150 * 200`, a hundred times the value at
+        // the scale a consumer reads.
+        let scalable = !matches!(op, BinaryOperator::Divide | BinaryOperator::Multiply);
+        if *op == BinaryOperator::Multiply
+            && (scales.0.is_some_and(|scale| scale > 0) || scales.1.is_some_and(|scale| scale > 0))
+            && let Some(product) =
+                multiply_by_plain_operand(left, right, scales, schema, options, emit)?
+        {
+            return Ok(product);
+        }
         if scalable
             && let Some(scale) = scales.0.filter(|scale| *scale > 0)
             && let Some(scaled) = scale_decimal_literal(right, scale)?
@@ -2130,6 +2223,42 @@ fn translate_binary_op(
             op: BinaryOperator::StringConcat,
             right: Box::new(rendered(right)?),
         });
+    }
+
+    // `||` over a value held as minor units renders the decimal PostgreSQL
+    // renders, since the stored integer would concatenate as its own count:
+    // `100.00 || 'x'` answered `10000x`. Two numeric operands are refused,
+    // because PostgreSQL has no `numeric || numeric` operator at all.
+    if *op == BinaryOperator::StringConcat {
+        let left_scale = scale_of(left, schema, options).filter(|scale| *scale > 0);
+        let right_scale = scale_of(right, schema, options).filter(|scale| *scale > 0);
+        if left_scale.is_some() && right_scale.is_some() {
+            return Err(crate::errors::Error::forward_refusal(
+                "|| over two NUMERIC values has no PostgreSQL counterpart: the server answers \
+                 `operator does not exist: numeric || numeric`, so the replica must not answer \
+                 a concatenation of their stored counts. Cast a side to text."
+                    .to_string(),
+            ));
+        }
+        if left_scale.is_some() || right_scale.is_some() {
+            let mut rendered =
+                |side: &Expr, scale: Option<u32>| -> Result<Expr, crate::errors::Error> {
+                    let translated = side.translate_with_warnings(schema, options, emit)?;
+                    let Some(scale) = scale else { return Ok(translated) };
+                    if !crate::impls::replay::is_replayable(&translated, options) {
+                        return Err(crate::impls::replay::reject_duplicated_operand(
+                            "|| over a NUMERIC value",
+                            &translated,
+                        ));
+                    }
+                    Ok(crate::impls::shared_helpers::render_minor_units_as_text(&translated, scale))
+                };
+            return Ok(Expr::BinaryOp {
+                left: Box::new(rendered(left, left_scale)?),
+                op: BinaryOperator::StringConcat,
+                right: Box::new(rendered(right, right_scale)?),
+            });
+        }
     }
 
     // Array overlap. Rewritten over `json_each` rather than passed through,
@@ -2522,6 +2651,16 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
         Ok(match self {
+            // PostgreSQL's other spellings of a string literal have no SQLite
+            // form: `$$hello$$` reads there as a parameter named `$hello$`,
+            // which stored NULL in silence, and `E'a\nb'`, `$tag$x$tag$` and
+            // `N'abc'` were syntax errors at apply.
+            Expr::Value(ValueWithSpan { value, span })
+                if postgres_string_literal_text(value).is_some() =>
+            {
+                let text = postgres_string_literal_text(value).unwrap_or_default();
+                Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), span: *span })
+            }
             Expr::Function(func) => {
                 let translated = func.translate_with_warnings(schema, options, emit)?;
                 match scale_of(self, schema, options) {
@@ -2754,21 +2893,45 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     {
                         let translated_expr =
                             expr.translate_with_warnings(schema, options, emit)?;
-                        let divisor = 10_u64.pow(scale);
-                        let real_value = Expr::Nested(Box::new(Expr::BinaryOp {
+                        if !crate::impls::replay::is_replayable(&translated_expr, options) {
+                            return Err(crate::impls::replay::reject_duplicated_operand(
+                                "CAST(... AS TEXT) over a NUMERIC value",
+                                &translated_expr,
+                            ));
+                        }
+                        return Ok(crate::impls::shared_helpers::render_minor_units_as_text(
+                            &translated_expr,
+                            scale,
+                        ));
+                    }
+                    // A value held as minor units cast to an integer type
+                    // is the value rounded, which is what PostgreSQL's
+                    // numeric-to-integer cast answers: `1.50::int` is 2,
+                    // where casting the stored count gave 150.
+                    if matches!(translated_type, sqlparser::ast::DataType::Integer(_))
+                        && let Some(scale) = scale_of(expr, schema, options).filter(|s| *s > 0)
+                    {
+                        let translated = expr.translate_with_warnings(schema, options, emit)?;
+                        return Ok(crate::impls::shared_helpers::rescale_minor_units(
+                            translated, scale, 0,
+                        ));
+                    }
+                    // Cast to a float type, the value divides by its factor as
+                    // a real: `1.50::float8` is 1.5, where casting the stored
+                    // count gave 150.
+                    if matches!(translated_type, sqlparser::ast::DataType::Real)
+                        && let Some(scale) = scale_of(expr, schema, options).filter(|s| *s > 0)
+                    {
+                        let translated = expr.translate_with_warnings(schema, options, emit)?;
+                        return Ok(Expr::Nested(Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Nested(Box::new(Expr::BinaryOp {
-                                left: Box::new(translated_expr),
+                                left: Box::new(translated),
                                 op: BinaryOperator::Multiply,
                                 right: Box::new(number_literal("1.0")),
                             }))),
                             op: BinaryOperator::Divide,
-                            right: Box::new(number_literal(&divisor.to_string())),
-                        }));
-                        return Ok(simple_function_expr(
-                            "printf",
-                            vec![string_literal(&format!("%.{scale}f")), real_value],
-                            None,
-                        ));
+                            right: Box::new(number_literal(&10_i128.pow(scale).to_string())),
+                        })));
                     }
                     // A boolean rendered as text reads `true` or `false` in
                     // PostgreSQL, and the translated integer would give `1`.

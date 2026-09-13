@@ -424,6 +424,8 @@ fn ordering_is_numeric() {
 /// `round(numeric, n)` becomes integer arithmetic, which is where R35's `trunc`
 /// fix has to agree: both round away from zero on a negative operand, measured
 /// on PostgreSQL 16 as `round(-2.5, 0) = -3` and `round(1.005, 2) = 1.01`.
+/// Rounding to no places answers a whole number, so the result is at scale 0
+/// like `floor`, `ceil` and `trunc`, not at the column's.
 #[test]
 fn round_matches_postgres_on_both_signs() {
     let rows = run_translated_with(
@@ -434,8 +436,8 @@ fn round_matches_postgres_on_both_signs() {
     );
     assert_eq!(
         rows,
-        vec![Some("3000".to_string()), Some("-3000".to_string()), Some("1000".to_string())],
-        "3, -3, and 1, still at the column's scale of 3"
+        vec![Some("3".to_string()), Some("-3".to_string()), Some("1".to_string())],
+        "3, -3 and 1, at scale 0, which is the scale PostgreSQL answers at"
     );
 }
 
@@ -500,7 +502,7 @@ fn a_literal_is_scaled_in_a_tuple_assignment() {
     );
     assert_eq!(
         rows,
-        vec![Some("7:150".to_string())],
+        vec![Some("7:1.50".to_string())],
         "the plain column is untouched, the scaled one moves"
     );
 }
@@ -600,7 +602,10 @@ fn a_declared_default_is_scaled() {
          SELECT a || '|' || b || '|' || c FROM t;",
         &Pg2SqliteOptions::default(),
     );
-    assert_eq!(rows, vec![Some("150|500|-150".to_string())], "1.50, 5.00 and -1.50 in minor units");
+    // Concatenation renders the decimal PostgreSQL renders, which is what
+    // the server answers for this query: a default landing unscaled would
+    // read 0.01 here.
+    assert_eq!(rows, vec![Some("1.50|5.00|-1.50".to_string())], "as PostgreSQL prints them");
 }
 
 /// PostgreSQL coerces a quoted default, `DEFAULT '1.50'` reads back 1.50, and
@@ -618,7 +623,7 @@ fn a_quoted_or_parenthesised_default_is_scaled() {
          SELECT a || '|' || b FROM t;",
         &Pg2SqliteOptions::default(),
     );
-    assert_eq!(rows, vec![Some("150|250".to_string())], "both spellings are the literal");
+    assert_eq!(rows, vec![Some("1.50|2.50".to_string())], "both spellings are the literal");
 }
 
 /// Guards the fix. `DEFAULT NULL` is result-neutral and must survive, and a
@@ -638,7 +643,10 @@ fn null_and_unscaled_defaults_are_untouched() {
     );
     assert_eq!(
         rows,
-        vec![Some("-100|5|7".to_string())],
+        // `coalesce(a, -1)` renders at the column's scale, where PostgreSQL
+        // prints `-1`: its coalesce drops the type modifier, so the value is
+        // the same and the text is not. Recorded rather than chased.
+        vec![Some("-1.00|5|7".to_string())],
         "the column kept its NULL, and the coalesce fallback reads at that column's scale, so \
          -1 is -1.00, which is -100 minor units; 5 and 7 take no scaling"
     );

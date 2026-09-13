@@ -334,6 +334,67 @@ fn truncate_to_scale(
     })))
 }
 
+/// Two operands of a scale-sensitive function, brought onto one minor-unit
+/// scale.
+///
+/// `mod` and `div` read both operands as values, so a plain number beside a
+/// column held as minor units has to be multiplied up: PostgreSQL answers
+/// `mod(1.50, 2)` as `1.50`, which is the stored `150 % 200`, where `150 % 2`
+/// answered zero. Neither operand carrying a scale leaves both alone.
+fn aligned_minor_unit_operands(
+    left: &Expr,
+    right: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<(Expr, Expr), crate::errors::Error> {
+    let left_scale = scale_of(left, schema, options).unwrap_or(0);
+    let right_scale = scale_of(right, schema, options).unwrap_or(0);
+    let common = left_scale.max(right_scale);
+    let translated_left = left.translate_with_warnings(schema, options, emit)?;
+    let translated_right = right.translate_with_warnings(schema, options, emit)?;
+    if common == 0 {
+        return Ok((translated_left, translated_right));
+    }
+    Ok((
+        rescale_minor_units(translated_left, left_scale, common),
+        rescale_minor_units(translated_right, right_scale, common),
+    ))
+}
+
+/// A value held at `scale` minor units, rounded to a multiple of `10^digits`
+/// and answered at scale 0.
+///
+/// One rounding, not two: rounding to whole units first and to the multiple
+/// afterwards would answer 1300 for `round(1249.60, -2)` where PostgreSQL
+/// answers 1200. Dividing by `10^(scale + digits)` in one step and
+/// multiplying the quotient back by `10^digits` rounds exactly once.
+fn round_to_multiple_of_ten(value: Expr, scale: u32, digits: u32) -> Expr {
+    let quotient = rescale_minor_units(value, scale + digits, 0);
+    rescale_minor_units(quotient, 0, digits)
+}
+
+/// One argument of `concat` or `concat_ws`, with a value held as minor units
+/// rendered as the decimal PostgreSQL renders.
+///
+/// `concat(100.00, 'x')` answers `100.00x` on the server, where the stored
+/// count concatenated as `10000x`.
+fn concatenated_operand(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Expr, crate::errors::Error> {
+    let translated = expr.translate_with_warnings(schema, options, emit)?;
+    let Some(scale) = scale_of(expr, schema, options).filter(|scale| *scale > 0) else {
+        return Ok(translated);
+    };
+    if !is_replayable(&translated, options) {
+        return Err(reject_duplicated_operand("concat over a NUMERIC value", &translated));
+    }
+    Ok(crate::impls::shared_helpers::render_minor_units_as_text(&translated, scale))
+}
+
 /// `floor` of a value held as minor units, using only integer arithmetic.
 ///
 /// `(x - (x % f + f) % f) / f` where f = `factor`.
@@ -1748,7 +1809,7 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 // NULLs; SQLite's || propagates them.
                 let exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
-                    .map(|e| e.translate_with_warnings(schema, options, emit))
+                    .map(|e| concatenated_operand(e, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?
                     .into_iter()
                     .map(wrap_with_coalesce)
@@ -1765,7 +1826,7 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 // values.
                 let mut exprs: Vec<Expr> = function_argument_exprs(&func.args)
                     .into_iter()
-                    .map(|e| e.translate_with_warnings(schema, options, emit))
+                    .map(|e| concatenated_operand(e, schema, options, emit))
                     .collect::<Result<Vec<_>, _>>()?;
                 if exprs.len() < 2 {
                     return Err(crate::errors::Error::forward_refusal(
@@ -1938,10 +1999,12 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 ))
             }
             FunctionTranslation::ToModulo => {
-                // mod(a, b) → (a % b)
+                // mod(a, b) → (a % b), with a plain operand brought onto the
+                // other's minor-unit scale: mod(1.50, 2) is 1.50 in
+                // PostgreSQL, and `150 % 2` answered 0.
                 let exprs = extract_exactly(&func.args, 2, "mod")?;
-                let left = exprs[0].translate_with_warnings(schema, options, emit)?;
-                let right = exprs[1].translate_with_warnings(schema, options, emit)?;
+                let (left, right) =
+                    aligned_minor_unit_operands(exprs[0], exprs[1], schema, options, emit)?;
                 Ok(Expr::Nested(Box::new(Expr::BinaryOp {
                     left: Box::new(left),
                     op: BinaryOperator::Modulo,
@@ -1949,10 +2012,12 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 })))
             }
             FunctionTranslation::ToIntegerDiv => {
-                // div(a, b) → CAST(a / b AS INTEGER)
+                // div(a, b) → CAST(a / b AS INTEGER), on operands at one
+                // scale: div(1.50, 2) is 0 in PostgreSQL, and `CAST(150 / 2)`
+                // answered 75, which reads as 0.75.
                 let exprs = extract_exactly(&func.args, 2, "div")?;
-                let left = exprs[0].translate_with_warnings(schema, options, emit)?;
-                let right = exprs[1].translate_with_warnings(schema, options, emit)?;
+                let (left, right) =
+                    aligned_minor_unit_operands(exprs[0], exprs[1], schema, options, emit)?;
                 Ok(Expr::Cast {
                     expr: Box::new(Expr::BinaryOp {
                         left: Box::new(left),
@@ -2217,6 +2282,15 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 // `round(x)` and `round(x, n)` over anything that is not minor
                 // units are SQLite's own round, which already agrees with
                 // PostgreSQL on a float.
+                // `round(v)` over minor units is `round(v, 0)`: SQLite's own
+                // round is the identity on the stored integer, so it answered
+                // the unrounded value.
+                if let [value] = exprs.as_slice()
+                    && let Some(scale) = scale_of(value, schema, options).filter(|s| *s > 0)
+                {
+                    let translated = value.translate_with_warnings(schema, options, emit)?;
+                    return Ok(rescale_minor_units(translated, scale, 0));
+                }
                 let [value, places] = exprs.as_slice() else {
                     return Ok(simple_function_expr(
                         "round",
@@ -2227,6 +2301,17 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                         translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     ));
                 };
+                // `round(x, -k)` over a plain number rounds to a multiple of
+                // `10^k`, which PostgreSQL answers at scale 0: round(123, -1)
+                // is 120. The places argument being negative used to take the
+                // refusal meant for a non-literal one.
+                if scale_of(value, schema, options).is_none_or(|scale| scale == 0)
+                    && let Some(negative) = integer_literal_value(places).filter(|n| *n < 0)
+                    && let Ok(digits) = u32::try_from(-negative)
+                {
+                    let translated = value.translate_with_warnings(schema, options, emit)?;
+                    return Ok(round_to_multiple_of_ten(translated, 0, digits));
+                }
                 let Some(scale) = scale_of(value, schema, options) else {
                     return Ok(simple_function_expr(
                         "round",
@@ -2237,18 +2322,24 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                         translate_window_type(func.over.as_ref(), schema, options, emit)?,
                     ));
                 };
-                let Some(target) =
-                    integer_literal_value(places).and_then(|n| u32::try_from(n).ok())
-                else {
+                let Some(written) = integer_literal_value(places) else {
                     return Err(crate::errors::Error::forward_refusal(format!(
                         "round({value}, {places}) over a NUMERIC needs the number of places as a \
-                                 literal, since the value is held as minor units and the rounding is \
-                                 integer arithmetic decided at translation time."
+                         literal, since the value is held as minor units and the rounding is \
+                         integer arithmetic decided at translation time."
                     )));
                 };
+                let translated = value.translate_with_warnings(schema, options, emit)?;
+                // Rounding to no places, or to a multiple of ten, answers a
+                // whole number, which is scale 0 here as it is for `floor`,
+                // `ceil` and `trunc`.
+                if written <= 0 {
+                    let digits = u32::try_from(-written).unwrap_or(0);
+                    return Ok(round_to_multiple_of_ten(translated, scale, digits));
+                }
                 // Down to the requested places and back, so the result keeps
                 // the column's scale exactly as PostgreSQL keeps the numeric's.
-                let translated = value.translate_with_warnings(schema, options, emit)?;
+                let target = u32::try_from(written).unwrap_or(scale);
                 let rounded = rescale_minor_units(translated, scale, target.min(scale));
                 Ok(rescale_minor_units(rounded, target.min(scale), scale))
             }
