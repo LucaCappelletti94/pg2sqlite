@@ -26,6 +26,33 @@ use crate::{
     warnings::TranslationWarning,
 };
 
+/// Refuses two columns whose names differ only in ASCII case.
+///
+/// PostgreSQL keeps `a` and `"A"` apart, folding an unquoted name to lower
+/// case and taking a quoted one as written. SQLite compares identifiers
+/// case-insensitively for ASCII, so the emitted table answered `duplicate
+/// column name: A` at apply, which the translation can see coming and say
+/// plainly.
+fn reject_case_colliding_columns(
+    columns: &[sqlparser::ast::ColumnDef],
+) -> Result<(), crate::errors::Error> {
+    for (index, column) in columns.iter().enumerate() {
+        if let Some(earlier) = columns[..index]
+            .iter()
+            .find(|earlier| earlier.name.value.eq_ignore_ascii_case(&column.name.value))
+        {
+            return Err(crate::errors::Error::forward_refusal(format!(
+                "the columns {} and {} differ only in case, which PostgreSQL keeps apart and \
+                 SQLite does not: it compares an identifier case-insensitively for ASCII \
+                 letters, so the emitted table would answer `duplicate column name`. Rename one \
+                 of them.",
+                earlier.name, column.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl crate::traits::translator::TranslatorWithContext for CreateTable {
     type SQLiteEntry = CreateTable;
 
@@ -181,6 +208,7 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
             .iter()
             .any(|column| folded_primary_key(column, &table_primary_key).is_some());
 
+        reject_case_colliding_columns(&self.columns)?;
         // Every field is named so a field added upstream fails to compile here
         // instead of leaking through a spread, the defect this rebuild fixes.
         let mut created_table = Self {

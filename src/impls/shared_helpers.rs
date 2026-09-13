@@ -675,13 +675,30 @@ pub(crate) fn declared_numeric_precision(
 
 /// Calls that answer on their operands' NUMERIC scale.
 ///
-/// - `abs`, `round`: PostgreSQL preserves the NUMERIC type exactly.
+/// - `abs`: PostgreSQL preserves the NUMERIC type exactly.
 /// - `avg`: the stored integers average as integers; a literal beside it is on
 ///   the same minor-unit scale as the column.
 /// - `coalesce`, `greatest`, `least`, `max`, `min`, `nullif`, `sum`: return the
 ///   common type of their arguments.
-const SCALE_PRESERVING_CALLS: [&str; 10] =
-    ["abs", "avg", "coalesce", "greatest", "least", "max", "min", "nullif", "round", "sum"];
+///
+/// `round` is absent because it preserves the scale only when it is asked for
+/// places above zero; `round(v)` and `round(v, 0)` answer a whole number, at
+/// scale 0, which [`rounding_keeps_the_scale`] decides.
+const SCALE_PRESERVING_CALLS: [&str; 9] =
+    ["abs", "avg", "coalesce", "greatest", "least", "max", "min", "nullif", "sum"];
+
+/// Whether a `round` call answers at its operand's scale rather than at scale
+/// 0.
+///
+/// `round(v, 2)` keeps the scale, as PostgreSQL keeps the numeric's.
+/// `round(v)`, `round(v, 0)` and `round(v, -1)` answer a whole number, which
+/// is scale 0 here as it is for `floor`, `ceil` and `trunc`, so a literal
+/// beside one must not be taken onto the column's scale.
+fn rounding_keeps_the_scale(function: &Function) -> bool {
+    let arguments = function_argument_exprs(&function.args);
+    let Some(places) = arguments.get(1) else { return false };
+    crate::impls::function_helpers::integer_literal_value(places).is_none_or(|written| written > 0)
+}
 
 /// True when `function` answers on the scale of its NUMERIC arguments.
 pub(crate) fn is_scale_preserving_call(function: &Function) -> bool {
@@ -710,7 +727,18 @@ fn numeric_precision_and_scale_of(
             Ok(u64::try_from(digits.len()).ok().map(|precision| (precision, 0)))
         }
         Expr::Cast { data_type, .. } => Ok(read(data_type)),
-        Expr::Function(function) if is_scale_preserving_call(function) => {
+        Expr::Function(function)
+            if crate::impls::object_name::last_ident(&function.name)
+                .is_some_and(|name| name.value.eq_ignore_ascii_case("round"))
+                && !rounding_keeps_the_scale(function) =>
+        {
+            Ok(None)
+        }
+        Expr::Function(function)
+            if is_scale_preserving_call(function)
+                || crate::impls::object_name::last_ident(&function.name)
+                    .is_some_and(|name| name.value.eq_ignore_ascii_case("round")) =>
+        {
             // Widest argument decides; errors from unresolvable refs decide
             // nothing.
             let mut widest: Option<(u64, u32)> = None;
@@ -1365,6 +1393,61 @@ fn expand_hex_to_bits(hex: &str) -> Result<String, Error> {
         }
     }
     Ok(bits)
+}
+
+/// The text PostgreSQL prints for a value held as minor units.
+///
+/// `printf('%s%d.%0<s>d', sign, whole, fraction)` over integer arithmetic
+/// rather than a float division, which is inexact past 2^53: a
+/// `NUMERIC(18,2)` holding `9999999999999999.99` rendered as
+/// `10000000000000000.00` through `printf('%.2f', v / 100.0)`. The outer
+/// `CASE` keeps SQL NULL, which `printf` would answer as `0.00`, and the sign
+/// is carried separately because a truncating division of `-50` by `100` is
+/// `0` and would lose it.
+///
+/// `value` is written into four positions, so a caller checks it is
+/// replayable first.
+#[must_use]
+pub(crate) fn render_minor_units_as_text(value: &Expr, scale: u32) -> Expr {
+    use crate::impls::{
+        expr_helpers::case_when,
+        function_helpers::{number_literal, simple_function_expr, string_literal},
+    };
+
+    let factor = 10_i128.pow(scale).to_string();
+    let absolute = || simple_function_expr("abs", vec![value.clone()], None);
+    let sign = case_when(
+        Expr::BinaryOp {
+            left: Box::new(value.clone()),
+            op: BinaryOperator::Lt,
+            right: Box::new(number_literal("0")),
+        },
+        string_literal("-"),
+        Some(string_literal("")),
+    );
+    let whole = Expr::BinaryOp {
+        left: Box::new(absolute()),
+        op: BinaryOperator::Divide,
+        right: Box::new(number_literal(&factor)),
+    };
+    let fraction = Expr::BinaryOp {
+        left: Box::new(absolute()),
+        op: BinaryOperator::Modulo,
+        right: Box::new(number_literal(&factor)),
+    };
+    let rendered = simple_function_expr(
+        "printf",
+        vec![string_literal(&format!("%s%d.%0{scale}d")), sign, whole, fraction],
+        None,
+    );
+    case_when(
+        Expr::IsNull(Box::new(value.clone())),
+        Expr::Value(ValueWithSpan {
+            value: Value::Null,
+            span: sqlparser::tokenizer::Span::empty(),
+        }),
+        Some(rendered),
+    )
 }
 
 /// Rewrites a literal written into `column` as minor units, in place.
