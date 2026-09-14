@@ -1,0 +1,8 @@
+# Read by every `cargo mutants` run. Scope runs with `-f <file>` and an explicit
+# `-- --test <binary>` list: the crate generates ~4200 mutants, and
+# tests/test_postgres_gauntlet.rs needs a Docker PostgreSQL per run.
+profile = "mutants"
+
+# Without this the scratch copy includes examples/web-playground/target,
+# fuzz/target and fuzz/corpus (30 GB).
+gitignore = true

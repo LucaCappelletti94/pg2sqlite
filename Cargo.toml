@@ -111,6 +111,11 @@ diesel = { git = "https://github.com/diesel-rs/diesel", branch = "main" }
 name = "translation"
 harness = false
 
+# Build profile for cargo-mutants, selected by .cargo/mutants.toml.
+[profile.mutants]
+inherits = "test"
+debug = "none"
+
 [lints.rust]
 missing_docs = "deny"
 unused_macro_rules = "forbid"
