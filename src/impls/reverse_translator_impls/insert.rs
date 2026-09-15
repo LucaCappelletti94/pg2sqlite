@@ -408,6 +408,7 @@ impl ReverseTranslator for Insert {
             returning,
             output: self.output.clone(),
             replace_into: self.replace_into,
+            by_name: false,
             priority: self.priority,
             insert_alias: self.insert_alias.clone(),
             settings: self.settings.clone(),
