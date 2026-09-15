@@ -162,7 +162,10 @@ fn returning_an_undeclared_column_is_left_to_the_engine() {
         )
         .expect("register the session variable function");
     let error = engine_refusal(&connection, &statements);
-    assert!(error.contains("nosuch"), "SQLite must name the column it lacks: {error}");
+    assert!(
+        error.contains("no such column: nosuch"),
+        "SQLite must refuse it as an undeclared column: {error}"
+    );
 }
 
 #[test]
@@ -179,5 +182,8 @@ fn an_assignment_to_an_undeclared_column_is_left_to_the_engine() {
 
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     let error = engine_refusal(&connection, &statements);
-    assert!(error.contains("missing"), "SQLite must name the column it lacks: {error}");
+    assert!(
+        error.contains("no such column: missing"),
+        "SQLite must refuse it as an undeclared column: {error}"
+    );
 }
