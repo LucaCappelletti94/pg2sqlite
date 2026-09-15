@@ -25,7 +25,7 @@ use crate::{
     impls::{
         datetime_helpers::normalize_timestamptz_offset,
         object_name::{
-            last_ident, last_ident_value_or_display,
+            COLUMN_LOOKUP_CASE, last_ident, last_ident_value_or_display,
             normalize_schema_qualified_object_name_for_sqlite, resolve_translation_table,
         },
         shared_helpers::{
@@ -523,7 +523,7 @@ pub(crate) fn default_expr_for_column(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<sqlparser::ast::Expr, crate::errors::Error> {
-    let Some(column) = table.column(column_name, schema)? else {
+    let Some(column) = table.column(column_name, schema, COLUMN_LOOKUP_CASE)? else {
         return Err(unknown_default_column(table.table_name(), column_name));
     };
 
@@ -850,7 +850,9 @@ fn database_filled_column(
     }
 
     for name in named {
-        let Some(column) = table.column(&name, schema)? else { continue };
+        let Some(column) = table.column(&name, schema, COLUMN_LOOKUP_CASE)? else {
+            continue;
+        };
         let filled = column.attribute().options.iter().any(|option| {
             matches!(
                 option.option,

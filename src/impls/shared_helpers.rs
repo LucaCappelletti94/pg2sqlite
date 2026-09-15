@@ -35,7 +35,7 @@ use sqlparser::ast::{
 use crate::{
     errors::Error,
     impls::{
-        object_name::{last_ident, resolve_translation_table},
+        object_name::{COLUMN_LOOKUP_CASE, last_ident, resolve_translation_table},
         query_builder::{from_relation, make_query, make_simple_select},
         translator_impls::{
             uuid::{
@@ -1773,7 +1773,9 @@ fn reject_generated_key_assignment(
 ) -> Result<(), Error> {
     let check = |name: &ObjectName, value: &Expr| -> Result<(), Error> {
         let Some(column) = last_ident(name) else { return Ok(()) };
-        let Some(column) = table.column(&column.value, schema)? else { return Ok(()) };
+        let Some(column) = table.column(&column.value, schema, COLUMN_LOOKUP_CASE)? else {
+            return Ok(());
+        };
         let attribute = column.attribute();
         let generated_always = declares_always_identity(&attribute.options);
         let generates_its_own = declares_identity(&attribute.options)
