@@ -79,6 +79,7 @@ pub(crate) fn insert(table: ObjectName, columns: Vec<ObjectName>, source: Query)
         returning: None,
         output: None,
         replace_into: false,
+        by_name: false,
         priority: None,
         insert_alias: None,
         settings: None,

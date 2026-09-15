@@ -188,7 +188,7 @@ use sqlparser::ast::{CreateIndex, Expr};
 
 use crate::{
     errors::Error,
-    impls::object_name::{last_ident, resolve_translation_table},
+    impls::object_name::{COLUMN_LOOKUP_CASE, last_ident, resolve_translation_table},
 };
 
 /// Classifies a GiST `CreateIndex` against the schema.
@@ -219,7 +219,10 @@ pub(crate) fn classify_gist_spatial_columns(
             non_spatial_columns.push(format!("{}", index_col.column.expr));
             continue;
         };
-        match table.column(&column_name, schema)?.map(|col| col.data_type(schema)) {
+        match table
+            .column(&column_name, schema, COLUMN_LOOKUP_CASE)?
+            .map(|col| col.data_type(schema))
+        {
             Some(dt) if is_spatial_data_type(&dt) => spatial_columns.push(column_name),
             _ => non_spatial_columns.push(column_name),
         }

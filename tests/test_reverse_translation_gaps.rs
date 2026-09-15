@@ -7,7 +7,11 @@
 //!   RELEASE SAVEPOINT)
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+use sqlparser::{
+    ast::Statement,
+    dialect::{PostgreSqlDialect, SQLiteDialect},
+    parser::Parser,
+};
 
 const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY, val TEXT, num INT);";
 
@@ -255,4 +259,21 @@ fn the_hive_ordering_clauses_are_refused_in_reverse() {
             .to_string();
         assert!(message.contains(clause), "the refusal should name {clause}: {message}");
     }
+}
+
+/// sqlparser #2403 parses `BY NAME` on the generic insert path for every
+/// dialect, so SQLite text carrying the Databricks clause reaches this
+/// direction; the parse assertion fails if upstream ever re-gates it.
+#[test]
+fn insert_by_name_is_refused_in_reverse() {
+    let sqlite_sql = "INSERT INTO t (id) BY NAME SELECT 1 AS id";
+    let parsed = Parser::parse_sql(&SQLiteDialect {}, sqlite_sql)
+        .expect("sqlparser parses BY NAME on the generic insert path since #2403");
+    let Statement::Insert(insert) = &parsed[0] else { panic!("expected an INSERT") };
+    assert!(insert.by_name, "the clause should reach the AST as by_name");
+
+    let message = reverse_result(SCHEMA, sqlite_sql)
+        .expect_err("BY NAME has no PostgreSQL grammar")
+        .to_string();
+    assert!(message.contains("BY NAME"), "the refusal should name BY NAME: {message}");
 }
