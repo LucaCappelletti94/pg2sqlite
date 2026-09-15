@@ -416,13 +416,15 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
     (
         "foreign-clause",
         &[
-                // R122: the six SELECT clauses foreign to both dialects.
+                // R122: clauses foreign to both dialects, SELECT shapes and
+                // the Databricks INSERT BY NAME.
                 "SELECT id FROM t LATERAL VIEW now() v AS ts_val;",
                 "SELECT id FROM t CLUSTER BY id;",
                 "SELECT id FROM t DISTRIBUTE BY id;",
                 "SELECT id FROM t SORT BY id;",
                 "SELECT id FROM t QUALIFY row_number() OVER (ORDER BY id) = 1;",
                 "SELECT id FROM t CONNECT BY id = 2;",
+                "INSERT INTO t (id) BY NAME SELECT 1 AS id;",
                     ],
     ),
     (

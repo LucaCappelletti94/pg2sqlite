@@ -328,6 +328,15 @@ impl ReverseTranslator for Insert {
         schema: &Self::Schema,
         options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
+        // Databricks SQL, parseable in every dialect since upstream #2403;
+        // the rebuild below would silently drop the name-matched columns.
+        if self.by_name {
+            return Err(Error::reverse_refusal(
+                "BY NAME is Databricks SQL, and neither SQLite nor PostgreSQL parses the clause. \
+                 List the target columns and match the source to them by position.",
+            ));
+        }
+
         // Refuse SQLite database qualifiers (main.t, temp.t) and system tables.
         if let TableObject::TableName(name) = &self.table {
             refuse_sqlite_specific_names(name)?;
@@ -579,6 +588,23 @@ mod tests {
 
         assert_eq!(reversed.assignments.len(), 1);
         assert_eq!(reversed.assignments[0].value.to_string(), "chr(65)");
+    }
+
+    /// Upstream sqlparser #2403 parses `BY NAME` for every dialect, so SQLite
+    /// text carrying the Databricks clause reaches this direction; the rebuild
+    /// would silently drop the name-matched columns.
+    #[test]
+    fn reverse_translate_rejects_databricks_by_name() {
+        let mut insert = parse_insert("INSERT INTO users(id) SELECT 1");
+        insert.by_name = true;
+
+        let schema = empty_schema();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
+        let err = insert
+            .reverse_translate(&schema, &options)
+            .expect_err("BY NAME has no PostgreSQL form");
+
+        assert!(err.to_string().contains("BY NAME"), "the refusal should name BY NAME: {err}");
     }
 
     #[test]

@@ -98,6 +98,16 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // Databricks SQL, parseable in every dialect since upstream #2403;
+        // translation would silently turn name-matched columns into
+        // positional ones.
+        if self.by_name {
+            return Err(crate::errors::Error::forward_refusal(
+                "BY NAME is Databricks SQL, and neither PostgreSQL nor SQLite parses the clause. \
+                 List the target columns and match the source to them by position.",
+            ));
+        }
+
         // Replace DEFAULT with the column's declared default BEFORE translating
         // the source, for two reasons. The substituted expression is PostgreSQL
         // SQL and gets translated by the same path as a written-out value
@@ -951,5 +961,20 @@ mod tests {
             .expect_err("non-on-conflict ON INSERT clause should fail");
 
         assert!(err.to_string().contains("Unsupported ON INSERT clause"));
+    }
+
+    /// Upstream sqlparser #2403 parses `BY NAME` for every dialect; it is
+    /// Databricks SQL, and dropping the flag would silently turn the
+    /// name-matched source columns into positional ones.
+    #[test]
+    fn translate_rejects_databricks_by_name() {
+        let mut insert = parse_insert("INSERT INTO users(id) SELECT 1");
+        insert.by_name = true;
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let err = insert.translate(&schema, &options).expect_err("BY NAME has no SQLite form");
+
+        assert!(err.to_string().contains("BY NAME"), "the refusal should name BY NAME: {err}");
     }
 }
