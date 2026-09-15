@@ -24,14 +24,23 @@ mod helpers;
 use helpers::translate_pg as translate;
 
 /// Applies every emitted statement, which proves SQLite takes the output.
-fn apply(statements: &[String]) -> Connection {
-    let connection = Connection::open_in_memory().expect("in-memory SQLite");
+fn apply(connection: &Connection, statements: &[String]) {
     for statement in statements {
         connection
             .execute_batch(&format!("{statement};"))
             .unwrap_or_else(|error| panic!("SQLite rejected emitted SQL: {error}\n{statement}"));
     }
+}
+
+/// What SQLite answers for the last emitted statement, the ones before it
+/// having been applied.
+fn engine_refusal(connection: &Connection, statements: &[String]) -> String {
+    let (last, setup) = statements.split_last().expect("at least one statement");
+    apply(connection, setup);
     connection
+        .execute_batch(&format!("{last};"))
+        .expect_err("SQLite has to be the one refusing this")
+        .to_string()
 }
 
 #[test]
@@ -46,7 +55,8 @@ fn a_quoted_column_carries_its_default_into_the_values_row() {
     let insert = statements.last().expect("an insert statement");
     assert!(insert.contains("VALUES (1, 7)"), "the declared default must be substituted: {insert}");
 
-    let connection = apply(&statements);
+    let connection = Connection::open_in_memory().expect("in-memory SQLite");
+    apply(&connection, &statements);
     let stored: i64 = connection
         .query_row("SELECT \"ColA\" FROM \"Tbl\" WHERE id = 1", [], |row| row.get(0))
         .expect("the inserted row");
@@ -64,7 +74,7 @@ fn the_folded_spelling_reaches_the_same_quoted_column() {
 
     let insert = statements.last().expect("an insert statement");
     assert!(insert.contains("VALUES (1, 7)"), "the declared default must be substituted: {insert}");
-    apply(&statements);
+    apply(&Connection::open_in_memory().expect("in-memory SQLite"), &statements);
 }
 
 #[test]
@@ -130,14 +140,29 @@ fn returning_a_quoted_defaulted_column_is_refused_on_a_policy_table() {
 
 #[test]
 fn returning_an_undeclared_column_is_left_to_the_engine() {
-    let statements = Pg2Sqlite::default()
+    let statements: Vec<String> = Pg2Sqlite::default()
         .sql(&policy_schema("nosuch"))
         .expect("parse")
         .translate(&monitor_options())
-        .expect("a name no column answers to is not a column the database fills in");
+        .expect("a name no column answers to is not a column the database fills in")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
 
-    let insert = statements.last().expect("an insert statement").to_string();
+    let insert = statements.last().expect("an insert statement");
     assert!(insert.contains("RETURNING nosuch"), "the name must reach SQLite intact: {insert}");
+
+    let connection = Connection::open_in_memory().expect("in-memory SQLite");
+    connection
+        .create_scalar_function(
+            "current_app_user",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |_| Ok(42i64),
+        )
+        .expect("register the session variable function");
+    let error = engine_refusal(&connection, &statements);
+    assert!(error.contains("nosuch"), "SQLite must name the column it lacks: {error}");
 }
 
 #[test]
@@ -151,4 +176,8 @@ fn an_assignment_to_an_undeclared_column_is_left_to_the_engine() {
 
     let update = statements.last().expect("an update statement");
     assert!(update.contains("missing = 5"), "the assignment must reach SQLite intact: {update}");
+
+    let connection = Connection::open_in_memory().expect("in-memory SQLite");
+    let error = engine_refusal(&connection, &statements);
+    assert!(error.contains("missing"), "SQLite must name the column it lacks: {error}");
 }
