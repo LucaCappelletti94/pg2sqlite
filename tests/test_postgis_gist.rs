@@ -137,3 +137,19 @@ fn gist_on_two_geometry_columns_emits_two_create_spatial_index_calls() {
     // syntax.
     run_sqlitegis_stmts(&stmts);
 }
+
+#[test]
+fn gist_on_a_quoted_geometry_column_translates_to_create_spatial_index() {
+    // A quoted mixed-case name used to miss the column.
+    let sql = "CREATE TABLE features (id INTEGER PRIMARY KEY, \"Geom\" geometry); \
+               CREATE INDEX features_geom_idx ON features USING gist (\"Geom\");";
+    let stmts = translate_with_sqlitegis(sql).expect("translate");
+    let joined = stmts.join("\n");
+    assert!(
+        joined.contains("CreateSpatialIndex")
+            && joined.contains("'features'")
+            && joined.contains("'Geom'"),
+        "expected SELECT CreateSpatialIndex('features', 'Geom') in output, got:\n{joined}"
+    );
+    run_sqlitegis_stmts(&stmts);
+}

@@ -12,13 +12,17 @@ use alloc::{
 };
 
 use sql_traits::{
-    structs::ParserDB,
+    structs::{IdentifierCase, ParserDB},
     traits::{DatabaseLike, TableLike},
     utils::identifier_resolution::identifiers_match,
 };
 use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
 
 use crate::errors::Error;
+
+/// The comparison a column lookup takes, folded because a table carrying both
+/// `a` and `"A"` is refused where it is created.
+pub(crate) const COLUMN_LOOKUP_CASE: IdentifierCase = IdentifierCase::Folded;
 
 /// Returns the last identifier segment of an object name.
 pub(crate) fn last_ident(name: &ObjectName) -> Option<&Ident> {
