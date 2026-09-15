@@ -13,6 +13,9 @@
 //!
 //! The lookups fold, so one column answers to `"ColA"` and to `cola`, which
 //! costs nothing because a table carrying both is refused where it is created.
+//!
+//! A name no column answers to is nobody's business here, and both guards
+//! leave that statement to the engine that will refuse it.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping, UuidRepresentation};
 use rusqlite::Connection;
@@ -81,10 +84,11 @@ fn a_quoted_generated_always_key_refuses_a_written_value() {
     assert!(error.contains("Id"), "the refusal must name the column: {error}");
 }
 
-#[test]
-fn returning_a_quoted_defaulted_column_is_refused_on_a_policy_table() {
-    let schema = "\
-CREATE TABLE documents (
+/// A policy-bearing table whose `note` column the database fills in, with
+/// `returning` naming what the insert reads back.
+fn policy_schema(returning: &str) -> String {
+    format!(
+        "CREATE TABLE documents (
     id INTEGER PRIMARY KEY,
     owner_id INTEGER NOT NULL,
     \"Note\" TEXT DEFAULT 'unset'
@@ -94,20 +98,26 @@ CREATE POLICY documents_select_policy ON documents
     FOR SELECT USING (owner_id = current_setting('app.user_id')::integer);
 CREATE POLICY documents_insert_policy ON documents
     FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id')::integer);
-INSERT INTO documents (owner_id) VALUES (42) RETURNING \"Note\";";
+INSERT INTO documents (owner_id) VALUES (42) RETURNING {returning};"
+    )
+}
 
-    let options = Pg2SqliteOptions::default()
+fn monitor_options() -> Pg2SqliteOptions {
+    Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_rls_audit_table_name("rls_violations")
         .with_session_variable(SessionVariableMapping::current_setting(
             "app.user_id",
             "current_app_user",
-        ));
+        ))
+}
 
+#[test]
+fn returning_a_quoted_defaulted_column_is_refused_on_a_policy_table() {
     let error = Pg2Sqlite::default()
-        .sql(schema)
+        .sql(&policy_schema("\"Note\""))
         .expect("parse")
-        .translate(&options)
+        .translate(&monitor_options())
         .expect_err("a defaulted column cannot be answered from the view row")
         .to_string();
 
@@ -116,4 +126,29 @@ INSERT INTO documents (owner_id) VALUES (42) RETURNING \"Note\";";
         error.contains("with_strict_rls_validation"),
         "the refusal must name the option that makes it work: {error}"
     );
+}
+
+#[test]
+fn returning_an_undeclared_column_is_left_to_the_engine() {
+    let statements = Pg2Sqlite::default()
+        .sql(&policy_schema("nosuch"))
+        .expect("parse")
+        .translate(&monitor_options())
+        .expect("a name no column answers to is not a column the database fills in");
+
+    let insert = statements.last().expect("an insert statement").to_string();
+    assert!(insert.contains("RETURNING nosuch"), "the name must reach SQLite intact: {insert}");
+}
+
+#[test]
+fn an_assignment_to_an_undeclared_column_is_left_to_the_engine() {
+    let statements = translate(
+        "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note TEXT);\n\
+         UPDATE t SET missing = 5 WHERE note = 'x';",
+        &Pg2SqliteOptions::default(),
+    )
+    .expect("the identity guard has nothing to say about a column the schema lacks");
+
+    let update = statements.last().expect("an update statement");
+    assert!(update.contains("missing = 5"), "the assignment must reach SQLite intact: {update}");
 }
