@@ -28,9 +28,10 @@ use crate::{
         ast_builder,
         function_helpers::{simple_function_expr, string_literal},
         object_name::{
-            last_ident_value_or_display, normalize_schema_qualified_object_name_for_sqlite,
-            postgres_catalog_function_name, quoted_ident, resolve_translation_table,
-            sqlite_unqualified_object_name,
+            fts_table_name, last_ident_value_or_display,
+            normalize_schema_qualified_object_name_for_sqlite, postgres_catalog_function_name,
+            quoted_ident, resolve_translation_table, sqlite_unqualified_object_name,
+            sync_trigger_name,
         },
         query_builder::{
             from_relation, make_query, make_simple_select, plain_table_factor, single_expr_query,
@@ -214,7 +215,7 @@ fn create_fts5_virtual_table(
     columns: &[String],
 ) -> Statement {
     let fts_name =
-        ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(&format!("{base_name}_fts")))]);
+        ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(&fts_table_name(base_name)))]);
 
     // Column names followed by external content mode options (unquoted, as
     // SQLite parses FTS5 module args as plain strings).
@@ -274,7 +275,7 @@ fn create_fts5_triggers(
     columns: &[String],
     predicate: Option<&Expr>,
 ) -> Vec<Statement> {
-    let fts_name = format!("{fts_table_base}_fts");
+    let fts_name = fts_table_name(fts_table_base);
     let name = |value: &str| ObjectName(vec![ObjectNamePart::Identifier(quoted_ident(value))]);
     let row_value = |row: &str, column: &str| {
         Expr::CompoundIdentifier(vec![Ident::new(row), quoted_ident(column)])
@@ -308,27 +309,33 @@ fn create_fts5_triggers(
             ast_builder::values(vec![old_values()]),
         )
     };
-    let trigger =
-        |suffix: &str, event: TriggerEvent, condition: Option<Expr>, statements: Vec<Statement>| {
-            ast_builder::trigger(
-                name(&format!("{fts_table_base}_fts_{suffix}")),
-                name(trigger_table),
-                TriggerPeriod::After,
-                event,
-                false,
-                condition,
-                statements,
-            )
+    let trigger = |event: TriggerEvent,
+                   part: Option<&str>,
+                   condition: Option<Expr>,
+                   statements: Vec<Statement>| {
+        let trigger_name = match part {
+            None => sync_trigger_name(&fts_name, &event),
+            Some(part) => format!("{}_{part}", sync_trigger_name(&fts_name, &event)),
         };
+        ast_builder::trigger(
+            name(&trigger_name),
+            name(trigger_table),
+            TriggerPeriod::After,
+            event,
+            false,
+            condition,
+            statements,
+        )
+    };
 
     match predicate {
         None => {
             vec![
-                trigger("ai", TriggerEvent::Insert, None, vec![insert_new()]),
-                trigger("ad", TriggerEvent::Delete, None, vec![delete_old()]),
+                trigger(TriggerEvent::Insert, None, None, vec![insert_new()]),
+                trigger(TriggerEvent::Delete, None, None, vec![delete_old()]),
                 trigger(
-                    "au",
                     TriggerEvent::Update(Vec::new()),
+                    None,
                     None,
                     vec![delete_old(), insert_new()],
                 ),
@@ -339,26 +346,26 @@ fn create_fts5_triggers(
             let old_predicate = qualify_predicate(predicate, "OLD");
             vec![
                 trigger(
-                    "ai",
                     TriggerEvent::Insert,
+                    None,
                     Some(new_predicate.clone()),
                     vec![insert_new()],
                 ),
                 trigger(
-                    "ad",
                     TriggerEvent::Delete,
+                    None,
                     Some(old_predicate.clone()),
                     vec![delete_old()],
                 ),
                 trigger(
-                    "au_delete",
                     TriggerEvent::Update(Vec::new()),
+                    Some("delete"),
                     Some(old_predicate),
                     vec![delete_old()],
                 ),
                 trigger(
-                    "au_insert",
                     TriggerEvent::Update(Vec::new()),
+                    Some("insert"),
                     Some(new_predicate),
                     vec![insert_new()],
                 ),
@@ -438,7 +445,7 @@ fn create_fts5_statements(
     );
     let target_columns =
         core::iter::once(name("rowid")).chain(columns.iter().map(|column| name(column))).collect();
-    statements.push(ast_builder::insert(name(&format!("{base_name}_fts")), target_columns, source));
+    statements.push(ast_builder::insert(name(&fts_table_name(&base_name)), target_columns, source));
 
     Ok(statements)
 }

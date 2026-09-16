@@ -16,7 +16,7 @@ use sql_traits::{
     traits::{DatabaseLike, TableLike},
     utils::identifier_resolution::identifiers_match,
 };
-use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+use sqlparser::ast::{Ident, ObjectName, ObjectNamePart, TriggerEvent};
 
 use crate::errors::Error;
 
@@ -86,6 +86,29 @@ pub(crate) fn append_suffix(name: &ObjectName, suffix: &str) -> ObjectName {
         ident.value.push_str(suffix);
     }
     updated
+}
+
+/// The FTS5 shadow table built over `base`, derived in one place by the
+/// `create_index` builders that write it and the `expr` MATCH rewrite that
+/// reads it.
+#[must_use]
+pub(crate) fn fts_table_name(base: &str) -> String {
+    format!("{base}_fts")
+}
+
+/// The name of an AFTER sync trigger of a shadow table (`fts5`, `vec0`),
+/// `{table}_ai`, `{table}_ad`, `{table}_au`, one vocabulary for both surfaces.
+#[must_use]
+pub(crate) fn sync_trigger_name(shadow_table: &str, event: &TriggerEvent) -> String {
+    let suffix = match event {
+        TriggerEvent::Insert => "ai",
+        TriggerEvent::Delete => "ad",
+        TriggerEvent::Update(_) => "au",
+        TriggerEvent::Truncate => {
+            unreachable!("sync triggers are only built for insert, delete and update")
+        }
+    };
+    format!("{shadow_table}_{suffix}")
 }
 
 /// Returns an object name normalized for SQLite by keeping only the terminal

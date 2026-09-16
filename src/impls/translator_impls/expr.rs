@@ -39,7 +39,7 @@ use crate::{
         },
         idioms::wrap_with_lower,
         interval::{interval_date_modifiers, interval_date_modifiers_scaled},
-        object_name::postgres_catalog_function_name,
+        object_name::{fts_table_name, postgres_catalog_function_name},
         query_builder::{
             from_relation, plain_table_factor, single_expr_query, table_function_factor,
         },
@@ -208,7 +208,7 @@ fn translate_fts_expression(
 
     // Translate tsquery syntax to FTS5 syntax
     let fts5_query = translate_tsquery_to_fts5(&query_str);
-    let fts_table_name = format!("{table_name}_fts");
+    let fts_name = fts_table_name(&table_name);
 
     let pk_reference = match &references[0] {
         Expr::CompoundIdentifier(parts) => {
@@ -225,10 +225,10 @@ fn translate_fts_expression(
         subquery: Box::new(single_expr_query(
             Expr::Identifier(Ident::new("rowid")),
             from_relation(plain_table_factor(ObjectName(vec![ObjectNamePart::Identifier(
-                Ident::new(fts_table_name.clone()),
+                Ident::new(fts_name.clone()),
             )]))),
             Some(Expr::BinaryOp {
-                left: Box::new(Expr::Identifier(Ident::new(fts_table_name))),
+                left: Box::new(Expr::Identifier(Ident::new(fts_name))),
                 op: BinaryOperator::Match,
                 right: Box::new(Expr::Value(ValueWithSpan {
                     value: Value::SingleQuotedString(fts5_query),

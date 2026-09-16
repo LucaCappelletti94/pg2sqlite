@@ -51,7 +51,10 @@ use crate::{
         function_helpers::{
             scalar_subquery_projection, simple_function_expr, single_quoted_literal,
         },
-        object_name::{last_ident, quote_identifier, quoted_ident, resolve_translation_table},
+        object_name::{
+            last_ident, quote_identifier, quoted_ident, resolve_translation_table,
+            sync_trigger_name,
+        },
         query_builder::{make_query, make_simple_select, single_expr_query},
         translator_impls::rls::resolve_trigger_table_name,
     },
@@ -222,9 +225,11 @@ fn create_vec0_triggers(
     let new_pk = row_value("NEW", pk_column);
     let old_pk = row_value("OLD", pk_column);
     let new_vector = row_value("NEW", column_name);
+    let update_event =
+        TriggerEvent::Update(vec![quoted_ident(column_name), quoted_ident(pk_column)]);
     vec![
         ast_builder::trigger(
-            name(&format!("{vec_table_name}_ai")),
+            name(&sync_trigger_name(vec_table_name, &TriggerEvent::Insert)),
             name(table_name),
             TriggerPeriod::After,
             TriggerEvent::Insert,
@@ -233,7 +238,7 @@ fn create_vec0_triggers(
             vec![insert(new_pk.clone(), new_vector.clone())],
         ),
         ast_builder::trigger(
-            name(&format!("{vec_table_name}_ad")),
+            name(&sync_trigger_name(vec_table_name, &TriggerEvent::Delete)),
             name(table_name),
             TriggerPeriod::After,
             TriggerEvent::Delete,
@@ -242,10 +247,10 @@ fn create_vec0_triggers(
             vec![delete(old_pk.clone())],
         ),
         ast_builder::trigger(
-            name(&format!("{vec_table_name}_au")),
+            name(&sync_trigger_name(vec_table_name, &update_event)),
             name(table_name),
             TriggerPeriod::After,
-            TriggerEvent::Update(vec![quoted_ident(column_name), quoted_ident(pk_column)]),
+            update_event,
             false,
             None,
             vec![delete(old_pk), insert(new_pk, new_vector)],
