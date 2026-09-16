@@ -39,6 +39,50 @@ use crate::{
     traits::{schema::Schema, translator::TranslatorWithContext},
 };
 
+/// R106 sequential semantics: PostgreSQL runs plpgsql assignments in order,
+/// so a value referencing a column assigned earlier in the same body
+/// must see that write. A single SQLite `UPDATE` evaluates its whole SET list
+/// against the pre-update row, so earlier values are composed into later ones
+/// instead of split across statements: splitting re-enters the trigger in an
+/// intermediate state and exhausts the recursion depth under
+/// `recursive_triggers = ON` (measured: `too many levels of trigger
+/// recursion`). References to columns assigned LATER stay raw, because reading
+/// the pre-update row is exactly what PostgreSQL does for them.
+fn compose_assignment_refs(expr: &Expr, assigned: &[(String, Expr)]) -> Expr {
+    let earlier = |name: &str| {
+        assigned
+            .iter()
+            .rev()
+            .find(|(col, _)| col.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    };
+    match expr {
+        Expr::Identifier(id) => earlier(&id.value).unwrap_or_else(|| expr.clone()),
+        Expr::CompoundIdentifier(parts)
+            if parts.len() == 2 && parts[0].value.eq_ignore_ascii_case("NEW") =>
+        {
+            earlier(&parts[1].value).unwrap_or_else(|| expr.clone())
+        }
+        _ => map_expr_children(expr, &|child| compose_assignment_refs(child, assigned)),
+    }
+}
+
+/// The maintenance assignments in body order, each value composed against the
+/// ones before it. One rule serves the trigger body, its recursion guard, and
+/// the RLS condition that mirrors the guard, so the three cannot disagree
+/// about what the sequential chain computes.
+pub(crate) fn maintenance_chain(
+    trigger: &CreateTrigger,
+    schema: &ParserDB,
+) -> Result<Vec<(String, Expr)>, sql_traits::errors::LookupError> {
+    let mut assigned: Vec<(String, Expr)> = Vec::new();
+    for (col, raw) in trigger.maintenance_assignments(schema)? {
+        let composed = compose_assignment_refs(&raw, &assigned);
+        assigned.push((col.column_name().to_owned(), composed));
+    }
+    Ok(assigned)
+}
+
 /// Builds the `UPDATE` that stands in for a plpgsql body assigning to
 /// `NEW.<column>`, which SQLite has no way to express directly.
 ///
@@ -59,15 +103,16 @@ fn generate_maintenance_trigger_body(
     // PostgreSQL one at this point. `target_table_name` may already be the
     // redirected RLS backing table, which the schema does not hold.
     let rewrites = ColumnRewrites::for_named_table(schema, &trigger.table_name, options);
-    let assignments = trigger
-        .maintenance_assignments(schema)?
-        .map(|(col, expr)| {
-            let value = expr.translate_with_warnings(schema, options, emit)?;
+    let assignments = maintenance_chain(trigger, schema)?
+        .into_iter()
+        .map(|(col, raw)| {
+            let value = raw.translate_with_warnings(schema, options, emit)?;
+            let value = rewrites.finish_value(col.as_str(), value, options)?;
             Ok(Assignment {
                 target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
-                    Ident::new(col.column_name()),
+                    Ident::new(col),
                 )])),
-                value: rewrites.finish_value(col.column_name(), value, options)?,
+                value,
             })
         })
         .collect::<Result<Vec<_>, crate::errors::Error>>()?;
@@ -303,14 +348,13 @@ fn build_maintenance_recursion_when_clause(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Option<Expr> {
-    let conditions: Vec<Expr> = trigger
-        .maintenance_assignments(schema)
+    let conditions: Vec<Expr> = maintenance_chain(trigger, schema)
         .ok()?
+        .into_iter()
         .filter_map(|(col, raw_expr)| {
             let old_expr = substitute_new_with_old(&raw_expr);
             let translated = old_expr.translate_with_warnings(schema, options, emit).ok()?;
-            let new_col =
-                Expr::CompoundIdentifier(vec![Ident::new("NEW"), Ident::new(col.column_name())]);
+            let new_col = Expr::CompoundIdentifier(vec![Ident::new("NEW"), Ident::new(&col)]);
             Some(Expr::IsDistinctFrom(Box::new(new_col), Box::new(translated)))
         })
         .collect();

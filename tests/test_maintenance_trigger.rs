@@ -1,4 +1,5 @@
-//! Test for maintenance trigger translation.
+//! Maintenance trigger translation, including R106 sequential assignments and
+//! R107 statement-supplied override.
 
 use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection, prelude::*};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, Translator};
@@ -814,4 +815,168 @@ FOR EACH ROW WHEN (OLD.id > 0) EXECUTE FUNCTION w2_maintain();
     let row =
         w2::table.filter(w2::id.eq(1)).select(W2Row::as_select()).first(&mut conn).expect("select");
     assert_eq!(row.tag.as_deref(), Some("hi!"), "maintenance trigger must have appended '!'");
+}
+
+// ── R106: sequential NEW.col assignments ────────────────────────────────────
+
+diesel::table! {
+    /// Three-column table whose a and b are maintained in sequence.
+    chain (id) {
+        /// Row id.
+        id -> Integer,
+        /// First maintenance column.
+        a -> Nullable<Text>,
+        /// Second maintenance column, assigned from the first.
+        b -> Nullable<Text>,
+    }
+}
+
+#[derive(Queryable, Selectable, Debug)]
+#[diesel(table_name = chain)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct ChainRow {
+    a: Option<String>,
+    b: Option<String>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = chain)]
+struct NewChain {
+    id: i32,
+    a: Option<String>,
+    b: Option<String>,
+}
+
+/// R106: PostgreSQL runs plpgsql assignments in order, so `NEW.b := NEW.a`
+/// reads the value the earlier assignment wrote. One SQLite `UPDATE` evaluates
+/// its whole SET list against the pre-update row, so the second column used to
+/// get the pre-maintenance value. The plan's probe: a becomes `X` from `x` and
+/// b must then become `X` too.
+#[test]
+fn chained_maintenance_assignments_see_earlier_writes() {
+    let sql = "
+CREATE TABLE chain (id INT PRIMARY KEY, a TEXT, b TEXT);
+
+CREATE OR REPLACE FUNCTION chain_maintain() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.a := upper(NEW.a);
+    NEW.b := NEW.a;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER chain_maint BEFORE UPDATE ON chain
+FOR EACH ROW EXECUTE FUNCTION chain_maintain();
+";
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate");
+
+    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
+    for stmt in &stmts {
+        diesel::sql_query(stmt.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("DDL: {e}\n{stmt}"));
+    }
+    diesel::insert_into(chain::table)
+        .values(&NewChain { id: 1, a: Some("abc".into()), b: Some("zzz".into()) })
+        .execute(&mut conn)
+        .expect("insert");
+    diesel::update(chain::table.filter(chain::id.eq(1)))
+        .set((chain::a.eq("x"), chain::b.eq("y")))
+        .execute(&mut conn)
+        .expect("update");
+
+    let row = chain::table
+        .filter(chain::id.eq(1))
+        .select(ChainRow::as_select())
+        .first(&mut conn)
+        .expect("select");
+    assert_eq!(row.a.as_deref(), Some("X"), "a must hold the uppercased value");
+    assert_eq!(
+        row.b.as_deref(),
+        Some("X"),
+        "b must see the value the earlier assignment wrote (PostgreSQL sequential semantics)"
+    );
+}
+
+// ── R107: the trigger overrides what the statement supplied ─────────────────
+
+diesel::table! {
+    /// Table where a BEFORE UPDATE trigger overwrites a column the statement
+    /// also sets.
+    ovr (id) {
+        /// Row id.
+        id -> Integer,
+        /// Column the statement writes and the trigger also maintains.
+        name -> Nullable<Text>,
+    }
+}
+
+#[derive(Queryable, Selectable, Debug)]
+#[diesel(table_name = ovr)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct OverRow {
+    name: Option<String>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = ovr)]
+struct NewOver {
+    id: i32,
+    name: Option<String>,
+}
+
+/// R107: PostgreSQL fires the trigger on every UPDATE and the trigger's value
+/// wins, including for the column the statement supplied.
+#[test]
+fn maintenance_trigger_overrides_the_statement_supplied_value() {
+    let sql = "
+CREATE TABLE ovr (id INT PRIMARY KEY, name TEXT);
+
+CREATE OR REPLACE FUNCTION ovr_maintain() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.name := 'trigger';
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ovr_maint BEFORE UPDATE ON ovr
+FOR EACH ROW EXECUTE FUNCTION ovr_maintain();
+";
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate");
+
+    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
+    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
+    for stmt in &stmts {
+        diesel::sql_query(stmt.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("DDL: {e}\n{stmt}"));
+    }
+    diesel::insert_into(ovr::table)
+        .values(&NewOver { id: 1, name: Some("old".into()) })
+        .execute(&mut conn)
+        .expect("insert");
+    diesel::update(ovr::table.filter(ovr::id.eq(1)))
+        .set(ovr::name.eq("manual"))
+        .execute(&mut conn)
+        .expect("update");
+
+    let row = ovr::table
+        .filter(ovr::id.eq(1))
+        .select(OverRow::as_select())
+        .first(&mut conn)
+        .expect("select");
+    assert_eq!(
+        row.name.as_deref(),
+        Some("trigger"),
+        "the maintenance trigger must override the statement-supplied value"
+    );
 }
