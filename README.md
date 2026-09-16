@@ -6,13 +6,11 @@
 [![Codecov](https://codecov.io/gh/LucaCappelletti94/pg2sqlite/branch/main/graph/badge.svg)](https://codecov.io/gh/LucaCappelletti94/pg2sqlite)
 [![Pages](https://github.com/LucaCappelletti94/pg2sqlite/workflows/Pages/badge.svg)](https://github.com/LucaCappelletti94/pg2sqlite/actions/workflows/pages.yml)
 
-A Rust library that translates PostgreSQL SQL into valid, runnable SQLite SQL. It parses PostgreSQL-dialect statements with [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and emits semantically equivalent SQLite, going well beyond type and syntax rewriting.
+A Rust library that translates PostgreSQL SQL into valid, runnable SQLite. It parses the PostgreSQL dialect with [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and emits semantically equivalent SQLite, going well past type and syntax rewriting. A live playground at [`pg2sqlite.luca.phd`](https://pg2sqlite.luca.phd) runs the translator client-side as WebAssembly against an in-page SQLite that executes the translated schema in the browser.
 
-A live playground at [`pg2sqlite.luca.phd`](https://pg2sqlite.luca.phd) runs the translator entirely client-side as WebAssembly, with an in-page SQLite so the translated schema is actually executed and queried in the browser. Paste PostgreSQL DDL, watch the SQLite translation update as you type, and run queries against the populated schema in either dialect.
+The contract is strict. Every returned statement is valid SQLite, an unimplemented equivalent is an explicit `Err` rather than SQL that fails at runtime, and constructs with no SQLite meaning (`CREATE FUNCTION`, `GRANT`, `COMMENT`, and similar) are dropped, reported as warnings by `translate_with_report` and left out silently by plain `translate`. Nothing that merely looks valid passes through, and the test suite checks behavior by executing the emitted SQL against SQLite rather than matching strings.
 
-The translation contract is strict. Every statement pg2sqlite returns is valid SQLite. If a construct can be translated, it is. If it has a SQLite equivalent that is not yet implemented, the call returns an explicit `Err` instead of SQL that fails at runtime. Constructs that carry no SQLite-representable information (`CREATE FUNCTION`, `GRANT`, `CREATE ROLE`, and similar) are dropped rather than passed through, as are column options with no SQLite counterpart (`COLLATION`, `CHARACTER SET`, `COMMENT`). Each such drop is reported: `translate_with_report` returns the statements together with warnings naming what was dropped and why, while plain `translate` discards them. There are no silent pass-throughs that look valid but fail on execution, and the test suite runs the translated SQL against SQLite through Diesel to check real runtime behavior rather than output strings.
-
-Most of the interesting work is in features that SQLite can express only through non-trivial rewrites. Row-Level Security policies become a renamed backing table, a view that enforces the `USING` clause, and `INSTEAD OF` triggers, optionally tailored to a session role so a client replica only sees the data it may access. A GIN index over `to_tsvector(...)` becomes an FTS5 virtual table with sync triggers. pgvector types and distance operators map to [sqlite-vec](https://github.com/asg017/sqlite-vec), and PostGIS geometry, `ST_*` functions, and GiST indexes map to the [SQLiteGIS](https://github.com/LucaCappelletti94/sqlitegis) extension. PL/pgSQL trigger bodies are rewritten to SQLite trigger syntax, and SQLite DML can be translated back to PostgreSQL to sync replicas upstream. The crate is `no_std + alloc` and compiles for `wasm32-unknown-unknown`, so the same translator runs in a browser tab or on an embedded target.
+The rewrites go beyond types. Row-Level Security becomes a renamed backing table, a view enforcing the `USING` clause, and `INSTEAD OF` triggers. A GIN `to_tsvector` index becomes an FTS5 virtual table with sync triggers. pgvector maps to [sqlite-vec](https://github.com/asg017/sqlite-vec) and PostGIS to the [SQLiteGIS](https://github.com/LucaCappelletti94/sqlitegis) extension. PL/pgSQL trigger bodies become SQLite trigger syntax, and SQLite DML translates back to PostgreSQL to sync replicas upstream. The crate is `no_std + alloc` and compiles for `wasm32-unknown-unknown`.
 
 ## Quick start
 
@@ -49,78 +47,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Semantic differences
 
-Two things are connection state in SQLite rather than database state, and the emitted script sets both for the connection it is applied to: `PRAGMA foreign_keys = 1` where the schema declares a foreign key, because SQLite enforces one only while that pragma is on and it is off by default, and `PRAGMA case_sensitive_like = 1` in every script, because it declares that the connection reads `LIKE` the case-sensitive way PostgreSQL always does and a script cannot know which `LIKE` will later run on the connection. A script cannot reach any other connection, so **every connection that writes to the replica has to set `foreign_keys` too**: without it the delete PostgreSQL refuses leaves an orphan row and says nothing. The translation reports this as a warning whenever it emits a foreign key.
+Divergences that survive translation because the difference lives in the engines, not in the emitted SQL.
 
-SQLite folds case for ASCII letters only, so `lower` and `upper` answer differently from PostgreSQL whenever the text is not ASCII. PostgreSQL folds by the database collation, which under a UTF-8 locale covers the whole of Unicode. For `ILIKE` the translator refuses a pattern literal carrying a non-ASCII letter rather than emitting a comparison that silently answers false, and `with_ilike_fold_function` names a Unicode-aware folding function (an ICU build's `lower`, or one the application registers) that `ILIKE` then runs through instead of `lower`.
-
-```sql
-SELECT 'ÄBC' ILIKE 'äbc';
--- PostgreSQL under en_US.utf8: true
--- translated without with_ilike_fold_function: refused
--- translated with it: SELECT fold('ÄBC') LIKE fold('äbc') ESCAPE '\'
-
-SELECT lower('ÄBC');
--- PostgreSQL under en_US.utf8: äbc
--- SQLite: Äbc
-```
-
-For `lower` and `upper` two things make the engines agree. Building SQLite with `SQLITE_ENABLE_ICU` replaces them with Unicode-aware versions. Giving the PostgreSQL column or database the `C` collation makes PostgreSQL fold ASCII only, which is what SQLite already does. Non-ASCII text stored in a column still reaches an ASCII-only `lower` when `ILIKE` runs without the fold option, since only the pattern literal can be inspected at translation time.
-
-SQLite's date functions hold milliseconds where PostgreSQL holds microseconds, so a timestamp keeps three decimal places and loses the rest. `make_time` and `make_timestamp` are exact, because they format the argument they are given rather than going through those functions.
-
-```sql
-SELECT extract(epoch from timestamp '2024-03-05 14:07:09.123456');
--- PostgreSQL: 1709647629.123456
--- SQLite:     1709647629.123
-```
-
-PostgreSQL raises an error where SQLite quietly answers something. Dividing by zero gives NULL, a cast of text that does not parse gives whatever prefix did parse, and integer arithmetic that leaves the 64-bit range degrades to a float instead of failing. None of the three has a general translation, since the SQLite answer is produced by the engine rather than by anything the emitted SQL says.
-
-```sql
-SELECT 1 / 0;
--- PostgreSQL: ERROR division by zero
--- SQLite:     NULL
-
-SELECT CAST('12abc' AS INTEGER);
--- PostgreSQL: ERROR invalid input syntax for type integer: "12abc"
--- SQLite:     12
-
-SELECT 9223372036854775807 + 1;
--- PostgreSQL: ERROR bigint out of range
--- SQLite:     9.2233720368547758e+18, and typeof() answers 'real'
-```
-
-A `NUMERIC(p,s)` column is the exception to the third: it is stored as a scaled integer under a `CHECK` that bounds it, so `NUMERIC(10,2)` emits `CHECK (amount BETWEEN -9999999999 AND 9999999999)` and overflowing it fails. An `INTEGER` or `BIGINT` column carries no such bound. Bind parameters carry the PostgreSQL value; the emitted SQL performs any re-representation conversion.
-
-Writing needs no knowledge of any of that, but reading does: a stored value is not always the value PostgreSQL would have handed back. `translation_manifest` answers what each column holds, as a `ColumnStorage`: an integer of minor units with its scale, sixteen bytes or canonical text for a UUID depending on the representation in force, JSON array text for an array column, packed floats with their width for a vector column, and `Direct` for every column whose emitted SQLite type already says what it is.
-
-A statement that fails inside a transaction aborts the transaction in PostgreSQL and does not in SQLite. The server refuses every later statement with `current transaction is aborted, commands ignored until end of transaction block` and the commit becomes a rollback, while SQLite leaves the transaction open and commits the rest, so a batch in which one statement fails ends with rows the server never kept. SQLite has no mode that changes this, so the code applying a translated batch has to roll back itself once any statement in an open transaction fails.
-
-A compound `SELECT` resolves one type per output column in PostgreSQL and none at all in SQLite, which decides per value. `SELECT 1 UNION SELECT '1'` is one row on the server, where the unknown literal becomes an integer and the branches deduplicate, and two rows in the replica, one integer and one text; `SELECT 'a' UNION SELECT 1` is an error there and two rows here; and `SELECT 1.0 UNION SELECT 1` answers `1.0` there and `1` here. Fixing this needs a type system the translation does not have, so the divergence is recorded rather than translated: give the branches an explicit cast when the type matters.
-
-Text comparison follows the collation. PostgreSQL uses the database's, which under a UTF-8 locale orders case-insensitively for the purpose of ranking letters, while SQLite's default `BINARY` collation compares byte by byte, so every upper-case letter sorts before every lower-case one. This reaches `ORDER BY`, `<`, `>`, `BETWEEN`, `MIN` and `MAX`, not only explicit comparisons.
-
-```sql
-SELECT 'a' < 'B';
--- PostgreSQL under en_US.utf8: true
--- SQLite:                      false
-```
-
-Declaring the PostgreSQL column or database `C` collation makes PostgreSQL compare byte by byte too, which is what SQLite already does.
-
-A `SERIAL` or `IDENTITY` key becomes `INTEGER PRIMARY KEY AUTOINCREMENT`, so SQLite counts from the table's high-water mark and never reissues the key of a deleted row, which is what a PostgreSQL sequence does. Two differences remain, both reported as warnings. A value an insert supplies moves the counter, where a sequence ignores one and keeps handing out the values it was going to, and a rolled back insert consumes no key, where a sequence has already advanced. Three statements are refused instead of being emitted with a different meaning: an insert that supplies a value for a `GENERATED ALWAYS AS IDENTITY` column, which PostgreSQL refuses too and which the emitted schema cannot catch for itself, an update that assigns such a column, and an update that sets any generated key to `DEFAULT`, which in PostgreSQL takes the next sequence value and in SQLite has nothing to stand for.
-
-A date, time, timestamp or interval column holds text, so the text is the value and it is brought to the form PostgreSQL prints: `'2024-3-5'` is stored as `2024-03-05`, `'2:30'` as `02:30:00`, `'2024-1-2 3:4'` as `2024-01-02 03:04:00`, `'PT15M'` as `00:15:00`, and `'1.5 months'` as `1 mon 15 days`. SQLite's own date functions answer `NULL` for an unpadded value, so the padding is what makes the stored value usable at all. A value PostgreSQL refuses is refused here too, `'2024-02-30'` and `'25:00:00'` among them, and so is a value whose meaning lives in server state: `'1/2/2024'` is a different day under a different `DateStyle`, `'Jan 2 2024'` depends on the locale, and `'today'` is resolved when the server reads it rather than standing for a fixed date. A `timestamp with time zone` keeps the offset it was written with, where PostgreSQL converts to the session's zone.
-
-`now()` becomes `datetime('now')`, which answers UTC text with whole seconds. PostgreSQL answers a `timestamp with time zone` with microseconds, so the zone, the sub-second part and the type all differ. `CURRENT_TIMESTAMP` is passed through and answers the same UTC text.
-
-```sql
-SELECT now();
--- PostgreSQL: 2026-08-08 15:08:14.548696+00
--- translated: SELECT datetime('now')  ->  2026-08-08 15:08:14
-```
-
-Two row-level security shapes cannot be reproduced by the view-and-trigger emulation, and both only arise when a row is readable under a wider predicate than it is writable. PostgreSQL lets an `UPDATE` or `DELETE` with no `WHERE` clause reach rows the session user cannot read, because nothing in the statement reads existing values. The emulated write triggers only ever fire for rows the view exposes, so such a statement affects fewer rows than PostgreSQL would. In the same situation `RETURNING` on an `UPDATE` or `DELETE` through the view can name rows the write policy skipped: SQLite reports every row the trigger fired for, while PostgreSQL reports only the rows actually changed. When every readable row is also writable, neither divergence can occur.
+- **Connection pragmas.** The script sets `foreign_keys = 1` and `case_sensitive_like = 1` only for the connection that applies it, and every connection that later writes to the replica has to set `foreign_keys` too, which the translation reports as a warning.
+- **Case and collation.** SQLite folds ASCII only and compares byte-wise, so `lower`, `upper`, `ORDER BY`, `MIN`, and `MAX` diverge on non-ASCII or mixed-case text and `'a' < 'B'` answers false. `ILIKE` becomes `lower(...) LIKE lower(...) ESCAPE '\'`, and a pattern literal carrying a non-ASCII letter is refused unless `with_ilike_fold_function` names a Unicode-aware fold. An ICU-built SQLite or a `C`-collation PostgreSQL agrees with the server instead.
+- **Quiet answers.** PostgreSQL raises where SQLite answers. Division by zero gives `NULL`, `CAST('12abc' AS INTEGER)` gives 12, and integer overflow degrades to a float, while an `INTEGER` or `BIGINT` column carries no bound against any of it. `NUMERIC(p,s)` is the guarded exception, a scaled integer under a bounding `CHECK`, so overflowing the column fails.
+- **Stored representations.** What a column physically holds is not always what PostgreSQL would hand back. `translation_manifest` answers per column as a `ColumnStorage`, one of scaled minor units, UUID bytes or canonical text, JSON array text, packed floats with their width, or `Direct`.
+- **Time.** SQLite's date functions hold milliseconds, so a timestamp keeps three decimals and loses the rest. Date, time, and interval columns hold padded text. `now()` becomes `datetime('now')`, whole-second UTC text, and `CURRENT_TIMESTAMP` passes through answering the same.
+- **Transactions.** A failing statement aborts the whole transaction in PostgreSQL and leaves it open in SQLite, so applying a translated batch correctly means rolling back yourself once anything fails inside an open transaction.
+- **Compound `SELECT`.** PostgreSQL resolves one type per output column and SQLite decides per value, so `SELECT 1 UNION SELECT '1'` is one row on the server and two in the replica. Cast the branches when the type matters.
+- **Generated keys.** `SERIAL` and `IDENTITY` become `INTEGER PRIMARY KEY AUTOINCREMENT`. A supplied insert value moves the counter where a sequence ignores one, a rolled-back insert consumes no key, both reported as warnings, and inserts or updates that assign a `GENERATED ALWAYS` column are refused outright.
+- **RLS emulation.** An unqualified `UPDATE` or `DELETE` and `RETURNING` through the view can diverge from the server only when a row is readable under a wider predicate than it is writable.
 
 ## License
 

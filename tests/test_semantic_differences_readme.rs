@@ -1,12 +1,12 @@
 //! F26: the README's `Semantic differences` section, held to its own claims.
 //!
-//! Every example there states what one engine answers and what the other does.
+//! Every bullet states what one engine answers or what the crate emits.
 //! Prose cannot check itself, so each claim about SQLite is executed here and
-//! each claim about what the crate emits is translated here. What is left
-//! unchecked is the PostgreSQL half, which was measured on PostgreSQL 17 when
-//! the section was written and is quoted in the plan.
+//! each claim about the emitted SQL is translated here. What is left unchecked
+//! is the PostgreSQL half, which was measured on PostgreSQL 17 when the
+//! section was written and is quoted in the plan.
 //!
-//! A README example that stops being true is worse than no example, because a
+//! A README claim that stops being true is worse than no claim, because a
 //! reader has no way to tell.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
