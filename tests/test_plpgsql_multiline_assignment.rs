@@ -115,3 +115,41 @@ fn a_semicolon_inside_the_expression_does_not_end_it() {
         Some("a; b".to_string())
     );
 }
+
+/// R109: PostgreSQL spells a named argument `name := value` or `name => value`,
+/// and the first collides with the assignment operator. A preprocessor that
+/// rewrote the first `:=` of a chunk turned the call into
+/// `scaled(SET factor = 2, ...)`. The three spellings of one call must reach
+/// one identical refusal, byte-equality being the proof that no rewrite fired.
+#[test]
+fn a_named_argument_call_refuses_identically_whatever_the_spelling() {
+    let outcomes: Vec<String> = [
+        "v := scaled(factor := 2, base := NEW.n)",
+        "v := scaled(factor => 2, base => NEW.n)",
+        "v := scaled(2, NEW.n)",
+    ]
+    .iter()
+    .map(|call| {
+        logged(&format!(
+            "DECLARE
+                 v INT;
+             BEGIN
+                 {call};
+                 INSERT INTO log (note) VALUES (v);
+                 RETURN NEW;
+             END;"
+        ))
+        .expect_err("an undeclared function must be refused")
+    })
+    .collect();
+    assert!(
+        outcomes[0].contains("scaled()"),
+        "the refusal must name the function: {}",
+        outcomes[0]
+    );
+    assert_eq!(outcomes[0], outcomes[1], "the `:=` spelling took a different path than `=>`");
+    assert_eq!(
+        outcomes[1], outcomes[2],
+        "the named spellings took a different path than positional"
+    );
+}
