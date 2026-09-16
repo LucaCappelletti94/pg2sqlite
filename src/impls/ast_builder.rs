@@ -17,7 +17,7 @@ use super::{
     query_builder::{from_relation, make_query, plain_table_factor, single_expr_query},
 };
 
-fn keyword_token(value: &str, keyword: Keyword) -> AttachedToken {
+pub(crate) fn keyword_token(value: &str, keyword: Keyword) -> AttachedToken {
     AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
         value: value.into(),
         quote_style: None,

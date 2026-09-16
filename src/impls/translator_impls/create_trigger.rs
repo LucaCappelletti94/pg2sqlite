@@ -19,14 +19,14 @@ use sqlparser::{
         DropTrigger, Expr, FromTable, Ident, ObjectName, ObjectNamePart, Query, SetExpr, Statement,
         TableFactor, TableObject, TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerObject,
         TriggerObjectKind, TriggerPeriod, Update, Value, ValueWithSpan,
-        helpers::attached_token::AttachedToken,
     },
     keywords::Keyword,
-    tokenizer::{Span, Token, TokenWithSpan, Word},
+    tokenizer::Span,
 };
 
 use crate::{
     impls::{
+        ast_builder,
         expr_helpers::map_expr_children,
         object_name::{
             append_suffix, normalize_schema_qualified_object_name_for_sqlite,
@@ -118,11 +118,7 @@ fn generate_maintenance_trigger_body(
         .collect::<Result<Vec<_>, crate::errors::Error>>()?;
 
     let update_stmt = Statement::Update(Update {
-        update_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-            value: "UPDATE".into(),
-            quote_style: None,
-            keyword: Keyword::UPDATE,
-        }))),
+        update_token: ast_builder::keyword_token("UPDATE", Keyword::UPDATE),
         table: TableWithJoins {
             relation: TableFactor::Table {
                 name: target_table_name.clone(),
@@ -157,17 +153,9 @@ fn generate_maintenance_trigger_body(
     });
 
     Ok(sqlparser::ast::BeginEndStatements {
-        begin_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-            value: "BEGIN".into(),
-            quote_style: None,
-            keyword: Keyword::BEGIN,
-        }))),
+        begin_token: ast_builder::keyword_token("BEGIN", Keyword::BEGIN),
         statements: vec![update_stmt],
-        end_token: AttachedToken(TokenWithSpan::wrap(Token::Word(Word {
-            value: "END".into(),
-            quote_style: None,
-            keyword: Keyword::END,
-        }))),
+        end_token: ast_builder::keyword_token("END", Keyword::END),
     })
 }
 
