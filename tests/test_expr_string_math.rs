@@ -176,10 +176,13 @@ fn test_ceil_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .values(&Data { id: 2, text_val: "test".to_string(), num_val: 3.8 })
         .execute(&mut conn)?;
 
-    // Translate the SELECT query through Pg2Sqlite
     let select_sql = "SELECT CEIL(num_val) as ceiled FROM data ORDER BY id";
     let translated_select = Pg2Sqlite::default().sql(select_sql)?.translate(&options)?;
-    let select_stmt = translated_select[0].to_string();
+    let select_stmt = translated_select
+        .iter()
+        .find(|s| !s.to_string().starts_with("PRAGMA"))
+        .expect("SELECT stmt")
+        .to_string();
 
     #[derive(QueryableByName, Debug)]
     struct CeilResult {
@@ -250,10 +253,13 @@ fn test_floor_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .values(&Data { id: 2, text_val: "test".to_string(), num_val: 3.8 })
         .execute(&mut conn)?;
 
-    // Translate the SELECT query through Pg2Sqlite
     let select_sql = "SELECT FLOOR(num_val) as floored FROM data ORDER BY id";
     let translated_select = Pg2Sqlite::default().sql(select_sql)?.translate(&options)?;
-    let select_stmt = translated_select[0].to_string();
+    let select_stmt = translated_select
+        .iter()
+        .find(|s| !s.to_string().starts_with("PRAGMA"))
+        .expect("SELECT stmt")
+        .to_string();
 
     #[derive(QueryableByName, Debug)]
     struct FloorResult {

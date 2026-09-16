@@ -137,14 +137,13 @@ fn on_cbrt_roots_the_magnitude_and_restores_the_sign() {
 fn sqlite_parses(sql: &str) {
     let mut conn = establish_connection();
     conn.batch_execute("CREATE TABLE t (v REAL, a REAL, b REAL, n REAL) STRICT;").unwrap();
-    match conn.batch_execute(sql) {
-        Ok(()) => {}
-        Err(e)
-            if {
-                let m = e.to_string();
-                m.contains("no such function:")
-            } => {}
-        Err(e) => panic!("SQLite rejected emitted SQL: {e}\n{sql}"),
+    // '\n'-joined stmts have no semicolons; run each individually.
+    for stmt in sql.split('\n').map(str::trim).filter(|s| !s.is_empty()) {
+        match conn.batch_execute(&format!("{stmt};")) {
+            Ok(()) => {}
+            Err(e) if e.to_string().contains("no such function:") => {}
+            Err(e) => panic!("SQLite rejected emitted SQL: {e}\n{stmt}"),
+        }
     }
 }
 
@@ -154,9 +153,11 @@ fn sqlite_parses(sql: &str) {
 /// it sat in front of the passthrough the inventory would have given it.
 #[test]
 fn sign_needs_no_declaration_because_sqlite_always_has_it() {
-    let emitted = translate_off("SELECT sign(v) FROM t;").expect("SQLite answers sign unaided");
-    assert_eq!(emitted, "SELECT sign(v) FROM t");
-    sqlite_parses(&emitted);
+    let stmts =
+        translate_pg("SELECT sign(v) FROM t;", &opts_off()).expect("SQLite answers sign unaided");
+    let select = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("user SELECT");
+    assert_eq!(select, "SELECT sign(v) FROM t");
+    sqlite_parses(select);
 }
 
 // ---------- the statistical aggregates are outside this gate ----------
@@ -184,9 +185,9 @@ fn the_statistical_aggregates_no_longer_consult_the_math_option() {
             "{name} must stay refused when only the math option is on"
         );
         let declared = Pg2SqliteOptions::default().with_user_defined_functions([name]);
-        let emitted = translate_pg(&query, &declared)
-            .unwrap_or_else(|error| panic!("{name} must translate once declared: {error}"))
-            .join("\n");
-        assert_eq!(emitted, format!("SELECT {name}({arguments}) FROM t"), "{name}");
+        let stmts = translate_pg(&query, &declared)
+            .unwrap_or_else(|error| panic!("{name} must translate once declared: {error}"));
+        let select = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("user SELECT");
+        assert_eq!(select, &format!("SELECT {name}({arguments}) FROM t"), "{name}");
     }
 }

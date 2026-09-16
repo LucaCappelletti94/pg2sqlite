@@ -2,6 +2,7 @@
 source: tests/test_rls_translation.rs
 expression: translated_sql
 ---
+PRAGMA case_sensitive_like = 1
 CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
 CREATE TABLE documents_rls (id BLOB PRIMARY KEY DEFAULT (uuidv7()) CHECK (length(id) = 16) NOT NULL, owner_id BLOB NOT NULL CHECK (length(owner_id) = 16), title TEXT NOT NULL, content TEXT) STRICT
 CREATE VIEW documents AS SELECT id, owner_id, title, content FROM documents_rls WHERE (owner_id = current_app_user())

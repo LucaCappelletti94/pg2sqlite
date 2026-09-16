@@ -23,8 +23,8 @@ fn tr(pg: &str) -> String {
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
         .into_iter()
-        .next()
-        .expect("at least one statement")
+        .find(|s| !s.starts_with("PRAGMA"))
+        .expect("at least one user statement")
 }
 
 fn tr_err(pg: &str) -> String {

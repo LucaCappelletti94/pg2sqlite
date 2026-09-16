@@ -26,7 +26,7 @@ fn test_is_distinct_from_translation_form() {
         .expect("parses")
         .translate(&Pg2SqliteOptions::default())
         .expect("translates");
-    let out = translated[0].to_string();
+    let out = select_sql(&translated);
 
     assert!(out.contains("IS DISTINCT FROM"), "the operator survives, got: {out}");
     assert!(!out.contains("CASE"), "Should NOT use CASE expression, got: {out}");
@@ -80,8 +80,8 @@ fn test_is_distinct_from_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
     let mut conn = SqliteConnection::establish(":memory:")?;
 
-    // Execute DDL
-    diesel::sql_query(translated[0].to_string()).execute(&mut conn)?;
+    // Execute DDL (and the dialect pragma), whatever their position.
+    execute_non_query_statements(&translated, &mut conn)?;
 
     diesel::sql_query(
         "INSERT INTO pairs VALUES (1,'x','x'),(2,'x','y'),(3,NULL,NULL),(4,NULL,'x'),(5,'x',NULL)",
@@ -95,7 +95,7 @@ fn test_is_distinct_from_semantic() -> Result<(), Box<dyn std::error::Error>> {
         id: i32,
     }
 
-    let rows = diesel::sql_query(translated[1].to_string()).load::<Row>(&mut conn)?;
+    let rows = diesel::sql_query(select_sql(&translated)).load::<Row>(&mut conn)?;
     let ids: Vec<i32> = rows.into_iter().map(|r| r.id).collect();
 
     // Row 1 (x=x): NOT distinct → excluded
@@ -116,7 +116,7 @@ fn test_is_not_distinct_from_semantic() -> Result<(), Box<dyn std::error::Error>
     ";
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
     let mut conn = SqliteConnection::establish(":memory:")?;
-    diesel::sql_query(translated[0].to_string()).execute(&mut conn)?;
+    execute_non_query_statements(&translated, &mut conn)?;
     diesel::sql_query(
         "INSERT INTO pairs VALUES (1,'x','x'),(2,'x','y'),(3,NULL,NULL),(4,NULL,'x')",
     )
@@ -128,7 +128,7 @@ fn test_is_not_distinct_from_semantic() -> Result<(), Box<dyn std::error::Error>
         id: i32,
     }
 
-    let rows = diesel::sql_query(translated[1].to_string()).load::<Row>(&mut conn)?;
+    let rows = diesel::sql_query(select_sql(&translated)).load::<Row>(&mut conn)?;
     let ids: Vec<i32> = rows.into_iter().map(|r| r.id).collect();
 
     // Row 1 (x=x): not distinct → included

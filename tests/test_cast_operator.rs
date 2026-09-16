@@ -21,7 +21,7 @@ struct Row {
 }
 
 fn tr(pg: &str) -> String {
-    translate_pg(pg, &Pg2SqliteOptions::default()).expect("translation failed").join("\n")
+    translate_pg(pg, &Pg2SqliteOptions::default()).expect("translation failed").join(";\n")
 }
 
 #[test]

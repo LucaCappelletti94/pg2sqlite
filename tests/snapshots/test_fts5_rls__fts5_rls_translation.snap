@@ -2,6 +2,7 @@
 source: tests/test_fts5_rls.rs
 expression: translated_sql
 ---
+PRAGMA case_sensitive_like = 1
 CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
 CREATE TABLE documents_rls (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL) STRICT
 CREATE VIEW documents AS SELECT id, title, content FROM documents_rls

@@ -179,7 +179,7 @@ fn sql_can_load_multiple_statements() {
     let sql = "CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY);";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(result.len(), 2, "Expected 2 statements, got: {}", result.len());
+    assert_eq!(result.len(), 3, "one pragma plus the two CREATE TABLEs, got: {}", result.len());
 }
 
 #[test]
@@ -191,9 +191,14 @@ fn translate_filters_non_translatable_statements() {
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    // CREATE TABLE and ALTER TABLE survive. Only CREATE EXTENSION is filtered:
-    // SQLite supports ADD COLUMN, so it is translated rather than dropped.
-    assert_eq!(result.len(), 2, "Expected 2 statements, got: {}", result.len());
+    // one pragma + CREATE TABLE + ALTER TABLE = 3 statements. CREATE EXTENSION
+    // is filtered.
+    assert_eq!(
+        result.len(),
+        3,
+        "one pragma plus CREATE TABLE and ALTER TABLE, got: {}",
+        result.len()
+    );
 }
 
 #[test]

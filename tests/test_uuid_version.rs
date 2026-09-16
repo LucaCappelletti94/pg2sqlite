@@ -34,7 +34,12 @@ fn with_v7() -> Pg2SqliteOptions {
 }
 
 fn translate(pg: &str, options: &Pg2SqliteOptions) -> String {
-    translate_pg(pg, options).expect("translate").join("\n")
+    translate_pg(pg, options)
+        .expect("translate")
+        .into_iter()
+        .filter(|s| !s.starts_with("PRAGMA"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn refusal(pg: &str, options: &Pg2SqliteOptions) -> String {

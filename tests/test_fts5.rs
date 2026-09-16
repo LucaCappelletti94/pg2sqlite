@@ -1082,7 +1082,11 @@ fn partial_gin_backfill_indexes_all_rows_ignoring_predicate() {
 
     // Apply only CREATE TABLE so seed inserts are not blocked by the triggers.
     // diesel::sql_query is used for DDL the typed DSL cannot express.
-    diesel::sql_query(translated[0].to_string()).execute(&mut conn).expect("create table");
+    let create = translated
+        .iter()
+        .find(|s| s.to_string().starts_with("CREATE TABLE"))
+        .expect("a CREATE TABLE must be emitted");
+    diesel::sql_query(create.to_string()).execute(&mut conn).expect("create table");
 
     diesel::insert_into(filterable_posts::table)
         .values(&NewFilterablePost { id: 1, title: "published article", published: true })
@@ -1097,7 +1101,7 @@ fn partial_gin_backfill_indexes_all_rows_ignoring_predicate() {
     // INSERT. diesel::sql_query is required because CREATE TRIGGER, CREATE
     // VIRTUAL TABLE, and FTS5 backfill SQL are not expressible via the
     // Diesel typed DSL.
-    for stmt in translated.iter().skip(1) {
+    for stmt in translated.iter().filter(|s| !s.to_string().starts_with("CREATE TABLE")) {
         diesel::sql_query(stmt.to_string()).execute(&mut conn).expect("apply fts statements");
     }
 

@@ -62,7 +62,7 @@ fn translate_with_report_preserves_translated_statements() {
         .expect("parse")
         .translate_with_report(&Pg2SqliteOptions::default())
         .expect("translate");
-    assert_eq!(report.statements.len(), 1);
+    assert_eq!(report.statements.len(), 2, "one pragma plus the CREATE TABLE");
     assert!(report.warnings.is_empty(), "nothing was dropped, got {:?}", report.warnings);
 }
 

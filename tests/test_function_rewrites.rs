@@ -4,13 +4,15 @@
 mod helpers;
 
 use diesel::{RunQueryDsl, SqliteConnection, prelude::*};
-use helpers::translate_sql;
+use helpers::{translate_pg, translate_sql};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 #[test]
 fn random_translates_to_float_range() {
     let options = Pg2SqliteOptions::default();
-    let sql = translate_sql("SELECT random()", &options).unwrap();
+    // translate_pg splits by statement; filter to the SELECT past the PRAGMA.
+    let stmts = translate_pg("SELECT random()", &options).unwrap();
+    let sql = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("SELECT stmt");
     let lower = sql.to_lowercase();
     assert!(lower.contains("cast"), "expected CAST(random() AS REAL): {sql}");
     assert!(lower.contains("9223372036854775808"), "expected offset constant: {sql}");
@@ -18,7 +20,8 @@ fn random_translates_to_float_range() {
     assert!(!lower.contains("abs("), "random rewrite should avoid ABS to prevent overflow: {sql}");
     assert!(lower.contains('/'), "expected division operator: {sql}");
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
-    diesel::sql_query(&sql).execute(&mut conn).unwrap();
+    // Translator output is a dynamic expression; typed DSL cannot reproduce it.
+    diesel::sql_query(sql.as_str()).execute(&mut conn).unwrap();
 }
 
 #[test]
@@ -27,7 +30,9 @@ fn random_rewrite_handles_sqlite_min_i64_without_overflow() -> Result<(), Box<dy
     let sql = "SELECT random() AS val";
     let options = Pg2SqliteOptions::default();
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-    let select_sql = translated[0].to_string();
+    // Skip the leading dialect PRAGMA to reach the SELECT itself.
+    let select_sql =
+        translated.iter().find(|s| !s.to_string().starts_with("PRAGMA")).unwrap().to_string();
 
     let forced_min_sql = if select_sql.contains("random()") {
         select_sql.replacen("random()", "-9223372036854775808", 1)
@@ -69,7 +74,9 @@ fn random_covers_the_unit_interval() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut conn = SqliteConnection::establish(":memory:")?;
 
-    let select_sql = translated[0].to_string();
+    // Skip the leading dialect PRAGMA to reach the SELECT itself.
+    let select_sql =
+        translated.iter().find(|s| !s.to_string().starts_with("PRAGMA")).unwrap().to_string();
 
     #[derive(QueryableByName, Debug)]
     struct FloatResult {
@@ -129,30 +136,35 @@ fn now_with_an_over_clause_is_refused() {
 #[test]
 fn a_window_aggregate_keeps_its_over_clause() {
     let options = Pg2SqliteOptions::default();
-    let sql = translate_sql(
+    // Filter to the SELECT past the leading dialect PRAGMA.
+    let stmts = translate_pg(
         "SELECT SUM(department_id) OVER (PARTITION BY department_id) FROM employees",
         &options,
     )
     .unwrap();
+    let sql = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("SELECT stmt");
     let lower = sql.to_lowercase();
     assert!(lower.contains("over (partition by"), "OVER PARTITION BY should survive: {sql}");
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
     // DDL: no typed DSL exists for CREATE TABLE in diesel.
     diesel::sql_query("CREATE TABLE employees (department_id INT)").execute(&mut conn).unwrap();
-    // Dynamically generated translated SQL cannot be expressed via the typed
-    // DSL.
-    diesel::sql_query(&sql).execute(&mut conn).expect("SUM OVER must run in SQLite");
+    // Translator output is a dynamic string; typed DSL cannot reproduce it.
+    diesel::sql_query(sql.as_str()).execute(&mut conn).expect("SUM OVER must run in SQLite");
 }
 
 #[test]
 fn to_timestamp_epoch() {
     let options = Pg2SqliteOptions::default();
-    let sql = translate_sql("SELECT to_timestamp(0)", &options).unwrap();
+    // Filter to the SELECT so the dialect PRAGMA is not run as sql_query body.
+    let stmts = translate_pg("SELECT to_timestamp(0)", &options).unwrap();
+    let sql = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("SELECT stmt");
     let lower = sql.to_lowercase();
     assert!(lower.contains("datetime("), "expected datetime: {sql}");
     assert!(lower.contains("unixepoch"), "expected 'unixepoch' modifier: {sql}");
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
-    diesel::sql_query(&sql).execute(&mut conn).unwrap();
+    // Dynamically generated translated SQL cannot be expressed via the typed
+    // DSL.
+    diesel::sql_query(sql.as_str()).execute(&mut conn).unwrap();
 }
 
 #[test]
@@ -169,7 +181,11 @@ fn to_timestamp_epoch_semantic() -> Result<(), Box<dyn std::error::Error>> {
         result: String,
     }
 
-    let results = diesel::sql_query(&translated[0].to_string()).load::<TextResult>(&mut conn)?;
+    // Skip the leading dialect PRAGMA to reach the SELECT statement.
+    let select_sql =
+        translated.iter().find(|s| !s.to_string().starts_with("PRAGMA")).unwrap().to_string();
+    // Translator output is a dynamic expression; typed DSL cannot reproduce it.
+    let results = diesel::sql_query(&select_sql).load::<TextResult>(&mut conn)?;
     assert_eq!(results.len(), 1);
     // Unix epoch 0 = 1970-01-01 00:00:00
     assert_eq!(
@@ -195,7 +211,11 @@ fn to_timestamp_epoch_semantic_nonzero() -> Result<(), Box<dyn std::error::Error
         result: String,
     }
 
-    let results = diesel::sql_query(&translated[0].to_string()).load::<TextResult>(&mut conn)?;
+    // Skip the leading dialect PRAGMA to reach the SELECT statement.
+    let select_sql =
+        translated.iter().find(|s| !s.to_string().starts_with("PRAGMA")).unwrap().to_string();
+    // Translator output is a dynamic expression; typed DSL cannot reproduce it.
+    let results = diesel::sql_query(&select_sql).load::<TextResult>(&mut conn)?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].result, "2023-11-14 22:13:20");
 
@@ -213,14 +233,19 @@ fn to_timestamp_with_format_unsupported() {
 fn timestamp_variants_are_now() {
     let options = Pg2SqliteOptions::default();
     for func in &["transaction_timestamp()", "statement_timestamp()", "clock_timestamp()"] {
-        let sql = translate_sql(&format!("SELECT {func}"), &options).unwrap();
+        // Filter to the SELECT so the dialect PRAGMA is not run as sql_query
+        // body.
+        let stmts = translate_pg(&format!("SELECT {func}"), &options).unwrap();
+        let sql = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("SELECT stmt");
         let lower = sql.to_lowercase();
         assert!(
             lower.contains("datetime('now')"),
             "{func} should translate to datetime('now'): {sql}"
         );
         let mut conn = SqliteConnection::establish(":memory:").unwrap();
-        diesel::sql_query(&sql).execute(&mut conn).unwrap();
+        // Dynamically generated translated SQL cannot be expressed via the
+        // typed DSL.
+        diesel::sql_query(sql.as_str()).execute(&mut conn).unwrap();
     }
 }
 
@@ -239,7 +264,12 @@ fn timestamp_variants_semantic() -> Result<(), Box<dyn std::error::Error>> {
             ts: String,
         }
 
-        let results = diesel::sql_query(&translated[0].to_string()).load::<TsResult>(&mut conn)?;
+        // Skip the leading dialect PRAGMA to reach the SELECT statement.
+        let select_sql =
+            translated.iter().find(|s| !s.to_string().starts_with("PRAGMA")).unwrap().to_string();
+        // Translator output is a dynamic expression; typed DSL cannot reproduce
+        // it.
+        let results = diesel::sql_query(&select_sql).load::<TsResult>(&mut conn)?;
         assert_eq!(results.len(), 1);
         assert!(
             results[0].ts.contains('-') && results[0].ts.contains(':'),

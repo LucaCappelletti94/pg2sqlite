@@ -52,8 +52,8 @@ fn not_ilike_output_uses_lower_wrapping() {
 }
 
 /// `lower(expr) LIKE lower(pattern)` must match every case variant even though
-/// the translator now emits `PRAGMA case_sensitive_like = ON` alongside any
-/// LIKE, which makes plain `LIKE` case-sensitive.
+/// every emitted script now carries `PRAGMA case_sensitive_like = ON` as part
+/// of the emitted dialect, which makes plain `LIKE` case-sensitive.
 #[test]
 fn ilike_matches_case_insensitively_with_case_sensitive_like_pragma() {
     let schema_sql = "CREATE TABLE words (id INTEGER PRIMARY KEY, word TEXT NOT NULL)";

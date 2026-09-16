@@ -7,9 +7,9 @@ fn test_pk_simple_int_nullable() {
     let sql = "CREATE TABLE test_int (id INT PRIMARY KEY)";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(translated.len(), 1);
+    assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
     assert_eq!(
-        translated[0].to_string(),
+        translated[1].to_string(),
         "CREATE TABLE test_int (id INTEGER PRIMARY KEY CHECK (id BETWEEN -2147483648 AND \
          2147483647) NOT NULL) STRICT"
     );
@@ -20,9 +20,9 @@ fn test_pk_simple_int_not_null() {
     let sql = "CREATE TABLE test_int_nn (id INT PRIMARY KEY NOT NULL)";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(translated.len(), 1);
+    assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
     assert_eq!(
-        translated[0].to_string(),
+        translated[1].to_string(),
         "CREATE TABLE test_int_nn (id INTEGER PRIMARY KEY NOT NULL CHECK (id BETWEEN \
          -2147483648 AND 2147483647)) STRICT"
     );
@@ -36,13 +36,13 @@ fn test_pk_string_binary_nullable() {
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(translated.len(), 2);
+    assert_eq!(translated.len(), 3, "the script leads with the dialect pragma");
     assert_eq!(
-        translated[0].to_string(),
+        translated[1].to_string(),
         "CREATE TABLE test_text (id TEXT PRIMARY KEY NOT NULL) STRICT"
     );
     assert_eq!(
-        translated[1].to_string(),
+        translated[2].to_string(),
         "CREATE TABLE test_blob (id BLOB PRIMARY KEY NOT NULL) STRICT"
     );
 }
@@ -58,9 +58,9 @@ fn test_pk_composite() {
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(translated.len(), 1);
+    assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
     assert_eq!(
-        translated[0].to_string(),
+        translated[1].to_string(),
         "CREATE TABLE test_composite (id1 INTEGER CHECK (id1 BETWEEN -2147483648 AND \
          2147483647) NOT NULL, id2 TEXT NOT NULL, PRIMARY KEY (id1, id2)) STRICT"
     );

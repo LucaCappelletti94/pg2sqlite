@@ -58,17 +58,17 @@ fn or_replace_view_emits_drop_then_create() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY);
                CREATE OR REPLACE VIEW v AS SELECT * FROM t;";
     let stmts = translate(sql).unwrap();
-    // Table DDL + DROP VIEW IF EXISTS + CREATE VIEW = 3 statements
-    assert_eq!(stmts.len(), 3, "Expected 3 statements, got {}: {stmts:?}", stmts.len());
-    let drop = &stmts[1];
-    let create = &stmts[2];
+    // one pragma + table DDL + DROP VIEW IF EXISTS + CREATE VIEW = 4 statements
+    assert_eq!(stmts.len(), 4, "Expected 4 statements, got {}: {stmts:?}", stmts.len());
+    let drop = &stmts[2];
+    let create = &stmts[3];
     assert!(
         drop.to_uppercase().contains("DROP VIEW IF EXISTS"),
-        "Second statement should be DROP VIEW IF EXISTS, got: {drop}"
+        "Third statement should be DROP VIEW IF EXISTS, got: {drop}"
     );
     assert!(
         create.to_uppercase().contains("CREATE VIEW"),
-        "Third statement should be CREATE VIEW, got: {create}"
+        "Fourth statement should be CREATE VIEW, got: {create}"
     );
     assert!(
         !create.to_uppercase().contains("OR REPLACE"),

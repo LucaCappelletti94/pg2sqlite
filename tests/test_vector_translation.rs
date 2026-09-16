@@ -233,7 +233,11 @@ fn qualified_vector_cast_lowers_to_vec_f32() -> Result<(), Box<dyn std::error::E
     let translated = Pg2Sqlite::default()
         .sql("SELECT '[1,2]'::public.vector AS v;")?
         .translate(&Pg2SqliteOptions::default())?;
-    let select_stmt = translated[0].to_string();
+    let select_stmt = translated
+        .iter()
+        .find(|s| !s.to_string().starts_with("PRAGMA"))
+        .expect("user SELECT statement")
+        .to_string();
 
     assert!(
         select_stmt.contains("vec_f32('[1,2]')"),
@@ -256,7 +260,11 @@ fn qualified_halfvec_cast_lowers_to_vec_f16() -> Result<(), Box<dyn std::error::
     let translated = Pg2Sqlite::default()
         .sql("SELECT '[1,2]'::public.halfvec AS v;")?
         .translate(&Pg2SqliteOptions::default())?;
-    let select_stmt = translated[0].to_string();
+    let select_stmt = translated
+        .iter()
+        .find(|s| !s.to_string().starts_with("PRAGMA"))
+        .expect("user SELECT statement")
+        .to_string();
 
     assert!(
         select_stmt.contains("vec_f16('[1,2]')"),
@@ -294,9 +302,8 @@ fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>>
 
     // Check for main table
     assert!(
-        translated_sql[0].contains("CREATE TABLE items"),
-        "First statement should be CREATE TABLE items, got: {}",
-        translated_sql[0]
+        translated_sql.iter().any(|s| s.contains("CREATE TABLE items")),
+        "Expected CREATE TABLE items among statements, got: {translated_sql:?}",
     );
 
     // Check for vec0 virtual table
@@ -405,7 +412,11 @@ fn test_no_vector_columns_no_vec0() -> Result<(), Box<dyn std::error::Error>> {
     let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
 
     // Should have just the main table
-    assert_eq!(translated.len(), 1, "Should have only 1 statement for table without vectors");
+    assert_eq!(
+        translated.len(),
+        2,
+        "the script leads with the dialect pragma; one table statement"
+    );
 
     let has_vec0 = translated.iter().any(|s| s.to_string().contains("vec0"));
     assert!(!has_vec0, "Should not have vec0 for table without vector columns");

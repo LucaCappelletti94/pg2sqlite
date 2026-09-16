@@ -45,8 +45,8 @@ fn test_default_gen_random_uuid() {
         .translate(&Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob))
         .unwrap();
 
-    assert_eq!(translated.len(), 1);
-    let stmt = translated[0].to_string();
+    assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
+    let stmt = translated[1].to_string();
 
     assert_eq!(
         stmt,
@@ -66,12 +66,13 @@ fn uuid_default_uses_registered_uuid_function() {
         .translate(&Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob))
         .expect("Failed to translate SQL");
 
-    assert_eq!(translated.len(), 1);
-    diesel::sql_query(translated[0].to_string())
+    assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
+    diesel::sql_query(translated[1].to_string())
         .execute(&mut conn)
         .expect("Failed to create table");
 
-    diesel::sql_query("INSERT INTO users DEFAULT VALUES")
+    diesel::insert_into(users::table)
+        .default_values()
         .execute(&mut conn)
         .expect("Failed to insert default row");
 

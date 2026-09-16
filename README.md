@@ -32,13 +32,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sql(pg_sql)?
         .translate(&Pg2SqliteOptions::default())?;
 
-    assert_eq!(sqlite_statements.len(), 2);
+    assert_eq!(sqlite_statements.len(), 3);
+    assert_eq!(sqlite_statements[0].to_string(), "PRAGMA case_sensitive_like = 1");
     assert_eq!(
-        sqlite_statements[0].to_string(),
+        sqlite_statements[1].to_string(),
         "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, username TEXT NOT NULL) STRICT"
     );
     assert_eq!(
-        sqlite_statements[1].to_string(),
+        sqlite_statements[2].to_string(),
         "INSERT INTO users (username) VALUES ('alice') ON CONFLICT DO NOTHING"
     );
 
@@ -48,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Semantic differences
 
-Two things are connection state in SQLite rather than database state, and the emitted script sets both for the connection it is applied to: `PRAGMA foreign_keys = 1` where the schema declares a foreign key, because SQLite enforces one only while that pragma is on and it is off by default, and `PRAGMA case_sensitive_like = 1` where a statement carries a `LIKE`. A script cannot reach any other connection, so **every connection that writes to the replica has to set `foreign_keys` too**: without it the delete PostgreSQL refuses leaves an orphan row and says nothing. The translation reports this as a warning whenever it emits a foreign key.
+Two things are connection state in SQLite rather than database state, and the emitted script sets both for the connection it is applied to: `PRAGMA foreign_keys = 1` where the schema declares a foreign key, because SQLite enforces one only while that pragma is on and it is off by default, and `PRAGMA case_sensitive_like = 1` in every script, because it declares that the connection reads `LIKE` the case-sensitive way PostgreSQL always does and a script cannot know which `LIKE` will later run on the connection. A script cannot reach any other connection, so **every connection that writes to the replica has to set `foreign_keys` too**: without it the delete PostgreSQL refuses leaves an orphan row and says nothing. The translation reports this as a warning whenever it emits a foreign key.
 
 SQLite folds case for ASCII letters only, so `lower` and `upper` answer differently from PostgreSQL whenever the text is not ASCII. PostgreSQL folds by the database collation, which under a UTF-8 locale covers the whole of Unicode. For `ILIKE` the translator refuses a pattern literal carrying a non-ASCII letter rather than emitting a comparison that silently answers false, and `with_ilike_fold_function` names a Unicode-aware folding function (an ICU build's `lower`, or one the application registers) that `ILIKE` then runs through instead of `lower`.
 

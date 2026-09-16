@@ -119,8 +119,10 @@ fn a_declared_table_named_like_a_backing_table_is_emitted_under_that_name() {
     assert_eq!(
         emitted,
         [
+            "PRAGMA case_sensitive_like = 1",
             "CREATE TABLE audit_rls (id INTEGER PRIMARY KEY CHECK (id BETWEEN -2147483648 AND 2147483647) NOT NULL, note TEXT) STRICT"
-        ]
+        ],
+        "a plain table emits the dialect pragma plus its DDL"
     );
 }
 

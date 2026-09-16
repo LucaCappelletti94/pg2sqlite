@@ -10,7 +10,6 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::ops::ControlFlow;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
@@ -19,8 +18,8 @@ use git2::Repository;
 use sql_traits::structs::{AccessResolution, ParseOptions, ParserDB, ParserDBIngestor};
 use sqlparser::{
     ast::{
-        AlterTableOperation, CreateIndex, Expr, Ident, IndexType, ObjectName, ObjectNamePart,
-        ObjectType, RenameTableNameKind, Statement, Value, ValueWithSpan, visit_expressions,
+        AlterTableOperation, CreateIndex, Ident, IndexType, ObjectName, ObjectNamePart, ObjectType,
+        RenameTableNameKind, Statement, Value, ValueWithSpan,
     },
     dialect::GenericDialect,
 };
@@ -222,19 +221,6 @@ fn foreign_key_pragma_warning() -> crate::warnings::TranslationWarning {
                  delete PostgreSQL refuses will leave an orphan row with no error."
             .to_string(),
     }
-}
-
-/// True when `statement` contains a `LIKE`, whose matching in SQLite depends on
-/// the connection's case sensitivity.
-fn statement_contains_like(statement: &Statement) -> bool {
-    visit_expressions(statement, |expr| {
-        if matches!(expr, Expr::Like { .. }) {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    })
-    .is_break()
 }
 
 /// Registers names from the raw statement because translations can need a
@@ -736,20 +722,16 @@ impl Pg2Sqlite {
         // ASCII unless the connection says otherwise, and no expression-level
         // rewrite fixes that: a BLOB operand stops matching wildcards entirely
         // and GLOB cannot express a pattern computed at runtime or an ESCAPE
-        // clause. So the script configures the connection it is applied to.
-        // ILIKE is unaffected because it lowercases both operands.
-        //
-        // The pragma is connection state, not database state, so a LIKE that is
-        // evaluated later than the script (inside a CHECK constraint, a trigger
-        // body, or a view) still depends on the pragma being set on whichever
-        // connection runs the write.
-        //
-        // This scans the translated statements while the catalog pre-walk above
-        // scans the input. The two differ only for ILIKE, which arrives without
-        // a LIKE and leaves as one, and which the pragma cannot affect either
-        // way, so scanning here emits a pragma an input scan would skip rather
-        // than catching one it would miss.
-        if result.iter().any(statement_contains_like) {
+        // clause. The pragma is therefore part of the emitted dialect, not a
+        // reaction to the script's text (R96): it is connection state, so it
+        // governs every LIKE that later runs on the connection, including one
+        // inside a view, a trigger body, or a hand-written query no scan of
+        // the script could enumerate. Two scripts reaching the same schema
+        // must leave the same LIKE semantics behind, whatever text produced
+        // them. ILIKE is unaffected because it lowercases both operands.
+        // No statements means no script, and an empty translation stays a
+        // no-op the caller can skip.
+        if !result.is_empty() {
             result.insert(0, case_sensitive_like_pragma());
         }
 
@@ -773,12 +755,16 @@ impl Pg2Sqlite {
     /// [`translation_manifest`](Self::translation_manifest) answers what each
     /// column holds.
     ///
-    /// The script leads with `PRAGMA foreign_keys = 1` where the schema
-    /// declares a foreign key, since SQLite enforces one only while that
-    /// pragma is on and it is off by default. A pragma is connection state,
-    /// so every other connection that writes to the replica has to set it
-    /// too, or a delete PostgreSQL refuses will leave an orphan row with no
-    /// error.
+    /// Every non-empty script leads with `PRAGMA case_sensitive_like = 1`,
+    /// part of declaring the emitted dialect, since a pg2sqlite database
+    /// always wants SQLite to read `LIKE` the case-sensitive way PostgreSQL
+    /// does. Where the schema declares a foreign key the script additionally
+    /// leads with `PRAGMA foreign_keys = 1`, since SQLite enforces one only
+    /// while that pragma is on and it is off by default. A pragma is
+    /// connection state, so every other connection that writes to the
+    /// replica has to set them too, or a delete PostgreSQL refuses will
+    /// leave an orphan row with no error and a `LIKE` will match case the
+    /// source database never would.
     ///
     /// Warnings about dropped or downgraded constructs are discarded on this
     /// path. Use [`translate_with_report`](Self::translate_with_report) to
@@ -837,7 +823,7 @@ impl Pg2Sqlite {
     /// let report = Pg2Sqlite::default()
     ///     .sql("CREATE TABLE t (a INT);")?
     ///     .translate_with_report(&Pg2SqliteOptions::default())?;
-    /// assert_eq!(report.statements.len(), 1);
+    /// assert_eq!(report.statements.len(), 2);
     /// assert!(report.warnings.is_empty());
     /// # Ok::<(), Error>(())
     /// ```
@@ -892,7 +878,10 @@ impl Pg2Sqlite {
     ///     .translate_to_sql(&Pg2SqliteOptions::default())?;
     /// assert_eq!(
     ///     sql,
-    ///     ["CREATE TABLE t (a INTEGER CHECK (a BETWEEN -2147483648 AND 2147483647)) STRICT"]
+    ///     [
+    ///         "PRAGMA case_sensitive_like = 1",
+    ///         "CREATE TABLE t (a INTEGER CHECK (a BETWEEN -2147483648 AND 2147483647)) STRICT"
+    ///     ]
     /// );
     /// # Ok::<(), Error>(())
     /// ```
@@ -1102,11 +1091,11 @@ impl Pg2Sqlite {
     /// is handed back as a plain `LIKE`, so without that setting the
     /// PostgreSQL statement matches fewer rows than the SQLite one did.
     ///
-    /// Forward translation writes that pragma into its own script, but only
-    /// into a script that itself contains a `LIKE`, and a pragma is connection
-    /// state rather than anything held in the database file. An application
-    /// that opens the replica later therefore has to set it, and nothing here
-    /// can tell whether it did.
+    /// Forward translation writes that pragma into every script it emits, as
+    /// part of declaring the emitted dialect, but a pragma is connection state
+    /// rather than anything held in the database file. An application that
+    /// opens the replica later therefore has to set it, and nothing here can
+    /// tell whether it did.
     ///
     /// Handing back `ILIKE` instead would not be the safer default. SQLite
     /// folds the ASCII letters only, so `'Ä' LIKE 'ä'` is false where

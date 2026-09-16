@@ -89,10 +89,22 @@ fn unnest_with_ordinality_still_numbers_the_rows() {
     .expect("UNNEST WITH ORDINALITY must keep translating");
 
     let mut conn = SqliteConnection::establish(":memory:").expect("connect");
-    let sql = translated.join("; ");
-    let numbered: Vec<Numbered> = diesel::sql_query(&sql)
+    let select_sql = translated
+        .iter()
+        .find(|s| s.to_ascii_uppercase().trim_start().starts_with("SELECT"))
+        .expect("SELECT must be emitted");
+    for stmt in
+        translated.iter().filter(|s| !s.to_ascii_uppercase().trim_start().starts_with("SELECT"))
+    {
+        diesel::sql_query(stmt.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|e| panic!("setup stmt failed: {e}\n{stmt}"));
+    }
+    // Translator output is dynamic; typed DSL cannot reproduce the unnest
+    // rewrite.
+    let numbered: Vec<Numbered> = diesel::sql_query(select_sql.as_str())
         .load(&mut conn)
-        .unwrap_or_else(|error| panic!("the emitted query must execute: {sql}: {error}"));
+        .unwrap_or_else(|error| panic!("the emitted query must execute: {select_sql}: {error}"));
 
     assert_eq!(
         numbered.iter().map(|row| (row.v.as_str(), row.ordinality)).collect::<Vec<_>>(),

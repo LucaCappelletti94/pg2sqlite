@@ -247,9 +247,9 @@ fn global_and_local_temporary_are_cleared_with_a_warning() {
         ))
         .expect("a noise word must not fail the translation");
         assert!(
-            stmts[0].contains("TEMPORARY") && !stmts[0].contains(spelling),
+            stmts[1].contains("TEMPORARY") && !stmts[1].contains(spelling),
             "{spelling} must be cleared and TEMPORARY kept: {}",
-            stmts[0]
+            stmts[1]
         );
         assert!(!warnings.is_empty(), "clearing {spelling} must be reported");
         sqlite_accepts(&stmts).expect("the emitted DDL must run");
@@ -324,9 +324,9 @@ fn temporary_and_if_not_exists_still_pass() {
     let stmts = translate("CREATE TEMPORARY TABLE IF NOT EXISTS t (id INT PRIMARY KEY);")
         .expect("both clauses are legal in both databases");
     assert!(
-        stmts[0].contains("TEMPORARY") && stmts[0].contains("IF NOT EXISTS"),
+        stmts[1].contains("TEMPORARY") && stmts[1].contains("IF NOT EXISTS"),
         "both clauses must survive: {}",
-        stmts[0]
+        stmts[1]
     );
     sqlite_accepts(&stmts).expect("the emitted DDL must run");
 }
@@ -407,9 +407,9 @@ fn check_no_inherit_keeps_the_check_and_drops_the_modifier_with_a_warning() {
         let (stmts, warnings) =
             translate_with_warnings(sql).expect("NO INHERIT must not fail the translation");
         assert!(
-            stmts[0].contains("CHECK") && !stmts[0].contains("NO INHERIT"),
+            stmts[1].contains("CHECK") && !stmts[1].contains("NO INHERIT"),
             "the CHECK must survive without the modifier: {}",
-            stmts[0]
+            stmts[1]
         );
         assert!(
             warnings.iter().any(|w| w.to_string().contains("NO INHERIT")),

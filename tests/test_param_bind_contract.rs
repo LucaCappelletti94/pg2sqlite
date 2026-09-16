@@ -44,17 +44,15 @@ mod numeric {
              SELECT id FROM t WHERE amount > $1;",
         );
         let mut conn = SqliteConnection::establish(":memory:").expect("open");
-        // STRICT and CHECK constraints cannot be expressed in diesel's typed
-        // DSL.
-        sql_query(&all[0]).execute(&mut conn).expect("DDL");
-        sql_query(&all[1]).execute(&mut conn).expect("seed");
-
-        // Translator emits the exact SELECT; typed DSL cannot reproduce
-        // placeholder wrapping.
+        // Translator output uses STRICT and placeholder wrapping; typed DSL
+        // cannot reproduce it.
         let probe = all
             .iter()
             .find(|s| s.to_ascii_uppercase().trim_start().starts_with("SELECT"))
             .expect("SELECT");
+        for s in all.iter().filter(|s| !s.to_ascii_uppercase().trim_start().starts_with("SELECT")) {
+            sql_query(s.as_str()).execute(&mut conn).expect("setup");
+        }
 
         let over_two: Vec<IdRow> = sql_query(probe)
             .bind::<diesel::sql_types::Double, _>(2.0_f64)
@@ -77,10 +75,16 @@ mod numeric {
              INSERT INTO t (id, amount) VALUES (1, $1);",
         );
         let mut conn = SqliteConnection::establish(":memory:").expect("open");
-        sql_query(&all[0]).execute(&mut conn).expect("DDL");
-        // Translator-emitted INSERT tested; typed DSL cannot reproduce the
-        // placeholder wrap.
-        sql_query(&all[1])
+        let insert = all
+            .iter()
+            .find(|s| s.to_ascii_uppercase().trim_start().starts_with("INSERT"))
+            .expect("INSERT");
+        // Translator-emitted INSERT; typed DSL cannot reproduce placeholder
+        // wrapping.
+        for s in all.iter().filter(|s| !s.to_ascii_uppercase().trim_start().starts_with("INSERT")) {
+            sql_query(s.as_str()).execute(&mut conn).expect("setup");
+        }
+        sql_query(insert.as_str())
             .bind::<diesel::sql_types::Double, _>(1.5_f64)
             .execute(&mut conn)
             .expect("parameterised INSERT must succeed");
@@ -114,8 +118,14 @@ mod numeric {
              INSERT INTO t (id, amount) VALUES (1, $1);",
         );
         let mut conn = SqliteConnection::establish(":memory:").expect("open");
-        sql_query(&all[0]).execute(&mut conn).expect("DDL");
-        sql_query(&all[1])
+        let insert = all
+            .iter()
+            .find(|s| s.to_ascii_uppercase().trim_start().starts_with("INSERT"))
+            .expect("INSERT");
+        for s in all.iter().filter(|s| !s.to_ascii_uppercase().trim_start().starts_with("INSERT")) {
+            sql_query(s.as_str()).execute(&mut conn).expect("setup");
+        }
+        sql_query(insert.as_str())
             .bind::<diesel::sql_types::Double, _>(1.5_f64)
             .execute(&mut conn)
             .expect("INSERT");
@@ -171,15 +181,14 @@ mod uuid_text {
              SELECT name FROM u WHERE id = $1;",
         );
         let mut conn = SqliteConnection::establish(":memory:").expect("open");
-        sql_query(&all[0]).execute(&mut conn).expect("DDL");
-        sql_query(&all[1]).execute(&mut conn).expect("INSERT");
-
         let probe = all
             .iter()
             .find(|s| s.to_ascii_uppercase().trim_start().starts_with("SELECT"))
             .expect("SELECT");
-        // Text representation stores TEXT; typed DSL would differ from the
-        // translator's output.
+        for s in all.iter().filter(|s| !s.to_ascii_uppercase().trim_start().starts_with("SELECT")) {
+            sql_query(s.as_str()).execute(&mut conn).expect("setup");
+        }
+        // Text representation; typed DSL would differ from translator output.
         let rows: Vec<NameRow> = sql_query(probe)
             .bind::<diesel::sql_types::Text, _>(UUID)
             .load(&mut conn)
@@ -197,13 +206,15 @@ mod uuid_text {
              INSERT INTO u (id, name) VALUES ($1, 'alice');",
         );
         let mut conn = SqliteConnection::establish(":memory:").expect("open");
-        sql_query(&all[0]).execute(&mut conn).expect("DDL");
-        // Translator-emitted INSERT tested; text representation needs no
-        // conversion.
         let insert = all
             .iter()
             .find(|s| s.to_ascii_uppercase().trim_start().starts_with("INSERT"))
             .expect("INSERT");
+        // Translator-emitted INSERT; typed DSL cannot reproduce placeholder
+        // wrapping.
+        for s in all.iter().filter(|s| !s.to_ascii_uppercase().trim_start().starts_with("INSERT")) {
+            sql_query(s.as_str()).execute(&mut conn).expect("setup");
+        }
         sql_query(insert)
             .bind::<diesel::sql_types::Text, _>(UUID)
             .execute(&mut conn)
@@ -260,17 +271,15 @@ mod uuid_blob {
              SELECT name FROM u WHERE id = $1;",
         );
         let mut conn = SqliteConnection::establish(":memory:").expect("open");
-        // STRICT and CHECK (length = 16) cannot be expressed in diesel's typed
-        // DSL.
-        sql_query(&all[0]).execute(&mut conn).expect("DDL");
-        sql_query(&all[1]).execute(&mut conn).expect("INSERT");
-
         let probe = all
             .iter()
             .find(|s| s.to_ascii_uppercase().trim_start().starts_with("SELECT"))
             .expect("SELECT");
-        // After the fix translator wraps ?1 in unhex/replace; typed DSL cannot
-        // reproduce it.
+        // STRICT / CHECK / unhex wrapping; typed DSL cannot reproduce
+        // translator output.
+        for s in all.iter().filter(|s| !s.to_ascii_uppercase().trim_start().starts_with("SELECT")) {
+            sql_query(s.as_str()).execute(&mut conn).expect("setup");
+        }
         let rows: Vec<NameRow> = sql_query(probe)
             .bind::<diesel::sql_types::Text, _>(UUID)
             .load(&mut conn)
@@ -288,13 +297,14 @@ mod uuid_blob {
              INSERT INTO u (id, name) VALUES ($1, 'alice');",
         );
         let mut conn = SqliteConnection::establish(":memory:").expect("open");
-        sql_query(&all[0]).execute(&mut conn).expect("DDL");
-        // Translator wraps ?1 in unhex/replace so the TEXT bind produces BLOB
-        // storage.
         let insert = all
             .iter()
             .find(|s| s.to_ascii_uppercase().trim_start().starts_with("INSERT"))
             .expect("INSERT");
+        // Translator wraps ?1 in unhex/replace; typed DSL cannot reproduce it.
+        for s in all.iter().filter(|s| !s.to_ascii_uppercase().trim_start().starts_with("INSERT")) {
+            sql_query(s.as_str()).execute(&mut conn).expect("setup");
+        }
         sql_query(insert)
             .bind::<diesel::sql_types::Text, _>(UUID)
             .execute(&mut conn)

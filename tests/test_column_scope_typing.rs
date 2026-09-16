@@ -163,7 +163,7 @@ fn a_constraint_check_resolves_its_own_table() {
     )
     .expect("a constraint check over the defined table translates");
     assert!(
-        emitted[0].contains("1050"),
+        emitted[1].contains("1050"),
         "the literal should be scaled into minor units, got: {emitted:?}"
     );
 }

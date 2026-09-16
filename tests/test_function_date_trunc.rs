@@ -200,13 +200,16 @@ fn a_window_aggregate_over_partition_still_translates() {
     let lower = sql.to_lowercase();
     assert!(lower.contains("over (partition by"), "OVER PARTITION BY should survive: {sql}");
     assert!(lower.contains("user_id"), "partition column should survive: {sql}");
+    // translate_sql joins statements with '\n'; extract just the SELECT for
+    // prepare.
+    let select = sql.split('\n').find(|s| !s.trim().starts_with("PRAGMA")).unwrap();
     {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE events (id INT PRIMARY KEY, user_id INT, created_at TEXT);",
         )
         .unwrap();
-        conn.prepare(&sql).expect("COUNT OVER must prepare in SQLite");
+        conn.prepare(select).expect("COUNT OVER must prepare in SQLite");
     }
 }
 

@@ -221,13 +221,19 @@ fn to_char_iso_year_week_day() {
         "to_char('IYYY-IW-ID') should produce strftime('%G-%V-%u', ...), got: {output}"
     );
 
-    // Execute the boundary value: 2024-12-30 is calendar 2024 but ISO
-    // 2025-W01-1.
-    let literal = translate("SELECT to_char(TIMESTAMP '2024-12-30 00:00:00', 'IYYY-IW-ID');")
-        .expect("the ISO codes have exact strftime equivalents");
-    // The SQL under test is translator output, a runtime string, so the raw
-    // query interface is the correct one.
+    // 2024-12-30 is calendar 2024 but ISO 2025-W01-1.
+    let select_stmt = Pg2Sqlite::default()
+        .sql("SELECT to_char(TIMESTAMP '2024-12-30 00:00:00', 'IYYY-IW-ID');")
+        .expect("parse")
+        .translate(&Pg2SqliteOptions::default())
+        .expect("translate")
+        .into_iter()
+        .find(|s| !s.to_string().starts_with("PRAGMA"))
+        .expect("SELECT stmt")
+        .to_string();
+    // The translated column has no alias; rusqlite positional access handles
+    // it.
     let conn = rusqlite::Connection::open_in_memory().unwrap();
-    let value: String = conn.query_row(&literal, [], |row| row.get(0)).unwrap();
-    assert_eq!(value, "2025-01-1", "PostgreSQL answers 2025-01-1: {literal}");
+    let value: String = conn.query_row(&select_stmt, [], |row| row.get(0)).unwrap();
+    assert_eq!(value, "2025-01-1", "PostgreSQL answers 2025-01-1: {select_stmt}");
 }

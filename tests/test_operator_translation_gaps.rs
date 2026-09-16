@@ -21,13 +21,14 @@ fn opts() -> Pg2SqliteOptions {
         .with_math_functions_available()
 }
 
-/// Translate `pg` with all options on and return the single emitted statement.
+/// Translate `pg` with all options on and return the first user (non-PRAGMA)
+/// statement.
 fn tr(pg: &str) -> String {
     translate_pg(pg, &opts())
         .expect("translation must succeed")
         .into_iter()
-        .next()
-        .expect("at least one statement")
+        .find(|s| !s.starts_with("PRAGMA"))
+        .expect("at least one user statement")
 }
 
 /// Translate `pg` with all options on and expect a translation error.

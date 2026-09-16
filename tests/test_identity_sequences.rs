@@ -196,7 +196,11 @@ fn a_named_table_level_primary_key_keeps_its_name() {
     assert!(ddl.contains("CONSTRAINT t_pkey PRIMARY KEY AUTOINCREMENT"), "{ddl}");
 
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
-    connection.execute_batch(&format!("{ddl};")).expect("emitted DDL executes");
+    // The translator leads with a dialect pragma; execute each statement
+    // individually.
+    for stmt in &statements {
+        connection.execute_batch(&format!("{stmt};")).expect("emitted DDL executes");
+    }
 }
 
 /// A composite key is not the rowid, so nothing is folded and the column

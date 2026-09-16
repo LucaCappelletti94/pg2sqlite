@@ -225,23 +225,24 @@ fn gist_tsvector_translates_to_fts5() {
     ";
     let translated_sql = translate_result(sql).unwrap();
 
-    // Should have: table + FTS5 virtual table + 3 triggers + 1 backfill INSERT
-    assert_eq!(translated_sql.len(), 6);
+    // one pragma + table + FTS5 virtual table + 3 triggers + 1 backfill INSERT
+    // = 7 statements
+    assert_eq!(translated_sql.len(), 7, "one pragma plus the 6 FTS5 statements");
 
-    // First statement is the table
-    assert!(translated_sql[0].contains("CREATE TABLE articles"));
+    // Second statement (index 1) is the table.
+    assert!(translated_sql[1].contains("CREATE TABLE articles"));
 
-    // Second statement should be CREATE VIRTUAL TABLE ... USING fts5
+    // Third statement (index 2) should be CREATE VIRTUAL TABLE ... USING fts5
     assert!(
-        translated_sql[1].contains("CREATE VIRTUAL TABLE"),
+        translated_sql[2].contains("CREATE VIRTUAL TABLE"),
         "Expected FTS5 virtual table, got: {}",
-        translated_sql[1]
+        translated_sql[2]
     );
-    assert!(translated_sql[1].contains("fts5"), "Expected fts5 module, got: {}", translated_sql[1]);
+    assert!(translated_sql[2].contains("fts5"), "Expected fts5 module, got: {}", translated_sql[2]);
     assert!(
-        translated_sql[1].contains("articles_fts"),
+        translated_sql[2].contains("articles_fts"),
         "Expected articles_fts table name, got: {}",
-        translated_sql[1]
+        translated_sql[2]
     );
     execute_translated(sql);
 }
@@ -254,50 +255,48 @@ fn gin_tsvector_translates_to_fts5() {
     ";
     let translated_sql = translate_result(sql).unwrap();
 
-    // Should have: table + FTS5 virtual table + 3 triggers (insert, delete,
-    // update)
-    // + 1 backfill INSERT
-    assert_eq!(translated_sql.len(), 6);
+    // one pragma + table + FTS5 virtual table + 3 triggers + 1 backfill INSERT
+    // = 7 statements
+    assert_eq!(translated_sql.len(), 7, "one pragma plus the 6 FTS5 statements");
 
-    // First statement is the table
-    assert!(translated_sql[0].contains("CREATE TABLE documents"));
+    // Second statement (index 1) is the table.
+    assert!(translated_sql[1].contains("CREATE TABLE documents"));
 
-    // Second statement should be CREATE VIRTUAL TABLE ... USING fts5
+    // Third statement (index 2) should be CREATE VIRTUAL TABLE ... USING fts5
     assert!(
-        translated_sql[1].contains("CREATE VIRTUAL TABLE"),
+        translated_sql[2].contains("CREATE VIRTUAL TABLE"),
         "Expected FTS5 virtual table, got: {}",
-        translated_sql[1]
+        translated_sql[2]
     );
-    assert!(translated_sql[1].contains("fts5"), "Expected fts5 module, got: {}", translated_sql[1]);
+    assert!(translated_sql[2].contains("fts5"), "Expected fts5 module, got: {}", translated_sql[2]);
     assert!(
-        translated_sql[1].contains("documents_fts"),
+        translated_sql[2].contains("documents_fts"),
         "Expected documents_fts table name, got: {}",
-        translated_sql[1]
-    );
-    assert!(
-        translated_sql[1].contains("title"),
-        "Expected title column, got: {}",
-        translated_sql[1]
-    );
-    assert!(translated_sql[1].contains("body"), "Expected body column, got: {}", translated_sql[1]);
-
-    // Statements 3-5 should be triggers
-    assert!(
-        translated_sql[2].contains("CREATE TRIGGER") && translated_sql[2].contains("AFTER INSERT"),
-        "Expected INSERT trigger, got: {}",
         translated_sql[2]
     );
     assert!(
-        translated_sql[3].contains("CREATE TRIGGER") && translated_sql[3].contains("AFTER DELETE"),
-        "Expected DELETE trigger, got: {}",
+        translated_sql[2].contains("title"),
+        "Expected title column, got: {}",
+        translated_sql[2]
+    );
+    assert!(translated_sql[2].contains("body"), "Expected body column, got: {}", translated_sql[2]);
+
+    // Statements 4-6 (indices 3-5) should be triggers
+    assert!(
+        translated_sql[3].contains("CREATE TRIGGER") && translated_sql[3].contains("AFTER INSERT"),
+        "Expected INSERT trigger, got: {}",
         translated_sql[3]
     );
     assert!(
-        translated_sql[4].contains("CREATE TRIGGER") && translated_sql[4].contains("AFTER UPDATE"),
-        "Expected UPDATE trigger, got: {}",
+        translated_sql[4].contains("CREATE TRIGGER") && translated_sql[4].contains("AFTER DELETE"),
+        "Expected DELETE trigger, got: {}",
         translated_sql[4]
     );
-    execute_translated(sql);
+    assert!(
+        translated_sql[5].contains("CREATE TRIGGER") && translated_sql[5].contains("AFTER UPDATE"),
+        "Expected UPDATE trigger, got: {}",
+        translated_sql[5]
+    );
 }
 
 /// The index path had the mirror image of the table-constraint defect: it

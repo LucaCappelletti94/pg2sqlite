@@ -205,7 +205,16 @@ fn default_now_translates_to_datetime_now() {
     // Verify the translated DDL works at runtime.
     use diesel::{Connection, RunQueryDsl, SqliteConnection};
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
-    diesel::sql_query(&output).execute(&mut conn).unwrap();
+    // The translator leads with a dialect pragma; DDL and vendor pragmas use
+    // sql_query.
+    let stmts = Pg2Sqlite::default()
+        .sql("CREATE TABLE now_test (id INTEGER PRIMARY KEY, created_at TEXT DEFAULT now());")
+        .unwrap()
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .unwrap();
+    for stmt in &stmts {
+        diesel::sql_query(stmt).execute(&mut conn).unwrap();
+    }
     // Insert without specifying created_at to exercise the DEFAULT.
     diesel::sql_query("INSERT INTO now_test (id) VALUES (1)").execute(&mut conn).unwrap();
 
@@ -245,8 +254,12 @@ fn every_default_shape_produces_runnable_ddl() {
     );
 
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    conn.execute_batch(&format!("{ddl};"))
-        .unwrap_or_else(|e| panic!("emitted DDL is not runnable: {e}\n{ddl}"));
+    // The translator leads with a dialect pragma; execute each statement
+    // individually.
+    for stmt in ddl.split('\n').filter(|s| !s.trim().is_empty()) {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted DDL is not runnable: {e}\n{stmt}"));
+    }
 
     // A bare literal or signed number must stay bare: wrapping is harmless but
     // the assertion pins which forms need parentheses and which do not.
@@ -388,8 +401,12 @@ fn c_and_posix_collations_become_binary() {
 
 fn assert_stmt_parses_as_sqlite(sql: &str) {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
-    conn.execute_batch(sql)
-        .unwrap_or_else(|e| panic!("emitted statement must run in SQLite: {e}\n{sql}"));
+    // The translator leads with a dialect pragma; execute each statement
+    // individually.
+    for stmt in sql.split('\n').filter(|s| !s.trim().is_empty()) {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("emitted statement must run in SQLite: {e}\n{stmt}"));
+    }
 }
 
 fn assert_all_stmts_parse_as_sqlite_with(pg_sql: &str, opts: &Pg2SqliteOptions) {

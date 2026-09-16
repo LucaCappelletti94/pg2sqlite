@@ -12,7 +12,8 @@
 //!
 //! - the two readings of a plain LIKE really do differ, and the pragma really
 //!   does close the gap
-//! - the forward direction really does emit the pragma for a script with a LIKE
+//! - the forward direction really does emit the pragma, unconditionally,
+//!   because it declares the emitted dialect rather than reacting to the script
 //! - a plain LIKE really is handed back unchanged
 //!
 //! Turning a plain LIKE into an ILIKE was considered and measured: SQLite folds
@@ -68,10 +69,11 @@ fn the_default_folding_does_not_reach_beyond_ascii() {
     assert_eq!(sqlite_says(None, "'\u{c4}' LIKE '\u{e4}'"), 0);
 }
 
-/// The forward direction writes the pragma the contract names, so a caller
-/// applying its script starts on a connection that satisfies the promise.
+/// The pragma the contract names, so a caller applying its script starts on a
+/// connection that satisfies the promise. One of three shape pins for the
+/// unconditional rule (LIKE, ILIKE-only, no-LIKE).
 #[test]
-fn the_forward_direction_emits_the_pragma_for_a_like() {
+fn a_script_with_a_like_carries_the_pragma() {
     let statements = Pg2Sqlite::default()
         .sql(&format!("{SCHEMA}\nSELECT s FROM t WHERE s LIKE 'a%';"))
         .expect("parse")
@@ -83,16 +85,35 @@ fn the_forward_direction_emits_the_pragma_for_a_like() {
     );
 }
 
-/// And only for one, so a schema carrying no LIKE hands the caller nothing,
-/// which is the failure the documentation names.
+/// R96: the pragma is part of the emitted dialect, not a reaction to the
+/// script's text. It is connection state, so it governs every LIKE that later
+/// runs on the connection, including one inside a view, a trigger body, or a
+/// hand-written query the script can neither see nor enumerate. A script that
+/// happened to carry no LIKE therefore still hands the caller a connection
+/// whose LIKE matches PostgreSQL.
 #[test]
-fn a_script_without_a_like_carries_no_pragma() {
+fn a_script_without_a_like_still_carries_the_pragma() {
     let statements = Pg2Sqlite::default()
         .sql(SCHEMA)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate");
-    assert!(!statements.iter().any(|s| s.contains("case_sensitive_like")), "{statements:?}");
+    assert!(
+        statements.iter().any(|s| s.contains("case_sensitive_like")),
+        "the emitted dialect declares PostgreSQL LIKE semantics unconditionally: {statements:?}"
+    );
+}
+
+/// An ILIKE-only script used to carry the pragma for an arbitrary reason; now
+/// it carries it by rule, like every other script.
+#[test]
+fn an_ilike_only_script_carries_the_pragma() {
+    let statements = Pg2Sqlite::default()
+        .sql(&format!("{SCHEMA}\nSELECT s FROM t WHERE s ILIKE 'a%';"))
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate");
+    assert!(statements.iter().any(|s| s.contains("case_sensitive_like")), "{statements:?}");
 }
 
 #[test]

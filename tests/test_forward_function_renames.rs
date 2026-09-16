@@ -126,8 +126,10 @@ fn reverse_json_array_length_passes_through_for_non_jsonb_arguments() {
 /// Execute the renamed SQLite output against an in-memory connection.
 fn sqlite_accepts(sql: &str) {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
-    conn.execute_batch(sql)
-        .unwrap_or_else(|e| panic!("SQLite rejected renamed output: {e}\n{sql}"));
+    for stmt in sql.split('\n').filter(|s| !s.trim().is_empty()) {
+        conn.execute_batch(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected renamed output: {e}\n{stmt}"));
+    }
 }
 
 /// Parse the PostgreSQL reverse-translation output to prove it is valid PG
@@ -142,7 +144,10 @@ fn pg_parses(sql: &str) {
 /// empty string needs its own treatment.
 #[test]
 fn ascii_of_the_empty_string_is_zero() {
-    let result = translate_sql("SELECT ascii('')", &default_opts()).unwrap();
+    let stmts = helpers::translate_pg("SELECT ascii('')", &default_opts())
+        .expect("translation must succeed");
+    let result =
+        stmts.into_iter().find(|s| !s.starts_with("PRAGMA")).expect("expected a SELECT statement");
     // The SQL under test is translator output, a runtime string, so the raw
     // query interface is the correct one.
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -165,7 +170,12 @@ fn ascii_keeps_null_and_first_character_semantics() {
         ("SELECT ascii('a')", Some(97)),
         ("SELECT ascii('ab')", Some(97)),
     ] {
-        let result = translate_sql(pg_sql, &default_opts()).unwrap();
+        let stmts =
+            helpers::translate_pg(pg_sql, &default_opts()).expect("translation must succeed");
+        let result = stmts
+            .into_iter()
+            .find(|s| !s.starts_with("PRAGMA"))
+            .expect("expected a SELECT statement");
         let value: Option<i64> = conn.query_row(&result, [], |row| row.get(0)).unwrap();
         assert_eq!(value, expected, "{pg_sql} translated to: {result}");
     }

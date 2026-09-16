@@ -161,7 +161,11 @@ fn get_create_table_sql(
     };
 
     let translated = translator.translate(&options).unwrap();
-    translated[0].to_string()
+    translated
+        .iter()
+        .find(|s| !s.to_string().starts_with("PRAGMA"))
+        .expect("user statement in translation")
+        .to_string()
 }
 
 #[test]
@@ -172,7 +176,7 @@ fn test_v4_text_unique_and_valid() {
     diesel::sql_query(sql).execute(&mut conn).unwrap();
 
     for _ in 0..100 {
-        diesel::sql_query("INSERT INTO users_v4_text DEFAULT VALUES").execute(&mut conn).unwrap();
+        diesel::insert_into(users_v4_text::table).default_values().execute(&mut conn).unwrap();
     }
 
     let results = users_v4_text::table.select(UuidText::as_select()).load(&mut conn).unwrap();
@@ -211,7 +215,7 @@ fn test_v4_blob_unique_and_valid() {
     diesel::sql_query(sql).execute(&mut conn).unwrap();
 
     for _ in 0..100 {
-        diesel::sql_query("INSERT INTO users_v4_blob DEFAULT VALUES").execute(&mut conn).unwrap();
+        diesel::insert_into(users_v4_blob::table).default_values().execute(&mut conn).unwrap();
     }
 
     let results = users_v4_blob::table.select(UuidBlob::as_select()).load(&mut conn).unwrap();
@@ -241,13 +245,13 @@ fn test_v7_text_sortable_and_valid() {
     diesel::sql_query(sql).execute(&mut conn).unwrap();
 
     // Insert 1st item
-    diesel::sql_query("INSERT INTO users_v7_text DEFAULT VALUES").execute(&mut conn).unwrap();
+    diesel::insert_into(users_v7_text::table).default_values().execute(&mut conn).unwrap();
 
     // Wait > 1s for unixepoch('now') resolution
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     // Insert 2nd item
-    diesel::sql_query("INSERT INTO users_v7_text DEFAULT VALUES").execute(&mut conn).unwrap();
+    diesel::insert_into(users_v7_text::table).default_values().execute(&mut conn).unwrap();
 
     // Retrieve in approximate insertion order (using rowid)
     let results = diesel::sql_query("SELECT id FROM users_v7_text ORDER BY rowid")
@@ -282,13 +286,13 @@ fn test_v7_blob_sortable_and_valid() {
     diesel::sql_query(sql).execute(&mut conn).unwrap();
 
     // Insert 1st item
-    diesel::sql_query("INSERT INTO users_v7_blob DEFAULT VALUES").execute(&mut conn).unwrap();
+    diesel::insert_into(users_v7_blob::table).default_values().execute(&mut conn).unwrap();
 
     // Wait > 1s
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     // Insert 2nd item
-    diesel::sql_query("INSERT INTO users_v7_blob DEFAULT VALUES").execute(&mut conn).unwrap();
+    diesel::insert_into(users_v7_blob::table).default_values().execute(&mut conn).unwrap();
 
     let results = diesel::sql_query("SELECT id FROM users_v7_blob ORDER BY rowid")
         .load::<IdBlob>(&mut conn)

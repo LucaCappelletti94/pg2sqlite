@@ -64,8 +64,9 @@ fn start_transaction_passes_through() {
         "START TRANSACTION should pass through, got: {output}"
     );
     {
-        let mut conn = SqliteConnection::establish(":memory:").unwrap();
-        conn.batch_execute(&format!("{output};\nROLLBACK;")).unwrap();
+        // The translator leads with a dialect pragma; use exec_stmts which
+        // handles each line.
+        exec_stmts(&format!("{output}\nROLLBACK"));
     }
 }
 
@@ -138,8 +139,9 @@ fn drop_trigger_strips_table_name() {
     // The ON my_table should be removed for SQLite
     assert!(!output.contains("ON my_table"), "ON table_name should be stripped, got: {output}");
     {
-        let mut conn = SqliteConnection::establish(":memory:").unwrap();
-        conn.batch_execute(&format!("{output};")).unwrap();
+        // The translator leads with a dialect pragma; use exec_stmts which
+        // handles each line.
+        exec_stmts(&output);
     }
 }
 
@@ -157,7 +159,7 @@ fn alter_table_add_column_is_translated() {
     let count =
         translate_count("CREATE TABLE t (id INT PRIMARY KEY); ALTER TABLE t ADD COLUMN name TEXT;")
             .unwrap();
-    assert_eq!(count, 2, "CREATE TABLE and ADD COLUMN should both be emitted");
+    assert_eq!(count, 3, "one pragma plus CREATE TABLE and ADD COLUMN");
 }
 
 #[test]
@@ -182,8 +184,9 @@ fn grant_filtered() {
                GRANT SELECT ON t TO some_role;";
     let count = translate_count(sql).unwrap();
     // CREATE TABLE produces 1 statement; CREATE ROLE and GRANT are both
-    // filtered
-    assert_eq!(count, 1, "Only CREATE TABLE should survive; GRANT and CREATE ROLE filtered");
+    // filtered. The pragma is also emitted, so count = 2 (pragma + CREATE
+    // TABLE).
+    assert_eq!(count, 2, "one pragma plus CREATE TABLE; GRANT and CREATE ROLE filtered");
 }
 
 #[test]
@@ -193,8 +196,8 @@ fn revoke_filtered() {
                GRANT SELECT ON t TO some_role;
                REVOKE SELECT ON t FROM some_role;";
     let count = translate_count(sql).unwrap();
-    // Only CREATE TABLE survives
-    assert_eq!(count, 1, "Only CREATE TABLE should survive; REVOKE filtered");
+    // Only CREATE TABLE and the leading pragma survive.
+    assert_eq!(count, 2, "one pragma plus CREATE TABLE; REVOKE filtered");
 }
 
 #[test]
@@ -237,7 +240,7 @@ fn create_policy_filtered() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY); \
                CREATE POLICY my_policy ON t FOR SELECT USING (true);";
     let count = translate_count(sql).unwrap();
-    assert_eq!(count, 1, "CREATE POLICY itself should emit nothing");
+    assert_eq!(count, 2, "one pragma plus CREATE TABLE; CREATE POLICY itself should emit nothing");
 }
 
 #[test]
@@ -272,12 +275,13 @@ fn mixed_statements_filters_correctly() {
     ";
     let stmts =
         Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
-    // CREATE TABLE, CREATE INDEX, ALTER TABLE, DROP INDEX. Only CREATE
-    // EXTENSION is filtered: ALTER TABLE ADD COLUMN is now translated.
+    // one pragma + CREATE TABLE + CREATE INDEX + ALTER TABLE + DROP INDEX = 5
+    // statements. Only CREATE EXTENSION is filtered: ALTER TABLE ADD COLUMN
+    // is now translated.
     assert_eq!(
         stmts.len(),
-        4,
-        "Expected 4 statements, got: {} - {:?}",
+        5,
+        "Expected 5 statements, got: {} - {:?}",
         stmts.len(),
         stmts.iter().map(ToString::to_string).collect::<Vec<_>>()
     );

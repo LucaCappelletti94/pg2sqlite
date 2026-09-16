@@ -2,6 +2,7 @@
 source: tests/test_rls_self_referential.rs
 expression: translated_sql
 ---
+PRAGMA case_sensitive_like = 1
 CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
 CREATE TABLE app_users_rls (id BLOB PRIMARY KEY NOT NULL CHECK (length(id) = 16), email TEXT NOT NULL UNIQUE, display_name TEXT, settings TEXT) STRICT
 CREATE VIEW app_users AS SELECT id, email, display_name, settings FROM app_users_rls WHERE (id = current_app_user())

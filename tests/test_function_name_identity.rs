@@ -31,12 +31,13 @@ fn refusal(pg: &str, options: &Pg2SqliteOptions) -> String {
     }
 }
 
-/// Runs the single emitted statement and answers its first column as text.
+/// Runs the single emitted user statement and answers its first column as text.
 fn run_one(pg: &str, options: &Pg2SqliteOptions) -> String {
     let emitted = translate(pg, options).expect("translation succeeds");
-    let [probe] = emitted.as_slice() else {
-        panic!("expected one emitted statement, got {emitted:?}");
-    };
+    let probe = emitted
+        .iter()
+        .find(|s| !s.starts_with("PRAGMA"))
+        .unwrap_or_else(|| panic!("expected a user statement in: {emitted:?}"));
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     connection
         .query_row(probe, [], |row| row.get::<_, String>(0))
@@ -96,7 +97,7 @@ fn a_schema_qualified_call_stays_refused_when_the_name_is_declared() {
 fn a_quoted_name_carrying_a_capital_passes_through_once_declared() {
     let options = Pg2SqliteOptions::default().with_user_defined_functions(["random"]);
     let emitted = translate(OWN_RANDOM, &options).expect("a declared name is the caller's word");
-    assert_eq!(emitted, [r#"SELECT "RANDOM"()"#]);
+    assert_eq!(emitted, ["PRAGMA case_sensitive_like = 1", r#"SELECT "RANDOM"()"#]);
 }
 
 #[test]
@@ -109,14 +110,14 @@ fn a_quoted_name_quoting_leaves_alone_is_still_the_builtin() {
 fn the_catalogue_prefix_still_names_the_builtin() {
     let emitted = translate("SELECT pg_catalog.now() AS v;", &Pg2SqliteOptions::default())
         .expect("pg_catalog.now names the built-in");
-    assert_eq!(emitted, ["SELECT datetime('now') AS v"]);
+    assert_eq!(emitted, ["PRAGMA case_sensitive_like = 1", "SELECT datetime('now') AS v"]);
 }
 
 #[test]
 fn a_bare_builtin_is_untouched_by_the_new_rule() {
     let emitted = translate("SELECT now() AS v;", &Pg2SqliteOptions::default())
         .expect("bare now names the built-in");
-    assert_eq!(emitted, ["SELECT datetime('now') AS v"]);
+    assert_eq!(emitted, ["PRAGMA case_sensitive_like = 1", "SELECT datetime('now') AS v"]);
 }
 
 #[test]
@@ -127,7 +128,7 @@ fn a_quoted_type_name_quoting_leaves_alone_still_maps() {
     )
     .expect(r#""vector" names the pgvector type"#);
     assert!(
-        emitted[0].contains("v BLOB"),
+        emitted[1].contains("v BLOB"),
         "the column should still store the vector as a blob, got: {emitted:?}"
     );
 }

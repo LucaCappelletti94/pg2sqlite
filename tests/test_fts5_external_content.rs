@@ -123,15 +123,15 @@ fn test_fts5_backfill_populates_preexisting_rows() -> Result<(), Box<dyn std::er
     // and the backfill INSERT).
     let stmts: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
 
-    // First statement is CREATE TABLE
-    diesel::sql_query(&stmts[0]).execute(&mut conn)?;
+    let create = stmts.iter().position(|s| s.starts_with("CREATE TABLE")).expect("a CREATE TABLE");
+    diesel::sql_query(&stmts[create]).execute(&mut conn)?;
 
     // Insert rows before the FTS infrastructure exists
     diesel::sql_query("INSERT INTO docs VALUES (1, 'hello world')").execute(&mut conn)?;
     diesel::sql_query("INSERT INTO docs VALUES (2, 'goodbye world')").execute(&mut conn)?;
 
     // Execute the remaining statements (FTS table, triggers, backfill)
-    for stmt in &stmts[1..] {
+    for stmt in stmts.iter().filter(|s| !s.starts_with("CREATE TABLE")) {
         diesel::sql_query(stmt).execute(&mut conn)?;
     }
 

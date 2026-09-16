@@ -23,8 +23,9 @@ fn test_statement() {
 
     let translator = Pg2Sqlite::default().statement(statement);
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(result.len(), 1);
-    assert!(result[0].to_string().contains("CREATE TABLE test_statement"));
+    assert_eq!(result.len(), 2, "the script leads with the dialect pragma");
+    assert!(result[0].to_string().contains("case_sensitive_like"));
+    assert!(result[1].to_string().contains("CREATE TABLE test_statement"));
     // Execute to prove real SQLite accepts the translated DDL.
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -35,8 +36,9 @@ fn test_statement() {
 fn test_sql() {
     let translator = Pg2Sqlite::default().sql("CREATE TABLE test_sql (id INT);").unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(result.len(), 1);
-    assert!(result[0].to_string().contains("CREATE TABLE test_sql"));
+    assert_eq!(result.len(), 2, "the script leads with the dialect pragma");
+    assert!(result[0].to_string().contains("case_sensitive_like"));
+    assert!(result[1].to_string().contains("CREATE TABLE test_sql"));
     // Execute to prove real SQLite accepts the translated DDL.
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -51,8 +53,9 @@ fn test_file() {
 
     let translator = Pg2Sqlite::default().file(path).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(result.len(), 1);
-    assert!(result[0].to_string().contains("CREATE TABLE test_file"));
+    assert_eq!(result.len(), 2, "the script leads with the dialect pragma");
+    assert!(result[0].to_string().contains("case_sensitive_like"));
+    assert!(result[1].to_string().contains("CREATE TABLE test_file"));
     // Execute to prove real SQLite accepts the translated DDL.
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -78,9 +81,10 @@ fn test_ups() {
     let translator = Pg2Sqlite::ups(dir.path()).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
 
-    assert_eq!(result.len(), 2);
-    assert!(result[0].to_string().contains("CREATE TABLE t1"));
-    assert!(result[1].to_string().contains("CREATE TABLE t2"));
+    assert_eq!(result.len(), 3, "one pragma plus the two migrations");
+    assert!(result[0].to_string().contains("case_sensitive_like"));
+    assert!(result[1].to_string().contains("CREATE TABLE t1"));
+    assert!(result[2].to_string().contains("CREATE TABLE t2"));
     // Execute to prove real SQLite accepts the translated DDL.
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -110,9 +114,10 @@ fn test_ups_until() {
     let translator = Pg2Sqlite::ups_until(root, &file2_path).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
 
-    assert_eq!(result.len(), 2);
-    assert!(result[0].to_string().contains("CREATE TABLE t1"));
-    assert!(result[1].to_string().contains("CREATE TABLE t2"));
+    assert_eq!(result.len(), 3, "one pragma plus the two migrations");
+    assert!(result[0].to_string().contains("case_sensitive_like"));
+    assert!(result[1].to_string().contains("CREATE TABLE t1"));
+    assert!(result[2].to_string().contains("CREATE TABLE t2"));
     // Execute to prove real SQLite accepts the translated DDL.
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&result.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -182,7 +187,7 @@ fn test_translate() {
     let result = translator.translate(&Pg2SqliteOptions::default());
     assert!(result.is_ok());
     let statements = result.unwrap();
-    assert_eq!(statements.len(), 1);
+    assert_eq!(statements.len(), 2, "one pragma plus the CREATE");
 }
 
 #[test]
@@ -195,9 +200,9 @@ fn test_on_conflict_do_update() {
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    assert_eq!(result.len(), 2);
+    assert_eq!(result.len(), 3, "one pragma plus CREATE and INSERT");
 
-    let insert_sql = result[1].to_string();
+    let insert_sql = result[2].to_string();
     assert!(insert_sql.contains("ON CONFLICT"), "Should contain ON CONFLICT");
     assert!(insert_sql.contains("DO UPDATE"), "Should contain DO UPDATE");
     assert!(insert_sql.contains("EXCLUDED.value"), "Should contain EXCLUDED reference");
@@ -214,8 +219,8 @@ fn test_alter_table_add_column_is_translated() {
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
         .unwrap();
-    assert_eq!(stmts.len(), 2, "ADD COLUMN must be emitted alongside CREATE TABLE");
-    assert!(stmts[1].to_string().contains("ADD COLUMN name TEXT"), "got: {}", stmts[1]);
+    assert_eq!(stmts.len(), 3, "pragma plus CREATE TABLE plus ADD COLUMN");
+    assert!(stmts[2].to_string().contains("ADD COLUMN name TEXT"), "got: {}", stmts[2]);
     // Execute to prove real SQLite accepts the translated DDL.
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
@@ -264,9 +269,14 @@ fn translate_to_sql_returns_strings() -> Result<(), Box<dyn std::error::Error>> 
         Pg2Sqlite::default().sql(sql)?.translate_to_sql(&Pg2SqliteOptions::default())?;
     assert!(!sql_strings.is_empty(), "translate_to_sql must return at least one statement");
     assert!(
-        sql_strings[0].to_uppercase().contains("CREATE TABLE"),
-        "First string must be the CREATE TABLE, got: {}",
+        sql_strings[0].contains("case_sensitive_like"),
+        "First string must be the dialect pragma, got: {}",
         sql_strings[0]
+    );
+    assert!(
+        sql_strings[1].to_uppercase().contains("CREATE TABLE"),
+        "the CREATE TABLE follows the pragma, got: {}",
+        sql_strings[1]
     );
 
     // The returned strings must be valid SQLite.

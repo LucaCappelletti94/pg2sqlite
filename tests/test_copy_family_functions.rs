@@ -22,7 +22,9 @@ fn translate_ok(pg: &str, options: &Pg2SqliteOptions) -> String {
         .expect("parse")
         .translate_to_sql(options)
         .expect("expected translation to succeed")
-        .join("\n")
+        .into_iter()
+        .find(|s| !s.starts_with("PRAGMA"))
+        .expect("expected a user statement")
 }
 
 /// A single text-typed column named `result`, used to read the translated

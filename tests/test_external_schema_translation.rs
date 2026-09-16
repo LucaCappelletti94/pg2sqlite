@@ -46,13 +46,13 @@ fn external_schema_drives_column_dependent_rewrites() {
         .translate_with_report_and_schema(&schema, &Pg2SqliteOptions::default())
         .expect("query should translate");
     assert!(report.warnings.is_empty(), "translation should be lossless");
-    assert_eq!(report.statements.len(), 1);
+    assert_eq!(report.statements.len(), 2, "one pragma plus the SELECT");
 
     let mut connection = sqlite_with(ddl);
     diesel::sql_query("INSERT INTO docs VALUES (1, '{\"a\":1}'), (2, '[2,3]')")
         .execute(&mut connection)
         .expect("fixture rows should insert");
-    let rows = diesel::sql_query(report.statements[0].to_string())
+    let rows = diesel::sql_query(report.statements[1].to_string())
         .load::<TextValue>(&mut connection)
         .expect("translated query should execute");
     assert_eq!(rows.len(), 1);
@@ -91,8 +91,10 @@ fn loaded_ddl_updates_the_supplied_schema() {
     diesel::sql_query("INSERT INTO t (id) VALUES (1)")
         .execute(&mut connection)
         .expect("fixture row should insert");
-    diesel::sql_query(&statements[0]).execute(&mut connection).expect("alter table should execute");
-    let rows = diesel::sql_query(&statements[1])
+    // statements[0] is the dialect pragma; [1] is ALTER TABLE; [2] is the
+    // UPDATE.
+    diesel::sql_query(&statements[1]).execute(&mut connection).expect("alter table should execute");
+    let rows = diesel::sql_query(&statements[2])
         .load::<TextValue>(&mut connection)
         .expect("update should execute");
     assert_eq!(rows.len(), 1);

@@ -2,6 +2,7 @@
 source: tests/test_vector_rls.rs
 expression: translated_sql
 ---
+PRAGMA case_sensitive_like = 1
 CREATE TABLE IF NOT EXISTS rls_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, violation_type TEXT NOT NULL, row_identifier TEXT NOT NULL, policy_name TEXT, detected_at TEXT NOT NULL, severity TEXT NOT NULL, details TEXT, reported_at TEXT) STRICT
 CREATE TABLE embeddings_rls (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, content TEXT NOT NULL, embedding BLOB) STRICT
 CREATE VIEW embeddings AS SELECT id, content, embedding FROM embeddings_rls

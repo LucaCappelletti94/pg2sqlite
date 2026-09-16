@@ -183,7 +183,11 @@ fn uuid_cast_in_select_lowers_to_conversion_call() {
         .expect("parse")
         .translate(&opts)
         .expect("translate");
-    let stmt = translated[0].to_string();
+    let stmt = translated
+        .iter()
+        .find(|s| !s.to_string().starts_with("PRAGMA"))
+        .expect("user SELECT statement")
+        .to_string();
     assert!(
         !stmt.contains("::BLOB") && !stmt.contains("::Blob") && !stmt.contains("::uuid"),
         "translated SELECT must not contain a PG-style `::` cast, got: {stmt}"
@@ -408,7 +412,12 @@ mod bind_param {
         // Apply CREATE TABLE. diesel::sql_query is used because the emitted DDL
         // includes STRICT and CHECK clauses that the Diesel typed DSL cannot
         // express.
-        diesel::sql_query(stmts[0].to_string()).execute(&mut conn).expect("create table");
+        let create_sql = stmts
+            .iter()
+            .find(|s| s.to_string().to_ascii_uppercase().trim_start().starts_with("CREATE"))
+            .expect("CREATE TABLE in translated output")
+            .to_string();
+        diesel::sql_query(create_sql).execute(&mut conn).expect("create table");
 
         // Find the translated INSERT which carries `?1` as the placeholder for
         // id.

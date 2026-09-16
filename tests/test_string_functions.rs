@@ -3,7 +3,7 @@
 mod helpers;
 
 use diesel::prelude::*;
-use helpers::translate_sql;
+use helpers::translate_pg;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 diesel::table! {
@@ -420,14 +420,15 @@ fn test_concat_ws_semantic_skips_nulls() -> Result<(), Box<dyn std::error::Error
 #[test]
 fn left_function_to_substr() {
     let options = Pg2SqliteOptions::default();
-    let sql = translate_sql("SELECT left('hello', 3)", &options).unwrap();
+    // Filter to the SELECT past the leading dialect PRAGMA.
+    let stmts = translate_pg("SELECT left('hello', 3)", &options).unwrap();
+    let sql = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("SELECT stmt");
     let lower = sql.to_lowercase();
     assert!(lower.contains("substr("), "expected substr: {sql}");
-    // Translated SQL is dynamically generated; rusqlite execute_batch proves
-    // SQLite accepts it.
-    rusqlite::Connection::open_in_memory()
-        .expect("in-memory SQLite")
-        .execute_batch(&sql)
+    // Translator output is dynamic; typed DSL cannot reproduce it.
+    let mut conn = diesel::SqliteConnection::establish(":memory:").unwrap();
+    diesel::sql_query(sql.as_str())
+        .execute(&mut conn)
         .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{sql}"));
 }
 
@@ -445,7 +446,11 @@ fn left_function_semantic() -> Result<(), Box<dyn std::error::Error>> {
         result: String,
     }
 
-    let results = diesel::sql_query(&translated[0].to_string()).load::<TextResult>(&mut conn)?;
+    // Skip the leading dialect PRAGMA to reach the SELECT statement.
+    let select_sql =
+        translated.iter().find(|s| !s.to_string().starts_with("PRAGMA")).unwrap().to_string();
+    // Translator output is a dynamic expression; typed DSL cannot reproduce it.
+    let results = diesel::sql_query(&select_sql).load::<TextResult>(&mut conn)?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].result, "hello", "left('hello world', 5) should be 'hello'");
 
@@ -455,14 +460,15 @@ fn left_function_semantic() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn right_function_to_substr() {
     let options = Pg2SqliteOptions::default();
-    let sql = translate_sql("SELECT right('hello', 3)", &options).unwrap();
+    // Filter to the SELECT past the leading dialect PRAGMA.
+    let stmts = translate_pg("SELECT right('hello', 3)", &options).unwrap();
+    let sql = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("SELECT stmt");
     let lower = sql.to_lowercase();
     assert!(lower.contains("substr("), "expected substr: {sql}");
-    // Translated SQL is dynamically generated; rusqlite execute_batch proves
-    // SQLite accepts it.
-    rusqlite::Connection::open_in_memory()
-        .expect("in-memory SQLite")
-        .execute_batch(&sql)
+    // Translator output is dynamic; typed DSL cannot reproduce it.
+    let mut conn = diesel::SqliteConnection::establish(":memory:").unwrap();
+    diesel::sql_query(sql.as_str())
+        .execute(&mut conn)
         .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{sql}"));
 }
 
@@ -480,7 +486,11 @@ fn right_function_semantic() -> Result<(), Box<dyn std::error::Error>> {
         result: String,
     }
 
-    let results = diesel::sql_query(&translated[0].to_string()).load::<TextResult>(&mut conn)?;
+    // Skip the leading dialect PRAGMA to reach the SELECT statement.
+    let select_sql =
+        translated.iter().find(|s| !s.to_string().starts_with("PRAGMA")).unwrap().to_string();
+    // Translator output is a dynamic expression; typed DSL cannot reproduce it.
+    let results = diesel::sql_query(&select_sql).load::<TextResult>(&mut conn)?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].result, "world", "right('hello world', 5) should be 'world'");
 

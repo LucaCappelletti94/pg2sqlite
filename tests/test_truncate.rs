@@ -136,7 +136,8 @@ fn truncate_empties_every_named_table() -> Result<(), Box<dyn std::error::Error>
     let statements = Pg2Sqlite::default()
         .sql(&format!("{BASE} TRUNCATE docs, notes;"))?
         .translate(&Pg2SqliteOptions::default())?;
-    for statement in statements.iter().skip(2) {
+    // The schema is already applied, so only the truncation statements run.
+    for statement in statements.iter().filter(|s| s.to_string().starts_with("DELETE FROM")) {
         sql_query(statement.to_string()).execute(&mut conn)?;
     }
 

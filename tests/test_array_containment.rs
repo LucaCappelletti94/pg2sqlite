@@ -23,7 +23,8 @@ fn opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_array_representation(ArrayRepresentation::Json)
 }
 
-/// Translate a single PG statement with the array representation enabled.
+/// Translate a single PG statement with the array representation enabled,
+/// skipping the leading dialect pragma.
 fn tr(pg: &str) -> String {
     Pg2Sqlite::default()
         .sql(pg)
@@ -31,7 +32,7 @@ fn tr(pg: &str) -> String {
         .translate_to_sql(&opts())
         .expect("translate")
         .into_iter()
-        .next()
+        .find(|s| !s.starts_with("PRAGMA"))
         .expect("at least one statement")
 }
 

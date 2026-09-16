@@ -2,6 +2,7 @@
 source: tests/test_trigger_multi_insert_conflict.rs
 expression: generated_sql
 ---
+PRAGMA case_sensitive_like = 1
 CREATE TABLE procedure_template_asset_models (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, name TEXT, procedure_template_id INTEGER CHECK (procedure_template_id BETWEEN -2147483648 AND 2147483647), based_on_id INTEGER CHECK (based_on_id BETWEEN -2147483648 AND 2147483647), asset_model_id INTEGER CHECK (asset_model_id BETWEEN -2147483648 AND 2147483647)) STRICT
 CREATE TABLE parent_procedure_templates (parent_id INTEGER NOT NULL CHECK (parent_id BETWEEN -2147483648 AND 2147483647), child_id INTEGER NOT NULL CHECK (child_id BETWEEN -2147483648 AND 2147483647), PRIMARY KEY (parent_id, child_id)) STRICT
 CREATE TABLE next_procedure_templates (parent_id INTEGER NOT NULL CHECK (parent_id BETWEEN -2147483648 AND 2147483647), predecessor_id INTEGER NOT NULL CHECK (predecessor_id BETWEEN -2147483648 AND 2147483647), successor_id INTEGER NOT NULL CHECK (successor_id BETWEEN -2147483648 AND 2147483647), PRIMARY KEY (parent_id, predecessor_id, successor_id)) STRICT

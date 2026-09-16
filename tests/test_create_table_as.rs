@@ -11,7 +11,12 @@ use pg2sqlite::prelude::Pg2SqliteOptions;
 #[test]
 fn create_table_as_select_translates_functions() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE snapshots AS SELECT id, now() AS created_at FROM source;";
-    let output = translate_sql(sql, &Pg2SqliteOptions::default())?;
+    // translate_to_sql returns individual statements including the leading
+    // dialect pragma.
+    let stmts = pg2sqlite::prelude::Pg2Sqlite::default()
+        .sql(sql)?
+        .translate_to_sql(&Pg2SqliteOptions::default())?;
+    let output = stmts.join("\n");
 
     assert!(
         output.contains("datetime('now')"),
@@ -23,9 +28,13 @@ fn create_table_as_select_translates_functions() -> Result<(), Box<dyn std::erro
     );
     let mut exec_conn = SqliteConnection::establish(":memory:").unwrap();
     exec_conn.batch_execute("CREATE TABLE source (id INTEGER, created_at TEXT) STRICT;").unwrap();
-    exec_conn
-        .batch_execute(&format!("{output};"))
-        .unwrap_or_else(|e| panic!("translated CTAS failed: {e}\n{output}"));
+    // Execute each statement individually; the translator leads with a dialect
+    // pragma.
+    for stmt in &stmts {
+        exec_conn
+            .batch_execute(&format!("{stmt};"))
+            .unwrap_or_else(|e| panic!("translated CTAS failed: {e}\n{stmt}"));
+    }
 
     Ok(())
 }

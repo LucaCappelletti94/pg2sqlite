@@ -26,17 +26,22 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 const BASE: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);";
 
-/// Translates `pg` and returns the statements after the leading `CREATE TABLE`.
+/// Translates `pg` and returns the statements after the fixture's
+/// `CREATE TABLE`, which also drops the dialect pragmas the script leads with.
 fn emitted(pg: &str) -> Vec<String> {
-    Pg2Sqlite::default()
+    let all: Vec<String> = Pg2Sqlite::default()
         .sql(pg)
         .expect("the fixture must parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translation must succeed")
         .iter()
-        .skip(1)
         .map(ToString::to_string)
-        .collect()
+        .collect();
+    let fixture = all
+        .iter()
+        .position(|s| s.starts_with("CREATE TABLE"))
+        .expect("the fixture CREATE TABLE is emitted");
+    all[fixture + 1..].to_vec()
 }
 
 /// Applies every emitted statement to a fresh database.

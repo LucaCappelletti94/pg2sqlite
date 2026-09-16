@@ -284,9 +284,9 @@ fn test_or_replace_view_emits_drop_then_create() {
 
     let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
 
-    assert_eq!(stmts.len(), 2, "Expected DROP + CREATE, got {stmts:?}");
-    let drop = stmts[0].to_string();
-    let create = stmts[1].to_string();
+    assert_eq!(stmts.len(), 3, "the script leads with the dialect pragma, then DROP + CREATE");
+    let drop = stmts[1].to_string();
+    let create = stmts[2].to_string();
     assert!(
         drop.to_uppercase().contains("DROP VIEW IF EXISTS"),
         "First statement should be DROP VIEW IF EXISTS, got: {drop}"
