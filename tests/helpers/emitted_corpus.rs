@@ -416,8 +416,10 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
     (
         "foreign-clause",
         &[
-                // R122: clauses foreign to both dialects, SELECT shapes and
-                // the Databricks INSERT BY NAME.
+                // R122: clauses foreign to both dialects, SELECT shapes, the
+                // Databricks INSERT BY NAME, Hive INSERT OVERWRITE, the MySQL
+                // INSERT INTO TABLE keyword, and PostgreSQL's SELECT ... INTO
+                // table-creation shorthand.
                 "SELECT id FROM t LATERAL VIEW now() v AS ts_val;",
                 "SELECT id FROM t CLUSTER BY id;",
                 "SELECT id FROM t DISTRIBUTE BY id;",
@@ -425,6 +427,9 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT id FROM t QUALIFY row_number() OVER (ORDER BY id) = 1;",
                 "SELECT id FROM t CONNECT BY id = 2;",
                 "INSERT INTO t (id) BY NAME SELECT 1 AS id;",
+                "INSERT INTO TABLE t (id) VALUES (9);",
+                "INSERT OVERWRITE INTO t (id) SELECT 1;",
+                "SELECT n INTO scratch FROM t;",
                     ],
     ),
     (

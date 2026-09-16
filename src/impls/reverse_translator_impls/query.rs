@@ -454,5 +454,16 @@ mod tests {
             },
             "CONNECT BY",
         );
+        refused(
+            &|select| {
+                select.into = Some(sqlparser::ast::SelectInto {
+                    temporary: false,
+                    unlogged: false,
+                    table: false,
+                    targets: vec![parse_expr("backup")],
+                });
+            },
+            "SELECT ... INTO",
+        );
     }
 }

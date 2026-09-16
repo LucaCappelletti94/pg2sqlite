@@ -337,6 +337,24 @@ impl ReverseTranslator for Insert {
             ));
         }
 
+        // Hive and Databricks; SQLite parses it only by dialect leniency,
+        // and PostgreSQL has no OVERWRITE clause either.
+        if self.overwrite {
+            return Err(Error::reverse_refusal(
+                "INSERT OVERWRITE is Hive and Databricks SQL, and neither PostgreSQL nor SQLite \
+                 parses it. Truncate the table and insert, or stage and swap.",
+            ));
+        }
+
+        // MySQL and Hive spelling; neither PostgreSQL nor SQLite parses the
+        // keyword, and passing it through would emit a statement PG refuses.
+        if self.has_table_keyword {
+            return Err(Error::reverse_refusal(
+                "INSERT INTO TABLE is MySQL and Hive SQL; PostgreSQL and SQLite both write \
+                 INSERT INTO <table> without the keyword.",
+            ));
+        }
+
         // Refuse SQLite database qualifiers (main.t, temp.t) and system tables.
         if let TableObject::TableName(name) = &self.table {
             refuse_sqlite_specific_names(name)?;
@@ -407,7 +425,7 @@ impl ReverseTranslator for Insert {
             table,
             table_alias: self.table_alias.clone(),
             columns: self.columns.clone(),
-            overwrite: self.overwrite,
+            overwrite: false,
             source,
             assignments,
             partitioned,
@@ -607,12 +625,42 @@ mod tests {
         assert!(err.to_string().contains("BY NAME"), "the refusal should name BY NAME: {err}");
     }
 
+    /// Upstream sqlparser parses `INSERT OVERWRITE` under SQLiteDialect; the
+    /// clause belongs to neither engine, and passing it through would emit a
+    /// statement PostgreSQL refuses.
+    #[test]
+    fn reverse_translate_rejects_hive_insert_overwrite() {
+        let schema = schema_from_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);");
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
+        let mut insert = parse_insert("INSERT INTO t (id) SELECT 1");
+        insert.overwrite = true;
+        let err = insert
+            .reverse_translate(&schema, &options)
+            .expect_err("OVERWRITE belongs to neither engine");
+        assert!(err.to_string().contains("OVERWRITE"), "{err}");
+    }
+
+    /// `INSERT INTO TABLE` parses under SQLiteDialect by leniency only; the
+    /// rebuild would carry the keyword into PostgreSQL output it rejects.
+    #[test]
+    fn reverse_translate_refuses_table_keyword_before_target() {
+        let schema = schema_from_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);");
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
+        let mut insert = parse_insert("INSERT INTO t (id) SELECT 1");
+        insert.has_table_keyword = true;
+        let err = insert
+            .reverse_translate(&schema, &options)
+            .expect_err("TABLE keyword is foreign to both engines");
+        assert!(err.to_string().contains("INSERT INTO TABLE"), "{err}");
+    }
+
     #[test]
     fn resolve_insert_table_accepts_unqualified_and_public_names() {
         let schema = schema_from_sql("CREATE TABLE users(id INT PRIMARY KEY);");
 
         let unqualified = resolve_insert_table(&schema, &table_object(&["users"]))
             .expect("unqualified table should resolve");
+
         assert_eq!(unqualified.table_name(), "users");
 
         let public_qualified = resolve_insert_table(&schema, &table_object(&["public", "users"]))

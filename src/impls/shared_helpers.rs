@@ -3172,6 +3172,15 @@ fn translate_select_with_from<D: TranslationDirection>(
     from: Vec<sqlparser::ast::TableWithJoins>,
 ) -> Result<sqlparser::ast::Select, Error> {
     reject_foreign_select_clauses::<D>(select)?;
+    // PostgreSQL's SELECT ... INTO creates a table; SQLite has no SELECT
+    // INTO of its own, and SQLiteDialect parses it only by leniency.
+    if let Some(into) = &select.into {
+        let targets = into.targets.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        return Err(unsupported_source_syntax_for::<D>(format!(
+            "SELECT ... INTO {targets} is PostgreSQL's CREATE TABLE AS shorthand, and SQLite \
+             has no SELECT INTO. Write CREATE TABLE {targets} AS SELECT ... instead."
+        )));
+    }
     let selection = select
         .selection
         .as_ref()
@@ -3199,7 +3208,7 @@ fn translate_select_with_from<D: TranslationDirection>(
         top: translate_top_shared::<D>(select.top.as_ref(), schema, options, emit)?,
         top_before_distinct: select.top_before_distinct,
         projection,
-        into: select.into.clone(),
+        into: None,
         from,
         lateral_views: Vec::new(),
         prewhere,

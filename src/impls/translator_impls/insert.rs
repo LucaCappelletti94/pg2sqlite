@@ -108,6 +108,24 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
             ));
         }
 
+        // Hive and Databricks; PostgreSQL answers a syntax error at
+        // OVERWRITE, and carrying the flag would emit it into SQLite too.
+        if self.overwrite {
+            return Err(crate::errors::Error::forward_refusal(
+                "INSERT OVERWRITE is Hive and Databricks SQL, and neither PostgreSQL nor SQLite \
+                 parses it. Truncate the table and insert, or stage into a new table and swap.",
+            ));
+        }
+
+        // MySQL and Hive spelling; PostgreSQL answers a syntax error at the
+        // keyword, so refusing here beats emitting SQL neither engine runs.
+        if self.has_table_keyword {
+            return Err(crate::errors::Error::forward_refusal(
+                "INSERT INTO TABLE is MySQL and Hive SQL; PostgreSQL and SQLite both write \
+                 INSERT INTO <table> without the keyword.",
+            ));
+        }
+
         // Replace DEFAULT with the column's declared default BEFORE translating
         // the source, for two reasons. The substituted expression is PostgreSQL
         // SQL and gets translated by the same path as a written-out value
@@ -976,5 +994,29 @@ mod tests {
         let err = insert.translate(&schema, &options).expect_err("BY NAME has no SQLite form");
 
         assert!(err.to_string().contains("BY NAME"), "the refusal should name BY NAME: {err}");
+    }
+
+    /// Hive and Databricks only; PostgreSQL itself rejects the clause, so the
+    /// refusal must not wait for the emitted SQL to fail in SQLite.
+    #[test]
+    fn translate_rejects_hive_insert_overwrite() {
+        let mut insert = parse_insert("INSERT INTO users(id) SELECT 1");
+        insert.overwrite = true;
+
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let err = insert.translate(&schema, &options).expect_err("OVERWRITE has no SQLite form");
+        assert!(err.to_string().contains("OVERWRITE"), "{err}");
+    }
+    /// `INSERT INTO TABLE` is MySQL and Hive; PostgreSQL 17 answers
+    /// `syntax error at or near "TABLE"`, measured by the gauntlet, so the
+    /// keyword must be refused rather than normalized away.
+    #[test]
+    fn translate_refuses_table_keyword_before_target() {
+        let insert = parse_insert("INSERT INTO TABLE users(id) SELECT 1");
+        let schema = empty_schema();
+        let options = Pg2SqliteOptions::default();
+        let err = insert.translate(&schema, &options).expect_err("TABLE keyword is not PG");
+        assert!(err.to_string().contains("INSERT INTO TABLE"), "{err}");
     }
 }
