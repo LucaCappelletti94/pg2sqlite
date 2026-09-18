@@ -1472,19 +1472,54 @@ fn written_collation(expr: &Expr) -> Option<ComparisonCollation> {
     found
 }
 
-/// The operand a comparison reads the collation of.
+/// The collation a comparison against `expr` runs under, written on it or
+/// declared on a column it reads.
 ///
-/// SQLite propagates a column's declared collation through parentheses and a
-/// `CAST` and through nothing else. Measured on SQLite 3.51.1, over a
-/// `NOCASE` column holding `'A'`, `(s) = 'a'` and `CAST(s AS TEXT) = 'a'`
-/// answer 1 where `lower(s) = 'A'`, `trim(s) = 'a'` and `s || '' = 'a'`
-/// answer 0, so the wrappers that keep the collation are looked through and
-/// the rest leave the byte comparison the search measures.
-fn collation_bearing_operand(expr: &Expr) -> &Expr {
-    match expr {
-        Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => collation_bearing_operand(inner),
-        _ => expr,
+/// `instr()` compares bytes whatever collation its operands carry. Measured
+/// on SQLite 3.51.1, `'a' COLLATE NOCASE = 'A'` answers 1 where
+/// `instr(',a,', ',A,')` answers 0, so an equality that is not a byte
+/// comparison has no `instr()` form.
+///
+/// Every column the operand reads decides, wherever it sits inside the
+/// expression, because PostgreSQL derives a collation through the
+/// expressions built over a column while SQLite keeps one only through
+/// parentheses and a `CAST`. Measured on PostgreSQL 17 over a column with a
+/// nondeterministic ICU collation holding `'A'`, `k = 'a'`,
+/// `lower(k) = 'A'`, `trim(k) = 'a'` and `k || '' = 'a'` all answer true,
+/// where the same expressions answer 0 in SQLite.
+fn comparison_collation(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<ComparisonCollation, crate::errors::Error> {
+    if let Some(written) = written_collation(expr) {
+        return Ok(written);
     }
+    let mut answer = Ok(ComparisonCollation::Byte);
+    first_collated_reference(expr, schema, options, &mut answer);
+    answer
+}
+
+/// Walks to the first column reference inside `expr` that does not compare
+/// bytes, leaving `answer` at the classification that stopped the walk.
+fn first_collated_reference(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    answer: &mut Result<ComparisonCollation, crate::errors::Error>,
+) {
+    if !matches!(answer, Ok(ComparisonCollation::Byte)) {
+        return;
+    }
+    if matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_)) {
+        *answer = reference_collation(expr, schema, options);
+        if !matches!(answer, Ok(ComparisonCollation::Byte)) {
+            return;
+        }
+    }
+    for_each_child_expr(expr, &mut |child| {
+        first_collated_reference(child, schema, options, answer);
+    });
 }
 
 /// The collation a comparison runs under, as far as the scope settles it.
@@ -1499,38 +1534,28 @@ enum ComparisonCollation {
     Unmappable(ObjectName),
 }
 
-/// The collation a comparison against `expr` runs under, written on the
-/// expression or declared on the column it names.
-///
-/// `instr()` compares bytes whatever collation its operands carry. Measured
-/// on SQLite 3.51.1, `'a' COLLATE NOCASE = 'A'` answers 1 where
-/// `instr(',a,', ',A,')` answers 0, and a column declared `COLLATE NOCASE`
-/// compares the same way, so an equality that is not a byte comparison has
-/// no `instr()` form.
+/// The collation the relations in scope declare for the column `reference`
+/// names.
 ///
 /// A reference the scope answers with two disagreeing collations is refused
 /// rather than read as a byte comparison. SQLite gives a compound select the
 /// leftmost branch's collation, measured on 3.51.1 over a view whose left
 /// branch is a `NOCASE` column, where the view's own equality is
 /// case-insensitive and the search is not. A name the scope declines by rule
-/// carries no declaration to dispute, so `rowid` and a PL/pgSQL variable
-/// keep comparing bytes.
-fn comparison_collation(
-    expr: &Expr,
+/// carries no declaration to dispute, so `rowid` and a bare PL/pgSQL
+/// variable keep comparing bytes.
+fn reference_collation(
+    reference: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<ComparisonCollation, crate::errors::Error> {
-    if let Some(written) = written_collation(expr) {
-        return Ok(written);
-    }
-    let operand = collation_bearing_operand(expr);
-    match declared_collation(operand, schema, options)? {
+    match declared_collation(reference, schema, options)? {
         Some(settled) => Ok(settled),
-        None if !collation_declined_by_rule(operand, options) => {
+        None if !collation_declined_by_rule(reference, options) => {
             Err(crate::errors::Error::forward_refusal(format!(
                 "A membership test over string_to_array() becomes an instr() search, which \
                  compares bytes, and the relations in scope do not settle the collation of \
-                 {operand}, so whether the equality it replaces compares bytes is unknown. A \
+                 {reference}, so whether the equality it replaces compares bytes is unknown. A \
                  compound select takes the collation of its leftmost branch, and a name a \
                  PL/pgSQL variable also carries is not read as a column, so name the column \
                  through a single branch, or rename the variable."
@@ -1643,8 +1668,9 @@ fn translate_delimited_membership(
                     "A membership test over string_to_array() becomes an instr() search, and \
                      SQLite's instr() compares bytes whatever collation its operands carry, so \
                      an equality under COLLATE {collation} would answer differently from the \
-                     search. Compare a BINARY-collated value, or fold the operands before the \
-                     comparison."
+                     search. PostgreSQL carries that collation through the expressions built \
+                     over the column, so folding the operand does not drop it either. Compare \
+                     a column declared without a collation."
                 )));
             }
         }

@@ -356,13 +356,6 @@ const CASE_INSENSITIVE_KEYS: &str = "CREATE TABLE ci (id INT PRIMARY KEY, k TEXT
 INSERT INTO ci (id, k) VALUES (1, 'a'), (2, 'A'), (3, 'b');
 ";
 
-fn case_insensitively_admitted(predicate: &str) -> Vec<i32> {
-    let pg =
-        format!("{CASE_INSENSITIVE_KEYS}CREATE VIEW held AS SELECT id FROM ci WHERE {predicate};");
-    let mut connection = open(&pg, &Pg2SqliteOptions::default(), None);
-    held::table.select(held::id).order(held::id).load(&mut connection).expect("read the view")
-}
-
 fn case_insensitive_refusal(predicate: &str) -> String {
     refusal(&format!("{CASE_INSENSITIVE_KEYS}SELECT id FROM ci WHERE {predicate};"))
 }
@@ -490,16 +483,23 @@ fn an_unmapped_session_shaped_function_is_refused() {
     assert!(error.contains("more than one place"), "the duplicated-operand refusal: {error}");
 }
 
-/// A wrapper whose result carries no collation compares bytes in SQLite, which
-/// is what the search measures, so the rewrite stands and answers every row
-/// whose folded key is an element.
+/// PostgreSQL carries a column's collation through the expressions built
+/// over it while SQLite does not, measured on PostgreSQL 17 over a column
+/// with a nondeterministic ICU collation holding `'A'`, where `k = 'a'`,
+/// `lower(k) = 'A'`, `trim(k) = 'a'` and `k || '' = 'a'` all answer true
+/// against 0 from the same expressions in SQLite. A wrapper is therefore no
+/// escape from the collation, and the rewrite refuses wherever a collated
+/// column is read.
 #[test]
-fn a_collation_dropping_wrapper_still_translates() {
-    assert_eq!(
-        case_insensitively_admitted("lower(k) = ANY(string_to_array('a,b', ','))"),
-        vec![1, 2, 3],
-        "lower() answers a byte-collated value, so 'a', 'A' and 'b' all fold into the set"
-    );
+fn a_collated_column_inside_a_wrapper_is_refused() {
+    for predicate in [
+        "lower(k) = ANY(string_to_array('a,b', ','))",
+        "trim(k) <> ALL(string_to_array('a,b', ','))",
+        "(k || '') = ANY(string_to_array('a,b', ','))",
+    ] {
+        let message = case_insensitive_refusal(predicate);
+        assert!(message.contains("NOCASE"), "{predicate} names the collation: {message}");
+    }
 }
 
 #[test]
