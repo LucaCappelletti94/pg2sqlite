@@ -406,6 +406,26 @@ fn an_unsettled_view_collation_is_refused() {
     assert!(message.contains("more than one collation"), "names what is unsettled: {message}");
 }
 
+/// A caller may register a function of their own named `current_setting`,
+/// which passes through as the user-defined function it is. Nothing says such
+/// a function answers the same value on every call, and the setting is read
+/// three times, so only a declared session-variable mapping counts as a
+/// stable reading and the rest is refused.
+#[test]
+fn an_unmapped_session_shaped_function_is_refused() {
+    let options = Pg2SqliteOptions::default().with_user_defined_functions(["current_setting"]);
+    let error = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE ci (k TEXT);\n\
+             SELECT k FROM ci WHERE k = ANY(string_to_array(current_setting('app.subjects'), ','));",
+        )
+        .expect("parse")
+        .translate_to_sql(&options)
+        .expect_err("an unmapped session function must not be read three times")
+        .to_string();
+    assert!(error.contains("more than one place"), "the duplicated-operand refusal: {error}");
+}
+
 /// A wrapper whose result carries no collation compares bytes in SQLite, which
 /// is what the search measures, so the rewrite stands and answers every row
 /// whose folded key is an element.
