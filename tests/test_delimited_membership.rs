@@ -391,6 +391,21 @@ fn a_cast_over_a_case_insensitive_column_is_refused() {
     assert!(nested.contains("NOCASE"), "parentheses keep the collation: {nested}");
 }
 
+/// SQLite gives a compound select the collation of its leftmost branch,
+/// measured on 3.51.1 where a view over `SELECT k FROM ci UNION ALL SELECT
+/// 'zz'` answers 1 for `k = 'a'` on the `'A'` row while the search answers 0.
+/// The scope reports the two branches as a disagreement, so the rewrite
+/// refuses rather than reading the column as byte collated.
+#[test]
+fn an_unsettled_view_collation_is_refused() {
+    let message = refusal(
+        "CREATE TABLE ci (id INT PRIMARY KEY, k TEXT COLLATE NOCASE);\n\
+         CREATE VIEW v AS SELECT k FROM ci UNION ALL SELECT 'zz';\n\
+         SELECT k FROM v WHERE k <> ALL(string_to_array('a', ','));",
+    );
+    assert!(message.contains("more than one collation"), "names what is unsettled: {message}");
+}
+
 /// A wrapper whose result carries no collation compares bytes in SQLite, which
 /// is what the search measures, so the rewrite stands and answers every row
 /// whose folded key is an element.

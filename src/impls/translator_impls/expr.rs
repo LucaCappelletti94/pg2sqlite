@@ -1482,38 +1482,81 @@ fn collation_bearing_operand(expr: &Expr) -> &Expr {
     }
 }
 
-/// The non-byte collation a comparison against `expr` runs under, written on
-/// the expression or declared on the column it names.
+/// The collation a comparison runs under, as far as the scope settles it.
+#[derive(PartialEq, Eq)]
+enum ComparisonCollation {
+    /// A byte comparison, which the search measures exactly.
+    Byte,
+    /// A collation the search cannot honour, named for the refusal.
+    Named(String),
+}
+
+/// The collation a comparison against `expr` runs under, written on the
+/// expression or declared on the column it names.
 ///
 /// `instr()` compares bytes whatever collation its operands carry. Measured
 /// on SQLite 3.51.1, `'a' COLLATE NOCASE = 'A'` answers 1 where
 /// `instr(',a,', ',A,')` answers 0, and a column declared `COLLATE NOCASE`
 /// compares the same way, so an equality that is not a byte comparison has
-/// no `instr()` form and the membership rewrite refuses rather than
-/// answering it bytewise.
-fn non_byte_collation(
+/// no `instr()` form.
+///
+/// A reference the scope answers with two disagreeing collations is refused
+/// rather than read as a byte comparison. SQLite gives a compound select the
+/// leftmost branch's collation, measured on 3.51.1 over a view whose left
+/// branch is a `NOCASE` column, where the view's own equality is
+/// case-insensitive and the search is not.
+fn comparison_collation(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
-) -> Result<Option<String>, crate::errors::Error> {
+) -> Result<ComparisonCollation, crate::errors::Error> {
     if let Some(name) = written_non_byte_collation(expr) {
-        return Ok(Some(name));
+        return Ok(ComparisonCollation::Named(name));
     }
+    let operand = collation_bearing_operand(expr);
+    match declared_collation(operand, schema, options)? {
+        Some(settled) => Ok(settled),
+        None if referenced_column_name(operand).is_some() => {
+            Err(crate::errors::Error::forward_refusal(format!(
+                "A membership test over string_to_array() becomes an instr() search, which \
+                 compares bytes, and the relations in scope answer more than one collation for \
+                 {operand}, so whether the equality it replaces is a byte comparison is not \
+                 settled. A compound select takes its leftmost branch's collation, so read the \
+                 column through a single branch, or compare a value whose collation is declared."
+            )))
+        }
+        None => Ok(ComparisonCollation::Byte),
+    }
+}
+
+/// The collation the relations in scope declare for `operand`, or `None` when
+/// it names no column or the scope answers two collations for it.
+fn declared_collation(
+    operand: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<ComparisonCollation>, crate::errors::Error> {
     declared_in_scope(
-        collation_bearing_operand(expr),
+        operand,
         schema,
         options,
         |column| {
-            column.options.iter().find_map(|option| {
-                match &option.option {
-                    sqlparser::ast::ColumnOption::Collation(collation) => {
-                        non_byte_collation_name(collation)
-                    }
-                    _ => None,
-                }
-            })
+            Some(
+                column
+                    .options
+                    .iter()
+                    .find_map(|option| {
+                        match &option.option {
+                            sqlparser::ast::ColumnOption::Collation(collation) => {
+                                non_byte_collation_name(collation)
+                            }
+                            _ => None,
+                        }
+                    })
+                    .map_or(ComparisonCollation::Byte, ComparisonCollation::Named),
+            )
         },
-        non_byte_collation,
+        |expression, schema, options| comparison_collation(expression, schema, options).map(Some),
     )
 }
 
@@ -1559,15 +1602,17 @@ fn translate_delimited_membership(
         return Ok(None);
     };
     let delimiter = membership_delimiter(delimiter)?;
-    if let Some(collation) =
-        non_byte_collation(left, schema, options)?.or(non_byte_collation(text, schema, options)?)
-    {
-        return Err(crate::errors::Error::forward_refusal(format!(
-            "A membership test over string_to_array() becomes an instr() search, and SQLite's \
-             instr() compares bytes whatever collation its operands carry, so an equality under \
-             COLLATE {collation} would answer differently from the search. Compare a \
-             BINARY-collated value, or fold the operands before the comparison."
-        )));
+    for operand in [left, text] {
+        if let ComparisonCollation::Named(collation) =
+            comparison_collation(operand, schema, options)?
+        {
+            return Err(crate::errors::Error::forward_refusal(format!(
+                "A membership test over string_to_array() becomes an instr() search, and \
+                 SQLite's instr() compares bytes whatever collation its operands carry, so an \
+                 equality under COLLATE {collation} would answer differently from the search. \
+                 Compare a BINARY-collated value, or fold the operands before the comparison."
+            )));
+        }
     }
     if !is_replayable(left, options) {
         return Err(reject_duplicated_operand("= ANY(string_to_array(...))", left));
