@@ -53,9 +53,9 @@ INSERT INTO keys (id, k) VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'a,b'), (5, NU
 /// Applies what `pg` translates to, on a connection where the session function
 /// answers `subjects`.
 ///
-/// The pragmas are the ones a replica runs under, and recursive triggers is
-/// load bearing, since a write through the guarded view fires an INSTEAD OF
-/// trigger whose body fires the backing table's own BEFORE guard.
+/// The pragmas are the ones `tests/helpers/mod.rs` gives every other row
+/// level security test, so the guarded view is exercised under the settings a
+/// replica is opened with rather than under bare defaults.
 fn open(pg: &str, options: &Pg2SqliteOptions, subjects: Option<&'static str>) -> SqliteConnection {
     let script = Pg2Sqlite::default()
         .sql(pg)
@@ -394,10 +394,38 @@ fn a_multi_character_delimiter_is_refused() {
     assert!(message.contains("single-character"), "names what the delimiter must be: {message}");
 }
 
-/// The left side is read twice, once for the delimiter guard and once for the
-/// search, so a left side that answers differently on each read is refused.
+/// Both operands are read more than once, the left side for the delimiter
+/// guard and the search, the text for the NULL guard, the emptiness test and
+/// the search, so an operand that answers differently on each read is
+/// refused rather than read twice.
 #[test]
-fn a_volatile_left_side_is_refused() {
-    let message = refusal("SELECT c() = ANY(string_to_array('a,b', ',')) FROM (SELECT 1) AS s;");
-    assert!(message.contains("string_to_array"), "names the construct: {message}");
+fn a_volatile_operand_is_refused_on_either_side() {
+    let left = refusal("SELECT c() = ANY(string_to_array('a,b', ',')) FROM (SELECT 1) AS s;");
+    assert!(
+        left.contains("reads c() once") && left.contains("more than one place"),
+        "the refusal is the duplicated-operand one: {left}"
+    );
+    let text = refusal(
+        "CREATE TABLE v (k TEXT);\n\
+         SELECT k FROM v WHERE k = ANY(string_to_array(clock_timestamp()::text, ','));",
+    );
+    assert!(
+        text.contains("clock_timestamp") && text.contains("more than one place"),
+        "the text side is guarded the same way: {text}"
+    );
+}
+
+/// A named-argument call is not the shape the rewrite reads, so it keeps the
+/// refusal a bare `string_to_array` answers rather than being rewritten from
+/// arguments whose order is not positional.
+#[test]
+fn a_named_argument_call_is_left_refused() {
+    let message = refusal(
+        "SELECT 'a' = ANY(string_to_array(string => 'a,b', delimiter => ',')) \
+         FROM (SELECT 1) AS s;",
+    );
+    assert!(
+        message.contains("not available in standard SQLite"),
+        "the bare refusal stands: {message}"
+    );
 }
