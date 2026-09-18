@@ -1484,6 +1484,30 @@ fn explicit_collation(expr: &Expr) -> Option<ComparisonCollation> {
     }
 }
 
+/// The collation the whole comparison runs under.
+///
+/// An explicit collation on either side decides it in PostgreSQL, whatever
+/// the other side inherits, so `k COLLATE "C" = ANY(string_to_array(setting,
+/// ','))` compares bytes however `setting` is declared. Otherwise the first
+/// operand carrying one decides.
+fn effective_collation(
+    left: &Expr,
+    text: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<ComparisonCollation, crate::errors::Error> {
+    if let Some(explicit) = [left, text].into_iter().find_map(explicit_collation) {
+        return Ok(explicit);
+    }
+    for operand in [left, text] {
+        let found = comparison_collation(operand, schema, options)?;
+        if found != ComparisonCollation::Byte {
+            return Ok(found);
+        }
+    }
+    Ok(ComparisonCollation::Byte)
+}
+
 /// The collation a comparison against `expr` runs under, written on it or
 /// declared on a column it reads.
 ///
@@ -1670,24 +1694,22 @@ fn translate_delimited_membership(
         return Ok(None);
     };
     let delimiter = membership_delimiter(delimiter)?;
-    for operand in [left, text] {
-        match comparison_collation(operand, schema, options)? {
-            ComparisonCollation::Byte => {}
-            // The message about a name SQLite has no counterpart for belongs
-            // to the mapping, which refuses it.
-            ComparisonCollation::Unmappable(collation) => {
-                sqlite_collation(&collation)?;
-            }
-            ComparisonCollation::Named(collation) => {
-                return Err(crate::errors::Error::forward_refusal(format!(
-                    "A membership test over string_to_array() becomes an instr() search, and \
-                     SQLite's instr() compares bytes whatever collation its operands carry, so \
-                     an equality under COLLATE {collation} would answer differently from the \
-                     search. PostgreSQL carries that collation through the expressions built \
-                     over the column, so folding the operand does not drop it either. Compare \
-                     a column declared without a collation."
-                )));
-            }
+    match effective_collation(left, text, schema, options)? {
+        ComparisonCollation::Byte => {}
+        // The message about a name SQLite has no counterpart for belongs to
+        // the mapping, which refuses it.
+        ComparisonCollation::Unmappable(collation) => {
+            sqlite_collation(&collation)?;
+        }
+        ComparisonCollation::Named(collation) => {
+            return Err(crate::errors::Error::forward_refusal(format!(
+                "A membership test over string_to_array() becomes an instr() search, and \
+                 SQLite's instr() compares bytes whatever collation its operands carry, so an \
+                 equality under COLLATE {collation} would answer differently from the search. \
+                 PostgreSQL carries that collation through the expressions built over the \
+                 column, so folding the operand does not drop it either. Compare a column \
+                 declared without a collation, or name a byte collation on the comparison."
+            )));
         }
     }
     if !is_replayable(left, options) {

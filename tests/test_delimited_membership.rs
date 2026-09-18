@@ -356,6 +356,13 @@ const CASE_INSENSITIVE_KEYS: &str = "CREATE TABLE ci (id INT PRIMARY KEY, k TEXT
 INSERT INTO ci (id, k) VALUES (1, 'a'), (2, 'A'), (3, 'b');
 ";
 
+fn case_insensitively_admitted(predicate: &str) -> Vec<i32> {
+    let pg =
+        format!("{CASE_INSENSITIVE_KEYS}CREATE VIEW held AS SELECT id FROM ci WHERE {predicate};");
+    let mut connection = open(&pg, &Pg2SqliteOptions::default(), None);
+    held::table.select(held::id).order(held::id).load(&mut connection).expect("read the view")
+}
+
 fn case_insensitive_refusal(predicate: &str) -> String {
     refusal(&format!("{CASE_INSENSITIVE_KEYS}SELECT id FROM ci WHERE {predicate};"))
 }
@@ -521,17 +528,10 @@ fn a_binary_collation_still_translates() {
         vec![1, 2],
         "BINARY is the collation instr() compares under"
     );
-    let overridden = Pg2Sqlite::default()
-        .sql(&format!(
-            "{CASE_INSENSITIVE_KEYS}SELECT id FROM ci \
-             WHERE k COLLATE BINARY = ANY(string_to_array('a,b', ','));"
-        ))
-        .expect("parse")
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("an explicit byte collation overrides the column's own");
-    assert!(
-        overridden.last().is_some_and(|statement| statement.contains("instr(")),
-        "the search stands: {overridden:?}"
+    assert_eq!(
+        case_insensitively_admitted("k COLLATE BINARY = ANY(string_to_array('a,b', ','))"),
+        vec![1, 3],
+        "the override compares bytes, so 'A' is no element where 'a' and 'b' are"
     );
 }
 
@@ -578,5 +578,24 @@ fn a_named_argument_call_is_left_refused() {
     assert!(
         message.contains("not available in standard SQLite"),
         "the bare refusal stands: {message}"
+    );
+}
+
+/// An explicit collation decides the whole comparison in PostgreSQL, whatever
+/// the other operand inherits, so naming a byte collation on the left keeps
+/// the search even where the setting's own column carries one.
+#[test]
+fn an_explicit_byte_collation_covers_both_operands() {
+    let statements = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE ci (id INT PRIMARY KEY, k TEXT, setting TEXT COLLATE NOCASE);\n\
+             SELECT id FROM ci WHERE k COLLATE BINARY = ANY(string_to_array(setting, ','));",
+        )
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("an explicit byte collation decides the comparison");
+    assert!(
+        statements.last().is_some_and(|statement| statement.contains("instr(")),
+        "the search stands: {statements:?}"
     );
 }
