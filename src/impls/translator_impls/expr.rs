@@ -32,7 +32,7 @@ use crate::{
         datetime_helpers::{
             DatePartKey, build_date_part_expr, datetime_field_key, normalize_timestamptz_offset,
         },
-        expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq, rebuild},
+        expr_helpers::{case_when, concat, not_predicate, null_safe_eq, null_safe_neq, rebuild},
         function_helpers::{
             integer_literal, integer_literal_value, number_literal, simple_function_expr,
             single_quoted_literal, string_literal,
@@ -1378,6 +1378,151 @@ fn quantifier_elements(right: &Expr) -> Option<&[Expr]> {
     }
 }
 
+/// The argument list of a plain `string_to_array(...)` call.
+///
+/// A call carrying a window, a filter, a modifier or an argument clause is
+/// not what a membership test over a session setting spells, so it is left to
+/// the refusal the bare function answers.
+fn string_to_array_arguments(right: &Expr) -> Option<&[FunctionArg]> {
+    let Expr::Function(function) = right else { return None };
+    let names_the_split = postgres_catalog_function_name(&function.name)
+        .is_some_and(|name| name == "string_to_array");
+    if !names_the_split
+        || function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let FunctionArguments::List(arguments) = &function.args else { return None };
+    if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
+        return None;
+    }
+    Some(&arguments.args)
+}
+
+/// One positional argument written as a bare expression.
+fn unnamed_argument(argument: &FunctionArg) -> Option<&Expr> {
+    match argument {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Some(expr),
+        _ => None,
+    }
+}
+
+/// The single character the membership rewrite splits on.
+///
+/// A delimiter spanning several characters can be spelled partly by the text
+/// around it, and the search then finds a boundary the split never made, so
+/// `string_to_array('~', '~~')` would report an empty element. PostgreSQL
+/// also splits on a NULL delimiter one character at a time, and answers the
+/// whole text as a single element for an empty one, so only a written single
+/// character names the test the search measures.
+fn membership_delimiter(delimiter: &Expr) -> Result<&str, crate::errors::Error> {
+    single_quoted_literal(delimiter).filter(|text| text.chars().count() == 1).ok_or_else(|| {
+        crate::errors::Error::forward_refusal(
+            "A membership test over string_to_array() becomes an instr() search over the \
+             delimited text, so the delimiter has to be written as a single-character string \
+             literal. A longer delimiter can overlap the text around it, PostgreSQL splits on a \
+             NULL delimiter one character at a time, and an empty delimiter answers the whole \
+             text as a single element."
+                .to_string(),
+        )
+    })
+}
+
+/// `x = ANY(string_to_array(a, d))`, and its `<> ALL` negation, as
+/// `CASE WHEN a IS NOT NULL THEN a <> '' AND instr(x, d) = 0
+/// AND instr(d || a || d, d || x || d) > 0 END`.
+///
+/// Surrounding both the text and the left side with the delimiter is what
+/// makes the search find a whole element rather than a substring of one.
+/// The rest is PostgreSQL's answer for the degenerate operands, measured at
+/// PostgreSQL 17 over every combination of an empty, NULL and
+/// delimiter-carrying text and left side. An empty text splits into no
+/// elements, where surrounding it with delimiters alone would read as one
+/// empty element. The split never produces an element carrying the
+/// delimiter, so a left side that carries one is no element even when the
+/// delimited text holds it verbatim. A NULL text answers NULL for every left
+/// side, which the delimiter test alone would turn into false, so the whole
+/// predicate hangs off `a IS NOT NULL`. A NULL left side answers NULL
+/// through `instr()`, which is how an unset session setting denies a row.
+///
+/// `Ok(None)` when the operand is not a `string_to_array` call, which leaves
+/// the call refused everywhere no membership test consumes it: the array
+/// itself has no SQLite value to answer with.
+fn translate_delimited_membership(
+    left: &Expr,
+    right: &Expr,
+    negated: bool,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Option<Expr>, crate::errors::Error> {
+    let Some(arguments) = string_to_array_arguments(right) else { return Ok(None) };
+    let [text, delimiter] = arguments else {
+        return Err(crate::errors::Error::forward_refusal(
+            "Only the two-argument string_to_array(text, delimiter) has a membership test in \
+             SQLite. The third argument turns every element equal to it into NULL, which \
+             changes what the test answers."
+                .to_string(),
+        ));
+    };
+    let (Some(text), Some(delimiter)) = (unnamed_argument(text), unnamed_argument(delimiter))
+    else {
+        return Ok(None);
+    };
+    let delimiter = membership_delimiter(delimiter)?;
+    if !is_replayable(left, options) {
+        return Err(reject_duplicated_operand("= ANY(string_to_array(...))", left));
+    }
+    if !is_replayable(text, options) {
+        return Err(reject_duplicated_operand("= ANY(string_to_array(...))", text));
+    }
+
+    let translated_left = left.translate_with_warnings(schema, options, emit)?;
+    let translated_text = text.translate_with_warnings(schema, options, emit)?;
+    let surrounded =
+        |inner: Expr| concat(concat(string_literal(delimiter), inner), string_literal(delimiter));
+    let whole_element = Expr::BinaryOp {
+        left: Box::new(simple_function_expr(
+            "instr",
+            vec![translated_left.clone(), string_literal(delimiter)],
+            None,
+        )),
+        op: BinaryOperator::Eq,
+        right: Box::new(integer_literal(0)),
+    };
+    let text_is_present = Expr::IsNotNull(Box::new(translated_text.clone()));
+    let text_is_split = Expr::BinaryOp {
+        left: Box::new(translated_text.clone()),
+        op: BinaryOperator::NotEq,
+        right: Box::new(string_literal("")),
+    };
+    let found = Expr::BinaryOp {
+        left: Box::new(simple_function_expr(
+            "instr",
+            vec![surrounded(translated_text), surrounded(translated_left)],
+            None,
+        )),
+        op: BinaryOperator::Gt,
+        right: Box::new(integer_literal(0)),
+    };
+    let membership = Expr::BinaryOp {
+        left: Box::new(Expr::BinaryOp {
+            left: Box::new(text_is_split),
+            op: BinaryOperator::And,
+            right: Box::new(whole_element),
+        }),
+        op: BinaryOperator::And,
+        right: Box::new(found),
+    };
+    let guarded = case_when(text_is_present, membership, None);
+    Ok(Some(if negated { not_predicate(guarded) } else { guarded }))
+}
+
 /// Translate the equality forms `x = ANY(...)` and `x <> ALL(...)` into
 /// `IN` / `NOT IN`.
 ///
@@ -1385,6 +1530,7 @@ fn quantifier_elements(right: &Expr) -> Option<&[Expr]> {
 /// - subquery: `x = ANY(SELECT ...)` -> `x IN (SELECT ...)`
 /// - array literal: `x = ANY(ARRAY[...])` -> `x IN (...)`
 /// - tuple: `x = ANY((...))` -> `x IN (...)`
+/// - delimited text: `x = ANY(string_to_array(a, ','))` -> `instr(...)`
 /// - array value: `x = ANY(tags)` -> `EXISTS (SELECT 1 FROM json_each(tags)
 ///   ...)`
 fn translate_any_all_to_in(
@@ -1395,6 +1541,11 @@ fn translate_any_all_to_in(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
+    if let Some(membership) =
+        translate_delimited_membership(left, right, negated, schema, options, emit)?
+    {
+        return Ok(membership);
+    }
     if let Expr::Subquery(q) = right {
         let translated_left = left.translate_with_warnings(schema, options, emit)?;
         return Ok(Expr::InSubquery {

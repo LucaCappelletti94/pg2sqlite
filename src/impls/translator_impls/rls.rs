@@ -47,7 +47,7 @@ use crate::{
     errors::Error,
     impls::{
         ast_builder,
-        expr_helpers::{for_each_child_expr, map_expr_children},
+        expr_helpers::{concat, for_each_child_expr, map_expr_children},
         function_helpers::{integer_literal, simple_function_expr, string_literal},
         object_name::{append_suffix, last_ident, quote_identifier, quoted_ident},
         query_builder::{
@@ -2744,14 +2744,6 @@ pub(crate) fn rename_table_for_rls(
     renamed.name = append_suffix(&renamed.name, suffix);
 
     renamed
-}
-
-fn concat(left: Expr, right: Expr) -> Expr {
-    Expr::BinaryOp {
-        left: Box::new(left),
-        op: BinaryOperator::StringConcat,
-        right: Box::new(right),
-    }
 }
 
 fn generated_column(table: &str, column: &str) -> Expr {

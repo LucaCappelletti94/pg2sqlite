@@ -1076,6 +1076,16 @@ pub(crate) fn null_safe_neq(left: Expr, right: Expr) -> Expr {
     Expr::IsDistinctFrom(Box::new(left), Box::new(right))
 }
 
+/// `<left> || <right>`, SQLite's text concatenation.
+#[must_use]
+pub(crate) fn concat(left: Expr, right: Expr) -> Expr {
+    Expr::BinaryOp {
+        left: Box::new(left),
+        op: sqlparser::ast::BinaryOperator::StringConcat,
+        right: Box::new(right),
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use sqlparser::ast::{Expr, Ident, Value, ValueWithSpan};
