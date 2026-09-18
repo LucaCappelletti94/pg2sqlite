@@ -1475,9 +1475,14 @@ enum Derivation {
 /// through parentheses and a `CAST`. Measured on PostgreSQL 17 over a column
 /// with a nondeterministic ICU collation holding `'A'`, `k = 'a'`,
 /// `lower(k) = 'A'`, `trim(k) = 'a'` and `k || '' = 'a'` all answer true,
-/// where the same expressions answer 0 in SQLite. An explicit collation
-/// anywhere below the operand outranks what the columns carry, so
-/// `lower(k COLLATE "C")` compares bytes however `k` is declared.
+/// where the same expressions answer 0 in SQLite.
+///
+/// Only a collation written on the operand itself decides the comparison.
+/// Inside a compound expression the strictest child decides instead, because
+/// PostgreSQL derives a `CASE` from its result arms rather than from its
+/// condition, and taking a nested explicit collation as the answer would read
+/// the wrong child. `lower(k COLLATE BINARY)` still compares bytes, since
+/// that child answers a byte comparison whatever `k` is declared.
 fn derived_collation(
     expr: &Expr,
     schema: &ParserDB,
@@ -1490,15 +1495,11 @@ fn derived_collation(
             Ok(Derivation::Inherited(reference_collation(expr, schema, options)?))
         }
         _ => {
-            let mut explicit = None;
             let mut inherited = ComparisonCollation::Byte;
             let mut refusal = None;
             for_each_child_expr(expr, &mut |child| {
                 match derived_collation(child, schema, options) {
-                    Ok(Derivation::Explicit(collation)) => {
-                        explicit = explicit.take().or(Some(collation));
-                    }
-                    Ok(Derivation::Inherited(collation)) => {
+                    Ok(Derivation::Explicit(collation) | Derivation::Inherited(collation)) => {
                         if inherited == ComparisonCollation::Byte {
                             inherited = collation;
                         }
@@ -1506,14 +1507,9 @@ fn derived_collation(
                     Err(error) => refusal = refusal.take().or(Some(error)),
                 }
             });
-            // An explicit collation below decides, so a reference the scope
-            // cannot settle beside it no longer matters.
-            if let Some(collation) = explicit {
-                return Ok(Derivation::Explicit(collation));
-            }
             match refusal {
-                Some(error) => Err(error),
-                None => Ok(Derivation::Inherited(inherited)),
+                Some(error) if inherited == ComparisonCollation::Byte => Err(error),
+                _ => Ok(Derivation::Inherited(inherited)),
             }
         }
     }

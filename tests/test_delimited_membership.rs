@@ -611,3 +611,15 @@ fn an_explicit_byte_collation_under_a_wrapper_keeps_the_search() {
         "the fold answers 'a', 'a' and 'b', each an element under a byte comparison"
     );
 }
+
+/// PostgreSQL derives a `CASE` collation from its result arms rather than
+/// from its condition, so a byte collation named in the condition does not
+/// make the comparison bytewise while the arms read a `NOCASE` column.
+#[test]
+fn a_byte_collation_in_a_condition_does_not_decide() {
+    let message = case_insensitive_refusal(
+        "CASE WHEN k COLLATE BINARY = 'x' THEN k ELSE k END \
+         = ANY(string_to_array('a,b', ','))",
+    );
+    assert!(message.contains("NOCASE"), "the arms decide: {message}");
+}
