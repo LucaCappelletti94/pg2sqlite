@@ -409,8 +409,9 @@ fn an_unsettled_view_collation_is_refused() {
 /// A schema built elsewhere is never revisited by the translation, so a
 /// column declared with a collation SQLite has no counterpart for reaches the
 /// rewrite with that collation intact. PostgreSQL applies the locale where
-/// the search compares bytes, so the rewrite is refused rather than assuming
-/// bytes for a name it could not map.
+/// the search compares bytes, so the rewrite raises the refusal the
+/// collation mapping owns rather than assuming bytes for a name it could not
+/// map.
 #[test]
 fn an_unmappable_declared_collation_is_refused() {
     let schema = Pg2Sqlite::default()
@@ -424,7 +425,22 @@ fn an_unmappable_declared_collation_is_refused() {
         .translate_with_report_and_schema(&schema, &Pg2SqliteOptions::default())
         .expect_err("a locale collation has no byte search")
         .to_string();
-    assert!(error.contains("en_US"), "names the collation: {error}");
+    assert!(
+        error.contains("EN_US") && error.contains("not a valid SQLite collation"),
+        "the mapping's own refusal: {error}"
+    );
+}
+
+/// `rowid` is SQLite's own column and the scope answers nothing for it by
+/// rule, which is not a collation dispute, so the membership test over it
+/// keeps translating.
+#[test]
+fn a_scope_declined_name_still_translates() {
+    assert_eq!(
+        admitted("CAST(rowid AS TEXT) = ANY(string_to_array('1,2', ','))"),
+        vec![1, 2],
+        "the first two rows carry rowid 1 and 2"
+    );
 }
 
 /// A caller may register a function of their own named `current_setting`,

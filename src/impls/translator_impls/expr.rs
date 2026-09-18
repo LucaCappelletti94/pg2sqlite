@@ -54,7 +54,8 @@ use crate::{
             declared_in_scope, declared_numeric_precision, declared_type_matches,
             extract_column_references_from_function, function_argument_exprs, is_bound_parameter,
             is_integral_expression, numeric_scale, referenced_column_name, rescale_minor_units,
-            scale_decimal_literal, scale_of, scale_parameter, translate_expr_recursive,
+            scale_decimal_literal, scale_of, scale_parameter, scope_declines_column,
+            translate_expr_recursive,
         },
         temporal_arithmetic::{
             TemporalKind, epoch_of_temporal_difference, temporal_kind_of,
@@ -1438,35 +1439,34 @@ fn membership_delimiter(delimiter: &Expr) -> Result<&str, crate::errors::Error> 
     })
 }
 
-/// The collation `collation` names, when it is not SQLite's byte comparison.
+/// How a comparison under `collation` compares.
 ///
-/// A name with no SQLite counterpart counts as non-byte rather than as
-/// bytes. `sqlite_collation` refuses such a name when the declaration itself
-/// is translated, but a query translated against a schema built elsewhere
-/// never revisits that DDL, so PostgreSQL's locale comparison would reach a
-/// byte search unchallenged.
-fn non_byte_collation_name(collation: &ObjectName) -> Option<String> {
-    let written = last_ident_value_or_display(collation);
-    let Ok(mapped) = sqlite_collation(collation) else { return Some(written) };
-    let name = mapped
-        .0
-        .last()
-        .and_then(ObjectNamePart::as_ident)
-        .map(|ident| ident.value.to_ascii_uppercase())?;
-    (name != "BINARY").then_some(name)
+/// A name with no SQLite counterpart is neither bytes nor a collation the
+/// search could honour. `sqlite_collation` refuses it when the declaration
+/// itself is translated, but a query translated against a schema built
+/// elsewhere never revisits that DDL, so PostgreSQL's locale comparison
+/// would otherwise reach a byte search unchallenged.
+fn classify_collation(collation: &ObjectName) -> ComparisonCollation {
+    let Ok(mapped) = sqlite_collation(collation) else {
+        return ComparisonCollation::Unmappable(collation.clone());
+    };
+    let name = last_ident_value_or_display(&mapped).to_ascii_uppercase();
+    if name == "BINARY" { ComparisonCollation::Byte } else { ComparisonCollation::Named(name) }
 }
 
-/// The first non-byte collation written anywhere inside `expr`.
-fn written_non_byte_collation(expr: &Expr) -> Option<String> {
-    if let Expr::Collate { collation, .. } = expr
-        && let Some(name) = non_byte_collation_name(collation)
-    {
-        return Some(name);
+/// The first collation written anywhere inside `expr` that leaves something
+/// other than a byte comparison.
+fn written_collation(expr: &Expr) -> Option<ComparisonCollation> {
+    if let Expr::Collate { collation, .. } = expr {
+        let classified = classify_collation(collation);
+        if classified != ComparisonCollation::Byte {
+            return Some(classified);
+        }
     }
     let mut found = None;
     for_each_child_expr(expr, &mut |child| {
         if found.is_none() {
-            found = written_non_byte_collation(child);
+            found = written_collation(child);
         }
     });
     found
@@ -1494,6 +1494,9 @@ enum ComparisonCollation {
     Byte,
     /// A collation the search cannot honour, named for the refusal.
     Named(String),
+    /// A collation SQLite has no counterpart for, kept whole so the refusal
+    /// that owns that message can raise it.
+    Unmappable(ObjectName),
 }
 
 /// The collation a comparison against `expr` runs under, written on the
@@ -1509,19 +1512,23 @@ enum ComparisonCollation {
 /// rather than read as a byte comparison. SQLite gives a compound select the
 /// leftmost branch's collation, measured on 3.51.1 over a view whose left
 /// branch is a `NOCASE` column, where the view's own equality is
-/// case-insensitive and the search is not.
+/// case-insensitive and the search is not. A name the scope declines by rule
+/// carries no declaration to dispute, so `rowid` and a PL/pgSQL variable
+/// keep comparing bytes.
 fn comparison_collation(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<ComparisonCollation, crate::errors::Error> {
-    if let Some(name) = written_non_byte_collation(expr) {
-        return Ok(ComparisonCollation::Named(name));
+    if let Some(written) = written_collation(expr) {
+        return Ok(written);
     }
     let operand = collation_bearing_operand(expr);
     match declared_collation(operand, schema, options)? {
         Some(settled) => Ok(settled),
-        None if referenced_column_name(operand).is_some() => {
+        None if referenced_column_name(operand)
+            .is_some_and(|name| !scope_declines_column(name, options)) =>
+        {
             Err(crate::errors::Error::forward_refusal(format!(
                 "A membership test over string_to_array() becomes an instr() search, which \
                  compares bytes, and the relations in scope answer more than one collation for \
@@ -1553,12 +1560,12 @@ fn declared_collation(
                     .find_map(|option| {
                         match &option.option {
                             sqlparser::ast::ColumnOption::Collation(collation) => {
-                                non_byte_collation_name(collation)
+                                Some(classify_collation(collation))
                             }
                             _ => None,
                         }
                     })
-                    .map_or(ComparisonCollation::Byte, ComparisonCollation::Named),
+                    .unwrap_or(ComparisonCollation::Byte),
             )
         },
         |expression, schema, options| comparison_collation(expression, schema, options).map(Some),
@@ -1608,15 +1615,22 @@ fn translate_delimited_membership(
     };
     let delimiter = membership_delimiter(delimiter)?;
     for operand in [left, text] {
-        if let ComparisonCollation::Named(collation) =
-            comparison_collation(operand, schema, options)?
-        {
-            return Err(crate::errors::Error::forward_refusal(format!(
-                "A membership test over string_to_array() becomes an instr() search, and \
-                 SQLite's instr() compares bytes whatever collation its operands carry, so an \
-                 equality under COLLATE {collation} would answer differently from the search. \
-                 Compare a BINARY-collated value, or fold the operands before the comparison."
-            )));
+        match comparison_collation(operand, schema, options)? {
+            ComparisonCollation::Byte => {}
+            // The message about a name SQLite has no counterpart for belongs
+            // to the mapping, which refuses it.
+            ComparisonCollation::Unmappable(collation) => {
+                sqlite_collation(&collation)?;
+            }
+            ComparisonCollation::Named(collation) => {
+                return Err(crate::errors::Error::forward_refusal(format!(
+                    "A membership test over string_to_array() becomes an instr() search, and \
+                     SQLite's instr() compares bytes whatever collation its operands carry, so \
+                     an equality under COLLATE {collation} would answer differently from the \
+                     search. Compare a BINARY-collated value, or fold the operands before the \
+                     comparison."
+                )));
+            }
         }
     }
     if !is_replayable(left, options) {

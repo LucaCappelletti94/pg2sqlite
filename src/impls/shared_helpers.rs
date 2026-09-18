@@ -304,6 +304,21 @@ pub(crate) fn extract_columns_from_function(function: &Function) -> ColumnRefere
     })
 }
 
+/// True when the scope answers nothing for `column_name` by rule rather than
+/// by failing to find it.
+///
+/// `rowid` is SQLite's own, a PL/pgSQL variable is neither resolved nor
+/// refused by contract, and the variable-value column is the shape that
+/// carries one, so none of the three has a declaration to read.
+pub(crate) fn scope_declines_column(
+    column_name: &str,
+    options: &crate::options::TranslationContext<'_>,
+) -> bool {
+    column_name.eq_ignore_ascii_case("rowid")
+        || column_name == crate::impls::translator_impls::plpgsql::VARIABLE_VALUE_COLUMN
+        || options.is_variable(column_name)
+}
+
 /// What the column `expr` names is declared as, read through the relations in
 /// scope.
 ///
@@ -349,10 +364,7 @@ pub(crate) fn declared_in_scope<T: PartialEq>(
     else {
         return Ok(None);
     };
-    if column_name.eq_ignore_ascii_case("rowid")
-        || column_name == crate::impls::translator_impls::plpgsql::VARIABLE_VALUE_COLUMN
-        || options.is_variable(column_name)
-    {
+    if scope_declines_column(column_name, options) {
         return Ok(None);
     }
 
