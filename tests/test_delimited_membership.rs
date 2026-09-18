@@ -599,3 +599,15 @@ fn an_explicit_byte_collation_covers_both_operands() {
         "the search stands: {statements:?}"
     );
 }
+
+/// An explicit collation below a wrapper decides the comparison too, since
+/// PostgreSQL derives the wrapper's collation from its argument, so a byte
+/// one there keeps the search over a column declared otherwise.
+#[test]
+fn an_explicit_byte_collation_under_a_wrapper_keeps_the_search() {
+    assert_eq!(
+        case_insensitively_admitted("lower(k COLLATE BINARY) = ANY(string_to_array('a,b', ','))"),
+        vec![1, 2, 3],
+        "the fold answers 'a', 'a' and 'b', each an element under a byte comparison"
+    );
+}

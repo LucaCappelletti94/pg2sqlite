@@ -1454,33 +1454,68 @@ fn classify_collation(collation: &ObjectName) -> ComparisonCollation {
     if name == "BINARY" { ComparisonCollation::Byte } else { ComparisonCollation::Named(name) }
 }
 
-/// The first collation written anywhere inside `expr` that leaves something
-/// other than a byte comparison.
-fn written_collation(expr: &Expr) -> Option<ComparisonCollation> {
-    if let Expr::Collate { collation, .. } = expr {
-        let classified = classify_collation(collation);
-        if classified != ComparisonCollation::Byte {
-            return Some(classified);
-        }
-    }
-    let mut found = None;
-    for_each_child_expr(expr, &mut |child| {
-        if found.is_none() {
-            found = written_collation(child);
-        }
-    });
-    found
+/// Where a collation came from, since an explicit one outranks an inherited
+/// one in both engines.
+enum Derivation {
+    /// Written on the expression, which decides the comparison.
+    Explicit(ComparisonCollation),
+    /// Carried up from a column the expression reads.
+    Inherited(ComparisonCollation),
 }
 
-/// The collation written on the operand itself, through parentheses.
+/// The collation `expr` carries, derived the way PostgreSQL derives one.
 ///
-/// An explicit collation decides the comparison in both engines, a byte one
-/// included, so `k COLLATE BINARY` compares bytes however `k` is declared.
-fn explicit_collation(expr: &Expr) -> Option<ComparisonCollation> {
+/// `instr()` compares bytes whatever collation its operands carry. Measured
+/// on SQLite 3.51.1, `'a' COLLATE NOCASE = 'A'` answers 1 where
+/// `instr(',a,', ',A,')` answers 0, so an equality that is not a byte
+/// comparison has no `instr()` form.
+///
+/// The derivation runs bottom up, because PostgreSQL carries a collation
+/// through the expressions built over a column while SQLite keeps one only
+/// through parentheses and a `CAST`. Measured on PostgreSQL 17 over a column
+/// with a nondeterministic ICU collation holding `'A'`, `k = 'a'`,
+/// `lower(k) = 'A'`, `trim(k) = 'a'` and `k || '' = 'a'` all answer true,
+/// where the same expressions answer 0 in SQLite. An explicit collation
+/// anywhere below the operand outranks what the columns carry, so
+/// `lower(k COLLATE "C")` compares bytes however `k` is declared.
+fn derived_collation(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Derivation, crate::errors::Error> {
     match expr {
-        Expr::Nested(inner) => explicit_collation(inner),
-        Expr::Collate { collation, .. } => Some(classify_collation(collation)),
-        _ => None,
+        Expr::Nested(inner) => derived_collation(inner, schema, options),
+        Expr::Collate { collation, .. } => Ok(Derivation::Explicit(classify_collation(collation))),
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
+            Ok(Derivation::Inherited(reference_collation(expr, schema, options)?))
+        }
+        _ => {
+            let mut explicit = None;
+            let mut inherited = ComparisonCollation::Byte;
+            let mut refusal = None;
+            for_each_child_expr(expr, &mut |child| {
+                match derived_collation(child, schema, options) {
+                    Ok(Derivation::Explicit(collation)) => {
+                        explicit = explicit.take().or(Some(collation));
+                    }
+                    Ok(Derivation::Inherited(collation)) => {
+                        if inherited == ComparisonCollation::Byte {
+                            inherited = collation;
+                        }
+                    }
+                    Err(error) => refusal = refusal.take().or(Some(error)),
+                }
+            });
+            // An explicit collation below decides, so a reference the scope
+            // cannot settle beside it no longer matters.
+            if let Some(collation) = explicit {
+                return Ok(Derivation::Explicit(collation));
+            }
+            match refusal {
+                Some(error) => Err(error),
+                None => Ok(Derivation::Inherited(inherited)),
+            }
+        }
     }
 }
 
@@ -1488,77 +1523,33 @@ fn explicit_collation(expr: &Expr) -> Option<ComparisonCollation> {
 ///
 /// An explicit collation on either side decides it in PostgreSQL, whatever
 /// the other side inherits, so `k COLLATE "C" = ANY(string_to_array(setting,
-/// ','))` compares bytes however `setting` is declared. Otherwise the first
-/// operand carrying one decides.
+/// ','))` compares bytes however `setting` is declared.
 fn effective_collation(
     left: &Expr,
     text: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<ComparisonCollation, crate::errors::Error> {
-    if let Some(explicit) = [left, text].into_iter().find_map(explicit_collation) {
-        return Ok(explicit);
-    }
+    let mut inherited = ComparisonCollation::Byte;
+    let mut refusal = None;
     for operand in [left, text] {
-        let found = comparison_collation(operand, schema, options)?;
-        if found != ComparisonCollation::Byte {
-            return Ok(found);
+        match derived_collation(operand, schema, options) {
+            Ok(Derivation::Explicit(collation)) => return Ok(collation),
+            Ok(Derivation::Inherited(collation)) => {
+                if inherited == ComparisonCollation::Byte {
+                    inherited = collation;
+                }
+            }
+            Err(error) => refusal = refusal.or(Some(error)),
         }
     }
-    Ok(ComparisonCollation::Byte)
-}
-
-/// The collation a comparison against `expr` runs under, written on it or
-/// declared on a column it reads.
-///
-/// `instr()` compares bytes whatever collation its operands carry. Measured
-/// on SQLite 3.51.1, `'a' COLLATE NOCASE = 'A'` answers 1 where
-/// `instr(',a,', ',A,')` answers 0, so an equality that is not a byte
-/// comparison has no `instr()` form.
-///
-/// Every column the operand reads decides, wherever it sits inside the
-/// expression, because PostgreSQL derives a collation through the
-/// expressions built over a column while SQLite keeps one only through
-/// parentheses and a `CAST`. Measured on PostgreSQL 17 over a column with a
-/// nondeterministic ICU collation holding `'A'`, `k = 'a'`,
-/// `lower(k) = 'A'`, `trim(k) = 'a'` and `k || '' = 'a'` all answer true,
-/// where the same expressions answer 0 in SQLite.
-fn comparison_collation(
-    expr: &Expr,
-    schema: &ParserDB,
-    options: &crate::options::TranslationContext<'_>,
-) -> Result<ComparisonCollation, crate::errors::Error> {
-    if let Some(explicit) = explicit_collation(expr) {
-        return Ok(explicit);
+    if inherited != ComparisonCollation::Byte {
+        return Ok(inherited);
     }
-    if let Some(written) = written_collation(expr) {
-        return Ok(written);
+    match refusal {
+        Some(error) => Err(error),
+        None => Ok(ComparisonCollation::Byte),
     }
-    let mut answer = Ok(ComparisonCollation::Byte);
-    first_collated_reference(expr, schema, options, &mut answer);
-    answer
-}
-
-/// Walks to the first column reference inside `expr` that does not compare
-/// bytes, leaving `answer` at the classification that stopped the walk.
-fn first_collated_reference(
-    expr: &Expr,
-    schema: &ParserDB,
-    options: &crate::options::TranslationContext<'_>,
-    answer: &mut Result<ComparisonCollation, crate::errors::Error>,
-) {
-    if !matches!(answer, Ok(ComparisonCollation::Byte)) {
-        return;
-    }
-    if matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_)) {
-        *answer = reference_collation(expr, schema, options);
-        if !matches!(answer, Ok(ComparisonCollation::Byte)) {
-            return;
-        }
-    }
-    for_each_child_expr(expr, &mut |child| {
-        first_collated_reference(child, schema, options, answer);
-    });
 }
 
 /// The collation a comparison runs under, as far as the scope settles it.
@@ -1648,7 +1639,13 @@ fn declared_collation(
                     .unwrap_or(ComparisonCollation::Byte),
             )
         },
-        |expression, schema, options| comparison_collation(expression, schema, options).map(Some),
+        |expression, schema, options| {
+            // A view column's own expression carries the collation it reads,
+            // and an explicit one there decides just the same.
+            Ok(Some(match derived_collation(expression, schema, options)? {
+                Derivation::Explicit(collation) | Derivation::Inherited(collation) => collation,
+            }))
+        },
     )
 }
 
