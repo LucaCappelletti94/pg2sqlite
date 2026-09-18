@@ -350,18 +350,57 @@ fn an_empty_delimiter_is_refused() {
     assert!(message.contains("literal"), "names what the delimiter must be: {message}");
 }
 
+/// A case-insensitive corpus, where `'a'` and `'A'` are one value to the
+/// column's own equality and two values to a byte search.
+const CASE_INSENSITIVE_KEYS: &str = "CREATE TABLE ci (id INT PRIMARY KEY, k TEXT COLLATE NOCASE);
+INSERT INTO ci (id, k) VALUES (1, 'a'), (2, 'A'), (3, 'b');
+";
+
+fn case_insensitively_admitted(predicate: &str) -> Vec<i32> {
+    let pg =
+        format!("{CASE_INSENSITIVE_KEYS}CREATE VIEW held AS SELECT id FROM ci WHERE {predicate};");
+    let mut connection = open(&pg, &Pg2SqliteOptions::default(), None);
+    held::table.select(held::id).order(held::id).load(&mut connection).expect("read the view")
+}
+
+fn case_insensitive_refusal(predicate: &str) -> String {
+    refusal(&format!("{CASE_INSENSITIVE_KEYS}SELECT id FROM ci WHERE {predicate};"))
+}
+
 /// SQLite's `instr()` compares bytes whatever collation its operands carry.
-/// Measured on the bundled build, `'a' COLLATE NOCASE = 'A'` answers 1 while
+/// Measured on SQLite 3.51.1, `'a' COLLATE NOCASE = 'A'` answers 1 while
 /// `instr(',a,', ',A,')` answers 0, and a column declared `COLLATE NOCASE`
 /// compares the same way, so a case-insensitive membership test has no
 /// `instr()` form and is refused rather than answered bytewise.
 #[test]
 fn a_case_insensitive_column_is_refused() {
-    let message = refusal(
-        "CREATE TABLE ci (s TEXT COLLATE NOCASE);\n\
-         SELECT s FROM ci WHERE s = ANY(string_to_array('a,b', ','));",
-    );
+    let message = case_insensitive_refusal("k = ANY(string_to_array('a,b', ','))");
     assert!(message.contains("NOCASE"), "names the collation: {message}");
+}
+
+/// SQLite propagates a column's collation through parentheses and a `CAST`
+/// and through nothing else. Measured on SQLite 3.51.1, over a `NOCASE`
+/// column `(k) = 'a'` and `CAST(k AS TEXT) = 'a'` answer 1 for `k = 'A'`
+/// where `lower(k) = 'A'`, `trim(k) = 'a'` and `k || '' = 'a'` answer 0, so
+/// the two that carry the collation are refused with it.
+#[test]
+fn a_cast_over_a_case_insensitive_column_is_refused() {
+    let cast = case_insensitive_refusal("CAST(k AS TEXT) = ANY(string_to_array('a,b', ','))");
+    assert!(cast.contains("NOCASE"), "a cast keeps the collation: {cast}");
+    let nested = case_insensitive_refusal("(k) <> ALL(string_to_array('a,b', ','))");
+    assert!(nested.contains("NOCASE"), "parentheses keep the collation: {nested}");
+}
+
+/// A wrapper whose result carries no collation compares bytes in SQLite, which
+/// is what the search measures, so the rewrite stands and answers every row
+/// whose folded key is an element.
+#[test]
+fn a_collation_dropping_wrapper_still_translates() {
+    assert_eq!(
+        case_insensitively_admitted("lower(k) = ANY(string_to_array('a,b', ','))"),
+        vec![1, 2, 3],
+        "lower() answers a byte-collated value, so 'a', 'A' and 'b' all fold into the set"
+    );
 }
 
 #[test]

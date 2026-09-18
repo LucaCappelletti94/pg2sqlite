@@ -1467,15 +1467,30 @@ fn written_non_byte_collation(expr: &Expr) -> Option<String> {
     found
 }
 
+/// The operand a comparison reads the collation of.
+///
+/// SQLite propagates a column's declared collation through parentheses and a
+/// `CAST` and through nothing else. Measured on SQLite 3.51.1, over a
+/// `NOCASE` column holding `'A'`, `(s) = 'a'` and `CAST(s AS TEXT) = 'a'`
+/// answer 1 where `lower(s) = 'A'`, `trim(s) = 'a'` and `s || '' = 'a'`
+/// answer 0, so the wrappers that keep the collation are looked through and
+/// the rest leave the byte comparison the search measures.
+fn collation_bearing_operand(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => collation_bearing_operand(inner),
+        _ => expr,
+    }
+}
+
 /// The non-byte collation a comparison against `expr` runs under, written on
 /// the expression or declared on the column it names.
 ///
-/// `instr()` compares bytes whatever collation its operands carry, measured
-/// on SQLite 3.51: `'a' COLLATE NOCASE = 'A'` answers 1 where
+/// `instr()` compares bytes whatever collation its operands carry. Measured
+/// on SQLite 3.51.1, `'a' COLLATE NOCASE = 'A'` answers 1 where
 /// `instr(',a,', ',A,')` answers 0, and a column declared `COLLATE NOCASE`
-/// compares the same way. So an equality that is not a byte comparison has no
-/// `instr()` form, and the membership rewrite has to refuse rather than
-/// answer it bytewise.
+/// compares the same way, so an equality that is not a byte comparison has
+/// no `instr()` form and the membership rewrite refuses rather than
+/// answering it bytewise.
 fn non_byte_collation(
     expr: &Expr,
     schema: &ParserDB,
@@ -1485,7 +1500,7 @@ fn non_byte_collation(
         return Ok(Some(name));
     }
     declared_in_scope(
-        expr,
+        collation_bearing_operand(expr),
         schema,
         options,
         |column| {
