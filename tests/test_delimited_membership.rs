@@ -583,20 +583,20 @@ fn a_named_argument_call_is_left_refused() {
 
 /// An explicit collation decides the whole comparison in PostgreSQL, whatever
 /// the other operand inherits, so naming a byte collation on the left keeps
-/// the search even where the setting's own column carries one.
+/// the search even where the setting's own column carries one, and the rows
+/// it admits are the ones a byte comparison admits.
 #[test]
 fn an_explicit_byte_collation_covers_both_operands() {
-    let statements = Pg2Sqlite::default()
-        .sql(
-            "CREATE TABLE ci (id INT PRIMARY KEY, k TEXT, setting TEXT COLLATE NOCASE);\n\
-             SELECT id FROM ci WHERE k COLLATE BINARY = ANY(string_to_array(setting, ','));",
-        )
-        .expect("parse")
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("an explicit byte collation decides the comparison");
-    assert!(
-        statements.last().is_some_and(|statement| statement.contains("instr(")),
-        "the search stands: {statements:?}"
+    let pg = "CREATE TABLE ci (id INT PRIMARY KEY, k TEXT, setting TEXT COLLATE NOCASE);
+INSERT INTO ci (id, k, setting) VALUES (1, 'a', 'a,b'), (2, 'A', 'a,b'), (3, 'b', 'a,b');
+CREATE VIEW held AS SELECT id FROM ci WHERE k COLLATE BINARY = ANY(string_to_array(setting, ','));";
+    let mut connection = open(pg, &Pg2SqliteOptions::default(), None);
+    let admitted: Vec<i32> =
+        held::table.select(held::id).order(held::id).load(&mut connection).expect("read the view");
+    assert_eq!(
+        admitted,
+        vec![1, 3],
+        "the byte comparison admits 'a' and 'b' and leaves the 'A' row out"
     );
 }
 

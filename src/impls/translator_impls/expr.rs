@@ -1483,6 +1483,14 @@ enum Derivation {
 /// condition, and taking a nested explicit collation as the answer would read
 /// the wrong child. `lower(k COLLATE BINARY)` still compares bytes, since
 /// that child answers a byte comparison whatever `k` is declared.
+///
+/// That leaves one deliberate limit. PostgreSQL lets an explicit collation on
+/// one child outrank a collated sibling, as in `coalesce(k COLLATE "C", n)`
+/// over a collated `n`, where the comparison is a byte one. Telling that
+/// child apart from a `CASE` condition needs a list of which children carry
+/// each expression's result, and reading the wrong one there answers a
+/// membership test wrongly rather than refusing it, so the strictest child
+/// decides and the shape is refused.
 fn derived_collation(
     expr: &Expr,
     schema: &ParserDB,
