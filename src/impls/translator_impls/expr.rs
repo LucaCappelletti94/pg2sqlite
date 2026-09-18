@@ -1472,6 +1472,18 @@ fn written_collation(expr: &Expr) -> Option<ComparisonCollation> {
     found
 }
 
+/// The collation written on the operand itself, through parentheses.
+///
+/// An explicit collation decides the comparison in both engines, a byte one
+/// included, so `k COLLATE BINARY` compares bytes however `k` is declared.
+fn explicit_collation(expr: &Expr) -> Option<ComparisonCollation> {
+    match expr {
+        Expr::Nested(inner) => explicit_collation(inner),
+        Expr::Collate { collation, .. } => Some(classify_collation(collation)),
+        _ => None,
+    }
+}
+
 /// The collation a comparison against `expr` runs under, written on it or
 /// declared on a column it reads.
 ///
@@ -1492,6 +1504,9 @@ fn comparison_collation(
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<ComparisonCollation, crate::errors::Error> {
+    if let Some(explicit) = explicit_collation(expr) {
+        return Ok(explicit);
+    }
     if let Some(written) = written_collation(expr) {
         return Ok(written);
     }

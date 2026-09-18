@@ -512,13 +512,26 @@ fn an_explicitly_collated_left_side_is_refused() {
 }
 
 /// A byte collation is what the search already measures, so naming one
-/// changes nothing.
+/// changes nothing, and an explicit one decides the comparison in both
+/// engines even over a column declared otherwise.
 #[test]
 fn a_binary_collation_still_translates() {
     assert_eq!(
         admitted("k COLLATE BINARY = ANY(string_to_array('a,b', ','))"),
         vec![1, 2],
         "BINARY is the collation instr() compares under"
+    );
+    let overridden = Pg2Sqlite::default()
+        .sql(&format!(
+            "{CASE_INSENSITIVE_KEYS}SELECT id FROM ci \
+             WHERE k COLLATE BINARY = ANY(string_to_array('a,b', ','));"
+        ))
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("an explicit byte collation overrides the column's own");
+    assert!(
+        overridden.last().is_some_and(|statement| statement.contains("instr(")),
+        "the search stands: {overridden:?}"
     );
 }
 
