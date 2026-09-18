@@ -304,7 +304,7 @@ pub(crate) fn extract_columns_from_function(function: &Function) -> ColumnRefere
     })
 }
 
-/// The declared type of the column `expr` names, read through the relations in
+/// What the column `expr` names is declared as, read through the relations in
 /// scope.
 ///
 /// Three answers, and the difference between the last two is what keeps a guess
@@ -312,20 +312,21 @@ pub(crate) fn extract_columns_from_function(function: &Function) -> ColumnRefere
 ///
 /// - `Ok(None)` when `expr` is not a column reference, so there is nothing to
 ///   resolve and nothing to refuse,
-/// - `Ok(Some(_))` when the scope resolves the reference and `read` accepts the
-///   declared type, or `Ok(None)` when `read` declines it,
+/// - `Ok(Some(_))` when the scope resolves the reference and `read_column`
+///   accepts the declaration, or `Ok(None)` when it declines it,
 /// - an error when `expr` is a reference the relations in scope cannot answer.
 ///   That case used to be answered by scanning every table in the schema for a
 ///   column of the same name, which reads another table's type when the names
 ///   collide.
 ///
-/// `read` needs the structured type, so the parsed DDL is read directly rather
-/// than through `ColumnLike::data_type`, which answers a normalised token.
+/// `read_column` sees the parsed declaration rather than `ColumnLike`'s
+/// normalised token, so it can read the structured type and the column's
+/// options, a collation among them.
 pub(crate) fn declared_in_scope<T: PartialEq>(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
-    read_type: impl Fn(&DataType) -> Option<T>,
+    read_column: impl Fn(&sqlparser::ast::ColumnDef) -> Option<T>,
     read_expression: impl Fn(
         &Expr,
         &ParserDB,
@@ -371,7 +372,7 @@ pub(crate) fn declared_in_scope<T: PartialEq>(
             &definition,
             schema,
             options,
-            &read_type,
+            &read_column,
             &read_expression,
         )? {
             DefinitionValue::Known(value) => Ok(value),
@@ -403,7 +404,7 @@ fn evaluate_definition<T: PartialEq>(
     definition: &ColumnDefinition<'_, '_, '_, ParserDB>,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
-    read_type: &impl Fn(&DataType) -> Option<T>,
+    read_column: &impl Fn(&sqlparser::ast::ColumnDef) -> Option<T>,
     read_expression: &impl Fn(
         &Expr,
         &ParserDB,
@@ -412,7 +413,7 @@ fn evaluate_definition<T: PartialEq>(
 ) -> Result<DefinitionValue<T>, crate::errors::Error> {
     match definition {
         ColumnDefinition::Base { column, .. } => {
-            Ok(DefinitionValue::Known(read_type(&column.attribute().data_type)))
+            Ok(DefinitionValue::Known(read_column(column.attribute())))
         }
         ColumnDefinition::Expression { expression, scope } => {
             let scoped = options.with_definition_scope(*scope);
@@ -423,14 +424,14 @@ fn evaluate_definition<T: PartialEq>(
                 &left.definition(),
                 schema,
                 options,
-                read_type,
+                read_column,
                 read_expression,
             )?;
             let right = evaluate_definition(
                 &right.definition(),
                 schema,
                 options,
-                read_type,
+                read_column,
                 read_expression,
             )?;
             Ok(match (left, right) {
@@ -444,7 +445,7 @@ fn evaluate_definition<T: PartialEq>(
             })
         }
         ColumnDefinition::RecursiveUnion { anchor, .. } => {
-            evaluate_definition(&anchor.definition(), schema, options, read_type, read_expression)
+            evaluate_definition(&anchor.definition(), schema, options, read_column, read_expression)
         }
         ColumnDefinition::Opaque => Ok(DefinitionValue::Opaque),
     }
@@ -604,7 +605,7 @@ pub(crate) fn declared_type_matches(
         expr,
         schema,
         options,
-        |data_type| predicate(&data_type.to_string()).then_some(()),
+        |column| predicate(&column.data_type.to_string()).then_some(()),
         |expression, schema, options| {
             Ok(declared_type_matches(expression, schema, options, predicate)?.then_some(()))
         },
@@ -783,7 +784,15 @@ fn numeric_precision_and_scale_of(
             };
             Ok(numeric_precision_and_scale_of(inner, schema, options).ok().flatten())
         }
-        _ => declared_in_scope(expr, schema, options, read, numeric_precision_and_scale_of),
+        _ => {
+            declared_in_scope(
+                expr,
+                schema,
+                options,
+                |column| read(&column.data_type),
+                numeric_precision_and_scale_of,
+            )
+        }
     }
 }
 

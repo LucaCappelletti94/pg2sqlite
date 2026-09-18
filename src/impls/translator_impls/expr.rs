@@ -32,7 +32,10 @@ use crate::{
         datetime_helpers::{
             DatePartKey, build_date_part_expr, datetime_field_key, normalize_timestamptz_offset,
         },
-        expr_helpers::{case_when, concat, not_predicate, null_safe_eq, null_safe_neq, rebuild},
+        expr_helpers::{
+            case_when, concat, for_each_child_expr, not_predicate, null_safe_eq, null_safe_neq,
+            rebuild,
+        },
         function_helpers::{
             integer_literal, integer_literal_value, number_literal, simple_function_expr,
             single_quoted_literal, string_literal,
@@ -1433,6 +1436,72 @@ fn membership_delimiter(delimiter: &Expr) -> Result<&str, crate::errors::Error> 
     })
 }
 
+/// The SQLite collation `collation` maps onto, when that collation is not a
+/// byte comparison.
+///
+/// A name with no SQLite counterpart answers `None`, which leaves it to the
+/// refusal [`sqlite_collation`] raises when the operand translates.
+fn non_byte_collation_name(collation: &ObjectName) -> Option<String> {
+    let mapped = sqlite_collation(collation).ok()?;
+    let name = mapped
+        .0
+        .last()
+        .and_then(ObjectNamePart::as_ident)
+        .map(|ident| ident.value.to_ascii_uppercase())?;
+    (name != "BINARY").then_some(name)
+}
+
+/// The first non-byte collation written anywhere inside `expr`.
+fn written_non_byte_collation(expr: &Expr) -> Option<String> {
+    if let Expr::Collate { collation, .. } = expr
+        && let Some(name) = non_byte_collation_name(collation)
+    {
+        return Some(name);
+    }
+    let mut found = None;
+    for_each_child_expr(expr, &mut |child| {
+        if found.is_none() {
+            found = written_non_byte_collation(child);
+        }
+    });
+    found
+}
+
+/// The non-byte collation a comparison against `expr` runs under, written on
+/// the expression or declared on the column it names.
+///
+/// `instr()` compares bytes whatever collation its operands carry, measured
+/// on SQLite 3.51: `'a' COLLATE NOCASE = 'A'` answers 1 where
+/// `instr(',a,', ',A,')` answers 0, and a column declared `COLLATE NOCASE`
+/// compares the same way. So an equality that is not a byte comparison has no
+/// `instr()` form, and the membership rewrite has to refuse rather than
+/// answer it bytewise.
+fn non_byte_collation(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<String>, crate::errors::Error> {
+    if let Some(name) = written_non_byte_collation(expr) {
+        return Ok(Some(name));
+    }
+    declared_in_scope(
+        expr,
+        schema,
+        options,
+        |column| {
+            column.options.iter().find_map(|option| {
+                match &option.option {
+                    sqlparser::ast::ColumnOption::Collation(collation) => {
+                        non_byte_collation_name(collation)
+                    }
+                    _ => None,
+                }
+            })
+        },
+        non_byte_collation,
+    )
+}
+
 /// `x = ANY(string_to_array(a, d))`, and its `<> ALL` negation, as
 /// `CASE WHEN a IS NOT NULL THEN a <> '' AND instr(x, d) = 0
 /// AND instr(d || a || d, d || x || d) > 0 END`.
@@ -1475,6 +1544,16 @@ fn translate_delimited_membership(
         return Ok(None);
     };
     let delimiter = membership_delimiter(delimiter)?;
+    if let Some(collation) =
+        non_byte_collation(left, schema, options)?.or(non_byte_collation(text, schema, options)?)
+    {
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "A membership test over string_to_array() becomes an instr() search, and SQLite's \
+             instr() compares bytes whatever collation its operands carry, so an equality under \
+             COLLATE {collation} would answer differently from the search. Compare a \
+             BINARY-collated value, or fold the operands before the comparison."
+        )));
+    }
     if !is_replayable(left, options) {
         return Err(reject_duplicated_operand("= ANY(string_to_array(...))", left));
     }
@@ -1941,10 +2020,15 @@ fn convert_beside_column_expr(
     // Resolve the column's declared PostgreSQL type from scope, then delegate.
     // Errors mean the reference cannot be resolved (no refusal: not our
     // position).
-    let data_type =
-        declared_in_scope(column_expr, schema, options, |dt| Some(dt.clone()), |_, _, _| Ok(None))
-            .ok()
-            .flatten();
+    let data_type = declared_in_scope(
+        column_expr,
+        schema,
+        options,
+        |column| Some(column.data_type.clone()),
+        |_, _, _| Ok(None),
+    )
+    .ok()
+    .flatten();
     match data_type {
         Some(dt) => convert_value_for_column_type(&dt, value, options),
         None => Ok(value),
@@ -2361,7 +2445,8 @@ fn translate_binary_op(
                     e,
                     schema,
                     options,
-                    |dt| {
+                    |column| {
+                        let dt = &column.data_type;
                         if is_vector_data_type(dt)
                             || matches!(dt, DataType::Array(_))
                             || (crate::impls::shared_helpers::literal_checks_apply(dt)

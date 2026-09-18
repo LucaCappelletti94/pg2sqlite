@@ -1345,7 +1345,7 @@ pub(crate) fn carries_json(
         expr,
         schema,
         options,
-        |data_type| is_json_document_type(data_type, options).then_some(()),
+        |column| is_json_document_type(&column.data_type, options).then_some(()),
         |expression, schema, options| Ok(carries_json(expression, schema, options)?.then_some(())),
     )?
     .is_some())
@@ -2347,7 +2347,7 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                         argument,
                         schema,
                         options,
-                        |data_type| Some(is_json_document_type(data_type, options)),
+                        |column| Some(is_json_document_type(&column.data_type, options)),
                         |expression, schema, options| {
                             Ok(Some(carries_json(expression, schema, options)?))
                         },

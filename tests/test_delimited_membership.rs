@@ -350,6 +350,40 @@ fn an_empty_delimiter_is_refused() {
     assert!(message.contains("literal"), "names what the delimiter must be: {message}");
 }
 
+/// SQLite's `instr()` compares bytes whatever collation its operands carry.
+/// Measured on the bundled build, `'a' COLLATE NOCASE = 'A'` answers 1 while
+/// `instr(',a,', ',A,')` answers 0, and a column declared `COLLATE NOCASE`
+/// compares the same way, so a case-insensitive membership test has no
+/// `instr()` form and is refused rather than answered bytewise.
+#[test]
+fn a_case_insensitive_column_is_refused() {
+    let message = refusal(
+        "CREATE TABLE ci (s TEXT COLLATE NOCASE);\n\
+         SELECT s FROM ci WHERE s = ANY(string_to_array('a,b', ','));",
+    );
+    assert!(message.contains("NOCASE"), "names the collation: {message}");
+}
+
+#[test]
+fn an_explicitly_collated_left_side_is_refused() {
+    let message = refusal(
+        "CREATE TABLE ci (s TEXT);\n\
+         SELECT s FROM ci WHERE s COLLATE RTRIM <> ALL(string_to_array('a,b', ','));",
+    );
+    assert!(message.contains("RTRIM"), "names the collation: {message}");
+}
+
+/// A byte collation is what the search already measures, so naming one
+/// changes nothing.
+#[test]
+fn a_binary_collation_still_translates() {
+    assert_eq!(
+        admitted("k COLLATE BINARY = ANY(string_to_array('a,b', ','))"),
+        vec![1, 2],
+        "BINARY is the collation instr() compares under"
+    );
+}
+
 /// Measured on PostgreSQL 17.11: `string_to_array('~', '~~')` answers the one
 /// element `~`, so `'' = ANY(...)` over it is false, where a search through
 /// `~~~~~` for `~~~~` answers true. A longer delimiter is refused rather than
