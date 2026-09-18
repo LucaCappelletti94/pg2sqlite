@@ -406,6 +406,27 @@ fn an_unsettled_view_collation_is_refused() {
     assert!(message.contains("more than one collation"), "names what is unsettled: {message}");
 }
 
+/// A schema built elsewhere is never revisited by the translation, so a
+/// column declared with a collation SQLite has no counterpart for reaches the
+/// rewrite with that collation intact. PostgreSQL applies the locale where
+/// the search compares bytes, so the rewrite is refused rather than assuming
+/// bytes for a name it could not map.
+#[test]
+fn an_unmappable_declared_collation_is_refused() {
+    let schema = Pg2Sqlite::default()
+        .sql(r#"CREATE TABLE ci (id INT PRIMARY KEY, k TEXT COLLATE "en_US");"#)
+        .expect("parse the schema")
+        .build_schema()
+        .expect("build the schema");
+    let error = Pg2Sqlite::default()
+        .sql("SELECT k FROM ci WHERE k = ANY(string_to_array('a,b', ','));")
+        .expect("parse the query")
+        .translate_with_report_and_schema(&schema, &Pg2SqliteOptions::default())
+        .expect_err("a locale collation has no byte search")
+        .to_string();
+    assert!(error.contains("en_US"), "names the collation: {error}");
+}
+
 /// A caller may register a function of their own named `current_setting`,
 /// which passes through as the user-defined function it is. Nothing says such
 /// a function answers the same value on every call, and the setting is read

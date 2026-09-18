@@ -42,7 +42,9 @@ use crate::{
         },
         idioms::wrap_with_lower,
         interval::{interval_date_modifiers, interval_date_modifiers_scaled},
-        object_name::{fts_table_name, postgres_catalog_function_name},
+        object_name::{
+            fts_table_name, last_ident_value_or_display, postgres_catalog_function_name,
+        },
         query_builder::{
             from_relation, plain_table_factor, single_expr_query, table_function_factor,
         },
@@ -1436,13 +1438,16 @@ fn membership_delimiter(delimiter: &Expr) -> Result<&str, crate::errors::Error> 
     })
 }
 
-/// The SQLite collation `collation` maps onto, when that collation is not a
-/// byte comparison.
+/// The collation `collation` names, when it is not SQLite's byte comparison.
 ///
-/// A name with no SQLite counterpart answers `None`, which leaves it to the
-/// refusal [`sqlite_collation`] raises when the operand translates.
+/// A name with no SQLite counterpart counts as non-byte rather than as
+/// bytes. `sqlite_collation` refuses such a name when the declaration itself
+/// is translated, but a query translated against a schema built elsewhere
+/// never revisits that DDL, so PostgreSQL's locale comparison would reach a
+/// byte search unchallenged.
 fn non_byte_collation_name(collation: &ObjectName) -> Option<String> {
-    let mapped = sqlite_collation(collation).ok()?;
+    let written = last_ident_value_or_display(collation);
+    let Ok(mapped) = sqlite_collation(collation) else { return Some(written) };
     let name = mapped
         .0
         .last()
