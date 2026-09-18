@@ -1526,19 +1526,35 @@ fn comparison_collation(
     let operand = collation_bearing_operand(expr);
     match declared_collation(operand, schema, options)? {
         Some(settled) => Ok(settled),
-        None if referenced_column_name(operand)
-            .is_some_and(|name| !scope_declines_column(name, options)) =>
-        {
+        None if !collation_declined_by_rule(operand, options) => {
             Err(crate::errors::Error::forward_refusal(format!(
                 "A membership test over string_to_array() becomes an instr() search, which \
-                 compares bytes, and the relations in scope answer more than one collation for \
-                 {operand}, so whether the equality it replaces is a byte comparison is not \
-                 settled. A compound select takes its leftmost branch's collation, so read the \
-                 column through a single branch, or compare a value whose collation is declared."
+                 compares bytes, and the relations in scope do not settle the collation of \
+                 {operand}, so whether the equality it replaces compares bytes is unknown. A \
+                 compound select takes the collation of its leftmost branch, and a name a \
+                 PL/pgSQL variable also carries is not read as a column, so name the column \
+                 through a single branch, or rename the variable."
             )))
         }
         None => Ok(ComparisonCollation::Byte),
     }
+}
+
+/// True when the scope answers nothing for `operand` by rule, leaving no
+/// declaration to dispute.
+///
+/// `rowid` and the variable-value column are synthetic and carry no declared
+/// collation. A variable shadows the name only where it is written bare, so
+/// a qualified reference names a column of that relation, and the scope
+/// declines it by the bare name alone, which is why that one stays unsettled
+/// rather than reading as bytes.
+fn collation_declined_by_rule(
+    operand: &Expr,
+    options: &crate::options::TranslationContext<'_>,
+) -> bool {
+    let Some(name) = referenced_column_name(operand) else { return true };
+    scope_declines_column(name, options)
+        && (matches!(operand, Expr::Identifier(_)) || !options.is_variable(name))
 }
 
 /// The collation the relations in scope declare for `operand`, or `None` when

@@ -403,7 +403,7 @@ fn an_unsettled_view_collation_is_refused() {
          CREATE VIEW v AS SELECT k FROM ci UNION ALL SELECT 'zz';\n\
          SELECT k FROM v WHERE k <> ALL(string_to_array('a', ','));",
     );
-    assert!(message.contains("more than one collation"), "names what is unsettled: {message}");
+    assert!(message.contains("do not settle the collation"), "names what is unsettled: {message}");
 }
 
 /// A schema built elsewhere is never revisited by the translation, so a
@@ -440,6 +440,33 @@ fn a_scope_declined_name_still_translates() {
         admitted("CAST(rowid AS TEXT) = ANY(string_to_array('1,2', ','))"),
         vec![1, 2],
         "the first two rows carry rowid 1 and 2"
+    );
+}
+
+/// A PL/pgSQL body may declare a variable whose name a column also carries,
+/// and the scope declines such a name whether it is written bare or
+/// qualified. A qualified reference is the column, so reading it as bytes
+/// emitted a search over a `NOCASE` column, and it is left unsettled
+/// instead.
+#[test]
+fn a_variable_name_does_not_hide_a_qualified_column_collation() {
+    let message = refusal(
+        "CREATE TABLE ci (id INT PRIMARY KEY, k TEXT COLLATE NOCASE);\n\
+         CREATE TABLE log (id INT PRIMARY KEY, hit BOOLEAN);\n\
+         CREATE FUNCTION mark() RETURNS TRIGGER LANGUAGE plpgsql AS $$\n\
+         DECLARE k TEXT := 'a';\n\
+         BEGIN\n\
+           IF EXISTS (SELECT 1 FROM ci WHERE ci.k = ANY(string_to_array(k, ','))) THEN\n\
+             RAISE EXCEPTION 'held';\n\
+           END IF;\n\
+           RETURN NEW;\n\
+         END;\n\
+         $$;\n\
+         CREATE TRIGGER mark_log BEFORE INSERT ON log FOR EACH ROW EXECUTE FUNCTION mark();",
+    );
+    assert!(
+        message.contains("do not settle the collation") && message.contains("ci.k"),
+        "the column is not read as bytes: {message}"
     );
 }
 
