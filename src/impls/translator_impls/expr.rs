@@ -1603,17 +1603,15 @@ fn reference_collation(
 /// declaration to dispute.
 ///
 /// `rowid` and the variable-value column are synthetic and carry no declared
-/// collation. A variable shadows the name only where it is written bare, so
-/// a qualified reference names a column of that relation, and the scope
-/// declines it by the bare name alone, which is why that one stays unsettled
-/// rather than reading as bytes.
+/// collation, and a bare name a PL/pgSQL variable holds is the variable
+/// rather than a column. Anything else the scope declines to answer stays
+/// unsettled instead of reading as bytes.
 fn collation_declined_by_rule(
     operand: &Expr,
     options: &crate::options::TranslationContext<'_>,
 ) -> bool {
     let Some(name) = referenced_column_name(operand) else { return true };
-    scope_declines_column(name, options)
-        && (matches!(operand, Expr::Identifier(_)) || !options.is_variable(name))
+    scope_declines_column(operand, name, options)
 }
 
 /// The collation the relations in scope declare for `operand`, or `None` when

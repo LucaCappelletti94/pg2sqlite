@@ -235,3 +235,46 @@ fn a_scaled_column_compared_against_an_integer_column() {
         "both rows differ"
     );
 }
+
+/// A qualified reference keeps its column's scale even where a PL/pgSQL
+/// variable carries the same name.
+///
+/// The scope declines a bare name a variable holds, since a variable is
+/// neither resolved nor refused, and it used to decline a qualified one by
+/// that same bare name. `t.amount` is the column, so the comparison literal
+/// still scales into minor units, and emitting `1.50` against a column
+/// holding `150` matches nothing.
+#[test]
+fn a_qualified_reference_scales_under_a_variable_of_the_same_name() {
+    let body = |variable: &str| {
+        format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, amount NUMERIC(10,2));\n\
+             CREATE TABLE log (id INT PRIMARY KEY);\n\
+             CREATE FUNCTION mark() RETURNS TRIGGER LANGUAGE plpgsql AS $$\n\
+             DECLARE {variable} NUMERIC(10,2) := 1.50;\n\
+             BEGIN\n\
+               IF EXISTS (SELECT 1 FROM t WHERE t.amount = 1.50) THEN\n\
+                 RAISE EXCEPTION 'hit';\n\
+               END IF;\n\
+               RETURN NEW;\n\
+             END;\n\
+             $$;\n\
+             CREATE TRIGGER mark_log BEFORE INSERT ON log FOR EACH ROW EXECUTE FUNCTION mark();"
+        )
+    };
+    for variable in ["amount", "threshold"] {
+        let statements = Pg2Sqlite::default()
+            .sql(&body(variable))
+            .expect("parse")
+            .translate_to_sql(&Pg2SqliteOptions::default())
+            .expect("translate");
+        let trigger = statements
+            .iter()
+            .find(|statement| statement.contains("t.amount ="))
+            .expect("the trigger carries the comparison");
+        assert!(
+            trigger.contains("t.amount = 150"),
+            "a variable named {variable} must not hide the column's scale: {trigger}"
+        );
+    }
+}
