@@ -48,7 +48,7 @@ use crate::{
         },
     },
     prelude::Pg2SqliteOptions,
-    traits::{SessionVariablePattern, translator::TranslatorWithContext},
+    traits::{SessionVariableMapping, SessionVariablePattern, translator::TranslatorWithContext},
 };
 
 /// Represents a function translation result.
@@ -159,6 +159,9 @@ enum FunctionTranslation {
     /// A session variable pattern no mapping pairs, which refuses in the
     /// mapping's own words rather than as an unknown function.
     UnpairedSessionVariable(SessionVariablePattern),
+    /// A session variable pattern a mapping pairs, read as one value, which
+    /// becomes the paired call.
+    PairedSessionVariable(SessionVariableMapping),
     /// `array_agg`, which answers NULL over no rows where `json_group_array`
     /// answers `'[]'`. Wrapped in `NULLIF(json_group_array(...), '[]')`.
     /// The reverse translator restores `json_agg` from this shape since the
@@ -578,12 +581,7 @@ fn translate_catalog_function(
     // as it applies to a policy predicate.
     if let Some(pattern) = session_variable::pattern_of(original_name, args) {
         return match options.find_session_variable(&pattern) {
-            Some(mapping) => {
-                FunctionTranslation::WithArgs {
-                    name: mapping.sqlite_function.clone(),
-                    args: Vec::new(),
-                }
-            }
+            Some(mapping) => FunctionTranslation::PairedSessionVariable(mapping.clone()),
             // A declared name is evidence the destination registered this very
             // function, which is a different claim from a mapping and is left
             // to stand.
@@ -2718,6 +2716,10 @@ impl crate::traits::translator::TranslatorWithContext for Function {
             }
             FunctionTranslation::UnpairedSessionVariable(pattern) => {
                 Err(session_variable::unpaired(&pattern))
+            }
+            FunctionTranslation::PairedSessionVariable(mapping) => {
+                session_variable::scalar_reading(&mapping)?;
+                Ok(session_variable::paired_call(&mapping))
             }
             FunctionTranslation::PassThrough => {
                 let translated_args =

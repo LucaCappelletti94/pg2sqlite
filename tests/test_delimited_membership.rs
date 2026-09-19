@@ -12,7 +12,10 @@
 //! DSL cannot express.
 
 use diesel::{connection::SimpleConnection, prelude::*};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
+use pg2sqlite::{
+    errors::Error,
+    prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping},
+};
 
 diesel::define_sql_function! {
     /// Answers the delimited session setting the policy reads.
@@ -202,8 +205,132 @@ CREATE POLICY p ON t USING (owner = ANY(string_to_array(current_setting('app.sub
 
 fn share_key_options() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_rls_audit_table_name("rls_violations").with_session_variable(
-        SessionVariableMapping::current_setting("app.subjects", "current_app_subjects"),
+        SessionVariableMapping::current_setting("app.subjects", "current_app_subjects")
+            .holding_set(','),
     )
+}
+
+fn refusal_under(pg: &str, options: &Pg2SqliteOptions) -> Error {
+    Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(options)
+        .expect_err("translation should be refused")
+}
+
+/// The mapping states what the setting holds, and a reading that disagrees is
+/// refused rather than emitted, since one `owner` against the whole joined
+/// text admits a row the server never does.
+#[test]
+fn a_set_valued_setting_read_as_one_value_is_refused() {
+    for predicate in [
+        "owner = current_setting('app.subjects', true)",
+        "owner = current_setting('app.subjects', true)::text",
+    ] {
+        let error = refusal_under(
+            &format!("CREATE TABLE t (owner TEXT);\nSELECT owner FROM t WHERE {predicate};"),
+            &share_key_options(),
+        );
+        assert!(
+            matches!(&error, Error::SessionVariableReadAsScalar { pattern, delimiter: ',' }
+                if pattern == "current_setting('app.subjects')"),
+            "{predicate} reads the set as one value, got: {error}"
+        );
+    }
+}
+
+/// A policy reads the setting through the same translation as a query, so
+/// the guard it would emit is refused before it can admit the wrong rows.
+#[test]
+fn a_policy_reading_a_set_valued_setting_as_one_value_is_refused() {
+    let error = refusal_under(
+        "CREATE TABLE t (owner TEXT);\n\
+         ALTER TABLE t ENABLE ROW LEVEL SECURITY;\n\
+         CREATE POLICY p ON t USING (owner = current_setting('app.subjects', true));",
+        &share_key_options(),
+    );
+    assert!(
+        matches!(&error, Error::SessionVariableReadAsScalar { delimiter: ',', .. }),
+        "the policy reads the set as one value, got: {error}"
+    );
+}
+
+/// `current_setting` answers text, so parentheses or a cast to text inside
+/// the split change nothing and the membership reading still applies.
+#[test]
+fn parentheses_or_a_text_cast_inside_the_split_keep_the_membership_reading() {
+    for setting in [
+        "current_setting('app.subjects', true)::text",
+        "(current_setting('app.subjects', true))",
+        "(current_setting('app.subjects', true)::text)",
+    ] {
+        let mut connection = open(
+            &format!(
+                "CREATE TABLE t (owner TEXT);\n\
+                 ALTER TABLE t ENABLE ROW LEVEL SECURITY;\n\
+                 CREATE POLICY p ON t USING (owner = ANY(string_to_array({setting}, ',')));"
+            ),
+            &share_key_options(),
+            Some("k1,k2"),
+        );
+        seed(&mut connection, &[Some("k1"), Some("k9")]);
+        assert_eq!(visible(&mut connection), vec![Some("k1".to_string())], "{setting}");
+    }
+}
+
+/// A strict mapping raises on an unset setting in PostgreSQL, and the search
+/// over the replica reads the same function either way.
+#[test]
+fn a_strict_set_valued_setting_translates_the_same_search() {
+    let options = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting_strict("app.subjects", "current_app_subjects")
+            .holding_set(','),
+    );
+    let emitted = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (owner TEXT);\n\
+             SELECT owner FROM t WHERE owner = ANY(string_to_array(current_setting('app.subjects'), ','));",
+        )
+        .expect("parse")
+        .translate_to_sql(&options)
+        .expect("a strict set reads through the same search");
+    let query = emitted.last().expect("the query is emitted");
+    assert!(
+        query.contains("instr(',' || current_app_subjects() || ',', ',' || owner || ',') > 0"),
+        "got: {query}"
+    );
+}
+
+/// The share key predicate in a query, which needs no audit table.
+const SHARE_KEY_QUERY: &str = "CREATE TABLE t (owner TEXT);
+SELECT owner FROM t WHERE owner = ANY(string_to_array(current_setting('app.subjects', true), ','));
+";
+
+#[test]
+fn a_membership_test_over_a_scalar_setting_is_refused() {
+    let options = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting("app.subjects", "current_app_subjects"),
+    );
+    let error = refusal_under(SHARE_KEY_QUERY, &options);
+    assert!(
+        matches!(&error, Error::SessionVariableReadAsSet { pattern, written }
+            if pattern == "current_setting('app.subjects')" && *written == ','),
+        "a mapping that declares no set holds one value, got: {error}"
+    );
+}
+
+#[test]
+fn a_membership_test_on_another_delimiter_is_refused() {
+    let options = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting("app.subjects", "current_app_subjects")
+            .holding_set(';'),
+    );
+    let error = refusal_under(SHARE_KEY_QUERY, &options);
+    assert!(
+        matches!(&error, Error::SessionVariableDelimiterDisagrees { pattern, recorded: ';', written }
+            if pattern == "current_setting('app.subjects')" && *written == ','),
+        "the refusal names both delimiters, got: {error}"
+    );
 }
 
 /// Seeds the backing table the way an authoritative apply does, with the

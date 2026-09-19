@@ -22,8 +22,8 @@ pub mod prelude {
         pg2sqlite::Pg2Sqlite,
         traits::{
             ArrayRepresentation, ReverseTranslator, Schema, SessionVariableMapping,
-            SessionVariablePattern, Translator, TranslatorWithContext, UuidRepresentation,
-            UuidVersion,
+            SessionVariablePattern, SessionVariableValue, Translator, TranslatorWithContext,
+            UuidRepresentation, UuidVersion,
         },
         warnings::{TranslationReport, TranslationWarning, WarningSink},
     };

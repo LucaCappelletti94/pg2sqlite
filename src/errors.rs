@@ -199,6 +199,48 @@ pub enum Error {
         /// The type the statement casts to.
         written: String,
     },
+    /// Error when a statement reads a session variable that holds a set as one
+    /// value.
+    #[error(
+        "The session variable mapping for '{pattern}' declares a set joined by '{delimiter}', \
+         which is read through `x = ANY(string_to_array(current_setting(...), '{delimiter}'))`, \
+         and this statement reads it as one value. Compare against the set, or drop the \
+         `holding_set` declaration if the setting holds one value."
+    )]
+    SessionVariableReadAsScalar {
+        /// The PostgreSQL pattern the mapping matches.
+        pattern: String,
+        /// The delimiter the mapping records.
+        delimiter: char,
+    },
+    /// Error when a membership test reads a session variable that holds one
+    /// value as a set.
+    #[error(
+        "The session variable mapping for '{pattern}' declares one value, and this statement \
+         splits the setting on '{written}' and tests membership of the elements. Declare the set \
+         with `holding_set('{written}')`, or compare against the value."
+    )]
+    SessionVariableReadAsSet {
+        /// The PostgreSQL pattern the mapping matches.
+        pattern: String,
+        /// The delimiter the statement splits on.
+        written: char,
+    },
+    /// Error when a membership test splits a session variable on a delimiter
+    /// other than the one its mapping records.
+    #[error(
+        "The session variable mapping for '{pattern}' declares a set joined by '{recorded}', and \
+         this statement splits the setting on '{written}'. The two have to agree: correct \
+         whichever is stale."
+    )]
+    SessionVariableDelimiterDisagrees {
+        /// The PostgreSQL pattern the mapping matches.
+        pattern: String,
+        /// The delimiter the mapping records.
+        recorded: char,
+        /// The delimiter the statement splits on.
+        written: char,
+    },
     /// Error when attempting to access an RLS backing table directly.
     #[error(
         "Direct access to RLS backing table '{table_name}' is not allowed. \

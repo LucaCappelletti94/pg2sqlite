@@ -31,8 +31,13 @@ use crate::{
     errors::Error,
     impls::{
         function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
-        idioms::{ascii_code_point_argument, forward_lower_argument, is_uniform_random_float},
+        idioms::{
+            DelimitedMembership, ascii_code_point_argument, delimited_membership_operands,
+            forward_lower_argument, is_uniform_random_float,
+        },
+        replay::is_replayable,
         reverse_translator_impls::ident_quoting::is_postgres_pseudo_expression,
+        session_variable,
         shared_helpers::{
             declared_in_scope, declared_type_matches, is_scale_preserving_call, scale_of,
             translate_expr_recursive,
@@ -41,6 +46,7 @@ use crate::{
         translator_impls::expr::sqlite_json_path_to_pg_text_path,
     },
     prelude::ReverseTranslator,
+    traits::SessionVariableMapping,
 };
 
 /// Convert a SQLite GLOB pattern to a PostgreSQL LIKE pattern.
@@ -619,7 +625,75 @@ fn restore_lowered_idiom(
                 .map(|argument| simple_function_expr("ascii", vec![argument], None)),
         );
     }
+    if let Some(membership) = delimited_membership_operands(expr) {
+        return Some(reverse_delimited_membership(membership, schema, options));
+    }
     reverse_temporal_arithmetic(expr, schema, options)
+}
+
+/// Restores the
+/// [`delimited_membership`](crate::impls::idioms::delimited_membership)
+/// search to `x = ANY(string_to_array(a, d))`, or to `x <> ALL(...)` when
+/// negated.
+///
+/// The search reads its text three times and its left side twice where
+/// PostgreSQL reads each once, so a volatile operand is refused. A text that
+/// is a paired function has to be declared a set joined by `d`, and becomes
+/// the setting directly, since the ordinary function path refuses reading a
+/// set as one value.
+///
+/// The search compares bytes and the restored test compares under the
+/// column's collation, which agree because the forward direction emits the
+/// search only over a byte collation.
+fn reverse_delimited_membership(
+    membership: DelimitedMembership<'_>,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Expr, Error> {
+    let DelimitedMembership { left, text, delimiter, negated } = membership;
+    for operand in [left, text] {
+        if !is_replayable(operand, options) {
+            return Err(Error::reverse_refusal(format!(
+                "The membership search reads {operand} more than once, where the \
+                 = ANY(string_to_array(...)) it spells reads it once, and this operand may \
+                 answer a different value on each evaluation."
+            )));
+        }
+    }
+    let text = match paired_setting(text, options) {
+        Some(mapping) => {
+            session_variable::set_reading(mapping, delimiter)?;
+            session_variable::reverse_pattern(mapping)
+        }
+        None => text.reverse_translate(schema, options)?,
+    };
+    let split = simple_function_expr(
+        "string_to_array",
+        vec![text, string_literal(delimiter.encode_utf8(&mut [0; 4]))],
+        None,
+    );
+    let left = Box::new(left.reverse_translate(schema, options)?);
+    Ok(if negated {
+        Expr::AllOp { left, compare_op: BinaryOperator::NotEq, right: Box::new(split) }
+    } else {
+        Expr::AnyOp { left, compare_op: BinaryOperator::Eq, right: Box::new(split), is_some: false }
+    })
+}
+
+/// The mapping whose paired function `expr` calls with no arguments, under
+/// parentheses or a plain cast to `text`.
+fn paired_setting<'o>(
+    expr: &Expr,
+    options: &'o crate::options::TranslationContext<'_>,
+) -> Option<&'o SessionVariableMapping> {
+    let Expr::Function(function) = session_variable::setting_operand(expr) else { return None };
+    if !session_variable::call_has_no_arguments(&function.args) {
+        return None;
+    }
+    session_variable::mapping_for_function(
+        &session_variable::function_name_lower(&function.name),
+        options,
+    )
 }
 
 /// Brings the literal arms of a `CASE` back to the scale its other arms
