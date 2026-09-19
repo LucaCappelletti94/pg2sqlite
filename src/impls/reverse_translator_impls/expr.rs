@@ -680,13 +680,13 @@ fn reverse_delimited_membership(
     })
 }
 
-/// The mapping whose paired function `expr` calls with no arguments, under a
-/// plain cast to `text` or bare.
+/// The mapping whose paired function `expr` calls with no arguments, under
+/// parentheses or a plain cast to `text`.
 fn paired_setting<'o>(
     expr: &Expr,
     options: &'o crate::options::TranslationContext<'_>,
 ) -> Option<&'o SessionVariableMapping> {
-    let Expr::Function(function) = session_variable::text_cast_operand(expr) else { return None };
+    let Expr::Function(function) = session_variable::setting_operand(expr) else { return None };
     if !session_variable::call_has_no_arguments(&function.args) {
         return None;
     }

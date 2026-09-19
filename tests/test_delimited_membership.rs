@@ -255,20 +255,27 @@ fn a_policy_reading_a_set_valued_setting_as_one_value_is_refused() {
     );
 }
 
-/// `current_setting` answers text, so a cast to it inside the split changes
-/// nothing and the membership reading still applies.
+/// `current_setting` answers text, so parentheses or a cast to text inside
+/// the split change nothing and the membership reading still applies.
 #[test]
-fn a_text_cast_inside_the_split_keeps_the_membership_reading() {
-    let mut connection = open(
-        "CREATE TABLE t (owner TEXT);\n\
-         ALTER TABLE t ENABLE ROW LEVEL SECURITY;\n\
-         CREATE POLICY p ON t USING \
-         (owner = ANY(string_to_array(current_setting('app.subjects', true)::text, ',')));",
-        &share_key_options(),
-        Some("k1,k2"),
-    );
-    seed(&mut connection, &[Some("k1"), Some("k9")]);
-    assert_eq!(visible(&mut connection), vec![Some("k1".to_string())]);
+fn parentheses_or_a_text_cast_inside_the_split_keep_the_membership_reading() {
+    for setting in [
+        "current_setting('app.subjects', true)::text",
+        "(current_setting('app.subjects', true))",
+        "(current_setting('app.subjects', true)::text)",
+    ] {
+        let mut connection = open(
+            &format!(
+                "CREATE TABLE t (owner TEXT);\n\
+                 ALTER TABLE t ENABLE ROW LEVEL SECURITY;\n\
+                 CREATE POLICY p ON t USING (owner = ANY(string_to_array({setting}, ',')));"
+            ),
+            &share_key_options(),
+            Some("k1,k2"),
+        );
+        seed(&mut connection, &[Some("k1"), Some("k9")]);
+        assert_eq!(visible(&mut connection), vec![Some("k1".to_string())], "{setting}");
+    }
 }
 
 /// A strict mapping raises on an unset setting in PostgreSQL, and the search

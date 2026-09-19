@@ -217,15 +217,30 @@ fn a_strict_set_valued_setting_keeps_the_strict_spelling_inside_the_split() {
     );
 }
 
-/// A cast to text over the paired function changes nothing, since the
-/// setting answers text, so the shape still reads as the membership test.
+/// Parentheses or a cast to text over the paired function change nothing,
+/// since the setting answers text, so the shape still reads as the test.
 #[test]
-fn a_text_cast_over_the_paired_function_keeps_the_membership_reading() {
-    let membership =
-        MEMBERSHIP.replace("current_app_subjects()", "CAST(current_app_subjects() AS TEXT)");
-    let postgres =
-        reverse(&format!("SELECT * FROM project_members WHERE {membership}"), &set_paired())
-            .expect("the cast is a no-op over text");
+fn parentheses_or_a_text_cast_over_the_paired_function_keep_the_membership_reading() {
+    for spelling in ["CAST(current_app_subjects() AS TEXT)", "(current_app_subjects())"] {
+        let membership = MEMBERSHIP.replace("current_app_subjects()", spelling);
+        let postgres =
+            reverse(&format!("SELECT * FROM project_members WHERE {membership}"), &set_paired())
+                .expect("the wrapper is a no-op over text");
+
+        assert_eq!(postgres, format!("SELECT * FROM project_members WHERE {SET_MEMBERSHIP}"));
+    }
+}
+
+/// A pairing states what a name means here, ahead of the inventory that
+/// would otherwise read the name as volatile.
+#[test]
+fn a_pairing_outranks_the_volatile_name_inventory() {
+    let options = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting(SET_SETTING, "random").holding_set(','),
+    );
+    let membership = MEMBERSHIP.replace("current_app_subjects()", "random()");
+    let postgres = reverse(&format!("SELECT * FROM project_members WHERE {membership}"), &options)
+        .expect("the paired name answers the setting, whatever it is called");
 
     assert_eq!(postgres, format!("SELECT * FROM project_members WHERE {SET_MEMBERSHIP}"));
 }

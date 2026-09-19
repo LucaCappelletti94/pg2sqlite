@@ -311,17 +311,19 @@ pub(crate) fn same_postgres_type(left: &DataType, right: &DataType) -> bool {
     canonical(left) == canonical(right)
 }
 
-/// `expr` without a plain cast to `text` over it, which `current_setting`
-/// already answers, so the cast changes nothing a membership test reads.
+/// `expr` without the parentheses and plain casts to `text` over it, which
+/// change nothing a membership test reads, since `current_setting` already
+/// answers text.
 #[must_use]
-pub(crate) fn text_cast_operand(expr: &Expr) -> &Expr {
+pub(crate) fn setting_operand(expr: &Expr) -> &Expr {
     match expr {
-        Expr::Cast {
+        Expr::Nested(inner)
+        | Expr::Cast {
             expr: inner,
             data_type: DataType::Text,
             format: None,
             kind: CastKind::Cast | CastKind::DoubleColon,
-        } => inner,
+        } => setting_operand(inner),
         _ => expr,
     }
 }

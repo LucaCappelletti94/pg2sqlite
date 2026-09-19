@@ -1718,13 +1718,13 @@ fn translate_delimited_membership(
     Ok(Some(delimited_membership(translated_left, translated_text, delimiter, negated)))
 }
 
-/// The mapping of a session variable pattern `expr` names, under a plain cast
-/// to `text` or bare, when it names one a mapping pairs.
+/// The mapping of a session variable pattern `expr` names, under parentheses
+/// or a plain cast to `text`, when it names one a mapping pairs.
 fn mapped_setting<'o>(
     expr: &Expr,
     options: &'o crate::options::TranslationContext<'_>,
 ) -> Option<&'o SessionVariableMapping> {
-    let Expr::Function(function) = session_variable::text_cast_operand(expr) else { return None };
+    let Expr::Function(function) = session_variable::setting_operand(expr) else { return None };
     let pattern = session_variable::pattern_of_function(function)?;
     options.find_session_variable(&pattern)
 }
