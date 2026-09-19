@@ -59,7 +59,13 @@ pub(crate) fn temporal_kind(
             }
         }
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
-            declared_in_scope(expr, schema, options, kind_of_data_type, temporal_kind)?
+            declared_in_scope(
+                expr,
+                schema,
+                options,
+                |column| kind_of_data_type(&column.data_type),
+                temporal_kind,
+            )?
         }
         // A rewritten subexpression is an operand in its own right, so
         // `(d + 7) - d` resolves.

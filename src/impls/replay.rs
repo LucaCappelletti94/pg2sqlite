@@ -12,7 +12,11 @@ use core::ops::ControlFlow;
 
 use sqlparser::ast::{Expr, Function, Visit, Visitor};
 
-use crate::{errors::Error, impls::sqlite_functions::classify, options::TranslationContext};
+use crate::{
+    errors::Error,
+    impls::{session_variable, sqlite_functions::classify},
+    options::TranslationContext,
+};
 
 /// The calls that answer a different value each time they run.
 ///
@@ -78,6 +82,13 @@ struct ReplayCheck<'a, 'o> {
 impl ReplayCheck<'_, '_> {
     /// True when the call names a function this crate knows and knows to be
     /// deterministic.
+    ///
+    /// A session variable the options map counts. `current_setting` and
+    /// `current_user` are STABLE in PostgreSQL, and row level security
+    /// already reads the function the mapping names once per row, so a host
+    /// whose function answered differently per call would already have an
+    /// incoherent replica. A call of the same shape with no mapping is a
+    /// function the caller declared and nothing more, so it stays unknown.
     fn call_replays(&self, function: &Function) -> bool {
         let Some(name) = crate::impls::object_name::last_ident(&function.name) else {
             return false;
@@ -88,6 +99,11 @@ impl ReplayCheck<'_, '_> {
         }
         if self.uuid_names().iter().any(|uuid| uuid.eq_ignore_ascii_case(&name)) {
             return false;
+        }
+        if session_variable::pattern_of_function(function)
+            .is_some_and(|pattern| self.options.find_session_variable(&pattern).is_some())
+        {
+            return true;
         }
         classify(&name).is_known()
     }

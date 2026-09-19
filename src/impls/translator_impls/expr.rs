@@ -32,14 +32,19 @@ use crate::{
         datetime_helpers::{
             DatePartKey, build_date_part_expr, datetime_field_key, normalize_timestamptz_offset,
         },
-        expr_helpers::{case_when, not_predicate, null_safe_eq, null_safe_neq, rebuild},
+        expr_helpers::{
+            case_when, concat, for_each_child_expr, not_predicate, null_safe_eq, null_safe_neq,
+            rebuild,
+        },
         function_helpers::{
             integer_literal, integer_literal_value, number_literal, simple_function_expr,
             single_quoted_literal, string_literal,
         },
         idioms::wrap_with_lower,
         interval::{interval_date_modifiers, interval_date_modifiers_scaled},
-        object_name::{fts_table_name, postgres_catalog_function_name},
+        object_name::{
+            fts_table_name, last_ident_value_or_display, postgres_catalog_function_name,
+        },
         query_builder::{
             from_relation, plain_table_factor, single_expr_query, table_function_factor,
         },
@@ -49,7 +54,8 @@ use crate::{
             declared_in_scope, declared_numeric_precision, declared_type_matches,
             extract_column_references_from_function, function_argument_exprs, is_bound_parameter,
             is_integral_expression, numeric_scale, referenced_column_name, rescale_minor_units,
-            scale_decimal_literal, scale_of, scale_parameter, translate_expr_recursive,
+            scale_decimal_literal, scale_of, scale_parameter, scope_declines_column,
+            translate_expr_recursive,
         },
         temporal_arithmetic::{
             TemporalKind, epoch_of_temporal_difference, temporal_kind_of,
@@ -1378,6 +1384,383 @@ fn quantifier_elements(right: &Expr) -> Option<&[Expr]> {
     }
 }
 
+/// The argument list of a plain `string_to_array(...)` call.
+///
+/// A call carrying a window, a filter, a modifier or an argument clause is
+/// not what a membership test over a session setting spells, so it is left to
+/// the refusal the bare function answers.
+fn string_to_array_arguments(right: &Expr) -> Option<&[FunctionArg]> {
+    let Expr::Function(function) = right else { return None };
+    let names_the_split = postgres_catalog_function_name(&function.name)
+        .is_some_and(|name| name == "string_to_array");
+    if !names_the_split
+        || function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let FunctionArguments::List(arguments) = &function.args else { return None };
+    if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
+        return None;
+    }
+    Some(&arguments.args)
+}
+
+/// One positional argument written as a bare expression.
+fn unnamed_argument(argument: &FunctionArg) -> Option<&Expr> {
+    match argument {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Some(expr),
+        _ => None,
+    }
+}
+
+/// The single character the membership rewrite splits on.
+///
+/// A delimiter spanning several characters can be spelled partly by the text
+/// around it, and the search then finds a boundary the split never made, so
+/// `string_to_array('~', '~~')` would report an empty element. PostgreSQL
+/// also splits on a NULL delimiter one character at a time, and answers the
+/// whole text as a single element for an empty one, so only a written single
+/// character names the test the search measures.
+fn membership_delimiter(delimiter: &Expr) -> Result<&str, crate::errors::Error> {
+    single_quoted_literal(delimiter).filter(|text| text.chars().count() == 1).ok_or_else(|| {
+        crate::errors::Error::forward_refusal(
+            "A membership test over string_to_array() becomes an instr() search over the \
+             delimited text, so the delimiter has to be written as a single-character string \
+             literal. A longer delimiter can overlap the text around it, PostgreSQL splits on a \
+             NULL delimiter one character at a time, and an empty delimiter answers the whole \
+             text as a single element."
+                .to_string(),
+        )
+    })
+}
+
+/// How a comparison under `collation` compares.
+///
+/// A name with no SQLite counterpart is neither bytes nor a collation the
+/// search could honour. `sqlite_collation` refuses it when the declaration
+/// itself is translated, but a query translated against a schema built
+/// elsewhere never revisits that DDL, so PostgreSQL's locale comparison
+/// would otherwise reach a byte search unchallenged.
+fn classify_collation(collation: &ObjectName) -> ComparisonCollation {
+    let Ok(mapped) = sqlite_collation(collation) else {
+        return ComparisonCollation::Unmappable(collation.clone());
+    };
+    let name = last_ident_value_or_display(&mapped).to_ascii_uppercase();
+    if name == "BINARY" { ComparisonCollation::Byte } else { ComparisonCollation::Named(name) }
+}
+
+/// Where a collation came from, since an explicit one outranks an inherited
+/// one in both engines.
+enum Derivation {
+    /// Written on the expression, which decides the comparison.
+    Explicit(ComparisonCollation),
+    /// Carried up from a column the expression reads.
+    Inherited(ComparisonCollation),
+}
+
+/// The collation `expr` carries, derived the way PostgreSQL derives one.
+///
+/// `instr()` compares bytes whatever collation its operands carry. Measured
+/// on SQLite 3.51.1, `'a' COLLATE NOCASE = 'A'` answers 1 where
+/// `instr(',a,', ',A,')` answers 0, so an equality that is not a byte
+/// comparison has no `instr()` form.
+///
+/// The derivation runs bottom up, because PostgreSQL carries a collation
+/// through the expressions built over a column while SQLite keeps one only
+/// through parentheses and a `CAST`. Measured on PostgreSQL 17 over a column
+/// with a nondeterministic ICU collation holding `'A'`, `k = 'a'`,
+/// `lower(k) = 'A'`, `trim(k) = 'a'` and `k || '' = 'a'` all answer true,
+/// where the same expressions answer 0 in SQLite.
+///
+/// Only a collation written on the operand itself decides the comparison.
+/// Inside a compound expression the strictest child decides instead, because
+/// PostgreSQL derives a `CASE` from its result arms rather than from its
+/// condition, and taking a nested explicit collation as the answer would read
+/// the wrong child. `lower(k COLLATE BINARY)` still compares bytes, since
+/// that child answers a byte comparison whatever `k` is declared.
+///
+/// That leaves one deliberate limit. PostgreSQL lets an explicit collation on
+/// one child outrank a collated sibling, as in `coalesce(k COLLATE "C", n)`
+/// over a collated `n`, where the comparison is a byte one. Telling that
+/// child apart from a `CASE` condition needs a list of which children carry
+/// each expression's result, and reading the wrong one there answers a
+/// membership test wrongly rather than refusing it, so the strictest child
+/// decides and the shape is refused.
+fn derived_collation(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Derivation, crate::errors::Error> {
+    match expr {
+        Expr::Nested(inner) => derived_collation(inner, schema, options),
+        Expr::Collate { collation, .. } => Ok(Derivation::Explicit(classify_collation(collation))),
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
+            Ok(Derivation::Inherited(reference_collation(expr, schema, options)?))
+        }
+        _ => {
+            let mut inherited = ComparisonCollation::Byte;
+            let mut refusal = None;
+            for_each_child_expr(expr, &mut |child| {
+                match derived_collation(child, schema, options) {
+                    Ok(Derivation::Explicit(collation) | Derivation::Inherited(collation)) => {
+                        if inherited == ComparisonCollation::Byte {
+                            inherited = collation;
+                        }
+                    }
+                    Err(error) => refusal = refusal.take().or(Some(error)),
+                }
+            });
+            match refusal {
+                Some(error) if inherited == ComparisonCollation::Byte => Err(error),
+                _ => Ok(Derivation::Inherited(inherited)),
+            }
+        }
+    }
+}
+
+/// The collation the whole comparison runs under.
+///
+/// An explicit collation on either side decides it in PostgreSQL, whatever
+/// the other side inherits, so `k COLLATE "C" = ANY(string_to_array(setting,
+/// ','))` compares bytes however `setting` is declared.
+fn effective_collation(
+    left: &Expr,
+    text: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<ComparisonCollation, crate::errors::Error> {
+    let mut inherited = ComparisonCollation::Byte;
+    let mut refusal = None;
+    for operand in [left, text] {
+        match derived_collation(operand, schema, options) {
+            Ok(Derivation::Explicit(collation)) => return Ok(collation),
+            Ok(Derivation::Inherited(collation)) => {
+                if inherited == ComparisonCollation::Byte {
+                    inherited = collation;
+                }
+            }
+            Err(error) => refusal = refusal.or(Some(error)),
+        }
+    }
+    if inherited != ComparisonCollation::Byte {
+        return Ok(inherited);
+    }
+    match refusal {
+        Some(error) => Err(error),
+        None => Ok(ComparisonCollation::Byte),
+    }
+}
+
+/// The collation a comparison runs under, as far as the scope settles it.
+#[derive(PartialEq, Eq)]
+enum ComparisonCollation {
+    /// A byte comparison, which the search measures exactly.
+    Byte,
+    /// A collation the search cannot honour, named for the refusal.
+    Named(String),
+    /// A collation SQLite has no counterpart for, kept whole so the refusal
+    /// that owns that message can raise it.
+    Unmappable(ObjectName),
+}
+
+/// The collation the relations in scope declare for the column `reference`
+/// names.
+///
+/// A reference the scope answers with two disagreeing collations is refused
+/// rather than read as a byte comparison. SQLite gives a compound select the
+/// leftmost branch's collation, measured on 3.51.1 over a view whose left
+/// branch is a `NOCASE` column, where the view's own equality is
+/// case-insensitive and the search is not. A name the scope declines by rule
+/// carries no declaration to dispute, so `rowid` and a bare PL/pgSQL
+/// variable keep comparing bytes.
+fn reference_collation(
+    reference: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<ComparisonCollation, crate::errors::Error> {
+    match declared_collation(reference, schema, options)? {
+        Some(settled) => Ok(settled),
+        None if !collation_declined_by_rule(reference, options) => {
+            Err(crate::errors::Error::forward_refusal(format!(
+                "A membership test over string_to_array() becomes an instr() search, which \
+                 compares bytes, and the relations in scope do not settle the collation of \
+                 {reference}, so whether the equality it replaces compares bytes is unknown. A \
+                 compound select takes the collation of its leftmost branch, and a name a \
+                 PL/pgSQL variable also carries is not read as a column, so name the column \
+                 through a single branch, or rename the variable."
+            )))
+        }
+        None => Ok(ComparisonCollation::Byte),
+    }
+}
+
+/// True when the scope answers nothing for `operand` by rule, leaving no
+/// declaration to dispute.
+///
+/// `rowid` and the variable-value column are synthetic and carry no declared
+/// collation. A variable shadows the name only where it is written bare, so
+/// a qualified reference names a column of that relation, and the scope
+/// declines it by the bare name alone, which is why that one stays unsettled
+/// rather than reading as bytes.
+fn collation_declined_by_rule(
+    operand: &Expr,
+    options: &crate::options::TranslationContext<'_>,
+) -> bool {
+    let Some(name) = referenced_column_name(operand) else { return true };
+    scope_declines_column(name, options)
+        && (matches!(operand, Expr::Identifier(_)) || !options.is_variable(name))
+}
+
+/// The collation the relations in scope declare for `operand`, or `None` when
+/// it names no column or the scope answers two collations for it.
+fn declared_collation(
+    operand: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<ComparisonCollation>, crate::errors::Error> {
+    declared_in_scope(
+        operand,
+        schema,
+        options,
+        |column| {
+            Some(
+                column
+                    .options
+                    .iter()
+                    .find_map(|option| {
+                        match &option.option {
+                            sqlparser::ast::ColumnOption::Collation(collation) => {
+                                Some(classify_collation(collation))
+                            }
+                            _ => None,
+                        }
+                    })
+                    .unwrap_or(ComparisonCollation::Byte),
+            )
+        },
+        |expression, schema, options| {
+            // A view column's own expression carries the collation it reads,
+            // and an explicit one there decides just the same.
+            Ok(Some(match derived_collation(expression, schema, options)? {
+                Derivation::Explicit(collation) | Derivation::Inherited(collation) => collation,
+            }))
+        },
+    )
+}
+
+/// `x = ANY(string_to_array(a, d))`, and its `<> ALL` negation, as
+/// `CASE WHEN a IS NOT NULL THEN a <> '' AND instr(x, d) = 0
+/// AND instr(d || a || d, d || x || d) > 0 END`.
+///
+/// Surrounding both the text and the left side with the delimiter is what
+/// makes the search find a whole element rather than a substring of one.
+/// The rest is PostgreSQL's answer for the degenerate operands, measured at
+/// PostgreSQL 17 over every combination of an empty, NULL and
+/// delimiter-carrying text and left side. An empty text splits into no
+/// elements, where surrounding it with delimiters alone would read as one
+/// empty element. The split never produces an element carrying the
+/// delimiter, so a left side that carries one is no element even when the
+/// delimited text holds it verbatim. A NULL text answers NULL for every left
+/// side, which the delimiter test alone would turn into false, so the whole
+/// predicate hangs off `a IS NOT NULL`. A NULL left side answers NULL
+/// through `instr()`, which is how an unset session setting denies a row.
+///
+/// `Ok(None)` when the operand is not a `string_to_array` call, which leaves
+/// the call refused everywhere no membership test consumes it: the array
+/// itself has no SQLite value to answer with.
+fn translate_delimited_membership(
+    left: &Expr,
+    right: &Expr,
+    negated: bool,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Option<Expr>, crate::errors::Error> {
+    let Some(arguments) = string_to_array_arguments(right) else { return Ok(None) };
+    let [text, delimiter] = arguments else {
+        return Err(crate::errors::Error::forward_refusal(
+            "Only the two-argument string_to_array(text, delimiter) has a membership test in \
+             SQLite. The third argument turns every element equal to it into NULL, which \
+             changes what the test answers."
+                .to_string(),
+        ));
+    };
+    let (Some(text), Some(delimiter)) = (unnamed_argument(text), unnamed_argument(delimiter))
+    else {
+        return Ok(None);
+    };
+    let delimiter = membership_delimiter(delimiter)?;
+    match effective_collation(left, text, schema, options)? {
+        ComparisonCollation::Byte => {}
+        // The message about a name SQLite has no counterpart for belongs to
+        // the mapping, which refuses it.
+        ComparisonCollation::Unmappable(collation) => {
+            sqlite_collation(&collation)?;
+        }
+        ComparisonCollation::Named(collation) => {
+            return Err(crate::errors::Error::forward_refusal(format!(
+                "A membership test over string_to_array() becomes an instr() search, and \
+                 SQLite's instr() compares bytes whatever collation its operands carry, so an \
+                 equality under COLLATE {collation} would answer differently from the search. \
+                 PostgreSQL carries that collation through the expressions built over the \
+                 column, so folding the operand does not drop it either. Compare a column \
+                 declared without a collation, or name a byte collation on the comparison."
+            )));
+        }
+    }
+    if !is_replayable(left, options) {
+        return Err(reject_duplicated_operand("= ANY(string_to_array(...))", left));
+    }
+    if !is_replayable(text, options) {
+        return Err(reject_duplicated_operand("= ANY(string_to_array(...))", text));
+    }
+
+    let translated_left = left.translate_with_warnings(schema, options, emit)?;
+    let translated_text = text.translate_with_warnings(schema, options, emit)?;
+    let surrounded =
+        |inner: Expr| concat(concat(string_literal(delimiter), inner), string_literal(delimiter));
+    let whole_element = Expr::BinaryOp {
+        left: Box::new(simple_function_expr(
+            "instr",
+            vec![translated_left.clone(), string_literal(delimiter)],
+            None,
+        )),
+        op: BinaryOperator::Eq,
+        right: Box::new(integer_literal(0)),
+    };
+    let text_is_present = Expr::IsNotNull(Box::new(translated_text.clone()));
+    let text_is_split = Expr::BinaryOp {
+        left: Box::new(translated_text.clone()),
+        op: BinaryOperator::NotEq,
+        right: Box::new(string_literal("")),
+    };
+    let found = Expr::BinaryOp {
+        left: Box::new(simple_function_expr(
+            "instr",
+            vec![surrounded(translated_text), surrounded(translated_left)],
+            None,
+        )),
+        op: BinaryOperator::Gt,
+        right: Box::new(integer_literal(0)),
+    };
+    let membership = Expr::BinaryOp {
+        left: Box::new(Expr::BinaryOp {
+            left: Box::new(text_is_split),
+            op: BinaryOperator::And,
+            right: Box::new(whole_element),
+        }),
+        op: BinaryOperator::And,
+        right: Box::new(found),
+    };
+    let guarded = case_when(text_is_present, membership, None);
+    Ok(Some(if negated { not_predicate(guarded) } else { guarded }))
+}
+
 /// Translate the equality forms `x = ANY(...)` and `x <> ALL(...)` into
 /// `IN` / `NOT IN`.
 ///
@@ -1385,6 +1768,7 @@ fn quantifier_elements(right: &Expr) -> Option<&[Expr]> {
 /// - subquery: `x = ANY(SELECT ...)` -> `x IN (SELECT ...)`
 /// - array literal: `x = ANY(ARRAY[...])` -> `x IN (...)`
 /// - tuple: `x = ANY((...))` -> `x IN (...)`
+/// - delimited text: `x = ANY(string_to_array(a, ','))` -> `instr(...)`
 /// - array value: `x = ANY(tags)` -> `EXISTS (SELECT 1 FROM json_each(tags)
 ///   ...)`
 fn translate_any_all_to_in(
@@ -1395,6 +1779,11 @@ fn translate_any_all_to_in(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
+    if let Some(membership) =
+        translate_delimited_membership(left, right, negated, schema, options, emit)?
+    {
+        return Ok(membership);
+    }
     if let Expr::Subquery(q) = right {
         let translated_left = left.translate_with_warnings(schema, options, emit)?;
         return Ok(Expr::InSubquery {
@@ -1790,10 +2179,15 @@ fn convert_beside_column_expr(
     // Resolve the column's declared PostgreSQL type from scope, then delegate.
     // Errors mean the reference cannot be resolved (no refusal: not our
     // position).
-    let data_type =
-        declared_in_scope(column_expr, schema, options, |dt| Some(dt.clone()), |_, _, _| Ok(None))
-            .ok()
-            .flatten();
+    let data_type = declared_in_scope(
+        column_expr,
+        schema,
+        options,
+        |column| Some(column.data_type.clone()),
+        |_, _, _| Ok(None),
+    )
+    .ok()
+    .flatten();
     match data_type {
         Some(dt) => convert_value_for_column_type(&dt, value, options),
         None => Ok(value),
@@ -2210,7 +2604,8 @@ fn translate_binary_op(
                     e,
                     schema,
                     options,
-                    |dt| {
+                    |column| {
+                        let dt = &column.data_type;
                         if is_vector_data_type(dt)
                             || matches!(dt, DataType::Array(_))
                             || (crate::impls::shared_helpers::literal_checks_apply(dt)

@@ -462,6 +462,10 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
                 "SELECT * FROM t WHERE n > ANY (SELECT id FROM u);",
                 "SELECT * FROM t WHERE n > ALL (SELECT id FROM u);",
                 "SELECT * FROM t WHERE n > ANY (SELECT id FROM u UNION SELECT t_id FROM u);",
+                // Membership over a delimited setting, which lowers onto an
+                // instr() search rather than an array.
+                "SELECT * FROM t WHERE s = ANY(string_to_array('a,b', ','));",
+                "SELECT * FROM t WHERE s <> ALL(string_to_array('a,b', ','));",
                     ],
     ),
     (
