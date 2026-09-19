@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# A superseding push cancels the run it replaced. main keeps every verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
