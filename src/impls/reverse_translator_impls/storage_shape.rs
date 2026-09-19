@@ -27,20 +27,47 @@ use sqlparser::ast::{CastKind, DataType, Expr, FunctionArguments, ObjectNamePart
 use crate::{errors::Error, impls::shared_helpers::declared_in_scope};
 
 /// The PostgreSQL type `expr` is declared with, when the schema names one.
+///
+/// `None` where `expr` names no column, since a literal or a computed value
+/// has no declaration to undo a storage wrapper by.
+///
+/// # Errors
+///
+/// Propagates the unresolved reference the scope answers for a column no
+/// relation in it declares. That case used to read as no declaration, which
+/// reversed `unhex` by its storage type and emitted `decode(..., 'hex')`
+/// against a column the server may hold as a uuid, where it answers
+/// `operator does not exist: uuid = bytea`.
 pub(crate) fn declared_data_type(
     expr: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
-) -> Option<DataType> {
+) -> Result<Option<DataType>, Error> {
     declared_in_scope(
         expr,
         schema,
         options,
         |column| Some(column.data_type.clone()),
-        |expression, schema, options| Ok(declared_data_type(expression, schema, options)),
+        declared_data_type,
     )
-    .ok()
-    .flatten()
+}
+
+/// True when undoing `value` needs the column's declared type, so reading it
+/// wrongly changes what the statement means.
+///
+/// A hex decode is a `bytea`, a `uuid` held as a blob, or neither, and a JSON
+/// array is an array column or a document. Everything else reverses the same
+/// whatever the column is declared as, so it never asks.
+pub(crate) fn needs_declared_type(value: &Expr) -> bool {
+    hex_decoded_argument(value).is_some() || is_json_array_construction(value)
+}
+
+/// True when `value` is the JSON array construction an array column's value
+/// reverses from.
+fn is_json_array_construction(value: &Expr) -> bool {
+    let Expr::Function(function) = value else { return false };
+    function_is_named(function, "json_build_array")
+        || function_is_named(function, "jsonb_build_array")
 }
 
 /// Rewrites an already-reversed value for the column it lands in.
@@ -70,16 +97,25 @@ pub(crate) fn retype_for_declared(
 
 /// Reads the declared type of `peer` and retypes `value` for it.
 ///
+/// The type is read only for a value whose meaning depends on it, so a
+/// reference the scope cannot answer costs nothing where the answer would
+/// have changed nothing.
+///
 /// # Errors
 ///
-/// Propagates the refusal [`retype_for_declared`] makes.
+/// Propagates the refusal [`retype_for_declared`] makes, and the unresolved
+/// reference [`declared_data_type`] answers for a value that does depend on
+/// the declaration.
 pub(crate) fn retype_against_peer(
     value: Expr,
     peer: &Expr,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
-    match declared_data_type(peer, schema, options) {
+    if !needs_declared_type(&value) {
+        return Ok(value);
+    }
+    match declared_data_type(peer, schema, options)? {
         Some(declared) => retype_for_declared(value, &declared, options),
         None => Ok(value),
     }

@@ -1426,9 +1426,13 @@ pub fn reverse_translate_function(
             // `array_length(xs, 1)`, which answers NULL for an empty array
             // where SQLite answers 0, so the zero is restored: measured, the
             // replica answers 2 and 0 over `{1,2}` and `{}`.
+            let declared = match arg {
+                Some(argument) => declared_data_type(argument, schema, options)?,
+                None => None,
+            };
             if let Some(argument) = arg
-                && let Some(declared) = declared_data_type(argument, schema, options)
-                && is_array_type(&declared)
+                && let Some(declared) = declared.as_ref()
+                && is_array_type(declared)
             {
                 let inner = crate::prelude::ReverseTranslator::reverse_translate(
                     argument, schema, options,
@@ -1490,7 +1494,7 @@ pub fn reverse_translate_function(
             // and PostgreSQL's encode answers lowercase, both measured, so the
             // bare call would quietly change the case of every digit.
             let exprs = extract_exactly(&func.args, 1, "hex")?;
-            let declared = declared_data_type(exprs[0], schema, options);
+            let declared = declared_data_type(exprs[0], schema, options)?;
             let inner =
                 crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
             // A uuid the replica holds as a blob is the 16 raw bytes, so its

@@ -181,3 +181,19 @@ fn the_length_of_a_json_column_still_reverses_to_the_json_overload() {
     let postgres = reversed("SELECT json_array_length(doc) FROM stored");
     assert!(postgres.contains("jsonb_array_length(doc)"), "{postgres}");
 }
+
+/// A reference the schema cannot resolve leaves the wrapper undecided, so the
+/// statement is refused rather than reversed by the storage type.
+///
+/// `unhex` over a column held as a blob is a uuid, a bytea or neither, and the
+/// three reverse differently. Reading it as bytea because the relation is
+/// absent emitted `decode(..., 'hex')` against what the server may hold as a
+/// uuid, where it answers `operator does not exist: uuid = bytea`.
+#[test]
+fn an_unresolvable_reference_refuses_rather_than_guessing_the_storage_type() {
+    let message = reverse_refusal(
+        "SELECT id FROM absent WHERE u = unhex('550e8400e29b41d4a716446655440000')",
+        &options(),
+    );
+    assert!(message.contains('u'), "the refusal names the reference: {message}");
+}
