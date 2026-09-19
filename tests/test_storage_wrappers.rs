@@ -181,3 +181,37 @@ fn the_length_of_a_json_column_still_reverses_to_the_json_overload() {
     let postgres = reversed("SELECT json_array_length(doc) FROM stored");
     assert!(postgres.contains("jsonb_array_length(doc)"), "{postgres}");
 }
+
+/// A reference the schema cannot resolve leaves the wrapper undecided, so the
+/// statement is refused rather than reversed by the storage type.
+///
+/// `unhex` over a column held as a blob is a uuid, a bytea or neither, and the
+/// three reverse differently. Reading it as bytea because the relation is
+/// absent emitted `decode(..., 'hex')` against what the server may hold as a
+/// uuid, where it answers `operator does not exist: uuid = bytea`.
+#[test]
+fn an_unresolvable_reference_refuses_rather_than_guessing_the_storage_type() {
+    let message = reverse_refusal(
+        "SELECT id FROM absent WHERE u = unhex('550e8400e29b41d4a716446655440000')",
+        &options(),
+    );
+    assert!(message.contains('u'), "the refusal names the reference: {message}");
+}
+
+/// `hex` over a reference the schema cannot answer keeps the `bytea` cast the
+/// arm documents as its fallback, since that cast is a no-op for a `bytea`
+/// column and a view's reverse translation is not worth giving up over a type
+/// nobody could read.
+#[test]
+fn hex_over_an_unresolvable_reference_keeps_its_documented_fallback() {
+    let schema =
+        Pg2Sqlite::default().sql(DDL).expect("the schema parses").build_schema().expect("builds");
+    let reversed = Pg2Sqlite::default()
+        .reverse_sql("SELECT hex(u) FROM absent", &schema, &options())
+        .expect("an unresolvable reference still reverses")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(reversed.contains("encode(u::BYTEA, 'hex')"), "{reversed}");
+}

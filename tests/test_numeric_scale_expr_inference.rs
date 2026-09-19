@@ -6,6 +6,7 @@
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
 
+use diesel::{connection::SimpleConnection, prelude::*};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use run_translated_helper::run_translated_with;
 
@@ -234,4 +235,100 @@ fn a_scaled_column_compared_against_an_integer_column() {
         vec![Some("2".to_string())],
         "both rows differ"
     );
+}
+
+diesel::table! {
+    /// The table whose insert fires the guarded trigger.
+    log (id) {
+        /// Primary key.
+        id -> Integer,
+    }
+}
+
+/// A trigger function body that raises when its condition holds, with
+/// `variable` declared inside it and `seeded` stored in the compared column.
+fn guarded_log(variable: &str, condition: &str, seeded: &str) -> String {
+    format!(
+        "CREATE TABLE t (id INT PRIMARY KEY, amount NUMERIC(10,2));
+CREATE TABLE log (id INT PRIMARY KEY);
+INSERT INTO t VALUES (1, {seeded});
+CREATE FUNCTION mark() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE {variable} NUMERIC(10,2) := 1.50;
+BEGIN
+  IF {condition} THEN
+    RAISE EXCEPTION 'hit';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER mark_log BEFORE INSERT ON log FOR EACH ROW EXECUTE FUNCTION mark();"
+    )
+}
+
+/// Applies what `pg` translates to, writes a `log` row, and answers the error
+/// the trigger raised, or `None` when it let the write through.
+fn insert_into_log(pg: &str) -> Option<String> {
+    let script = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate")
+        .iter()
+        .map(|statement| format!("{statement};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut connection = SqliteConnection::establish(":memory:").expect("connect");
+    connection
+        .batch_execute("PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON;")
+        .expect("set the replica pragmas");
+    connection.batch_execute(&script).expect("apply the translated script");
+    diesel::insert_into(log::table)
+        .values(log::id.eq(1))
+        .execute(&mut connection)
+        .err()
+        .map(|error| error.to_string())
+}
+
+/// A qualified reference keeps its column's scale even where a PL/pgSQL
+/// variable carries the same name.
+///
+/// The scope declines a bare name a variable holds, since a variable is
+/// neither resolved nor refused, and it used to decline a qualified one by
+/// that same bare name. `t.amount` is the column, which holds minor units, so
+/// the compared literal has to scale or the condition matches nothing.
+#[test]
+fn a_qualified_reference_scales_under_a_variable_of_the_same_name() {
+    for variable in ["amount", "threshold"] {
+        let raised = insert_into_log(&guarded_log(
+            variable,
+            "EXISTS (SELECT 1 FROM t WHERE t.amount = 1.50)",
+            "1.50",
+        ))
+        .unwrap_or_else(|| {
+            panic!("the row holds 1.50, so the trigger must raise with a variable {variable}")
+        });
+        assert!(raised.contains("hit"), "unexpected error with a variable {variable}: {raised}");
+        assert!(
+            insert_into_log(&guarded_log(
+                variable,
+                "EXISTS (SELECT 1 FROM t WHERE t.amount = 1.50)",
+                "2.00",
+            ))
+            .is_none(),
+            "the row holds 2.00, so the condition must not hold with a variable {variable}"
+        );
+    }
+}
+
+/// A bare reference to a declared variable is the variable, so a column of
+/// the same name does not lend it a scale.
+///
+/// The variable holds 1.50 and the column holds minor units, so scaling this
+/// comparison would test the substituted 1.50 against 150 and the trigger
+/// would let the write through.
+#[test]
+fn a_bare_variable_is_not_scaled_by_a_column_with_the_same_name() {
+    let raised = insert_into_log(&guarded_log("amount", "amount = 1.50", "1.50"))
+        .expect("the variable equals its own value, so the trigger must raise");
+    assert!(raised.contains("hit"), "unexpected error: {raised}");
 }

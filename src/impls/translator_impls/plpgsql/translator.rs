@@ -1696,14 +1696,6 @@ impl VariableScope {
 ///
 /// A single-segment compound identifier is what `(v_n)` parses to in some
 /// positions, and it names the same variable as the bare form.
-fn bare_identifier_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Identifier(ident) => Some(ident.value.as_str()),
-        Expr::CompoundIdentifier(idents) if idents.len() == 1 => Some(idents[0].value.as_str()),
-        _ => None,
-    }
-}
-
 struct VariableSubstituter<'a>(&'a VariableScope);
 
 impl VisitorMut for VariableSubstituter<'_> {
@@ -1713,7 +1705,8 @@ impl VisitorMut for VariableSubstituter<'_> {
     /// own `val` column would otherwise be a candidate for a variable of that
     /// name.
     fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
-        let replacement = bare_identifier_name(expr).and_then(|name| self.0.replacement(name));
+        let replacement = crate::impls::shared_helpers::bare_identifier_name(expr)
+            .and_then(|name| self.0.replacement(name));
         if let Some(replacement) = replacement.cloned() {
             *expr = replacement;
         }

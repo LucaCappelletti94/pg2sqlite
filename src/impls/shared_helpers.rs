@@ -304,19 +304,39 @@ pub(crate) fn extract_columns_from_function(function: &Function) -> ColumnRefere
     })
 }
 
-/// True when the scope answers nothing for `column_name` by rule rather than
-/// by failing to find it.
+/// The name a reference carries when it names nothing but itself.
 ///
-/// `rowid` is SQLite's own, a PL/pgSQL variable is neither resolved nor
-/// refused by contract, and the variable-value column is the shape that
-/// carries one, so none of the three has a declaration to read.
+/// A bare name arrives as an `Identifier` and, in some positions, as a
+/// one-part `CompoundIdentifier`, and the PL/pgSQL substituter replaces a
+/// variable in both shapes, so whatever decides that a reference is bare has
+/// to read both the same way.
+pub(crate) fn bare_identifier_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.as_str()),
+        Expr::CompoundIdentifier(parts) if parts.len() == 1 => Some(parts[0].value.as_str()),
+        _ => None,
+    }
+}
+
+/// True when the scope answers nothing for `reference` by rule rather than by
+/// failing to find it.
+///
+/// `rowid` is SQLite's own and the variable-value column is the shape a
+/// PL/pgSQL variable is carried in, so neither has a declaration to read
+/// however it is written. A variable itself is neither resolved nor refused
+/// by contract, but it shadows only the bare name, so a qualified reference
+/// is the relation's column and is read as one. Declining `t.amount` because
+/// a variable named `amount` is in scope skipped the column's own numeric
+/// scale, which emits a comparison against major units where the column
+/// holds minor ones.
 pub(crate) fn scope_declines_column(
+    reference: &Expr,
     column_name: &str,
     options: &crate::options::TranslationContext<'_>,
 ) -> bool {
     column_name.eq_ignore_ascii_case("rowid")
         || column_name == crate::impls::translator_impls::plpgsql::VARIABLE_VALUE_COLUMN
-        || options.is_variable(column_name)
+        || (bare_identifier_name(reference).is_some() && options.is_variable(column_name))
 }
 
 /// What the column `expr` names is declared as, read through the relations in
@@ -364,7 +384,7 @@ pub(crate) fn declared_in_scope<T: PartialEq>(
     else {
         return Ok(None);
     };
-    if scope_declines_column(column_name, options) {
+    if scope_declines_column(reference, column_name, options) {
         return Ok(None);
     }
 

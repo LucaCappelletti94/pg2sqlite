@@ -444,10 +444,8 @@ fn a_scope_declined_name_still_translates() {
 }
 
 /// A PL/pgSQL body may declare a variable whose name a column also carries,
-/// and the scope declines such a name whether it is written bare or
-/// qualified. A qualified reference is the column, so reading it as bytes
-/// emitted a search over a `NOCASE` column, and it is left unsettled
-/// instead.
+/// and a qualified reference is still the column, so its declared collation
+/// decides. Reading it as bytes emitted a search over a `NOCASE` column.
 #[test]
 fn a_variable_name_does_not_hide_a_qualified_column_collation() {
     let message = refusal(
@@ -464,10 +462,7 @@ fn a_variable_name_does_not_hide_a_qualified_column_collation() {
          $$;\n\
          CREATE TRIGGER mark_log BEFORE INSERT ON log FOR EACH ROW EXECUTE FUNCTION mark();",
     );
-    assert!(
-        message.contains("do not settle the collation") && message.contains("ci.k"),
-        "the column is not read as bytes: {message}"
-    );
+    assert!(message.contains("NOCASE"), "the column's own collation decides: {message}");
 }
 
 /// A caller may register a function of their own named `current_setting`,

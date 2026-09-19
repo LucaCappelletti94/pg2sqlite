@@ -15,8 +15,8 @@ use alloc::{
 use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
-        BinaryOperator, CaseWhen, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-        Ident, ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan,
+        BinaryOperator, CaseWhen, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+        ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan,
         helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
@@ -25,7 +25,7 @@ use sqlparser::{
 use super::{
     function::reverse_translate_function,
     helpers::{Reverse, unscale_integer_literal},
-    storage_shape::{declared_data_type, retype_against_peer, retype_for_declared},
+    storage_shape::retype_against_peer,
 };
 use crate::{
     errors::Error,
@@ -323,18 +323,6 @@ fn retype_binary_operands(
     })
 }
 
-/// Retypes `value` when the position's column type is known.
-fn retype_for_column(
-    value: Expr,
-    declared: Option<&DataType>,
-    options: &crate::options::TranslationContext<'_>,
-) -> Result<Expr, Error> {
-    match declared {
-        Some(declared) => retype_for_declared(value, declared, options),
-        None => Ok(value),
-    }
-}
-
 /// Reverses an `IN` list, bringing each item onto the operand's column both in
 /// scale and in shape.
 fn reverse_in_list(
@@ -345,14 +333,13 @@ fn reverse_in_list(
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
-    let declared = declared_data_type(operand, schema, options);
     Ok(Expr::InList {
         expr: Box::new(operand.reverse_translate(schema, options)?),
         list: list
             .iter()
             .map(|item| {
                 let reversed = reverse_unscale_or_translate(item, scale, schema, options)?;
-                retype_for_column(reversed, declared.as_ref(), options)
+                retype_against_peer(reversed, operand, schema, options)
             })
             .collect::<Result<Vec<_>, _>>()?,
         negated,
@@ -370,10 +357,9 @@ fn reverse_between(
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
-    let declared = declared_data_type(operand, schema, options);
     let bound = |bound: &Expr| {
         let reversed = reverse_unscale_or_translate(bound, scale, schema, options)?;
-        retype_for_column(reversed, declared.as_ref(), options)
+        retype_against_peer(reversed, operand, schema, options)
     };
     Ok(Expr::Between {
         expr: Box::new(operand.reverse_translate(schema, options)?),
