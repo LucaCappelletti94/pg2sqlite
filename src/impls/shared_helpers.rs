@@ -304,6 +304,20 @@ pub(crate) fn extract_columns_from_function(function: &Function) -> ColumnRefere
     })
 }
 
+/// The name a reference carries when it names nothing but itself.
+///
+/// A bare name arrives as an `Identifier` and, in some positions, as a
+/// one-part `CompoundIdentifier`, and the PL/pgSQL substituter replaces a
+/// variable in both shapes, so whatever decides that a reference is bare has
+/// to read both the same way.
+pub(crate) fn bare_identifier_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.as_str()),
+        Expr::CompoundIdentifier(parts) if parts.len() == 1 => Some(parts[0].value.as_str()),
+        _ => None,
+    }
+}
+
 /// True when the scope answers nothing for `reference` by rule rather than by
 /// failing to find it.
 ///
@@ -322,7 +336,7 @@ pub(crate) fn scope_declines_column(
 ) -> bool {
     column_name.eq_ignore_ascii_case("rowid")
         || column_name == crate::impls::translator_impls::plpgsql::VARIABLE_VALUE_COLUMN
-        || (matches!(reference, Expr::Identifier(_)) && options.is_variable(column_name))
+        || (bare_identifier_name(reference).is_some() && options.is_variable(column_name))
 }
 
 /// What the column `expr` names is declared as, read through the relations in

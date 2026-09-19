@@ -278,3 +278,39 @@ fn a_qualified_reference_scales_under_a_variable_of_the_same_name() {
         );
     }
 }
+
+/// A bare reference to a declared variable is the variable, so a column of
+/// the same name does not lend it a scale.
+///
+/// The variable holds `1.50` and the column holds minor units, so scaling the
+/// comparison literal here would compare the substituted `1.50` against
+/// `150`.
+#[test]
+fn a_bare_variable_is_not_scaled_by_a_column_of_the_same_name() {
+    let statements = Pg2Sqlite::default()
+        .sql(
+            "CREATE TABLE t (id INT PRIMARY KEY, amount NUMERIC(10,2));\n\
+             CREATE TABLE log (id INT PRIMARY KEY);\n\
+             CREATE FUNCTION mark() RETURNS TRIGGER LANGUAGE plpgsql AS $$\n\
+             DECLARE amount NUMERIC(10,2) := 1.50;\n\
+             BEGIN\n\
+               IF amount = 1.50 THEN\n\
+                 RAISE EXCEPTION 'hit';\n\
+               END IF;\n\
+               RETURN NEW;\n\
+             END;\n\
+             $$;\n\
+             CREATE TRIGGER mark_log BEFORE INSERT ON log FOR EACH ROW EXECUTE FUNCTION mark();",
+        )
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .expect("translate");
+    let trigger = statements
+        .iter()
+        .find(|statement| statement.contains("RAISE(ABORT, 'hit')"))
+        .expect("the trigger carries the condition");
+    assert!(
+        trigger.contains("(SELECT 1.50) = 1.50"),
+        "the variable keeps its own value on both sides: {trigger}"
+    );
+}
