@@ -1494,7 +1494,11 @@ pub fn reverse_translate_function(
             // and PostgreSQL's encode answers lowercase, both measured, so the
             // bare call would quietly change the case of every digit.
             let exprs = extract_exactly(&func.args, 1, "hex")?;
-            let declared = declared_data_type(exprs[0], schema, options)?;
+            // A reference the scope cannot answer keeps that fallback rather
+            // than refusing, since the cast is a no-op for a bytea column and
+            // the reverse direction does not give up a view's translation
+            // over a type it could not read.
+            let declared = declared_data_type(exprs[0], schema, options).unwrap_or_default();
             let inner =
                 crate::prelude::ReverseTranslator::reverse_translate(exprs[0], schema, options)?;
             // A uuid the replica holds as a blob is the 16 raw bytes, so its

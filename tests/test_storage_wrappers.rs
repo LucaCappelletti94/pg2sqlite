@@ -197,3 +197,21 @@ fn an_unresolvable_reference_refuses_rather_than_guessing_the_storage_type() {
     );
     assert!(message.contains('u'), "the refusal names the reference: {message}");
 }
+
+/// `hex` over a reference the schema cannot answer keeps the `bytea` cast the
+/// arm documents as its fallback, since that cast is a no-op for a `bytea`
+/// column and a view's reverse translation is not worth giving up over a type
+/// nobody could read.
+#[test]
+fn hex_over_an_unresolvable_reference_keeps_its_documented_fallback() {
+    let schema =
+        Pg2Sqlite::default().sql(DDL).expect("the schema parses").build_schema().expect("builds");
+    let reversed = Pg2Sqlite::default()
+        .reverse_sql("SELECT hex(u) FROM absent", &schema, &options())
+        .expect("an unresolvable reference still reverses")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(reversed.contains("encode(u::BYTEA, 'hex')"), "{reversed}");
+}
