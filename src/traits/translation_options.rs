@@ -77,6 +77,25 @@ impl core::fmt::Display for SessionVariablePattern {
     }
 }
 
+/// What a session setting holds, which every reading in both directions has
+/// to agree with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum SessionVariableValue {
+    /// One value, cast to `pg_type` on the way back when one is recorded.
+    Scalar {
+        /// The PostgreSQL type the setting holds, spelled as PostgreSQL spells
+        /// it, when the caller recorded one.
+        pg_type: Option<String>,
+    },
+    /// Text values joined by `delimiter`, read only through
+    /// `x = ANY(string_to_array(current_setting(...), delimiter))`.
+    DelimitedSet {
+        /// The single character the setting is split on.
+        delimiter: char,
+    },
+}
+
 /// A mapping from a PostgreSQL session variable pattern to a SQLite function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -85,14 +104,8 @@ pub struct SessionVariableMapping {
     pub pg_pattern: SessionVariablePattern,
     /// The SQLite function name to use as replacement.
     pub sqlite_function: String,
-    /// The PostgreSQL type the setting holds, when the caller recorded one.
-    ///
-    /// PostgreSQL's `current_setting` answers text, so a predicate comparing it
-    /// against a `uuid` or an `integer` column casts it, and the cast is lost
-    /// going to SQLite because the replica's function answers the value
-    /// directly. Recording the type here lets the cast be written again on
-    /// the way back.
-    pub pg_type: Option<String>,
+    /// What the setting holds.
+    pub value: SessionVariableValue,
     /// Whether this mapping represents the tolerant `current_setting(name,
     /// true)` form rather than the strict one-argument
     /// `current_setting(name)` form.
@@ -112,7 +125,7 @@ impl SessionVariableMapping {
         Self {
             pg_pattern,
             sqlite_function: sqlite_function.into(),
-            pg_type: None,
+            value: SessionVariableValue::Scalar { pg_type: None },
             missing_ok: true,
         }
     }
@@ -146,7 +159,7 @@ impl SessionVariableMapping {
     }
 
     /// Records the PostgreSQL type the setting holds, spelled as PostgreSQL
-    /// spells it.
+    /// spells it, replacing a declared set.
     ///
     /// # Example
     /// ```
@@ -154,11 +167,33 @@ impl SessionVariableMapping {
     ///
     /// let mapping =
     ///     SessionVariableMapping::current_setting("app.user_id", "app_user_id").with_pg_type("uuid");
-    /// assert_eq!(mapping.pg_type.as_deref(), Some("uuid"));
+    /// assert_eq!(mapping.value, SessionVariableValue::Scalar { pg_type: Some("uuid".into()) });
     /// ```
     #[must_use]
     pub fn with_pg_type(mut self, pg_type: impl Into<String>) -> Self {
-        self.pg_type = Some(pg_type.into());
+        self.value = SessionVariableValue::Scalar { pg_type: Some(pg_type.into()) };
+        self
+    }
+
+    /// Declares that the setting holds text values joined by `delimiter`,
+    /// which is read only through a membership test.
+    ///
+    /// The last declaration wins, so this replaces a recorded type, and a
+    /// later [`with_pg_type`] replaces the set.
+    ///
+    /// [`with_pg_type`]: SessionVariableMapping::with_pg_type
+    ///
+    /// # Example
+    /// ```
+    /// use pg2sqlite::prelude::*;
+    ///
+    /// let mapping =
+    ///     SessionVariableMapping::current_setting("app.subjects", "app_subjects").holding_set(',');
+    /// assert_eq!(mapping.value, SessionVariableValue::DelimitedSet { delimiter: ',' });
+    /// ```
+    #[must_use]
+    pub fn holding_set(mut self, delimiter: char) -> Self {
+        self.value = SessionVariableValue::DelimitedSet { delimiter };
         self
     }
 
@@ -189,7 +224,7 @@ impl SessionVariableMapping {
     /// # Ok::<(), pg2sqlite::errors::Error>(())
     /// ```
     pub fn pg_type_node(&self) -> Result<Option<DataType>, Error> {
-        let Some(pg_type) = &self.pg_type else {
+        let SessionVariableValue::Scalar { pg_type: Some(pg_type) } = &self.value else {
             return Ok(None);
         };
         let unreadable = |source: Option<SqlParseError>| {

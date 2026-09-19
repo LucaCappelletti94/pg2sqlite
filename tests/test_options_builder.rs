@@ -13,7 +13,8 @@
 use pg2sqlite::{
     errors::Error,
     prelude::{
-        Pg2SqliteOptions, SessionVariableMapping, SessionVariablePattern, UuidRepresentation,
+        Pg2SqliteOptions, SessionVariableMapping, SessionVariablePattern, SessionVariableValue,
+        UuidRepresentation,
     },
 };
 use sqlparser::ast::{DataType, ExactNumberInfo};
@@ -217,15 +218,39 @@ fn duplicate_session_variable_mapping_last_wins() {
 }
 
 #[test]
-fn a_mapping_records_no_type_by_default() {
+fn a_mapping_holds_an_untyped_value_by_default() {
     let mapping = SessionVariableMapping::current_setting("app.user_id", "app_user_id");
 
-    assert!(mapping.pg_type.is_none());
+    assert_eq!(mapping.value, SessionVariableValue::Scalar { pg_type: None });
     assert_eq!(
         mapping.pg_type_node().expect("no recorded type is not an error"),
         None,
         "a mapping without a recorded type asks for no cast"
     );
+}
+
+#[test]
+fn a_declared_set_records_its_delimiter_and_no_type() {
+    let mapping =
+        SessionVariableMapping::current_setting("app.subjects", "app_subjects").holding_set(',');
+
+    assert_eq!(mapping.value, SessionVariableValue::DelimitedSet { delimiter: ',' });
+    assert_eq!(mapping.pg_type_node().expect("a set records no type"), None);
+}
+
+/// A type and a set are two claims about one setting, so whichever is declared
+/// last stands, the way a later mapping for the same pattern wins.
+#[test]
+fn the_last_value_declaration_wins() {
+    let set = SessionVariableMapping::current_setting("app.subjects", "app_subjects")
+        .with_pg_type("uuid")
+        .holding_set(',');
+    assert_eq!(set.value, SessionVariableValue::DelimitedSet { delimiter: ',' });
+
+    let typed = SessionVariableMapping::current_setting("app.user_id", "app_user_id")
+        .holding_set(',')
+        .with_pg_type("uuid");
+    assert_eq!(typed.value, SessionVariableValue::Scalar { pg_type: Some("uuid".into()) });
 }
 
 #[test]

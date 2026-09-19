@@ -11,13 +11,16 @@
 use alloc::{boxed::Box, string::ToString, vec, vec::Vec};
 
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, Value, ValueWithSpan,
+    BinaryOperator, CaseWhen, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, UnaryOperator, Value, ValueWithSpan,
 };
 
 use crate::impls::{
-    expr_helpers::case_when,
-    function_helpers::{integer_literal, number_literal, simple_function_expr, string_literal},
+    expr_helpers::{case_when, concat, not_predicate},
+    function_helpers::{
+        integer_literal, number_literal, simple_function_expr, single_quoted_literal,
+        string_literal,
+    },
 };
 
 // ── ILIKE case folding ──────────────────────────────────────────────────────
@@ -185,6 +188,152 @@ pub(crate) fn ascii_code_point_argument(expr: &Expr) -> Option<&Expr> {
     (ascii_code_point(argument.clone()) == *expr).then_some(argument)
 }
 
+// ── membership over delimited text ──────────────────────────────────────────
+
+/// `x = ANY(string_to_array(a, d))`, and its `<> ALL` negation, as
+/// `CASE WHEN a IS NOT NULL THEN a <> '' AND instr(x, d) = 0
+/// AND instr(d || a || d, d || x || d) > 0 END`, under `NOT (...)` when
+/// negated.
+///
+/// Surrounding both the text and the left side with the delimiter is what
+/// makes the search find a whole element rather than a substring of one.
+/// The rest is PostgreSQL's answer for the degenerate operands, measured at
+/// PostgreSQL 17 over every combination of an empty, NULL and
+/// delimiter-carrying text and left side. An empty text splits into no
+/// elements, where surrounding it with delimiters alone would read as one
+/// empty element. The split never produces an element carrying the
+/// delimiter, so a left side that carries one is no element even when the
+/// delimited text holds it verbatim. A NULL text answers NULL for every left
+/// side, which the delimiter test alone would turn into false, so the whole
+/// predicate hangs off `a IS NOT NULL`. A NULL left side answers NULL
+/// through `instr()`, which is how an unset session setting denies a row.
+///
+/// `text` is read three times and `left` twice; callers refuse volatile
+/// operands before invoking this.
+#[must_use]
+pub(crate) fn delimited_membership(left: Expr, text: Expr, delimiter: char, negated: bool) -> Expr {
+    let mut encoded = [0u8; 4];
+    let delimiter: &str = delimiter.encode_utf8(&mut encoded);
+    let surrounded =
+        |inner: Expr| concat(concat(string_literal(delimiter), inner), string_literal(delimiter));
+    let whole_element = Expr::BinaryOp {
+        left: Box::new(simple_function_expr(
+            "instr",
+            vec![left.clone(), string_literal(delimiter)],
+            None,
+        )),
+        op: BinaryOperator::Eq,
+        right: Box::new(integer_literal(0)),
+    };
+    let text_is_present = Expr::IsNotNull(Box::new(text.clone()));
+    let text_is_split = Expr::BinaryOp {
+        left: Box::new(text.clone()),
+        op: BinaryOperator::NotEq,
+        right: Box::new(string_literal("")),
+    };
+    let found = Expr::BinaryOp {
+        left: Box::new(simple_function_expr(
+            "instr",
+            vec![surrounded(text), surrounded(left)],
+            None,
+        )),
+        op: BinaryOperator::Gt,
+        right: Box::new(integer_literal(0)),
+    };
+    let membership = Expr::BinaryOp {
+        left: Box::new(Expr::BinaryOp {
+            left: Box::new(text_is_split),
+            op: BinaryOperator::And,
+            right: Box::new(whole_element),
+        }),
+        op: BinaryOperator::And,
+        right: Box::new(found),
+    };
+    let guarded = case_when(text_is_present, membership, None);
+    if negated { not_predicate(guarded) } else { guarded }
+}
+
+/// The operands of a [`delimited_membership`] shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DelimitedMembership<'e> {
+    /// The value tested for membership.
+    pub left: &'e Expr,
+    /// The delimited text.
+    pub text: &'e Expr,
+    /// The single character the text is split on.
+    pub delimiter: char,
+    /// True for the `<> ALL` negation.
+    pub negated: bool,
+}
+
+/// The operands of the [`delimited_membership`] shape, or `None` for anything
+/// else. Rebuild-and-compare, like [`forward_lower_argument`].
+#[must_use]
+pub(crate) fn delimited_membership_operands(expr: &Expr) -> Option<DelimitedMembership<'_>> {
+    let (body, negated) = match expr {
+        Expr::UnaryOp { op: UnaryOperator::Not, expr: nested } => {
+            match nested.as_ref() {
+                Expr::Nested(inner) => (inner.as_ref(), true),
+                _ => return None,
+            }
+        }
+        _ => (expr, false),
+    };
+    let Expr::Case { conditions, .. } = body else {
+        return None;
+    };
+    let [CaseWhen { result, .. }] = conditions.as_slice() else {
+        return None;
+    };
+    let Expr::BinaryOp { right: found, .. } = result else {
+        return None;
+    };
+    let Expr::BinaryOp { left: search, .. } = found.as_ref() else {
+        return None;
+    };
+    let Expr::Function(search) = search.as_ref() else {
+        return None;
+    };
+    let FunctionArguments::List(list) = &search.args else {
+        return None;
+    };
+    let [
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(text)),
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(left)),
+    ] = list.args.as_slice()
+    else {
+        return None;
+    };
+    let (delimiter, text) = surrounded_operand(text)?;
+    let (_, left) = surrounded_operand(left)?;
+    (delimited_membership(left.clone(), text.clone(), delimiter, negated) == *expr)
+        .then_some(DelimitedMembership { left, text, delimiter, negated })
+}
+
+/// The delimiter and operand of `d || operand || d`, as the concatenation
+/// parses.
+fn surrounded_operand(expr: &Expr) -> Option<(char, &Expr)> {
+    let Expr::BinaryOp { left: inner, op: BinaryOperator::StringConcat, .. } = expr else {
+        return None;
+    };
+    let Expr::BinaryOp { left: delimiter, op: BinaryOperator::StringConcat, right: operand } =
+        inner.as_ref()
+    else {
+        return None;
+    };
+    Some((single_character(single_quoted_literal(delimiter)?)?, operand))
+}
+
+/// The one character `text` spells, or `None` for any other length.
+#[must_use]
+pub(crate) fn single_character(text: &str) -> Option<char> {
+    let mut characters = text.chars();
+    match (characters.next(), characters.next()) {
+        (Some(character), None) => Some(character),
+        _ => None,
+    }
+}
+
 // ── empty-set aggregates ─────────────────────────────────────────────────────
 
 /// `NULLIF(<aggregate>, '[]')`: `json_group_array` answers `'[]'` over no
@@ -344,7 +493,12 @@ mod tests {
     /// tree.
     #[test]
     fn the_ascii_shape_survives_a_parse() {
-        let printed = format!("SELECT {}", ascii_code_point(ident_expr("s")));
+        let parsed = parse_expr(&ascii_code_point(ident_expr("s")));
+        assert_eq!(ascii_code_point_argument(&parsed), Some(&ident_expr("s")));
+    }
+
+    fn parse_expr(built: &Expr) -> Expr {
+        let printed = format!("SELECT {built}");
         let statements =
             sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, &printed)
                 .expect("the emitted shape parses as SQLite");
@@ -357,6 +511,33 @@ mod tests {
         let sqlparser::ast::SelectItem::UnnamedExpr(parsed) = &select.projection[0] else {
             unreachable!("the projection is a bare expression")
         };
-        assert_eq!(ascii_code_point_argument(parsed), Some(&ident_expr("s")));
+        parsed.clone()
+    }
+
+    #[test]
+    fn the_membership_shape_round_trips_and_survives_a_parse() {
+        for negated in [false, true] {
+            let built = delimited_membership(ident_expr("k"), ident_expr("held"), ',', negated);
+            let expected = DelimitedMembership {
+                left: &ident_expr("k"),
+                text: &ident_expr("held"),
+                delimiter: ',',
+                negated,
+            };
+            assert_eq!(delimited_membership_operands(&built), Some(expected));
+            assert_eq!(delimited_membership_operands(&parse_expr(&built)), Some(expected));
+        }
+        assert_eq!(delimited_membership_operands(&ident_expr("k")), None);
+    }
+
+    /// A shape whose reads of the text disagree is not the idiom.
+    #[test]
+    fn a_membership_shape_with_mismatched_text_is_not_extracted() {
+        let mut crossed = delimited_membership(ident_expr("k"), ident_expr("held"), ',', false);
+        let Expr::Case { conditions, .. } = &mut crossed else {
+            unreachable!("the builder builds a CASE")
+        };
+        conditions[0].condition = Expr::IsNotNull(Box::new(ident_expr("other")));
+        assert_eq!(delimited_membership_operands(&crossed), None);
     }
 }

@@ -6,6 +6,10 @@
 //! answers the value directly. Coming back, the paired call becomes the pattern
 //! again and the cast is written from the type the mapping records.
 //!
+//! The mapping also states what the setting holds, and a reading that
+//! disagrees with it is refused in either direction: a set is read only
+//! through a membership test, a scalar never is.
+//!
 //! Single source of truth for both directions, and for the row-security
 //! transformer, which used to carry its own copy of the substitution.
 
@@ -29,7 +33,7 @@ use crate::{
     errors::Error,
     impls::function_helpers::{simple_function_expr, single_quoted_literal, string_literal},
     options::Pg2SqliteOptions,
-    traits::{SessionVariableMapping, SessionVariablePattern},
+    traits::{SessionVariableMapping, SessionVariablePattern, SessionVariableValue},
 };
 
 /// The lower-cased last part of a function's name.
@@ -121,21 +125,60 @@ pub(crate) fn mapping_for_function<'a>(
         .or_else(|| mappings.iter().rev().find(paired))
 }
 
-/// The PostgreSQL expression the paired function stands for.
-///
-/// For a tolerant mapping (`missing_ok = true`, the default) the reverse emits
-/// `current_setting(name, true)`, which answers NULL when the setting is unset.
-/// For a strict mapping (`missing_ok = false`) the reverse emits
-/// `current_setting(name)` with no second argument, which raises when the
-/// setting is unset. The role keyword is written without an argument list,
-/// since PostgreSQL refuses `current_user()` as a syntax error.
+/// Refuses reading a set-valued setting as one value.
 ///
 /// # Errors
 ///
-/// Returns [`Error::SessionVariableTypeUnreadable`] when the recorded type does
-/// not parse.
-pub(crate) fn reverse_expression(mapping: &SessionVariableMapping) -> Result<Expr, Error> {
-    let pattern = match &mapping.pg_pattern {
+/// Returns [`Error::SessionVariableReadAsScalar`] when the mapping declares a
+/// delimited set.
+pub(crate) fn scalar_reading(mapping: &SessionVariableMapping) -> Result<(), Error> {
+    match mapping.value {
+        SessionVariableValue::Scalar { .. } => Ok(()),
+        SessionVariableValue::DelimitedSet { delimiter } => {
+            Err(Error::SessionVariableReadAsScalar {
+                pattern: mapping.pg_pattern.to_string(),
+                delimiter,
+            })
+        }
+    }
+}
+
+/// Refuses a membership test that splits the setting on `written` unless the
+/// mapping declares a set joined by that delimiter.
+///
+/// # Errors
+///
+/// Returns [`Error::SessionVariableReadAsSet`] for a scalar mapping and
+/// [`Error::SessionVariableDelimiterDisagrees`] for a set joined by another
+/// delimiter.
+pub(crate) fn set_reading(mapping: &SessionVariableMapping, written: char) -> Result<(), Error> {
+    let pattern = || mapping.pg_pattern.to_string();
+    match mapping.value {
+        SessionVariableValue::Scalar { .. } => {
+            Err(Error::SessionVariableReadAsSet { pattern: pattern(), written })
+        }
+        SessionVariableValue::DelimitedSet { delimiter } if delimiter == written => Ok(()),
+        SessionVariableValue::DelimitedSet { delimiter } => {
+            Err(Error::SessionVariableDelimiterDisagrees {
+                pattern: pattern(),
+                recorded: delimiter,
+                written,
+            })
+        }
+    }
+}
+
+/// The PostgreSQL pattern the paired function stands for, without the cast.
+///
+/// For a tolerant mapping (`missing_ok = true`, the default) this is
+/// `current_setting(name, true)`, which answers NULL when the setting is unset.
+/// For a strict mapping (`missing_ok = false`) it is `current_setting(name)`
+/// with no second argument, which raises when the setting is unset. The role
+/// keyword is written without an argument list, since PostgreSQL refuses
+/// `current_user()` as a syntax error.
+#[must_use]
+pub(crate) fn reverse_pattern(mapping: &SessionVariableMapping) -> Expr {
+    match &mapping.pg_pattern {
         SessionVariablePattern::CurrentSetting { name } => {
             if mapping.missing_ok {
                 simple_function_expr(
@@ -165,8 +208,20 @@ pub(crate) fn reverse_expression(mapping: &SessionVariableMapping) -> Result<Exp
                 within_group: vec![],
             })
         }
-    };
+    }
+}
 
+/// The PostgreSQL expression the paired function stands for when read as one
+/// value: the pattern, cast to the recorded type when there is one.
+///
+/// # Errors
+///
+/// Returns [`Error::SessionVariableReadAsScalar`] when the mapping declares a
+/// set, and [`Error::SessionVariableTypeUnreadable`] when the recorded type
+/// does not parse.
+pub(crate) fn reverse_expression(mapping: &SessionVariableMapping) -> Result<Expr, Error> {
+    scalar_reading(mapping)?;
+    let pattern = reverse_pattern(mapping);
     Ok(match mapping.pg_type_node()? {
         Some(data_type) => {
             Expr::Cast {
@@ -211,9 +266,10 @@ pub(crate) fn call_has_no_arguments(args: &FunctionArguments) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`Error::SessionVariableTypeDisagrees`] when the written cast names
-/// a different type than the mapping records, since the cast is dropped here
-/// and written again from the recorded type on the way back.
+/// Returns [`Error::SessionVariableReadAsScalar`] when the mapping declares a
+/// set, and [`Error::SessionVariableTypeDisagrees`] when the written cast
+/// names a different type than the mapping records, since the cast is dropped
+/// here and written again from the recorded type on the way back.
 pub(crate) fn translate_cast(
     inner: &Expr,
     data_type: &DataType,
@@ -228,13 +284,15 @@ pub(crate) fn translate_cast(
     let Some(mapping) = options.find_session_variable(&pattern) else {
         return Ok(None);
     };
+    scalar_reading(mapping)?;
 
-    if let Some(recorded) = mapping.pg_type_node()?
+    if let SessionVariableValue::Scalar { pg_type: Some(spelling) } = &mapping.value
+        && let Some(recorded) = mapping.pg_type_node()?
         && !same_postgres_type(&recorded, data_type)
     {
         return Err(Error::SessionVariableTypeDisagrees {
             pattern: pattern.to_string(),
-            recorded: mapping.pg_type.clone().unwrap_or_default(),
+            recorded: spelling.clone(),
             written: data_type.to_string(),
         });
     }
@@ -251,6 +309,21 @@ pub(crate) fn translate_cast(
 #[must_use]
 pub(crate) fn same_postgres_type(left: &DataType, right: &DataType) -> bool {
     canonical(left) == canonical(right)
+}
+
+/// `expr` without a plain cast to `text` over it, which `current_setting`
+/// already answers, so the cast changes nothing a membership test reads.
+#[must_use]
+pub(crate) fn text_cast_operand(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast {
+            expr: inner,
+            data_type: DataType::Text,
+            format: None,
+            kind: CastKind::Cast | CastKind::DoubleColon,
+        } => inner,
+        _ => expr,
+    }
 }
 
 /// One representative per set of PostgreSQL aliases, parameters kept.

@@ -156,3 +156,181 @@ fn the_forward_and_reverse_directions_are_inverses() {
         "the round trip returns the setting it started from, got: {back}"
     );
 }
+
+/// The setting that holds the keys a caller holds, joined by a comma.
+const SET_SETTING: &str = "app.subjects";
+
+/// The function the replica answers the joined keys with.
+const SET_FUNCTION: &str = "current_app_subjects";
+
+fn set_paired() -> Pg2SqliteOptions {
+    Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting(SET_SETTING, SET_FUNCTION).holding_set(','),
+    )
+}
+
+/// The predicate the forward direction emits for `user_id =
+/// ANY(string_to_array(current_setting('app.subjects', true), ','))`, which is
+/// the one spelling of a membership test the reverse direction reads.
+const MEMBERSHIP: &str = "CASE WHEN current_app_subjects() IS NOT NULL THEN \
+    current_app_subjects() <> '' AND instr(user_id, ',') = 0 AND \
+    instr(',' || current_app_subjects() || ',', ',' || user_id || ',') > 0 END";
+
+const SET_MEMBERSHIP: &str =
+    "user_id = ANY(string_to_array(current_setting('app.subjects', true), ','))";
+
+#[test]
+fn the_membership_shape_over_a_set_valued_setting_becomes_any_over_the_split() {
+    let postgres = reverse(
+        &format!(
+            "SELECT * FROM docs WHERE project_id IN \
+             (SELECT project_id FROM project_members WHERE {MEMBERSHIP})"
+        ),
+        &set_paired(),
+    )
+    .expect("the mapping declares the set the shape tests membership of");
+
+    assert_eq!(
+        postgres,
+        format!(
+            "SELECT * FROM docs WHERE project_id IN \
+             (SELECT project_id FROM project_members WHERE {SET_MEMBERSHIP})"
+        )
+    );
+}
+
+/// A strict mapping keeps its one-argument spelling inside the split, since
+/// `current_setting(name, true)` there would make the test tolerate an unset
+/// setting the scalar reading raises on.
+#[test]
+fn a_strict_set_valued_setting_keeps_the_strict_spelling_inside_the_split() {
+    let options = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting_strict(SET_SETTING, SET_FUNCTION).holding_set(','),
+    );
+    let postgres = reverse(&format!("SELECT * FROM project_members WHERE {MEMBERSHIP}"), &options)
+        .expect("the strict mapping declares the set");
+
+    assert_eq!(
+        postgres,
+        "SELECT * FROM project_members WHERE \
+         user_id = ANY(string_to_array(current_setting('app.subjects'), ','))"
+    );
+}
+
+/// A cast to text over the paired function changes nothing, since the
+/// setting answers text, so the shape still reads as the membership test.
+#[test]
+fn a_text_cast_over_the_paired_function_keeps_the_membership_reading() {
+    let membership =
+        MEMBERSHIP.replace("current_app_subjects()", "CAST(current_app_subjects() AS TEXT)");
+    let postgres =
+        reverse(&format!("SELECT * FROM project_members WHERE {membership}"), &set_paired())
+            .expect("the cast is a no-op over text");
+
+    assert_eq!(postgres, format!("SELECT * FROM project_members WHERE {SET_MEMBERSHIP}"));
+}
+
+#[test]
+fn the_negated_membership_shape_becomes_all_over_the_split() {
+    let postgres =
+        reverse(&format!("SELECT * FROM project_members WHERE NOT ({MEMBERSHIP})"), &set_paired())
+            .expect("the negation is the forward spelling of <> ALL");
+
+    assert_eq!(
+        postgres,
+        "SELECT * FROM project_members WHERE \
+         user_id <> ALL(string_to_array(current_setting('app.subjects', true), ','))"
+    );
+}
+
+#[test]
+fn a_set_valued_setting_read_as_one_value_refuses() {
+    let error = reverse(
+        "SELECT * FROM project_members WHERE user_id = current_app_subjects()",
+        &set_paired(),
+    )
+    .expect_err("one user_id against the whole joined text matches nobody the server admits");
+
+    assert!(
+        matches!(&error, Error::SessionVariableReadAsScalar { pattern, delimiter: ',' }
+            if pattern == "current_setting('app.subjects')"),
+        "the refusal names the setting and its delimiter, got: {error}"
+    );
+}
+
+#[test]
+fn a_scalar_setting_read_as_a_set_refuses() {
+    let options = Pg2SqliteOptions::default()
+        .with_session_variable(SessionVariableMapping::current_setting(SET_SETTING, SET_FUNCTION));
+
+    let error = reverse(&format!("SELECT * FROM project_members WHERE {MEMBERSHIP}"), &options)
+        .expect_err("a mapping that declares no set holds one value");
+
+    assert!(
+        matches!(&error, Error::SessionVariableReadAsSet { pattern, written }
+            if pattern == "current_setting('app.subjects')" && *written == ','),
+        "the refusal names the setting and the delimiter the statement split on, got: {error}"
+    );
+}
+
+#[test]
+fn a_delimiter_other_than_the_declared_one_refuses() {
+    let options = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting(SET_SETTING, SET_FUNCTION).holding_set(';'),
+    );
+
+    let error = reverse(&format!("SELECT * FROM project_members WHERE {MEMBERSHIP}"), &options)
+        .expect_err("splitting on a comma reads a set the mapping does not declare");
+
+    assert!(
+        matches!(&error, Error::SessionVariableDelimiterDisagrees { pattern, recorded: ';', written }
+            if pattern == "current_setting('app.subjects')" && *written == ','),
+        "the refusal names both delimiters, got: {error}"
+    );
+}
+
+/// The shape is the forward lowering of `= ANY(string_to_array(a, d))` for any
+/// replayable `a`, not only for a setting, so a column reads back the same way.
+#[test]
+fn the_membership_shape_over_a_column_becomes_any_over_the_split() {
+    let postgres = reverse(
+        "SELECT * FROM docs WHERE CASE WHEN title IS NOT NULL THEN title <> '' AND \
+         instr('x', ';') = 0 AND instr(';' || title || ';', ';' || 'x' || ';') > 0 END",
+        &Pg2SqliteOptions::default(),
+    )
+    .expect("the shape needs no mapping when the text is a column");
+
+    assert_eq!(postgres, "SELECT * FROM docs WHERE 'x' = ANY(string_to_array(title, ';'))");
+}
+
+/// The shape reads its text in three places and its left side in two, where
+/// PostgreSQL reads each once, so an operand that answers differently per read
+/// is not the membership test it looks like.
+#[test]
+fn the_membership_shape_over_a_volatile_operand_refuses() {
+    let error = reverse(
+        "SELECT * FROM docs WHERE CASE WHEN title IS NOT NULL THEN title <> '' AND \
+         instr(random(), ',') = 0 AND instr(',' || title || ',', ',' || random() || ',') > 0 END",
+        &Pg2SqliteOptions::default(),
+    )
+    .expect_err("random() answers a different value on each read");
+
+    assert!(error.to_string().contains("random()"), "the refusal names the operand: {error}");
+}
+
+#[test]
+fn the_membership_test_round_trips() {
+    let options = set_paired();
+    let postgres_source = format!("{DDL} SELECT id FROM project_members WHERE {SET_MEMBERSHIP};");
+
+    let forward = Pg2Sqlite::default()
+        .sql(&postgres_source)
+        .expect("the document parses")
+        .translate(&options)
+        .expect("the membership test becomes the guarded search");
+    let sqlite_query = forward.last().expect("the query is emitted").to_string();
+    assert!(sqlite_query.contains("instr("), "forward emits the search, got: {sqlite_query}");
+
+    let back = reverse(&sqlite_query, &options).expect("and the search becomes the test again");
+    assert_eq!(back, format!("SELECT id FROM project_members WHERE {SET_MEMBERSHIP}"));
+}
