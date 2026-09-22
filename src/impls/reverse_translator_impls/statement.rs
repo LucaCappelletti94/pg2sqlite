@@ -16,10 +16,10 @@ use core::ops::ControlFlow;
 use sql_traits::{
     structs::ParserDB,
     traits::{DatabaseLike, TableLike},
-    utils::identifier_resolution::{identifiers_match, parse_lookup_identifier},
+    utils::identifier_resolution::identifiers_match,
 };
 use sqlparser::ast::{
-    Delete, Expr, Ident, Insert, ObjectName, Query, SetExpr, Statement, Table, TableObject,
+    Delete, Expr, Ident, Insert, ObjectName, Query, SetExpr, Statement, TableObject,
     TransactionModifier, Update, Visit, Visitor,
 };
 #[cfg(all(test, feature = "std"))]
@@ -36,44 +36,6 @@ use crate::{
     },
     prelude::{Pg2SqliteOptions, ReverseTranslator},
 };
-
-#[derive(Clone, Copy)]
-enum Written<'a> {
-    Ident(&'a Ident),
-    Text(&'a str),
-}
-
-impl<'a> Written<'a> {
-    fn from_ident(ident: &'a Ident) -> Self {
-        Self::Ident(ident)
-    }
-
-    fn from_text(text: &'a str) -> Self {
-        Self::Text(text)
-    }
-
-    fn with_parts<R>(&self, f: impl FnOnce(&str, bool) -> R) -> R {
-        match self {
-            Self::Ident(ident) => f(&ident.value, ident.quote_style.is_some()),
-            Self::Text(text) => {
-                let parsed = parse_lookup_identifier(text);
-                f(parsed.value(), parsed.is_quoted())
-            }
-        }
-    }
-
-    fn sqlite_matches(&self, other: &Self) -> bool {
-        self.with_parts(|left, _| other.with_parts(|right, _| left.eq_ignore_ascii_case(right)))
-    }
-
-    fn postgres_matches(&self, other: &Self) -> bool {
-        self.with_parts(|left, left_quoted| {
-            other.with_parts(|right, right_quoted| {
-                identifiers_match(left, left_quoted, right, right_quoted)
-            })
-        })
-    }
-}
 
 /// True when `name` ends with `suffix`, ignoring ASCII case.
 ///
@@ -124,26 +86,24 @@ impl<'a> RlsTableNames<'a> {
     /// `written` is the whole name as the statement spelled it, which is what
     /// the message quotes, so a schema-qualified reference reads back the way
     /// the caller wrote it.
-    fn refusal(&self, reference: Written<'_>, written: &str) -> Option<Error> {
-        reference.with_parts(|value, _| {
-            if let Some(backing) = self.backing.iter().find(|name| name.eq_ignore_ascii_case(value))
-            {
-                return Some(Error::RlsTableDetected {
-                    table_name: backing.clone(),
-                    suffix: self.suffix.to_string(),
-                });
-            }
+    fn refusal(&self, reference: &Ident, written: &str) -> Option<Error> {
+        let value = reference.value.as_str();
+        if let Some(backing) = self.backing.iter().find(|name| name.eq_ignore_ascii_case(value)) {
+            return Some(Error::RlsTableDetected {
+                table_name: backing.clone(),
+                suffix: self.suffix.to_string(),
+            });
+        }
 
-            if self.declared.iter().any(|name| name.eq_ignore_ascii_case(value)) {
-                return None;
-            }
+        if self.declared.iter().any(|name| name.eq_ignore_ascii_case(value)) {
+            return None;
+        }
 
-            ends_with_suffix_ignoring_case(value, self.suffix).then(|| {
-                Error::RlsTableDetected {
-                    table_name: written.to_string(),
-                    suffix: self.suffix.to_string(),
-                }
-            })
+        ends_with_suffix_ignoring_case(value, self.suffix).then(|| {
+            Error::RlsTableDetected {
+                table_name: written.to_string(),
+                suffix: self.suffix.to_string(),
+            }
         })
     }
 }
@@ -159,19 +119,19 @@ fn cte_shadow_disagreement(alias: &str, written: &str) -> Error {
 }
 
 /// What the CTE names in scope say about a relation reference.
-enum CteBinding {
+enum CteBinding<'a> {
     /// No CTE in scope answers the reference.
     Absent,
     /// Both databases bind the reference to the CTE, so it names no table.
     Shadowed,
     /// SQLite binds the reference to the CTE while PostgreSQL does not, because
     /// the alias is delimited and spelled differently.
-    SqliteOnly(String),
+    SqliteOnly(&'a str),
 }
 
 fn check_table_for_rls(name: &ObjectName, names: &RlsTableNames<'_>) -> Result<(), Error> {
     let Some(last) = last_ident(name) else { return Ok(()) };
-    match names.refusal(Written::from_ident(last), &name.to_string()) {
+    match names.refusal(last, &name.to_string()) {
         Some(error) => Err(error),
         None => Ok(()),
     }
@@ -182,18 +142,6 @@ fn check_table_object_for_rls(table: &TableObject, names: &RlsTableNames<'_>) ->
         TableObject::TableName(name) => check_table_for_rls(name, names),
         TableObject::TableFunction(_) | TableObject::TableQuery(_) => Ok(()),
     }
-}
-
-/// The name a `TABLE t` set expression reads, spelled as the statement wrote
-/// it.
-fn table_command_written_name(table: &Table) -> Option<String> {
-    let table_name = table.table_name.as_ref()?;
-    Some(
-        table
-            .schema_name
-            .as_ref()
-            .map_or_else(|| table_name.clone(), |schema| format!("{schema}.{table_name}")),
-    )
 }
 
 /// One query's CTE names and their visibility while its children are visited.
@@ -212,17 +160,21 @@ struct RlsAstVisitor<'a> {
 }
 
 impl RlsAstVisitor<'_> {
-    fn cte_binding(&self, reference: Written<'_>) -> CteBinding {
+    fn cte_binding(&self, reference: &Ident) -> CteBinding<'_> {
         for scope in self.cte_scopes.iter().rev() {
             for alias in scope.aliases.iter().take(scope.visible_aliases) {
-                let alias = Written::from_ident(alias);
-                if !alias.sqlite_matches(&reference) {
+                if !alias.value.eq_ignore_ascii_case(&reference.value) {
                     continue;
                 }
-                return if alias.postgres_matches(&reference) {
+                return if identifiers_match(
+                    &alias.value,
+                    alias.quote_style.is_some(),
+                    &reference.value,
+                    reference.quote_style.is_some(),
+                ) {
                     CteBinding::Shadowed
                 } else {
-                    CteBinding::SqliteOnly(alias.with_parts(|value, _| value.to_string()))
+                    CteBinding::SqliteOnly(&alias.value)
                 };
             }
         }
@@ -231,7 +183,7 @@ impl RlsAstVisitor<'_> {
 
     /// The refusal a relation reference earns, with the CTE names in scope
     /// taken into account.
-    fn relation_refusal(&self, reference: Written<'_>, written: &str) -> Option<Error> {
+    fn relation_refusal(&self, reference: &Ident, written: &str) -> Option<Error> {
         match self.cte_binding(reference) {
             CteBinding::Shadowed => None,
             CteBinding::Absent => self.names.refusal(reference, written),
@@ -242,7 +194,7 @@ impl RlsAstVisitor<'_> {
             CteBinding::SqliteOnly(alias) => {
                 self.names
                     .refusal(reference, written)
-                    .map(|_| cte_shadow_disagreement(&alias, written))
+                    .map(|_| cte_shadow_disagreement(alias, written))
             }
         }
     }
@@ -263,9 +215,12 @@ impl RlsAstVisitor<'_> {
                 self.check_set_expr(right)
             }
             SetExpr::Table(table) => {
-                let Some(written) = table_command_written_name(table) else { return Ok(()) };
-                let name = table.table_name.as_deref().unwrap_or_default();
-                match self.relation_refusal(Written::from_text(name), &written) {
+                let Some(name) = &table.table_name else { return Ok(()) };
+                let written = table
+                    .schema_name
+                    .as_ref()
+                    .map_or_else(|| name.to_string(), |schema| format!("{schema}.{name}"));
+                match self.relation_refusal(name, &written) {
                     Some(error) => Err(error),
                     None => Ok(()),
                 }
@@ -342,7 +297,7 @@ impl Visitor for RlsAstVisitor<'_> {
 
     fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
         let Some(last) = last_ident(relation) else { return ControlFlow::Continue(()) };
-        match self.relation_refusal(Written::from_ident(last), &relation.to_string()) {
+        match self.relation_refusal(last, &relation.to_string()) {
             None => ControlFlow::Continue(()),
             Some(err) => ControlFlow::Break(Box::new(err)),
         }
@@ -681,13 +636,13 @@ mod tests {
         check_set_expr_for_rls(values_query.body.as_ref(), &empty_schema(), &options).unwrap();
 
         let table_expr = SetExpr::Table(Box::new(sqlparser::ast::Table {
-            table_name: Some("users".to_string()),
+            table_name: Some(sqlparser::ast::Ident::new("users")),
             schema_name: None,
         }));
         check_set_expr_for_rls(&table_expr, &empty_schema(), &options).unwrap();
 
         let rls_table_expr = SetExpr::Table(Box::new(sqlparser::ast::Table {
-            table_name: Some("users_rls".to_string()),
+            table_name: Some(sqlparser::ast::Ident::new("users_rls")),
             schema_name: None,
         }));
         let err = check_set_expr_for_rls(&rls_table_expr, &empty_schema(), &options).unwrap_err();

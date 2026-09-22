@@ -1719,7 +1719,7 @@ mod tests {
         assert!(matches!(set_query.translate(&schema, &options).unwrap(), SetExpr::Query(_)));
 
         let set_table = SetExpr::Table(Box::new(sqlparser::ast::Table {
-            table_name: Some("users".to_string()),
+            table_name: Some(sqlparser::ast::Ident::new("users")),
             schema_name: None,
         }));
         assert!(set_table.translate(&schema, &options).is_err());

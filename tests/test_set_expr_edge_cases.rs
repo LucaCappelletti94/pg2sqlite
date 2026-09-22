@@ -8,7 +8,7 @@ use sqlparser::ast::{Query, SetExpr, Statement};
 fn make_table_query() -> Query {
     let mut query = base_query();
     *query.body = SetExpr::Table(Box::new(sqlparser::ast::Table {
-        table_name: Some("foo".to_string()),
+        table_name: Some(sqlparser::ast::Ident::new("foo")),
         schema_name: None,
     }));
     query

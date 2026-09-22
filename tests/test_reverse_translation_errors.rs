@@ -12,7 +12,7 @@
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sqlparser::{
-    ast::{SetExpr, Statement, Table},
+    ast::{Ident, SetExpr, Statement, Table},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
@@ -219,7 +219,7 @@ fn rls_table_in_table_statement_produces_error() {
     let mut stmt = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT 1;").unwrap().remove(0);
     if let Statement::Query(query) = &mut stmt {
         *query.body = SetExpr::Table(Box::new(Table {
-            table_name: Some("users_rls".to_string()),
+            table_name: Some(Ident::new("users_rls")),
             schema_name: None,
         }));
     } else {
@@ -245,8 +245,8 @@ fn rls_table_in_quoted_table_statement_produces_error() {
     let mut stmt = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT 1;").unwrap().remove(0);
     if let Statement::Query(query) = &mut stmt {
         *query.body = SetExpr::Table(Box::new(Table {
-            table_name: Some("\"users_rls\"".to_string()),
-            schema_name: Some("\"public\"".to_string()),
+            table_name: Some(Ident::with_quote('"', "users_rls")),
+            schema_name: Some(Ident::with_quote('"', "public")),
         }));
     } else {
         panic!("expected query statement");

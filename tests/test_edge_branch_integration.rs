@@ -452,7 +452,7 @@ fn reverse_translation_covers_uncommon_query_variants() {
             "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET c = 1",
         )),
         SetExpr::Table(Box::new(sqlparser::ast::Table {
-            table_name: Some("t".to_string()),
+            table_name: Some(sqlparser::ast::Ident::new("t")),
             schema_name: None,
         })),
     ];
