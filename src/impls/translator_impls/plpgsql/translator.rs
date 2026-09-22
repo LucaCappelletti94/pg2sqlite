@@ -2530,7 +2530,7 @@ mod tests {
         assert!(unary.to_string().contains("NOT"));
 
         let mut table_set_expr = SetExpr::Table(Box::new(sqlparser::ast::Table {
-            table_name: Some("users".to_string()),
+            table_name: Some(sqlparser::ast::Ident::new("users")),
             schema_name: None,
         }));
         PlPgSqlTranslator::transform_set_expr(&mut table_set_expr, &mut ctx, &options);
@@ -2678,7 +2678,7 @@ mod tests {
         insert_table_source.source = Some(Box::new(Query {
             with: None,
             body: Box::new(SetExpr::Table(Box::new(sqlparser::ast::Table {
-                table_name: Some("users".to_string()),
+                table_name: Some(sqlparser::ast::Ident::new("users")),
                 schema_name: None,
             }))),
             order_by: None,

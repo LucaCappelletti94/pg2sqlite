@@ -179,6 +179,41 @@ fn a_cte_alias_does_not_shadow_the_same_name_inside_its_body() {
 }
 
 #[test]
+fn a_table_command_naming_a_backing_table_is_refused() {
+    let error =
+        refusal("SELECT id FROM docs UNION TABLE docs_rls", SECURED, &Pg2SqliteOptions::default());
+    assert!(
+        matches!(&error, Error::RlsTableDetected { table_name, .. } if table_name == "docs_rls"),
+        "the refusal should name the backing table, got: {error:?}"
+    );
+}
+
+#[test]
+fn a_table_command_matching_a_cte_alias_exactly_reads_the_cte() {
+    let emitted = reverse(
+        "WITH docs_rls AS (SELECT 1 AS id) TABLE docs_rls",
+        SECURED,
+        &Pg2SqliteOptions::default(),
+    )
+    .expect("both databases bind an unquoted TABLE command to an unquoted alias");
+    assert_eq!(emitted, "WITH docs_rls AS (SELECT 1 AS id) TABLE docs_rls");
+}
+
+#[test]
+fn a_quoted_table_command_shadowed_only_by_case_is_refused() {
+    let error = refusal(
+        r#"WITH docs_rls AS (SELECT 1 AS id) TABLE "DOCS_RLS""#,
+        SECURED,
+        &Pg2SqliteOptions::default(),
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(r#"backing table "DOCS_RLS""#),
+        "the refusal should quote the name as the TABLE command wrote it, got: {message}"
+    );
+}
+
+#[test]
 fn an_empty_suffix_is_refused_when_translating_forward() {
     let error = Pg2Sqlite::default()
         .sql("CREATE TABLE t (id INT PRIMARY KEY);")
