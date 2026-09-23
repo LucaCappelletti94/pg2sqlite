@@ -675,14 +675,14 @@ fn a_comparison_literal_is_normalised_too() {
 }
 
 #[test]
-fn a_timestamptz_offset_is_still_filled_out() {
+fn a_timestamptz_offset_is_moved_to_utc() {
     let rows = query_rows(
         "CREATE TABLE t (ts timestamptz);
          INSERT INTO t (ts) VALUES ('2024-01-02 03:04:05+02');
          SELECT ts FROM t;",
         &default_opts(),
     );
-    assert_eq!(rows, vec![Some("2024-01-02 03:04:05+02:00".to_string())]);
+    assert_eq!(rows, vec![Some("2024-01-02 01:04:05.000000+00:00".to_string())]);
 }
 
 #[test]
@@ -846,7 +846,7 @@ fn a_utc_marker_becomes_a_zero_offset() {
          SELECT v FROM t;",
         &default_opts(),
     );
-    assert_eq!(rows, vec![Some("2024-01-02 03:04:05+00:00".to_string())]);
+    assert_eq!(rows, vec![Some("2024-01-02 03:04:05.000000+00:00".to_string())]);
 }
 
 #[test]

@@ -63,8 +63,8 @@ fn forward_update_translates_assignment_expressions() {
     ";
     let output = translate(sql);
     assert!(
-        output.contains("datetime('now')"),
-        "Expected now() to translate to datetime('now'): {output}"
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "Expected now() to translate to strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'): {output}"
     );
     execute_all(&output);
 }
@@ -147,7 +147,8 @@ fn forward_update_limit_translates_expressions() {
     let output = stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
-        output.contains("LIMIT") && output.contains("datetime('now')"),
+        output.contains("LIMIT")
+            && output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
         "Expected translated LIMIT expression in UPDATE: {output}"
     );
 

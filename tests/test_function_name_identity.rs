@@ -110,14 +110,26 @@ fn a_quoted_name_quoting_leaves_alone_is_still_the_builtin() {
 fn the_catalogue_prefix_still_names_the_builtin() {
     let emitted = translate("SELECT pg_catalog.now() AS v;", &Pg2SqliteOptions::default())
         .expect("pg_catalog.now names the built-in");
-    assert_eq!(emitted, ["PRAGMA case_sensitive_like = 1", "SELECT datetime('now') AS v"]);
+    assert_eq!(
+        emitted,
+        [
+            "PRAGMA case_sensitive_like = 1",
+            "SELECT strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') AS v"
+        ]
+    );
 }
 
 #[test]
 fn a_bare_builtin_is_untouched_by_the_new_rule() {
     let emitted = translate("SELECT now() AS v;", &Pg2SqliteOptions::default())
         .expect("bare now names the built-in");
-    assert_eq!(emitted, ["PRAGMA case_sensitive_like = 1", "SELECT datetime('now') AS v"]);
+    assert_eq!(
+        emitted,
+        [
+            "PRAGMA case_sensitive_like = 1",
+            "SELECT strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') AS v"
+        ]
+    );
 }
 
 #[test]

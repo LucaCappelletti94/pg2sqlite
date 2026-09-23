@@ -108,7 +108,8 @@ fn to_char_args_swapped_format_before_column() {
 
 #[test]
 fn to_char_now_also_translated() {
-    // NOW() inside to_char should also be translated to datetime('now')
+    // NOW() inside to_char should also be translated to strftime('%Y-%m-%d
+    // %H:%M:%f000+00:00', 'now')
     let sql = "SELECT to_char(NOW(), 'YYYY-MM-DD');";
     let output = translate(sql).unwrap();
     assert!(
@@ -116,8 +117,8 @@ fn to_char_now_also_translated() {
         "to_char(NOW(), ...) should produce strftime, got: {output}"
     );
     assert!(
-        output.contains("datetime('now')"),
-        "NOW() inside to_char should become datetime('now'), got: {output}"
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "NOW() inside to_char should become strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'), got: {output}"
     );
     assert_all_stmts_parse_as_sqlite(sql);
 }

@@ -29,9 +29,7 @@ use sqlparser::{
 
 use crate::{
     impls::{
-        datetime_helpers::{
-            DatePartKey, build_date_part_expr, datetime_field_key, normalize_timestamptz_offset,
-        },
+        datetime_helpers::{DatePartKey, build_date_part_expr, datetime_field_key},
         expr_helpers::{
             case_when, for_each_child_expr, not_predicate, null_safe_eq, null_safe_neq, rebuild,
         },
@@ -2157,6 +2155,14 @@ fn convert_beside_column_expr(
     .ok()
     .flatten();
     match data_type {
+        // A comparison widens the zoneless column to an instant rather than narrowing the instant.
+        Some(dt)
+            if crate::impls::temporal_literals::temporal_literal_kind(&dt).is_some_and(
+                |kind| kind != crate::impls::temporal_literals::TemporalLiteralKind::TIMESTAMPTZ,
+            ) && crate::impls::datetime_helpers::is_canonical_timestamptz_call(&value) =>
+        {
+            Ok(value)
+        }
         Some(dt) => convert_value_for_column_type(&dt, value, options),
         None => Ok(value),
     }
@@ -3506,23 +3512,25 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         let translated = expr.translate_with_warnings(schema, options, emit)?;
                         return Ok(promote_date_to_midnight(translated));
                     }
-                    // TIMESTAMPTZ literal: normalise ±HH offset to ±HH:MM so
-                    // SQLite date functions can parse the value.
-                    if matches!(
-                        data_type,
-                        DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
-                    ) && let Expr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(text),
-                        span,
-                    }) = expr.as_ref()
+                    // A cast to a temporal type answers the text a column of
+                    // that type holds.
+                    if let Some(kind) =
+                        crate::impls::temporal_literals::temporal_literal_kind(data_type)
                     {
+                        let source =
+                            crate::impls::timezone::timestamp_awareness(expr, schema, options)
+                                .ok()
+                                .flatten();
+                        let converted = crate::impls::shared_helpers::convert_temporal_value(
+                            kind,
+                            expr.translate_with_warnings(schema, options, emit)?,
+                            source,
+                        )?;
+                        if matches!(converted, Expr::Function(_)) {
+                            return Ok(converted);
+                        }
                         return Ok(Expr::Cast {
-                            expr: Box::new(Expr::Value(ValueWithSpan {
-                                value: Value::SingleQuotedString(normalize_timestamptz_offset(
-                                    text,
-                                )),
-                                span: *span,
-                            })),
+                            expr: Box::new(converted),
                             data_type: data_type.translate_with_warnings(schema, options, emit)?,
                             format: None,
                             kind: CastKind::Cast,
@@ -3756,18 +3764,15 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
                     ) && let Value::SingleQuotedString(s) = &typed_string.value.value
                     {
-                        let normalized = normalize_timestamptz_offset(s);
-                        return Ok(Expr::Cast {
-                            expr: Box::new(Expr::Value(ValueWithSpan {
-                                value: Value::SingleQuotedString(normalized),
-                                span: typed_string.value.span,
-                            })),
-                            data_type: typed_string
-                                .data_type
-                                .translate_with_warnings(schema, options, emit)?,
-                            format: None,
-                            kind: sqlparser::ast::CastKind::Cast,
-                        });
+                        let canonical =
+                            crate::impls::temporal_literals::normalize_temporal_literal(
+                                crate::impls::temporal_literals::TemporalLiteralKind::TIMESTAMPTZ,
+                                s,
+                            )?;
+                        return Ok(Expr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(canonical),
+                            span: typed_string.value.span,
+                        }));
                     }
                     Ok(Expr::Cast {
                         expr: Box::new(Expr::Value(typed_string.value.clone())),

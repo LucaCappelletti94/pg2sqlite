@@ -127,6 +127,17 @@ pub(crate) fn declared_default(
             let scaled = scaled_default(column, expr)?;
             if is_uuid_data_type(&column.data_type) && is_blob_uuid_representation(options) {
                 wrap_uuid_column_default(&column.name, scaled, options)
+            } else if crate::impls::temporal_literals::temporal_literal_kind(&column.data_type)
+                .is_some()
+            {
+                // PostgreSQL casts a default to the column type, which a
+                // trigger spells out.
+                Ok(Expr::Cast {
+                    kind: sqlparser::ast::CastKind::Cast,
+                    expr: Box::new(scaled),
+                    data_type: column.data_type.clone(),
+                    format: None,
+                })
             } else {
                 Ok(scaled)
             }
@@ -291,8 +302,14 @@ pub(crate) fn translate_column_def(
                 } else {
                     scaled
                 };
-            ColumnOptionDef { name: o.name.clone(), option: ColumnOption::Default(default_expr) }
-                .translate_with_warnings(schema, options, emit)
+            let translated = ColumnOptionDef {
+                name: o.name.clone(),
+                option: ColumnOption::Default(default_expr),
+            }
+            .translate_with_warnings(schema, options, emit)?;
+            let source =
+                crate::impls::timezone::timestamp_awareness(expr, schema, options).ok().flatten();
+            temporal_default(&column.data_type, translated, source)
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -318,6 +335,31 @@ pub(crate) fn translate_column_def(
         data_type: column.data_type.translate_with_warnings(schema, options, emit)?,
         options: translated_options,
     })
+}
+
+/// A temporal column's translated `DEFAULT` in the text the column holds,
+/// exactly as a written value would be converted.
+fn temporal_default(
+    data_type: &DataType,
+    option: Option<ColumnOptionDef>,
+    source: Option<crate::impls::timezone::TimestampAwareness>,
+) -> Result<Option<ColumnOptionDef>, Error> {
+    let Some(kind) = crate::impls::temporal_literals::temporal_literal_kind(data_type) else {
+        return Ok(option);
+    };
+    let Some(ColumnOptionDef { name, option: ColumnOption::Default(mut value) }) = option else {
+        return Ok(option);
+    };
+    while let Expr::Nested(inner) = value {
+        value = *inner;
+    }
+    let value = crate::impls::shared_helpers::convert_temporal_value(kind, value, source)?;
+    Ok(Some(ColumnOptionDef {
+        name,
+        option: ColumnOption::Default(
+            crate::impls::translator_impls::column_option::parenthesize_default(value),
+        ),
+    }))
 }
 
 /// Every bound PostgreSQL enforces through the column's declared type, as
@@ -576,9 +618,11 @@ fn report_column_downgrades(
             from: column.data_type.to_string(),
             to: "TEXT".to_string(),
             location: location.clone(),
-            reason: "SQLite has no zone-aware temporal type, so the value is stored as text. \
-                     Equality and ordering compare text, not instants: two values that name the \
-                     same moment in different offsets (+02:00 vs +00:00) compare unequal."
+            reason: "SQLite has no zone-aware temporal type, so the value is stored as text and \
+                     compares as text. The translation writes a timestamptz as UTC text with a \
+                     +00:00 offset, so those compare as instants, but a bound parameter or a \
+                     time with time zone is stored as given, and two spellings of one moment \
+                     (+02:00 vs +00:00) compare unequal."
                 .to_string(),
         });
     }

@@ -52,6 +52,13 @@ pub(crate) fn single_quoted_literal(expr: &Expr) -> Option<&str> {
     }
 }
 
+/// Whether `function` calls `name`, compared without case.
+#[must_use]
+pub(crate) fn is_function_named(function: &sqlparser::ast::Function, name: &str) -> bool {
+    crate::impls::object_name::last_ident(&function.name)
+        .is_some_and(|ident| ident.value.eq_ignore_ascii_case(name))
+}
+
 /// The one expression `(SELECT <expr>)` projects, when the subquery reads
 /// nothing and answers exactly that.
 ///

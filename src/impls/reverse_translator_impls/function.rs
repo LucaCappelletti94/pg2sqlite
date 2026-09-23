@@ -89,6 +89,8 @@ pub enum FunctionReversal {
     ToTimestampFromEpoch,
     /// Transform strftime(composite_fmt, ts) to date_trunc(field, ts)
     ToDateTrunc(String),
+    /// Transform the canonical `timestamptz` strftime to a timestamptz cast.
+    ToTimestamptz,
     /// Transform json(x) to CAST(x AS JSONB)
     ToCastAsJsonb,
     /// Transform json_set/json_insert to their PG equivalents with path
@@ -233,6 +235,18 @@ fn reverse_strftime(args: &FunctionArguments) -> FunctionReversal {
         ));
     };
 
+    if format == crate::impls::datetime_helpers::TIMESTAMPTZ_FORMAT {
+        let is_now = list.args.get(1).is_some_and(|arg| {
+            matches!(
+                arg,
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(value),
+                    ..
+                }))) if value == "now"
+            )
+        });
+        return if is_now { FunctionReversal::ToNow } else { FunctionReversal::ToTimestamptz };
+    }
     if let Some(field) = reverse_strftime_to_date_trunc_field(format) {
         return FunctionReversal::ToDateTrunc(field.to_string());
     }
@@ -1088,6 +1102,17 @@ pub fn reverse_translate_function(
             let timestamp =
                 crate::prelude::ReverseTranslator::reverse_translate(exprs[1], schema, options)?;
             Ok(simple_function_expr("to_char", vec![timestamp, string_literal(&template)], None))
+        }
+        FunctionReversal::ToTimestamptz => {
+            let exprs = extract_exactly(&func.args, 2, "strftime")?;
+            let timestamp =
+                crate::prelude::ReverseTranslator::reverse_translate(exprs[1], schema, options)?;
+            Ok(Expr::Cast {
+                expr: Box::new(timestamp),
+                data_type: DataType::Timestamp(None, TimezoneInfo::Tz),
+                format: None,
+                kind: CastKind::DoubleColon,
+            })
         }
         FunctionReversal::ToNow => {
             // datetime('now') -> NOW()

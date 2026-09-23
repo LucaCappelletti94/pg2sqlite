@@ -969,8 +969,8 @@ fn insert_on_conflict_do_update_translates_expressions() {
     ";
     let output = translate(sql);
     assert!(
-        output.contains("datetime('now')"),
-        "Expected datetime('now') in ON CONFLICT DO UPDATE: {output}"
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "Expected strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') in ON CONFLICT DO UPDATE: {output}"
     );
     execute_emitted(sql);
 }
@@ -983,8 +983,8 @@ fn insert_returning_translates_expressions() {
     ";
     let output = translate(sql);
     assert!(
-        output.contains("datetime('now')"),
-        "Expected datetime('now') in INSERT RETURNING: {output}"
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "Expected strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') in INSERT RETURNING: {output}"
     );
     execute_emitted(sql);
 }

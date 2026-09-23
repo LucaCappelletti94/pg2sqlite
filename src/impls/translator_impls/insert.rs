@@ -16,14 +16,11 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, IndexLike, TableLike, UniqueIndexLike},
 };
-use sqlparser::ast::{
-    DataType, Expr, Insert, SelectItem, SetExpr, TableObject, TimezoneInfo, Value, ValueWithSpan,
-};
+use sqlparser::ast::{DataType, Insert, SelectItem, SetExpr, TableObject};
 
 use super::helpers::Forward;
 use crate::{
     impls::{
-        datetime_helpers::normalize_timestamptz_offset,
         object_name::{
             COLUMN_LOOKUP_CASE, last_ident, last_ident_value_or_display,
             normalize_schema_qualified_object_name_for_sqlite, resolve_translation_table,
@@ -142,6 +139,7 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         reject_explicit_identity_values(self, schema)?;
         let mut prepared = self.clone();
         substitute_default_values(&mut prepared, schema, options, emit)?;
+        cast_temporal_insert_values(&mut prepared, schema, options)?;
 
         let source = prepared
             .source
@@ -170,7 +168,6 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         });
         // One pass for all column-type conversions: literals and parameters.
         apply_column_type_conversions(&mut insert, target.optional(), schema, options)?;
-        normalize_timestamptz_literals(&mut insert, target.optional(), schema)?;
 
         if let Some(on_insert) = &self.on {
             match on_insert {
@@ -655,6 +652,36 @@ fn unknown_default_column(table: &str, column_name: &str) -> crate::errors::Erro
     ))
 }
 
+/// Writes out PostgreSQL's assignment cast wherever a source value's zone
+/// differs from its temporal target column's.
+///
+/// A projection names the columns of its own `FROM`, so its zone is read in
+/// that scope, which borrows a copy of the source because the walk rewrites it.
+fn cast_temporal_insert_values(
+    insert: &mut Insert,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), crate::errors::Error> {
+    let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
+    // The later passes own the refusals for a target that does not resolve.
+    let Ok(Some(table)) = resolve_translation_table(schema, table_name) else { return Ok(()) };
+    let rewrites = ColumnRewrites::of_table(table, schema, options);
+    let Ok(column_names) = insert_column_names(insert, table, schema) else { return Ok(()) };
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    let scope_query = (!matches!(source.body.as_ref(), SetExpr::Values(_))).then(|| source.clone());
+    let substitute = scope_query.as_ref().and_then(crate::impls::shared_helpers::scope_query_for);
+    let scope = scope_query.as_ref().and_then(|query| {
+        sql_traits::structs::ColumnScope::from_query(substitute.as_ref().unwrap_or(query), schema)
+            .ok()
+    });
+    let scoped = scope.as_ref().map(|scope| options.with_scope(scope));
+    let context = scoped.as_ref().unwrap_or(options);
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |index, expr| {
+        let Some(column) = column_names.get(index) else { return Ok(expr) };
+        Ok(rewrites.temporal_column_cast(column, &expr, schema, context).unwrap_or(expr))
+    })
+}
+
 /// Applies every column-type conversion at every INSERT source position.
 ///
 /// Builds a name → DataType map and calls `convert_value_for_column_type` per
@@ -894,53 +921,6 @@ fn database_filled_column(
     }
 
     Ok(None)
-}
-
-/// The names of a table's `TIMESTAMPTZ` columns, whose literals need their
-/// offset normalising.
-fn timestamptz_columns_of_table(
-    table: &ParserTable,
-    schema: &ParserDB,
-) -> Result<Vec<String>, crate::errors::Error> {
-    Ok(table
-        .columns(schema)?
-        .filter(|column| {
-            matches!(
-                column.attribute().data_type,
-                DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
-            )
-        })
-        .map(|column| column.column_name().to_owned())
-        .collect())
-}
-
-/// Normalises minute-less UTC offsets in TIMESTAMPTZ-column literals so every
-/// SQLite date function can parse them (`+02` → `+02:00`).
-fn normalize_timestamptz_literals(
-    insert: &mut Insert,
-    table: Option<&ParserTable>,
-    schema: &ParserDB,
-) -> Result<(), crate::errors::Error> {
-    let Some(table) = table else { return Ok(()) };
-    let tstz_cols = timestamptz_columns_of_table(table, schema)?;
-    if tstz_cols.is_empty() {
-        return Ok(());
-    }
-    let column_names = insert_column_names(insert, table, schema)?;
-    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
-        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
-        if tstz_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name))
-            && let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), span }) =
-                expr
-        {
-            return Ok(Expr::Value(ValueWithSpan {
-                value: Value::SingleQuotedString(normalize_timestamptz_offset(&text)),
-                span,
-            }));
-        }
-        Ok(expr)
-    })
 }
 
 #[cfg(all(test, feature = "std"))]

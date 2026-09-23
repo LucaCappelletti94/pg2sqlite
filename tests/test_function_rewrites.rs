@@ -237,10 +237,9 @@ fn timestamp_variants_are_now() {
         // body.
         let stmts = translate_pg(&format!("SELECT {func}"), &options).unwrap();
         let sql = stmts.iter().find(|s| !s.starts_with("PRAGMA")).expect("SELECT stmt");
-        let lower = sql.to_lowercase();
         assert!(
-            lower.contains("datetime('now')"),
-            "{func} should translate to datetime('now'): {sql}"
+            sql.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+            "{func} should translate to strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'): {sql}"
         );
         let mut conn = SqliteConnection::establish(":memory:").unwrap();
         // Dynamically generated translated SQL cannot be expressed via the

@@ -268,10 +268,10 @@ fn test_join_now_translation() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Should have a SELECT statement")
         .to_string();
 
-    // Should contain datetime('now'), not NOW()
+    // Should contain strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'), not NOW()
     assert!(
-        select_stmt.contains("datetime('now')"),
-        "NOW() in JOIN should translate to datetime('now'), got: {select_stmt}"
+        select_stmt.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "NOW() in JOIN should translate to strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'), got: {select_stmt}"
     );
     assert!(
         !select_stmt.to_uppercase().contains("NOW()"),

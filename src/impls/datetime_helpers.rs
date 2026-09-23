@@ -11,7 +11,10 @@ use alloc::{
     vec::Vec,
 };
 
-use sqlparser::ast::{BinaryOperator, CastKind, DataType, DateTimeField, Expr};
+use sqlparser::ast::{
+    BinaryOperator, CastKind, DataType, DateTimeField, Expr, FunctionArg, FunctionArgExpr,
+    FunctionArguments,
+};
 
 use super::function_helpers::{integer_literal, simple_function_expr, string_literal};
 use crate::errors::Error;
@@ -340,6 +343,111 @@ pub(crate) fn build_strftime_call(format: &str, value_expr: Expr) -> Expr {
     simple_function_expr("strftime", vec![string_literal(format), value_expr], None)
 }
 
+/// The `strftime` format of the text a replica holds for a `timestamptz`,
+/// `YYYY-MM-DD HH:MM:SS.ffffff+00:00`, where `%f` stops at milliseconds and
+/// the zeros pad it to microseconds.
+pub(crate) const TIMESTAMPTZ_FORMAT: &str = "%Y-%m-%d %H:%M:%f000+00:00";
+
+/// The canonical `timestamptz` text of a value SQLite's date functions read.
+#[must_use]
+pub(crate) fn canonical_timestamptz_call(value_expr: Expr) -> Expr {
+    build_strftime_call(TIMESTAMPTZ_FORMAT, value_expr)
+}
+
+/// Whether `expr` is a [`canonical_timestamptz_call`].
+#[must_use]
+pub(crate) fn is_canonical_timestamptz_call(expr: &Expr) -> bool {
+    let Expr::Function(function) = peel_nested(expr) else { return false };
+    super::function_helpers::is_function_named(function, "strftime")
+        && matches!(
+            super::shared_helpers::function_argument_exprs(&function.args).as_slice(),
+            [format, _] if super::function_helpers::single_quoted_literal(format)
+                == Some(TIMESTAMPTZ_FORMAT)
+        )
+}
+
+/// Moves the operand out of a [`canonical_timestamptz_call`], leaving `expr`
+/// untouched and answering `None` when it is not one.
+pub(crate) fn take_canonical_timestamptz_operand(expr: &mut Expr) -> Option<Expr> {
+    if is_canonical_timestamptz_call(expr) { take_last_argument(expr) } else { None }
+}
+
+/// `value` as canonical `timestamptz` text.
+///
+/// A one-argument `datetime(x)`, which is what `AT TIME ZONE 'UTC'` becomes,
+/// only drops the offset and the fraction, so its canonical text is `x`'s.
+#[must_use]
+pub(crate) fn canonical_timestamptz_value(mut value: Expr) -> Expr {
+    if is_canonical_timestamptz_call(&value) {
+        return value;
+    }
+    if is_utc_datetime_call(&value)
+        && let Some(operand) = take_last_argument(&mut value)
+    {
+        return if is_canonical_timestamptz_call(&operand) {
+            operand
+        } else {
+            canonical_timestamptz_call(operand)
+        };
+    }
+    if is_offset_less_timestamp_call(&value) { canonical_timestamptz_call(value) } else { value }
+}
+
+fn is_utc_datetime_call(expr: &Expr) -> bool {
+    let Expr::Function(function) = peel_nested(expr) else { return false };
+    super::function_helpers::is_function_named(function, "datetime")
+        && super::shared_helpers::function_argument_exprs(&function.args).len() == 1
+}
+
+/// Moves the last argument out of a call, which the caller then discards.
+/// `None`, with `expr` untouched, when `expr` is not a call with one.
+fn take_last_argument(expr: &mut Expr) -> Option<Expr> {
+    let mut call = expr;
+    while let Expr::Nested(inner) = call {
+        call = inner;
+    }
+    let Expr::Function(function) = call else { return None };
+    let FunctionArguments::List(list) = &mut function.args else { return None };
+    if !matches!(list.args.last(), Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(_)))) {
+        return None;
+    }
+    match list.args.pop() {
+        Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(operand))) => Some(operand),
+        _ => None,
+    }
+}
+
+/// Whether `expr` is a timestamp one of SQLite's date functions computed,
+/// which is text without an offset.
+#[must_use]
+pub(crate) fn is_offset_less_timestamp_call(expr: &Expr) -> bool {
+    let Expr::Function(function) = peel_nested(expr) else { return false };
+    let named = |name| super::function_helpers::is_function_named(function, name);
+    if named("datetime") || named("date") {
+        return true;
+    }
+    let arguments = super::shared_helpers::function_argument_exprs(&function.args);
+    // Interval arithmetic trims the zeros `'subsec'` pads with.
+    if named("rtrim") {
+        return arguments.first().is_some_and(|trimmed| is_offset_less_timestamp_call(trimmed));
+    }
+    // Only a format that prints a date and a time of day, as date_trunc's do.
+    named("strftime")
+        && arguments
+            .first()
+            .and_then(|format| super::function_helpers::single_quoted_literal(format))
+            .is_some_and(|format| {
+                format != TIMESTAMPTZ_FORMAT && format.starts_with("%Y-") && format.contains(':')
+            })
+}
+
+fn peel_nested(mut expr: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expr {
+        expr = inner;
+    }
+    expr
+}
+
 fn binary(left: Expr, op: BinaryOperator, right: Expr) -> Expr {
     Expr::BinaryOp { left: Box::new(left), op, right: Box::new(right) }
 }
@@ -458,29 +566,4 @@ pub(crate) fn build_date_trunc_year_span_call(value_expr: Expr, span: i64, offse
         )],
         None,
     )
-}
-
-/// Normalise a TIMESTAMPTZ literal body so its UTC offset includes minutes.
-///
-/// SQLite date functions refuse `±HH` offsets and return NULL; `±HH:MM` is
-/// accepted. Appending `:00` is lossless — a PostgreSQL offset without minutes
-/// carries zero extra minutes.
-#[must_use]
-pub(crate) fn normalize_timestamptz_offset(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    // ±HH suffix: sign at position ≥ 19 (after "YYYY-MM-DD HH:MM:SS"), total
-    // length ≥ 22.
-    if len >= 22
-        && bytes[len - 2].is_ascii_digit()
-        && bytes[len - 1].is_ascii_digit()
-        && (bytes[len - 3] == b'+' || bytes[len - 3] == b'-')
-        && (len - 3) >= 19
-    {
-        let mut result = s.to_string();
-        result.push_str(":00");
-        result
-    } else {
-        s.to_string()
-    }
 }

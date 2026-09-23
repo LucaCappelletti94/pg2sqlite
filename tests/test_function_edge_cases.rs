@@ -311,22 +311,25 @@ fn jsonb_object_agg_is_refused() {
 }
 
 #[test]
-fn now_becomes_datetime_now() {
+fn now_becomes_canonical_now() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY);
                SELECT now();";
     let output = translate(sql).unwrap();
-    assert!(output.contains("datetime"), "NOW() should become datetime('now'), got: {output}");
+    assert!(
+        output.contains("strftime("),
+        "NOW() should become strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'), got: {output}"
+    );
     execute_all(sql);
 }
 
 #[test]
-fn schema_qualified_now_becomes_datetime_now() {
+fn schema_qualified_now_becomes_canonical_now() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY);
                SELECT pg_catalog.now();";
     let output = translate(sql).unwrap();
     assert!(
-        output.contains("datetime"),
-        "pg_catalog.now() should become datetime('now'), got: {output}"
+        output.contains("strftime("),
+        "pg_catalog.now() should become strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'), got: {output}"
     );
     assert!(
         !output.to_lowercase().contains("pg_catalog.now"),
