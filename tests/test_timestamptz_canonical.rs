@@ -16,12 +16,16 @@ fn rows(pg: &str) -> Vec<Option<String>> {
     run_translated_with(pg, &Pg2SqliteOptions::default())
 }
 
-fn is_canonical(text: &str) -> bool {
-    const SHAPE: &[u8] = b"dddd-dd-dd dd:dd:dd.dddddd+00:00";
-    text.len() == SHAPE.len()
-        && text.bytes().zip(SHAPE).all(|(byte, &expected)| {
+/// Whether `text` matches `shape`, where `d` stands for any digit.
+fn has_shape(text: &str, shape: &str) -> bool {
+    text.len() == shape.len()
+        && text.bytes().zip(shape.bytes()).all(|(byte, expected)| {
             if expected == b'd' { byte.is_ascii_digit() } else { byte == expected }
         })
+}
+
+fn is_canonical(text: &str) -> bool {
+    has_shape(text, "dddd-dd-dd dd:dd:dd.dddddd+00:00")
 }
 
 fn assert_all_canonical(rows: &[Option<String>]) {
@@ -75,15 +79,24 @@ fn now_written_by_insert_update_and_upsert_is_canonical() {
 
 #[test]
 fn a_computed_timestamptz_is_written_canonical() {
-    assert_eq!(
-        rows(
-            "CREATE TABLE t (id int PRIMARY KEY, at timestamptz);
-             INSERT INTO t (id, at) VALUES (1, '2026-09-23 13:42:07+00');
-             UPDATE t SET at = at + interval '1 day' WHERE id = 1;
-             SELECT at FROM t;",
-        ),
-        vec![Some("2026-09-24 13:42:07.000000+00:00".to_string())]
-    );
+    for (assignment, stored) in [
+        ("at + interval '1 day'", "2026-09-24 13:42:07.000000+00:00"),
+        ("date_trunc('day', at)", "2026-09-23 00:00:00.000000+00:00"),
+        // A zoneless timestamp read in UTC keeps its fraction.
+        ("naive AT TIME ZONE 'UTC'", "2026-09-23 13:42:07.500000+00:00"),
+    ] {
+        assert_eq!(
+            rows(&format!(
+                "CREATE TABLE t (id int PRIMARY KEY, at timestamptz, naive timestamp);
+                 INSERT INTO t (id, at, naive)
+                     VALUES (1, '2026-09-23 13:42:07+00', '2026-09-23 13:42:07.5');
+                 UPDATE t SET at = {assignment} WHERE id = 1;
+                 SELECT at FROM t;"
+            )),
+            vec![Some(stored.to_string())],
+            "{assignment}"
+        );
+    }
 }
 
 #[test]
@@ -99,6 +112,7 @@ fn a_timestamptz_literal_is_written_in_utc_with_microseconds() {
         // second. Measured on PostgreSQL 16.
         ("2026-09-23 13:42:07.9999995+00", "2026-09-23 13:42:08.000000+00:00"),
         ("2026-09-23 13:42:07.0000025+00", "2026-09-23 13:42:07.000002+00:00"),
+        ("2026-09-23 13:42:07.1234567+00", "2026-09-23 13:42:07.123457+00:00"),
         // Across midnight, the month and the year.
         ("2027-01-01 01:00:00+02", "2026-12-31 23:00:00.000000+00:00"),
         ("2024-02-28 22:00:00-03", "2024-02-29 01:00:00.000000+00:00"),
@@ -177,19 +191,23 @@ fn now_read_back_is_canonical_and_compares_with_stored_values() {
 }
 
 #[test]
-fn now_written_into_a_column_without_a_zone_keeps_its_offset_less_form() {
-    for (declared, expected_len) in [("timestamp", 19), ("date", 10)] {
+fn now_written_into_another_temporal_column_takes_that_column_form() {
+    for (declared, shape) in [
+        ("timestamp", "dddd-dd-dd dd:dd:dd"),
+        ("date", "dddd-dd-dd"),
+        ("time", "dd:dd:dd"),
+        ("time with time zone", "dd:dd:dd+00:00"),
+    ] {
         let written = rows(&format!(
             "CREATE TABLE t (id int PRIMARY KEY, at {declared} DEFAULT now());
              INSERT INTO t (id) VALUES (1);
-             INSERT INTO t (id, at) VALUES (2, now());
+             INSERT INTO t (id, at) VALUES (2, now()), (3, (now()));
              SELECT at FROM t;"
         ));
-        assert_eq!(written.len(), 2, "{declared}");
+        assert_eq!(written.len(), 3, "{declared}");
         for row in written {
             let text = row.expect("the value should not be NULL");
-            assert_eq!(text.len(), expected_len, "{declared}: {text}");
-            assert!(!text.contains('+'), "{declared}: {text}");
+            assert!(has_shape(&text, shape), "{declared}: {text} is not {shape}");
         }
     }
 }
@@ -236,15 +254,22 @@ fn a_default_forwarded_by_a_row_level_security_trigger_keeps_the_column_form() {
 }
 
 #[test]
-fn the_canonical_now_reverses_to_now() {
-    let translator = Pg2Sqlite::default();
-    let schema = translator.build_schema().expect("empty schema");
-    let reversed = translator
-        .reverse_sql(
-            "SELECT strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now');",
-            &schema,
-            &Pg2SqliteOptions::default(),
-        )
-        .expect("reverse");
-    assert_eq!(reversed.iter().map(ToString::to_string).collect::<Vec<_>>(), ["SELECT NOW()"]);
+fn the_canonical_form_reverses_to_now_or_a_timestamptz_cast() {
+    let translator = Pg2Sqlite::default().sql("CREATE TABLE t (at timestamptz);").expect("parse");
+    let schema = translator.build_schema().expect("schema");
+    for (sqlite, postgres) in [
+        ("SELECT strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')", "SELECT NOW()"),
+        (
+            "SELECT strftime('%Y-%m-%d %H:%M:%f000+00:00', at) FROM t",
+            "SELECT at::TIMESTAMPTZ FROM t",
+        ),
+    ] {
+        let reversed =
+            translator.reverse_sql(sqlite, &schema, &Pg2SqliteOptions::default()).expect("reverse");
+        assert_eq!(
+            reversed.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [postgres],
+            "{sqlite}"
+        );
+    }
 }

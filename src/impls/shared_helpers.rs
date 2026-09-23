@@ -1350,38 +1350,37 @@ pub(crate) fn normalize_temporal_literal_expr(
 /// text that column holds.
 ///
 /// A literal is normalised. A `timestamptz` column takes the canonical text of
-/// a timestamp SQLite's date functions computed, and a column without a zone
-/// takes its own form of a canonical `timestamptz`. Any other value, a column
-/// reference or a parameter among them, already holds the column's text.
+/// a timestamp SQLite's date functions computed, and every other temporal
+/// column takes its own form of a canonical `timestamptz`. Any other value, a
+/// column reference or a parameter among them, already holds the column's
+/// text.
 pub(crate) fn convert_temporal_value(
     kind: crate::impls::temporal_literals::TemporalLiteralKind,
     mut expr: Expr,
 ) -> Result<Expr, Error> {
     use crate::impls::{
         datetime_helpers::{canonical_timestamptz_value, take_canonical_timestamptz_operand},
+        function_helpers::simple_function_expr,
         temporal_literals::TemporalLiteralKind,
     };
     if crate::impls::function_helpers::single_quoted_literal(&expr).is_some() {
         return normalize_temporal_literal_expr(kind, expr);
     }
-    let zoneless_function = match kind {
-        TemporalLiteralKind::Timestamp { zoned: true } => {
-            return Ok(canonical_timestamptz_value(expr));
+    if kind == (TemporalLiteralKind::Timestamp { zoned: true }) {
+        return Ok(canonical_timestamptz_value(expr));
+    }
+    let Some(operand) = take_canonical_timestamptz_operand(&mut expr) else { return Ok(expr) };
+    Ok(match kind {
+        TemporalLiteralKind::Time { zoned: true } => {
+            crate::impls::datetime_helpers::build_strftime_call("%H:%M:%S+00:00", operand)
         }
-        TemporalLiteralKind::Timestamp { zoned: false } => "datetime",
-        TemporalLiteralKind::Date => "date",
-        TemporalLiteralKind::Time { zoned: false } => "time",
-        TemporalLiteralKind::Time { zoned: true } => return Ok(expr),
-    };
-    Ok(match take_canonical_timestamptz_operand(&mut expr) {
-        Some(operand) => {
-            crate::impls::function_helpers::simple_function_expr(
-                zoneless_function,
-                vec![operand],
-                None,
-            )
+        TemporalLiteralKind::Time { zoned: false } => {
+            simple_function_expr("time", vec![operand], None)
         }
-        None => expr,
+        TemporalLiteralKind::Date => simple_function_expr("date", vec![operand], None),
+        TemporalLiteralKind::Timestamp { .. } => {
+            simple_function_expr("datetime", vec![operand], None)
+        }
     })
 }
 
