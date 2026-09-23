@@ -1122,6 +1122,62 @@ impl ColumnRewrites {
             }
         }
     }
+
+    /// The value an assignment translates, with PostgreSQL's cast into a
+    /// temporal target column written out where [`temporal_assignment_cast`]
+    /// finds one, and `None` when the value translates as written.
+    pub(crate) fn assignment_cast(
+        &self,
+        target: &AssignmentTarget,
+        value: &Expr,
+        schema: &ParserDB,
+        context: Option<&crate::options::TranslationContext<'_>>,
+    ) -> Option<Expr> {
+        let AssignmentTarget::ColumnName(name) = target else { return None };
+        self.temporal_column_cast(&last_ident(name)?.value, value, schema, context?)
+    }
+
+    /// [`temporal_assignment_cast`] into `column`, when it is a temporal
+    /// column of this table.
+    pub(crate) fn temporal_column_cast(
+        &self,
+        column: &str,
+        value: &Expr,
+        schema: &ParserDB,
+        context: &crate::options::TranslationContext<'_>,
+    ) -> Option<Expr> {
+        let (_, data_type) =
+            self.literal_checked_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(column))?;
+        temporal_assignment_cast(value, data_type, schema, context)
+    }
+}
+
+/// `value` cast to the temporal `data_type` it is written into, when the
+/// value's zone differs from the column's.
+///
+/// PostgreSQL applies that cast on assignment, and on the replica it changes
+/// the text: a zoneless timestamp into a `timestamptz` column has to become the
+/// canonical text, and an instant into a zoneless column has to drop it.
+pub(crate) fn temporal_assignment_cast(
+    value: &Expr,
+    data_type: &DataType,
+    schema: &ParserDB,
+    context: &crate::options::TranslationContext<'_>,
+) -> Option<Expr> {
+    use crate::impls::{temporal_literals::TemporalLiteralKind, timezone::TimestampAwareness};
+    let kind = crate::impls::temporal_literals::temporal_literal_kind(data_type)?;
+    // A value whose zone cannot be read keeps the column's own conversion.
+    let awareness =
+        crate::impls::timezone::timestamp_awareness(value, schema, context).ok().flatten()?;
+    let zoned = kind == (TemporalLiteralKind::Timestamp { zoned: true });
+    (zoned == (awareness == TimestampAwareness::Naive)).then(|| {
+        Expr::Cast {
+            kind: CastKind::Cast,
+            expr: Box::new(value.clone()),
+            data_type: data_type.clone(),
+            format: None,
+        }
+    })
 }
 
 /// True when `expr` is a bound parameter (`$1`, `?1`, etc.).
@@ -1232,7 +1288,7 @@ pub(crate) fn convert_value_for_column_type(
         return convert_bit_literal(expr);
     }
     if let Some(kind) = crate::impls::temporal_literals::temporal_literal_kind(data_type) {
-        return convert_temporal_value(kind, expr);
+        return convert_temporal_value(kind, expr, None);
     }
     if matches!(data_type, DataType::Interval { .. }) {
         return normalize_interval_literal_expr(expr);
@@ -1351,35 +1407,52 @@ pub(crate) fn normalize_temporal_literal_expr(
 ///
 /// A literal is normalised. A `timestamptz` column takes the canonical text of
 /// a timestamp SQLite's date functions computed, and every other temporal
-/// column takes its own form of a canonical `timestamptz`. Any other value, a
-/// column reference or a parameter among them, already holds the column's
-/// text.
+/// column takes its own form of a canonical `timestamptz`. `source` is the
+/// value's own zone where it is known, and decides a value that is neither: a
+/// zoneless one is moved to the canonical text and an instant to the column's
+/// form. Anything else already holds the column's text.
 pub(crate) fn convert_temporal_value(
     kind: crate::impls::temporal_literals::TemporalLiteralKind,
     mut expr: Expr,
+    source: Option<crate::impls::timezone::TimestampAwareness>,
 ) -> Result<Expr, Error> {
     use crate::impls::{
-        datetime_helpers::{canonical_timestamptz_value, take_canonical_timestamptz_operand},
+        datetime_helpers::{
+            canonical_timestamptz_call, canonical_timestamptz_value, is_canonical_timestamptz_call,
+            take_canonical_timestamptz_operand,
+        },
         function_helpers::simple_function_expr,
         temporal_literals::TemporalLiteralKind,
+        timezone::TimestampAwareness,
     };
     if crate::impls::function_helpers::single_quoted_literal(&expr).is_some() {
         return normalize_temporal_literal_expr(kind, expr);
     }
     if kind == (TemporalLiteralKind::Timestamp { zoned: true }) {
-        return Ok(canonical_timestamptz_value(expr));
+        let value = canonical_timestamptz_value(expr);
+        return Ok(
+            if source == Some(TimestampAwareness::Naive) && !is_canonical_timestamptz_call(&value) {
+                canonical_timestamptz_call(value)
+            } else {
+                value
+            },
+        );
     }
-    let Some(operand) = take_canonical_timestamptz_operand(&mut expr) else { return Ok(expr) };
+    let instant = match take_canonical_timestamptz_operand(&mut expr) {
+        Some(operand) => operand,
+        None if source == Some(TimestampAwareness::Aware) => expr,
+        None => return Ok(expr),
+    };
     Ok(match kind {
         TemporalLiteralKind::Time { zoned: true } => {
-            crate::impls::datetime_helpers::build_strftime_call("%H:%M:%S+00:00", operand)
+            crate::impls::datetime_helpers::build_strftime_call("%H:%M:%S+00:00", instant)
         }
         TemporalLiteralKind::Time { zoned: false } => {
-            simple_function_expr("time", vec![operand], None)
+            simple_function_expr("time", vec![instant], None)
         }
-        TemporalLiteralKind::Date => simple_function_expr("date", vec![operand], None),
+        TemporalLiteralKind::Date => simple_function_expr("date", vec![instant], None),
         TemporalLiteralKind::Timestamp { .. } => {
-            simple_function_expr("datetime", vec![operand], None)
+            simple_function_expr("datetime", vec![instant], None)
         }
     })
 }
@@ -1679,7 +1752,10 @@ pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
         .assignments
         .iter()
         .map(|a| {
-            let value = D::translate_expr(&a.value, schema, options, emit)?;
+            let cast =
+                rewrites.assignment_cast(&a.target, &a.value, schema, D::forward_context(options));
+            let value =
+                D::translate_expr(cast.as_ref().unwrap_or(&a.value), schema, options, emit)?;
             Ok(Assignment {
                 target: a.target.clone(),
                 value: rewrites.finish_assignment(&a.target, value, D::config(options))?,
@@ -3029,7 +3105,9 @@ pub(crate) fn translate_update<D: TranslationDirection>(
                 return Err(default_outside_an_insert_error());
             }
             let source = substituted.as_ref().unwrap_or(&a.value);
-            let value = D::translate_expr(source, schema, options, emit)?;
+            let cast =
+                rewrites.assignment_cast(&a.target, source, schema, D::forward_context(options));
+            let value = D::translate_expr(cast.as_ref().unwrap_or(source), schema, options, emit)?;
             Ok(Assignment {
                 target: a.target.clone(),
                 value: rewrites.finish_assignment(&a.target, value, D::config(options))?,

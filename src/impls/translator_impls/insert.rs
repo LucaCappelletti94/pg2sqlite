@@ -139,6 +139,7 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         reject_explicit_identity_values(self, schema)?;
         let mut prepared = self.clone();
         substitute_default_values(&mut prepared, schema, options, emit)?;
+        cast_temporal_insert_values(&mut prepared, schema, options)?;
 
         let source = prepared
             .source
@@ -649,6 +650,36 @@ fn unknown_default_column(table: &str, column_name: &str) -> crate::errors::Erro
         "DEFAULT was written for {table}.{column_name}, which the translation schema does not \
          declare, so its default cannot be resolved."
     ))
+}
+
+/// Writes out PostgreSQL's assignment cast wherever a source value's zone
+/// differs from its temporal target column's.
+///
+/// A projection names the columns of its own `FROM`, so its zone is read in
+/// that scope, which borrows a copy of the source because the walk rewrites it.
+fn cast_temporal_insert_values(
+    insert: &mut Insert,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), crate::errors::Error> {
+    let TableObject::TableName(table_name) = &insert.table else { return Ok(()) };
+    // The later passes own the refusals for a target that does not resolve.
+    let Ok(Some(table)) = resolve_translation_table(schema, table_name) else { return Ok(()) };
+    let rewrites = ColumnRewrites::of_table(table, schema, options);
+    let Ok(column_names) = insert_column_names(insert, table, schema) else { return Ok(()) };
+    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
+    let scope_query = (!matches!(source.body.as_ref(), SetExpr::Values(_))).then(|| source.clone());
+    let substitute = scope_query.as_ref().and_then(crate::impls::shared_helpers::scope_query_for);
+    let scope = scope_query.as_ref().and_then(|query| {
+        sql_traits::structs::ColumnScope::from_query(substitute.as_ref().unwrap_or(query), schema)
+            .ok()
+    });
+    let scoped = scope.as_ref().map(|scope| options.with_scope(scope));
+    let context = scoped.as_ref().unwrap_or(options);
+    for_each_insert_position(source.body.as_mut(), &column_names, &mut |index, expr| {
+        let Some(column) = column_names.get(index) else { return Ok(expr) };
+        Ok(rewrites.temporal_column_cast(column, &expr, schema, context).unwrap_or(expr))
+    })
 }
 
 /// Applies every column-type conversion at every INSERT source position.

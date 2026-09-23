@@ -157,6 +157,34 @@ fn a_timestamptz_column_copied_into_another_keeps_its_microseconds() {
 }
 
 #[test]
+fn a_value_crossing_between_zoned_and_zoneless_columns_takes_the_target_form() {
+    for (write, stored) in [
+        ("INSERT INTO t (id, at) SELECT 2, naive FROM t", "2026-09-23 13:42:07.500000+00:00"),
+        (
+            "INSERT INTO t (id, at) SELECT 2, naive::timestamptz FROM t",
+            "2026-09-23 13:42:07.500000+00:00",
+        ),
+        ("UPDATE t SET at = naive", "2026-09-23 13:42:07.500000+00:00"),
+        (
+            "INSERT INTO t (id, at) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET at = naive",
+            "2026-09-23 13:42:07.500000+00:00",
+        ),
+        ("UPDATE t SET naive = at", "2026-09-23 13:42:07"),
+        ("INSERT INTO t (id, naive) SELECT 2, at FROM t", "2026-09-23 13:42:07"),
+    ] {
+        let column = if stored.ends_with("+00:00") { "at" } else { "naive" };
+        let written = rows(&format!(
+            "CREATE TABLE t (id int PRIMARY KEY, at timestamptz, naive timestamp);
+             INSERT INTO t (id, at, naive)
+                 VALUES (1, '2026-09-23 13:42:07+00', '2026-09-23 13:42:07.5');
+             {write};
+             SELECT {column} FROM t ORDER BY id DESC LIMIT 1;"
+        ));
+        assert_eq!(written, vec![Some(stored.to_string())], "{write}");
+    }
+}
+
+#[test]
 fn a_trigger_assignment_writes_canonical_text() {
     assert_all_canonical(&rows(
         "CREATE TABLE brands (id int PRIMARY KEY, name text, edited_at timestamptz);
@@ -272,4 +300,12 @@ fn the_canonical_form_reverses_to_now_or_a_timestamptz_cast() {
             "{sqlite}"
         );
     }
+    // A trailing modifier shifts the instant, so it cannot collapse to NOW().
+    translator
+        .reverse_sql(
+            "SELECT strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now', '+1 day')",
+            &schema,
+            &Pg2SqliteOptions::default(),
+        )
+        .expect_err("the modifier has no PostgreSQL form here");
 }

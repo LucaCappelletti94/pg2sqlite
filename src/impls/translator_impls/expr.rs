@@ -3521,9 +3521,14 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     if let Some(kind) =
                         crate::impls::temporal_literals::temporal_literal_kind(data_type)
                     {
+                        let source =
+                            crate::impls::timezone::timestamp_awareness(expr, schema, options)
+                                .ok()
+                                .flatten();
                         let converted = crate::impls::shared_helpers::convert_temporal_value(
                             kind,
                             expr.translate_with_warnings(schema, options, emit)?,
+                            source,
                         )?;
                         if matches!(converted, Expr::Function(_)) {
                             return Ok(converted);
