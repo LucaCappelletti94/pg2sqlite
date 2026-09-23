@@ -17,13 +17,12 @@ use alloc::{boxed::Box, format, string::ToString, vec};
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, DateTimeField, Expr, ExtractSyntax, Function, Value,
-    ValueWithSpan,
+    BinaryOperator, CastKind, DataType, DateTimeField, Expr, ExtractSyntax, Value, ValueWithSpan,
 };
 
 use super::{
     datetime_helpers::build_subsecond_unixepoch_call,
-    function_helpers::{simple_function_expr, string_literal},
+    function_helpers::{is_function_named, simple_function_expr, string_literal},
     shared_helpers::{declared_in_scope, function_argument_exprs, is_integral_expression},
 };
 use crate::{errors::Error, prelude::ReverseTranslator, traits::translator::TranslatorWithContext};
@@ -404,7 +403,7 @@ pub(crate) fn reverse_temporal_arithmetic(
     }
 
     if let Expr::Function(function) = expr
-        && named(function, "date")
+        && is_function_named(function, "date")
         && let [
             Expr::BinaryOp { left, op: op @ (BinaryOperator::Plus | BinaryOperator::Minus), right },
         ] = function_argument_exprs(&function.args).as_slice()
@@ -434,7 +433,7 @@ pub(crate) fn reverse_temporal_arithmetic(
 /// The sole argument of `julianday(x)`.
 fn julianday_argument(expr: &Expr) -> Option<&Expr> {
     let Expr::Function(function) = expr else { return None };
-    if !named(function, "julianday") {
+    if !is_function_named(function, "julianday") {
         return None;
     }
     match function_argument_exprs(&function.args).as_slice() {
@@ -446,7 +445,7 @@ fn julianday_argument(expr: &Expr) -> Option<&Expr> {
 /// The value argument of `unixepoch(x, 'subsec')`.
 fn subsec_epoch_argument(expr: &Expr) -> Option<&Expr> {
     let Expr::Function(function) = expr else { return None };
-    if !named(function, "unixepoch") {
+    if !is_function_named(function, "unixepoch") {
         return None;
     }
     match function_argument_exprs(&function.args).as_slice() {
@@ -465,7 +464,7 @@ fn trimmed_subsecond_datetime_argument(expr: &Expr) -> Option<&Expr> {
     let inner = rtrim_argument(expr, ".")?;
     let rendered = rtrim_argument(inner, "0")?;
     let Expr::Function(function) = rendered else { return None };
-    if !named(function, "datetime") {
+    if !is_function_named(function, "datetime") {
         return None;
     }
     match function_argument_exprs(&function.args).as_slice() {
@@ -481,7 +480,7 @@ fn trimmed_subsecond_datetime_argument(expr: &Expr) -> Option<&Expr> {
 /// The first argument of `rtrim(x, <cut>)`.
 fn rtrim_argument<'a>(expr: &'a Expr, cut: &str) -> Option<&'a Expr> {
     let Expr::Function(function) = expr else { return None };
-    if !named(function, "rtrim") {
+    if !is_function_named(function, "rtrim") {
         return None;
     }
     match function_argument_exprs(&function.args).as_slice() {
@@ -505,11 +504,6 @@ fn reversed_to_timestamp(
         vec![ReverseTranslator::reverse_translate(epoch, schema, options)?],
         None,
     ))
-}
-
-fn named(function: &Function, name: &str) -> bool {
-    crate::impls::object_name::last_ident(&function.name)
-        .is_some_and(|ident| ident.value.eq_ignore_ascii_case(name))
 }
 
 fn reversed_binary_op(

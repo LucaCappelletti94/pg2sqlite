@@ -43,6 +43,11 @@ pub(crate) enum TemporalLiteralKind {
     },
 }
 
+impl TemporalLiteralKind {
+    /// `timestamp with time zone`, whose replica text is canonical.
+    pub(crate) const TIMESTAMPTZ: Self = Self::Timestamp { zoned: true };
+}
+
 /// The kind of temporal literal `data_type` takes, or `None` for every other
 /// type.
 #[must_use]

@@ -2158,11 +2158,7 @@ fn convert_beside_column_expr(
         // A comparison widens the zoneless column to an instant rather than narrowing the instant.
         Some(dt)
             if crate::impls::temporal_literals::temporal_literal_kind(&dt).is_some_and(
-                |kind| {
-                    kind != crate::impls::temporal_literals::TemporalLiteralKind::Timestamp {
-                        zoned: true,
-                    }
-                },
+                |kind| kind != crate::impls::temporal_literals::TemporalLiteralKind::TIMESTAMPTZ,
             ) && crate::impls::datetime_helpers::is_canonical_timestamptz_call(&value) =>
         {
             Ok(value)
@@ -3770,9 +3766,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     {
                         let canonical =
                             crate::impls::temporal_literals::normalize_temporal_literal(
-                                crate::impls::temporal_literals::TemporalLiteralKind::Timestamp {
-                                    zoned: true,
-                                },
+                                crate::impls::temporal_literals::TemporalLiteralKind::TIMESTAMPTZ,
                                 s,
                             )?;
                         return Ok(Expr::Value(ValueWithSpan {

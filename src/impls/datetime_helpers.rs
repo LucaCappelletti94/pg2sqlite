@@ -358,7 +358,7 @@ pub(crate) fn canonical_timestamptz_call(value_expr: Expr) -> Expr {
 #[must_use]
 pub(crate) fn is_canonical_timestamptz_call(expr: &Expr) -> bool {
     let Expr::Function(function) = peel_nested(expr) else { return false };
-    function.name.to_string().eq_ignore_ascii_case("strftime")
+    super::function_helpers::is_function_named(function, "strftime")
         && matches!(
             super::shared_helpers::function_argument_exprs(&function.args).as_slice(),
             [format, _] if super::function_helpers::single_quoted_literal(format)
@@ -395,7 +395,7 @@ pub(crate) fn canonical_timestamptz_value(mut value: Expr) -> Expr {
 
 fn is_utc_datetime_call(expr: &Expr) -> bool {
     let Expr::Function(function) = peel_nested(expr) else { return false };
-    function.name.to_string().eq_ignore_ascii_case("datetime")
+    super::function_helpers::is_function_named(function, "datetime")
         && super::shared_helpers::function_argument_exprs(&function.args).len() == 1
 }
 
@@ -422,23 +422,23 @@ fn take_last_argument(expr: &mut Expr) -> Option<Expr> {
 #[must_use]
 pub(crate) fn is_offset_less_timestamp_call(expr: &Expr) -> bool {
     let Expr::Function(function) = peel_nested(expr) else { return false };
-    let name = function.name.to_string();
-    if name.eq_ignore_ascii_case("datetime") || name.eq_ignore_ascii_case("date") {
+    let named = |name| super::function_helpers::is_function_named(function, name);
+    if named("datetime") || named("date") {
         return true;
     }
     let arguments = super::shared_helpers::function_argument_exprs(&function.args);
     // Interval arithmetic trims the zeros `'subsec'` pads with.
-    if name.eq_ignore_ascii_case("rtrim") {
+    if named("rtrim") {
         return arguments.first().is_some_and(|trimmed| is_offset_less_timestamp_call(trimmed));
     }
-    if !name.eq_ignore_ascii_case("strftime") {
-        return false;
-    }
-    // Only a format that prints a whole timestamp, as date_trunc's do.
-    arguments
-        .first()
-        .and_then(|format| super::function_helpers::single_quoted_literal(format))
-        .is_some_and(|format| format != TIMESTAMPTZ_FORMAT && format.starts_with("%Y-"))
+    // Only a format that prints a date and a time of day, as date_trunc's do.
+    named("strftime")
+        && arguments
+            .first()
+            .and_then(|format| super::function_helpers::single_quoted_literal(format))
+            .is_some_and(|format| {
+                format != TIMESTAMPTZ_FORMAT && format.starts_with("%Y-") && format.contains(':')
+            })
 }
 
 fn peel_nested(mut expr: &Expr) -> &Expr {

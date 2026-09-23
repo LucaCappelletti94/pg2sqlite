@@ -1169,7 +1169,7 @@ pub(crate) fn temporal_assignment_cast(
     // A value whose zone cannot be read keeps the column's own conversion.
     let awareness =
         crate::impls::timezone::timestamp_awareness(value, schema, context).ok().flatten()?;
-    let zoned = kind == (TemporalLiteralKind::Timestamp { zoned: true });
+    let zoned = kind == TemporalLiteralKind::TIMESTAMPTZ;
     (zoned == (awareness == TimestampAwareness::Naive)).then(|| {
         Expr::Cast {
             kind: CastKind::Cast,
@@ -1428,7 +1428,7 @@ pub(crate) fn convert_temporal_value(
     if crate::impls::function_helpers::single_quoted_literal(&expr).is_some() {
         return normalize_temporal_literal_expr(kind, expr);
     }
-    if kind == (TemporalLiteralKind::Timestamp { zoned: true }) {
+    if kind == TemporalLiteralKind::TIMESTAMPTZ {
         let value = canonical_timestamptz_value(expr);
         return Ok(
             if source == Some(TimestampAwareness::Naive) && !is_canonical_timestamptz_call(&value) {
