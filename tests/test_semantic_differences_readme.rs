@@ -97,22 +97,22 @@ fn the_same_ordering_reaches_order_by() {
 
 // --- now() ------------------------------------------------------------------
 
-#[test]
-fn now_becomes_datetime_now() {
-    assert!(translate("SELECT now();").contains("datetime('now')"));
-}
-
-/// Whole seconds and text, which is the part of the claim about the shape of
-/// the answer rather than its value.
-#[test]
-fn datetime_now_answers_whole_seconds_as_text() {
-    assert_eq!(sqlite_answers("typeof(datetime('now'))"), Some("text".to_string()));
-    let answer = sqlite_answers("datetime('now')").expect("a value");
-    assert!(!answer.contains('.'), "no sub-second part: {answer}");
-    assert_eq!(answer.len(), "2026-08-08 15:08:14".len(), "{answer}");
+/// What SQLite answers for the translation of the PostgreSQL `expression`.
+fn translated_answer(expression: &str) -> String {
+    let translated = translate(&format!("SELECT {expression};"));
+    let projection = translated.strip_prefix("SELECT ").expect("a projection");
+    sqlite_answers(projection).expect("a value")
 }
 
 #[test]
-fn current_timestamp_is_passed_through() {
-    assert!(translate("SELECT CURRENT_TIMESTAMP;").contains("CURRENT_TIMESTAMP"));
+fn now_and_current_timestamp_answer_utc_text_with_microseconds() {
+    for expression in ["now()", "CURRENT_TIMESTAMP"] {
+        let answer = translated_answer(expression);
+        assert!(answer.ends_with("+00:00"), "{expression}: {answer}");
+        assert_eq!(
+            answer.len(),
+            "2026-08-08 15:08:14.123000+00:00".len(),
+            "{expression}: {answer}"
+        );
+    }
 }

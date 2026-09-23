@@ -233,7 +233,7 @@ impl crate::traits::translator::TranslatorWithContext for ColumnOptionDef {
 /// operator is a syntax error, so `DEFAULT json_array()` and
 /// `DEFAULT CAST(x AS TEXT)` have to become `DEFAULT (json_array())` and
 /// `DEFAULT (CAST(x AS TEXT))`.
-fn parenthesize_default(expr: Expr) -> Expr {
+pub(crate) fn parenthesize_default(expr: Expr) -> Expr {
     let accepted_bare = match &expr {
         // A literal, an already parenthesized expression, or a bare word.
         Expr::Value(_) | Expr::Nested(_) | Expr::Identifier(_) => true,

@@ -59,9 +59,9 @@ pub(crate) fn temporal_literal_kind(data_type: &DataType) -> Option<TemporalLite
 /// The text PostgreSQL prints for `text` read as `kind`, or the refusal
 /// PostgreSQL answers for it.
 ///
-/// A timestamp with no time part takes midnight, which is what PostgreSQL
-/// prints for `'2024-03-05'::timestamp`. A fractional second is kept as
-/// written, since PostgreSQL prints the digits it was given.
+/// A timestamp with no time part takes midnight. A `timestamp with time zone`
+/// becomes the replica's one text per instant, UTC with microseconds and a
+/// `+00:00` offset, so that equal instants compare as equal text.
 pub(crate) fn normalize_temporal_literal(
     kind: TemporalLiteralKind,
     text: &str,
@@ -75,27 +75,111 @@ pub(crate) fn normalize_temporal_literal(
         }
         TemporalLiteralKind::Time { zoned } => {
             let (body, zone) = split_time_zone(kind, trimmed, zoned)?;
-            Ok(format!("{}{zone}", parse_time(kind, body, trimmed)?))
+            let zone = zone.map_or_else(String::new, |zone| zone.render());
+            Ok(format!("{}{zone}", parse_time(kind, body, trimmed)?.render()))
         }
         TemporalLiteralKind::Timestamp { zoned } => {
             let (body, zone) = split_time_zone(kind, trimmed, zoned)?;
             let (date, time) = split_timestamp(body);
-            let (mut year, mut month, mut day) = parse_date(kind, date, trimmed)?;
-            let mut time = match time {
+            let (year, month, day) = parse_date(kind, date, trimmed)?;
+            let clock = match time {
                 Some(time) => parse_time(kind, time, trimmed)?,
-                None => "00:00:00".to_string(),
+                None => Clock::MIDNIGHT,
             };
-            // PostgreSQL takes 24:00:00 on a timestamp as the next day's
-            // midnight: `'2024-03-05 24:00:00'` answers `2024-03-06
-            // 00:00:00`. A `time` column keeps the hour, which is why the
-            // roll is here rather than in `parse_time`.
-            if time.starts_with("24:") {
-                time = "00:00:00".to_string();
-                (year, month, day) = next_day(year, month, day);
+            if zoned {
+                // No offset reads as UTC, the zone the replica's own clock
+                // answers in.
+                let offset = zone.map_or(0, |zone| zone.seconds());
+                return canonical_instant((year, month, day), &clock, offset, trimmed);
             }
-            Ok(format!("{year:04}-{month:02}-{day:02} {time}{zone}"))
+            // PostgreSQL reads 24:00:00 on a timestamp as the next day's
+            // midnight.
+            if clock.hour == 24 {
+                let (year, month, day) = next_day(year, month, day);
+                return Ok(format!("{year:04}-{month:02}-{day:02} {}", Clock::MIDNIGHT.render()));
+            }
+            Ok(format!("{year:04}-{month:02}-{day:02} {}", clock.render()))
         }
     }
+}
+
+/// The canonical `YYYY-MM-DD HH:MM:SS.ffffff+00:00` text of an instant.
+fn canonical_instant(
+    (year, month, day): (u32, u32, u32),
+    clock: &Clock<'_>,
+    offset_seconds: i64,
+    text: &str,
+) -> Result<String, Error> {
+    const MICROS_PER_SECOND: i64 = 1_000_000;
+    const MICROS_PER_DAY: i64 = 86_400 * MICROS_PER_SECOND;
+    let seconds =
+        i64::from(clock.hour) * 3600 + i64::from(clock.minute) * 60 + i64::from(clock.second)
+            - offset_seconds;
+    let micros = days_from_civil(year, month, day) * MICROS_PER_DAY
+        + seconds * MICROS_PER_SECOND
+        + clock.fraction.map_or(0, rounded_microseconds);
+    let (year, month, day) = civil_from_days(micros.div_euclid(MICROS_PER_DAY));
+    if !(1..=9999).contains(&year) {
+        return Err(Error::forward_refusal(format!(
+            "\"{text}\" falls outside the years 1 to 9999 once it is moved to UTC, and the \
+             replica holds a timestamp with time zone as UTC text with a four-digit year."
+        )));
+    }
+    let micros_of_day = micros.rem_euclid(MICROS_PER_DAY);
+    let second_of_day = micros_of_day / MICROS_PER_SECOND;
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}.{:06}+00:00",
+        second_of_day / 3600,
+        second_of_day / 60 % 60,
+        second_of_day % 60,
+        micros_of_day % MICROS_PER_SECOND
+    ))
+}
+
+/// The fraction of a second in microseconds, rounded as PostgreSQL rounds it,
+/// which is `rint(strtod(fraction) * 1e6)`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "the scaled fraction lies in [0, 1e6], exact in both f64 and i64"
+)]
+fn rounded_microseconds(fraction: &str) -> i64 {
+    let scaled = format!("0.{fraction}").parse::<f64>().unwrap_or_default() * 1e6;
+    debug_assert!((0.0..=1e6).contains(&scaled), "{fraction} is not a fraction of a second");
+    let whole = scaled as i64; // truncation toward zero, the rounding follows
+    match (scaled - whole as f64).partial_cmp(&0.5) {
+        Some(core::cmp::Ordering::Greater) => whole + 1,
+        Some(core::cmp::Ordering::Equal) => whole + (whole & 1),
+        _ => whole,
+    }
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date.
+fn days_from_civil(year: u32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_from_march = (i64::from(month) + 9) % 12;
+    let day_of_year = (153 * month_from_march + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The proleptic Gregorian date of a day count since 1970-01-01, with a
+/// signed year so that a date before year 1 can be refused.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_from_march = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
+    let month = if month_from_march < 10 { month_from_march + 3 } else { month_from_march - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    debug_assert!((1..=31).contains(&day) && (1..=12).contains(&month), "civil arithmetic");
+    (year, u32::try_from(month).unwrap_or(1), u32::try_from(day).unwrap_or(1))
 }
 
 /// The name PostgreSQL gives the type in its own error messages.
@@ -191,17 +275,39 @@ fn reject_non_iso_input(kind: TemporalLiteralKind, text: &str) -> Result<(), Err
     Ok(())
 }
 
-/// Splits a UTC offset off the end, answering the normalised offset text.
+/// A UTC offset as written, kept apart from its text so a timestamp can be
+/// moved to UTC and a time can print it as `±HH:MM`.
+#[derive(Clone, Copy)]
+struct UtcOffset {
+    negative: bool,
+    hours: u32,
+    minutes: u32,
+}
+
+impl UtcOffset {
+    const UTC: Self = Self { negative: false, hours: 0, minutes: 0 };
+
+    /// `±HH:MM`, the only offset form SQLite's date functions read.
+    fn render(self) -> String {
+        let sign = if self.negative { '-' } else { '+' };
+        format!("{sign}{:02}:{:02}", self.hours, self.minutes)
+    }
+
+    fn seconds(self) -> i64 {
+        let magnitude = i64::from(self.hours) * 3600 + i64::from(self.minutes) * 60;
+        if self.negative { -magnitude } else { magnitude }
+    }
+}
+
+/// Splits a UTC offset off the end.
 ///
-/// `Z` is `+00:00`, and an offset written as hours only takes `:00` minutes,
-/// which SQLite's date functions need: they answer `NULL` for `±HH`. The
-/// search starts after the time part, since a date's own separators are
+/// The search starts after the time part, since a date's own separators are
 /// hyphens and `'2024-01-01'` would otherwise read `-01` as an offset.
 fn split_time_zone(
     kind: TemporalLiteralKind,
     text: &str,
     zoned: bool,
-) -> Result<(&str, String), Error> {
+) -> Result<(&str, Option<UtcOffset>), Error> {
     let time_start = match kind {
         TemporalLiteralKind::Time { .. } => Some(0),
         _ => text.find([' ', 'T', 't']).map(|index| index + 1),
@@ -209,15 +315,15 @@ fn split_time_zone(
     let offset_at =
         time_start.and_then(|start| text[start..].find(['+', '-']).map(|index| index + start));
     let (body, zone) = match offset_at {
-        Some(index) => (&text[..index], Some(text[index..].to_string())),
+        Some(index) => (&text[..index], Some(&text[index..])),
         None => {
             match text.strip_suffix(['Z', 'z']) {
-                Some(body) => (body, Some("+00:00".to_string())),
+                Some(body) => (body, Some("Z")),
                 None => (text, None),
             }
         }
     };
-    let Some(zone) = zone else { return Ok((text, String::new())) };
+    let Some(zone) = zone else { return Ok((text, None)) };
     if !zoned {
         return Err(unreadable(
             kind,
@@ -225,15 +331,12 @@ fn split_time_zone(
             "this column has no time zone, so an offset in the value would be dropped.",
         ));
     }
-    Ok((body.trim_end(), normalize_offset(kind, &zone, text)?))
+    let offset = if zone == "Z" { UtcOffset::UTC } else { parse_offset(kind, zone, text)? };
+    Ok((body.trim_end(), Some(offset)))
 }
 
-/// Brings a UTC offset to `±HH:MM`, the only form SQLite's date functions
-/// read.
-///
-/// `zone` carries its sign as its first character, which is how the split
-/// found it.
-fn normalize_offset(kind: TemporalLiteralKind, zone: &str, text: &str) -> Result<String, Error> {
+/// Reads `±HH[:MM]`, whose sign is its first character.
+fn parse_offset(kind: TemporalLiteralKind, zone: &str, text: &str) -> Result<UtcOffset, Error> {
     let (sign, digits) = zone.split_at(1);
     let mut parts = digits.split(':');
     let hours: u32 = parse_component(kind, parts.next().unwrap_or_default(), text)?;
@@ -247,7 +350,7 @@ fn normalize_offset(kind: TemporalLiteralKind, zone: &str, text: &str) -> Result
     if hours > 15 || minutes > 59 {
         return Err(out_of_range(text));
     }
-    Ok(format!("{sign}{hours:02}:{minutes:02}"))
+    Ok(UtcOffset { negative: sign == "-", hours, minutes })
 }
 
 /// Splits a timestamp into its date and, when present, its time.
@@ -280,9 +383,33 @@ fn parse_date(kind: TemporalLiteralKind, date: &str, text: &str) -> Result<(u32,
     Ok((year, month, day))
 }
 
-/// Parses `HH:MM[:SS[.frac]]` with unpadded components allowed, answering the
-/// text PostgreSQL prints.
-fn parse_time(kind: TemporalLiteralKind, time: &str, text: &str) -> Result<String, Error> {
+/// A validated time of day, with the fraction of a second as written.
+struct Clock<'a> {
+    hour: u32,
+    minute: u32,
+    second: u32,
+    fraction: Option<&'a str>,
+}
+
+impl Clock<'_> {
+    const MIDNIGHT: Clock<'static> = Clock { hour: 0, minute: 0, second: 0, fraction: None };
+
+    /// The text PostgreSQL prints, which keeps the fraction's digits as given.
+    fn render(&self) -> String {
+        let Self { hour, minute, second, fraction } = self;
+        match fraction {
+            Some(fraction) => format!("{hour:02}:{minute:02}:{second:02}.{fraction}"),
+            None => format!("{hour:02}:{minute:02}:{second:02}"),
+        }
+    }
+}
+
+/// Parses `HH:MM[:SS[.frac]]` with unpadded components allowed.
+fn parse_time<'a>(
+    kind: TemporalLiteralKind,
+    time: &'a str,
+    text: &str,
+) -> Result<Clock<'a>, Error> {
     let mut parts = time.split(':');
     let hour: u32 = parse_component(kind, parts.next().unwrap_or_default(), text)?;
     let minute: u32 = parse_component(kind, parts.next().ok_or_else(|| shape(kind, text))?, text)?;
@@ -318,10 +445,7 @@ fn parse_time(kind: TemporalLiteralKind, time: &str, text: &str) -> Result<Strin
     if hour > 24 || (hour == 24 && (minute > 0 || second > 0 || fraction.is_some())) {
         return Err(out_of_range(text));
     }
-    Ok(match fraction {
-        Some(fraction) => format!("{hour:02}:{minute:02}:{second:02}.{fraction}"),
-        None => format!("{hour:02}:{minute:02}:{second:02}"),
-    })
+    Ok(Clock { hour, minute, second, fraction })
 }
 
 /// One numeric component of a temporal literal.

@@ -187,15 +187,15 @@ fn fk_to_non_rls_table_unchanged() {
 }
 
 /// PostgreSQL's `now()` function returns the current timestamp.
-/// SQLite's equivalent is `datetime('now')`.
+/// SQLite's equivalent is `strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')`.
 /// A column with `DEFAULT now()` must survive translation and work at runtime.
 #[test]
-fn default_now_translates_to_datetime_now() {
+fn default_now_translates_to_canonical_now() {
     let output =
         translate("CREATE TABLE now_test (id INTEGER PRIMARY KEY, created_at TEXT DEFAULT now());");
     assert!(
-        output.contains("datetime") || output.contains("DATETIME"),
-        "now() must become datetime('now'), got: {output}"
+        output.contains("strftime("),
+        "now() must become strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'), got: {output}"
     );
     assert!(
         !output.to_lowercase().contains("now()"),
@@ -225,7 +225,10 @@ fn default_now_translates_to_datetime_now() {
     }
     let rows = diesel::sql_query("SELECT created_at FROM now_test").load::<Row>(&mut conn).unwrap();
     assert_eq!(rows.len(), 1, "Should have one row");
-    assert!(rows[0].created_at.is_some(), "DEFAULT datetime('now') should set a timestamp");
+    assert!(
+        rows[0].created_at.is_some(),
+        "DEFAULT strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') should set a timestamp"
+    );
 }
 
 /// SQLite's `DEFAULT` clause takes a literal, a signed number, a bare keyword,
@@ -247,7 +250,7 @@ fn every_default_shape_produces_runnable_ddl() {
             parenthesized INT DEFAULT (42),
             arithmetic INT DEFAULT 1 + 2,
             casted TEXT DEFAULT 'hello'::text,
-            keyword TEXT DEFAULT CURRENT_TIMESTAMP,
+            keyword DATE DEFAULT CURRENT_DATE,
             call TEXT DEFAULT now(),
             boolean BOOLEAN DEFAULT true
          );",
@@ -267,8 +270,11 @@ fn every_default_shape_produces_runnable_ddl() {
     assert!(ddl.contains("signed INTEGER DEFAULT -1"), "{ddl}");
     assert!(ddl.contains("arithmetic INTEGER DEFAULT (1 + 2)"), "{ddl}");
     assert!(ddl.contains("casted TEXT DEFAULT (CAST('hello' AS TEXT))"), "{ddl}");
-    assert!(ddl.contains("keyword TEXT DEFAULT CURRENT_TIMESTAMP"), "{ddl}");
-    assert!(ddl.contains("call TEXT DEFAULT (datetime('now'))"), "{ddl}");
+    assert!(ddl.contains("keyword TEXT DEFAULT CURRENT_DATE"), "{ddl}");
+    assert!(
+        ddl.contains("call TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'))"),
+        "{ddl}"
+    );
 }
 
 #[test]

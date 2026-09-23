@@ -620,11 +620,22 @@ fn translate_catalog_function(
         FunctionTranslation::Rename(options.get_uuid_function_name().to_string())
     }
     "uuidv7" => uuid_v7_translation(options),
-    // NOW() -> datetime('now')
-    "now" => FunctionTranslation::WithArgs {
-        name: "datetime".to_string(),
-        args: vec![string_literal("now")],
-    },
+    "now" | "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
+        canonical_now_translation()
+    }
+    "current_timestamp" => {
+        match args {
+            FunctionArguments::List(list) if !list.args.is_empty() => {
+                FunctionTranslation::Unsupported(
+                    "CURRENT_TIMESTAMP with a precision argument rounds the instant to that many \
+                     digits, and SQLite's clock has no such rounding. Write CURRENT_TIMESTAMP \
+                     without a precision."
+                        .to_string(),
+                )
+            }
+            _ => canonical_now_translation(),
+        }
+    }
     "ts_rank" | "ts_rank_cd" => FunctionTranslation::Unsupported(
         "ts_rank/ts_rank_cd are not directly translatable to SQLite. \
          FTS5 provides bm25() for ranking, but it requires a different query structure. \
@@ -831,13 +842,6 @@ fn translate_catalog_function(
             ),
         }
     }
-    // transaction_timestamp / statement_timestamp / clock_timestamp → datetime('now')
-    "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
-        FunctionTranslation::WithArgs {
-            name: "datetime".to_string(),
-            args: vec![string_literal("now")],
-        }
-    }
     // Sequence functions: no SQLite equivalent
     "currval" | "lastval" | "setval" => FunctionTranslation::Unsupported(
         "currval/lastval/setval are PostgreSQL sequence functions and are not available \
@@ -972,7 +976,7 @@ fn translate_catalog_function(
         ))
     }
     "timeofday" => FunctionTranslation::Unsupported(
-        "timeofday() is not available in SQLite. Use datetime('now') instead.".to_string(),
+        "timeofday() is not available in SQLite. Use now() instead.".to_string(),
     ),
     "json_populate_record" | "jsonb_populate_record" => {
         FunctionTranslation::Unsupported(format!(
@@ -1064,6 +1068,18 @@ fn classify_statistical_aggregate(name: &str, options: &Pg2SqliteOptions) -> Fun
          or rusqlite's create_window_function, and declare it with \
          with_user_defined_functions([\"{name}\"])."
     ))
+}
+
+/// What `now()` and its aliases become: the current instant as the replica's
+/// `timestamptz` text.
+fn canonical_now_translation() -> FunctionTranslation {
+    FunctionTranslation::WithArgs {
+        name: "strftime".to_string(),
+        args: vec![
+            string_literal(crate::impls::datetime_helpers::TIMESTAMPTZ_FORMAT),
+            string_literal("now"),
+        ],
+    }
 }
 
 /// What `uuidv7()` becomes.

@@ -133,15 +133,16 @@ fn string_agg_with_order_by_preserves_order_clause() {
 }
 
 /// string_agg(NOW()::text, ',') — the NOW() inside the aggregate arg must be
-/// translated to datetime('now') in the output, not left as NOW().
+/// translated to strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') in the output,
+/// not left as NOW().
 #[test]
 fn string_agg_translates_nested_now_in_args() {
     let sql = format!("{SCHEMA} SELECT string_agg(NOW()::text, ',') FROM t;");
     let out = translate_ok(&sql);
     assert!(out.contains("group_concat"), "Should rename to group_concat: {out}");
     assert!(
-        out.to_lowercase().contains("datetime"),
-        "NOW() inside arg must translate to datetime('now'): {out}"
+        out.to_lowercase().contains("strftime("),
+        "NOW() inside arg must translate to strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'): {out}"
     );
     assert!(
         !out.to_uppercase().contains("NOW()"),

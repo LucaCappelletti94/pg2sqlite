@@ -317,7 +317,10 @@ fn view_body_translates_now() {
         SELECT *, NOW() AS created FROM events;
     ";
     let output = translate(sql);
-    assert!(output.contains("datetime('now')"), "Expected datetime('now') in view body: {output}");
+    assert!(
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "Expected strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') in view body: {output}"
+    );
     exec_translated(sql);
 }
 
@@ -328,7 +331,10 @@ fn group_by_translates_expressions() {
         SELECT NOW(), COUNT(*) FROM events GROUP BY NOW();
     ";
     let output = translate(sql);
-    assert!(output.contains("GROUP BY datetime('now')"), "Expected translated GROUP BY: {output}");
+    assert!(
+        output.contains("GROUP BY strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "Expected translated GROUP BY: {output}"
+    );
     exec_translated(sql);
 }
 
@@ -339,7 +345,10 @@ fn having_translates_expressions() {
         SELECT ts, COUNT(*) FROM events GROUP BY ts HAVING NOW() > ts;
     ";
     let output = translate(sql);
-    assert!(output.contains("HAVING datetime('now')"), "Expected translated HAVING: {output}");
+    assert!(
+        output.contains("HAVING strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "Expected translated HAVING: {output}"
+    );
     exec_translated(sql);
 }
 
@@ -350,7 +359,10 @@ fn cte_body_translates_expressions() {
         WITH cte AS (SELECT NOW() AS ts FROM events) SELECT * FROM cte;
     ";
     let output = translate(sql);
-    assert!(output.contains("datetime('now')"), "Expected datetime('now') in CTE body: {output}");
+    assert!(
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "Expected strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') in CTE body: {output}"
+    );
     exec_translated(sql);
 }
 
@@ -374,8 +386,8 @@ fn named_window_translates_expressions() {
     ";
     let output = translate(sql);
     assert!(
-        output.contains("datetime('now')"),
-        "Expected datetime('now') in named window: {output}"
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "Expected strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') in named window: {output}"
     );
     exec_translated(sql);
 }

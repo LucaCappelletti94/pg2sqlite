@@ -16,14 +16,11 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, DatabaseLike, IndexLike, TableLike, UniqueIndexLike},
 };
-use sqlparser::ast::{
-    DataType, Expr, Insert, SelectItem, SetExpr, TableObject, TimezoneInfo, Value, ValueWithSpan,
-};
+use sqlparser::ast::{DataType, Insert, SelectItem, SetExpr, TableObject};
 
 use super::helpers::Forward;
 use crate::{
     impls::{
-        datetime_helpers::normalize_timestamptz_offset,
         object_name::{
             COLUMN_LOOKUP_CASE, last_ident, last_ident_value_or_display,
             normalize_schema_qualified_object_name_for_sqlite, resolve_translation_table,
@@ -170,7 +167,6 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         });
         // One pass for all column-type conversions: literals and parameters.
         apply_column_type_conversions(&mut insert, target.optional(), schema, options)?;
-        normalize_timestamptz_literals(&mut insert, target.optional(), schema)?;
 
         if let Some(on_insert) = &self.on {
             match on_insert {
@@ -894,53 +890,6 @@ fn database_filled_column(
     }
 
     Ok(None)
-}
-
-/// The names of a table's `TIMESTAMPTZ` columns, whose literals need their
-/// offset normalising.
-fn timestamptz_columns_of_table(
-    table: &ParserTable,
-    schema: &ParserDB,
-) -> Result<Vec<String>, crate::errors::Error> {
-    Ok(table
-        .columns(schema)?
-        .filter(|column| {
-            matches!(
-                column.attribute().data_type,
-                DataType::Timestamp(_, TimezoneInfo::Tz | TimezoneInfo::WithTimeZone)
-            )
-        })
-        .map(|column| column.column_name().to_owned())
-        .collect())
-}
-
-/// Normalises minute-less UTC offsets in TIMESTAMPTZ-column literals so every
-/// SQLite date function can parse them (`+02` → `+02:00`).
-fn normalize_timestamptz_literals(
-    insert: &mut Insert,
-    table: Option<&ParserTable>,
-    schema: &ParserDB,
-) -> Result<(), crate::errors::Error> {
-    let Some(table) = table else { return Ok(()) };
-    let tstz_cols = timestamptz_columns_of_table(table, schema)?;
-    if tstz_cols.is_empty() {
-        return Ok(());
-    }
-    let column_names = insert_column_names(insert, table, schema)?;
-    let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
-    for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, expr| {
-        let Some(col_name) = column_names.get(idx) else { return Ok(expr) };
-        if tstz_cols.iter().any(|name| name.eq_ignore_ascii_case(col_name))
-            && let Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(text), span }) =
-                expr
-        {
-            return Ok(Expr::Value(ValueWithSpan {
-                value: Value::SingleQuotedString(normalize_timestamptz_offset(&text)),
-                span,
-            }));
-        }
-        Ok(expr)
-    })
 }
 
 #[cfg(all(test, feature = "std"))]

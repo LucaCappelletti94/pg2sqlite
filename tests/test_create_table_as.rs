@@ -1,7 +1,8 @@
 //! Tests for CREATE TABLE ... AS SELECT subquery translation (GROUP B).
 //!
 //! Verifies that PG functions inside the AS SELECT subquery are translated
-//! (e.g. `now()` → `datetime('now')`), not cloned verbatim.
+//! (e.g. `now()` → `strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')`), not cloned
+//! verbatim.
 
 mod helpers;
 use diesel::{Connection, RunQueryDsl, SqliteConnection, connection::SimpleConnection};
@@ -19,8 +20,8 @@ fn create_table_as_select_translates_functions() -> Result<(), Box<dyn std::erro
     let output = stmts.join("\n");
 
     assert!(
-        output.contains("datetime('now')"),
-        "now() should be translated to datetime('now') in AS SELECT, got:\n{output}"
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
+        "now() should be translated to strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now') in AS SELECT, got:\n{output}"
     );
     assert!(
         !output.contains("now()"),

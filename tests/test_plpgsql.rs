@@ -385,7 +385,7 @@ fn query_statement_runs_standard_translation_pipeline() {
 
     let output = translate(sql);
     assert!(
-        output.contains("datetime('now')"),
+        output.contains("strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')"),
         "Expected query statement expressions to be translated through standard pipeline: {output}"
     );
     execute_trigger_ddl(sql);

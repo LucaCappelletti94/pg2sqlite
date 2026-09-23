@@ -962,9 +962,9 @@ pub(crate) struct ColumnRewrites {
     /// Array columns under the JSON representation; a bound parameter here is
     /// refused.
     array_cols: Vec<String>,
-    /// Columns whose written literal has to be read before it is emitted: a
+    /// Columns whose written value has to be read before it is emitted: a
     /// float special SQLite cannot hold, a bit string in PostgreSQL's own
-    /// spelling, or a temporal literal to validate and normalise.
+    /// spelling, or a temporal value to bring to the text the column holds.
     literal_checked_cols: Vec<(String, DataType)>,
 }
 
@@ -1232,7 +1232,7 @@ pub(crate) fn convert_value_for_column_type(
         return convert_bit_literal(expr);
     }
     if let Some(kind) = crate::impls::temporal_literals::temporal_literal_kind(data_type) {
-        return normalize_temporal_literal_expr(kind, expr);
+        return convert_temporal_value(kind, expr);
     }
     if matches!(data_type, DataType::Interval { .. }) {
         return normalize_interval_literal_expr(expr);
@@ -1344,6 +1344,45 @@ pub(crate) fn normalize_temporal_literal_expr(
     };
     let normalized = crate::impls::temporal_literals::normalize_temporal_literal(kind, text)?;
     Ok(Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(normalized), span: *span }))
+}
+
+/// Brings a value written into, or compared with, a temporal column to the
+/// text that column holds.
+///
+/// A literal is normalised. A `timestamptz` column takes the canonical text of
+/// a timestamp SQLite's date functions computed, and a column without a zone
+/// takes its own form of a canonical `timestamptz`. Any other value, a column
+/// reference or a parameter among them, already holds the column's text.
+pub(crate) fn convert_temporal_value(
+    kind: crate::impls::temporal_literals::TemporalLiteralKind,
+    mut expr: Expr,
+) -> Result<Expr, Error> {
+    use crate::impls::{
+        datetime_helpers::{canonical_timestamptz_value, take_canonical_timestamptz_operand},
+        temporal_literals::TemporalLiteralKind,
+    };
+    if crate::impls::function_helpers::single_quoted_literal(&expr).is_some() {
+        return normalize_temporal_literal_expr(kind, expr);
+    }
+    let zoneless_function = match kind {
+        TemporalLiteralKind::Timestamp { zoned: true } => {
+            return Ok(canonical_timestamptz_value(expr));
+        }
+        TemporalLiteralKind::Timestamp { zoned: false } => "datetime",
+        TemporalLiteralKind::Date => "date",
+        TemporalLiteralKind::Time { zoned: false } => "time",
+        TemporalLiteralKind::Time { zoned: true } => return Ok(expr),
+    };
+    Ok(match take_canonical_timestamptz_operand(&mut expr) {
+        Some(operand) => {
+            crate::impls::function_helpers::simple_function_expr(
+                zoneless_function,
+                vec![operand],
+                None,
+            )
+        }
+        None => expr,
+    })
 }
 
 /// What a column of this type stores, for the translation manifest.

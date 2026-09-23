@@ -45,7 +45,8 @@ fn window_partition_by_date_trunc_is_translated() {
     execute_all_emitted(&sql);
 }
 
-/// NOW() inside ORDER BY of an inline window spec must become datetime('now').
+/// NOW() inside ORDER BY of an inline window spec must become
+/// strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now').
 #[test]
 fn window_order_by_now_is_translated() {
     let sql = format!(
@@ -54,8 +55,8 @@ fn window_order_by_now_is_translated() {
     );
     let out = translate_ok(&sql);
     assert!(
-        out.to_lowercase().contains("datetime"),
-        "NOW() in window ORDER BY must become datetime('now'): {out}"
+        out.to_lowercase().contains("strftime("),
+        "NOW() in window ORDER BY must become strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'): {out}"
     );
     assert!(
         !out.to_uppercase().contains("NOW()"),

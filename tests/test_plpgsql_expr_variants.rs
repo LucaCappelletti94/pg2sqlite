@@ -132,8 +132,8 @@ fn plpgsql_at_time_zone_is_transformed() {
         "AT TIME ZONE has no SQLite equivalent and must not survive: {sql_str}"
     );
     assert!(
-        lower.contains("datetime(datetime('now'))"),
-        "NOW() AT TIME ZONE 'UTC' should become datetime(datetime('now')): {sql_str}"
+        sql_str.contains("datetime(strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now'))"),
+        "NOW() AT TIME ZONE 'UTC' should become datetime(strftime('%Y-%m-%d %H:%M:%f000+00:00', 'now')): {sql_str}"
     );
     assert!(
         !lower.contains("gen_random_uuid"),
