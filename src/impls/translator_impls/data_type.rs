@@ -346,7 +346,8 @@ DataType::Array(elem) => {
         ArrayElemTypeDef::SquareBracket(t, _)
         | ArrayElemTypeDef::AngleBracket(t)
         | ArrayElemTypeDef::Qualified(t, _)
-        | ArrayElemTypeDef::Parenthesis(t) => Some(t.as_ref()),
+        | ArrayElemTypeDef::Parenthesis(t)
+        | ArrayElemTypeDef::ParenthesisNotNull(t) => Some(t.as_ref()),
         ArrayElemTypeDef::None => None,
     };
     if let Some(inner) = inner
@@ -507,6 +508,35 @@ mod tests {
         ] {
             assert_eq!(
                 DataType::Array(elem).translate(&schema, &options).expect("array should translate"),
+                DataType::Text
+            );
+        }
+    }
+
+    #[test]
+    fn parenthesised_array_element_translates_with_or_without_not_null() {
+        use sqlparser::ast::{ArrayElemTypeDef, DataType as Dt, ExactNumberInfo};
+
+        use crate::traits::ArrayRepresentation;
+
+        let schema = empty_schema();
+        let options =
+            Pg2SqliteOptions::default().with_array_representation(ArrayRepresentation::Json);
+        let spellings: [fn(Box<Dt>) -> ArrayElemTypeDef; 2] =
+            [ArrayElemTypeDef::Parenthesis, ArrayElemTypeDef::ParenthesisNotNull];
+        for spelling in spellings {
+            let scaled = Dt::Numeric(ExactNumberInfo::PrecisionAndScale(10, 2));
+            let err = DataType::Array(spelling(Box::new(scaled)))
+                .translate(&schema, &options)
+                .expect_err("a scaled NUMERIC element should be refused");
+            assert!(
+                err.to_string().contains("NUMERIC(p,2)[] cannot be translated"),
+                "error should name the scaled NUMERIC element, got: {err}"
+            );
+            assert_eq!(
+                DataType::Array(spelling(Box::new(Dt::Int(None))))
+                    .translate(&schema, &options)
+                    .expect("an INT element should translate"),
                 DataType::Text
             );
         }
