@@ -187,6 +187,7 @@ const CASES: &[Case] = &[
     warned("DROP SEQUENCE seq"),
     // Warned and dropped: foreign data and credentials.
     warned("CREATE SERVER srv FOREIGN DATA WRAPPER postgres_fdw"),
+    warned("CREATE FOREIGN TABLE ft (id INT) SERVER srv"),
     warned("CREATE CONNECTOR c TYPE 'mysql'"),
     warned("ALTER CONNECTOR c SET URL 'u'"),
     warned("DROP CONNECTOR c"),

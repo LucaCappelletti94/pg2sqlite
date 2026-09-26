@@ -107,6 +107,17 @@ fn create_server_emits_lossy_drop_warning() {
 }
 
 #[test]
+fn create_foreign_table_emits_lossy_drop_warning() {
+    let warns = warnings_for(
+        "CREATE SERVER s FOREIGN DATA WRAPPER w;\n\
+         CREATE FOREIGN TABLE f (id INT) SERVER s;",
+    );
+    assert_eq!(warns.len(), 2);
+    assert_lossy_drop(&warns[0], "CREATE SERVER");
+    assert_lossy_drop(&warns[1], "CREATE FOREIGN TABLE");
+}
+
+#[test]
 fn create_role_emits_lossy_drop_warning() {
     let warns = warnings_for("CREATE ROLE alice;");
     assert_eq!(warns.len(), 1);
