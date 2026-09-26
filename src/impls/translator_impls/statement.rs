@@ -1997,6 +1997,9 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
                 drop_with_warning("ALTER FUNCTION", REASON_ACCESS_CONTROL, emit)
             }
             Self::CreateServer(_) => drop_with_warning("CREATE SERVER", REASON_FOREIGN_DATA, emit),
+            Self::CreateForeignTable(_) => {
+                drop_with_warning("CREATE FOREIGN TABLE", REASON_FOREIGN_DATA, emit)
+            }
             Self::CreateConnector(_) => {
                 drop_with_warning("CREATE CONNECTOR", REASON_FOREIGN_DATA, emit)
             }
