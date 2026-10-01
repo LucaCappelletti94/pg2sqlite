@@ -19,14 +19,8 @@
 //! equivalent" - the translator output is itself the canonical form
 //! the test is anchoring on.
 //!
-//! The reverse step needs a schema. We reuse the same 4-table
-//! fixture as `fuzz_reverse_translation` (users / posts / tags /
-//! items with JSONB, UUID, vector). Inputs whose DML references
-//! tables outside that schema will trip the reverse step (Err) and
-//! get skipped silently - the harness's signal density depends on
-//! libfuzzer eventually producing inputs that match the schema; a
-//! seed corpus would amplify this materially (see follow-up note in
-//! fuzz/README.md).
+//! The reverse step uses the four-table fixture from `fuzz_reverse_translation`.
+//! Seeds in `fuzz/seeds/fuzz_roundtrip_equivalence/` exercise DML against that schema.
 
 #![no_main]
 
