@@ -1,11 +1,13 @@
 # pg2sqlite fuzz harness
 
-Two libfuzzer-driven targets, run via [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz):
+Four `libFuzzer` targets run via [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz). Each decodes `arbitrary` input into `Pg2SqliteOptions` followed by SQL text.
 
-- `fuzz_sql_translation` feeds raw bytes through `Pg2Sqlite::sql().translate()`.
-- `fuzz_reverse_translation` feeds raw bytes through `reverse_sql()` against a fixed schema (users, posts, tags, items, covering JSONB, UUID, and vector(128)). The schema is parsed once on first iteration via `LazyLock` so each step only pays for `reverse_sql` itself.
+- `fuzz_sql_translation` feeds the SQL through `Pg2Sqlite::sql().translate()`.
+- `fuzz_translate_apply` translates the SQL and applies the result to an in-memory SQLite database, failing on a syntax-class SQLite error.
+- `fuzz_reverse_translation` feeds the SQL through `reverse_sql()` against a fixed schema (users, posts, tags, items, covering JSONB, UUID, and vector(128)) and requires the output to parse as PostgreSQL. The schema is parsed once on first iteration via `LazyLock` so each step only pays for `reverse_sql` itself.
+- `fuzz_roundtrip_equivalence` translates forward, reverses against the same schema, translates forward again, and requires both SQLite renders to match.
 
-Both targets cap inputs at 500 bytes and skip non-UTF-8 payloads to keep iteration time bounded.
+The parse-only targets cap the SQL at 500 bytes, the apply and round-trip targets at 1024.
 
 ## Run
 
@@ -16,6 +18,22 @@ cargo fuzz run fuzz_reverse_translation
 ```
 
 Append `-- -max_total_time=60` (or similar libfuzzer flags) to time-cap a session. Crashes land in `fuzz/artifacts/<target>/<hash>`. Reproduce a single artefact with `cargo fuzz run <target> fuzz/artifacts/<target>/<hash>`.
+
+## Seed corpus
+
+Every target has structured seeds in `fuzz/seeds/<target>/`, and the ClusterFuzzLite build fails for a target without seeds. The corpus includes encoded test inputs and fuzzer-grown inputs, reduced with edge-only set cover. Pass the seeds as a second corpus directory for a local run.
+
+```
+mkdir -p fuzz/corpus/fuzz_sql_translation
+cargo fuzz run fuzz_sql_translation fuzz/corpus/fuzz_sql_translation fuzz/seeds/fuzz_sql_translation
+```
+
+To refresh a target's seeds after a longer run, reduce the grown corpus into an empty directory and replace `fuzz/seeds/<target>/` with it.
+
+```
+mkdir -p /tmp/seeds
+cargo fuzz run fuzz_sql_translation /tmp/seeds fuzz/corpus/fuzz_sql_translation fuzz/seeds/fuzz_sql_translation -- -set_cover_merge=1 -use_counters=0
+```
 
 ## Run every target in parallel
 
