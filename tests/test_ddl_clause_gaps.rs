@@ -4,7 +4,11 @@
 //! These tests assert observable contracts (exact emitted SQL or error message
 //! content) rather than implementation internals.
 
+mod helpers;
+
+use diesel::prelude::*;
 use pg2sqlite::{
+    errors::{Error, RefusalCategory, TranslationDirection},
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     warnings::TranslationWarning,
 };
@@ -186,19 +190,10 @@ fn unlogged_drops_modifier_and_warns() {
 // CREATE TABLE (LIKE t)
 // ---------------------------------------------------------------------------
 
-/// CREATE TABLE a (LIKE t) must be rejected.
-///
-/// This is safety-critical: SQLite parses LIKE as an ordinary identifier, so it
-/// would silently create a table with a single column named LIKE of type t and
-/// no columns from the referenced table. The translator must catch this before
-/// emitting anything.
 #[test]
 fn like_clause_is_rejected() {
     let sql = "CREATE TABLE t (id INT); CREATE TABLE a (LIKE t);";
-    let err = translate(sql).expect_err("LIKE clause must be rejected");
-    let msg = err.to_string();
-    // The message must name the construct and explain the risk.
-    assert!(msg.contains("LIKE") || msg.contains("like"), "error must mention LIKE: {msg}");
+    assert_unrepresentable(sql);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,12 +203,7 @@ fn like_clause_is_rejected() {
 #[test]
 fn inherits_is_rejected() {
     let sql = "CREATE TABLE t (id INT); CREATE TABLE a () INHERITS (t);";
-    let err = translate(sql).expect_err("INHERITS must be rejected");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("INHERIT") || msg.contains("inherit"),
-        "error must mention INHERITS: {msg}"
-    );
+    assert_unrepresentable(sql);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,12 +214,7 @@ fn inherits_is_rejected() {
 fn partition_of_is_rejected() {
     let sql = "CREATE TABLE t (id INT, n INT) PARTITION BY RANGE (n); \
                CREATE TABLE a PARTITION OF t FOR VALUES FROM (1) TO (100);";
-    let err = translate(sql).expect_err("PARTITION OF must be rejected");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("PARTITION") || msg.contains("partition"),
-        "error must mention PARTITION OF: {msg}"
-    );
+    assert_unrepresentable(sql);
 }
 
 // ---------------------------------------------------------------------------
@@ -426,4 +411,121 @@ fn check_no_inherit_keeps_the_check_and_drops_the_modifier_with_a_warning() {
         let err = conn.execute_batch("INSERT INTO t VALUES (2, -1);");
         assert!(err.is_err(), "the CHECK must still enforce after the modifier is dropped");
     }
+}
+
+diesel::table! {
+    /// Declared-column fixtures.
+    documents (id) {
+        /// A stable row identifier.
+        id -> Integer,
+        /// A nullable document payload.
+        payload -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    /// Source rows for inferred columns.
+    members (id) {
+        /// A stable row identifier.
+        id -> Integer,
+        /// A member name.
+        name -> Text,
+    }
+}
+
+diesel::table! {
+    /// Rows materialized by CTAS.
+    archive (id) {
+        /// A stable row identifier.
+        id -> Integer,
+        /// A member name.
+        name -> Text,
+    }
+}
+
+fn assert_unrepresentable(sql: &str) {
+    let Error::TranslationRefusal(refusal) = translate(sql).expect_err("translation refusal")
+    else {
+        panic!("expected a structured translation refusal");
+    };
+    assert_eq!(refusal.direction(), TranslationDirection::PostgreSqlToSqlite);
+    assert_eq!(refusal.category(), RefusalCategory::UnrepresentableSemantics);
+}
+
+#[test]
+fn zero_column_tables_are_refused() {
+    for source in [
+        "CREATE TABLE empty ();",
+        "CREATE TEMP TABLE empty ();",
+        r#"CREATE TABLE "Empty" ();"#,
+        "CREATE TABLE empty (CHECK (1 = 1));",
+    ] {
+        assert_unrepresentable(source);
+    }
+}
+
+#[test]
+fn zero_column_refusal_is_atomic_for_schema_scripts() {
+    assert_unrepresentable("CREATE TABLE empty (); CREATE TABLE documents (id INT);");
+    assert_unrepresentable("CREATE TABLE documents (id INT); CREATE TABLE empty ();");
+}
+
+#[test]
+fn zero_width_ctas_is_refused() {
+    assert_unrepresentable(
+        "CREATE TABLE members (id INT); CREATE TABLE archive AS SELECT FROM members;",
+    );
+}
+
+#[test]
+fn declared_columns_preserve_values_and_nulls() {
+    let statements =
+        translate("CREATE TABLE documents (id INT PRIMARY KEY, payload TEXT);").unwrap();
+    let mut connection = helpers::establish_connection();
+    for statement in statements {
+        // Translated DDL is runtime syntax under test.
+        diesel::sql_query(statement).execute(&mut connection).unwrap();
+    }
+    let rows = [
+        (documents::id.eq(1), documents::payload.eq(Some("alpha"))),
+        (documents::id.eq(2), documents::payload.eq(None::<&str>)),
+    ];
+    diesel::insert_into(documents::table).values(&rows).execute(&mut connection).unwrap();
+    let actual = documents::table
+        .select((documents::id, documents::payload))
+        .order(documents::id.asc())
+        .load::<(i32, Option<String>)>(&mut connection)
+        .unwrap();
+    assert_eq!(actual, [(1, Some("alpha".to_owned())), (2, None)]);
+}
+
+#[test]
+fn ctas_infers_columns_and_preserves_rows() {
+    let translator = Pg2Sqlite::default().sql("CREATE TABLE members (id INT, name TEXT);").unwrap();
+    let schema = translator.build_schema().unwrap();
+    let mut connection = helpers::establish_connection();
+    for statement in translator.translate_to_sql(&opts()).unwrap() {
+        // Translated DDL is runtime syntax under test.
+        diesel::sql_query(statement).execute(&mut connection).unwrap();
+    }
+    let rows = [
+        (members::id.eq(10), members::name.eq("alpha")),
+        (members::id.eq(20), members::name.eq("beta")),
+    ];
+    diesel::insert_into(members::table).values(&rows).execute(&mut connection).unwrap();
+    let statements = Pg2Sqlite::default()
+        .sql("CREATE TABLE archive AS SELECT id, name FROM members;")
+        .unwrap()
+        .translate_to_sql_with_schema(&schema, &opts())
+        .unwrap();
+    for statement in statements {
+        // Translated CTAS is runtime syntax under test.
+        diesel::sql_query(statement).execute(&mut connection).unwrap();
+    }
+    let actual = archive::table
+        .select((archive::id, archive::name))
+        .order(archive::id.asc())
+        .load::<(i32, String)>(&mut connection)
+        .unwrap();
+    assert_eq!(actual, [(10, "alpha".to_owned()), (20, "beta".to_owned())]);
 }
