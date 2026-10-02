@@ -109,6 +109,13 @@ impl TranslationDirection for Forward {
     }
 }
 
+/// SQLite accepts a DML target alias only after `AS`.
+pub(crate) fn spell_target_alias_with_as(target: &mut sqlparser::ast::TableFactor) {
+    if let sqlparser::ast::TableFactor::Table { alias: Some(alias), .. } = target {
+        alias.explicit = true;
+    }
+}
+
 define_direction_wrappers! {
     direction = Forward;
     fn translate_table_with_joins(table_with_joins: &TableWithJoins) -> TableWithJoins = translate_table_with_joins;
