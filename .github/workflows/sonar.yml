@@ -30,6 +30,9 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
+          # The validity corpus is a list of SQL literals, which duplicate
+          # detection reads as repeated code.
           args: >
             -Dsonar.organization=lucacappelletti94-github
             -Dsonar.projectKey=LucaCappelletti94_pg2sqlite
+            -Dsonar.cpd.exclusions=tests/helpers/emitted_corpus.rs
