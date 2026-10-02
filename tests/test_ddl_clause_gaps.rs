@@ -413,35 +413,28 @@ fn check_no_inherit_keeps_the_check_and_drops_the_modifier_with_a_warning() {
     }
 }
 
-diesel::table! {
-    /// Declared-column fixtures.
-    documents (id) {
-        /// A stable row identifier.
-        id -> Integer,
-        /// A nullable document payload.
-        payload -> Nullable<Text>,
+// Translated SQL runs raw because it is the output under test.
+mod schema {
+    diesel::table! {
+        documents (id) {
+            id -> Integer,
+            payload -> Nullable<Text>,
+        }
+    }
+    diesel::table! {
+        members (id) {
+            id -> Integer,
+            name -> Text,
+        }
+    }
+    diesel::table! {
+        archive (id) {
+            id -> Integer,
+            name -> Text,
+        }
     }
 }
-
-diesel::table! {
-    /// Source rows for inferred columns.
-    members (id) {
-        /// A stable row identifier.
-        id -> Integer,
-        /// A member name.
-        name -> Text,
-    }
-}
-
-diesel::table! {
-    /// Rows materialized by CTAS.
-    archive (id) {
-        /// A stable row identifier.
-        id -> Integer,
-        /// A member name.
-        name -> Text,
-    }
-}
+use schema::{archive, documents, members};
 
 fn assert_unrepresentable(sql: &str) {
     let Error::TranslationRefusal(refusal) = translate(sql).expect_err("translation refusal")
@@ -483,7 +476,6 @@ fn declared_columns_preserve_values_and_nulls() {
         translate("CREATE TABLE documents (id INT PRIMARY KEY, payload TEXT);").unwrap();
     let mut connection = helpers::establish_connection();
     for statement in statements {
-        // Translated DDL is runtime syntax under test.
         diesel::sql_query(statement).execute(&mut connection).unwrap();
     }
     let rows = [
@@ -505,7 +497,6 @@ fn ctas_infers_columns_and_preserves_rows() {
     let schema = translator.build_schema().unwrap();
     let mut connection = helpers::establish_connection();
     for statement in translator.translate_to_sql(&opts()).unwrap() {
-        // Translated DDL is runtime syntax under test.
         diesel::sql_query(statement).execute(&mut connection).unwrap();
     }
     let rows = [
@@ -519,7 +510,6 @@ fn ctas_infers_columns_and_preserves_rows() {
         .translate_to_sql_with_schema(&schema, &opts())
         .unwrap();
     for statement in statements {
-        // Translated CTAS is runtime syntax under test.
         diesel::sql_query(statement).execute(&mut connection).unwrap();
     }
     let actual = archive::table

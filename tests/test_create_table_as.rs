@@ -1,49 +1,37 @@
-//! Materialized query columns, function values and row selection.
+//! Materialized query columns, function values and row selection, with
+//! translated SQL run raw as the output under test.
 
 use diesel::{connection::SimpleConnection, prelude::*};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-diesel::table! {
-    /// Function inputs.
-    source (id) {
-        /// A stable row identifier.
-        id -> Integer,
-        /// A nullable Unicode input.
-        value -> Nullable<Text>,
+mod schema {
+    diesel::table! {
+        source (id) {
+            id -> Integer,
+            value -> Nullable<Text>,
+        }
+    }
+    diesel::table! {
+        snapshots (id) {
+            id -> Integer,
+            characters -> Nullable<Integer>,
+        }
+    }
+    diesel::table! {
+        users (id) {
+            id -> Integer,
+            name -> Text,
+            active -> Bool,
+        }
+    }
+    diesel::table! {
+        archive (id) {
+            id -> Integer,
+            name -> Text,
+        }
     }
 }
-
-diesel::table! {
-    /// Materialized function results.
-    snapshots (id) {
-        /// A stable row identifier.
-        id -> Integer,
-        /// A nullable character count.
-        characters -> Nullable<Integer>,
-    }
-}
-
-diesel::table! {
-    /// Filtered source rows.
-    users (id) {
-        /// A stable row identifier.
-        id -> Integer,
-        /// A display name.
-        name -> Text,
-        /// Whether the row is selected.
-        active -> Bool,
-    }
-}
-
-diesel::table! {
-    /// Materialized selected rows.
-    archive (id) {
-        /// A stable row identifier.
-        id -> Integer,
-        /// A display name.
-        name -> Text,
-    }
-}
+use schema::{archive, snapshots, source, users};
 
 #[test]
 fn ctas_function_output_preserves_values_and_nulls() {
@@ -67,7 +55,6 @@ fn ctas_function_output_preserves_values_and_nulls() {
         .translate_to_sql_with_schema(&schema, &options)
         .unwrap()
     {
-        // Translated CTAS and its function are runtime syntax under test.
         connection.batch_execute(&sql).unwrap();
     }
     let actual = snapshots::table
@@ -102,7 +89,6 @@ fn ctas_materializes_selected_rows() {
         .translate_to_sql_with_schema(&schema, &options)
         .unwrap()
     {
-        // Translated CTAS and its predicate are runtime syntax under test.
         connection.batch_execute(&sql).unwrap();
     }
     let actual = archive::table
