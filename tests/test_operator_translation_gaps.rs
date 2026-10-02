@@ -435,3 +435,27 @@ fn json_contained_by_arrow_at_rejects() {
         "error must mention <@ or containment: {msg}"
     );
 }
+
+/// Historical factorial operators have no exact SQLite counterpart.
+#[test]
+fn historical_factorial_operators_are_refused() {
+    for source in [
+        "SELECT 5 !",
+        "SELECT !! 5",
+        "SELECT count(*)! AS n FROM (SELECT 1) AS q",
+        "SELECT 1 WHERE 3 ! = 6",
+    ] {
+        let pg2sqlite::errors::Error::TranslationRefusal(refusal) = tr_err(source) else {
+            panic!("expected a structured translation refusal for {source}");
+        };
+        assert_eq!(
+            refusal.direction(),
+            pg2sqlite::errors::TranslationDirection::PostgreSqlToSqlite
+        );
+        assert_eq!(
+            refusal.category(),
+            pg2sqlite::errors::RefusalCategory::UnrepresentableSemantics,
+            "{source}"
+        );
+    }
+}
