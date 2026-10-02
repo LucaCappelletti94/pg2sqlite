@@ -157,6 +157,8 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
             "SELECT @ n FROM t;",
             "SELECT n & 1, n | 1, ~n, n << 1, n >> 1 FROM t;",
             "SELECT n # 1 FROM t;",
+            "SELECT n ! FROM t;",
+            "SELECT !! n FROM t;",
             "SELECT s || 'x' FROM t;",
             "SELECT s ~ 'a' FROM t;",
             "SELECT s ~* 'a' FROM t;",

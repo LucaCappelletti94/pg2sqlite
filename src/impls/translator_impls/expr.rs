@@ -3930,6 +3930,12 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                                 None,
                             )
                         }
+                        UnaryOperator::PGPostfixFactorial | UnaryOperator::PGPrefixFactorial => {
+                            return Err(crate::errors::Error::forward_refusal(format!(
+                                "the factorial operator {op} returns exact numeric results \
+                                 beyond SQLite's 64-bit integers, and SQLite has no factorial"
+                            )));
+                        }
                         _ => translate_expr_recursive::<Forward>(self, schema, options, emit)?,
                     })
                 })?
