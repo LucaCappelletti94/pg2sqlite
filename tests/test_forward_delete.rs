@@ -156,18 +156,16 @@ fn delete_order_by_and_limit_translate_expressions() {
     }
 }
 
-/// Target aliases preserve deleted and returned rows.
+/// Target aliases preserve deleted and returned rows, with the translated SQL
+/// run raw as the output under test.
 mod delete_alias {
     use diesel::{connection::SimpleConnection, prelude::*, sql_types::Integer};
     use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
     use sqlparser::ast::Statement;
 
     diesel::table! {
-        /// Delete target rows.
         t (id) {
-            /// A stable row identifier.
             id -> Integer,
-            /// A filtered value.
             n -> Integer,
         }
     }
@@ -182,8 +180,6 @@ mod delete_alias {
 
     const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY, n INT NOT NULL);";
 
-    /// Applies the translated schema, inserts fixtures and returns the
-    /// translated delete.
     fn prepared(source: &str) -> (SqliteConnection, String) {
         let statements = Pg2Sqlite::default()
             .sql(&format!("{SCHEMA}\n{source}"))
@@ -196,7 +192,6 @@ mod delete_alias {
             if matches!(statement, Statement::Delete(_)) {
                 delete = Some(statement.to_string());
             } else {
-                // Translated DDL is runtime syntax under test.
                 connection.batch_execute(&statement.to_string()).unwrap();
             }
         }
@@ -223,7 +218,6 @@ mod delete_alias {
             "DELETE FROM t AS x WHERE x.id = 2;",
         ] {
             let (mut connection, delete) = prepared(source);
-            // Translated delete is runtime syntax under test.
             diesel::sql_query(&delete)
                 .execute(&mut connection)
                 .unwrap_or_else(|error| panic!("translated delete failed {error}\n{delete}"));
@@ -235,8 +229,6 @@ mod delete_alias {
     fn delete_alias_without_as_returns_deleted_rows() {
         let (mut connection, delete) =
             prepared("DELETE FROM t x WHERE x.n > 15 RETURNING x.id, x.n;");
-        // Translated delete and returning projection are runtime syntax under
-        // test.
         let mut returned = diesel::sql_query(&delete)
             .load::<Returned>(&mut connection)
             .unwrap_or_else(|error| panic!("translated delete failed {error}\n{delete}"));

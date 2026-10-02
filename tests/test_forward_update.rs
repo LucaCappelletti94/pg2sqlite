@@ -162,7 +162,8 @@ fn forward_update_limit_translates_expressions() {
     }
 }
 
-/// Target aliases preserve stored and returned values.
+/// Target aliases preserve stored and returned values, with the translated SQL
+/// run raw as the output under test.
 mod update_alias {
     use diesel::{prelude::*, sqlite::SqliteConnection};
     use pg2sqlite::prelude::Pg2SqliteOptions;
@@ -171,22 +172,15 @@ mod update_alias {
     use super::helpers;
 
     diesel::table! {
-        /// Update target rows.
         t (id) {
-            /// A stable row identifier.
             id -> Integer,
-            /// An assigned value.
             a -> Integer,
-            /// An independent source value.
             b -> Integer,
         }
     }
     diesel::table! {
-        /// Auxiliary update inputs.
         f (id) {
-            /// A target row identifier.
             id -> Integer,
-            /// An independent input value.
             x -> Integer,
         }
     }
@@ -199,7 +193,6 @@ mod update_alias {
         a: i32,
     }
 
-    /// Applies translated DDL and retains the update for execution.
     fn prepared_update(pg: &str) -> (SqliteConnection, String) {
         let statements = helpers::translate_statements(pg, &Pg2SqliteOptions::default())
             .expect("translation should succeed");
@@ -210,7 +203,6 @@ mod update_alias {
             match statement {
                 Statement::Update(_) => update = Some(rendered),
                 _ => {
-                    // Translated DDL is runtime syntax under test.
                     diesel::sql_query(rendered.as_str())
                         .execute(&mut conn)
                         .unwrap_or_else(|error| panic!("setup DDL failed {error}\n{rendered}"));
@@ -239,11 +231,9 @@ mod update_alias {
             .expect("final state must load")
     }
 
-    /// Runs the translated UPDATE and asserts the stored rows.
     fn run_and_assert_t(pg: &str, expected: &[(i32, i32, i32)]) {
         let (mut conn, update) = prepared_update(pg);
         insert_t(&mut conn);
-        // Translated update is runtime syntax under test.
         diesel::sql_query(update.as_str())
             .execute(&mut conn)
             .unwrap_or_else(|error| panic!("translated update failed {error}\n{update}"));
@@ -307,8 +297,6 @@ mod update_alias {
             .values([(f::id.eq(1), f::x.eq(77)), (f::id.eq(2), f::x.eq(88))])
             .execute(&mut conn)
             .expect("f fixture rows must insert");
-        // Translated update and its joined inputs are runtime syntax under
-        // test.
         diesel::sql_query(update.as_str())
             .execute(&mut conn)
             .unwrap_or_else(|error| panic!("translated update failed {error}\n{update}"));
@@ -322,8 +310,6 @@ mod update_alias {
              UPDATE t AS se SET a = 99 WHERE se.id = 2 RETURNING se.id, se.a;",
         );
         insert_t(&mut conn);
-        // Translated update and returning projection are runtime syntax under
-        // test.
         let returned: Vec<ReturningRow> = diesel::sql_query(update.as_str())
             .load(&mut conn)
             .unwrap_or_else(|error| panic!("translated update failed {error}\n{update}"));
