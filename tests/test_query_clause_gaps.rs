@@ -325,8 +325,6 @@ fn nested_query_dispatch_preserves_dml_state() {
     ] {
         let mut connection = fixture();
         for statement in translated(source).unwrap() {
-            // Translated DML and its query source are runtime syntax under
-            // test.
             connection.batch_execute(&statement.to_string()).unwrap();
         }
         let actual =

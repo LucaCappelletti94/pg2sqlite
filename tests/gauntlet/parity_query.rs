@@ -1,4 +1,5 @@
-//! Query operand pagination and parameter parity.
+//! Query operand pagination and parameter parity, with translated SQL run raw
+//! as the output under test.
 
 use diesel::{
     connection::SimpleConnection,
@@ -11,9 +12,7 @@ use sqlparser::ast::Statement;
 use crate::{helpers::establish_connection, postgres_harness};
 
 diesel::table! {
-    /// Query operand fixtures shared by both backends.
     nums (n) {
-        /// A distinct integer value.
         n -> Integer,
     }
 }
@@ -65,7 +64,6 @@ fn diesel_compound_queries_preserve_pagination_and_bind_identity() {
             }
         })
         .expect("translated query");
-    // Translated SQL is runtime syntax under test.
     let mut actual = diesel::sql_query(&translated)
         .bind::<BigInt, _>(3_i64)
         .bind::<BigInt, _>(2_i64)
@@ -89,7 +87,6 @@ fn diesel_compound_queries_preserve_pagination_and_bind_identity() {
             }
         })
         .expect("reverse query");
-    // Reverse-translated SQL and bind identities are runtime syntax under test.
     let mut reverse_rows = diesel::sql_query(&reverse)
         .bind::<BigInt, _>(3_i64)
         .bind::<BigInt, _>(2_i64)

@@ -364,8 +364,6 @@ fn rendered_query(statements: &[sqlparser::ast::Statement]) -> String {
         .join(";")
 }
 
-// A scaling depth can exceed the parser recursion limit, which setup records as
-// a refusal lane.
 fn prepare_query_shape(
     name: &str,
     sql: &str,
@@ -442,7 +440,6 @@ fn bench_runtime_shape(c: &mut Criterion, name: &str, query: &str) {
         connection.batch_execute(QUERY_SCHEMA).unwrap();
         let rows = (1..=size).map(|n| nums::n.eq(n)).collect::<Vec<_>>();
         diesel::insert_into(nums::table).values(&rows).execute(&mut connection).unwrap();
-        // Translated SQL is runtime syntax under test.
         let actual = diesel::sql_query(query)
             .load::<QueryNumber>(&mut connection)
             .unwrap()
@@ -549,8 +546,6 @@ fn bench_query_shapes(c: &mut Criterion) {
         b.iter(|| black_box(refused.translate_with_schema(&schema, &options)));
     });
 
-    // The setup assertion keeps an over-accepting parser from being recorded
-    // as a refusal
     let malformed = "SELECT n FROM nums WHERE n =";
     assert!(Pg2Sqlite::default().sql(malformed).is_err());
     c.bench_function("query_shapes/refusal/malformed_source", |b| {
