@@ -118,8 +118,15 @@ impl crate::traits::translator::TranslatorWithContext for Query {
             });
         }
 
+        let body = match self.body.as_ref() {
+            // Inherited CTEs require the SELECT-local scope.
+            SetExpr::Select(select) if self.with.is_some() || options.cte_clause().is_none() => {
+                SetExpr::Select(Box::new(select.translate_with_warnings(schema, options, emit)?))
+            }
+            _ => self.body.translate_with_warnings(schema, options, emit)?,
+        };
         Ok(build_query_envelope(
-            self.body.translate_with_warnings(schema, options, emit)?,
+            body,
             with,
             order_by,
             limit_clause,

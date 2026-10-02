@@ -44,3 +44,6 @@ mod parity_values;
 
 #[path = "gauntlet/parity_numeric.rs"]
 mod parity_numeric;
+
+#[path = "gauntlet/parity_query.rs"]
+mod parity_query;

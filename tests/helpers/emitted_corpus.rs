@@ -106,6 +106,8 @@ pub const CORPUS_GROUPS: &[(&str, &[&str])] = &[
             "SELECT n FROM t ORDER BY id FETCH FIRST ROW ONLY;",
             "SELECT n FROM t ORDER BY id OFFSET 1 ROW FETCH NEXT ROWS ONLY;",
             "SELECT n FROM (SELECT n FROM t ORDER BY id FETCH FIRST ROW ONLY) AS paged;",
+            "SELECT n FROM ((SELECT n FROM t ORDER BY id FETCH FIRST 2 ROWS ONLY)) AS paged;",
+            "(SELECT n FROM t ORDER BY id FETCH FIRST 2 ROWS ONLY) UNION ALL (SELECT n FROM t ORDER BY id OFFSET 2);",
             "SELECT n FROM t FOR UPDATE;",
             "SELECT n FROM t FOR SHARE;",
             "SELECT * FROM t JOIN u ON t.id = u.t_id;",
