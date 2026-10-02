@@ -371,7 +371,7 @@ fn forward_translate_limit_and_fetch(
         };
         return Ok((
             Some(LimitClause::LimitOffset {
-                limit: Some(quantity.unwrap_or_else(|| integer_literal(0))),
+                limit: Some(quantity.unwrap_or_else(|| integer_literal(1))),
                 offset,
                 limit_by: vec![],
             }),
