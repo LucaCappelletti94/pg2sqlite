@@ -459,3 +459,30 @@ fn historical_factorial_operators_are_refused() {
         );
     }
 }
+
+/// PostgreSQL geometric prefix operators have no SQLite counterpart.
+#[test]
+fn geometric_prefix_operators_are_refused() {
+    for (source, operator) in [
+        ("SELECT # p", "#"),
+        ("SELECT @-@ p", "@-@"),
+        ("SELECT @@ p", "@@"),
+        ("SELECT ?- p", "?-"),
+        ("SELECT ?| p", "?|"),
+        ("CREATE VIEW v AS SELECT#c", "#"),
+    ] {
+        let pg2sqlite::errors::Error::TranslationRefusal(refusal) = tr_err(source) else {
+            panic!("expected a structured translation refusal for {source}");
+        };
+        assert_eq!(
+            refusal.category(),
+            pg2sqlite::errors::RefusalCategory::UnrepresentableSemantics,
+            "{source}"
+        );
+        assert!(
+            refusal.detail().contains(&format!("{operator} operator")),
+            "{source}: {}",
+            refusal.detail()
+        );
+    }
+}

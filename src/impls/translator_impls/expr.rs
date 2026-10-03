@@ -3889,9 +3889,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         .to_string(),
                 ));
             }
-            // PG-specific prefix operators that SQLite lacks.
-            // Remaining UnaryOp variants (Not, Minus, Plus, BitwiseNot) fall through
-            // to translate_expr_recursive, which keeps them and recurses into the operand.
+            // Not, Minus, Plus and BitwiseNot fall through and keep the operator.
             Expr::UnaryOp { op, expr } => {
                 rebuild(|| {
                     Ok(match op {
@@ -3934,6 +3932,16 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                             return Err(crate::errors::Error::forward_refusal(format!(
                                 "the factorial operator {op} returns exact numeric results \
                                  beyond SQLite's 64-bit integers, and SQLite has no factorial"
+                            )));
+                        }
+                        UnaryOperator::Hash
+                        | UnaryOperator::AtDashAt
+                        | UnaryOperator::DoubleAt
+                        | UnaryOperator::QuestionDash
+                        | UnaryOperator::QuestionPipe => {
+                            return Err(crate::errors::Error::forward_refusal(format!(
+                                "The {op} operator is a PostgreSQL geometric operator \
+                                 with no SQLite translation"
                             )));
                         }
                         _ => translate_expr_recursive::<Forward>(self, schema, options, emit)?,
