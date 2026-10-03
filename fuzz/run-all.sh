@@ -75,6 +75,11 @@ fi
 # Build the libfuzzer arg suffix once.
 EXTRA_SUFFIX=" -- ${LIBFUZZER_ARGS[*]}"
 
+# `libFuzzer` writes only to the first corpus directory.
+for target in "${TARGETS[@]}"; do
+    mkdir -p "fuzz/corpus/$target"
+done
+
 # All targets live in a single window as side-by-side panes so a crash
 # is visible at a glance without flipping between windows. `tiled`
 # layout rebalances after each split so the panes stay equal-sized
@@ -82,11 +87,11 @@ EXTRA_SUFFIX=" -- ${LIBFUZZER_ARGS[*]}"
 WINDOW="fuzz"
 first="${TARGETS[0]}"
 tmux new-session -d -s "$SESSION" -n "$WINDOW" -c "$PROJECT_ROOT" \
-    "cargo +nightly fuzz run $first$EXTRA_SUFFIX; exec bash"
+    "cargo +nightly fuzz run $first fuzz/corpus/$first fuzz/seeds/$first$EXTRA_SUFFIX; exec bash"
 
 for target in "${TARGETS[@]:1}"; do
     tmux split-window -t "$SESSION:$WINDOW" -c "$PROJECT_ROOT" \
-        "cargo +nightly fuzz run $target$EXTRA_SUFFIX; exec bash"
+        "cargo +nightly fuzz run $target fuzz/corpus/$target fuzz/seeds/$target$EXTRA_SUFFIX; exec bash"
     tmux select-layout -t "$SESSION:$WINDOW" tiled >/dev/null
 done
 
