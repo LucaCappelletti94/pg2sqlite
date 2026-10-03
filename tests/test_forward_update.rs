@@ -1,6 +1,7 @@
 //! Tests for forward UPDATE translation in
 //! `src/impls/translator_impls/update.rs`.
 
+mod helpers;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
@@ -158,5 +159,161 @@ fn forward_update_limit_translates_expressions() {
     let conn = Connection::open_in_memory().unwrap();
     for s in stmts.iter().filter(|s| !matches!(s, Statement::Update(_))) {
         conn.execute_batch(&format!("{s};")).unwrap();
+    }
+}
+
+/// Target aliases preserve stored and returned values, with the translated SQL
+/// run raw as the output under test.
+mod update_alias {
+    use diesel::{prelude::*, sqlite::SqliteConnection};
+    use pg2sqlite::prelude::Pg2SqliteOptions;
+    use sqlparser::ast::Statement;
+
+    use super::helpers;
+
+    diesel::table! {
+        t (id) {
+            id -> Integer,
+            a -> Integer,
+            b -> Integer,
+        }
+    }
+    diesel::table! {
+        f (id) {
+            id -> Integer,
+            x -> Integer,
+        }
+    }
+
+    #[derive(QueryableByName, Debug, PartialEq, Eq)]
+    struct ReturningRow {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        id: i32,
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        a: i32,
+    }
+
+    fn prepared_update(pg: &str) -> (SqliteConnection, String) {
+        let statements = helpers::translate_statements(pg, &Pg2SqliteOptions::default())
+            .expect("translation should succeed");
+        let mut conn = helpers::establish_connection();
+        let mut update = None;
+        for statement in &statements {
+            let rendered = statement.to_string();
+            match statement {
+                Statement::Update(_) => update = Some(rendered),
+                _ => {
+                    diesel::sql_query(rendered.as_str())
+                        .execute(&mut conn)
+                        .unwrap_or_else(|error| panic!("setup DDL failed {error}\n{rendered}"));
+                }
+            }
+        }
+        (conn, update.expect("an UPDATE must be emitted"))
+    }
+
+    fn insert_t(conn: &mut SqliteConnection) {
+        diesel::insert_into(t::table)
+            .values([
+                (t::id.eq(1), t::a.eq(10), t::b.eq(100)),
+                (t::id.eq(2), t::a.eq(20), t::b.eq(200)),
+                (t::id.eq(3), t::a.eq(30), t::b.eq(300)),
+            ])
+            .execute(conn)
+            .expect("fixture rows must insert");
+    }
+
+    fn read_t(conn: &mut SqliteConnection) -> Vec<(i32, i32, i32)> {
+        t::table
+            .select((t::id, t::a, t::b))
+            .order(t::id.asc())
+            .load::<(i32, i32, i32)>(conn)
+            .expect("final state must load")
+    }
+
+    fn run_and_assert_t(pg: &str, expected: &[(i32, i32, i32)]) {
+        let (mut conn, update) = prepared_update(pg);
+        insert_t(&mut conn);
+        diesel::sql_query(update.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|error| panic!("translated update failed {error}\n{update}"));
+        assert_eq!(read_t(&mut conn), expected);
+    }
+
+    #[test]
+    fn update_alias_without_as_executes_in_sqlite() {
+        run_and_assert_t(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);\n\
+             UPDATE t se SET a = a + 1 WHERE id = 2;",
+            &[(1, 10, 100), (2, 21, 200), (3, 30, 300)],
+        );
+    }
+
+    #[test]
+    fn update_quoted_alias_without_as_executes_in_sqlite() {
+        run_and_assert_t(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);\n\
+             UPDATE t \"Se\" SET a = a + 1 WHERE \"Se\".id = 2;",
+            &[(1, 10, 100), (2, 21, 200), (3, 30, 300)],
+        );
+    }
+
+    #[test]
+    fn update_alias_with_as_keeps_qualified_predicate() {
+        run_and_assert_t(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);\n\
+             UPDATE t AS se SET a = a + 1 WHERE se.id = 3;",
+            &[(1, 10, 100), (2, 20, 200), (3, 31, 300)],
+        );
+    }
+
+    #[test]
+    fn update_alias_with_as_keeps_qualified_assignment() {
+        run_and_assert_t(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);\n\
+             UPDATE t AS se SET a = se.b + 5 WHERE se.id = 1;",
+            &[(1, 105, 100), (2, 20, 200), (3, 30, 300)],
+        );
+    }
+
+    #[test]
+    fn update_quoted_alias_with_as_executes_in_sqlite() {
+        run_and_assert_t(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);\n\
+             UPDATE t AS \"Se\" SET a = a + 1 WHERE \"Se\".id = 2;",
+            &[(1, 10, 100), (2, 21, 200), (3, 30, 300)],
+        );
+    }
+
+    #[test]
+    fn update_from_with_target_alias_maps_columns() {
+        let (mut conn, update) = prepared_update(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);\n\
+             CREATE TABLE f (id INT PRIMARY KEY, x INT);\n\
+             UPDATE t AS se SET a = f.x FROM f WHERE se.id = f.id;",
+        );
+        insert_t(&mut conn);
+        diesel::insert_into(f::table)
+            .values([(f::id.eq(1), f::x.eq(77)), (f::id.eq(2), f::x.eq(88))])
+            .execute(&mut conn)
+            .expect("f fixture rows must insert");
+        diesel::sql_query(update.as_str())
+            .execute(&mut conn)
+            .unwrap_or_else(|error| panic!("translated update failed {error}\n{update}"));
+        assert_eq!(read_t(&mut conn), vec![(1, 77, 100), (2, 88, 200), (3, 30, 300)]);
+    }
+
+    #[test]
+    fn update_alias_with_as_returning_rewrites_to_target() {
+        let (mut conn, update) = prepared_update(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT);\n\
+             UPDATE t AS se SET a = 99 WHERE se.id = 2 RETURNING se.id, se.a;",
+        );
+        insert_t(&mut conn);
+        let returned: Vec<ReturningRow> = diesel::sql_query(update.as_str())
+            .load(&mut conn)
+            .unwrap_or_else(|error| panic!("translated update failed {error}\n{update}"));
+        assert_eq!(returned, vec![ReturningRow { id: 2, a: 99 }]);
+        assert_eq!(read_t(&mut conn), vec![(1, 10, 100), (2, 99, 200), (3, 30, 300)]);
     }
 }

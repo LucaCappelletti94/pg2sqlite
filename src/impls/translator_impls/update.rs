@@ -14,7 +14,7 @@ use alloc::{
 
 use sqlparser::ast::{Update, UpdateTableFromKind};
 
-use super::helpers::Forward;
+use super::helpers::{Forward, spell_target_alias_with_as};
 use crate::{
     errors::Error,
     impls::{returning_scope::scope_returning_to_target, shared_helpers::translate_update},
@@ -50,6 +50,7 @@ impl crate::traits::translator::TranslatorWithContext for Update {
         let scoped = target_scope.as_ref().map(|scope| options.with_scope(scope));
         let options = scoped.as_ref().unwrap_or(options);
         let mut update = translate_update::<Forward>(self, schema, options, emit)?;
+        spell_target_alias_with_as(&mut update.table.relation);
         let auxiliary = update.from.as_ref().map_or(&[][..], |from| {
             let (UpdateTableFromKind::BeforeSet(tables) | UpdateTableFromKind::AfterSet(tables)) =
                 from;
