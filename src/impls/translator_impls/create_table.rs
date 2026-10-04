@@ -110,6 +110,12 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
             )));
         }
 
+        if self.columns.is_empty() && self.query.is_none() {
+            return Err(crate::errors::Error::forward_refusal(
+                "SQLite tables require at least one output column".to_string(),
+            ));
+        }
+
         reject_foreign_create_table_modifiers(self)?;
 
         // GLOBAL and LOCAL are SQL-standard noise words PostgreSQL accepts and

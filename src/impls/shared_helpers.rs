@@ -3329,6 +3329,11 @@ fn translate_select_with_from<D: TranslationDirection>(
     from: Vec<sqlparser::ast::TableWithJoins>,
 ) -> Result<sqlparser::ast::Select, Error> {
     reject_foreign_select_clauses::<D>(select)?;
+    if D::IS_FORWARD && select.projection.is_empty() {
+        return Err(Error::forward_refusal(
+            "SQLite queries require at least one output column".to_string(),
+        ));
+    }
     // PostgreSQL's SELECT ... INTO creates a table; SQLite has no SELECT
     // INTO of its own, and SQLiteDialect parses it only by leniency.
     if let Some(into) = &select.into {
