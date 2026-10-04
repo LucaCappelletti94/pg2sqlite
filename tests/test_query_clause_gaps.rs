@@ -1,4 +1,4 @@
-//! Query pagination defaults, values and refusal contracts.
+//! Query pagination, nested query scope and refusal contracts.
 
 use diesel::{
     connection::SimpleConnection,
@@ -197,4 +197,138 @@ fn explicit_fetch_preserves_bind_identity() {
 #[test]
 fn fetch_percent_is_refused() {
     assert_refusal("SELECT n FROM nums ORDER BY n FETCH FIRST 20 PERCENT ROWS ONLY");
+}
+
+#[test]
+fn alias_column_list_is_refused() {
+    assert_refusal("SELECT a FROM (VALUES (1),(2)) AS v(a)");
+}
+
+#[test]
+fn tablesample_is_refused() {
+    assert_refusal("SELECT n FROM nums TABLESAMPLE BERNOULLI(10)");
+}
+
+#[test]
+fn nested_query_dispatch_applies_pagination() {
+    assert_rows(
+        "SELECT n FROM ((SELECT n FROM nums ORDER BY n OFFSET 1 ROW FETCH FIRST 2 ROWS ONLY)) AS paged ORDER BY n",
+        &[2, 3],
+    );
+    assert_rows(
+        "SELECT n FROM ((SELECT n FROM nums ORDER BY n OFFSET 3)) AS paged ORDER BY n",
+        &[4, 5],
+    );
+    assert_rows("SELECT ((SELECT n FROM nums ORDER BY n FETCH FIRST 1 ROW ONLY)) AS n", &[1]);
+}
+
+#[test]
+fn compound_operand_clauses_stay_local() {
+    assert_rows(
+        "(SELECT n FROM nums ORDER BY n FETCH FIRST 2 ROWS ONLY) UNION ALL (SELECT n FROM nums ORDER BY n DESC OFFSET 1 ROW FETCH NEXT 2 ROWS ONLY) ORDER BY n",
+        &[1, 2, 3, 4],
+    );
+    assert_rows(
+        "SELECT n FROM nums WHERE n < 3 UNION ALL (SELECT n FROM nums ORDER BY n OFFSET 3) ORDER BY n",
+        &[1, 2, 4, 5],
+    );
+}
+
+#[test]
+fn cte_compound_operand_dispatch_applies_pagination() {
+    assert_rows(
+        "WITH selected AS ((SELECT n FROM nums ORDER BY n FETCH FIRST 2 ROWS ONLY) UNION ALL SELECT n FROM nums WHERE false) SELECT n FROM selected ORDER BY n",
+        &[1, 2],
+    );
+}
+
+#[test]
+fn nested_query_scopes_preserve_cte_shadowing() {
+    assert_rows(
+        "SELECT n FROM ((WITH nums AS (SELECT 11 AS n UNION ALL SELECT 13 AS n) SELECT n FROM nums ORDER BY n FETCH FIRST 1 ROW ONLY)) AS paged",
+        &[11],
+    );
+    assert_rows(
+        "WITH nums AS (SELECT 11 AS n UNION ALL SELECT 13 AS n) SELECT n FROM (SELECT n FROM nums ORDER BY n FETCH FIRST 1 ROW ONLY) AS paged",
+        &[11],
+    );
+}
+
+#[test]
+fn inherited_cte_types_shadow_schema_columns() {
+    assert_rows(
+        "WITH nums AS (SELECT 'abcd'::text AS n) SELECT (SELECT char_length(n) FROM nums) AS n",
+        &[4],
+    );
+    assert_rows(
+        "WITH nums AS (SELECT 'abcd'::text AS n) SELECT n FROM (SELECT char_length(n) AS n FROM nums) AS measured",
+        &[4],
+    );
+}
+
+#[test]
+fn nested_query_dispatch_preserves_refusals() {
+    assert_refusal(
+        "SELECT n FROM ((SELECT n FROM nums ORDER BY n FETCH FIRST 2 ROWS WITH TIES)) AS paged",
+    );
+}
+
+#[test]
+fn nested_row_locks_report_lossy_semantics() {
+    let source = "SELECT n FROM ((SELECT n FROM nums FOR UPDATE)) AS locked ORDER BY n";
+    assert_rows(source, &[1, 2, 3, 4, 5]);
+    let schema = Pg2Sqlite::default().sql(SCHEMA).unwrap().build_schema().unwrap();
+    let report = Pg2Sqlite::default()
+        .sql(source)
+        .unwrap()
+        .translate_with_report_and_schema(&schema, &Pg2SqliteOptions::default())
+        .unwrap();
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .filter(|warning| {
+                matches!(warning, pg2sqlite::warnings::TranslationWarning::LossyDrop { .. })
+            })
+            .count(),
+        1,
+    );
+}
+
+#[test]
+fn nested_operand_depth_preserves_pagination() {
+    for depth in [1, 2, 4, 8] {
+        let operand = format!(
+            "{}SELECT n FROM nums ORDER BY n FETCH FIRST 2 ROWS ONLY{}",
+            "(".repeat(depth),
+            ")".repeat(depth),
+        );
+        assert_rows(&format!("{operand} UNION SELECT 5 AS n ORDER BY n"), &[1, 2, 5]);
+    }
+}
+
+#[test]
+fn nested_query_dispatch_preserves_dml_state() {
+    for (source, expected) in [
+        (
+            "INSERT INTO nums(n) SELECT n FROM ((SELECT n FROM nums ORDER BY n FETCH FIRST 1 ROW ONLY)) AS paged",
+            &[1, 1, 2, 3, 4, 5][..],
+        ),
+        (
+            "UPDATE nums SET n=((SELECT n FROM nums ORDER BY n DESC FETCH FIRST 1 ROW ONLY)) WHERE n=1",
+            &[2, 3, 4, 5, 5][..],
+        ),
+        (
+            "DELETE FROM nums WHERE n<=((SELECT n FROM nums ORDER BY n OFFSET 1 ROW FETCH FIRST 1 ROW ONLY))",
+            &[3, 4, 5][..],
+        ),
+    ] {
+        let mut connection = fixture();
+        for statement in translated(source).unwrap() {
+            connection.batch_execute(&statement.to_string()).unwrap();
+        }
+        let actual =
+            nums::table.select(nums::n).order(nums::n.asc()).load::<i32>(&mut connection).unwrap();
+        assert_eq!(actual, expected, "{source}");
+    }
 }

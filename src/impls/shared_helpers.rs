@@ -3474,7 +3474,7 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
             SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, &scoped, emit)?))
         }
         SetExpr::Query(query) => {
-            SetExpr::Query(Box::new(translate_query_shared::<D>(query, schema, options, emit)?))
+            SetExpr::Query(Box::new(D::translate_query(query, schema, options, emit)?))
         }
         SetExpr::SetOperation { op, set_quantifier, left, right } => {
             if D::IS_FORWARD
