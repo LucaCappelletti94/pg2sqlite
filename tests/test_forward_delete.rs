@@ -155,3 +155,85 @@ fn delete_order_by_and_limit_translate_expressions() {
         conn.execute_batch(&format!("{s};")).unwrap();
     }
 }
+
+/// Target aliases preserve deleted and returned rows, with the translated SQL
+/// run raw as the output under test.
+mod delete_alias {
+    use diesel::{connection::SimpleConnection, prelude::*, sql_types::Integer};
+    use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+    use sqlparser::ast::Statement;
+
+    diesel::table! {
+        t (id) {
+            id -> Integer,
+            n -> Integer,
+        }
+    }
+
+    #[derive(QueryableByName, Debug, PartialEq, Eq)]
+    struct Returned {
+        #[diesel(sql_type = Integer)]
+        id: i32,
+        #[diesel(sql_type = Integer)]
+        n: i32,
+    }
+
+    const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY, n INT NOT NULL);";
+
+    fn prepared(source: &str) -> (SqliteConnection, String) {
+        let statements = Pg2Sqlite::default()
+            .sql(&format!("{SCHEMA}\n{source}"))
+            .unwrap()
+            .translate(&Pg2SqliteOptions::default())
+            .unwrap();
+        let mut connection = SqliteConnection::establish(":memory:").unwrap();
+        let mut delete = None;
+        for statement in statements {
+            if matches!(statement, Statement::Delete(_)) {
+                delete = Some(statement.to_string());
+            } else {
+                connection.batch_execute(&statement.to_string()).unwrap();
+            }
+        }
+        diesel::insert_into(t::table)
+            .values([
+                (t::id.eq(1), t::n.eq(10)),
+                (t::id.eq(2), t::n.eq(20)),
+                (t::id.eq(3), t::n.eq(30)),
+            ])
+            .execute(&mut connection)
+            .unwrap();
+        (connection, delete.expect("translated delete"))
+    }
+
+    fn remaining(connection: &mut SqliteConnection) -> Vec<(i32, i32)> {
+        t::table.select((t::id, t::n)).order(t::id.asc()).load(connection).unwrap()
+    }
+
+    #[test]
+    fn delete_alias_without_as_removes_selected_rows() {
+        for source in [
+            "DELETE FROM t x WHERE x.id = 2;",
+            "DELETE FROM t \"X\" WHERE \"X\".id = 2;",
+            "DELETE FROM t AS x WHERE x.id = 2;",
+        ] {
+            let (mut connection, delete) = prepared(source);
+            diesel::sql_query(&delete)
+                .execute(&mut connection)
+                .unwrap_or_else(|error| panic!("translated delete failed {error}\n{delete}"));
+            assert_eq!(remaining(&mut connection), [(1, 10), (3, 30)], "{source}");
+        }
+    }
+
+    #[test]
+    fn delete_alias_without_as_returns_deleted_rows() {
+        let (mut connection, delete) =
+            prepared("DELETE FROM t x WHERE x.n > 15 RETURNING x.id, x.n;");
+        let mut returned = diesel::sql_query(&delete)
+            .load::<Returned>(&mut connection)
+            .unwrap_or_else(|error| panic!("translated delete failed {error}\n{delete}"));
+        returned.sort_by_key(|row| row.id);
+        assert_eq!(returned, [Returned { id: 2, n: 20 }, Returned { id: 3, n: 30 }]);
+        assert_eq!(remaining(&mut connection), [(1, 10)]);
+    }
+}

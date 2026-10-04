@@ -11,7 +11,7 @@ use alloc::{
 
 use sqlparser::ast::{Delete, Expr, Statement};
 
-use super::helpers::{Forward, translate_table_with_joins};
+use super::helpers::{Forward, spell_target_alias_with_as, translate_table_with_joins};
 use crate::impls::{
     function_helpers::integer_literal,
     query_builder::single_expr_query,
@@ -53,6 +53,11 @@ impl crate::traits::translator::TranslatorWithContext for Delete {
             translate_delete_core::<Forward>(self, schema, options, emit)?;
 
         let mut delete = Delete { selection, from, returning, order_by, limit, ..self.clone() };
+        let (sqlparser::ast::FromTable::WithFromKeyword(targets)
+        | sqlparser::ast::FromTable::WithoutKeyword(targets)) = &mut delete.from;
+        for target in targets {
+            spell_target_alias_with_as(&mut target.relation);
+        }
 
         // Translated up front because the RETURNING scope check needs the
         // relations these introduce, whether or not the fold below runs.
