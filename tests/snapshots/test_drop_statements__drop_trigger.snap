@@ -1,0 +1,7 @@
+---
+source: tests/test_drop_statements.rs
+expression: translated_sql
+---
+DROP TRIGGER my_trigger
+DROP TRIGGER IF EXISTS my_trigger
+DROP TRIGGER my_trigger

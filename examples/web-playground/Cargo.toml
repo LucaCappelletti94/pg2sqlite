@@ -1,0 +1,66 @@
+[package]
+name = "pg2sqlite-web-playground"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Browser playground for pg2sqlite: paste PostgreSQL, see SQLite, run it in-page."
+
+# Not a workspace member: Dioxus's dep graph would slow the parent workspace's precommit/audit.
+[workspace]
+
+[[bin]]
+name = "pg2sqlite-web-playground"
+path = "src/main.rs"
+
+[dependencies]
+# `default-features = false` drops git2/tempfile/std::fs, letting the crate build for wasm32.
+pg2sqlite = { path = "../..", default-features = false }
+
+dioxus = { version = "0.7", features = ["web"] }
+
+# arborium fails to link under the dev profile (undefined `stderr`), so use the release profile.
+dioxus-code = { version = "0.1", default-features = false, features = ["lang-sql"] }
+dioxus-code-editor = "0.1"
+
+dioxus-free-icons = { version = "0.10", features = ["font-awesome-solid", "font-awesome-brands"] }
+
+diesel = { version = "2", default-features = false, features = ["sqlite"] }
+sqlite-wasm-rs = "0.5"
+
+# ST_* spatial functions and vec0 virtual table used by translated spatial and
+# pgvector schemas. Tracks the published crate so the playground and the root
+# manifest stay on one version.
+sqlitegis = { version = "0.2.0", default-features = false, features = ["sqlite"] }
+sqlite-wasm-vec = "0.1"
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "Clipboard",
+    "Navigator",
+    "Element",
+    "DomRect",
+    "Performance",
+] }
+gloo-timers = { version = "0.4", features = ["futures"] }
+
+log = "0.4"
+console_log = { version = "1", features = ["color"] }
+console_error_panic_hook = "0.1"
+dx_icons = { version = "0.1.0", features = ["simple"] }
+
+# Patches don't inherit across workspace boundaries, duplicated from the parent pg2sqlite workspace.
+[patch.crates-io]
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+# binaryen aborts on the DWARF that rustc emits, so strip before wasm-opt runs.
+strip = "debuginfo"
+debug = false

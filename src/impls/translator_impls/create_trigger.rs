@@ -1,0 +1,988 @@
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
+use sql_traits::{
+    structs::ParserDB,
+    traits::{ColumnLike, TriggerLike},
+};
+use sqlparser::{
+    ast::{
+        Assignment, AssignmentTarget, BinaryOperator, ConditionalStatements, CreateTrigger,
+        DropTrigger, Expr, FromTable, Ident, ObjectName, ObjectNamePart, Query, SetExpr, Statement,
+        TableFactor, TableObject, TableWithJoins, TriggerEvent, TriggerExecBodyType, TriggerObject,
+        TriggerObjectKind, TriggerPeriod, Update, Value, ValueWithSpan,
+    },
+    keywords::Keyword,
+    tokenizer::Span,
+};
+
+use crate::{
+    impls::{
+        ast_builder,
+        expr_helpers::map_expr_children,
+        object_name::{
+            append_suffix, normalize_schema_qualified_object_name_for_sqlite,
+            resolve_translation_table, translation_table_has_rls,
+            validate_schema_qualified_object_name_for_sqlite,
+        },
+        query_builder::single_expr_query,
+        shared_helpers::ColumnRewrites,
+    },
+    traits::{schema::Schema, translator::TranslatorWithContext},
+};
+
+/// R106 sequential semantics: PostgreSQL runs plpgsql assignments in order,
+/// so a value referencing a column assigned earlier in the same body
+/// must see that write. A single SQLite `UPDATE` evaluates its whole SET list
+/// against the pre-update row, so earlier values are composed into later ones
+/// instead of split across statements: splitting re-enters the trigger in an
+/// intermediate state and exhausts the recursion depth under
+/// `recursive_triggers = ON` (measured: `too many levels of trigger
+/// recursion`). References to columns assigned LATER stay raw, because reading
+/// the pre-update row is exactly what PostgreSQL does for them.
+fn compose_assignment_refs(expr: &Expr, assigned: &[(String, Expr)]) -> Expr {
+    let earlier = |name: &str| {
+        assigned
+            .iter()
+            .rev()
+            .find(|(col, _)| col.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    };
+    match expr {
+        Expr::Identifier(id) => earlier(&id.value).unwrap_or_else(|| expr.clone()),
+        Expr::CompoundIdentifier(parts)
+            if parts.len() == 2 && parts[0].value.eq_ignore_ascii_case("NEW") =>
+        {
+            earlier(&parts[1].value).unwrap_or_else(|| expr.clone())
+        }
+        _ => map_expr_children(expr, &|child| compose_assignment_refs(child, assigned)),
+    }
+}
+
+/// The maintenance assignments in body order, each value composed against the
+/// ones before it. One rule serves the trigger body, its recursion guard, and
+/// the RLS condition that mirrors the guard, so the three cannot disagree
+/// about what the sequential chain computes.
+pub(crate) fn maintenance_chain(
+    trigger: &CreateTrigger,
+    schema: &ParserDB,
+) -> Result<Vec<(String, Expr)>, sql_traits::errors::LookupError> {
+    let mut assigned: Vec<(String, Expr)> = Vec::new();
+    for (col, raw) in trigger.maintenance_assignments(schema)? {
+        let composed = compose_assignment_refs(&raw, &assigned);
+        assigned.push((col.column_name().to_owned(), composed));
+    }
+    Ok(assigned)
+}
+
+/// Builds the `UPDATE` that stands in for a plpgsql body assigning to
+/// `NEW.<column>`, which SQLite has no way to express directly.
+///
+/// The assigned value is PostgreSQL and goes through `Expr::translate` like any
+/// other expression. Skipping that step emitted `AT TIME ZONE`, `::` casts, and
+/// `greatest` verbatim, the first two rejected when the trigger is created and
+/// the third only on the first write, since SQLite resolves function names
+/// lazily.
+fn generate_maintenance_trigger_body(
+    trigger: &CreateTrigger,
+    target_table_name: &ObjectName,
+    row_context: &str,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<sqlparser::ast::BeginEndStatements, crate::errors::Error> {
+    // The rewrites come from the trigger's own table, whose name is still the
+    // PostgreSQL one at this point. `target_table_name` may already be the
+    // redirected RLS backing table, which the schema does not hold.
+    let rewrites = ColumnRewrites::for_named_table(schema, &trigger.table_name, options);
+    let assignments = maintenance_chain(trigger, schema)?
+        .into_iter()
+        .map(|(col, raw)| {
+            let cast = rewrites.temporal_column_cast(col.as_str(), &raw, schema, options);
+            let value =
+                cast.as_ref().unwrap_or(&raw).translate_with_warnings(schema, options, emit)?;
+            let value = rewrites.finish_value(col.as_str(), value, options)?;
+            Ok(Assignment {
+                target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
+                    Ident::new(col),
+                )])),
+                value,
+            })
+        })
+        .collect::<Result<Vec<_>, crate::errors::Error>>()?;
+
+    let update_stmt = Statement::Update(Update {
+        update_token: ast_builder::keyword_token("UPDATE", Keyword::UPDATE),
+        table: TableWithJoins {
+            relation: TableFactor::Table {
+                name: target_table_name.clone(),
+                alias: None,
+                args: None,
+                with_hints: vec![],
+                version: None,
+                partitions: vec![],
+                json_path: None,
+                sample: None,
+                index_hints: vec![],
+                with_ordinality: false,
+            },
+            joins: vec![],
+        },
+        assignments,
+        from: None,
+        selection: Some(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("rowid"))),
+            op: BinaryOperator::Eq,
+            right: Box::new(Expr::CompoundIdentifier(vec![
+                Ident::new(row_context),
+                Ident::new("rowid"),
+            ])),
+        }),
+        returning: None,
+        output: None,
+        or: None,
+        order_by: Vec::new(),
+        limit: None,
+        optimizer_hints: Vec::new(),
+    });
+
+    Ok(sqlparser::ast::BeginEndStatements {
+        begin_token: ast_builder::keyword_token("BEGIN", Keyword::BEGIN),
+        statements: vec![update_stmt],
+        end_token: ast_builder::keyword_token("END", Keyword::END),
+    })
+}
+
+/// Replaces an empty translated body with `SELECT NULL`, reporting the trigger
+/// whose body vanished.
+///
+/// The report is unconditional because nothing here can tell an intentional
+/// no-op, a plpgsql function whose only statement is `RETURN NEW`, from a body
+/// the plpgsql translator emptied by dropping statements it could not render.
+fn substitute_no_op_body_when_empty(
+    mut body: sqlparser::ast::BeginEndStatements,
+    emit: crate::warnings::WarningSink<'_>,
+) -> sqlparser::ast::BeginEndStatements {
+    if !body.statements.is_empty() {
+        return body;
+    }
+
+    emit(crate::warnings::TranslationWarning::LossyDrop {
+        construct: "empty trigger body".to_string(),
+        reason: "the translated trigger body has no statements left, so the trigger does nothing. \
+                 SQLite rejects an empty BEGIN END, so it carries SELECT NULL instead."
+            .to_string(),
+    });
+
+    // SQLite rejects an empty BEGIN END, so the body carries `SELECT NULL`.
+    body.statements = vec![Statement::Query(Box::new(single_expr_query(
+        Expr::Value(ValueWithSpan { value: Value::Null, span: Span::empty() }),
+        vec![],
+        None,
+    )))];
+    body
+}
+
+fn route_trigger_write_name(
+    name: &mut ObjectName,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), crate::errors::Error> {
+    if options.get_write_exemption_function().is_none() {
+        return Ok(());
+    }
+    let Some(ObjectNamePart::Identifier(last)) = name.0.last_mut() else {
+        return Ok(());
+    };
+    if super::rls::table_has_rls(&last.value, schema)? {
+        last.value.push_str(options.get_rls_table_suffix());
+    }
+    Ok(())
+}
+
+fn route_trigger_table_factor(
+    factor: &mut TableFactor,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), crate::errors::Error> {
+    if let TableFactor::Table { name, .. } = factor {
+        route_trigger_write_name(name, schema, options)?;
+    }
+    Ok(())
+}
+
+fn route_trigger_query_writes(
+    query: &mut Query,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), crate::errors::Error> {
+    if let Some(with) = &mut query.with {
+        for cte in &mut with.cte_tables {
+            route_trigger_query_writes(&mut cte.query, schema, options)?;
+        }
+    }
+    match query.body.as_mut() {
+        SetExpr::Query(query) => route_trigger_query_writes(query, schema, options)?,
+        SetExpr::Insert(statement) | SetExpr::Update(statement) | SetExpr::Delete(statement) => {
+            route_trigger_statement_writes(statement, schema, options)?;
+        }
+        SetExpr::Select(_)
+        | SetExpr::SetOperation { .. }
+        | SetExpr::Values(_)
+        | SetExpr::Merge(_)
+        | SetExpr::Table(_) => {}
+    }
+    Ok(())
+}
+
+fn route_trigger_statement_writes(
+    statement: &mut Statement,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), crate::errors::Error> {
+    match statement {
+        Statement::Insert(insert) => {
+            if let TableObject::TableName(name) = &mut insert.table {
+                route_trigger_write_name(name, schema, options)?;
+            }
+        }
+        Statement::Update(update) => {
+            route_trigger_table_factor(&mut update.table.relation, schema, options)?;
+        }
+        Statement::Delete(delete) => {
+            let (FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables)) =
+                &mut delete.from;
+            if let Some(target) = tables.first_mut() {
+                route_trigger_table_factor(&mut target.relation, schema, options)?;
+            }
+        }
+        Statement::Query(query) => route_trigger_query_writes(query, schema, options)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn generate_standard_trigger_body(
+    exec_body: &sqlparser::ast::TriggerExecBody,
+    events: &[sqlparser::ast::TriggerEvent],
+    table_name: &sqlparser::ast::ObjectName,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Option<sqlparser::ast::BeginEndStatements>, crate::errors::Error> {
+    let function_name = &exec_body.func_desc.name;
+    if let Some((mut body, mut context)) = schema.function_body_with_context(function_name)? {
+        // Seed trigger-specific context so the body translator can
+        // constant-fold TG_OP and TG_TABLE_NAME references.
+        context.trigger_events = events
+            .iter()
+            .map(|e| {
+                match e {
+                    sqlparser::ast::TriggerEvent::Insert => "INSERT".to_string(),
+                    sqlparser::ast::TriggerEvent::Update(_) => "UPDATE".to_string(),
+                    sqlparser::ast::TriggerEvent::Delete => "DELETE".to_string(),
+                    sqlparser::ast::TriggerEvent::Truncate => "TRUNCATE".to_string(),
+                }
+            })
+            .collect();
+        context.trigger_table = table_name.0.last().and_then(|p| {
+            match p {
+                sqlparser::ast::ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
+                sqlparser::ast::ObjectNamePart::Function(_) => None,
+            }
+        });
+        let mut translated = super::plpgsql::PlPgSqlTranslator::translate_with_context(
+            &body, context, schema, options, emit,
+        )?;
+        for statement in &mut translated {
+            route_trigger_statement_writes(statement, schema, options)?;
+        }
+        body.statements = translated;
+        Ok(Some(body))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Replaces `NEW` with `OLD` in compound identifiers so the WHEN clause can
+/// compare the current NEW value against what the maintenance expression
+/// computes from OLD, the value the recursion UPDATE would already have set.
+pub(crate) fn substitute_new_with_old(expr: &Expr) -> Expr {
+    if let Expr::CompoundIdentifier(parts) = expr
+        && parts.first().is_some_and(|part| part.value.eq_ignore_ascii_case("NEW"))
+    {
+        let mut renamed = parts.clone();
+        renamed[0] = Ident::new("OLD");
+        return Expr::CompoundIdentifier(renamed);
+    }
+    map_expr_children(expr, &substitute_new_with_old)
+}
+
+/// WHEN clause for AFTER UPDATE maintenance triggers that prevents re-firing
+/// on the trigger's own UPDATE (recursion guard).
+///
+/// Fires when ANY maintained column's NEW value differs from what the
+/// maintenance expression computes from OLD — the recursion case always has
+/// every column already at its maintained value, so the clause is false there.
+fn build_maintenance_recursion_when_clause(
+    trigger: &CreateTrigger,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Option<Expr> {
+    let conditions: Vec<Expr> = maintenance_chain(trigger, schema)
+        .ok()?
+        .into_iter()
+        .filter_map(|(col, raw_expr)| {
+            let old_expr = substitute_new_with_old(&raw_expr);
+            let translated = old_expr.translate_with_warnings(schema, options, emit).ok()?;
+            let new_col = Expr::CompoundIdentifier(vec![Ident::new("NEW"), Ident::new(&col)]);
+            Some(Expr::IsDistinctFrom(Box::new(new_col), Box::new(translated)))
+        })
+        .collect();
+
+    conditions.into_iter().reduce(|a, b| {
+        Expr::BinaryOp { left: Box::new(a), op: BinaryOperator::Or, right: Box::new(b) }
+    })
+}
+
+/// ANDs two optional conditions; used to attach the recursion guard to any
+/// existing WHEN clause from the source trigger.
+fn merge_conditions(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            Some(Expr::BinaryOp {
+                left: Box::new(Expr::Nested(Box::new(a))),
+                op: BinaryOperator::And,
+                right: Box::new(Expr::Nested(Box::new(b))),
+            })
+        }
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
+fn maintenance_trigger_has_insert_event(events: &[TriggerEvent]) -> bool {
+    events.iter().any(|event| matches!(event, TriggerEvent::Insert))
+}
+
+fn split_before_insert_maintenance_trigger(
+    create_trigger: &CreateTrigger,
+    schema: &ParserDB,
+) -> Option<(CreateTrigger, CreateTrigger)> {
+    let Ok(true) = create_trigger.is_maintenance_trigger(schema) else {
+        return None;
+    };
+
+    if !matches!(create_trigger.period, Some(TriggerPeriod::Before)) {
+        return None;
+    }
+
+    let has_insert_event =
+        create_trigger.events.iter().any(|event| matches!(event, TriggerEvent::Insert));
+    if !has_insert_event {
+        return None;
+    }
+
+    let non_insert_events = create_trigger
+        .events
+        .iter()
+        .filter(|event| !matches!(event, TriggerEvent::Insert))
+        .cloned()
+        .collect::<Vec<_>>();
+    if non_insert_events.is_empty() {
+        return None;
+    }
+
+    let mut insert_trigger = create_trigger.clone();
+    insert_trigger.events = vec![TriggerEvent::Insert];
+    insert_trigger.name = append_suffix(&create_trigger.name, "_pg2sqlite_insert");
+
+    let mut non_insert_trigger = create_trigger.clone();
+    non_insert_trigger.events = non_insert_events;
+
+    Some((insert_trigger, non_insert_trigger))
+}
+
+impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
+    type SQLiteEntry = Vec<(Option<DropTrigger>, CreateTrigger)>;
+
+    #[allow(clippy::too_many_lines)]
+    fn translate_with_warnings(
+        &self,
+        schema: &sql_traits::structs::ParserDB,
+        options: &crate::options::TranslationContext<'_>,
+        emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
+    ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        // A trigger body reads the row of the table it is attached to, through
+        // `NEW` and `OLD` or bare, and there is no query around it, so that
+        // table is the outermost scope its column types resolve against. A
+        // query inside the body attaches its own scope over this one.
+        let trigger_scope =
+            crate::impls::object_name::resolve_translation_table(schema, &self.table_name)?
+                .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+        let scoped = trigger_scope.as_ref().map(|scope| options.with_pseudo_row_scope(scope));
+        let options = scoped.as_ref().unwrap_or(options);
+        // Checked before the FOR EACH clause because PostgreSQL allows
+        // TRUNCATE triggers only FOR EACH STATEMENT, so that check would catch
+        // every valid one first and advise a rewrite PostgreSQL rejects.
+        if self.events.iter().any(|event| matches!(event, TriggerEvent::Truncate)) {
+            return Err(crate::errors::Error::forward_refusal(
+                "a TRUNCATE trigger has no SQLite equivalent, since SQLite has no TRUNCATE. \
+                 PostgreSQL TRUNCATE is translated to DELETE FROM, which fires DELETE triggers, \
+                 so add the work to a DELETE trigger if it should run on that."
+                    .to_string(),
+            ));
+        }
+
+        // SQLite has only row triggers. The omitted clause is the same case:
+        // PostgreSQL defaults to STATEMENT and SQLite to ROW, so passing it
+        // through reverses how often the body runs. Checked before the
+        // maintenance-trigger split, which recurses through here.
+        match self.trigger_object {
+            Some(
+                TriggerObjectKind::For(TriggerObject::Row)
+                | TriggerObjectKind::ForEach(TriggerObject::Row),
+            ) => {}
+            Some(
+                TriggerObjectKind::For(TriggerObject::Statement)
+                | TriggerObjectKind::ForEach(TriggerObject::Statement),
+            ) => {
+                return Err(crate::errors::Error::forward_refusal(
+                    "a statement trigger has no SQLite equivalent, since SQLite fires a trigger \
+                         once per row rather than once per statement. Rewrite the body so it is \
+                         correct once per row and declare the trigger FOR EACH ROW."
+                        .to_string(),
+                ));
+            }
+            None => {
+                return Err(crate::errors::Error::forward_refusal(
+                    "a trigger with no FOR EACH clause is a statement trigger in PostgreSQL, \
+                         which has no SQLite equivalent, since SQLite fires a trigger once per row \
+                         rather than once per statement. Write FOR EACH ROW if that is what was \
+                         meant, since SQLite would otherwise silently run the body once per row."
+                        .to_string(),
+                ));
+            }
+        }
+
+        // A transition table hands the body every row the statement touched,
+        // which a SQLite row trigger cannot see. PostgreSQL allows the clause
+        // on a FOR EACH ROW trigger too, so R27's rejection does not cover it.
+        if let Some(referencing) = self.referencing.first() {
+            return Err(crate::errors::Error::forward_refusal(format!(
+                "the transition table `{referencing}` has no SQLite equivalent, since a SQLite \
+                 trigger body sees one row at a time through NEW and OLD and never the set of \
+                 rows a statement touched. Collect the rows in a table the body appends to, or \
+                 do the work in the application."
+            )));
+        }
+
+        let source_table_name = self.table_name.clone();
+        validate_schema_qualified_object_name_for_sqlite(schema, &source_table_name)?;
+        let normalized_source_table_name =
+            normalize_schema_qualified_object_name_for_sqlite(schema, &source_table_name)?;
+
+        let mut normalized_trigger = self.clone();
+        normalized_trigger.table_name = normalized_source_table_name;
+
+        // The sql-traits trigger machinery resolves the table by its declared
+        // spelling, so the traits-facing trigger carries the registry name
+        // while the emitted trigger keeps the normalized one. The split
+        // halves re-normalize on their own translate pass.
+        let resolved_table = resolve_translation_table(schema, &source_table_name)?;
+        let can_use_trigger_traits = resolved_table.is_some();
+
+        let mut trigger_for_helpers = self.clone();
+        if let Some(table) = resolved_table {
+            trigger_for_helpers.table_name = table.name.clone();
+        }
+
+        if can_use_trigger_traits
+            && let Some((insert_trigger, non_insert_trigger)) =
+                split_before_insert_maintenance_trigger(&trigger_for_helpers, schema)
+        {
+            let mut translated = Vec::new();
+            translated.extend(non_insert_trigger.translate_with_warnings(schema, options, emit)?);
+            translated.extend(insert_trigger.translate_with_warnings(schema, options, emit)?);
+            return Ok(translated);
+        }
+
+        let CreateTrigger {
+            or_alter,
+            temporary,
+            or_replace,
+            is_constraint,
+            name,
+            period,
+            events,
+            table_name: _table_name,
+            referenced_table_name,
+            referencing,
+            trigger_object,
+            period_before_table,
+            condition,
+            statements_as,
+            exec_body,
+            statements,
+            characteristics,
+        } = normalized_trigger;
+
+        if let Some(statements) = statements {
+            return Err(crate::errors::Error::unsupported_source_syntax(format!(
+                "Triggers with statements are not supported: `{statements}`"
+            )));
+        }
+
+        let Some(exec_body) = exec_body else {
+            return Err(crate::errors::Error::unsupported_source_syntax(
+                "Triggers without an execution body are not supported",
+            ));
+        };
+
+        if matches!(exec_body.exec_type, TriggerExecBodyType::Procedure) {
+            return Err(crate::errors::Error::unsupported_source_syntax(format!(
+                "Triggers with execution body of type `Procedure` are not supported: `{exec_body}`"
+            )));
+        }
+
+        let mut period = period;
+        let is_maintenance_trigger =
+            can_use_trigger_traits && trigger_for_helpers.is_maintenance_trigger(schema)?;
+
+        if !is_maintenance_trigger {
+            let self_name = crate::impls::object_name::last_ident(&self.name)
+                .map_or("", |ident| ident.value.as_str());
+            if options.is_conflicting_trigger_name(self_name) {
+                let table = crate::impls::object_name::last_ident(&trigger_for_helpers.table_name)
+                    .map_or("?", |ident| ident.value.as_str());
+                return Err(crate::errors::Error::forward_refusal(format!(
+                    "multiple BEFORE/AFTER row triggers share the same event and timing on \
+                     table `{table}`: PostgreSQL fires them in name order but SQLite fires \
+                     in reverse creation order. Merge the trigger bodies into a single trigger."
+                )));
+            }
+        }
+
+        let maintenance_insert_event =
+            is_maintenance_trigger && maintenance_trigger_has_insert_event(&events);
+        let maintenance_update_event =
+            is_maintenance_trigger && events.iter().any(|e| matches!(e, TriggerEvent::Update(_)));
+        if maintenance_insert_event && matches!(period, Some(TriggerPeriod::Before)) {
+            // Row does not exist yet in BEFORE INSERT; AFTER preserves
+            // final-row semantics.
+            period = Some(TriggerPeriod::After);
+        }
+        // BEFORE UPDATE maintenance triggers are overwritten by the original
+        // UPDATE; AFTER ensures the maintenance write is the last
+        // write.
+        if maintenance_update_event && matches!(period, Some(TriggerPeriod::Before)) {
+            period = Some(TriggerPeriod::After);
+        }
+
+        // For BEFORE/AFTER triggers on RLS-protected tables, redirect to the
+        // underlying _rls table. INSTEAD OF triggers are used on the
+        // view, but BEFORE/AFTER triggers must target the actual table
+        // (which has been renamed to table_rls).
+        let redirected_source_table_name =
+            if matches!(period, Some(TriggerPeriod::Before | TriggerPeriod::After)) {
+                if translation_table_has_rls(schema, &source_table_name)? {
+                    append_suffix(&source_table_name, options.get_rls_table_suffix())
+                } else {
+                    source_table_name.clone()
+                }
+            } else {
+                source_table_name.clone()
+            };
+        let redirected_table_name = normalize_schema_qualified_object_name_for_sqlite(
+            schema,
+            &redirected_source_table_name,
+        )?;
+
+        let function_body = if is_maintenance_trigger {
+            let row_context = if maintenance_insert_event { "NEW" } else { "OLD" };
+            generate_maintenance_trigger_body(
+                &trigger_for_helpers,
+                &redirected_table_name,
+                row_context,
+                schema,
+                options,
+                emit,
+            )?
+        } else if let Some(body) = generate_standard_trigger_body(
+            &exec_body,
+            &events,
+            &redirected_table_name,
+            schema,
+            options,
+            emit,
+        )? {
+            body
+        } else {
+            return Err(crate::errors::Error::forward_refusal(format!(
+                "Trigger function '{}' body not found. Make sure the CREATE FUNCTION statement \
+                 is included in the same translation batch as the CREATE TRIGGER.",
+                exec_body.func_desc.name
+            )));
+        };
+
+        // SQLite requires at least one statement between BEGIN and END, so an
+        // emptied body is `near "END": syntax error` rather than a trigger that
+        // does nothing. Substituting `SELECT NULL` keeps the trigger object in
+        // place, which skipping the statement would not: a later DROP TRIGGER
+        // would find nothing, and a CREATE OR REPLACE could not emit its DROP
+        // at all, since this returns pairs in which the CREATE is not optional.
+        let function_body = substitute_no_op_body_when_empty(function_body, emit);
+
+        let maybe_drop_trigger = or_replace.then(|| {
+            DropTrigger {
+                if_exists: true,
+                trigger_name: name.clone(),
+                table_name: None,
+                option: None,
+            }
+        });
+
+        if or_alter {
+            return Err(crate::errors::Error::unsupported_source_syntax(
+                "Triggers with `OR ALTER` are not supported",
+            ));
+        }
+
+        if is_constraint {
+            return Err(crate::errors::Error::unsupported_source_syntax(
+                "Constraint triggers are not supported",
+            ));
+        }
+
+        if let Some(characteristics) = &characteristics {
+            return Err(crate::errors::Error::unsupported_source_syntax(format!(
+                "Triggers with characteristics are not supported: `{characteristics}`"
+            )));
+        }
+
+        Ok(vec![(
+            maybe_drop_trigger,
+            CreateTrigger {
+                or_alter,
+                temporary,
+                or_replace: false,
+                is_constraint,
+                name,
+                period,
+                events,
+                table_name: redirected_table_name,
+                referenced_table_name,
+                referencing,
+                trigger_object,
+                period_before_table,
+                statements_as,
+                condition: {
+                    let translated_cond = condition
+                        .as_ref()
+                        .map(|cond| cond.translate_with_warnings(schema, options, emit))
+                        .transpose()?;
+                    let recursion_guard = (is_maintenance_trigger && maintenance_update_event)
+                        .then(|| {
+                            build_maintenance_recursion_when_clause(
+                                &trigger_for_helpers,
+                                schema,
+                                options,
+                                emit,
+                            )
+                        })
+                        .flatten();
+                    merge_conditions(translated_cond, recursion_guard)
+                },
+                exec_body: None,
+                statements: Some(ConditionalStatements::BeginEnd(function_body)),
+                characteristics: None,
+            },
+        )])
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use sql_traits::structs::ParserDB;
+    use sqlparser::{
+        ast::{CreateTrigger, Statement},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use crate::prelude::{Pg2SqliteOptions, Translator};
+
+    fn parse_statements(sql: &str) -> Vec<Statement> {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("sql should parse")
+    }
+
+    fn parse_trigger(sql: &str) -> CreateTrigger {
+        let stmt = parse_statements(sql).remove(0);
+        let Statement::CreateTrigger(trigger) = stmt else {
+            panic!("expected create trigger");
+        };
+        trigger
+    }
+
+    fn schema_with_trigger_function_and_rls_table() -> ParserDB {
+        let schema_sql = r#"
+            CREATE TABLE docs(id INTEGER PRIMARY KEY);
+            ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+            CREATE FUNCTION docs_trigger_fn() RETURNS trigger AS $$
+            BEGIN
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+        "#;
+        ParserDB::from_statements(parse_statements(schema_sql), "test".to_string())
+            .expect("schema should build")
+    }
+
+    #[test]
+    fn instead_of_trigger_on_rls_table_keeps_original_table_name() {
+        let schema = schema_with_trigger_function_and_rls_table();
+        let options = crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default());
+        let trigger = parse_trigger(
+            "CREATE TRIGGER docs_instead INSTEAD OF INSERT ON docs \
+             FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn()",
+        );
+
+        let translated = trigger
+            .translate(&schema, &options)
+            .expect("trigger translation should succeed")
+            .into_iter()
+            .next()
+            .expect("trigger should be translated");
+
+        let (_drop_stmt, create_trigger) = translated;
+        assert_eq!(create_trigger.table_name.to_string(), "docs");
+    }
+
+    #[test]
+    fn missing_trigger_function_body_always_errors() {
+        let schema = ParserDB::from_statements(
+            parse_statements("CREATE TABLE docs(id INTEGER PRIMARY KEY);"),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+        let trigger = parse_trigger(
+            "CREATE TRIGGER docs_ai AFTER INSERT ON docs \
+             FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn()",
+        );
+
+        let err =
+            trigger.translate(&schema, &Pg2SqliteOptions::default()).expect_err("should fail");
+        assert!(err.to_string().contains("Trigger function"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn before_insert_or_update_maintenance_trigger_translates_to_two_triggers() {
+        let schema = ParserDB::from_statements(
+            parse_statements(
+                r#"
+                CREATE TABLE brands(id INTEGER PRIMARY KEY, name TEXT, edited_at TEXT);
+                CREATE FUNCTION set_brands_edited_at() RETURNS trigger AS $$
+                BEGIN
+                    NEW.edited_at = CURRENT_TIMESTAMP;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+                "#,
+            ),
+            "test".to_string(),
+        )
+        .expect("schema should build");
+        let trigger = parse_trigger(
+            "CREATE TRIGGER trigger_upsert_brands_edited_at \
+             BEFORE INSERT OR UPDATE ON brands \
+             FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at()",
+        );
+
+        let translated = trigger
+            .translate(&schema, &Pg2SqliteOptions::default())
+            .expect("trigger translation should succeed");
+        assert_eq!(translated.len(), 2, "expected split translation for mixed maintenance trigger");
+
+        let sql = translated
+            .into_iter()
+            .map(|(_, trigger)| trigger.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            sql.contains("CREATE TRIGGER trigger_upsert_brands_edited_at AFTER UPDATE ON brands"),
+            "missing AFTER UPDATE branch: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN"),
+            "UPDATE branch must carry a recursion-guard WHEN clause: {sql}"
+        );
+        assert!(
+            sql.contains("CREATE TRIGGER trigger_upsert_brands_edited_at_pg2sqlite_insert AFTER INSERT ON brands"),
+            "missing AFTER INSERT branch: {sql}"
+        );
+    }
+    /// SQLite has only row triggers, and `FOR EACH STATEMENT` is `near
+    /// "STATEMENT": syntax error`. A row trigger cannot stand in for one: the
+    /// body would run once per affected row instead of once per statement.
+    #[test]
+    fn statement_triggers_are_rejected() {
+        for spelling in ["FOR EACH STATEMENT", "FOR STATEMENT"] {
+            let trigger = parse_trigger(&format!(
+                "CREATE TRIGGER docs_ai AFTER INSERT ON docs \
+                 {spelling} EXECUTE FUNCTION docs_trigger_fn()"
+            ));
+            let err = trigger
+                .translate(
+                    &schema_with_trigger_function_and_rls_table(),
+                    &Pg2SqliteOptions::default(),
+                )
+                .expect_err("a statement trigger has no SQLite form");
+            assert!(
+                err.to_string().contains("once per statement"),
+                "the error must say what differs, got: {err}"
+            );
+        }
+    }
+
+    /// PostgreSQL defaults to `FOR EACH STATEMENT` when the clause is omitted,
+    /// measured on PostgreSQL 16: a trigger written without it fires once for a
+    /// three row insert and `information_schema.triggers` reports `STATEMENT`.
+    /// SQLite defaults to the opposite, so the omitted spelling must be
+    /// rejected too, or the body silently starts running once per row.
+    #[test]
+    fn a_trigger_without_a_for_each_clause_is_rejected() {
+        let trigger = parse_trigger(
+            "CREATE TRIGGER docs_ai AFTER INSERT ON docs EXECUTE FUNCTION docs_trigger_fn()",
+        );
+        let err = trigger
+            .translate(&schema_with_trigger_function_and_rls_table(), &Pg2SqliteOptions::default())
+            .expect_err("an omitted clause means STATEMENT in PostgreSQL");
+        assert!(
+            err.to_string().contains("once per statement"),
+            "the error must say what differs, got: {err}"
+        );
+    }
+
+    /// Both row spellings still translate. Guards the rejection from widening
+    /// to the case SQLite does support.
+    #[test]
+    fn row_triggers_still_translate() {
+        for spelling in ["FOR EACH ROW", "FOR ROW"] {
+            let trigger = parse_trigger(&format!(
+                "CREATE TRIGGER docs_ai AFTER INSERT ON docs \
+                 {spelling} EXECUTE FUNCTION docs_trigger_fn()"
+            ));
+            trigger
+                .translate(
+                    &schema_with_trigger_function_and_rls_table(),
+                    &Pg2SqliteOptions::default(),
+                )
+                .unwrap_or_else(|error| panic!("{spelling} is what SQLite does: {error}"));
+        }
+    }
+
+    /// A transition table gives the body every row the statement touched, so a
+    /// SQLite row trigger cannot stand in for it even when the PostgreSQL
+    /// trigger is itself `FOR EACH ROW`. Measured on PostgreSQL 16: an
+    /// `AFTER INSERT ... REFERENCING NEW TABLE AS nt FOR EACH ROW` trigger over
+    /// a three row insert fires three times and sees all three rows each time.
+    ///
+    /// Each spelling is paired with an event PostgreSQL accepts it on, so the
+    /// rejection is the translator's and not a stand-in for an invalid input.
+    #[test]
+    fn transition_tables_are_rejected() {
+        for (event, referencing) in
+            [("INSERT", "REFERENCING NEW TABLE AS nt"), ("DELETE", "REFERENCING OLD TABLE AS ot")]
+        {
+            let trigger = parse_trigger(&format!(
+                "CREATE TRIGGER docs_a AFTER {event} ON docs \
+                 {referencing} FOR EACH ROW EXECUTE FUNCTION docs_trigger_fn()"
+            ));
+            let err = trigger
+                .translate(
+                    &schema_with_trigger_function_and_rls_table(),
+                    &Pg2SqliteOptions::default(),
+                )
+                .expect_err("SQLite has no transition tables");
+            assert!(
+                err.to_string().contains("transition table"),
+                "the error must name the clause, got: {err}"
+            );
+        }
+    }
+
+    /// Every TRUNCATE trigger PostgreSQL accepts is a statement trigger, which
+    /// R27 already refuses, but with advice that is wrong here: rewriting it
+    /// `FOR EACH ROW` is itself refused by PostgreSQL. So the message has to
+    /// name TRUNCATE for every spelling.
+    ///
+    /// The last case is not valid PostgreSQL and is included because sqlparser
+    /// parses it, so it reaches the translator regardless.
+    #[test]
+    fn truncate_triggers_are_rejected() {
+        for spelling in [
+            "AFTER TRUNCATE ON docs FOR EACH STATEMENT",
+            "AFTER TRUNCATE ON docs",
+            "AFTER INSERT OR TRUNCATE ON docs FOR EACH STATEMENT",
+            "AFTER TRUNCATE ON docs FOR EACH ROW",
+        ] {
+            let trigger = parse_trigger(&format!(
+                "CREATE TRIGGER docs_at {spelling} EXECUTE FUNCTION docs_trigger_fn()"
+            ));
+            let err = trigger
+                .translate(
+                    &schema_with_trigger_function_and_rls_table(),
+                    &Pg2SqliteOptions::default(),
+                )
+                .expect_err("SQLite has no TRUNCATE");
+            assert!(
+                err.to_string().contains("TRUNCATE"),
+                "`{spelling}` must be refused for its event, got: {err}"
+            );
+        }
+    }
+    #[test]
+    fn configured_exemption_routes_trigger_dml_targets_to_backing_tables() {
+        let schema = schema_with_trigger_function_and_rls_table();
+        let options = crate::options::TranslationContext::from_owned(
+            Pg2SqliteOptions::default().with_write_exemption_function("write_is_exempt"),
+        );
+
+        for sql in [
+            "INSERT INTO docs(id) VALUES (1)",
+            "UPDATE docs SET id = 2 WHERE id = 1",
+            "DELETE FROM docs WHERE id = 1",
+        ] {
+            let mut statement = parse_statements(sql).remove(0);
+            super::route_trigger_statement_writes(&mut statement, &schema, &options)
+                .expect("route trigger write");
+            assert!(
+                statement.to_string().contains("docs_rls"),
+                "target must be the backing table: {statement}"
+            );
+        }
+
+        let mut select = parse_statements("SELECT id FROM docs").remove(0);
+        super::route_trigger_statement_writes(&mut select, &schema, &options)
+            .expect("leave reads alone");
+        assert_eq!(select.to_string(), "SELECT id FROM docs");
+
+        let mut default_insert = parse_statements("INSERT INTO docs(id) VALUES (1)").remove(0);
+        super::route_trigger_statement_writes(
+            &mut default_insert,
+            &schema,
+            &crate::options::TranslationContext::from_owned(Pg2SqliteOptions::default()),
+        )
+        .expect("leave default translation alone");
+        assert_eq!(default_insert.to_string(), "INSERT INTO docs (id) VALUES (1)");
+    }
+}

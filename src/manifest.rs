@@ -1,0 +1,283 @@
+//! Logical to physical table map for a translation.
+//!
+//! RLS translation renames a table's storage behind a view and read-only
+//! translation denies writes, so the logical (PostgreSQL) name no longer
+//! always names a plain table. The RLS suffix is configurable, so the map
+//! cannot be guessed by convention. Get it from
+//! [`Pg2Sqlite::translation_manifest`](crate::pg2sqlite::Pg2Sqlite::translation_manifest).
+
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
+
+/// How the translation wrapped one table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrapperKind {
+    /// Translated one to one. The logical name is a real table.
+    Plain,
+    /// RLS translation. The physical table carries the configured suffix, a
+    /// view holds the logical name, and INSTEAD OF triggers enforce policies.
+    RlsView,
+    /// Read-only translation. The name is unchanged and BEFORE triggers deny
+    /// writes.
+    ReadOnly,
+}
+
+/// One table's translation outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableManifestEntry {
+    /// The table name in the source (PostgreSQL) schema.
+    pub logical: String,
+    /// The SQLite table that physically stores the rows.
+    pub physical: String,
+    /// The wrapper generated around the physical table.
+    pub wrapper: WrapperKind,
+    /// How each column is physically represented, one entry per column in
+    /// declaration order.
+    pub columns: Vec<ColumnManifestEntry>,
+}
+
+/// How one column is physically represented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnManifestEntry {
+    /// The column name, as declared in the source schema.
+    pub name: String,
+    /// What the stored value is, for a reader that has to turn it back into
+    /// the value PostgreSQL would have given it.
+    pub storage: ColumnStorage,
+}
+
+/// What a column's stored value is, where that is not the value PostgreSQL
+/// holds.
+///
+/// Only the read direction needs this. A caller binds and writes what
+/// PostgreSQL takes, and the emitted SQL performs whatever conversion the
+/// column's storage needs, so nothing here is applied to a value on its way
+/// in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnStorage {
+    /// The stored value is the value, and the emitted SQLite type says what
+    /// it is.
+    Direct,
+    /// An `INTEGER` of minor units, which a `NUMERIC(p,s)` column stores:
+    /// `19.99` at scale 2 is stored as `1999`, so dividing by `10^scale`
+    /// recovers the decimal.
+    MinorUnits {
+        /// The power of ten the stored integer is scaled by.
+        scale: u32,
+    },
+    /// Sixteen bytes of `BLOB`, the UUID in its own byte order, which is the
+    /// `Blob` UUID representation.
+    UuidBlob,
+    /// Canonical lowercase hyphenated UUID text, which is the `Text` UUID
+    /// representation.
+    UuidText,
+    /// JSON array text, which is how an array column is stored under the
+    /// JSON array representation: PostgreSQL's `{1,2}` is held as `[1,2]`.
+    JsonArray,
+    /// Packed floats in a `BLOB`, which is what `sqlite-vec` reads.
+    Vector {
+        /// The declared width, or `None` when the column declared none.
+        dimensions: Option<u32>,
+        /// The width of one element.
+        element: VectorElement,
+    },
+}
+
+/// The element type of a stored vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorElement {
+    /// Four bytes per element, little endian, which `vector` uses.
+    Float32,
+    /// Two bytes per element, little endian, which `halfvec` uses.
+    Float16,
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use sqlparser::ast::Statement;
+
+    use super::WrapperKind;
+    use crate::{pg2sqlite::Pg2Sqlite, prelude::Pg2SqliteOptions};
+
+    fn manifest(sql: &str, options: &Pg2SqliteOptions) -> Vec<super::TableManifestEntry> {
+        Pg2Sqlite::default()
+            .sql(sql)
+            .expect("input should parse")
+            .translation_manifest(options)
+            .expect("manifest should build")
+    }
+
+    /// Backing-table name of the sole `CREATE TABLE` carrying the RLS suffix in
+    /// the generator's real output. Used as the drift-guard oracle.
+    fn generated_rls_backing_name(sql: &str, options: &Pg2SqliteOptions) -> String {
+        let statements = Pg2Sqlite::default()
+            .sql(sql)
+            .expect("input should parse")
+            .translate(options)
+            .expect("translation should succeed");
+        let suffix = options.get_rls_table_suffix();
+        let names: Vec<String> = statements
+            .iter()
+            .filter_map(|statement| {
+                match statement {
+                    Statement::CreateTable(create) => Some(create.name.to_string()),
+                    _ => None,
+                }
+            })
+            .filter(|name| name.contains(suffix))
+            .collect();
+        assert_eq!(names.len(), 1, "expected exactly one RLS backing table, got {names:?}");
+        names.into_iter().next().unwrap()
+    }
+
+    const PLAIN_AND_RLS: &str = r#"
+        CREATE TABLE plain_docs (id INTEGER PRIMARY KEY, body TEXT);
+        CREATE TABLE secure_docs (id INTEGER PRIMARY KEY, owner_id INTEGER);
+        ALTER TABLE secure_docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY p ON secure_docs USING (owner_id = 1);
+    "#;
+
+    #[test]
+    fn plain_and_rls_tables_yield_expected_entries_with_drift_guarded_physical_name() {
+        let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+        let manifest = manifest(PLAIN_AND_RLS, &options);
+
+        assert_eq!(manifest.len(), 2);
+
+        assert_eq!(manifest[0].logical, "plain_docs");
+        assert_eq!(manifest[0].physical, "plain_docs");
+        assert_eq!(manifest[0].wrapper, WrapperKind::Plain);
+
+        assert_eq!(manifest[1].logical, "secure_docs");
+        assert_eq!(manifest[1].physical, "secure_docs_rls");
+        assert_eq!(manifest[1].wrapper, WrapperKind::RlsView);
+
+        let backing = generated_rls_backing_name(PLAIN_AND_RLS, &options);
+        assert!(
+            backing.contains(&manifest[1].physical),
+            "manifest physical {} drifted from generated backing table {backing}",
+            manifest[1].physical,
+        );
+    }
+
+    #[test]
+    fn rls_table_suffix_option_is_reflected_in_manifest() {
+        let options = Pg2SqliteOptions::default()
+            .with_rls_table_suffix("_x")
+            .with_rls_audit_table_name("rls_audit");
+        let manifest = manifest(PLAIN_AND_RLS, &options);
+
+        let rls_entry = manifest.iter().find(|e| e.logical == "secure_docs").unwrap();
+        assert_eq!(rls_entry.physical, "secure_docs_x");
+        assert_eq!(rls_entry.wrapper, WrapperKind::RlsView);
+
+        let backing = generated_rls_backing_name(PLAIN_AND_RLS, &options);
+        assert!(backing.contains("secure_docs_x"), "generated backing table was {backing}");
+    }
+
+    #[test]
+    fn empty_schema_yields_empty_manifest() {
+        assert!(
+            manifest("CREATE ROLE nobody;", &Pg2SqliteOptions::default()).is_empty(),
+            "a schema with no tables publishes no entries"
+        );
+    }
+
+    #[test]
+    fn readonly_non_rls_table_is_classified_read_only_with_equal_names() {
+        let sql = r#"
+            CREATE ROLE app_user;
+            CREATE TABLE reference_data (id INTEGER PRIMARY KEY, label TEXT);
+            GRANT SELECT ON reference_data TO app_user;
+            CREATE TABLE editable (id INTEGER PRIMARY KEY);
+            GRANT ALL ON editable TO app_user;
+        "#;
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let manifest = manifest(sql, &options);
+
+        let readonly = manifest.iter().find(|e| e.logical == "reference_data").unwrap();
+        assert_eq!(readonly.physical, "reference_data");
+        assert_eq!(readonly.wrapper, WrapperKind::ReadOnly);
+
+        let writable = manifest.iter().find(|e| e.logical == "editable").unwrap();
+        assert_eq!(writable.physical, "editable");
+        assert_eq!(writable.wrapper, WrapperKind::Plain);
+    }
+
+    #[test]
+    fn non_selectable_table_is_omitted_from_manifest() {
+        let sql = r#"
+            CREATE ROLE app_user;
+            CREATE TABLE hidden (id INTEGER PRIMARY KEY);
+            CREATE TABLE visible (id INTEGER PRIMARY KEY);
+            GRANT SELECT ON visible TO app_user;
+        "#;
+        let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
+        let manifest = manifest(sql, &options);
+
+        assert_eq!(
+            manifest.iter().map(|e| e.logical.as_str()).collect::<Vec<_>>(),
+            vec!["visible"]
+        );
+    }
+
+    #[test]
+    fn manifest_does_not_translate_queries_or_row_changes() {
+        let options = Pg2SqliteOptions::default();
+        for statement in ["SELECT {fn ABS(-1)};", "INSERT INTO t (id) VALUES ({fn ABS(-1)});"] {
+            let translator = Pg2Sqlite::default()
+                .sql(&format!("CREATE TABLE t (id INTEGER PRIMARY KEY); {statement}"))
+                .expect("input should parse");
+            let error = translator
+                .translate(&options)
+                .expect_err("full translation should inspect the statement");
+            assert!(
+                error.to_string().contains("ODBC function escape syntax"),
+                "unexpected translation result for {statement}: {error}"
+            );
+
+            let entries = translator
+                .translation_manifest(&options)
+                .expect("non-schema SQL should not affect the manifest");
+            assert_eq!(
+                entries.iter().map(|entry| entry.logical.as_str()).collect::<Vec<_>>(),
+                vec!["t"]
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_validates_non_table_schema_statements() {
+        let translator = Pg2Sqlite::default()
+            .sql(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY);
+                 CREATE VIEW broken AS SELECT {fn ABS(-1)};",
+            )
+            .expect("input should parse");
+        let error = translator
+            .translation_manifest(&Pg2SqliteOptions::default())
+            .expect_err("an untranslatable view should block the manifest");
+
+        assert!(
+            error.to_string().contains("ODBC function escape syntax"),
+            "unexpected manifest result: {error}"
+        );
+    }
+
+    #[test]
+    fn manifest_returns_the_translation_error() {
+        let translator = Pg2Sqlite::default()
+            .sql("CREATE TABLE t (generated SERIAL, id INTEGER PRIMARY KEY);")
+            .expect("input should parse");
+        let options = Pg2SqliteOptions::default();
+
+        let translation_error =
+            translator.translate(&options).expect_err("translation should reject the serial");
+        let manifest_error = translator
+            .translation_manifest(&options)
+            .expect_err("manifest should reject the serial");
+
+        assert_eq!(manifest_error.to_string(), translation_error.to_string());
+        assert!(manifest_error.to_string().contains("value source"));
+    }
+}

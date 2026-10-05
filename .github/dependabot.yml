@@ -1,0 +1,42 @@
+version: 2
+updates:
+  # Rust dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "sqlparser"
+          - "sql-traits"
+    ignore:
+      # testcontainers-modules 0.15 is the newest release and requires
+      # testcontainers ^0.27, so 0.28 cannot resolve at all. Drop this entry
+      # once a testcontainers-modules release supports 0.28.
+      - dependency-name: testcontainers
+        versions: [">=0.28, <0.29"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    ignore:
+      # The reference selects the Rust toolchain rather than the action version,
+      # so Dependabot reads 1.85.0 as a release and offers a nonexistent 1.120.0.
+      - dependency-name: dtolnay/rust-toolchain

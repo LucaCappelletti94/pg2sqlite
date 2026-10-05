@@ -1,0 +1,3 @@
+# `sqlite-wasm-rs` has no native target, so default to wasm32 for `cargo check` and IDE integrations.
+[build]
+target = "wasm32-unknown-unknown"

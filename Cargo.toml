@@ -1,0 +1,153 @@
+[package]
+name = "pg2sqlite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Translates PostgreSQL SQL into valid runnable SQLite SQL, emitting semantically equivalent output for types, RLS, FTS5, pgvector, and PostGIS constructs."
+homepage = "https://pg2sqlite.luca.phd"
+repository = "https://github.com/LucaCappelletti94/pg2sqlite"
+documentation = "https://docs.rs/pg2sqlite"
+readme = "README.md"
+keywords = ["postgresql", "sqlite", "sql", "translation", "migration"]
+categories = ["database", "parser-implementations"]
+
+[dependencies]
+sqlparser = { version = "0.63", default-features = false, features = ["visitor"] }
+sqlparser-plpgsql = { git = "https://github.com/LucaCappelletti94/sqlparser-plpgsql", branch = "main", features = ["body-parse"] }
+sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", branch = "main", default-features = false }
+git2 = { version = "0.21", optional = true }
+tempfile = { version = "3.27", optional = true }
+thiserror = { version = "2.0", default-features = false }
+# Optional Arbitrary impls on the public option types so fuzz harnesses
+# can drive `Pg2SqliteOptions` (and its dependent enums) from libfuzzer
+# input bytes. Gated behind the `arbitrary` feature so production
+# builds don't pull the dep.
+arbitrary = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+diesel = { version = "2.3.9", features = ["postgres", "sqlite"] }
+insta = "1.47.2"
+rosetta-uuid = { version = "0.2.0", features = ["diesel", "postgres", "sqlite"] }
+rusqlite = { version = "0.40", features = ["bundled", "functions", "window"] }
+sqlite-vec = "0.1.9"
+zerocopy = "0.8.48"
+rand = "0.10.1"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
+testcontainers = { version = "0.27", features = ["blocking"] }
+parking_lot = "0.12.5"
+
+# Optional integration gated by the `sqlitegis` feature. Declared in
+# `[dependencies]` (not `[dev-dependencies]`) because Cargo only honors
+# `optional = true` on regular dependencies. Still test-only: nothing
+# in `src/` references it unless `feature = "sqlitegis"` is set.
+[dependencies.sqlitegis]
+# 0.2.0 is the floor rather than a preference: the ellipsoid measures
+# `ST_LengthSpheroid`, `ST_AreaSpheroid` and `ST_PerimeterSpheroid` arrived in
+# 0.1.5, and 0.2.0 raises the `libsqlite3-sys` ceiling the rest of the graph
+# needs.
+version = "0.2.0"
+default-features = false
+features = ["sqlite", "diesel-sqlite"]
+optional = true
+
+[dependencies.libsqlite3-sys]
+version = "0.38"
+optional = true
+
+[features]
+# Default feature: pulls in everything that depends on the host environment
+# (filesystem-backed loaders, git-backed loaders, std-bound error variants,
+# and the `recursive-protection` stack guard from sqlparser). Drop this with
+# `--no-default-features` to build for `wasm32-unknown-unknown` or other
+# no_std targets. The `[patch.crates-io]` block below tracks apache main,
+# which makes `sqlparser/visitor` no_std-compatible.
+default = ["std"]
+std = [
+    "sqlparser/std",
+    "sqlparser/recursive-protection",
+    "sql-traits/std",
+    "thiserror/std",
+    "git",
+]
+# Cloning a schema from a repository. Only reachable with `std`, which is why
+# `std` turns it on rather than the other way round.
+git = ["dep:git2", "dep:tempfile"]
+# SQLiteGIS Diesel + native-SQLite spatial integration is native-only,
+# so it implies `std`.
+sqlitegis = [
+    "std",
+    "dep:sqlitegis",
+    "dep:libsqlite3-sys",
+]
+# Derives `Arbitrary` on `Pg2SqliteOptions`, `UuidRepresentation`,
+# `SessionVariablePattern`, `SessionVariableValue`, and
+# `SessionVariableMapping`. Consumed by the fuzz harnesses; not used by
+# production code.
+arbitrary = ["dep:arbitrary"]
+
+# Every crate in this graph targets unreleased sqlparser AST, so this patch is
+# not droppable. Against released 0.62.0 the build dies inside `sql-traits`
+# first, on `TableConstraint::Exclude` and `UniqueConstraint::include`, and this
+# crate's own source then fails on `Statement::CreateTextSearch`,
+# `AlterTextSearch`, `CreateFileFormat`, `CreateWarehouse`, `Put`,
+# `Expr::IsJson`, `JsonPredicateType`, `JsonKeyUniqueness`, and the `unlogged`
+# field. Dropping the patch therefore waits on a sqlparser release carrying that
+# AST and a `sql-traits` revision built against it, which is also what blocks
+# publishing this crate to crates.io.
+#
+# Patching at the workspace root unifies every dependent (sql-traits, sql_docs)
+# onto a single sqlparser so dialect types stay compatible across crate
+# boundaries. `sqlparser_derive` follows automatically as a path dependency of
+# the git sqlparser, so it needs no separate patch.
+[patch.crates-io]
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
+
+# `SqliteConnection::set_triggers_enabled` and its db-config siblings are on
+# diesel main and absent from 2.3.12, and the RLS trigger tests need them.
+diesel = { git = "https://github.com/diesel-rs/diesel", branch = "main" }
+
+[[bench]]
+name = "translation"
+harness = false
+
+# Build profile for cargo-mutants, selected by .cargo/mutants.toml.
+[profile.mutants]
+inherits = "test"
+debug = "none"
+
+[lints.rust]
+missing_docs = "deny"
+unused_macro_rules = "forbid"
+unconditional_recursion = "forbid"
+unreachable_patterns = "forbid"
+unused_import_braces = "forbid"
+unused_must_use = "forbid"
+deprecated = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "forbid"
+bare_urls = "forbid"
+invalid_codeblock_attributes = "forbid"
+invalid_html_tags = "forbid"
+missing_crate_level_docs = "forbid"
+unescaped_backticks = "forbid"
+redundant_explicit_links = "forbid"
+invalid_rust_codeblocks = "forbid"
+
+[lints.clippy]
+unreadable_literal = "allow"
+missing_panics_doc = "allow"
+new_ret_no_self = "allow"
+struct_excessive_bools = "allow"
+should_panic_without_expect = "allow"
+doc_markdown = "allow"
+needless_raw_string_hashes = "allow"
+items_after_statements = "allow"
+needless_borrows_for_generic_args = "allow"
+redundant_closure_for_method_calls = "allow"
+uninlined_format_args = "allow"
+approx_constant = "allow"
+clone_on_copy = "forbid"
+pedantic = { level = "deny", priority = -1 }

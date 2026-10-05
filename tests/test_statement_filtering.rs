@@ -1,0 +1,296 @@
+//! Tests for statement-level filtering/passthrough in
+//! `src/impls/translator_impls/statement.rs`.
+//!
+//! Covers:
+//! - Passthrough statements: VACUUM, COMMIT, ROLLBACK, START TRANSACTION,
+//!   SAVEPOINT, RELEASE
+//! - DROP TABLE/VIEW/INDEX -> strips CASCADE/RESTRICT
+//! - DROP TRIGGER -> strips table name and option
+//! - Filtered/skipped statements: ALTER TABLE, CREATE FUNCTION, GRANT, etc.
+//! - DROP of unsupported object type -> empty
+
+mod helpers;
+
+use diesel::{Connection, connection::SimpleConnection, sqlite::SqliteConnection};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+
+/// Helper: translate SQL and return the output or error string.
+fn translate(sql: &str) -> Result<String, String> {
+    helpers::translate_sql(sql, &Pg2SqliteOptions::default())
+}
+
+/// Helper: translate SQL and return the count of resulting statements.
+fn translate_count(sql: &str) -> Result<usize, String> {
+    helpers::translate_count(sql, &Pg2SqliteOptions::default())
+}
+
+#[test]
+fn vacuum_passes_through() {
+    let output = translate("VACUUM;").unwrap();
+    assert!(output.contains("VACUUM"), "VACUUM should pass through, got: {output}");
+    exec_stmts(&output);
+}
+
+#[test]
+fn commit_passes_through() {
+    // A COMMIT ending a transaction the batch opened. One with nothing to end
+    // is a no-op on the server and is dropped, pinned in
+    // `test_transaction_blocks.rs`.
+    let output = translate("BEGIN; COMMIT;").unwrap();
+    assert!(output.contains("COMMIT"), "COMMIT should pass through, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&output.replace('\n', ";\n")).unwrap();
+    }
+}
+
+#[test]
+fn rollback_passes_through() {
+    let output = translate("BEGIN; ROLLBACK;").unwrap();
+    assert!(output.contains("ROLLBACK"), "ROLLBACK should pass through, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&output.replace('\n', ";\n")).unwrap();
+    }
+}
+
+#[test]
+fn start_transaction_passes_through() {
+    let output = translate("START TRANSACTION;").unwrap();
+    // SQLite uses BEGIN instead of START TRANSACTION, but the parser should
+    // handle it
+    assert!(
+        output.contains("TRANSACTION") || output.contains("BEGIN"),
+        "START TRANSACTION should pass through, got: {output}"
+    );
+    {
+        // The translator leads with a dialect pragma; use exec_stmts which
+        // handles each line.
+        exec_stmts(&format!("{output}\nROLLBACK"));
+    }
+}
+
+#[test]
+fn savepoint_passes_through() {
+    // Inside a transaction block, which is the only place PostgreSQL takes a
+    // savepoint: outside one it answers `SAVEPOINT can only be used in
+    // transaction blocks`, pinned in `test_transaction_blocks.rs`.
+    let output = translate("BEGIN; SAVEPOINT sp1;").unwrap();
+    assert!(output.contains("SAVEPOINT"), "SAVEPOINT should pass through, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&output.replace('\n', ";\n")).unwrap();
+    }
+}
+
+#[test]
+fn release_savepoint_passes_through() {
+    let output = translate("BEGIN; SAVEPOINT sp1; RELEASE SAVEPOINT sp1;").unwrap();
+    assert!(output.contains("RELEASE"), "RELEASE SAVEPOINT should pass through, got: {output}");
+    {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute(&output.replace('\n', ";\n")).unwrap();
+    }
+}
+
+#[test]
+fn drop_table_strips_cascade() {
+    // Use IF EXISTS to avoid schema builder requiring the table to exist
+    let output = translate("DROP TABLE IF EXISTS t CASCADE;").unwrap();
+    assert!(output.contains("DROP TABLE"), "DROP TABLE should be present, got: {output}");
+    assert!(!output.contains("CASCADE"), "CASCADE should be stripped, got: {output}");
+    exec_stmts(&output);
+}
+
+#[test]
+fn drop_table_if_exists() {
+    let output = translate("DROP TABLE IF EXISTS t;").unwrap();
+    assert!(output.contains("DROP TABLE"), "DROP TABLE should be present, got: {output}");
+    assert!(output.contains("IF EXISTS"), "IF EXISTS should be preserved, got: {output}");
+    exec_stmts(&output);
+}
+
+#[test]
+fn drop_view_strips_restrict() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY);
+               CREATE VIEW v AS SELECT * FROM t;
+               DROP VIEW v RESTRICT;";
+    let output = translate(sql).unwrap();
+    assert!(output.contains("DROP VIEW"), "DROP VIEW should be present, got: {output}");
+    assert!(!output.contains("RESTRICT"), "RESTRICT should be stripped, got: {output}");
+    exec_stmts(&output);
+}
+
+#[test]
+fn drop_index() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
+               CREATE INDEX idx_name ON t (name);
+               DROP INDEX idx_name;";
+    let output = translate(sql).unwrap();
+    assert!(output.contains("DROP INDEX"), "DROP INDEX should be present, got: {output}");
+    exec_stmts(&output);
+}
+
+#[test]
+fn drop_trigger_strips_table_name() {
+    let sql = "DROP TRIGGER IF EXISTS my_trigger ON my_table;";
+    let output = translate(sql).unwrap();
+    assert!(output.contains("DROP TRIGGER"), "DROP TRIGGER should be present, got: {output}");
+    // The ON my_table should be removed for SQLite
+    assert!(!output.contains("ON my_table"), "ON table_name should be stripped, got: {output}");
+    {
+        // The translator leads with a dialect pragma; use exec_stmts which
+        // handles each line.
+        exec_stmts(&output);
+    }
+}
+
+#[test]
+fn drop_sequence_produces_empty() {
+    let count = translate_count("DROP SEQUENCE my_seq;").unwrap();
+    assert_eq!(count, 0, "DROP SEQUENCE should produce no output");
+}
+
+/// `ALTER TABLE ... ADD COLUMN` is translated. The table must be declared so
+/// the column definition can be routed through the schema-aware column
+/// translator.
+#[test]
+fn alter_table_add_column_is_translated() {
+    let count =
+        translate_count("CREATE TABLE t (id INT PRIMARY KEY); ALTER TABLE t ADD COLUMN name TEXT;")
+            .unwrap();
+    assert_eq!(count, 3, "one pragma plus CREATE TABLE and ADD COLUMN");
+}
+
+#[test]
+fn create_function_filtered() {
+    let sql = "CREATE FUNCTION my_func() RETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql;";
+    let count = translate_count(sql).unwrap();
+    assert_eq!(count, 0, "CREATE FUNCTION should be filtered");
+}
+
+#[test]
+fn create_extension_filtered() {
+    let sql = "CREATE EXTENSION IF NOT EXISTS pgcrypto;";
+    let count = translate_count(sql).unwrap();
+    assert_eq!(count, 0, "CREATE EXTENSION should be filtered");
+}
+
+#[test]
+fn grant_filtered() {
+    // The role and table must exist in the schema for the schema builder
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY);
+               CREATE ROLE some_role;
+               GRANT SELECT ON t TO some_role;";
+    let count = translate_count(sql).unwrap();
+    // CREATE TABLE produces 1 statement; CREATE ROLE and GRANT are both
+    // filtered. The pragma is also emitted, so count = 2 (pragma + CREATE
+    // TABLE).
+    assert_eq!(count, 2, "one pragma plus CREATE TABLE; GRANT and CREATE ROLE filtered");
+}
+
+#[test]
+fn revoke_filtered() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY);
+               CREATE ROLE some_role;
+               GRANT SELECT ON t TO some_role;
+               REVOKE SELECT ON t FROM some_role;";
+    let count = translate_count(sql).unwrap();
+    // Only CREATE TABLE and the leading pragma survive.
+    assert_eq!(count, 2, "one pragma plus CREATE TABLE; REVOKE filtered");
+}
+
+#[test]
+fn create_type_filtered() {
+    let sql = "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');";
+    let count = translate_count(sql).unwrap();
+    assert_eq!(count, 0, "CREATE TYPE should be filtered");
+}
+
+#[test]
+fn create_schema_filtered() {
+    let sql = "CREATE SCHEMA myschema;";
+    let count = translate_count(sql).unwrap();
+    assert_eq!(count, 0, "CREATE SCHEMA should be filtered");
+}
+
+/// `SET search_path` decides which table a bare name means, so dropping it
+/// could change which table a later statement reads. Inverted from
+/// `set_statement_filtered`, which pinned the silent drop.
+#[test]
+fn set_search_path_is_rejected() {
+    let error = translate("SET search_path TO myschema;").expect_err("SET must be reported");
+    assert!(error.contains("search_path"), "expected the error to name the setting, got {error}");
+}
+
+/// A setting that only governs how long a statement may run cannot change its
+/// result, so it is dropped rather than refused. This is the pg_dump preamble,
+/// which must keep translating.
+#[test]
+fn set_statement_timeout_is_dropped() {
+    let count = translate_count("SET statement_timeout = 0;").unwrap();
+    assert_eq!(count, 0, "a result-neutral SET emits nothing");
+}
+
+#[test]
+fn create_policy_filtered() {
+    // The policy's table must exist in the document, as PostgreSQL itself
+    // refuses a policy on an absent relation. The table is the one emitted
+    // statement, so the policy contributes nothing.
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY); \
+               CREATE POLICY my_policy ON t FOR SELECT USING (true);";
+    let count = translate_count(sql).unwrap();
+    assert_eq!(count, 2, "one pragma plus CREATE TABLE; CREATE POLICY itself should emit nothing");
+}
+
+#[test]
+fn create_role_filtered() {
+    let sql = "CREATE ROLE my_role;";
+    let count = translate_count(sql).unwrap();
+    assert_eq!(count, 0, "CREATE ROLE should be filtered");
+}
+
+#[test]
+fn comment_filtered() {
+    let sql = "COMMENT ON TABLE t IS 'my table';";
+    let count = translate_count(sql).unwrap();
+    assert_eq!(count, 0, "COMMENT should be filtered");
+}
+
+#[test]
+fn create_sequence_filtered() {
+    let sql = "CREATE SEQUENCE my_seq;";
+    let count = translate_count(sql).unwrap();
+    assert_eq!(count, 0, "CREATE SEQUENCE should be filtered");
+}
+
+#[test]
+fn mixed_statements_filters_correctly() {
+    let sql = "
+        CREATE TABLE t (id INT PRIMARY KEY, name TEXT);
+        CREATE EXTENSION IF NOT EXISTS pgcrypto;
+        CREATE INDEX idx_name ON t (name);
+        ALTER TABLE t ADD COLUMN email TEXT;
+        DROP INDEX idx_name;
+    ";
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    // one pragma + CREATE TABLE + CREATE INDEX + ALTER TABLE + DROP INDEX = 5
+    // statements. Only CREATE EXTENSION is filtered: ALTER TABLE ADD COLUMN
+    // is now translated.
+    assert_eq!(
+        stmts.len(),
+        5,
+        "Expected 5 statements, got: {} - {:?}",
+        stmts.len(),
+        stmts.iter().map(ToString::to_string).collect::<Vec<_>>()
+    );
+}
+
+fn exec_stmts(sql_str: &str) {
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    for line in sql_str.lines().filter(|l| !l.trim().is_empty()) {
+        conn.batch_execute(&format!("{line};"))
+            .unwrap_or_else(|e| panic!("SQLite rejected translated statement: {line}\n{e}"));
+    }
+}

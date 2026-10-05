@@ -1,0 +1,21 @@
+[application]
+name = "pg2sqlite-web-playground"
+default_platform = "web"
+
+[web.app]
+title = "pg2sqlite playground - translate PostgreSQL to SQLite in your browser"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "public"]
+
+# Linked at build time to avoid a flash of unstyled content (FOUC).
+[web.resource]
+style = ["/app.css"]
+
+[web.resource.dev]
+
+# binaryen aborts on the DWARF rustc emits, so strip debug info before wasm-opt.
+[web.wasm_opt]
+debug = false
+level = "4"

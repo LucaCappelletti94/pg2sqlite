@@ -1,0 +1,106 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialise Pages deploys so two builds never race for the environment. Do not
+# cancel an in-flight deploy when a new commit lands. Let it finish so the site
+# never sits half-replaced.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    name: Build web playground and deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy-1.outputs.page_url || steps.deploy-2.outputs.page_url || steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            .
+            examples/web-playground
+          cache-targets: false
+
+      - name: Install dioxus-cli
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+        with:
+          # A floating dx can diverge from the dioxus library and break the
+          # build, so the CLI is pinned to a version tested against it. No
+          # lockfile is committed, so the library resolves to the current
+          # 0.7 release on every build.
+          tool: dioxus-cli@0.7.9
+
+      - name: Install wasm-bindgen-cli
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+        with:
+          tool: wasm-bindgen-cli
+
+      - name: Build web playground
+        working-directory: examples/web-playground
+        run: dx build --release --platform web
+
+      - name: Stage public artifact
+        run: |
+          OUT="examples/web-playground/target/dx/pg2sqlite-web-playground/release/web/public"
+          if [ ! -d "$OUT" ]; then
+            echo "dx web output not found at $OUT" >&2
+            echo "fallback scan:" >&2
+            find examples/web-playground/target -type d -name public -path '*release*' >&2 || true
+            exit 1
+          fi
+          mkdir -p _site
+          cp -r "$OUT"/. _site/
+          # CNAME associates the deployment with the custom domain and refuses
+          # takeover by other Pages sites. It must match the Custom Domain set
+          # under repo Settings > Pages.
+          echo "pg2sqlite.luca.phd" > _site/CNAME
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: _site
+
+      # actions/deploy-pages@v4 has intermittently returned deployment_failed
+      # from the Pages backend. Creating a fresh deployment after a short pause
+      # almost always succeeds. Retry twice before failing the job.
+      - name: Deploy to GitHub Pages
+        id: deploy-1
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        continue-on-error: true
+
+      - name: Wait before retrying (attempt 2)
+        if: steps.deploy-1.outcome == 'failure'
+        run: sleep 30
+
+      - name: Deploy to GitHub Pages (retry 2)
+        id: deploy-2
+        if: steps.deploy-1.outcome == 'failure'
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        continue-on-error: true
+
+      - name: Wait before retrying (attempt 3)
+        if: steps.deploy-1.outcome == 'failure' && steps.deploy-2.outcome == 'failure'
+        run: sleep 60
+
+      - name: Deploy to GitHub Pages (retry 3)
+        id: deployment
+        if: steps.deploy-1.outcome == 'failure' && steps.deploy-2.outcome == 'failure'
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

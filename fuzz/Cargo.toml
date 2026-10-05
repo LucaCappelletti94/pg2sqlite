@@ -1,0 +1,71 @@
+[package]
+name = "pg2sqlite-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Keep this crate out of any parent workspace. libfuzzer-sys pulls in
+# nightly-only build flags and instrumentation; bundling it into the
+# main pg2sqlite workspace would slow precommit / audit for everyone
+# else. Mirrors the pattern examples/web-playground/Cargo.toml uses.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+pg2sqlite = { path = "..", features = ["arbitrary"] }
+arbitrary = { version = "1", features = ["derive"] }
+# Needed so the reverse fuzz target can name `ParserDB` in the static
+# context type. Track the same `main` branch pg2sqlite does: no lockfile is
+# committed, so both copies resolve to the same current commit on a fresh
+# build and the trait bounds line up.
+sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", branch = "main", default-features = false, features = ["std"] }
+# Direct dep so the round-trip harness can name `Statement` for its
+# render helper. Routed through the `[patch.crates-io]` block at the
+# bottom of this file onto the same apache main sqlparser pg2sqlite uses.
+sqlparser = "0.63"
+# In-memory SQLite for the apply-side fuzz target. `bundled` so the
+# fuzzer build is self-contained and doesn't depend on the host's
+# libsqlite3 version, which could otherwise mask or shift dialect
+# behaviour between developers.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_sql_translation"
+path = "fuzz_targets/fuzz_sql_translation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_reverse_translation"
+path = "fuzz_targets/fuzz_reverse_translation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_translate_apply"
+path = "fuzz_targets/fuzz_translate_apply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_roundtrip_equivalence"
+path = "fuzz_targets/fuzz_roundtrip_equivalence.rs"
+test = false
+doc = false
+bench = false
+
+# `[patch.crates-io]` doesn't inherit across workspace boundaries.
+# pg2sqlite (one level up) has the same patch; we duplicate it here
+# because this crate is intentionally *not* a workspace member of
+# pg2sqlite. Mirrors examples/web-playground/Cargo.toml.
+[patch.crates-io]
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }

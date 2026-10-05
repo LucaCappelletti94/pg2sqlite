@@ -1,0 +1,1563 @@
+//! Shared expression walker/visitor helpers.
+//!
+//! These helpers capture the structural recursion over [`Expr`] variants so
+//! that each specific walker only needs to handle its "interesting" arms and
+//! can delegate the mechanical child-traversal to one of these functions.
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
+use sqlparser::ast::{CaseWhen, Expr, JsonPathElem, helpers::attached_token::AttachedToken};
+
+/// Apply `f` to every direct child [`Expr`], rebuilding the node. Callers
+/// should match their "interesting" variants first and fall through for the
+/// rest.
+///
+/// Adapter over [`try_map_expr_children`], the single variant table.
+/// Subqueries are left untouched, so callers needing subquery traversal must
+/// handle `InSubquery`/`Subquery`/`Exists` themselves.
+pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr {
+    let result = try_map_expr_children::<core::convert::Infallible>(
+        expr,
+        &mut |child| Ok(f(child)),
+        &mut |query| Ok(query.clone()),
+    );
+    match result {
+        Ok(rebuilt) => rebuilt,
+        Err(never) => match never {},
+    }
+}
+
+/// Runs `make` in its own frame.
+///
+/// The expression walkers match every `Expr` variant, and an unoptimised build
+/// gives each arm's temporaries their own stack slot instead of overlapping
+/// them, so a frame grows with the variant count. Rebuilding inside a closure
+/// keeps those slots out of the walker's frame, which is what lets deeply
+/// nested expressions translate within a thread's default stack.
+pub(crate) fn rebuild<E>(make: impl FnOnce() -> Result<Expr, E>) -> Result<Expr, E> {
+    make()
+}
+
+/// The single variant table for the rebuilding walkers: `map_expr_children`
+/// and `mutate_expr_children` are adapters over this core, and
+/// `for_each_child_expr` is hand-written against it with a pin test, since a
+/// read-only walk cannot borrow through a rebuilding one without copying.
+///
+/// Every expression a call carries is a child here, so a caller that matches
+/// `Expr::Function` itself must not also delegate the same node, or the
+/// arguments are transformed twice. Recurses into `Subquery`, `Exists`, and
+/// `InSubquery` via `f_query`.
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
+pub(crate) fn try_map_expr_children<E>(
+    expr: &Expr,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+    f_query: &mut impl FnMut(&sqlparser::ast::Query) -> Result<sqlparser::ast::Query, E>,
+) -> Result<Expr, E> {
+    Ok(match expr {
+        Expr::Identifier(_)
+        | Expr::CompoundIdentifier(_)
+        | Expr::Value(_)
+        | Expr::TypedString(_)
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(..)
+        | Expr::MatchAgainst { .. } => expr.clone(),
+
+        Expr::IsFalse(e) => rebuild(|| Ok(Expr::IsFalse(Box::new(f(e)?))))?,
+        Expr::IsNotFalse(e) => rebuild(|| Ok(Expr::IsNotFalse(Box::new(f(e)?))))?,
+        Expr::IsTrue(e) => rebuild(|| Ok(Expr::IsTrue(Box::new(f(e)?))))?,
+        Expr::IsNotTrue(e) => rebuild(|| Ok(Expr::IsNotTrue(Box::new(f(e)?))))?,
+        Expr::IsNull(e) => rebuild(|| Ok(Expr::IsNull(Box::new(f(e)?))))?,
+        Expr::IsNotNull(e) => rebuild(|| Ok(Expr::IsNotNull(Box::new(f(e)?))))?,
+        Expr::IsUnknown(e) => rebuild(|| Ok(Expr::IsUnknown(Box::new(f(e)?))))?,
+        Expr::IsNotUnknown(e) => rebuild(|| Ok(Expr::IsNotUnknown(Box::new(f(e)?))))?,
+        Expr::Nested(e) => rebuild(|| Ok(Expr::Nested(Box::new(f(e)?))))?,
+        Expr::OuterJoin(e) => rebuild(|| Ok(Expr::OuterJoin(Box::new(f(e)?))))?,
+        Expr::Prior(e) => rebuild(|| Ok(Expr::Prior(Box::new(f(e)?))))?,
+        Expr::Prefixed { prefix, value } => {
+            rebuild(|| Ok(Expr::Prefixed { prefix: prefix.clone(), value: Box::new(f(value)?) }))?
+        }
+        Expr::Named { expr: inner, name } => {
+            rebuild(|| Ok(Expr::Named { expr: Box::new(f(inner)?), name: name.clone() }))?
+        }
+        Expr::IsNormalized { expr: inner, form, negated } => {
+            rebuild(|| {
+                Ok(Expr::IsNormalized { expr: Box::new(f(inner)?), form: *form, negated: *negated })
+            })?
+        }
+        Expr::IsJson { expr: inner, kind, unique_keys, negated } => {
+            rebuild(|| {
+                Ok(Expr::IsJson {
+                    expr: Box::new(f(inner)?),
+                    kind: *kind,
+                    unique_keys: *unique_keys,
+                    negated: *negated,
+                })
+            })?
+        }
+        Expr::UnaryOp { op, expr: inner } => {
+            rebuild(|| Ok(Expr::UnaryOp { op: *op, expr: Box::new(f(inner)?) }))?
+        }
+        Expr::Cast { kind, expr: inner, data_type, format } => {
+            rebuild(|| {
+                Ok(Expr::Cast {
+                    kind: kind.clone(),
+                    expr: Box::new(f(inner)?),
+                    data_type: data_type.clone(),
+                    format: format.clone(),
+                })
+            })?
+        }
+        Expr::Extract { field, syntax, expr: inner } => {
+            rebuild(|| {
+                Ok(Expr::Extract {
+                    field: field.clone(),
+                    syntax: syntax.clone(),
+                    expr: Box::new(f(inner)?),
+                })
+            })?
+        }
+        Expr::Ceil { expr: inner, field } => {
+            rebuild(|| Ok(Expr::Ceil { expr: Box::new(f(inner)?), field: field.clone() }))?
+        }
+        Expr::Floor { expr: inner, field } => {
+            rebuild(|| Ok(Expr::Floor { expr: Box::new(f(inner)?), field: field.clone() }))?
+        }
+        Expr::Collate { expr: inner, collation } => {
+            rebuild(|| {
+                Ok(Expr::Collate { expr: Box::new(f(inner)?), collation: collation.clone() })
+            })?
+        }
+        Expr::Convert { is_try, expr: inner, data_type, charset, target_before_value, styles } => {
+            rebuild(|| {
+                Ok(Expr::Convert {
+                    is_try: *is_try,
+                    expr: Box::new(f(inner)?),
+                    data_type: data_type.clone(),
+                    charset: charset.clone(),
+                    target_before_value: *target_before_value,
+                    styles: styles.iter().map(&mut *f).collect::<Result<_, _>>()?,
+                })
+            })?
+        }
+
+        Expr::IsDistinctFrom(a, b) => {
+            rebuild(|| Ok(Expr::IsDistinctFrom(Box::new(f(a)?), Box::new(f(b)?))))?
+        }
+        Expr::IsNotDistinctFrom(a, b) => {
+            rebuild(|| Ok(Expr::IsNotDistinctFrom(Box::new(f(a)?), Box::new(f(b)?))))?
+        }
+        Expr::BinaryOp { left, op, right } => {
+            rebuild(|| {
+                Ok(Expr::BinaryOp {
+                    left: Box::new(f(left)?),
+                    op: op.clone(),
+                    right: Box::new(f(right)?),
+                })
+            })?
+        }
+        Expr::AnyOp { left, compare_op, right, is_some } => {
+            rebuild(|| {
+                Ok(Expr::AnyOp {
+                    left: Box::new(f(left)?),
+                    compare_op: compare_op.clone(),
+                    right: Box::new(f(right)?),
+                    is_some: *is_some,
+                })
+            })?
+        }
+        Expr::AllOp { left, compare_op, right } => {
+            rebuild(|| {
+                Ok(Expr::AllOp {
+                    left: Box::new(f(left)?),
+                    compare_op: compare_op.clone(),
+                    right: Box::new(f(right)?),
+                })
+            })?
+        }
+        Expr::Like { negated, any, expr: inner, pattern, escape_char } => {
+            rebuild(|| {
+                Ok(Expr::Like {
+                    negated: *negated,
+                    any: *any,
+                    expr: Box::new(f(inner)?),
+                    pattern: Box::new(f(pattern)?),
+                    escape_char: escape_char.clone(),
+                })
+            })?
+        }
+        Expr::ILike { negated, any, expr: inner, pattern, escape_char } => {
+            rebuild(|| {
+                Ok(Expr::ILike {
+                    negated: *negated,
+                    any: *any,
+                    expr: Box::new(f(inner)?),
+                    pattern: Box::new(f(pattern)?),
+                    escape_char: escape_char.clone(),
+                })
+            })?
+        }
+        Expr::SimilarTo { negated, expr: inner, pattern, escape_char } => {
+            rebuild(|| {
+                Ok(Expr::SimilarTo {
+                    negated: *negated,
+                    expr: Box::new(f(inner)?),
+                    pattern: Box::new(f(pattern)?),
+                    escape_char: escape_char.clone(),
+                })
+            })?
+        }
+        Expr::RLike { negated, expr: inner, pattern, regexp } => {
+            rebuild(|| {
+                Ok(Expr::RLike {
+                    negated: *negated,
+                    expr: Box::new(f(inner)?),
+                    pattern: Box::new(f(pattern)?),
+                    regexp: *regexp,
+                })
+            })?
+        }
+        Expr::AtTimeZone { timestamp, time_zone } => {
+            rebuild(|| {
+                Ok(Expr::AtTimeZone {
+                    timestamp: Box::new(f(timestamp)?),
+                    time_zone: Box::new(f(time_zone)?),
+                })
+            })?
+        }
+        Expr::Position { expr: inner, r#in } => {
+            rebuild(|| Ok(Expr::Position { expr: Box::new(f(inner)?), r#in: Box::new(f(r#in)?) }))?
+        }
+
+        Expr::Between { expr: inner, negated, low, high } => {
+            rebuild(|| {
+                Ok(Expr::Between {
+                    expr: Box::new(f(inner)?),
+                    negated: *negated,
+                    low: Box::new(f(low)?),
+                    high: Box::new(f(high)?),
+                })
+            })?
+        }
+        Expr::Overlay { expr: inner, overlay_what, overlay_from, overlay_for } => {
+            rebuild(|| {
+                Ok(Expr::Overlay {
+                    expr: Box::new(f(inner)?),
+                    overlay_what: Box::new(f(overlay_what)?),
+                    overlay_from: Box::new(f(overlay_from)?),
+                    overlay_for: overlay_for.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                })
+            })?
+        }
+
+        Expr::InList { expr: inner, list, negated } => {
+            rebuild(|| {
+                Ok(Expr::InList {
+                    expr: Box::new(f(inner)?),
+                    list: list.iter().map(&mut *f).collect::<Result<_, _>>()?,
+                    negated: *negated,
+                })
+            })?
+        }
+        Expr::Tuple(items) => {
+            rebuild(|| Ok(Expr::Tuple(items.iter().map(&mut *f).collect::<Result<_, _>>()?)))?
+        }
+        Expr::Array(arr) => {
+            rebuild(|| {
+                Ok(Expr::Array(sqlparser::ast::Array {
+                    elem: arr.elem.iter().map(&mut *f).collect::<Result<_, _>>()?,
+                    named: arr.named,
+                }))
+            })?
+        }
+        Expr::GroupingSets(sets) => {
+            rebuild(|| {
+                Ok(Expr::GroupingSets(
+                    sets.iter()
+                        .map(|s| s.iter().map(&mut *f).collect::<Result<_, _>>())
+                        .collect::<Result<_, _>>()?,
+                ))
+            })?
+        }
+        Expr::Cube(sets) => {
+            rebuild(|| {
+                Ok(Expr::Cube(
+                    sets.iter()
+                        .map(|s| s.iter().map(&mut *f).collect::<Result<_, _>>())
+                        .collect::<Result<_, _>>()?,
+                ))
+            })?
+        }
+        Expr::Rollup(sets) => {
+            rebuild(|| {
+                Ok(Expr::Rollup(
+                    sets.iter()
+                        .map(|s| s.iter().map(&mut *f).collect::<Result<_, _>>())
+                        .collect::<Result<_, _>>()?,
+                ))
+            })?
+        }
+        Expr::Struct { values, fields } => {
+            rebuild(|| {
+                Ok(Expr::Struct {
+                    values: values.iter().map(&mut *f).collect::<Result<_, _>>()?,
+                    fields: fields.clone(),
+                })
+            })?
+        }
+
+        Expr::Substring { expr: inner, substring_from, substring_for, special, shorthand } => {
+            rebuild(|| {
+                Ok(Expr::Substring {
+                    expr: Box::new(f(inner)?),
+                    substring_from: substring_from
+                        .as_ref()
+                        .map(|e| f(e))
+                        .transpose()?
+                        .map(Box::new),
+                    substring_for: substring_for.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                    special: *special,
+                    shorthand: *shorthand,
+                })
+            })?
+        }
+        Expr::Trim { expr: inner, trim_where, trim_what, trim_characters } => {
+            rebuild(|| {
+                Ok(Expr::Trim {
+                    expr: Box::new(f(inner)?),
+                    trim_where: *trim_where,
+                    trim_what: trim_what.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                    trim_characters: trim_characters
+                        .as_ref()
+                        .map(|v| v.iter().map(f).collect::<Result<_, _>>())
+                        .transpose()?,
+                })
+            })?
+        }
+        Expr::Case { case_token, end_token, operand, conditions, else_result } => {
+            rebuild(|| {
+                Ok(Expr::Case {
+                    case_token: case_token.clone(),
+                    end_token: end_token.clone(),
+                    operand: operand.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                    conditions: conditions
+                        .iter()
+                        .map(|cw| {
+                            Ok(sqlparser::ast::CaseWhen {
+                                condition: f(&cw.condition)?,
+                                result: f(&cw.result)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, E>>()?,
+                    else_result: else_result.as_ref().map(|e| f(e)).transpose()?.map(Box::new),
+                })
+            })?
+        }
+        Expr::Interval(interval) => {
+            rebuild(|| {
+                Ok(Expr::Interval(sqlparser::ast::Interval {
+                    value: Box::new(f(&interval.value)?),
+                    leading_field: interval.leading_field.clone(),
+                    leading_precision: interval.leading_precision,
+                    last_field: interval.last_field.clone(),
+                    fractional_seconds_precision: interval.fractional_seconds_precision,
+                }))
+            })?
+        }
+        Expr::InUnnest { expr: inner, array_expr, negated } => {
+            rebuild(|| {
+                Ok(Expr::InUnnest {
+                    expr: Box::new(f(inner)?),
+                    array_expr: Box::new(f(array_expr)?),
+                    negated: *negated,
+                })
+            })?
+        }
+
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            rebuild(|| {
+                Ok(Expr::CompoundFieldAccess {
+                    root: Box::new(f(root)?),
+                    access_chain: access_chain
+                        .iter()
+                        .map(|a| try_map_access_expr(a, f))
+                        .collect::<Result<_, _>>()?,
+                })
+            })?
+        }
+        Expr::JsonAccess { value, path } => {
+            rebuild(|| {
+                Ok(Expr::JsonAccess {
+                    value: Box::new(f(value)?),
+                    path: try_map_json_path(path, f)?,
+                })
+            })?
+        }
+
+        // Subquery and Exists nodes are walked via f_query.
+        Expr::Subquery(q) => rebuild(|| Ok(Expr::Subquery(Box::new(f_query(q)?))))?,
+        Expr::Exists { subquery, negated } => {
+            rebuild(|| {
+                Ok(Expr::Exists { subquery: Box::new(f_query(subquery)?), negated: *negated })
+            })?
+        }
+        Expr::InSubquery { expr: inner, subquery, negated } => {
+            rebuild(|| {
+                Ok(Expr::InSubquery {
+                    expr: Box::new(f(inner)?),
+                    subquery: Box::new(f_query(subquery)?),
+                    negated: *negated,
+                })
+            })?
+        }
+
+        // Dictionary, Map, Lambda, and MemberOf recurse into their children.
+        Expr::Dictionary(fields) => {
+            rebuild(|| {
+                Ok(Expr::Dictionary(
+                    fields
+                        .iter()
+                        .map(|field| {
+                            Ok(sqlparser::ast::DictionaryField {
+                                key: field.key.clone(),
+                                value: Box::new(f(&field.value)?),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, E>>()?,
+                ))
+            })?
+        }
+        Expr::Map(map) => {
+            rebuild(|| {
+                Ok(Expr::Map(sqlparser::ast::Map {
+                    entries: map
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            Ok(sqlparser::ast::MapEntry {
+                                key: Box::new(f(&entry.key)?),
+                                value: Box::new(f(&entry.value)?),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, E>>()?,
+                }))
+            })?
+        }
+        Expr::Lambda(lambda) => {
+            rebuild(|| {
+                Ok(Expr::Lambda(sqlparser::ast::LambdaFunction {
+                    params: lambda.params.clone(),
+                    body: Box::new(f(&lambda.body)?),
+                    syntax: lambda.syntax,
+                }))
+            })?
+        }
+        Expr::MemberOf(member) => {
+            rebuild(|| {
+                Ok(Expr::MemberOf(sqlparser::ast::MemberOf {
+                    value: Box::new(f(&member.value)?),
+                    array: Box::new(f(&member.array)?),
+                }))
+            })?
+        }
+
+        Expr::Function(function) => {
+            rebuild(|| Ok(Expr::Function(try_map_function_children(function, f, f_query)?)))?
+        }
+    })
+}
+
+/// Maps every expression a call carries: its parameters, its arguments and
+/// their clauses, its `FILTER`, its `WITHIN GROUP` keys and its `OVER` window.
+///
+/// Every field is named, with no `..`, so a field added upstream fails to
+/// compile here rather than quietly escaping the walk. That was the shape of
+/// the defect this replaced: a call was skipped entirely, so a caller that
+/// fell through to this table never saw an argument, and both the `RETURNING`
+/// scope check and the RLS cycle detection read past one.
+fn try_map_function_children<E>(
+    function: &sqlparser::ast::Function,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+    f_query: &mut impl FnMut(&sqlparser::ast::Query) -> Result<sqlparser::ast::Query, E>,
+) -> Result<sqlparser::ast::Function, E> {
+    let sqlparser::ast::Function {
+        name,
+        uses_odbc_syntax,
+        parameters,
+        args,
+        within_group,
+        filter,
+        null_treatment,
+        over,
+    } = function;
+
+    Ok(sqlparser::ast::Function {
+        name: name.clone(),
+        uses_odbc_syntax: *uses_odbc_syntax,
+        parameters: try_map_function_arguments(parameters, f, f_query)?,
+        args: try_map_function_arguments(args, f, f_query)?,
+        within_group: try_map_order_by_exprs(within_group, f)?,
+        filter: match filter {
+            Some(predicate) => Some(Box::new(f(predicate)?)),
+            None => None,
+        },
+        null_treatment: *null_treatment,
+        over: match over {
+            Some(sqlparser::ast::WindowType::WindowSpec(spec)) => {
+                Some(sqlparser::ast::WindowType::WindowSpec(try_map_window_spec(spec, f)?))
+            }
+            Some(named @ sqlparser::ast::WindowType::NamedWindow(_)) => Some(named.clone()),
+            None => None,
+        },
+    })
+}
+
+fn try_map_function_arguments<E>(
+    arguments: &sqlparser::ast::FunctionArguments,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+    f_query: &mut impl FnMut(&sqlparser::ast::Query) -> Result<sqlparser::ast::Query, E>,
+) -> Result<sqlparser::ast::FunctionArguments, E> {
+    Ok(match arguments {
+        sqlparser::ast::FunctionArguments::None => sqlparser::ast::FunctionArguments::None,
+        sqlparser::ast::FunctionArguments::Subquery(query) => {
+            sqlparser::ast::FunctionArguments::Subquery(Box::new(f_query(query)?))
+        }
+        sqlparser::ast::FunctionArguments::List(list) => {
+            let sqlparser::ast::FunctionArgumentList { duplicate_treatment, args, clauses } = list;
+            sqlparser::ast::FunctionArguments::List(sqlparser::ast::FunctionArgumentList {
+                duplicate_treatment: *duplicate_treatment,
+                args: args
+                    .iter()
+                    .map(|arg| try_map_function_arg(arg, f))
+                    .collect::<Result<Vec<_>, E>>()?,
+                clauses: clauses
+                    .iter()
+                    .map(|clause| try_map_function_argument_clause(clause, f))
+                    .collect::<Result<Vec<_>, E>>()?,
+            })
+        }
+    })
+}
+
+fn try_map_function_arg<E>(
+    arg: &sqlparser::ast::FunctionArg,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::FunctionArg, E> {
+    Ok(match arg {
+        sqlparser::ast::FunctionArg::Named { name, arg, operator } => {
+            sqlparser::ast::FunctionArg::Named {
+                name: name.clone(),
+                arg: try_map_function_arg_expr(arg, f)?,
+                operator: operator.clone(),
+            }
+        }
+        sqlparser::ast::FunctionArg::ExprNamed { name, arg, operator } => {
+            sqlparser::ast::FunctionArg::ExprNamed {
+                name: f(name)?,
+                arg: try_map_function_arg_expr(arg, f)?,
+                operator: operator.clone(),
+            }
+        }
+        sqlparser::ast::FunctionArg::Unnamed(arg) => {
+            sqlparser::ast::FunctionArg::Unnamed(try_map_function_arg_expr(arg, f)?)
+        }
+    })
+}
+
+fn try_map_function_arg_expr<E>(
+    arg: &sqlparser::ast::FunctionArgExpr,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::FunctionArgExpr, E> {
+    Ok(match arg {
+        sqlparser::ast::FunctionArgExpr::Expr(expr) => {
+            sqlparser::ast::FunctionArgExpr::Expr(f(expr)?)
+        }
+        wildcard => wildcard.clone(),
+    })
+}
+
+fn try_map_function_argument_clause<E>(
+    clause: &sqlparser::ast::FunctionArgumentClause,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::FunctionArgumentClause, E> {
+    use sqlparser::ast::FunctionArgumentClause as Clause;
+
+    Ok(match clause {
+        Clause::Where(predicate) => Clause::Where(f(predicate)?),
+        Clause::OrderBy(keys) => Clause::OrderBy(try_map_order_by_exprs(keys, f)?),
+        Clause::Limit(limit) => Clause::Limit(f(limit)?),
+        Clause::Having(sqlparser::ast::HavingBound(kind, bound)) => {
+            Clause::Having(sqlparser::ast::HavingBound(*kind, f(bound)?))
+        }
+        // `IgnoreOrRespectNulls`, `OnOverflow`, `Separator`, and the JSON
+        // clauses carry no expression.
+        other => other.clone(),
+    })
+}
+
+fn try_map_order_by_exprs<E>(
+    keys: &[sqlparser::ast::OrderByExpr],
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<Vec<sqlparser::ast::OrderByExpr>, E> {
+    keys.iter()
+        .map(|key| {
+            Ok(sqlparser::ast::OrderByExpr {
+                expr: f(&key.expr)?,
+                options: key.options.clone(),
+                with_fill: key.with_fill.clone(),
+            })
+        })
+        .collect()
+}
+
+fn try_map_window_spec<E>(
+    spec: &sqlparser::ast::WindowSpec,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::WindowSpec, E> {
+    let sqlparser::ast::WindowSpec { window_name, partition_by, order_by, window_frame } = spec;
+
+    Ok(sqlparser::ast::WindowSpec {
+        window_name: window_name.clone(),
+        partition_by: partition_by.iter().map(&mut *f).collect::<Result<Vec<_>, E>>()?,
+        order_by: try_map_order_by_exprs(order_by, f)?,
+        window_frame: match window_frame {
+            Some(frame) => {
+                Some(sqlparser::ast::WindowFrame {
+                    units: frame.units,
+                    start_bound: try_map_window_frame_bound(&frame.start_bound, f)?,
+                    end_bound: match &frame.end_bound {
+                        Some(bound) => Some(try_map_window_frame_bound(bound, f)?),
+                        None => None,
+                    },
+                })
+            }
+            None => None,
+        },
+    })
+}
+
+fn try_map_window_frame_bound<E>(
+    bound: &sqlparser::ast::WindowFrameBound,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::WindowFrameBound, E> {
+    use sqlparser::ast::WindowFrameBound as Bound;
+
+    Ok(match bound {
+        Bound::Preceding(Some(offset)) => Bound::Preceding(Some(Box::new(f(offset)?))),
+        Bound::Following(Some(offset)) => Bound::Following(Some(Box::new(f(offset)?))),
+        // `CURRENT ROW` and the unbounded spellings carry no offset.
+        other => other.clone(),
+    })
+}
+
+fn try_map_access_expr<E>(
+    access: &sqlparser::ast::AccessExpr,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::AccessExpr, E> {
+    Ok(match access {
+        sqlparser::ast::AccessExpr::Dot(e) => sqlparser::ast::AccessExpr::Dot(f(e)?),
+        sqlparser::ast::AccessExpr::Subscript(sub) => {
+            sqlparser::ast::AccessExpr::Subscript(try_map_subscript(sub, f)?)
+        }
+    })
+}
+
+fn try_map_subscript<E>(
+    sub: &sqlparser::ast::Subscript,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::Subscript, E> {
+    Ok(match sub {
+        sqlparser::ast::Subscript::Index { index } => {
+            sqlparser::ast::Subscript::Index { index: f(index)? }
+        }
+        sqlparser::ast::Subscript::Slice { lower_bound, upper_bound, stride } => {
+            sqlparser::ast::Subscript::Slice {
+                lower_bound: lower_bound.as_ref().map(&mut *f).transpose()?,
+                upper_bound: upper_bound.as_ref().map(&mut *f).transpose()?,
+                stride: stride.as_ref().map(&mut *f).transpose()?,
+            }
+        }
+    })
+}
+
+fn try_map_json_path<E>(
+    path: &sqlparser::ast::JsonPath,
+    f: &mut impl FnMut(&Expr) -> Result<Expr, E>,
+) -> Result<sqlparser::ast::JsonPath, E> {
+    Ok(sqlparser::ast::JsonPath {
+        path: path
+            .path
+            .iter()
+            .map(|elem| {
+                Ok(match elem {
+                    JsonPathElem::Dot { key, quoted } => {
+                        JsonPathElem::Dot { key: key.clone(), quoted: *quoted }
+                    }
+                    JsonPathElem::Bracket { key } => JsonPathElem::Bracket { key: f(key)? },
+                    JsonPathElem::ColonBracket { key } => {
+                        JsonPathElem::ColonBracket { key: f(key)? }
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, E>>()?,
+    })
+}
+
+/// Read-only variant of [`map_expr_children`] that does not rebuild the tree.
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
+pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
+    match expr {
+        // leaf nodes
+        Expr::Identifier(_)
+        | Expr::CompoundIdentifier(_)
+        | Expr::Value(_)
+        | Expr::TypedString(_)
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(..)
+        | Expr::MatchAgainst { .. } => {}
+
+        // single child
+        Expr::IsFalse(e)
+        | Expr::IsNotFalse(e)
+        | Expr::IsTrue(e)
+        | Expr::IsNotTrue(e)
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnknown(e)
+        | Expr::IsNotUnknown(e)
+        | Expr::Nested(e)
+        | Expr::OuterJoin(e)
+        | Expr::Prior(e) => f(e),
+
+        Expr::Prefixed { value, .. } => f(value),
+        Expr::Named { expr: inner, .. }
+        | Expr::IsNormalized { expr: inner, .. }
+        | Expr::IsJson { expr: inner, .. } => f(inner),
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Extract { expr: inner, .. }
+        | Expr::Ceil { expr: inner, .. }
+        | Expr::Floor { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => f(inner),
+        Expr::Convert { expr: inner, styles, .. } => {
+            f(inner);
+            for s in styles {
+                f(s);
+            }
+        }
+
+        // two children
+        Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => {
+            f(a);
+            f(b);
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::AnyOp { left, right, .. }
+        | Expr::AllOp { left, right, .. } => {
+            f(left);
+            f(right);
+        }
+        Expr::Like { expr: inner, pattern, .. }
+        | Expr::ILike { expr: inner, pattern, .. }
+        | Expr::SimilarTo { expr: inner, pattern, .. }
+        | Expr::RLike { expr: inner, pattern, .. } => {
+            f(inner);
+            f(pattern);
+        }
+        Expr::AtTimeZone { timestamp, time_zone } => {
+            f(timestamp);
+            f(time_zone);
+        }
+        Expr::Position { expr: inner, r#in } => {
+            f(inner);
+            f(r#in);
+        }
+
+        // three children
+        Expr::Between { expr: inner, low, high, .. } => {
+            f(inner);
+            f(low);
+            f(high);
+        }
+        Expr::Overlay { expr: inner, overlay_what, overlay_from, overlay_for } => {
+            f(inner);
+            f(overlay_what);
+            f(overlay_from);
+            if let Some(e) = overlay_for {
+                f(e);
+            }
+        }
+
+        // list children
+        Expr::InList { expr: inner, list, .. } => {
+            f(inner);
+            for e in list {
+                f(e);
+            }
+        }
+        Expr::Tuple(items) => {
+            for e in items {
+                f(e);
+            }
+        }
+        Expr::Array(arr) => {
+            for e in &arr.elem {
+                f(e);
+            }
+        }
+        Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
+            for set in sets {
+                for e in set {
+                    f(e);
+                }
+            }
+        }
+        Expr::Struct { values, .. } => {
+            for e in values {
+                f(e);
+            }
+        }
+
+        // structured with optional children
+        Expr::Substring { expr: inner, substring_from, substring_for, .. } => {
+            f(inner);
+            if let Some(e) = substring_from {
+                f(e);
+            }
+            if let Some(e) = substring_for {
+                f(e);
+            }
+        }
+        Expr::Trim { expr: inner, trim_what, trim_characters, .. } => {
+            f(inner);
+            if let Some(e) = trim_what {
+                f(e);
+            }
+            if let Some(chars) = trim_characters {
+                for c in chars {
+                    f(c);
+                }
+            }
+        }
+        Expr::Case { operand, conditions, else_result, .. } => {
+            if let Some(e) = operand {
+                f(e);
+            }
+            for cw in conditions {
+                f(&cw.condition);
+                f(&cw.result);
+            }
+            if let Some(e) = else_result {
+                f(e);
+            }
+        }
+        Expr::InSubquery { expr: inner, .. } => f(inner),
+        Expr::InUnnest { expr: inner, array_expr, .. } => {
+            f(inner);
+            f(array_expr);
+        }
+        Expr::Interval(interval) => f(&interval.value),
+
+        // compound access
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            f(root);
+            for a in access_chain {
+                match a {
+                    sqlparser::ast::AccessExpr::Dot(e) => f(e),
+                    sqlparser::ast::AccessExpr::Subscript(sub) => {
+                        for_each_subscript_expr(sub, f);
+                    }
+                }
+            }
+        }
+        Expr::JsonAccess { value, path } => {
+            f(value);
+            for elem in &path.path {
+                if let JsonPathElem::Bracket { key } = elem {
+                    f(key);
+                }
+            }
+        }
+
+        Expr::Function(function) => for_each_function_child_expr(function, f),
+
+        // A subquery's expressions live under a `Query`, which this walk has
+        // no callback for; callers that need them match these two themselves.
+        Expr::Subquery(_) | Expr::Exists { .. } => {}
+
+        // Remaining leaf-like variants
+        // Dictionary and Map recurse into their children
+        Expr::Dictionary(fields) => {
+            for field in fields {
+                f(&field.value);
+            }
+        }
+        Expr::Map(map) => {
+            for entry in &map.entries {
+                f(&entry.key);
+                f(&entry.value);
+            }
+        }
+        Expr::Lambda(lambda) => f(&lambda.body),
+        Expr::MemberOf(member) => {
+            f(&member.value);
+            f(&member.array);
+        }
+    }
+}
+
+/// Calls `f` on every direct child `&mut Expr`, mutating in place.
+///
+/// Adapter over [`try_map_expr_children`], the single variant table: each
+/// direct child is cloned, mutated, and written back, so the tax is one clone
+/// per child per level. Every caller is a plpgsql trigger-body pass over
+/// small expressions, which is why the rebuilding walker is the core and this
+/// one pays the adapter cost rather than the other way around.
+pub(crate) fn mutate_expr_children(expr: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+    let result = try_map_expr_children::<core::convert::Infallible>(
+        expr,
+        &mut |child| {
+            let mut owned = child.clone();
+            f(&mut owned);
+            Ok(owned)
+        },
+        &mut |query| Ok(query.clone()),
+    );
+    match result {
+        Ok(rebuilt) => *expr = rebuilt,
+        Err(never) => match never {},
+    }
+}
+
+/// The read-only mirror of [`try_map_function_children`], kept beside it so
+/// the two tables are read together.
+fn for_each_function_child_expr(function: &sqlparser::ast::Function, f: &mut impl FnMut(&Expr)) {
+    let sqlparser::ast::Function {
+        name: _,
+        uses_odbc_syntax: _,
+        parameters,
+        args,
+        within_group,
+        filter,
+        null_treatment: _,
+        over,
+    } = function;
+
+    for arguments in [parameters, args] {
+        if let sqlparser::ast::FunctionArguments::List(list) = arguments {
+            for arg in &list.args {
+                if let sqlparser::ast::FunctionArg::ExprNamed { name, .. } = arg {
+                    f(name);
+                }
+                let (sqlparser::ast::FunctionArg::Named { arg, .. }
+                | sqlparser::ast::FunctionArg::ExprNamed { arg, .. }
+                | sqlparser::ast::FunctionArg::Unnamed(arg)) = arg;
+                if let sqlparser::ast::FunctionArgExpr::Expr(expr) = arg {
+                    f(expr);
+                }
+            }
+            for clause in &list.clauses {
+                for_each_function_argument_clause_expr(clause, f);
+            }
+        }
+    }
+
+    for key in within_group {
+        f(&key.expr);
+    }
+    if let Some(predicate) = filter {
+        f(predicate);
+    }
+    if let Some(sqlparser::ast::WindowType::WindowSpec(spec)) = over {
+        for key in &spec.partition_by {
+            f(key);
+        }
+        for key in &spec.order_by {
+            f(&key.expr);
+        }
+        if let Some(frame) = &spec.window_frame {
+            for bound in [Some(&frame.start_bound), frame.end_bound.as_ref()].into_iter().flatten()
+            {
+                if let sqlparser::ast::WindowFrameBound::Preceding(Some(offset))
+                | sqlparser::ast::WindowFrameBound::Following(Some(offset)) = bound
+                {
+                    f(offset);
+                }
+            }
+        }
+    }
+}
+
+fn for_each_function_argument_clause_expr(
+    clause: &sqlparser::ast::FunctionArgumentClause,
+    f: &mut impl FnMut(&Expr),
+) {
+    use sqlparser::ast::FunctionArgumentClause as Clause;
+
+    match clause {
+        Clause::Where(predicate) | Clause::Limit(predicate) => f(predicate),
+        Clause::OrderBy(keys) => {
+            for key in keys {
+                f(&key.expr);
+            }
+        }
+        Clause::Having(sqlparser::ast::HavingBound(_, bound)) => f(bound),
+        _ => {}
+    }
+}
+
+fn for_each_subscript_expr(sub: &sqlparser::ast::Subscript, f: &mut impl FnMut(&Expr)) {
+    match sub {
+        sqlparser::ast::Subscript::Index { index } => f(index),
+        sqlparser::ast::Subscript::Slice { lower_bound, upper_bound, stride } => {
+            if let Some(e) = lower_bound {
+                f(e);
+            }
+            if let Some(e) = upper_bound {
+                f(e);
+            }
+            if let Some(e) = stride {
+                f(e);
+            }
+        }
+    }
+}
+
+/// `CASE WHEN <condition> THEN <then_expr> [ELSE <else_expr>] END`.
+///
+/// Omitting `else_expr` yields NULL when the condition is false or NULL, which
+/// is how the translators express a guarded value.
+#[must_use]
+pub(crate) fn case_when(condition: Expr, then_expr: Expr, else_expr: Option<Expr>) -> Expr {
+    Expr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: None,
+        conditions: vec![CaseWhen { condition, result: then_expr }],
+        else_result: else_expr.map(Box::new),
+    }
+}
+
+/// `<left> IS NOT DISTINCT FROM <right>`, null-safe equality.
+///
+/// SQLite has taken this spelling since 3.39 and the floor is 3.46, so the bare
+/// `IS` this used to render through `BinaryOperator::Custom` buys nothing and
+/// costs the round trip: `a IS b` is valid SQLite that `sqlparser` refuses,
+/// taking only `IS [NOT] NULL|TRUE|FALSE|DISTINCT FROM` after `IS`, so the
+/// emitted script could not be read back by the reverse direction, which parses
+/// SQLite with that same dialect.
+#[must_use]
+pub(crate) fn null_safe_eq(left: Expr, right: Expr) -> Expr {
+    Expr::IsNotDistinctFrom(Box::new(left), Box::new(right))
+}
+
+/// `NOT (<expr>)`, parenthesized so the negation binds the whole predicate
+/// rather than its leftmost operand.
+#[must_use]
+pub(crate) fn not_predicate(expr: Expr) -> Expr {
+    Expr::UnaryOp {
+        op: sqlparser::ast::UnaryOperator::Not,
+        expr: Box::new(Expr::Nested(Box::new(expr))),
+    }
+}
+
+/// `<left> IS DISTINCT FROM <right>`, null-safe inequality, native since the
+/// same version as its complement above.
+#[must_use]
+pub(crate) fn null_safe_neq(left: Expr, right: Expr) -> Expr {
+    Expr::IsDistinctFrom(Box::new(left), Box::new(right))
+}
+
+/// `<left> || <right>`, SQLite's text concatenation.
+#[must_use]
+pub(crate) fn concat(left: Expr, right: Expr) -> Expr {
+    Expr::BinaryOp {
+        left: Box::new(left),
+        op: sqlparser::ast::BinaryOperator::StringConcat,
+        right: Box::new(right),
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use sqlparser::ast::{Expr, Ident, Value, ValueWithSpan};
+
+    use super::*;
+
+    fn ident_expr(name: &str) -> Expr {
+        Expr::Identifier(Ident::new(name))
+    }
+
+    fn num_expr(n: &str) -> Expr {
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(n.to_string(), false),
+            span: sqlparser::tokenizer::Span::empty(),
+        })
+    }
+
+    #[test]
+    fn map_expr_children_transforms_binary_op() {
+        let expr = Expr::BinaryOp {
+            left: Box::new(ident_expr("a")),
+            op: sqlparser::ast::BinaryOperator::Plus,
+            right: Box::new(num_expr("1")),
+        };
+        // Wrap every child in Nested
+        let result = map_expr_children(&expr, &|e| Expr::Nested(Box::new(e.clone())));
+        assert_eq!(result.to_string(), "(a) + (1)");
+    }
+
+    #[test]
+    fn map_expr_children_leaves_leaf_unchanged() {
+        let expr = ident_expr("x");
+        let result = map_expr_children(&expr, &|_| panic!("should not be called on leaf"));
+        assert_eq!(result.to_string(), "x");
+    }
+
+    #[test]
+    fn for_each_child_expr_visits_case_parts() {
+        let expr = Expr::Case {
+            case_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+            end_token: sqlparser::ast::helpers::attached_token::AttachedToken::empty(),
+            operand: Some(Box::new(ident_expr("x"))),
+            conditions: vec![sqlparser::ast::CaseWhen {
+                condition: ident_expr("a"),
+                result: ident_expr("b"),
+            }],
+            else_result: Some(Box::new(ident_expr("c"))),
+        };
+        let mut visited = Vec::new();
+        for_each_child_expr(&expr, &mut |e| visited.push(e.to_string()));
+        assert_eq!(visited, vec!["x", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn mutate_expr_children_transforms_in_place() {
+        let mut expr = Expr::Tuple(vec![ident_expr("a"), ident_expr("b")]);
+        mutate_expr_children(&mut expr, &mut |e| {
+            if let Expr::Identifier(ident) = e {
+                ident.value = ident.value.to_uppercase();
+            }
+        });
+        assert_eq!(expr.to_string(), "(A, B)");
+    }
+
+    /// Parse a single SQL expression using the PostgreSQL dialect.
+    fn parse_expr(sql: &str) -> Expr {
+        let full = format!("SELECT {sql} FROM dummy");
+        let dialect = sqlparser::dialect::PostgreSqlDialect {};
+        let mut stmts = sqlparser::parser::Parser::parse_sql(&dialect, &full)
+            .unwrap_or_else(|e| panic!("parse failed for `{sql}`: {e}"));
+        let stmt = stmts.pop().expect("statement");
+        let sqlparser::ast::Statement::Query(query) = stmt else { panic!("not a query") };
+        let sqlparser::ast::SetExpr::Select(select) = *query.body else { panic!("not a select") };
+        let projection = select.projection.into_iter().next().expect("projection");
+        match projection {
+            sqlparser::ast::SelectItem::UnnamedExpr(e)
+            | sqlparser::ast::SelectItem::ExprWithAlias { expr: e, .. } => e,
+            other => panic!("non-Expr projection for `{sql}`: {other:?}"),
+        }
+    }
+
+    /// SQL expressions that produce a wide spread of `Expr` variants. Used
+    /// below to exercise every walker uniformly.
+    fn sample_expressions() -> Vec<(&'static str, &'static str)> {
+        vec![
+            // Leaves and value-like variants
+            ("identifier", "a"),
+            ("compound_identifier", "schema.tbl.col"),
+            ("number_value", "1"),
+            ("string_value", "'hi'"),
+            ("typed_string", "TIMESTAMP '2020-01-01'"),
+            // Single-child wrappers
+            ("is_false", "a IS FALSE"),
+            ("is_not_false", "a IS NOT FALSE"),
+            ("is_true", "a IS TRUE"),
+            ("is_not_true", "a IS NOT TRUE"),
+            ("is_null", "a IS NULL"),
+            ("is_not_null", "a IS NOT NULL"),
+            ("is_unknown", "a IS UNKNOWN"),
+            ("is_not_unknown", "a IS NOT UNKNOWN"),
+            ("is_normalized", "a IS NORMALIZED"),
+            ("is_json", "a IS JSON"),
+            ("is_not_json", "a IS NOT JSON"),
+            ("is_json_array", "a IS JSON ARRAY"),
+            ("is_json_unique_keys", "a IS JSON OBJECT WITH UNIQUE KEYS"),
+            ("nested", "(a + 1)"),
+            ("unary_op_not", "NOT a"),
+            ("unary_op_minus", "-a"),
+            ("cast", "CAST(a AS INTEGER)"),
+            ("try_cast", "TRY_CAST(a AS INTEGER)"),
+            ("extract", "EXTRACT(YEAR FROM a)"),
+            ("ceil_scale", "CEIL(a)"),
+            ("floor_scale", "FLOOR(a)"),
+            ("collate", "a COLLATE \"C\""),
+            ("convert", "CONVERT(a USING utf8)"),
+            // Two-child operators
+            ("binary_op_plus", "a + b"),
+            ("binary_op_eq", "a = b"),
+            ("binary_op_and", "a AND b"),
+            ("any_op", "a = ANY(b)"),
+            ("all_op", "a = ALL(b)"),
+            ("like", "a LIKE 'x%'"),
+            ("ilike", "a ILIKE 'x%'"),
+            ("similar_to", "a SIMILAR TO 'x%'"),
+            ("position", "POSITION('x' IN a)"),
+            ("at_time_zone", "a AT TIME ZONE 'UTC'"),
+            ("is_distinct_from", "a IS DISTINCT FROM b"),
+            ("is_not_distinct_from", "a IS NOT DISTINCT FROM b"),
+            // Lists, ranges, structured
+            ("tuple", "(a, b, c)"),
+            ("array_value", "ARRAY[a, b, c]"),
+            ("in_list", "a IN (1, 2, 3)"),
+            ("in_subquery", "a IN (SELECT id FROM t)"),
+            ("between", "a BETWEEN 1 AND 10"),
+            ("case_with_operand", "CASE a WHEN 1 THEN 'one' ELSE 'other' END"),
+            ("case_searched", "CASE WHEN a > 0 THEN 'pos' END"),
+            ("trim_chars", "TRIM(BOTH 'x' FROM a)"),
+            ("substring", "SUBSTRING(a FROM 1 FOR 3)"),
+            ("overlay", "OVERLAY(a PLACING 'z' FROM 2 FOR 1)"),
+            ("compound_field_access", "a.b.c"),
+            ("interval", "INTERVAL '1 day'"),
+            ("subquery", "(SELECT max(id) FROM t)"),
+            ("exists", "EXISTS (SELECT 1 FROM t)"),
+            ("subscript", "a[1]"),
+            ("subscript_slice", "a[1:3]"),
+            ("function", "now()"),
+            ("function_with_args", "concat(a, b, c)"),
+            ("json_access_arrow", "a -> 'k'"),
+            ("json_access_long_arrow", "a -> 'k' ->> 'v'"),
+        ]
+    }
+
+    /// Smoke-test that every walker handles every sampled `Expr` variant
+    /// without panicking and that `map_expr_children` with an identity
+    /// transform plus `mutate_expr_children` with a no-op are observably
+    /// no-ops. This is what lifts the per-variant arms above the
+    /// "never executed" baseline.
+    #[test]
+    fn walkers_handle_all_sampled_variants() {
+        for (label, sql) in sample_expressions() {
+            let expr = parse_expr(sql);
+
+            // map_expr_children with identity = same Display
+            let mapped = map_expr_children(&expr, &|e| e.clone());
+            assert_eq!(
+                mapped.to_string(),
+                expr.to_string(),
+                "{label}: map_expr_children identity changed Display",
+            );
+
+            // try_map_expr_children with identity = same Display
+            let tried: Result<Expr, ()> =
+                try_map_expr_children(&expr, &mut |e| Ok(e.clone()), &mut |q| Ok(q.clone()));
+            assert_eq!(
+                tried.expect("identity should not fail").to_string(),
+                expr.to_string(),
+                "{label}: try_map_expr_children identity changed Display",
+            );
+
+            // for_each_child_expr does not panic
+            for_each_child_expr(&expr, &mut |_| {});
+
+            // mutate_expr_children with no-op = same Display
+            let mut mutated = expr.clone();
+            mutate_expr_children(&mut mutated, &mut |_| {});
+            assert_eq!(
+                mutated.to_string(),
+                expr.to_string(),
+                "{label}: mutate_expr_children no-op changed Display",
+            );
+        }
+    }
+
+    #[test]
+    fn try_map_expr_children_propagates_error() {
+        let expr = Expr::BinaryOp {
+            left: Box::new(ident_expr("a")),
+            op: sqlparser::ast::BinaryOperator::Plus,
+            right: Box::new(num_expr("1")),
+        };
+        let result: Result<Expr, &'static str> =
+            try_map_expr_children(&expr, &mut |_| Err("boom"), &mut |q| Ok(q.clone()));
+        assert_eq!(result, Err("boom"));
+    }
+
+    #[test]
+    fn for_each_child_expr_counts_in_list() {
+        let expr = parse_expr("a IN (1, 2, 3)");
+        let mut count = 0;
+        for_each_child_expr(&expr, &mut |_| count += 1);
+        // Expected: 1 expr (a) + 3 list items
+        assert_eq!(count, 4);
+    }
+
+    /// Every expression a call carries is a child, in both walkers, which is
+    /// what keeps a caller that falls through from reading past an argument.
+    #[test]
+    fn a_call_yields_every_expression_it_carries() {
+        let expr = parse_expr(
+            "sum(a, b) FILTER (WHERE c > 1) OVER (PARTITION BY d ORDER BY e ROWS BETWEEN f \
+             PRECEDING AND g FOLLOWING)",
+        );
+
+        let mut visited = Vec::new();
+        for_each_child_expr(&expr, &mut |child| visited.push(child.to_string()));
+        assert_eq!(visited, vec!["a", "b", "c > 1", "d", "e", "f", "g"]);
+
+        let mut mapped = Vec::new();
+        let rebuilt: Result<Expr, ()> = try_map_expr_children(
+            &expr,
+            &mut |child| {
+                mapped.push(child.to_string());
+                Ok(child.clone())
+            },
+            &mut |query| Ok(query.clone()),
+        );
+        assert_eq!(mapped, visited, "the two tables must agree");
+        assert_eq!(rebuilt.expect("identity map").to_string(), expr.to_string());
+    }
+
+    /// A subquery written as an argument arrives at the child callback as the
+    /// `Expr::Subquery` it is, which is what lets a caller that inspects
+    /// subqueries see one hidden inside a call.
+    #[test]
+    fn a_subquery_argument_reaches_the_child_callback() {
+        let expr = parse_expr("coalesce((SELECT 1 FROM other), 0)");
+        let mut visited = Vec::new();
+        for_each_child_expr(&expr, &mut |child| visited.push(child.to_string()));
+        assert_eq!(visited, vec!["(SELECT 1 FROM other)", "0"]);
+    }
+
+    /// Every spelling an argument can take, since each is its own arm of the
+    /// table and a missed one is a caller reading past that argument.
+    #[test]
+    fn every_argument_spelling_is_walked() {
+        for (sql, expected) in [
+            // `a => 1` is an `ExprNamed`, whose name is an expression too.
+            ("f(a => 1, b)", vec!["a", "1", "b"]),
+            ("string_agg(a, ',' ORDER BY b)", vec!["a", "','", "b"]),
+            ("percentile_cont(0.5) WITHIN GROUP (ORDER BY a)", vec!["0.5", "a"]),
+            ("count(*) FILTER (WHERE a > 1)", vec!["a > 1"]),
+            ("sum(a) OVER w", vec!["a"]),
+        ] {
+            let expr = parse_expr(sql);
+
+            let mut visited = Vec::new();
+            for_each_child_expr(&expr, &mut |child| visited.push(child.to_string()));
+            assert_eq!(visited, expected, "walking {sql}");
+
+            let mut mapped = Vec::new();
+            let rebuilt: Result<Expr, ()> = try_map_expr_children(
+                &expr,
+                &mut |child| {
+                    mapped.push(child.to_string());
+                    Ok(child.clone())
+                },
+                &mut |query| Ok(query.clone()),
+            );
+            assert_eq!(mapped, expected, "mapping {sql}");
+            assert_eq!(
+                rebuilt.expect("identity map").to_string(),
+                expr.to_string(),
+                "rebuilding {sql}"
+            );
+        }
+    }
+
+    /// A call whose argument list is a bare subquery hands that query to the
+    /// query callback, the one place a subquery is not also a child
+    /// expression.
+    #[test]
+    fn a_bare_subquery_argument_list_reaches_the_query_callback() {
+        let expr = parse_expr("ARRAY(SELECT 1 FROM other)");
+        let mut queries = 0;
+        let rebuilt: Result<Expr, ()> =
+            try_map_expr_children(&expr, &mut |child| Ok(child.clone()), &mut |query| {
+                queries += 1;
+                Ok(query.clone())
+            });
+        assert_eq!(rebuilt.expect("identity map").to_string(), expr.to_string());
+        assert_eq!(queries, 1);
+    }
+
+    /// `{'k1': 1, 'k2': 2}`. Not reachable from a PostgreSQL parse, since
+    /// `supports_dictionary_syntax` is false on `PostgreSqlDialect`, so the
+    /// node has to be built by hand to exercise the walkers.
+    fn dictionary_expr() -> Expr {
+        Expr::Dictionary(vec![
+            sqlparser::ast::DictionaryField {
+                key: Ident::new("k1"),
+                value: Box::new(num_expr("1")),
+            },
+            sqlparser::ast::DictionaryField {
+                key: Ident::new("k2"),
+                value: Box::new(num_expr("2")),
+            },
+        ])
+    }
+
+    /// `MAP {a: 1}`. Distinct key and value expressions, so a walker that
+    /// visits one twice instead of each once is caught.
+    fn map_literal_expr() -> Expr {
+        Expr::Map(sqlparser::ast::Map {
+            entries: vec![sqlparser::ast::MapEntry {
+                key: Box::new(ident_expr("a")),
+                value: Box::new(num_expr("1")),
+            }],
+        })
+    }
+
+    #[test]
+    fn map_expr_children_rebuilds_dictionary_values() {
+        let result = map_expr_children(&dictionary_expr(), &|e| Expr::Nested(Box::new(e.clone())));
+        // Every value is parenthesized, every key is untouched.
+        assert_eq!(result.to_string(), "{k1: (1), k2: (2)}");
+    }
+
+    #[test]
+    fn map_expr_children_rebuilds_both_halves_of_a_map_entry() {
+        let result = map_expr_children(&map_literal_expr(), &|e| Expr::Nested(Box::new(e.clone())));
+        // Both halves parenthesized. Walking the key twice would render
+        // `(a): (a)`, walking only the value would leave the key bare.
+        assert_eq!(result.to_string(), "MAP {(a): (1)}");
+    }
+
+    #[test]
+    fn for_each_child_expr_visits_dictionary_values() {
+        let mut seen = Vec::new();
+        for_each_child_expr(&dictionary_expr(), &mut |e| seen.push(e.to_string()));
+        assert_eq!(seen, vec!["1", "2"], "both field values, keys are idents not exprs");
+    }
+
+    #[test]
+    fn for_each_child_expr_visits_both_halves_of_a_map_entry() {
+        let mut seen = Vec::new();
+        for_each_child_expr(&map_literal_expr(), &mut |e| seen.push(e.to_string()));
+        assert_eq!(seen, vec!["a", "1"], "key then value, each exactly once");
+    }
+
+    #[test]
+    fn mutate_expr_children_rewrites_dictionary_values_in_place() {
+        let mut expr = dictionary_expr();
+        mutate_expr_children(&mut expr, &mut |e| *e = Expr::Nested(Box::new(e.clone())));
+        assert_eq!(expr.to_string(), "{k1: (1), k2: (2)}");
+    }
+
+    #[test]
+    fn mutate_expr_children_rewrites_both_halves_of_a_map_entry_in_place() {
+        let mut expr = map_literal_expr();
+        mutate_expr_children(&mut expr, &mut |e| *e = Expr::Nested(Box::new(e.clone())));
+        assert_eq!(expr.to_string(), "MAP {(a): (1)}");
+    }
+
+    /// The three walkers that used to end in a catch-all are now exhaustive,
+    /// which is what stops the next `Expr` variant sqlparser adds from being
+    /// silently skipped by some walkers and handled by others. Exhaustiveness
+    /// is enforced by the compiler, so this test records the guarantee and
+    /// pins the drift that motivated it: `Dictionary` and `Map` were handled
+    /// by `try_map_expr_children` alone.
+    #[test]
+    fn every_walker_agrees_on_dictionary_and_map() {
+        for expr in [dictionary_expr(), map_literal_expr()] {
+            let expected = {
+                let mut seen = 0;
+                for_each_child_expr(&expr, &mut |_| seen += 1);
+                seen
+            };
+            assert!(expected > 0, "fixture must have children to be worth walking");
+
+            let mapped = core::cell::Cell::new(0_usize);
+            let _ = map_expr_children(&expr, &|e| {
+                mapped.set(mapped.get() + 1);
+                e.clone()
+            });
+            assert_eq!(mapped.get(), expected, "map_expr_children visited a different child count");
+
+            let mut mutated_expr = expr.clone();
+            let mut mutated = 0;
+            mutate_expr_children(&mut mutated_expr, &mut |_| mutated += 1);
+            assert_eq!(mutated, expected, "mutate_expr_children visited a different child count");
+
+            let mut tried = 0_usize;
+            let _: Result<Expr, ()> = try_map_expr_children(
+                &expr,
+                &mut |e| {
+                    tried += 1;
+                    Ok(e.clone())
+                },
+                &mut |q| Ok(q.clone()),
+            );
+            assert_eq!(tried, expected, "try_map_expr_children visited a different child count");
+        }
+    }
+
+    /// `x -> x + 1`, hand-built: no dialect this crate parses produces a
+    /// lambda, so the walkers' agreement on it can only be pinned here.
+    fn lambda_expr() -> Expr {
+        Expr::Lambda(sqlparser::ast::LambdaFunction {
+            params: sqlparser::ast::OneOrManyWithParens::One(
+                sqlparser::ast::LambdaFunctionParameter { name: Ident::new("x"), data_type: None },
+            ),
+            body: Box::new(Expr::BinaryOp {
+                left: Box::new(ident_expr("x")),
+                op: sqlparser::ast::BinaryOperator::Plus,
+                right: Box::new(num_expr("1")),
+            }),
+            syntax: sqlparser::ast::LambdaSyntax::Arrow,
+        })
+    }
+
+    /// `a MEMBER OF (b)`, hand-built for the same reason as the lambda.
+    fn member_of_expr() -> Expr {
+        Expr::MemberOf(sqlparser::ast::MemberOf {
+            value: Box::new(ident_expr("a")),
+            array: Box::new(ident_expr("b")),
+        })
+    }
+
+    /// The read-only walker stays hand-written (a read-only walk cannot borrow
+    /// through the rebuilding core without copying), so this is the pin that
+    /// keeps its variant table from drifting: over every sampled shape plus
+    /// the hand-built ones, `for_each_child_expr` and the core visit exactly
+    /// the same children in the same order.
+    #[test]
+    fn the_read_only_walker_visits_what_the_core_visits() {
+        let mut corpus: Vec<(String, Expr)> = sample_expressions()
+            .into_iter()
+            .map(|(label, sql)| (label.to_string(), parse_expr(sql)))
+            .collect();
+        corpus.push(("dictionary".to_string(), dictionary_expr()));
+        corpus.push(("map_literal".to_string(), map_literal_expr()));
+        corpus.push(("lambda".to_string(), lambda_expr()));
+        corpus.push(("member_of".to_string(), member_of_expr()));
+
+        for (label, expr) in corpus {
+            let mut read_only = Vec::new();
+            for_each_child_expr(&expr, &mut |child| read_only.push(child.to_string()));
+
+            let mut core_visited = Vec::new();
+            let _: Result<Expr, ()> = try_map_expr_children(
+                &expr,
+                &mut |child| {
+                    core_visited.push(child.to_string());
+                    Ok(child.clone())
+                },
+                &mut |q| Ok(q.clone()),
+            );
+
+            assert_eq!(
+                read_only, core_visited,
+                "{label}: for_each_child_expr and try_map_expr_children disagree on the children"
+            );
+        }
+    }
+}

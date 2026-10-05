@@ -1,0 +1,40 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Run weekly on Sundays
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    # The repository default for GITHUB_TOKEN is read-only, and rustsec/audit-check
+    # publishes its findings as a check run, so the job has to ask for that scope
+    # explicitly or the step dies with "Resource not accessible by integration".
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The lockfile is not tracked, since committing it freezes the git
+      # dependency at one commit. cargo-audit needs one, so resolve it here.
+      - name: Generate a lockfile
+        run: cargo generate-lockfile
+
+      - name: Run security audit
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

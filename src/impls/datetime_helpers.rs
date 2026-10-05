@@ -1,0 +1,569 @@
+//! Shared date/time mapping helpers for forward and reverse translation.
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
+use sqlparser::ast::{
+    BinaryOperator, CastKind, DataType, DateTimeField, Expr, FunctionArg, FunctionArgExpr,
+    FunctionArguments,
+};
+
+use super::function_helpers::{integer_literal, simple_function_expr, string_literal};
+use crate::errors::Error;
+
+/// Canonical date/time part keys used for shared mappings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DatePartKey {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
+    DayOfWeek,
+    DayOfYear,
+    Epoch,
+    /// ISO 8601 week number, Monday based, week 1 holding the first Thursday.
+    Week,
+    /// The year that ISO week belongs to, which differs from the calendar year
+    /// at a boundary: 2023-01-01 is week 52 of 2022.
+    IsoYear,
+    /// ISO weekday, Monday as 1 through Sunday as 7, where `DayOfWeek` counts
+    /// Sunday as 0.
+    IsoDayOfWeek,
+}
+
+/// Parse a PostgreSQL `date_part` / `extract` textual field into a canonical
+/// key.
+#[must_use]
+pub(crate) fn parse_date_part_key(field: &str) -> Option<DatePartKey> {
+    match field.to_ascii_lowercase().as_str() {
+        "year" | "years" => Some(DatePartKey::Year),
+        "month" | "months" => Some(DatePartKey::Month),
+        "day" | "days" => Some(DatePartKey::Day),
+        "hour" | "hours" => Some(DatePartKey::Hour),
+        "minute" | "minutes" => Some(DatePartKey::Minute),
+        "second" | "seconds" => Some(DatePartKey::Second),
+        "dow" | "weekday" => Some(DatePartKey::DayOfWeek),
+        "doy" => Some(DatePartKey::DayOfYear),
+        "epoch" => Some(DatePartKey::Epoch),
+        "week" | "weeks" => Some(DatePartKey::Week),
+        "isoyear" => Some(DatePartKey::IsoYear),
+        "isodow" => Some(DatePartKey::IsoDayOfWeek),
+        _ => None,
+    }
+}
+
+/// Convert a parsed [`DateTimeField`] to a canonical key.
+#[must_use]
+pub(crate) fn datetime_field_key(field: &DateTimeField) -> Option<DatePartKey> {
+    match field {
+        DateTimeField::Year | DateTimeField::Years => Some(DatePartKey::Year),
+        DateTimeField::Month | DateTimeField::Months => Some(DatePartKey::Month),
+        DateTimeField::Day | DateTimeField::Days => Some(DatePartKey::Day),
+        DateTimeField::Hour | DateTimeField::Hours => Some(DatePartKey::Hour),
+        DateTimeField::Minute | DateTimeField::Minutes => Some(DatePartKey::Minute),
+        DateTimeField::Second | DateTimeField::Seconds => Some(DatePartKey::Second),
+        // PostgreSQL EXTRACT(DOW/DOY ...) uses Dow/Doy variants, not the
+        // MySQL-style DayOfWeek/DayOfYear variants. Map both so either form works.
+        DateTimeField::Dow | DateTimeField::DayOfWeek => Some(DatePartKey::DayOfWeek),
+        DateTimeField::Doy | DateTimeField::DayOfYear => Some(DatePartKey::DayOfYear),
+        DateTimeField::Epoch => Some(DatePartKey::Epoch),
+        DateTimeField::Week(_) | DateTimeField::Weeks | DateTimeField::IsoWeek => {
+            Some(DatePartKey::Week)
+        }
+        DateTimeField::Isoyear => Some(DatePartKey::IsoYear),
+        DateTimeField::Isodow => Some(DatePartKey::IsoDayOfWeek),
+        _ => None,
+    }
+}
+
+/// Convert a canonical key to SQLite `strftime` format and cast type.
+#[must_use]
+pub(crate) fn strftime_mapping_for_key(key: DatePartKey) -> (&'static str, DataType) {
+    match key {
+        DatePartKey::Year => ("%Y", DataType::Integer(None)),
+        DatePartKey::Month => ("%m", DataType::Integer(None)),
+        DatePartKey::Day => ("%d", DataType::Integer(None)),
+        DatePartKey::Hour => ("%H", DataType::Integer(None)),
+        DatePartKey::Minute => ("%M", DataType::Integer(None)),
+        DatePartKey::Second => ("%f", DataType::Real),
+        DatePartKey::DayOfWeek => ("%w", DataType::Integer(None)),
+        DatePartKey::DayOfYear => ("%j", DataType::Integer(None)),
+        // `build_date_part_expr` answers EPOCH before reaching here, so `%s`,
+        // which has no fractional part, is never emitted.
+        DatePartKey::Epoch => ("%s", DataType::Real),
+        // %V is the ISO week, Monday based, where %W is Sunday based and
+        // disagrees at every year boundary. Same for %G against %Y and %u
+        // against %w.
+        DatePartKey::Week => ("%V", DataType::Integer(None)),
+        DatePartKey::IsoYear => ("%G", DataType::Integer(None)),
+        DatePartKey::IsoDayOfWeek => ("%u", DataType::Integer(None)),
+    }
+}
+
+/// The whole of one date part, which for `EPOCH` is not a `strftime` call.
+///
+/// `strftime('%s', x)` answers whole seconds, so it drops the fraction
+/// PostgreSQL carries. `unixepoch(x, 'subsec')` keeps it, and is SQLite 3.42,
+/// inside the declared floor. SQLite holds milliseconds where PostgreSQL holds
+/// microseconds, so the two agree to three decimal places and no further.
+#[must_use]
+pub(crate) fn build_date_part_expr(key: DatePartKey, value_expr: Expr) -> Expr {
+    if key == DatePartKey::Epoch {
+        return build_subsecond_unixepoch_call(value_expr);
+    }
+    let (format_str, cast_type) = strftime_mapping_for_key(key);
+    Expr::Cast {
+        expr: Box::new(build_strftime_call(format_str, value_expr)),
+        data_type: cast_type,
+        format: None,
+        kind: CastKind::Cast,
+    }
+}
+
+/// `unixepoch(x, 'subsec')`, the seconds since the epoch with the fraction.
+#[must_use]
+pub(crate) fn build_subsecond_unixepoch_call(value_expr: Expr) -> Expr {
+    simple_function_expr("unixepoch", vec![value_expr, string_literal("subsec")], None)
+}
+
+/// Parse a SQLite `strftime` format into a PostgreSQL date-time field.
+#[must_use]
+pub(crate) fn datetime_field_from_strftime_format(format: &str) -> Option<DateTimeField> {
+    match format {
+        "%Y" => Some(DateTimeField::Year),
+        "%m" => Some(DateTimeField::Month),
+        "%d" => Some(DateTimeField::Day),
+        "%H" => Some(DateTimeField::Hour),
+        "%M" => Some(DateTimeField::Minute),
+        // %S is standard strftime; %f is emitted for fractional-second paths.
+        "%S" | "%f" => Some(DateTimeField::Second),
+        "%s" => Some(DateTimeField::Epoch),
+        // %W, the Sunday based week, has no PostgreSQL field: EXTRACT(WEEK)
+        // is the ISO one, so reversing %W to it would change the answer.
+        "%V" => Some(DateTimeField::Week(None)),
+        "%G" => Some(DateTimeField::Isoyear),
+        "%u" => Some(DateTimeField::Isodow),
+        "%w" => Some(DateTimeField::DayOfWeek),
+        "%j" => Some(DateTimeField::DayOfYear),
+        _ => None,
+    }
+}
+
+/// The `to_char` template codes and the `strftime` specifiers they lower onto.
+///
+/// Read forwards by the `to_char` translation and backwards by the `strftime`
+/// reversal, so the two cannot drift apart. Longest codes first, since the
+/// scan takes the first match and `HH24` must be tried before `HH`.
+///
+/// `YY` is absent: SQLite has no `%y` and answers NULL for it, so a template
+/// carrying a two-digit year has no lowering at all.
+const TO_CHAR_CODES: &[(&str, &str)] = &[
+    ("YYYY", "%Y"),
+    // The ISO codes: IYYY is the ISO week-numbering year, IW the ISO week
+    // (Monday based, zero padded), ID the ISO day of week (1 is Monday).
+    // Measured against both engines at the year boundary: 2024-12-30 answers
+    // 2025-01-1 on each, and both compute every field independently, so an
+    // ISO and calendar mix agrees too.
+    ("IYYY", "%G"),
+    ("IW", "%V"),
+    ("ID", "%u"),
+    ("HH24", "%H"),
+    ("HH12", "%I"),
+    ("MM", "%m"),
+    ("DD", "%d"),
+    ("HH", "%I"),
+    ("MI", "%M"),
+    ("SS", "%S"),
+];
+
+/// Characters a template may carry between codes.
+///
+/// `T` is here because it is the ISO separator, but PostgreSQL only reads it
+/// as a literal when the next character is neither `H` nor `M`, which is what
+/// `bare_t_is_literal` checks.
+const TO_CHAR_SEPARATORS: &[char] = &['-', ':', '.', '/', ',', '_', ' ', 'T'];
+
+/// Lower a PostgreSQL `to_char` template onto a SQLite `strftime` format.
+///
+/// A left-to-right scan rather than a substitution, because a quoted run is
+/// literal text and a substitution cannot see the quotes.
+pub(crate) fn pg_to_char_format_to_strftime(pg_format: &str) -> Result<String, Error> {
+    let mut result = String::with_capacity(pg_format.len());
+    let mut rest = pg_format;
+
+    while !rest.is_empty() {
+        if let Some(after_quote) = rest.strip_prefix('"') {
+            let Some(end) = after_quote.find('"') else {
+                return Err(unsupported_template(
+                    pg_format,
+                    "carries an unterminated quote. A literal run is written \"like this\".",
+                ));
+            };
+            push_quoted_literal(&mut result, &after_quote[..end], pg_format)?;
+            rest = &after_quote[end + 1..];
+            continue;
+        }
+
+        if let Some((code, specifier)) =
+            TO_CHAR_CODES.iter().find(|(code, _)| rest.starts_with(code))
+        {
+            result.push_str(specifier);
+            rest = &rest[code.len()..];
+            continue;
+        }
+
+        if rest.starts_with("YY") {
+            return Err(unsupported_template(
+                pg_format,
+                "asks for the two-digit year YY, which SQLite has no specifier for: its \
+                 strftime answers NULL for '%y'. Use YYYY.",
+            ));
+        }
+        // MS (milliseconds) and US (microseconds) are sub-second codes.
+        // SQLite strftime has no sub-second specifier, so they are named
+        // explicitly rather than blamed on the first letter (M or U).
+        if rest.starts_with("MS") || rest.starts_with("US") {
+            let code = if rest.starts_with("MS") { "MS" } else { "US" };
+            return Err(unsupported_template(
+                pg_format,
+                &format!(
+                    "contains the fractional-seconds code \'{code}\'. SQLite strftime has no \
+                     sub-second specifier; the finest resolution is SS (whole seconds). \
+                     Three-digit milliseconds can be extracted with \
+                     printf(\'%.3f\', unixepoch(ts, \'subsec\') %% 1)."
+                ),
+            ));
+        }
+
+        let character = rest.chars().next().unwrap_or_default();
+        if character == 'T' && !bare_t_is_literal(rest) {
+            return Err(unsupported_template(
+                pg_format,
+                "carries a bare T before an hour or a minute, which PostgreSQL reads as the \
+                 start of TH or TM rather than as a separator. Write the ISO separator as \
+                 \"T\".",
+            ));
+        }
+        if !TO_CHAR_SEPARATORS.contains(&character) {
+            return Err(unsupported_template(
+                pg_format,
+                &format!(
+                    "contains '{character}'. Supported codes: YYYY, IYYY, IW, ID, MM, DD, \
+                     HH24, HH12, HH, MI, SS. Supported separators: - : . / , _ (space) T, and \
+                     any text in double quotes. For number formatting codes (9, 0, FM, L, ...) \
+                     use printf() or CAST."
+                ),
+            ));
+        }
+        result.push(character);
+        rest = &rest[character.len_utf8()..];
+    }
+
+    Ok(result)
+}
+
+/// True when PostgreSQL reads the `T` starting `rest` as a literal.
+///
+/// `TH` is the ordinal suffix, so `'DDTH'` answers `08TH`, and `TM` is the
+/// translation-mode prefix, so `'DDTMI'` answers a year digit. Every other
+/// following character leaves the `T` alone.
+fn bare_t_is_literal(rest: &str) -> bool {
+    !matches!(rest.as_bytes().get(1), Some(b'H' | b'M'))
+}
+
+/// Copy a quoted run into the format, doubling every `%`.
+///
+/// SQLite reads a `%` as introducing a specifier and answers NULL for one it
+/// does not know, so an undoubled percent would take the whole call with it.
+fn push_quoted_literal(result: &mut String, literal: &str, pg_format: &str) -> Result<(), Error> {
+    if literal.contains('\\') {
+        return Err(unsupported_template(
+            pg_format,
+            "escapes a character inside a quoted run with a backslash, which this translation \
+             does not read.",
+        ));
+    }
+    for character in literal.chars() {
+        if character == '%' {
+            result.push_str("%%");
+        } else {
+            result.push(character);
+        }
+    }
+    Ok(())
+}
+
+fn unsupported_template(pg_format: &str, reason: &str) -> Error {
+    Error::forward_refusal(format!("to_char format '{pg_format}' {reason}"))
+}
+
+/// The `to_char` template that answers what `format` answers, when every
+/// specifier in it has one.
+///
+/// `%y` is absent on purpose: SQLite has no such specifier and answers NULL for
+/// it, so calling it `YY` would equate a null with two digits. A `T` comes back
+/// quoted, because PostgreSQL reads a bare one as the start of `TH` or `TM`.
+#[must_use]
+pub(crate) fn strftime_format_to_pg_to_char(format: &str) -> Option<String> {
+    let mut template = String::with_capacity(format.len());
+    let mut chars = format.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let spec = chars.next()?;
+            // SQLite has no `%y`, so there is no call here to name.
+            if spec == 'y' {
+                return None;
+            }
+            let (code, _) = TO_CHAR_CODES.iter().find(|(_, strftime)| strftime.ends_with(spec))?;
+            template.push_str(code);
+        } else if c == 'T' {
+            template.push_str("\"T\"");
+        } else if TO_CHAR_SEPARATORS.contains(&c) {
+            template.push(c);
+        } else {
+            return None;
+        }
+    }
+    Some(template)
+}
+
+/// Build `strftime('<format>', <expr>)`.
+#[must_use]
+pub(crate) fn build_strftime_call(format: &str, value_expr: Expr) -> Expr {
+    simple_function_expr("strftime", vec![string_literal(format), value_expr], None)
+}
+
+/// The `strftime` format of the text a replica holds for a `timestamptz`,
+/// `YYYY-MM-DD HH:MM:SS.ffffff+00:00`, where `%f` stops at milliseconds and
+/// the zeros pad it to microseconds.
+pub(crate) const TIMESTAMPTZ_FORMAT: &str = "%Y-%m-%d %H:%M:%f000+00:00";
+
+/// The canonical `timestamptz` text of a value SQLite's date functions read.
+#[must_use]
+pub(crate) fn canonical_timestamptz_call(value_expr: Expr) -> Expr {
+    build_strftime_call(TIMESTAMPTZ_FORMAT, value_expr)
+}
+
+/// Whether `expr` is a [`canonical_timestamptz_call`].
+#[must_use]
+pub(crate) fn is_canonical_timestamptz_call(expr: &Expr) -> bool {
+    let Expr::Function(function) = peel_nested(expr) else { return false };
+    super::function_helpers::is_function_named(function, "strftime")
+        && matches!(
+            super::shared_helpers::function_argument_exprs(&function.args).as_slice(),
+            [format, _] if super::function_helpers::single_quoted_literal(format)
+                == Some(TIMESTAMPTZ_FORMAT)
+        )
+}
+
+/// Moves the operand out of a [`canonical_timestamptz_call`], leaving `expr`
+/// untouched and answering `None` when it is not one.
+pub(crate) fn take_canonical_timestamptz_operand(expr: &mut Expr) -> Option<Expr> {
+    if is_canonical_timestamptz_call(expr) { take_last_argument(expr) } else { None }
+}
+
+/// `value` as canonical `timestamptz` text.
+///
+/// A one-argument `datetime(x)`, which is what `AT TIME ZONE 'UTC'` becomes,
+/// only drops the offset and the fraction, so its canonical text is `x`'s.
+#[must_use]
+pub(crate) fn canonical_timestamptz_value(mut value: Expr) -> Expr {
+    if is_canonical_timestamptz_call(&value) {
+        return value;
+    }
+    if is_utc_datetime_call(&value)
+        && let Some(operand) = take_last_argument(&mut value)
+    {
+        return if is_canonical_timestamptz_call(&operand) {
+            operand
+        } else {
+            canonical_timestamptz_call(operand)
+        };
+    }
+    if is_offset_less_timestamp_call(&value) { canonical_timestamptz_call(value) } else { value }
+}
+
+fn is_utc_datetime_call(expr: &Expr) -> bool {
+    let Expr::Function(function) = peel_nested(expr) else { return false };
+    super::function_helpers::is_function_named(function, "datetime")
+        && super::shared_helpers::function_argument_exprs(&function.args).len() == 1
+}
+
+/// Moves the last argument out of a call, which the caller then discards.
+/// `None`, with `expr` untouched, when `expr` is not a call with one.
+fn take_last_argument(expr: &mut Expr) -> Option<Expr> {
+    let mut call = expr;
+    while let Expr::Nested(inner) = call {
+        call = inner;
+    }
+    let Expr::Function(function) = call else { return None };
+    let FunctionArguments::List(list) = &mut function.args else { return None };
+    if !matches!(list.args.last(), Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(_)))) {
+        return None;
+    }
+    match list.args.pop() {
+        Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(operand))) => Some(operand),
+        _ => None,
+    }
+}
+
+/// Whether `expr` is a timestamp one of SQLite's date functions computed,
+/// which is text without an offset.
+#[must_use]
+pub(crate) fn is_offset_less_timestamp_call(expr: &Expr) -> bool {
+    let Expr::Function(function) = peel_nested(expr) else { return false };
+    let named = |name| super::function_helpers::is_function_named(function, name);
+    if named("datetime") || named("date") {
+        return true;
+    }
+    let arguments = super::shared_helpers::function_argument_exprs(&function.args);
+    // Interval arithmetic trims the zeros `'subsec'` pads with.
+    if named("rtrim") {
+        return arguments.first().is_some_and(|trimmed| is_offset_less_timestamp_call(trimmed));
+    }
+    // Only a format that prints a date and a time of day, as date_trunc's do.
+    named("strftime")
+        && arguments
+            .first()
+            .and_then(|format| super::function_helpers::single_quoted_literal(format))
+            .is_some_and(|format| {
+                format != TIMESTAMPTZ_FORMAT && format.starts_with("%Y-") && format.contains(':')
+            })
+}
+
+fn peel_nested(mut expr: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expr {
+        expr = inner;
+    }
+    expr
+}
+
+fn binary(left: Expr, op: BinaryOperator, right: Expr) -> Expr {
+    Expr::BinaryOp { left: Box::new(left), op, right: Box::new(right) }
+}
+
+/// `CAST(strftime('<format>', <expr>) AS INTEGER)`, a calendar component as a
+/// number rather than as text.
+fn strftime_number(format: &str, value_expr: Expr) -> Expr {
+    Expr::Cast {
+        expr: Box::new(build_strftime_call(format, value_expr)),
+        data_type: DataType::Integer(None),
+        format: None,
+        kind: CastKind::Cast,
+    }
+}
+
+/// The Monday of the ISO week `value_expr` falls in, at midnight, which is
+/// what PostgreSQL's `date_trunc('week', ...)` answers.
+///
+/// SQLite's `weekday 1` modifier moves forward to the next Monday and stays
+/// put when the date is already one. Stepping back six days first therefore
+/// makes the current week's Monday the next one in every case, the date itself
+/// included. Checked against PostgreSQL 16 on nine dates covering Sundays,
+/// Mondays, and year boundaries.
+#[must_use]
+pub(crate) fn build_date_trunc_week_call(value_expr: Expr) -> Expr {
+    simple_function_expr(
+        "datetime",
+        vec![
+            value_expr,
+            string_literal("-6 days"),
+            string_literal("weekday 1"),
+            string_literal("start of day"),
+        ],
+        None,
+    )
+}
+
+/// The first day of the quarter `value_expr` falls in, at midnight.
+///
+/// `((month - 1) / 3) * 3` is the count of whole months from January to the
+/// start of that quarter, using SQLite's truncating integer division.
+///
+/// The arithmetic is parenthesised because SQLite binds `||` tighter than `*`
+/// and `/`, so a flat rendering would group the operands the wrong way, and
+/// `Display` adds no parentheses of its own.
+#[must_use]
+pub(crate) fn build_date_trunc_quarter_call(value_expr: Expr) -> Expr {
+    let month_index = binary(
+        strftime_number("%m", value_expr.clone()),
+        BinaryOperator::Minus,
+        integer_literal(1),
+    );
+    let months_into_year = binary(
+        binary(Expr::Nested(Box::new(month_index)), BinaryOperator::Divide, integer_literal(3)),
+        BinaryOperator::Multiply,
+        integer_literal(3),
+    );
+    let modifier = binary(
+        binary(
+            string_literal("+"),
+            BinaryOperator::StringConcat,
+            Expr::Nested(Box::new(months_into_year)),
+        ),
+        BinaryOperator::StringConcat,
+        string_literal(" months"),
+    );
+
+    simple_function_expr(
+        "datetime",
+        vec![value_expr, string_literal("start of year"), modifier],
+        None,
+    )
+}
+
+/// The first day of the `span`-year period `value_expr` falls in, at midnight.
+///
+/// `offset` is where the count starts, and it is the whole difference between
+/// the three PostgreSQL units this serves. A decade floors the year, so 2000
+/// begins the decade 2000 and `offset` is 0. A century and a millennium count
+/// from year 1, so 2000 belongs to the century beginning 1901 and the
+/// millennium beginning 1001, and `offset` is 1. All three verified against
+/// PostgreSQL 16.
+///
+/// `printf` pads the year, so a period beginning before year 1000 still forms
+/// a date SQLite can read.
+///
+/// The subtraction is parenthesised because `*` and `/` bind tighter than `-`,
+/// so a flat `y - 1 / 100 * 100` would reduce to `y - 0`. When `offset` is
+/// zero both terms are dropped rather than emitted as `- 0` and `+ 0`.
+#[must_use]
+pub(crate) fn build_date_trunc_year_span_call(value_expr: Expr, span: i64, offset: i64) -> Expr {
+    let year = strftime_number("%Y", value_expr);
+    let counted_from = if offset == 0 {
+        year
+    } else {
+        Expr::Nested(Box::new(binary(year, BinaryOperator::Minus, integer_literal(offset))))
+    };
+
+    let floored = binary(
+        binary(counted_from, BinaryOperator::Divide, integer_literal(span)),
+        BinaryOperator::Multiply,
+        integer_literal(span),
+    );
+    let period_start = if offset == 0 {
+        floored
+    } else {
+        binary(floored, BinaryOperator::Plus, integer_literal(offset))
+    };
+
+    simple_function_expr(
+        "datetime",
+        vec![simple_function_expr(
+            "printf",
+            vec![string_literal("%04d-01-01 00:00:00"), period_start],
+            None,
+        )],
+        None,
+    )
+}

@@ -1,0 +1,10 @@
+---
+exclude_paths:
+  - "benches/**"
+  - "fuzz/**"
+  - "tests/fixtures/**"
+# Tests duplicate by design; every other tool and metric still covers them.
+engines:
+  duplication:
+    exclude_paths:
+      - "tests/**"

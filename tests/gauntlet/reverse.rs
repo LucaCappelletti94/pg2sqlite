@@ -1,0 +1,991 @@
+//! Gauntlet C: the reverse translator's output is not merely parseable as
+//! PostgreSQL, it is something PostgreSQL will take.
+//!
+//! Every case here is harvested from one of the 23 reverse-translation test
+//! files that already exist. Those tests check that the output parses with
+//! sqlparser's PostgreSQL dialect; this file goes one step further and asks a
+//! real server. PREPARE validates names, types, and functions without leaving
+//! state behind. Execute cases are self-contained SELECTs whose results prove
+//! the function resolved correctly.
+//!
+//! A case PostgreSQL refuses is a finding about the reverse translator. It is
+//! kept in the list as a `KnownRefusal` with the server's own words, so the
+//! list documents the state rather than hiding it.
+
+#![allow(clippy::too_many_lines)]
+
+use std::collections::HashSet;
+
+use diesel::{
+    Connection, QueryableByName, RunQueryDsl, SqliteConnection, sql_query,
+    sql_types::{Integer, Nullable, Text},
+};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
+use postgres_harness::{apply, fresh_database};
+use sql_traits::structs::ParserDB;
+
+use crate::postgres_harness;
+
+/// Union of all table shapes referenced by the harvested cases. Applied once to
+/// a fresh database and reused for every case.
+const SCHEMA_DDL: &str = "
+CREATE TABLE t (
+    id      INTEGER PRIMARY KEY,
+    s       TEXT,
+    n       INTEGER,
+    r       REAL,
+    payload JSONB,
+    ts      TIMESTAMP,
+    tz      TIMESTAMPTZ,
+    a       INTEGER,
+    b       INTEGER,
+    c       INTEGER,
+    d       INTEGER
+);
+CREATE TABLE t2 (id INTEGER, c INTEGER, t1_id INTEGER, a_id INTEGER, value TEXT);
+CREATE TABLE t3 (id INTEGER, t2_id INTEGER, b_id INTEGER);
+CREATE TABLE users (
+    id     INTEGER PRIMARY KEY,
+    name   TEXT,
+    age    INTEGER,
+    score  REAL,
+    email  TEXT,
+    active BOOLEAN
+);
+CREATE TABLE posts (
+    id      INTEGER PRIMARY KEY,
+    user_id INTEGER,
+    title   TEXT
+);
+CREATE TABLE tags (
+    id       INTEGER PRIMARY KEY,
+    name     TEXT,
+    category TEXT,
+    post_id  INTEGER,
+    tag      TEXT
+);
+CREATE TABLE events (
+    id         INTEGER PRIMARY KEY,
+    created_at TIMESTAMP
+);
+CREATE TABLE docs (
+    id      INTEGER PRIMARY KEY,
+    content TEXT
+);
+CREATE TABLE items (
+    id       INTEGER PRIMARY KEY,
+    category TEXT,
+    price    INTEGER
+);
+CREATE TABLE orders (
+    id      INTEGER PRIMARY KEY,
+    user_id INTEGER,
+    total   INTEGER
+);
+CREATE TABLE u (
+    id   INTEGER PRIMARY KEY,
+    name TEXT,
+    note TEXT
+);
+CREATE TABLE t1 (id INTEGER PRIMARY KEY, name TEXT);
+CREATE TABLE a (id INTEGER PRIMARY KEY, val TEXT);
+CREATE TABLE b (id INTEGER PRIMARY KEY, a_id INTEGER);
+CREATE TABLE c (id INTEGER PRIMARY KEY, b_id INTEGER);
+CREATE TABLE user_roles (
+    user_id    INTEGER,
+    role_id    INTEGER,
+    granted_at TIMESTAMP,
+    PRIMARY KEY (user_id, role_id)
+);
+CREATE TABLE readings (
+    id     INTEGER PRIMARY KEY,
+    sensor TEXT    NOT NULL,
+    ts_val INTEGER NOT NULL,
+    value  INTEGER NOT NULL
+);
+CREATE TABLE callers (
+    id         INTEGER PRIMARY KEY,
+    owner      TEXT,
+    owner_uuid UUID
+);
+CREATE TABLE stored (
+    id  INTEGER PRIMARY KEY,
+    u   UUID,
+    raw BYTEA,
+    xs  INTEGER[],
+    doc JSONB
+);
+";
+
+fn build_schema() -> ParserDB {
+    Pg2Sqlite::default()
+        .sql(SCHEMA_DDL)
+        .expect("schema DDL parses")
+        .build_schema()
+        .expect("schema builds")
+}
+
+/// All cases PostgreSQL is expected to accept, validated by PREPARE/DEALLOCATE.
+/// Sources are noted inline.
+///
+/// Format: (sqlite_input, source_file_hint)
+const ACCEPT_CASES: &[(&str, &str)] = &[
+    // --- storage wrappers over a column whose PostgreSQL type is not the
+    // storage type (test_reverse_storage_wrappers.rs). Mapping the wrapper by
+    // name alone named the storage type and the server refused the statement:
+    // `operator does not exist: uuid = bytea`, `cannot cast type uuid to
+    // bytea`, `column "xs" is of type integer[] but expression is of type
+    // json`, `function json_array_length(integer[]) does not exist`.
+    ("SELECT hex(u) FROM stored", "storage_wrappers"),
+    ("SELECT xs FROM stored WHERE xs = json_array(1, 2)", "storage_wrappers"),
+    ("SELECT json_array_length(xs) FROM stored", "storage_wrappers"),
+    ("SELECT hex(raw) FROM stored", "storage_wrappers"),
+    ("SELECT raw FROM stored WHERE raw = unhex('00ff')", "storage_wrappers"),
+    ("SELECT json_array_length(doc) FROM stored", "storage_wrappers"),
+    // --- the date and time parts, which cross as casts because PostgreSQL
+    // refuses `time(x)`, `time` being a type name there
+    // (test_reverse_unknown_functions.rs)
+    ("SELECT date(ts) FROM t", "date_and_time"),
+    ("SELECT time(ts) FROM t", "date_and_time"),
+    ("SELECT date() FROM t", "date_and_time"),
+    ("SELECT time() FROM t", "date_and_time"),
+    // --- json functions (test_reverse_json_functions.rs,
+    // test_reverse_output_is_valid_postgres.rs)
+    // json_set and json_insert wrap the value in to_jsonb(); hex casts the argument to bytea.
+    // json_type(x) is now refused (vocabulary mismatch); json_type(x, path) still works.
+    ("SELECT json(s) FROM t", "json_functions"),
+    ("SELECT json_set(payload, '$.a', 1) FROM t", "json_functions"),
+    ("SELECT json_insert(payload, '$.a', 1) FROM t", "json_functions"),
+    ("SELECT json_set(payload, '$.a.b', 1) FROM t", "json_functions"),
+    ("SELECT json_remove(payload, '$.a') FROM t", "json_functions"),
+    ("SELECT json_quote(s) FROM t", "json_functions"),
+    ("SELECT json_valid(s) FROM t", "json_functions"),
+    ("SELECT json_patch(payload, payload) FROM t", "json_functions"),
+    ("SELECT json_array_length(payload) FROM t", "json_functions"),
+    ("SELECT json_group_array(s) FROM t", "json_functions"),
+    ("SELECT json_array(s) FROM t", "json_functions"),
+    ("SELECT json_remove(payload, '$.a.b') FROM t", "json_functions"),
+    // --- scalar functions (test_reverse_scalar_functions.rs,
+    // test_reverse_output_is_valid_postgres.rs)
+    ("SELECT ifnull(n, 0) FROM t", "scalar_functions"),
+    ("SELECT total(n) FROM t", "scalar_functions"),
+    ("SELECT unhex(s) FROM t", "scalar_functions"),
+    ("SELECT instr(s, 'a') FROM t", "scalar_functions"),
+    ("SELECT unicode(s) FROM t", "scalar_functions"),
+    ("SELECT nullif(n, 0) FROM t", "scalar_functions"),
+    ("SELECT group_concat(s, ',') FROM t", "scalar_functions"),
+    ("SELECT group_concat(s) FROM t", "scalar_functions"),
+    ("SELECT group_concat(DISTINCT s) FROM t", "scalar_functions"),
+    // hex(x) now casts the argument to bytea so encode() accepts it.
+    ("SELECT hex(s) FROM t", "scalar_functions"),
+    // --- strftime (test_reverse_strftime.rs, test_reverse_output_is_valid_postgres.rs)
+    ("SELECT strftime('%Y-01-01 00:00:00', ts) FROM t", "strftime"),
+    ("SELECT strftime('%Y', ts) FROM t", "strftime"),
+    ("SELECT strftime('%Y-%m-%d', ts) FROM t", "strftime"),
+    ("SELECT strftime('%H:%M:%S', ts) FROM t", "strftime"),
+    ("SELECT strftime('%Y-%m-%dT%H', ts) FROM t", "strftime"),
+    ("SELECT strftime('%I:%M', ts) FROM t", "strftime"),
+    // --- epoch (test_reverse_epoch_now.rs)
+    ("SELECT unixepoch(ts) FROM t", "epoch_now"),
+    ("SELECT unixepoch(ts, 'subsec') FROM t", "epoch_now"),
+    ("SELECT datetime(tz) FROM t", "epoch_now"),
+    ("SELECT datetime(ts) FROM t", "epoch_now"),
+    // --- string_agg (test_reverse_string_agg.rs)
+    ("SELECT group_concat(name) FROM tags", "string_agg"),
+    ("SELECT group_concat(name, '|') FROM tags", "string_agg"),
+    ("SELECT group_concat(DISTINCT name) FROM tags", "string_agg"),
+    ("SELECT group_concat(name ORDER BY name DESC) FROM tags", "string_agg"),
+    ("SELECT group_concat(name) OVER (ORDER BY id) FROM tags", "string_agg"),
+    // --- GLOB to LIKE (test_reverse_output_is_valid_postgres.rs,
+    // test_reverse_scalar_functions.rs)
+    ("SELECT s FROM t WHERE s GLOB 'a*'", "glob"),
+    ("SELECT s FROM t WHERE s GLOB 'a?b'", "glob"),
+    // --- REGEXP to POSIX (test_reverse_output_is_valid_postgres.rs, test_reverse_expr.rs)
+    ("SELECT s FROM t WHERE s REGEXP '^[A-Z]'", "regexp"),
+    ("SELECT s FROM t WHERE s NOT REGEXP '^[A-Z]'", "regexp"),
+    // --- INSERT OR REPLACE / OR IGNORE (test_reverse_output_is_valid_postgres.rs)
+    ("INSERT OR IGNORE INTO t (id, n) VALUES (1, 42)", "insert_or_ignore"),
+    ("INSERT OR REPLACE INTO t (id, s, n) VALUES (1, 'x', 42)", "insert_or_replace"),
+    ("INSERT OR REPLACE INTO t (id) VALUES (1)", "insert_or_replace"),
+    ("REPLACE INTO t (id, s) VALUES (1, 'x')", "insert_or_replace"),
+    // --- placeholders (test_reverse_placeholders.rs)
+    ("SELECT * FROM t WHERE a > ? AND b = ?", "placeholders"),
+    ("SELECT * FROM t WHERE a > ?2 AND b = ?1", "placeholders"),
+    ("SELECT * FROM t LIMIT ? OFFSET ?", "placeholders"),
+    ("SELECT * FROM t WHERE a IN (?, ?)", "placeholders"),
+    ("SELECT * FROM t WHERE a BETWEEN ? AND ?", "placeholders"),
+    ("UPDATE t SET a = ?, b = ? WHERE c = ?", "placeholders"),
+    ("DELETE FROM t WHERE a = ?", "placeholders"),
+    ("INSERT INTO t (a, b) VALUES (?, ?)", "placeholders"),
+    ("WITH x AS (SELECT a FROM t WHERE b = ?) SELECT * FROM x WHERE a = ?", "placeholders"),
+    // --- query features (test_reverse_query.rs)
+    ("SELECT * FROM users ORDER BY name ASC", "query"),
+    ("SELECT * FROM users ORDER BY age DESC", "query"),
+    ("SELECT id FROM users UNION SELECT id FROM users", "query"),
+    ("SELECT id FROM users UNION ALL SELECT id FROM users", "query"),
+    ("SELECT id FROM users INTERSECT SELECT id FROM users", "query"),
+    ("SELECT id FROM users EXCEPT SELECT id FROM users", "query"),
+    ("SELECT age, COUNT(*) FROM users GROUP BY age HAVING COUNT(*) > 1", "query"),
+    ("SELECT age, COUNT(*) FROM users GROUP BY age", "query"),
+    ("SELECT * FROM (SELECT id, name FROM users) AS sub", "query"),
+    ("SELECT name AS user_name FROM users", "query"),
+    ("SELECT u.name, p.title FROM users u INNER JOIN posts p ON u.id = p.user_id", "query"),
+    ("SELECT u.name, p.title FROM users u LEFT JOIN posts p ON u.id = p.user_id", "query"),
+    ("SELECT * FROM users CROSS JOIN posts", "query"),
+    ("SELECT u.name, p.title FROM users u RIGHT OUTER JOIN posts p ON u.id = p.user_id", "query"),
+    ("SELECT u.name, p.title FROM users u FULL OUTER JOIN posts p ON u.id = p.user_id", "query"),
+    ("SELECT * FROM users NATURAL JOIN posts", "query"),
+    ("SELECT * FROM t JOIN t2 USING (c)", "query"),
+    ("SELECT * FROM users LIMIT 10", "query"),
+    ("SELECT * FROM users LIMIT 10 OFFSET 5", "query"),
+    ("SELECT DISTINCT name FROM users", "query"),
+    ("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30), (2, 'Bob', 25)", "query"),
+    ("SELECT * FROM users LEFT OUTER JOIN posts ON users.id = posts.user_id", "query"),
+    (
+        "SELECT name, (SELECT COUNT(*) FROM posts WHERE posts.user_id = users.id) AS post_count FROM users",
+        "query",
+    ),
+    ("SELECT name AS user_name, age AS user_age FROM users", "query"),
+    (
+        "SELECT users.name, posts.title, COUNT(*) FROM users JOIN posts ON users.id = posts.user_id GROUP BY users.name, posts.title",
+        "query",
+    ),
+    ("SELECT name, SUM(age) FROM users GROUP BY name HAVING SUM(age) > 100", "query"),
+    (
+        "SELECT * FROM (SELECT id, name FROM users WHERE age > 18) AS adults WHERE adults.name LIKE 'A%'",
+        "query",
+    ),
+    (
+        "SELECT id, name FROM users WHERE age > 30 UNION ALL SELECT id, name FROM users WHERE age < 10 ORDER BY name",
+        "query",
+    ),
+    ("SELECT * FROM users", "query"),
+    (
+        "SELECT SUM(u.id) OVER w2 FROM users u WINDOW w1 AS (PARTITION BY u.id ORDER BY u.id), w2 AS (w1)",
+        "query",
+    ),
+    // --- DML (test_reverse_dml.rs)
+    ("DELETE FROM users WHERE id = 1", "dml"),
+    ("DELETE FROM users WHERE id IN (SELECT user_id FROM posts WHERE title = 'test')", "dml"),
+    ("DELETE FROM users", "dml"),
+    ("UPDATE users SET name = 'test' WHERE id = 1", "dml"),
+    ("UPDATE users SET age = age + 1 WHERE id = 1", "dml"),
+    ("UPDATE users SET name = 'Bob', age = 30 WHERE id = 1", "dml"),
+    ("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)", "dml"),
+    ("INSERT OR IGNORE INTO users (id, name, age) VALUES (1, 'Alice', 30)", "dml"),
+    ("INSERT OR REPLACE INTO users (id, name, age) VALUES (1, 'Alice', 30)", "dml"),
+    ("INSERT INTO users (id, name, age) SELECT id, title, 0 FROM posts", "dml"),
+    (
+        "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) ON CONFLICT (id) DO UPDATE SET name = excluded.name WHERE users.age > 18",
+        "dml",
+    ),
+    ("DELETE FROM users WHERE id = 1 RETURNING *", "dml"),
+    ("DELETE FROM users WHERE id = 1 RETURNING id, name", "dml"),
+    ("DELETE FROM users WHERE id = 1 RETURNING id AS deleted_id", "dml"),
+    ("UPDATE users SET name = 'test' WHERE id = 1 RETURNING *", "dml"),
+    ("UPDATE users SET name = 'test' WHERE id = 1 RETURNING name AS updated_name", "dml"),
+    ("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) RETURNING *", "dml"),
+    ("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) RETURNING id AS new_id", "dml"),
+    ("DELETE FROM users WHERE EXISTS (SELECT 1 FROM posts WHERE posts.user_id = users.id)", "dml"),
+    ("UPDATE users SET name = posts.title FROM posts WHERE users.id = posts.user_id", "dml"),
+    ("INSERT INTO users (id, name, age) SELECT p.id, p.title, 0 FROM posts p", "dml"),
+    ("INSERT INTO users (id, name, age) SELECT id, title || ' author', 0 FROM posts", "dml"),
+    ("DELETE FROM users WHERE age < 18 RETURNING id, name || ' deleted' AS msg", "dml"),
+    ("UPDATE users SET age = age + 1 WHERE id = 1 RETURNING id, name, age AS new_age", "dml"),
+    (
+        "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) RETURNING id, name AS inserted_name",
+        "dml",
+    ),
+    (
+        "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) ON CONFLICT (id) DO NOTHING",
+        "dml",
+    ),
+    ("UPDATE users SET name = 'updated', age = 99 WHERE id > 5 AND name LIKE '%test%'", "dml"),
+    // --- expressions (test_reverse_expr.rs)
+    ("SELECT NOT (age > 5) FROM users", "expr"),
+    ("SELECT -age FROM users", "expr"),
+    ("SELECT (age + 1) FROM users", "expr"),
+    ("SELECT age + score FROM users", "expr"),
+    ("SELECT * FROM users WHERE age > 5 AND name = 'test'", "expr"),
+    ("SELECT CAST(age AS TEXT) FROM users", "expr"),
+    ("SELECT * FROM users WHERE name IS NULL", "expr"),
+    ("SELECT * FROM users WHERE name IS NOT NULL", "expr"),
+    ("SELECT * FROM users WHERE (age > 0) IS TRUE", "expr"),
+    ("SELECT * FROM users WHERE (age > 0) IS NOT TRUE", "expr"),
+    ("SELECT * FROM users WHERE (age > 0) IS FALSE", "expr"),
+    ("SELECT * FROM users WHERE (age > 0) IS NOT FALSE", "expr"),
+    ("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM users WHERE age > 5)", "expr"),
+    ("SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM users WHERE age > 5)", "expr"),
+    ("SELECT * FROM users WHERE name LIKE '%test%'", "expr"),
+    ("SELECT * FROM users WHERE name NOT LIKE '%test%'", "expr"),
+    ("SELECT * FROM users WHERE age IN (1, 2, 3)", "expr"),
+    ("SELECT * FROM users WHERE age NOT IN (1, 2, 3)", "expr"),
+    ("SELECT * FROM users WHERE id IN (SELECT id FROM users WHERE age > 5)", "expr"),
+    ("SELECT * FROM users WHERE age BETWEEN 10 AND 20", "expr"),
+    ("SELECT CASE WHEN age > 18 THEN 'adult' ELSE 'minor' END FROM users", "expr"),
+    ("SELECT CASE age WHEN 18 THEN 'eighteen' WHEN 21 THEN 'twentyone' END FROM users", "expr"),
+    ("SELECT (SELECT MAX(age) FROM users) AS max_age", "expr"),
+    ("SELECT TRIM(name) FROM users", "expr"),
+    ("SELECT POSITION('a' IN name) FROM users", "expr"),
+    ("SELECT SUBSTRING(name FROM 1 FOR 3) FROM users", "expr"),
+    (
+        "SELECT * FROM users WHERE (age > 18 AND name IS NOT NULL) OR score BETWEEN 0.0 AND 100.0",
+        "expr",
+    ),
+    ("SELECT * FROM users WHERE name ILIKE '%test%'", "expr"),
+    ("SELECT * FROM users WHERE name NOT ILIKE '%test%'", "expr"),
+    ("SELECT EXTRACT(YEAR FROM created_at) FROM events", "expr"),
+    ("SELECT * FROM users WHERE (id, age) IN ((1, 30), (2, 25))", "expr"),
+    ("SELECT TRIM(LEADING ' ' FROM name) FROM users", "expr"),
+    ("SELECT TRIM(BOTH ' ' FROM name) FROM users", "expr"),
+    ("SELECT CEIL(score) FROM users", "expr"),
+    ("SELECT FLOOR(score) FROM users", "expr"),
+    ("SELECT * FROM users WHERE name REGEXP '^[A-Z]'", "expr"),
+    ("SELECT users.name FROM users", "expr"),
+    ("SELECT * FROM events WHERE created_at > DATE '2024-01-01'", "expr"),
+    ("SELECT * FROM events WHERE created_at > TIMESTAMP '2024-01-01 00:00:00'", "expr"),
+    ("SELECT SUBSTRING(name, 1, 3) FROM users", "expr"),
+    (
+        "SELECT CASE WHEN age < 13 THEN 'child' WHEN age < 18 THEN 'teen' WHEN age < 65 THEN 'adult' ELSE 'senior' END FROM users",
+        "expr",
+    ),
+    ("SELECT * FROM users WHERE age NOT BETWEEN 10 AND 20", "expr"),
+    ("SELECT * FROM users WHERE id NOT IN (SELECT id FROM users WHERE age < 18)", "expr"),
+    ("SELECT * FROM users WHERE ((age > 5) AND (name IS NOT NULL)) OR (score < 10.0)", "expr"),
+    // --- ARRAY literal (test_reverse_expr.rs)
+    // The SQLite dialect misparsed ARRAY[...] as an identifier with a bracket
+    // alias; the reverse translator now reconstructs the original array.
+    // --- LIMIT comma form (test_reverse_limit_comma.rs)
+    ("SELECT id FROM t ORDER BY id LIMIT 5, 10", "limit_comma"),
+    ("SELECT id FROM t ORDER BY id LIMIT 10 OFFSET 5", "limit_comma"),
+    // --- ident quoting (test_reverse_ident_quoting.rs)
+    (r"SELECT `t`.`c` FROM `t` WHERE `t`.`c` > 1 ORDER BY `t`.`c`", "ident_quoting"),
+    (r"SELECT [t].[c] FROM [t] WHERE [t].[c] > 1 ORDER BY [t].[c]", "ident_quoting"),
+    (r"INSERT INTO `t` (`c`) VALUES (1) RETURNING `c`", "ident_quoting"),
+    (r"UPDATE [t] SET [c] = 2 WHERE [c] = 1", "ident_quoting"),
+    (r"DELETE FROM `t` WHERE `c` = 1", "ident_quoting"),
+    (r"WITH `cte` AS (SELECT `c` FROM `t`) SELECT `c` FROM `cte`", "ident_quoting"),
+    (
+        r"SELECT `x`.`c` FROM `t` AS `x` JOIN `t` AS `y` ON `x`.`c` = `y`.`c` WHERE `x`.`c` IN (SELECT `c` FROM `t`)",
+        "ident_quoting",
+    ),
+    // --- OR REPLACE (test_reverse_or_replace.rs, no triggers in schema so no refusal)
+    ("INSERT OR REPLACE INTO u VALUES (1, 'x', 'y')", "or_replace"),
+    ("INSERT OR IGNORE INTO u VALUES (1, 'x', 'y')", "or_replace"),
+    ("INSERT OR ABORT INTO u VALUES (1, 'x', 'y')", "or_replace"),
+    // --- LIKE contract (test_reverse_like_contract.rs)
+    ("SELECT * FROM t WHERE s LIKE '%test%'", "like_contract"),
+    ("SELECT * FROM t WHERE s NOT LIKE '%test%'", "like_contract"),
+    // --- roundtrip (test_reverse_roundtrip.rs)
+    ("SELECT strftime('%Y-01-01 00:00:00', created_at) FROM events", "roundtrip"),
+    ("SELECT strftime('%Y', created_at) FROM events", "roundtrip"),
+    ("SELECT strftime('%m', created_at) FROM events", "roundtrip"),
+    ("SELECT strftime('%d', created_at) FROM events", "roundtrip"),
+    ("SELECT strftime('%H', created_at) FROM events", "roundtrip"),
+    ("SELECT strftime('%M', created_at) FROM events", "roundtrip"),
+    ("SELECT strftime('%S', created_at) FROM events", "roundtrip"),
+    // --- translation (test_reverse_translation.rs)
+    ("SELECT id, name, email FROM users WHERE name = 'Alice'", "translation"),
+    ("INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')", "translation"),
+    ("UPDATE users SET name = 'Bob', email = 'bob@example.com' WHERE id = 1", "translation"),
+    ("DELETE FROM users WHERE id = 1", "translation"),
+    ("SELECT * FROM events WHERE created_at > datetime('now')", "translation"),
+    ("SELECT INSTR(content, 'search') FROM docs", "translation"),
+    ("SELECT category, group_concat(name) FROM tags GROUP BY category", "translation"),
+    ("SELECT char(65) FROM users", "translation"),
+    ("SELECT u.name, p.title FROM users u JOIN posts p ON u.id = p.user_id", "translation"),
+    (
+        "SELECT category, COUNT(*) AS cnt FROM items GROUP BY category HAVING COUNT(*) > 1",
+        "translation",
+    ),
+    // --- field_clones / statement_edges (test_reverse_field_clones.rs,
+    // test_reverse_statement_edges.rs)
+    ("SELECT c FROM t GROUP BY c HAVING c > 0", "statement_edges"),
+    ("SELECT ROW_NUMBER() OVER (PARTITION BY c ORDER BY c) FROM t", "statement_edges"),
+    ("SELECT COUNT(*) FILTER (WHERE c > 0) FROM t", "statement_edges"),
+    ("SELECT c FROM t JOIN t2 USING (c)", "statement_edges"),
+];
+
+/// Self-contained SELECTs that are executed directly. The execution proves the
+/// function exists and produces a result. The expected return value is noted in
+/// the comment; the assertion is that the statement runs without error.
+const EXECUTE_CASES: &[(&str, &str)] = &[
+    // char(65) -> chr(65) returns 'A'
+    ("SELECT char(65)", "chr(65) returns 'A'"),
+    // ifnull(1, 0) -> COALESCE(1, 0) returns 1
+    ("SELECT ifnull(1, 0)", "COALESCE(1, 0) returns 1"),
+    // iif(1 > 0, 'yes', 'no') -> CASE WHEN returns 'yes'
+    ("SELECT iif(1 > 0, 'yes', 'no')", "CASE WHEN returns 'yes'"),
+    // unixepoch() -> floor(EXTRACT(EPOCH FROM NOW()))::BIGINT returns current epoch seconds
+    ("SELECT unixepoch()", "returns current epoch as whole seconds"),
+    // nullif(1, 0) -> nullif(1, 0) returns 1
+    ("SELECT nullif(1, 0)", "returns 1"),
+    // min(3, 1) -> LEAST(3, 1) returns 1
+    ("SELECT min(3, 1)", "LEAST(3, 1) returns 1"),
+    // max(3, 1) -> GREATEST(3, 1) returns 3
+    ("SELECT max(3, 1)", "GREATEST(3, 1) returns 3"),
+];
+
+/// Cases where PostgreSQL refuses what the reverse translator emits. Each entry
+/// is (sqlite_input, fragment that must appear in the refusal message). These
+/// are findings about the reverse translator, not errors in the gauntlet.
+const KNOWN_REFUSALS: &[(&str, &str)] = &[
+    // --- a column whose name PostgreSQL reserves
+    // Brackets are SQLite's identifier quoting, so this input is not an array
+    // literal: it reads the column `ARRAY` under the alias `1, 2, 3`, which is
+    // what SQLite answers. The reverse translation says the same thing, and
+    // PostgreSQL refuses it because `ARRAY` is a reserved word that has to be
+    // quoted to name a column. Quoting it is not as simple as quoting every
+    // reserved word an identifier node carries, because sqlparser also carries
+    // keywords such as `DEFAULT` in identifier nodes, and quoting one of those
+    // turns syntax into a column reference. The fix needs to know which
+    // identifiers are names, which the quoting pass currently cannot see.
+    ("SELECT ARRAY[1, 2, 3] FROM users", "syntax error"),
+    // --- timestamp > INTERVAL: type mismatch in PostgreSQL
+    // PostgreSQL cannot compare timestamp (no time zone) with interval using >.
+    // SQLite has no interval type, so this construct has no direct equivalent.
+    // Whether this case belongs in the corpus at all is an open question.
+    ("SELECT * FROM events WHERE created_at > INTERVAL '1' DAY", "does not exist"),
+];
+
+/// Cases the translator itself refuses, each with a fragment of the refusal.
+///
+/// A refusal is the designed outcome where no PostgreSQL form answers what
+/// the SQLite input answered, so these sit beside the accepted cases rather
+/// than among the failures: the corpus records that the refusal is deliberate
+/// and that its message still says why.
+const TRANSLATOR_REFUSALS: &[(&str, &str)] = &[
+    // A hex blob compared with a uuid column: whether it reverses at all
+    // depends on how the translation holds a uuid, and these options name no
+    // representation, which is also why the forward direction refuses a uuid
+    // column outright. The blob form's reversal is pinned by
+    // `reversed_storage_wrappers_answer_what_the_replica_answered`, which sets
+    // one.
+    ("SELECT u FROM stored WHERE u = unhex('550e8400e29b41d4a716446655440000')", "uuid"),
+    // SQLite's json_extract unwraps a scalar, so a string arrives without
+    // quotes and a boolean as 1. PostgreSQL's #> answers jsonb, quotes and
+    // all, and #>> answers text for every kind, so neither preserves what the
+    // replica answered.
+    ("SELECT json_extract(payload, '$.a') FROM t", "json_extract"),
+    ("SELECT json_extract(payload, '$.a.b') FROM t", "json_extract"),
+    // A multi-argument min or max over a column that may be NULL: SQLite
+    // answers NULL and PostgreSQL's LEAST and GREATEST skip the NULL.
+    ("SELECT min(n, 1) FROM t", "LEAST"),
+    ("SELECT max(n, 1) FROM t", "GREATEST"),
+];
+
+#[test]
+fn reverse_output_runs_in_postgres() {
+    let schema = build_schema();
+    let options = Pg2SqliteOptions::default();
+    let mut conn = fresh_database();
+    apply(&mut conn, SCHEMA_DDL).expect("schema applied to fresh database");
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut n: usize = 0;
+    let mut refusal_count: usize = 0;
+
+    // --- PREPARE cases ---------------------------------------------------
+    for &(sqlite_input, source) in ACCEPT_CASES {
+        let pg_sql = match Pg2Sqlite::default().reverse_sql(sqlite_input, &schema, &options) {
+            Err(e) => {
+                // The translator refused something that all existing tests
+                // accept.
+                failures.push(format!("[{source}] translator refused {sqlite_input:?}: {e}"));
+                n += 1;
+                continue;
+            }
+            Ok(stmts) => stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "),
+        };
+
+        let name = format!("gauntlet_{n}");
+        match apply(&mut conn, &format!("PREPARE {name} AS {pg_sql}")) {
+            Ok(()) => {
+                apply(&mut conn, &format!("DEALLOCATE {name}"))
+                    .expect("DEALLOCATE should not fail");
+            }
+            Err(e) => {
+                failures.push(format!(
+                    "[{source}] PostgreSQL refused {sqlite_input:?}\n  translated: {pg_sql}\n  error: {e}"
+                ));
+            }
+        }
+        n += 1;
+    }
+
+    // --- Execute cases (self-contained SELECTs) ---------------------------
+    for &(sqlite_input, description) in EXECUTE_CASES {
+        let pg_sql = match Pg2Sqlite::default().reverse_sql(sqlite_input, &schema, &options) {
+            Err(e) => {
+                failures.push(format!("[execute] translator refused {sqlite_input:?}: {e}"));
+                n += 1;
+                continue;
+            }
+            Ok(stmts) => stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "),
+        };
+        match apply(&mut conn, &pg_sql) {
+            Ok(()) => {}
+            Err(e) => {
+                failures.push(format!(
+                    "[execute/{description}] PostgreSQL refused {sqlite_input:?}\n  translated: {pg_sql}\n  error: {e}"
+                ));
+            }
+        }
+        n += 1;
+    }
+
+    // --- Known refusals ---------------------------------------------------
+    for &(sqlite_input, fragment) in KNOWN_REFUSALS {
+        refusal_count += 1;
+        let pg_sql = match Pg2Sqlite::default().reverse_sql(sqlite_input, &schema, &options) {
+            Err(e) => {
+                // The translator refusing is separate from PostgreSQL refusing.
+                failures.push(format!(
+                    "[known_refusal] translator refused {sqlite_input:?} (expected PostgreSQL to refuse): {e}"
+                ));
+                n += 1;
+                continue;
+            }
+            Ok(stmts) => stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "),
+        };
+
+        let name = format!("gauntlet_{n}");
+        match apply(&mut conn, &format!("PREPARE {name} AS {pg_sql}")) {
+            Err(e) if e.to_lowercase().contains(&fragment.to_lowercase()) => {
+                // Expected refusal.
+            }
+            Err(e) => {
+                failures.push(format!(
+                    "[known_refusal] PostgreSQL refused {sqlite_input:?} with unexpected message\n  expected fragment: {fragment:?}\n  actual error: {e}\n  translated: {pg_sql}"
+                ));
+            }
+            Ok(()) => {
+                apply(&mut conn, &format!("DEALLOCATE {name}")).ok();
+                failures.push(format!(
+                    "[known_refusal] PostgreSQL accepted {sqlite_input:?} which was expected to be refused\n  translated: {pg_sql}\n  to fix: move this to ACCEPT_CASES"
+                ));
+            }
+        }
+        n += 1;
+    }
+
+    // --- Refusals the translator makes on purpose -------------------------
+    for &(sqlite_input, fragment) in TRANSLATOR_REFUSALS {
+        refusal_count += 1;
+        match Pg2Sqlite::default().reverse_sql(sqlite_input, &schema, &options) {
+            Err(error) if error.to_string().contains(fragment) => {}
+            Err(error) => failures.push(format!(
+                "[translator_refusal] {sqlite_input:?} was refused with an unexpected message\n  expected fragment: {fragment:?}\n  actual error: {error}"
+            )),
+            Ok(statements) => failures.push(format!(
+                "[translator_refusal] {sqlite_input:?} was translated, and this corpus says it cannot be\n  translated: {}",
+                statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+            )),
+        }
+        n += 1;
+    }
+
+    let total = n;
+    let accepted = total - refusal_count - failures.len();
+    eprintln!(
+        "reverse gauntlet: {total} cases, {accepted} accepted, {refusal_count} known refusals, {} failures",
+        failures.len()
+    );
+
+    assert!(failures.is_empty(), "{} case(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
+}
+
+/// One function name, as the catalogue answers it.
+#[derive(QueryableByName, Debug)]
+struct CatalogueName {
+    /// The name the query selected.
+    #[diesel(sql_type = Text)]
+    name: String,
+}
+
+/// The check whose absence let the omission happen: the corpus comes from the
+/// server, so a name this crate never heard of is still asked about.
+///
+/// Existence tests the inventories for wrong entries. It cannot test them for
+/// missing ones, which is the failure that shipped: a hand-kept list is
+/// complete only against a list of names somebody already thought of. Walking
+/// the catalogue instead makes the omission the thing that fails. It caught
+/// `jsonb_object_agg` on the first run, a name this crate's own
+/// `AGGREGATE_NAMES` carries, so the first bound drawn around the fix had the
+/// same hole as the bug.
+///
+/// Aggregates and window functions are the whole of `prokind` `a` and `w`,
+/// which makes them a corpus with no judgement in it. The scalar functions need
+/// a filter, which `every_scalar_the_forward_direction_knows_reverses` supplies
+/// below.
+#[test]
+fn every_aggregate_the_server_has_reverses() {
+    let mut connection = fresh_database();
+
+    // `prokind` and `regnamespace` are catalogue columns with no diesel schema,
+    // which is why this one statement is raw.
+    let aggregates: Vec<CatalogueName> = sql_query(
+        "SELECT DISTINCT proname AS name FROM pg_proc \
+         WHERE pronamespace = 'pg_catalog'::regnamespace AND prokind IN ('a', 'w') \
+         ORDER BY name",
+    )
+    .load(&mut connection)
+    .expect("the catalogue answers");
+
+    // A query that stopped selecting anything would make every assertion below
+    // vacuous, and PostgreSQL 17 answers 61.
+    assert!(
+        aggregates.len() >= 55,
+        "the catalogue should list every aggregate, got {}",
+        aggregates.len()
+    );
+
+    let schema = build_schema();
+    let options = Pg2SqliteOptions::default();
+    let refused: Vec<String> = aggregates
+        .iter()
+        .filter_map(|row| {
+            let sqlite = format!("SELECT {}(n) FROM t", row.name);
+            Pg2Sqlite::default()
+                .reverse_sql(&sqlite, &schema, &options)
+                .err()
+                .map(|error| format!("{}: {error}", row.name))
+        })
+        .collect();
+
+    assert!(
+        refused.is_empty(),
+        "PostgreSQL has {} aggregate(s) the reverse direction refuses:\n{}",
+        refused.len(),
+        refused.join("\n")
+    );
+}
+
+/// The same closure for the scalars, where the catalogue alone is no corpus:
+/// `pg_catalog` holds around 2650 of them, nearly all operator and type
+/// plumbing nobody writes in a query, and no column separates those from the
+/// ones a person types.
+///
+/// This crate's own forward behaviour is the filter. A name it was never taught
+/// earns the generic `is not a SQLite function` refusal going out, and anything
+/// else means it was taught the name, which is the crate claiming PostgreSQL
+/// has it. That claim is what the reverse direction then has to honour, so:
+///
+/// > if the forward direction knows a name PostgreSQL has, and SQLite does not
+/// > have it, the reverse direction must place it.
+///
+/// A name both engines have is excluded because whether it may cross is a
+/// judgement about meaning, recorded name by name in the reverse translator's
+/// `SQLITE_ONLY`, and not something a catalogue sweep may rule on. Names
+/// neither direction knows are simply skipped, which is right: this crate is
+/// allowed not to know `int4pl`.
+///
+/// The one textual dependency, the forward refusal's wording, is why the
+/// recognised count is asserted rather than left to speak for itself. If that
+/// message ever changes, this test says so instead of quietly passing
+/// everything.
+#[test]
+fn every_scalar_the_forward_direction_knows_reverses() {
+    /// Small on purpose: the sweep parses it once per name, and the shared
+    /// `SCHEMA_DDL` above is twenty tables of shapes no probe here needs.
+    const PROBE_DDL: &str = "CREATE TABLE t (id INT PRIMARY KEY, n INT, r REAL, s TEXT);";
+
+    let mut postgres = fresh_database();
+    let mut sqlite = SqliteConnection::establish(":memory:").expect("SQLite opens");
+
+    // Diesel's query DSL cannot name SQLite's PRAGMA virtual tables.
+    let sqlite_function_names: HashSet<String> =
+        sql_query("SELECT DISTINCT name FROM pragma_function_list")
+            .load::<CatalogueName>(&mut sqlite)
+            .expect("SQLite reports its scalar functions")
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+
+    // `regnamespace` is a catalogue cast with no diesel schema, which is why
+    // this one statement is raw. The pattern drops the handful of names that
+    // are not plain identifiers and could not be written as a call anyway.
+    let names: Vec<CatalogueName> = sql_query(
+        "SELECT DISTINCT proname AS name FROM pg_proc \
+         WHERE pronamespace = 'pg_catalog'::regnamespace AND proname ~ '^[a-z_][a-z0-9_]*$' \
+         ORDER BY name",
+    )
+    .load(&mut postgres)
+    .expect("the catalogue answers");
+    assert!(names.len() >= 2500, "the catalogue should be whole, got {}", names.len());
+
+    let schema = Pg2Sqlite::default()
+        .sql(PROBE_DDL)
+        .expect("the probe schema parses")
+        .build_schema()
+        .expect("the probe schema builds");
+    let options = Pg2SqliteOptions::default();
+
+    let mut known = 0usize;
+    let mut refused = Vec::new();
+
+    for row in &names {
+        let call = format!("SELECT {}(s) FROM t", row.name);
+        let outbound = Pg2Sqlite::default()
+            .sql(&format!("{PROBE_DDL}{call};"))
+            .and_then(|parsed| parsed.translate_to_sql(&options));
+        let forward_knows = match &outbound {
+            Ok(_) => true,
+            Err(error) => {
+                let message = error.to_string();
+                // A name PostgreSQL spells in a way SQLite's parser will not
+                // read says nothing about either direction.
+                if message.contains("Parser error") {
+                    continue;
+                }
+                !message.contains("is not a SQLite function")
+            }
+        };
+        if !forward_knows {
+            continue;
+        }
+        let sqlite_has_scalar = sqlite_function_names.contains(&row.name);
+        let sqlite_has_table_function = (0..=3).any(|arity| {
+            let arguments = core::iter::repeat_n("NULL", arity).collect::<Vec<_>>().join(", ");
+            sql_query(format!(
+                "SELECT CAST(1 AS TEXT) AS name FROM {}({arguments}) LIMIT 0",
+                row.name
+            ))
+            .load::<CatalogueName>(&mut sqlite)
+            .is_ok()
+        });
+        if sqlite_has_scalar || sqlite_has_table_function {
+            continue;
+        }
+
+        known += 1;
+
+        if let Err(error) = Pg2Sqlite::default().reverse_sql(&call, &schema, &options) {
+            refused.push(format!("{}: {error}", row.name));
+        }
+    }
+
+    // PostgreSQL 17 leaves 214 names the forward direction knows that SQLite
+    // does not provide. A collapse here means a filter stopped filtering.
+    assert!(known >= 180, "the forward direction should know far more names, got {known}");
+
+    assert!(
+        refused.is_empty(),
+        "the forward direction knows {} name(s) PostgreSQL has that the reverse direction \
+         refuses:\n{}",
+        refused.len(),
+        refused.join("\n")
+    );
+}
+
+/// What a session variable mapping reverses into is SQL the server takes.
+///
+/// Each case carries its own options, since the pairing is what the case is
+/// about, so they cannot ride along in `reverse_output_runs_in_postgres`.
+#[test]
+fn a_reversed_session_variable_runs_in_postgres() {
+    let schema = build_schema();
+    let mut connection = fresh_database();
+    apply(&mut connection, SCHEMA_DDL).expect("schema applied to fresh database");
+
+    let untyped = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting("app.user_id", "app_user_id"),
+    );
+    let typed = Pg2SqliteOptions::default().with_session_variable(
+        SessionVariableMapping::current_setting("app.user_id", "app_user_id").with_pg_type("uuid"),
+    );
+    let role = Pg2SqliteOptions::default()
+        .with_session_variable(SessionVariableMapping::current_user("sqlite_user"));
+
+    let cases: [(&str, &Pg2SqliteOptions, &str); 4] = [
+        // The setting answers text, so a text column compares without a cast.
+        ("SELECT id FROM callers WHERE owner = app_user_id()", &untyped, "text column"),
+        // A uuid column does not: `uuid = text` is an error, which is why the
+        // mapping records the type and the cast is written back.
+        ("SELECT id FROM callers WHERE owner_uuid = app_user_id()", &typed, "uuid column"),
+        // The role keyword, which PostgreSQL refuses with parentheses.
+        ("SELECT id FROM callers WHERE owner = sqlite_user()", &role, "current_user"),
+        // Inside a subquery, which is the shape a membership filter takes.
+        (
+            "SELECT id FROM callers WHERE id IN (SELECT id FROM callers WHERE owner = \
+             app_user_id())",
+            &untyped,
+            "subquery",
+        ),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (index, (sqlite_input, options, description)) in cases.iter().enumerate() {
+        let postgres = match Pg2Sqlite::default().reverse_sql(sqlite_input, &schema, options) {
+            Ok(statements) => {
+                statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+            }
+            Err(error) => {
+                failures.push(format!("[{description}] the translator refused: {error}"));
+                continue;
+            }
+        };
+
+        let name = format!("session_{index}");
+        match apply(&mut connection, &format!("PREPARE {name} AS {postgres}")) {
+            Ok(()) => {
+                apply(&mut connection, &format!("DEALLOCATE {name}"))
+                    .expect("DEALLOCATE should not fail");
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "[{description}] PostgreSQL refused {sqlite_input:?}\n  translated: \
+                     {postgres}\n  error: {error}"
+                ));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "{} case(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
+}
+
+/// One nullable integer, for a reverse-translated SELECT whose value matters.
+#[derive(QueryableByName, Debug)]
+struct MaybeInteger {
+    /// The selected value.
+    #[diesel(sql_type = Nullable<Integer>)]
+    val: Option<i32>,
+}
+
+/// The reverse direction must not change an answer: SQLite's `unicode('')` is
+/// NULL (measured on 3.51), and PostgreSQL's `ascii('')` is 0 (measured on
+/// 18), so the plain rename flips NULL to 0 for the empty string.
+#[test]
+fn the_reverse_of_unicode_agrees_with_sqlite_on_the_empty_string() {
+    let schema = build_schema();
+    let options = Pg2SqliteOptions::default();
+    let pg_sql = Pg2Sqlite::default()
+        .reverse_sql("SELECT unicode('') AS val", &schema, &options)
+        .expect("unicode reverses")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let mut connection = fresh_database();
+    // The SQL under test is reverse-translator output, a runtime string the
+    // typed DSL cannot express.
+    let rows: Vec<MaybeInteger> =
+        sql_query(&pg_sql).load(&mut connection).expect("PostgreSQL runs the reverse output");
+    assert_eq!(rows.len(), 1, "one row expected: {pg_sql}");
+    assert_eq!(
+        rows[0].val, None,
+        "SQLite answers NULL for unicode(''), the reverse output must too: {pg_sql}"
+    );
+}
+
+/// One scalar answer read as text, whichever engine answered it.
+#[derive(QueryableByName, Debug)]
+struct ScalarText {
+    /// The value the expression answered, NULL included.
+    #[diesel(sql_type = Nullable<Text>)]
+    answer: Option<String>,
+}
+
+/// The PostgreSQL table the parity check reads, holding one column per storage
+/// wrapper the reverse direction has to undo.
+const STORED_DDL: &str = "CREATE TABLE stored (\
+     id INT PRIMARY KEY, u UUID, raw BYTEA, xs INT[], doc JSONB);";
+
+/// Two rows, the second one empty where emptiness is what diverges: SQLite
+/// answers 0 for the length of an empty array and PostgreSQL's `array_length`
+/// answers NULL.
+const STORED_ROWS: &str = "\
+     INSERT INTO stored (id, u, raw, xs, doc) VALUES \
+     (1, '550e8400-e29b-41d4-a716-446655440000'::uuid, '\\x00ff'::bytea, ARRAY[1,2], '[1,2,3]'::jsonb); \
+     INSERT INTO stored (id, u, raw, xs, doc) VALUES \
+     (2, '660e8400-e29b-41d4-a716-446655440000'::uuid, '\\x'::bytea, ARRAY[]::int[], '[]'::jsonb);";
+
+/// SQLite expressions over `stored`, each one a storage wrapper whose
+/// PostgreSQL form depends on the column's declared type rather than on the
+/// wrapper's name.
+const STORAGE_WRAPPER_PARITY: &[&str] = &[
+    "SELECT CAST(hex(u) AS TEXT) AS answer FROM stored ORDER BY id",
+    "SELECT CAST(hex(raw) AS TEXT) AS answer FROM stored ORDER BY id",
+    "SELECT CAST(json_array_length(xs) AS TEXT) AS answer FROM stored ORDER BY id",
+    "SELECT CAST(json_array_length(doc) AS TEXT) AS answer FROM stored ORDER BY id",
+    "SELECT CAST(count(*) AS TEXT) AS answer FROM stored \
+     WHERE u = unhex('550e8400e29b41d4a716446655440000')",
+    "SELECT CAST(count(*) AS TEXT) AS answer FROM stored WHERE raw = unhex('00ff')",
+    "SELECT CAST(count(*) AS TEXT) AS answer FROM stored WHERE xs = json_array(1, 2)",
+];
+
+/// The reverse direction has to answer what the replica answered, not merely
+/// produce something the server accepts.
+///
+/// The replica is built by this crate's own forward translation of the same
+/// schema and rows, so the two sides are the pair a caller really has: a
+/// PostgreSQL table and the SQLite one it was translated into.
+#[test]
+fn reversed_storage_wrappers_answer_what_the_replica_answered() {
+    let options = Pg2SqliteOptions::default()
+        .with_uuid_representation(pg2sqlite::prelude::UuidRepresentation::Blob)
+        .with_array_representation(pg2sqlite::prelude::ArrayRepresentation::Json);
+
+    let replica = Pg2Sqlite::default()
+        .sql(&format!("{STORED_DDL}{STORED_ROWS}"))
+        .expect("the fixture parses")
+        .translate_to_sql(&options)
+        .expect("the fixture translates");
+    let mut sqlite = SqliteConnection::establish(":memory:").expect("SQLite opens");
+    for statement in &replica {
+        sql_query(statement).execute(&mut sqlite).expect("the emitted fixture applies");
+    }
+
+    let mut postgres = fresh_database();
+    apply(&mut postgres, &format!("{STORED_DDL}{STORED_ROWS}")).expect("the fixture applies");
+
+    let schema = Pg2Sqlite::default()
+        .sql(STORED_DDL)
+        .expect("the schema parses")
+        .build_schema()
+        .expect("the schema builds");
+
+    let mut failures = Vec::new();
+    for &sqlite_sql in STORAGE_WRAPPER_PARITY {
+        let replica_answer: Vec<Option<String>> = sql_query(sqlite_sql)
+            .load::<ScalarText>(&mut sqlite)
+            .expect("the replica answers")
+            .into_iter()
+            .map(|row| row.answer)
+            .collect();
+
+        let reversed = match Pg2Sqlite::default().reverse_sql(sqlite_sql, &schema, &options) {
+            Ok(statements) => {
+                statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+            }
+            Err(error) => {
+                failures.push(format!("{sqlite_sql:?} was refused: {error}"));
+                continue;
+            }
+        };
+        match sql_query(&reversed).load::<ScalarText>(&mut postgres) {
+            Ok(rows) => {
+                let server_answer: Vec<Option<String>> =
+                    rows.into_iter().map(|row| row.answer).collect();
+                if server_answer != replica_answer {
+                    failures.push(format!(
+                        "{sqlite_sql:?}\n  reversed: {reversed}\n  replica: {replica_answer:?}\n  server:  {server_answer:?}"
+                    ));
+                }
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "{sqlite_sql:?}\n  reversed: {reversed}\n  server refused: {error}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} case(s) diverged:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
