@@ -432,6 +432,14 @@ impl Pg2Sqlite {
     /// let translator = Pg2Sqlite::default().sql("CREATE TABLE t (a INT);").unwrap();
     /// ```
     pub fn sql(mut self, sql: &str) -> Result<Self, crate::errors::Error> {
+        if sql.contains('\0') {
+            return Err(crate::errors::Error::unsupported_source_syntax(
+                "the source text carries a NUL byte. PostgreSQL's wire protocol sends query \
+                 text as a NUL-terminated string, so a server could never read past that byte, \
+                 and a NUL inside a quoted literal would truncate the statement there instead \
+                 of ending the quote. Remove the byte from the source.",
+            ));
+        }
         let stmt =
             sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
                 .map_err(|source| {
