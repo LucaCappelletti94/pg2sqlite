@@ -503,6 +503,15 @@ impl ReverseTranslator for Expr {
                 )
             }
 
+            // SQLite's parser rejects the Snowflake `obj:key.key2` dot-path
+            // syntax outright, so it cannot have come from SQLite.
+            Expr::JsonAccess { .. } => {
+                Err(Error::reverse_refusal(format!(
+                    "{self} uses Snowflake-style `obj:key` dot-path JSON access, which SQLite's \
+                 parser does not accept either. Use SQLite's -> or ->> JSON operators instead."
+                )))
+            }
+
             _ => translate_expr_recursive::<Reverse>(self, schema, options, &mut |_| {}),
         }
     }
