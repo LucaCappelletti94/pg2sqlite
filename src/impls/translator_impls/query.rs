@@ -38,6 +38,26 @@ use crate::{
 pub(crate) const DISTINCT_ON_DERIVED_ALIAS: &str = "__pg2sqlite_distinct_on";
 pub(crate) const DISTINCT_ON_ROWNUM_ALIAS: &str = "__pg2sqlite_rn";
 
+fn query_contains_dml(query: &Query) -> bool {
+    fn body_contains_dml(body: &SetExpr) -> bool {
+        match body {
+            SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) | SetExpr::Merge(_) => {
+                true
+            }
+            SetExpr::Query(query) => query_contains_dml(query),
+            SetExpr::SetOperation { left, right, .. } => {
+                body_contains_dml(left) || body_contains_dml(right)
+            }
+            _ => false,
+        }
+    }
+    query
+        .with
+        .as_ref()
+        .is_some_and(|with| with.cte_tables.iter().any(|cte| query_contains_dml(&cte.query)))
+        || body_contains_dml(&query.body)
+}
+
 impl crate::traits::translator::TranslatorWithContext for Query {
     type SQLiteEntry = Query;
 
@@ -47,6 +67,9 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        let function_context = (options.allows_function_queries() && query_contains_dml(self))
+            .then(|| options.without_function_queries());
+        let options = function_context.as_ref().unwrap_or(options);
         // Everything below reads column types through the relations this query
         // exposes rather than through every table of that name in the schema,
         // so the scope is attached before any expression is translated. A
@@ -65,6 +88,13 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         };
         let scoped = scope.as_ref().map(|scope| options.with_scope(scope));
         let options = scoped.as_ref().unwrap_or(options);
+        let related = match self.body.as_ref() {
+            SetExpr::Select(select) if !select.from.is_empty() => {
+                Some(options.with_call_relations(&select.from))
+            }
+            _ => None,
+        };
+        let options = related.as_ref().unwrap_or(options);
         let noted = options.with_cte_clause(self.with.as_ref().or_else(|| options.cte_clause()));
         let options = &noted;
 

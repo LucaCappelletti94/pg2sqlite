@@ -3316,8 +3316,11 @@ pub(crate) fn translate_select_forward(
     if let Some(scope_query) = scope_query {
         let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
         let scoped = options.with_scope(&scope);
-        return translate_select_with_from::<Forward>(select, schema, &scoped, emit, from);
+        let related = scoped.with_call_relations(&select.from);
+        return translate_select_with_from::<Forward>(select, schema, &related, emit, from);
     }
+    let related = (!select.from.is_empty()).then(|| options.with_call_relations(&select.from));
+    let options = related.as_ref().unwrap_or(options);
     translate_select_with_from::<Forward>(select, schema, options, emit, from)
 }
 

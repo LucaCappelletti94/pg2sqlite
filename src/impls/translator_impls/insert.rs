@@ -95,6 +95,9 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        let function_context =
+            options.allows_function_queries().then(|| options.without_function_queries());
+        let options = function_context.as_ref().unwrap_or(options);
         // Databricks SQL, parseable in every dialect since upstream #2403;
         // translation would silently turn name-matched columns into
         // positional ones.
