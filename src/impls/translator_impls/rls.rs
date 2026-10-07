@@ -12,6 +12,7 @@
 //! SQLite no way to tell an omitted column from one written NULL, so a default
 //! answers for both.
 
+use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::{
@@ -333,6 +334,17 @@ enum PolicyPredicate {
     Expr(Box<Expr>),
 }
 
+fn expand_policy_expression<'e>(
+    expr: &'e Expr,
+    table: &CreateTable,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<Cow<'e, Expr>, Error> {
+    let scope = sql_traits::structs::ColumnScope::for_table(table, schema);
+    super::sql_function::expand_expression(expr, schema, &options.with_scope(&scope), emit)
+}
+
 /// Combines a policy set the way PostgreSQL does:
 /// `(PERMISSIVE_1 OR PERMISSIVE_2 OR ...) AND RESTRICTIVE_1 AND RESTRICTIVE_2`.
 ///
@@ -403,8 +415,9 @@ fn combine_policy_predicates(
             }
         };
         let Some(expr) = expr else { continue };
+        let expanded = expand_policy_expression(expr, table, schema, options, emit)?;
         let mut transformed =
-            transform_expr(expr, options, table, schema, prefix, table_rename, facts);
+            transform_expr(&expanded, options, table, schema, prefix, table_rename, facts);
         // Folded before translation so a substituted default travels the same
         // path the column definition sends it down, and lands as the same SQL
         // the backing table declares.
@@ -635,8 +648,12 @@ fn build_write_guard(
     // D2: volatile policy predicate — appears in trigger guard and forwarding
     // WHERE or backing check trigger WHEN, two independent draws.
     for policy in policies {
+        let using = policy
+            .using_expression(schema)
+            .map(|expr| expand_policy_expression(expr, table, schema, options, &mut |_| {}))
+            .transpose()?;
         if kind == GuardKind::Update
-            && let Some(using) = policy.using_expression(schema)
+            && let Some(using) = using.as_ref()
             && !is_replayable(&scrub_policy_stable_exprs(using, options), options)
         {
             return Err(reject_duplicated_operand(
@@ -648,9 +665,12 @@ fn build_write_guard(
                 using,
             ));
         }
-        let check_expr =
-            policy.check_expression(schema).or_else(|| policy.using_expression(schema));
-        if let Some(check) = check_expr
+        let check_expr = policy
+            .check_expression(schema)
+            .or_else(|| policy.using_expression(schema))
+            .map(|expr| expand_policy_expression(expr, table, schema, options, &mut |_| {}))
+            .transpose()?;
+        if let Some(check) = check_expr.as_ref()
             && !is_replayable(&scrub_policy_stable_exprs(check, options), options)
         {
             let clause = if policy.check_expression(schema).is_some() {
@@ -1096,12 +1116,17 @@ pub fn validate_table_policies(
     schema: &ParserDB,
     options: &Pg2SqliteOptions,
 ) -> Result<(), Error> {
+    let context = crate::options::TranslationContext::new(options);
     for policy in table.policies(schema)? {
         if let Some(using_expr) = policy.using_expression(schema) {
-            validate_session_variables(using_expr, options, table.table_name(), policy.name())?;
+            let expanded =
+                expand_policy_expression(using_expr, table, schema, &context, &mut |_| {})?;
+            validate_session_variables(&expanded, options, table.table_name(), policy.name())?;
         }
         if let Some(check_expr) = policy.check_expression(schema) {
-            validate_session_variables(check_expr, options, table.table_name(), policy.name())?;
+            let expanded =
+                expand_policy_expression(check_expr, table, schema, &context, &mut |_| {})?;
+            validate_session_variables(&expanded, options, table.table_name(), policy.name())?;
         }
     }
     Ok(())
@@ -1492,6 +1517,13 @@ fn transform_query(
         outer_table,
         lowercased_columns: facts.lowercased_columns,
     };
+
+    if let Some(with) = &mut transformed.with {
+        for cte in &mut with.cte_tables {
+            *cte.query =
+                transform_query(&cte.query, options, table, schema, prefix, outer_table, facts);
+        }
+    }
 
     *transformed.body = transform_set_expr(&query.body, &context);
 
@@ -1942,7 +1974,8 @@ fn reject_self_referential_read_policy(
     let guarded = table.table_name();
     for policy in policies {
         let Some(predicate) = policy.using.as_ref() else { continue };
-        let reads_itself = sqlparser::ast::visit_relations(predicate, |relation| {
+        let predicate = expand_policy_expression(predicate, table, schema, options, &mut |_| {})?;
+        let reads_itself = sqlparser::ast::visit_relations(predicate.as_ref(), |relation| {
             if crate::impls::object_name::last_ident(relation)
                 .is_some_and(|ident| ident.value.eq_ignore_ascii_case(guarded))
             {
@@ -1968,7 +2001,7 @@ fn reject_self_referential_read_policy(
         // Every table a policy reads is read through its own view, so any
         // reference here can close a cycle, aliased or not.
         let mut refs: Vec<String> = Vec::new();
-        collect_subquery_tables(predicate, &mut refs);
+        collect_subquery_tables(&predicate, &mut refs);
 
         for other_name in &refs {
             if other_name.eq_ignore_ascii_case(guarded) {
@@ -1986,8 +2019,15 @@ fn reject_self_referential_read_policy(
                 filter_policies(other_table, schema, &[CreatePolicyCommand::Select], options)?;
             for other_policy in &other_select {
                 let Some(other_pred) = other_policy.using.as_ref() else { continue };
+                let other_pred = expand_policy_expression(
+                    other_pred,
+                    other_table,
+                    schema,
+                    options,
+                    &mut |_| {},
+                )?;
                 let mut back_refs: Vec<String> = Vec::new();
-                collect_subquery_tables(other_pred, &mut back_refs);
+                collect_subquery_tables(&other_pred, &mut back_refs);
                 if back_refs.iter().any(|r| r.eq_ignore_ascii_case(guarded)) {
                     return Err(Error::forward_refusal(format!(
                         "The read policy {} on {guarded} and the read policy {} on {other_name} \

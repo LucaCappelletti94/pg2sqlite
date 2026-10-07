@@ -243,6 +243,9 @@ pub(crate) fn translate_column_def(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<ColumnDef, crate::errors::Error> {
+    let function_context =
+        options.allows_function_queries().then(|| options.without_function_queries());
+    let options = function_context.as_ref().unwrap_or(options);
     // Both an identity column and a serial ask SQLite to supply values, which
     // it does only through the rowid alias, so both need the translated type
     // and the table's key before anything else is decided.

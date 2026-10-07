@@ -35,6 +35,7 @@ pub mod postgis;
 pub(crate) mod query;
 mod referential_action;
 pub mod rls;
+pub(crate) mod sql_function;
 mod statement;
 mod table_constraint;
 pub(crate) mod update;

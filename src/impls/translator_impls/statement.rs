@@ -356,14 +356,8 @@ const REASON_TYPE_DEFINITION: &str = "SQLite has no composite, enum, or domain t
 const REASON_FOREIGN_DATA: &str = "SQLite reads only its own database file, so it has no foreign data layer for the definition \
      to configure.";
 
-/// Reason a function definition is dropped. A trigger function is not lost: its
-/// body is inlined into every trigger that calls it, which is what
-/// `create_trigger.rs` uses `function_body_with_context` for. Any other
-/// function has to be registered by the host, the same way this crate expects
-/// `current_setting` to be registered for row level security.
-const REASON_FUNCTION: &str = "SQLite has no statement that defines a function. A trigger function's body is inlined into \
-     the triggers that call it, and any other function must be registered by the host through \
-     SQLite's C API.";
+/// Reason a function declaration has no SQLite statement.
+const REASON_FUNCTION: &str = "SQLite has no function declaration statement, and supported SQL and trigger bodies inline at their calls while other functions require host registration.";
 
 /// Reason an extension declaration is dropped: extension functions are
 /// translated by name, independently of any declaration.
@@ -851,6 +845,13 @@ fn translate_alter_table_operation(
         | AlterTableOperation::DisableRowLevelSecurity
         | AlterTableOperation::ForceRowLevelSecurity
         | AlterTableOperation::NoForceRowLevelSecurity => Ok(None),
+        AlterTableOperation::OwnerTo { new_owner: sqlparser::ast::Owner::Ident(_) } => {
+            emit(crate::warnings::TranslationWarning::LossyDrop {
+                construct: "ALTER TABLE OWNER TO".to_string(),
+                reason: REASON_ACCESS_CONTROL.to_string(),
+            });
+            Ok(None)
+        }
         other => {
             Err(Error::forward_refusal(format!(
                 "ALTER TABLE {} {other} has no SQLite equivalent. SQLite can only rename a table \

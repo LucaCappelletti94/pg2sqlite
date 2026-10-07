@@ -41,6 +41,9 @@ impl crate::traits::translator::TranslatorWithContext for Update {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, Error> {
+        let function_context =
+            options.allows_function_queries().then(|| options.without_function_queries());
+        let options = function_context.as_ref().unwrap_or(options);
         // The statement's target is the relation an unqualified column names,
         // and a query inside the statement attaches its own scope over this
         // one, so an outer reference still resolves.

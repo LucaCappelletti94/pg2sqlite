@@ -72,7 +72,7 @@ pub trait Schema: DatabaseLike<Table = CreateTable, Function = CreateFunction> {
 /// Returns [`None`] for a reference no catalog lookup can answer: a part built
 /// while the statement runs, or a name reaching past a schema into another
 /// catalog.
-fn function_lookup_target(name: &ObjectName) -> Option<TargetName<'_>> {
+pub(crate) fn function_lookup_target(name: &ObjectName) -> Option<TargetName<'_>> {
     fn written(part: &ObjectNamePart) -> Option<(&str, bool)> {
         match part {
             ObjectNamePart::Identifier(ident) => {

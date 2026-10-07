@@ -12,6 +12,10 @@ The contract is strict. Every returned statement is valid SQLite, an unimplement
 
 The rewrites go beyond types. Row-Level Security becomes a renamed backing table, a view enforcing the `USING` clause, and `INSTEAD OF` triggers. A GIN `to_tsvector` index becomes an FTS5 virtual table with sync triggers. pgvector maps to [sqlite-vec](https://github.com/asg017/sqlite-vec) and PostGIS to the [SQLiteGIS](https://github.com/LucaCappelletti94/sqlitegis) extension. PL/pgSQL trigger bodies become SQLite trigger syntax, and SQLite DML translates back to PostgreSQL to sync replicas upstream. The crate is `no_std + alloc` and compiles for `wasm32-unknown-unknown`.
 
+Functions with a single scalar `SELECT` projection in a `LANGUAGE sql` body inline at their calls, including policy predicates, with parameter substitution and `STRICT` `NULL` handling. `SECURITY INVOKER` reads policy-filtered views, while `SECURITY DEFINER` reads locally delivered backing rows only under a proven ownership or role exemption, with a shared creator assumed when both object owners are omitted.
+
+Recursive calls, set-returning bodies, nonreplayable arguments, relocated or omitted caller aggregate/window operations, unresolved overloads, and unsupported function-local settings are refused. Query-bodied calls in column, constraint, or index definitions and in `INSERT`, `UPDATE`, or `DELETE` are refused, and explicitly registered destination functions retain precedence.
+
 ## Quick start
 
 ```rust
