@@ -289,6 +289,22 @@ fn foreign_create_table_modifiers_are_refused() {
     }
 }
 
+/// SQLite's table options parse under the PostgreSQL dialect, but PostgreSQL
+/// rejects them, so a source carrying one is refused like any other foreign
+/// clause, alone or in a list.
+#[test]
+fn sqlite_table_options_in_the_source_are_refused() {
+    for (sql, option) in [
+        ("CREATE TABLE t (id INT PRIMARY KEY) WITHOUT ROWID;", "WITHOUT ROWID"),
+        ("CREATE TABLE t (id INT PRIMARY KEY) STRICT;", "STRICT"),
+        ("CREATE TABLE t (id INT PRIMARY KEY), STRICT;", "STRICT"),
+        ("CREATE TABLE t (id INT PRIMARY KEY) WITHOUT ROWID, STRICT;", "WITHOUT ROWID, STRICT"),
+    ] {
+        let error = translate(sql).expect_err(sql).to_string();
+        assert!(error.contains(option), "the refusal must name {option}: {error}");
+    }
+}
+
 /// `ON COMMIT PRESERVE ROWS` is PostgreSQL's own default for a temporary
 /// table, and SQLite temporary tables already keep rows across transactions,
 /// so clearing it is result-neutral and warned.
