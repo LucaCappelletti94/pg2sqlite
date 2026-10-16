@@ -474,6 +474,7 @@ pub(crate) fn try_build_rtree_filter(
         ])),
         subquery: Box::new(candidates),
         negated: false,
+        global: false,
     };
     Some(and(Expr::Nested(Box::new(indexed_row)), Expr::Nested(Box::new(where_expr.clone()))))
 }

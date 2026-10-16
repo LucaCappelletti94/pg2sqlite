@@ -41,7 +41,11 @@ impl ReverseTranslator for Delete {
             ));
         }
         let scope_query = delete_scope_query(self);
-        let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
+        let scope = sql_traits::structs::ColumnScope::from_query(
+            &scope_query,
+            schema,
+            sql_traits::structs::IdentifierCase::AsWritten,
+        )?;
         let scoped = options.with_scope(&scope);
         let (selection, from, returning, order_by, limit) =
             translate_delete_core::<Reverse>(self, schema, &scoped, &mut |_| {})?;
@@ -76,6 +80,8 @@ impl ReverseTranslator for Delete {
             output: self.output.clone(),
             order_by,
             limit,
+            on_cluster: self.on_cluster.clone(),
+            settings: self.settings.clone(),
         })
     }
 }

@@ -152,6 +152,8 @@ fn generate_maintenance_trigger_body(
         order_by: Vec::new(),
         limit: None,
         optimizer_hints: Vec::new(),
+        on_cluster: None,
+        settings: None,
     });
 
     Ok(sqlparser::ast::BeginEndStatements {
@@ -427,8 +429,15 @@ impl crate::traits::translator::TranslatorWithContext for CreateTrigger {
         // table is the outermost scope its column types resolve against. A
         // query inside the body attaches its own scope over this one.
         let trigger_scope =
-            crate::impls::object_name::resolve_translation_table(schema, &self.table_name)?
-                .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+            crate::impls::object_name::resolve_translation_table(schema, &self.table_name)?.map(
+                |table| {
+                    sql_traits::structs::ColumnScope::for_table(
+                        table,
+                        schema,
+                        sql_traits::structs::IdentifierCase::AsWritten,
+                    )
+                },
+            );
         let scoped = trigger_scope.as_ref().map(|scope| options.with_pseudo_row_scope(scope));
         let options = scoped.as_ref().unwrap_or(options);
         // Checked before the FOR EACH clause because PostgreSQL allows

@@ -74,6 +74,7 @@ pub(crate) fn insert(table: ObjectName, columns: Vec<ObjectName>, source: Query)
         assignments: Vec::new(),
         partitioned: None,
         after_columns: Vec::new(),
+        overriding: None,
         has_table_keyword: false,
         on: None,
         returning: None,
@@ -114,6 +115,8 @@ pub(crate) fn delete(table: ObjectName, selection: Option<Expr>) -> Statement {
         output: None,
         order_by: Vec::new(),
         limit: None,
+        on_cluster: None,
+        settings: None,
     })
 }
 pub(crate) fn update(
@@ -135,6 +138,8 @@ pub(crate) fn update(
         or: None,
         order_by: Vec::new(),
         limit: None,
+        on_cluster: None,
+        settings: None,
     })
 }
 pub(crate) fn create_table(

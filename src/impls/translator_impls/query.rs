@@ -61,7 +61,11 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         ) {
             None
         } else {
-            Some(sql_traits::structs::ColumnScope::from_query(scope_query, schema)?)
+            Some(sql_traits::structs::ColumnScope::from_query(
+                scope_query,
+                schema,
+                sql_traits::structs::IdentifierCase::AsWritten,
+            )?)
         };
         let scoped = scope.as_ref().map(|scope| options.with_scope(scope));
         let options = scoped.as_ref().unwrap_or(options);
@@ -1172,6 +1176,7 @@ impl crate::traits::translator::TranslatorWithContext for SetExpr {
             let scope = sql_traits::structs::ColumnScope::from_query(
                 scope_substitute.as_ref().unwrap_or(&scope_query),
                 schema,
+                sql_traits::structs::IdentifierCase::AsWritten,
             )?;
             let scoped = options.with_scope(&scope);
             return Ok(SetExpr::Select(Box::new(

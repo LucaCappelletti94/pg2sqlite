@@ -82,8 +82,13 @@ pub(crate) fn insert_target_scope<'db>(
     if crate::impls::object_name::last_ident(name).is_none() {
         return Ok(None);
     }
-    Ok(crate::impls::object_name::resolve_translation_table(schema, name)?
-        .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema)))
+    Ok(crate::impls::object_name::resolve_translation_table(schema, name)?.map(|table| {
+        sql_traits::structs::ColumnScope::for_table(
+            table,
+            schema,
+            sql_traits::structs::IdentifierCase::AsWritten,
+        )
+    }))
 }
 
 impl crate::traits::translator::TranslatorWithContext for Insert {
@@ -671,8 +676,12 @@ fn cast_temporal_insert_values(
     let scope_query = (!matches!(source.body.as_ref(), SetExpr::Values(_))).then(|| source.clone());
     let substitute = scope_query.as_ref().and_then(crate::impls::shared_helpers::scope_query_for);
     let scope = scope_query.as_ref().and_then(|query| {
-        sql_traits::structs::ColumnScope::from_query(substitute.as_ref().unwrap_or(query), schema)
-            .ok()
+        sql_traits::structs::ColumnScope::from_query(
+            substitute.as_ref().unwrap_or(query),
+            schema,
+            sql_traits::structs::IdentifierCase::AsWritten,
+        )
+        .ok()
     });
     let scoped = scope.as_ref().map(|scope| options.with_scope(scope));
     let context = scoped.as_ref().unwrap_or(options);

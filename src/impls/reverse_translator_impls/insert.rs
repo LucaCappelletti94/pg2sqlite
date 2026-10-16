@@ -430,6 +430,7 @@ impl ReverseTranslator for Insert {
             assignments,
             partitioned,
             after_columns: self.after_columns.clone(),
+            overriding: self.overriding,
             has_table_keyword: self.has_table_keyword,
             on: self.on.clone(),
             returning,

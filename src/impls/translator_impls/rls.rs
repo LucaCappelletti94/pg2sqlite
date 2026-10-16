@@ -428,9 +428,13 @@ fn combine_policy_predicates(
                 at: None,
             });
             scope_query = relations_scope_query(from_relation(relation));
-            sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?
+            sql_traits::structs::ColumnScope::from_query(
+                &scope_query,
+                schema,
+                IdentifierCase::AsWritten,
+            )?
         } else {
-            sql_traits::structs::ColumnScope::for_table(table, schema)
+            sql_traits::structs::ColumnScope::for_table(table, schema, IdentifierCase::AsWritten)
         };
         let scoped = options.with_pseudo_row_scope(&policy_scope);
         let transformed = transformed.translate_with_warnings(schema, &scoped, emit)?;
@@ -1430,7 +1434,7 @@ fn transform_expr_generic(
             )))
         }
 
-        Expr::InSubquery { expr: inner, subquery, negated } => {
+        Expr::InSubquery { expr: inner, subquery, negated, global } => {
             Expr::InSubquery {
                 expr: Box::new(recurse(inner)),
                 subquery: Box::new(transform_query(
@@ -1443,6 +1447,7 @@ fn transform_expr_generic(
                     strategy.facts(),
                 )),
                 negated: *negated,
+                global: *global,
             }
         }
 

@@ -561,8 +561,15 @@ impl crate::traits::translator::TranslatorWithContext for CreateIndex {
         // An index expression and a partial index predicate name the indexed
         // table's own columns, with no query around them.
         let index_scope =
-            crate::impls::object_name::resolve_translation_table(schema, &self.table_name)?
-                .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+            crate::impls::object_name::resolve_translation_table(schema, &self.table_name)?.map(
+                |table| {
+                    sql_traits::structs::ColumnScope::for_table(
+                        table,
+                        schema,
+                        sql_traits::structs::IdentifierCase::AsWritten,
+                    )
+                },
+            );
         let scoped = index_scope.as_ref().map(|scope| options.with_scope(scope));
         let options = scoped.as_ref().unwrap_or(options);
         let sqlite_table_name =

@@ -46,6 +46,37 @@ fn sqlite_accepts(stmts: &[String]) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+#[test]
+fn temporary_definition_columns_keep_generated_values_and_checks() {
+    let statements = translate(
+        r#"CREATE TEMP TABLE "Docs" (
+            "Id" INT PRIMARY KEY,
+            quantity INT DEFAULT 2 CHECK (quantity > 0),
+            total INT GENERATED ALWAYS AS ("Id" + quantity) STORED
+        );"#,
+    )
+    .unwrap();
+    let connection = Connection::open_in_memory().unwrap();
+    for statement in statements {
+        connection.execute_batch(&statement).unwrap();
+    }
+    connection.execute(r#"INSERT INTO temp."Docs" ("Id") VALUES (23)"#, []).unwrap();
+    let error = connection
+        .execute(r#"INSERT INTO temp."Docs" ("Id", quantity) VALUES (41, -1)"#, [])
+        .unwrap_err();
+    assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::ConstraintViolation));
+    let rows = connection
+        .prepare(r#"SELECT "Id", quantity, total FROM temp."Docs" ORDER BY "Id""#)
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, [(23, 2, 25)]);
+}
+
 // ---------------------------------------------------------------------------
 // ALTER TABLE RENAME TO
 // ---------------------------------------------------------------------------

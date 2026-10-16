@@ -99,7 +99,11 @@ fn reverse_expr_in_table(
         )
         .expect("table lookup should succeed")
         .expect("the fixture declares the table");
-    let scope = sql_traits::structs::ColumnScope::for_table(relation, schema);
+    let scope = sql_traits::structs::ColumnScope::for_table(
+        relation,
+        schema,
+        sql_traits::structs::IdentifierCase::AsWritten,
+    );
     let base = pg2sqlite::options::TranslationContext::new(options);
     let context = base.with_scope(&scope);
     expr.reverse_translate(schema, &context)
