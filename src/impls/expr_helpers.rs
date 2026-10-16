@@ -258,12 +258,13 @@ pub(crate) fn try_map_expr_children<E>(
             })?
         }
 
-        Expr::InList { expr: inner, list, negated } => {
+        Expr::InList { expr: inner, list, negated, global } => {
             rebuild(|| {
                 Ok(Expr::InList {
                     expr: Box::new(f(inner)?),
                     list: list.iter().map(&mut *f).collect::<Result<_, _>>()?,
                     negated: *negated,
+                    global: *global,
                 })
             })?
         }
@@ -409,12 +410,13 @@ pub(crate) fn try_map_expr_children<E>(
                 Ok(Expr::Exists { subquery: Box::new(f_query(subquery)?), negated: *negated })
             })?
         }
-        Expr::InSubquery { expr: inner, subquery, negated } => {
+        Expr::InSubquery { expr: inner, subquery, negated, global } => {
             rebuild(|| {
                 Ok(Expr::InSubquery {
                     expr: Box::new(f(inner)?),
                     subquery: Box::new(f_query(subquery)?),
                     negated: *negated,
+                    global: *global,
                 })
             })?
         }

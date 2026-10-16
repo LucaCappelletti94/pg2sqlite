@@ -3050,8 +3050,7 @@ pub(crate) fn translate_update<D: TranslationDirection>(
 ) -> Result<sqlparser::ast::Update, Error> {
     if D::IS_FORWARD && !update.table.joins.is_empty() {
         return Err(Error::forward_refusal(
-            "UPDATE with joins on the target table is not supported in SQLite. \
-             Use UPDATE ... FROM ... instead."
+            "UPDATE with joins on the target table is not supported in SQLite. Use UPDATE ... FROM ... instead."
                 .to_string(),
         ));
     }
@@ -3150,6 +3149,8 @@ pub(crate) fn translate_update<D: TranslationDirection>(
         or: update.or,
         order_by: update.order_by.clone(),
         limit,
+        on_cluster: update.on_cluster.clone(),
+        settings: update.settings.clone(),
     };
 
     // Route ST_* WHERE predicates through the rtree shadow via IN-subquery.
@@ -3314,7 +3315,11 @@ pub(crate) fn translate_select_forward(
     let scope_query =
         scope_query_after_factor_rewrites(select, &from, options.cte_clause().cloned());
     if let Some(scope_query) = scope_query {
-        let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
+        let scope = sql_traits::structs::ColumnScope::from_query(
+            &scope_query,
+            schema,
+            sql_traits::structs::IdentifierCase::AsWritten,
+        )?;
         let scoped = options.with_scope(&scope);
         return translate_select_with_from::<Forward>(select, schema, &scoped, emit, from);
     }
@@ -3469,6 +3474,7 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
             let scope = sql_traits::structs::ColumnScope::from_query(
                 scope_substitute.as_ref().unwrap_or(&scope_query),
                 schema,
+                sql_traits::structs::IdentifierCase::AsWritten,
             )?;
             let scoped = D::with_scope(options, &scope);
             SetExpr::Select(Box::new(translate_select_shared::<D>(select, schema, &scoped, emit)?))

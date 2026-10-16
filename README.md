@@ -10,6 +10,8 @@ A Rust library that translates PostgreSQL SQL into valid, runnable SQLite. It pa
 
 The contract is strict. Every returned statement is valid SQLite, an unimplemented equivalent is an explicit `Err` rather than SQL that fails at runtime, and constructs with no SQLite meaning (`CREATE FUNCTION`, `GRANT`, `COMMENT`, and similar) are dropped, reported as warnings by `translate_with_report` and left out silently by plain `translate`. Nothing that merely looks valid passes through, and the test suite checks behavior by executing the emitted SQL against SQLite rather than matching strings.
 
+`CREATE TEMPORARY TABLE` binds definition expressions to its declared columns and preserves the temporary modifier.
+
 The rewrites go beyond types. Row-Level Security becomes a renamed backing table, a view enforcing the `USING` clause, and `INSTEAD OF` triggers. A GIN `to_tsvector` index becomes an FTS5 virtual table with sync triggers. pgvector maps to [sqlite-vec](https://github.com/asg017/sqlite-vec) and PostGIS to the [SQLiteGIS](https://github.com/LucaCappelletti94/sqlitegis) extension. PL/pgSQL trigger bodies become SQLite trigger syntax, and SQLite DML translates back to PostgreSQL to sync replicas upstream. The crate is `no_std + alloc` and compiles for `wasm32-unknown-unknown`.
 
 ## Quick start

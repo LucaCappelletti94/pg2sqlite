@@ -12,11 +12,12 @@ use alloc::{
 };
 
 use sql_traits::{
-    structs::{IdentifierCase, ParserDB},
+    errors::LookupError,
+    structs::{IdentifierCase, ParserDB, TargetName},
     traits::{DatabaseLike, TableLike},
     utils::identifier_resolution::identifiers_match,
 };
-use sqlparser::ast::{Ident, ObjectName, ObjectNamePart, TriggerEvent};
+use sqlparser::ast::{CreateTable, Ident, ObjectName, ObjectNamePart, TriggerEvent};
 
 use crate::errors::Error;
 
@@ -210,6 +211,20 @@ pub(crate) fn resolve_translation_table<'a>(
 ) -> Result<Option<&'a <ParserDB as DatabaseLike>::Table>, Error> {
     validate_schema_qualified_object_name_for_sqlite(schema, name)?;
     Ok(schema.resolve_table_object_name(name)?)
+}
+
+/// Resolves a table declaration to the catalogue node for its stored owner.
+pub(crate) fn resolve_declared_table<'a>(
+    schema: &'a ParserDB,
+    create_table: &CreateTable,
+) -> Result<Option<&'a CreateTable>, LookupError> {
+    let target = TargetName::new(create_table.table_name(), create_table.table_name_is_quoted());
+    let target = match create_table.table_schema() {
+        Some(schema_name) => target.with_schema(schema_name, create_table.table_schema_is_quoted()),
+        None if create_table.temporary => target.with_schema("pg_temp", false),
+        None => target,
+    };
+    schema.table_by_target(target, IdentifierCase::AsWritten)
 }
 
 /// Returns whether a resolved translation table has row level security.

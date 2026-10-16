@@ -152,6 +152,7 @@ pub(crate) fn array_overlap(left: Expr, right: Expr) -> Expr {
             None,
         )),
         negated: false,
+        global: false,
     };
 
     Expr::Exists {

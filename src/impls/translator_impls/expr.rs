@@ -240,6 +240,7 @@ fn translate_fts_expression(
             }),
         )),
         negated: false,
+        global: false,
     })
 }
 
@@ -507,6 +508,7 @@ fn string_set_membership(expr: Expr, values: &[&str]) -> Expr {
         expr: Box::new(expr),
         list: values.iter().map(|value| string_literal(value)).collect(),
         negated: false,
+        global: false,
     }
 }
 
@@ -1756,6 +1758,7 @@ fn translate_any_all_to_in(
             expr: Box::new(translated_left),
             subquery: Box::new(q.translate_with_warnings(schema, options, emit)?),
             negated,
+            global: false,
         });
     }
     if let Some(elements) = quantifier_elements(right) {
@@ -1768,6 +1771,7 @@ fn translate_any_all_to_in(
                 .map(|e| scale_or_translate(e, scale, schema, options, emit))
                 .collect::<Result<Vec<_>, _>>()?,
             negated,
+            global: false,
         });
     }
 
@@ -2088,6 +2092,7 @@ fn array_containment(haystack: Expr, needle: Expr) -> Expr {
         expr: Box::new(Expr::Identifier(Ident::new("value"))),
         subquery: haystack_values,
         negated: true,
+        global: false,
     };
     let inner = single_expr_query(
         integer_literal(1),
@@ -3311,7 +3316,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     _ => translated,
                 }
             }
-            Expr::InList { expr: operand, list, negated } => {
+            Expr::InList { expr: operand, list, negated, global } => {
                 rebuild(|| {
                     let scale = scale_of(operand, schema, options).filter(|scale| *scale > 0);
                     Ok::<Expr, crate::errors::Error>(Expr::InList {
@@ -3328,6 +3333,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                             })
                             .collect::<Result<Vec<_>, crate::errors::Error>>()?,
                         negated: *negated,
+                        global: *global,
                     })
                 })?
             }
@@ -4273,6 +4279,7 @@ fn translate_is_json(
                         expr: Box::new(type_of),
                         list: vec![string_literal("array"), string_literal("object")],
                         negated: true,
+                        global: false,
                     }
                 }
                 JsonPredicateType::Value => unreachable!("handled above"),

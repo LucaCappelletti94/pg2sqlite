@@ -66,8 +66,14 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
         // A constraint check, a computed column and a default all name this
         // table's own columns, and there is no query around them, so the table
         // being defined is the scope every expression below resolves against.
-        let table_scope = crate::impls::object_name::resolve_translation_table(schema, &self.name)?
-            .map(|table| sql_traits::structs::ColumnScope::for_table(table, schema));
+        let table_scope =
+            crate::impls::object_name::resolve_declared_table(schema, self)?.map(|table| {
+                sql_traits::structs::ColumnScope::for_table(
+                    table,
+                    schema,
+                    sql_traits::structs::IdentifierCase::AsWritten,
+                )
+            });
         let scoped = table_scope.as_ref().map(|scope| options.with_scope(scope));
         let options = scoped.as_ref().unwrap_or(options);
         // LIKE t is the most dangerous unsupported clause: SQLite would parse

@@ -88,7 +88,11 @@ impl ReverseTranslator for Update {
             ));
         }
         let scope_query = update_scope_query(self);
-        let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
+        let scope = sql_traits::structs::ColumnScope::from_query(
+            &scope_query,
+            schema,
+            sql_traits::structs::IdentifierCase::AsWritten,
+        )?;
         let scoped = options.with_scope(&scope);
         let mut translated = translate_update::<Reverse>(self, schema, &scoped, &mut |_| {})?;
         // Unscale integer literals assigned to NUMERIC columns.

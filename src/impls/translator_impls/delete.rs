@@ -45,8 +45,11 @@ impl crate::traits::translator::TranslatorWithContext for Delete {
         // and a query inside the statement attaches its own scope over this
         // one, so an outer reference still resolves.
         let scope_query = delete_scope_query(self);
-        let target_scope =
-            Some(sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?);
+        let target_scope = Some(sql_traits::structs::ColumnScope::from_query(
+            &scope_query,
+            schema,
+            sql_traits::structs::IdentifierCase::AsWritten,
+        )?);
         let scoped = target_scope.as_ref().map(|scope| options.with_scope(scope));
         let options = scoped.as_ref().unwrap_or(options);
         let (selection, from, returning, order_by, limit) =

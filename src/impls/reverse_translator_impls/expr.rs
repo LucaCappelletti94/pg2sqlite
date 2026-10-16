@@ -335,6 +335,7 @@ fn reverse_in_list(
     operand: &Expr,
     list: &[Expr],
     negated: bool,
+    global: bool,
     schema: &ParserDB,
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
@@ -349,6 +350,7 @@ fn reverse_in_list(
             })
             .collect::<Result<Vec<_>, _>>()?,
         negated,
+        global,
     })
 }
 
@@ -483,8 +485,8 @@ impl ReverseTranslator for Expr {
                 retype_binary_operands(reversed, left, right, schema, options)
             }
 
-            Expr::InList { expr: operand, list, negated } => {
-                reverse_in_list(operand, list, *negated, schema, options)
+            Expr::InList { expr: operand, list, negated, global } => {
+                reverse_in_list(operand, list, *negated, *global, schema, options)
             }
 
             Expr::Between { expr: operand, negated, low, high } => {

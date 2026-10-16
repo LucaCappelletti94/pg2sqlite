@@ -176,6 +176,7 @@ impl ReverseTranslator for Query {
         let scope = sql_traits::structs::ColumnScope::from_query(
             scope_substitute.as_ref().unwrap_or(query),
             schema,
+            sql_traits::structs::IdentifierCase::AsWritten,
         )?;
         let scoped = options.with_scope(&scope);
         let noted = scoped.with_cte_clause(query.with.as_ref().or_else(|| scoped.cte_clause()));
@@ -199,7 +200,11 @@ impl ReverseTranslator for SetExpr {
                 options.cte_clause().cloned(),
                 SetExpr::Select(select.clone()),
             );
-            let scope = sql_traits::structs::ColumnScope::from_query(&scope_query, schema)?;
+            let scope = sql_traits::structs::ColumnScope::from_query(
+                &scope_query,
+                schema,
+                sql_traits::structs::IdentifierCase::AsWritten,
+            )?;
             let scoped = options.with_scope(&scope);
             return translate_set_expr_shared::<Reverse>(self, schema, &scoped, &mut |_| {});
         }
