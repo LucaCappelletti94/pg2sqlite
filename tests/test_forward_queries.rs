@@ -8,7 +8,7 @@ mod translate_helpers;
 use diesel::{RunQueryDsl, SqliteConnection, prelude::*};
 use helpers::translate_statements;
 use pg2sqlite::{
-    errors::{Error, RefusalCategory},
+    errors::{Error, RefusalCategory, TranslationDirection},
     options::Pg2SqliteOptions,
     prelude::{Pg2Sqlite, Translator},
 };
@@ -418,6 +418,51 @@ fn order_by_expr_translation_rejects_with_fill_clause() {
             if refusal.category() == RefusalCategory::UnsupportedSourceSyntax
                 && refusal.detail() == "WITH FILL in ORDER BY"
     ));
+}
+
+/// SQLite's `USING` takes no alias, so PostgreSQL's `USING (...) AS j` is
+/// refused wherever the join sits.
+#[test]
+fn join_using_alias_is_refused_forward() {
+    for tail in [
+        "SELECT j.id FROM users JOIN posts USING (id) AS j;",
+        "SELECT j.id FROM users LEFT JOIN posts USING (id) AS j;",
+        "SELECT name FROM users WHERE id IN \
+         (SELECT j.id FROM posts JOIN comments USING (id) AS j);",
+    ] {
+        let error = Pg2Sqlite::default()
+            .sql(&format!("{SCHEMA}\n{tail}"))
+            .unwrap()
+            .translate(&Pg2SqliteOptions::default())
+            .expect_err(tail);
+        let Error::TranslationRefusal(refusal) = error else {
+            panic!("expected a refusal for {tail}: {error}");
+        };
+        assert_eq!(refusal.direction(), TranslationDirection::PostgreSqlToSqlite);
+        assert_eq!(refusal.category(), RefusalCategory::UnrepresentableSemantics);
+        assert!(refusal.detail().contains("USING (id) AS j"), "{tail}: {}", refusal.detail());
+    }
+}
+
+/// SQLite rejects `USING (...) AS j`, so a SQLite input carrying it is not
+/// SQLite and is refused rather than passed on to PostgreSQL.
+#[test]
+fn join_using_alias_is_refused_reverse() {
+    let translator = Pg2Sqlite::default().sql(SCHEMA).unwrap();
+    let schema = translator.build_schema().unwrap();
+    let error = translator
+        .reverse_sql(
+            "SELECT j.id FROM users JOIN posts USING (id) AS j",
+            &schema,
+            &Pg2SqliteOptions::default(),
+        )
+        .expect_err("SQLite has no join alias");
+    let Error::TranslationRefusal(refusal) = error else {
+        panic!("expected a refusal: {error}");
+    };
+    assert_eq!(refusal.direction(), TranslationDirection::SqliteToPostgreSql);
+    assert_eq!(refusal.category(), RefusalCategory::UnsupportedSourceSyntax);
+    assert!(refusal.detail().contains("USING (id) AS j"), "{}", refusal.detail());
 }
 
 #[test]
