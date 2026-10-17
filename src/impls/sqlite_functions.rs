@@ -205,6 +205,37 @@ pub(crate) fn classify(name: &str) -> NameClass {
     }
 }
 
+/// Matches a PostgreSQL inventory name under identifier case rules.
+pub(crate) fn postgres_has_name(name: &str, quoted: bool) -> bool {
+    let compare = |known: &&str| {
+        known
+            .bytes()
+            .cmp(name.bytes().map(|byte| if quoted { byte } else { byte.to_ascii_lowercase() }))
+    };
+    SHARED_WITH_POSTGRES.binary_search_by(compare).is_ok()
+        || POSTGRES_DIFFERENT_SEMANTICS.binary_search_by(compare).is_ok()
+        || POSTGRES_ONLY.binary_search_by(compare).is_ok()
+}
+
+const POSTGRES_DIFFERENT_SEMANTICS: &[&str] = &[
+    "char",
+    "date",
+    "format",
+    "json_array_length",
+    "json_each",
+    "json_object",
+    "jsonb_insert",
+    "jsonb_object",
+    "jsonb_set",
+    "like",
+    "ltrim",
+    "max",
+    "min",
+    "random",
+    "rtrim",
+    "time",
+];
+
 /// SQLite names PostgreSQL answers the same way, which are therefore the only
 /// ones the reverse direction may emit unchanged.
 ///

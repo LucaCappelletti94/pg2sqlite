@@ -1,24 +1,4 @@
-//! Which written form of a name this crate may claim as a PostgreSQL built-in.
-//!
-//! The translator used to read the last segment of a function or type name,
-//! lowercase it, and look that up, which made three different names one:
-//!
-//! - `"RANDOM"()`, a function the script defines itself and which returns 42 in
-//!   PostgreSQL 17.3, came out as the built-in random-fraction rewrite.
-//! - `app.random()`, returning 7 in PostgreSQL, came out the same way.
-//! - `SELECT app.upper(name)` passed through untouched, and SQLite refuses that
-//!   with `near "(": syntax error`, since it has no schema-qualified function
-//!   call at all. Even `main.abs(-1)` over a real attached database is a syntax
-//!   error.
-//!
-//! PostgreSQL keeps the capitals of a delimited identifier, so only a spelling
-//! that quoting leaves alone can name a catalogue entry. Measured on 17.3:
-//! `"random"()` and `pg_catalog.now()` resolve to the built-ins, `"NOW"()` does
-//! not exist.
-//!
-//! Types take the quoting half of that rule and not the prefix half, because an
-//! extension may be installed into a named schema, which is why
-//! `public.vector` maps to `BLOB` and must keep doing so.
+//! Function and type names preserve schema qualification and quoted case.
 mod helpers;
 use helpers::translate_pg as translate;
 use pg2sqlite::prelude::Pg2SqliteOptions;
@@ -54,24 +34,6 @@ CREATE SCHEMA app;
 CREATE FUNCTION app.random() RETURNS INT AS $$ SELECT 7 $$ LANGUAGE sql;
 SELECT app.random();
 ";
-
-#[test]
-fn a_quoted_name_carrying_a_capital_is_not_the_builtin() {
-    let message = refusal(OWN_RANDOM, &Pg2SqliteOptions::default());
-    assert!(
-        message.contains("RANDOM") && message.contains("with_user_defined_functions"),
-        "the refusal should name the function and the way to declare it, got: {message}"
-    );
-}
-
-#[test]
-fn a_schema_qualified_call_is_refused_for_want_of_syntax() {
-    let message = refusal(QUALIFIED_RANDOM, &Pg2SqliteOptions::default());
-    assert!(
-        message.contains("app.random") && message.contains("qualified"),
-        "the refusal should name the call and why SQLite cannot carry it, got: {message}"
-    );
-}
 
 #[test]
 fn a_schema_qualified_call_naming_a_sqlite_function_is_refused_too() {

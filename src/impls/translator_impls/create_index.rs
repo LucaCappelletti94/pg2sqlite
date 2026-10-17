@@ -558,6 +558,9 @@ impl crate::traits::translator::TranslatorWithContext for CreateIndex {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        let function_context =
+            options.allows_function_queries().then(|| options.without_function_queries());
+        let options = function_context.as_ref().unwrap_or(options);
         // An index expression and a partial index predicate name the indexed
         // table's own columns, with no query around them.
         let index_scope =

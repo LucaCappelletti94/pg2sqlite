@@ -3321,8 +3321,11 @@ pub(crate) fn translate_select_forward(
             sql_traits::structs::IdentifierCase::AsWritten,
         )?;
         let scoped = options.with_scope(&scope);
-        return translate_select_with_from::<Forward>(select, schema, &scoped, emit, from);
+        let related = scoped.with_call_relations(&select.from);
+        return translate_select_with_from::<Forward>(select, schema, &related, emit, from);
     }
+    let related = (!select.from.is_empty()).then(|| options.with_call_relations(&select.from));
+    let options = related.as_ref().unwrap_or(options);
     translate_select_with_from::<Forward>(select, schema, options, emit, from)
 }
 

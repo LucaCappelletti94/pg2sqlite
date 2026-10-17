@@ -185,6 +185,10 @@ pub struct TranslationContext<'a> {
     variables: &'a [String],
     /// Whether every relation available to the input is present in the schema.
     schema_is_complete: bool,
+    /// Caller relations expose qualifiers for bare references.
+    call_relations: &'a [sqlparser::ast::TableWithJoins],
+    /// Whether SQL-function query bodies can retain their call-site semantics.
+    function_queries_allowed: bool,
 }
 
 impl<'a> TranslationContext<'a> {
@@ -200,6 +204,8 @@ impl<'a> TranslationContext<'a> {
             with: None,
             variables: &[],
             schema_is_complete: false,
+            call_relations: &[],
+            function_queries_allowed: true,
         }
     }
     pub(crate) fn with_complete_schema(options: &'a Pg2SqliteOptions) -> Self {
@@ -218,6 +224,8 @@ impl<'a> TranslationContext<'a> {
             with: None,
             variables: &[],
             schema_is_complete: false,
+            call_relations: &[],
+            function_queries_allowed: true,
         }
     }
 
@@ -243,6 +251,8 @@ impl<'a> TranslationContext<'a> {
             with: self.with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
+            call_relations: &[],
+            function_queries_allowed: self.function_queries_allowed,
         }
     }
     pub(crate) fn with_pseudo_row_scope<'s>(
@@ -257,6 +267,8 @@ impl<'a> TranslationContext<'a> {
             with: self.with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
+            call_relations: &[],
+            function_queries_allowed: self.function_queries_allowed,
         }
     }
 
@@ -272,6 +284,8 @@ impl<'a> TranslationContext<'a> {
             with: self.with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
+            call_relations: &[],
+            function_queries_allowed: self.function_queries_allowed,
         }
     }
 
@@ -288,6 +302,8 @@ impl<'a> TranslationContext<'a> {
             with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
+            call_relations: self.call_relations,
+            function_queries_allowed: self.function_queries_allowed,
         }
     }
 
@@ -301,6 +317,8 @@ impl<'a> TranslationContext<'a> {
             with: self.with,
             variables,
             schema_is_complete: self.schema_is_complete,
+            call_relations: self.call_relations,
+            function_queries_allowed: self.function_queries_allowed,
         }
     }
 
@@ -319,6 +337,152 @@ impl<'a> TranslationContext<'a> {
     #[must_use]
     pub(crate) fn cte_clause(&self) -> Option<&sqlparser::ast::With> {
         self.with
+    }
+
+    /// Attaches the caller's `FROM` bindings at this context level.
+    #[must_use]
+    pub(crate) fn with_call_relations<'s>(
+        &'s self,
+        relations: &'s [sqlparser::ast::TableWithJoins],
+    ) -> TranslationContext<'s> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: self.scope,
+            outer: self.outer,
+            with: self.with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+            call_relations: relations,
+            function_queries_allowed: self.function_queries_allowed,
+        }
+    }
+
+    /// Disallows query-bodied SQL calls where evaluation semantics are
+    /// unproven.
+    pub(crate) fn without_function_queries(&self) -> TranslationContext<'_> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: self.scope,
+            outer: self.outer,
+            with: self.with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+            call_relations: self.call_relations,
+            function_queries_allowed: false,
+        }
+    }
+
+    pub(crate) const fn allows_function_queries(&self) -> bool {
+        self.function_queries_allowed
+    }
+
+    /// Returns the visible relation binding for a bare caller column.
+    pub(crate) fn resolve_caller_relation<'s>(
+        &'s self,
+        reference: &sqlparser::ast::Ident,
+    ) -> Result<Option<&'s sqlparser::ast::Ident>, sql_traits::errors::LookupError> {
+        fn visit_factor<'s>(
+            factor: &'s sqlparser::ast::TableFactor,
+            scope: &ColumnScope<'_, '_, ParserDB>,
+            reference: &sqlparser::ast::Ident,
+            visible: &mut Option<&'s sqlparser::ast::Ident>,
+        ) -> Result<(), sql_traits::errors::LookupError> {
+            use sqlparser::ast::TableFactor;
+
+            let binding = match factor {
+                TableFactor::Table { alias: Some(alias), .. }
+                | TableFactor::Derived { alias: Some(alias), .. }
+                | TableFactor::NestedJoin { alias: Some(alias), .. } => Some(&alias.name),
+                TableFactor::Table { name, alias: None, .. } => {
+                    crate::impls::object_name::last_ident(name)
+                }
+                TableFactor::NestedJoin { table_with_joins, alias: None } => {
+                    for nested in core::iter::once(&table_with_joins.relation)
+                        .chain(table_with_joins.joins.iter().map(|join| &join.relation))
+                    {
+                        visit_factor(nested, scope, reference, visible)?;
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(binding) = binding
+                && scope
+                    .resolve_column_definition(&sqlparser::ast::Expr::CompoundIdentifier(vec![
+                        binding.clone(),
+                        reference.clone(),
+                    ]))?
+                    .is_some()
+                && let Some(previous) = visible.replace(binding)
+            {
+                return Err(sql_traits::errors::LookupError::AmbiguousTableLookup {
+                    object_name: reference.value.clone(),
+                    candidates: vec![previous.value.clone(), binding.value.clone()],
+                });
+            }
+            Ok(())
+        }
+
+        let mut context = self;
+        loop {
+            let scope = match context.scope {
+                Some(TranslationScope::Query { scope, pseudo_row: false }) => scope,
+                Some(TranslationScope::Definition(scope)) => {
+                    if let Some(definition) = scope.resolve_column_definition(
+                        &sqlparser::ast::Expr::Identifier(reference.clone()),
+                    )? {
+                        return Ok(match definition {
+                            ColumnDefinition::Base { table, .. } => {
+                                crate::impls::object_name::last_ident(&table.name)
+                            }
+                            _ => None,
+                        });
+                    }
+                    context = match context.outer {
+                        Some(outer) => outer,
+                        None => return Ok(None),
+                    };
+                    continue;
+                }
+                _ => {
+                    match context.outer {
+                        Some(outer) => {
+                            context = outer;
+                            continue;
+                        }
+                        None => return Ok(None),
+                    }
+                }
+            };
+            let Some(definition) = scope
+                .resolve_column_definition(&sqlparser::ast::Expr::Identifier(reference.clone()))?
+            else {
+                context = match context.outer {
+                    Some(outer) => outer,
+                    None => return Ok(None),
+                };
+                continue;
+            };
+            let mut visible = None;
+            for relation in context.call_relations {
+                for factor in core::iter::once(&relation.relation)
+                    .chain(relation.joins.iter().map(|join| &join.relation))
+                {
+                    visit_factor(factor, scope, reference, &mut visible)?;
+                }
+            }
+            if visible.is_some() || !context.call_relations.is_empty() {
+                return Ok(visible);
+            }
+            return Ok(match definition {
+                ColumnDefinition::Base { table, .. } => {
+                    crate::impls::object_name::last_ident(&table.name)
+                }
+                _ => None,
+            });
+        }
     }
     /// The scopes a reference may resolve against, innermost first.
     pub(crate) fn column_definitions<'s>(

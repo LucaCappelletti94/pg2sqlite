@@ -1735,6 +1735,10 @@ impl crate::traits::translator::TranslatorWithContext for Function {
             )));
         }
 
+        if let Some(expanded) = super::sql_function::try_expand_call(self, schema, options, emit)? {
+            return expanded.translate_with_warnings(schema, options, emit);
+        }
+
         // SQLite 3.25 added native FILTER (WHERE ...) for aggregates; our floor
         // is 3.46, so CASE lowering is never needed. Translate the filter
         // expression now so every arm can keep it natively.
