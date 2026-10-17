@@ -15,7 +15,8 @@ use alloc::{
 
 use sqlparser::ast::{
     ColumnOption, ColumnOptionDef, CreateTable, CreateTableOptions, HiveDistributionStyle,
-    OnCommit, PrimaryKeyConstraint, TableConstraint, WithData,
+    OnCommit, PrimaryKeyConstraint, SqliteTableOption, SqliteTableOptions, TableConstraint,
+    WithData,
 };
 
 use crate::{
@@ -244,11 +245,14 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
                 .collect(),
             query,
             // SQLite STRICT mode enforces type checking (not valid on CTAS).
-            strict: !is_ctas,
+            // The source carries no table options, refused above.
+            sqlite_table_options: SqliteTableOptions {
+                leading_comma: false,
+                options: if is_ctas { Vec::new() } else { vec![SqliteTableOption::Strict] },
+            },
             // Legal in both databases and carried through unchanged.
             temporary: self.temporary,
             if_not_exists: self.if_not_exists,
-            without_rowid: self.without_rowid,
             // Cleared with a warning above when present.
             unlogged: false,
             global: None,
@@ -361,6 +365,8 @@ impl crate::traits::translator::TranslatorWithContext for CreateTable {
 fn reject_foreign_create_table_modifiers(
     create_table: &CreateTable,
 ) -> Result<(), crate::errors::Error> {
+    // The one refused clause whose text depends on the input.
+    let sqlite_options_clause: String;
     let foreign = if create_table.global.is_some() && !create_table.temporary {
         // PostgreSQL only accepts GLOBAL and LOCAL immediately before
         // TEMPORARY, measured on 16.
@@ -474,6 +480,14 @@ fn reject_foreign_create_table_modifiers(
         Some("FALLBACK, which is Teradata")
     } else if matches!(create_table.with_data, Some(WithData { statistics: Some(_), .. })) {
         Some("AND STATISTICS, which is Teradata")
+    } else if !create_table.sqlite_table_options.options.is_empty() {
+        let options = &create_table.sqlite_table_options.options;
+        sqlite_options_clause = format!(
+            "the SQLite table {} {}",
+            if options.len() == 1 { "option" } else { "options" },
+            options.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+        );
+        Some(sqlite_options_clause.as_str())
     } else {
         None
     };
