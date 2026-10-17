@@ -2734,26 +2734,33 @@ fn translate_binary_op(
         return Ok(simple_function_expr("pow", vec![l, r], None));
     }
 
-    // # is PostgreSQL bitwise XOR; SQLite has no # token.
-    // (a | b) - (a & b) equals a XOR b exactly for all integers.
+    // # is PostgreSQL bitwise XOR, which SQLite lacks, so it lowers to (a | b)
+    // - (a & b).
     if *op == BinaryOperator::PGBitwiseXor {
-        let l = left.translate_with_warnings(schema, options, emit)?;
-        let r = right.translate_with_warnings(schema, options, emit)?;
-        let or_expr = Expr::Nested(Box::new(Expr::BinaryOp {
-            left: Box::new(l.clone()),
-            op: BinaryOperator::BitwiseOr,
-            right: Box::new(r.clone()),
-        }));
-        let and_expr = Expr::Nested(Box::new(Expr::BinaryOp {
-            left: Box::new(l),
-            op: BinaryOperator::BitwiseAnd,
-            right: Box::new(r),
-        }));
-        return Ok(Expr::BinaryOp {
-            left: Box::new(or_expr),
-            op: BinaryOperator::Minus,
-            right: Box::new(and_expr),
-        });
+        let translated = [
+            left.translate_with_warnings(schema, options, emit)?,
+            right.translate_with_warnings(schema, options, emit)?,
+        ];
+        return crate::impls::bind_once::bind_once(
+            "#",
+            [left, right],
+            translated,
+            options,
+            |[l, r]| {
+                let operator = |op| {
+                    Expr::Nested(Box::new(Expr::BinaryOp {
+                        left: Box::new(l.clone()),
+                        op,
+                        right: Box::new(r.clone()),
+                    }))
+                };
+                Expr::BinaryOp {
+                    left: Box::new(operator(BinaryOperator::BitwiseOr)),
+                    op: BinaryOperator::Minus,
+                    right: Box::new(operator(BinaryOperator::BitwiseAnd)),
+                }
+            },
+        );
     }
 
     // `||` is overloaded. On arrays PostgreSQL concatenates elements, on text

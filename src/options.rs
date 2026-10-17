@@ -185,6 +185,7 @@ pub struct TranslationContext<'a> {
     variables: &'a [String],
     /// Whether every relation available to the input is present in the schema.
     schema_is_complete: bool,
+    subqueries_allowed: bool,
 }
 
 impl<'a> TranslationContext<'a> {
@@ -200,6 +201,7 @@ impl<'a> TranslationContext<'a> {
             with: None,
             variables: &[],
             schema_is_complete: false,
+            subqueries_allowed: true,
         }
     }
     pub(crate) fn with_complete_schema(options: &'a Pg2SqliteOptions) -> Self {
@@ -218,6 +220,7 @@ impl<'a> TranslationContext<'a> {
             with: None,
             variables: &[],
             schema_is_complete: false,
+            subqueries_allowed: true,
         }
     }
 
@@ -243,6 +246,7 @@ impl<'a> TranslationContext<'a> {
             with: self.with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
+            subqueries_allowed: self.subqueries_allowed,
         }
     }
     pub(crate) fn with_pseudo_row_scope<'s>(
@@ -257,6 +261,7 @@ impl<'a> TranslationContext<'a> {
             with: self.with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
+            subqueries_allowed: self.subqueries_allowed,
         }
     }
 
@@ -272,6 +277,7 @@ impl<'a> TranslationContext<'a> {
             with: self.with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
+            subqueries_allowed: self.subqueries_allowed,
         }
     }
 
@@ -288,6 +294,7 @@ impl<'a> TranslationContext<'a> {
             with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
+            subqueries_allowed: self.subqueries_allowed,
         }
     }
 
@@ -301,7 +308,27 @@ impl<'a> TranslationContext<'a> {
             with: self.with,
             variables,
             schema_is_complete: self.schema_is_complete,
+            subqueries_allowed: self.subqueries_allowed,
         }
+    }
+
+    /// Restricts expression translation to a position that forbids subqueries.
+    pub(crate) fn without_subqueries(&self) -> TranslationContext<'_> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: self.scope,
+            outer: self.outer,
+            with: self.with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+            subqueries_allowed: false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn allows_subqueries(&self) -> bool {
+        self.subqueries_allowed
     }
 
     /// True when `name` is a PL/pgSQL variable rather than a column.

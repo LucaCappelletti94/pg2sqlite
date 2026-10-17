@@ -615,6 +615,8 @@ impl crate::traits::translator::TranslatorWithContext for CreateIndex {
         }
 
         report_dropped_index_clauses(self, emit);
+        let definition_options = options.without_subqueries();
+        let options = &definition_options;
 
         // Regular index - translate normally, explicitly dropping PG-only
         // fields (using, concurrently, include, nulls_distinct, with,
