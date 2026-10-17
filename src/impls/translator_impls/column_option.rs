@@ -53,6 +53,8 @@ impl crate::traits::translator::TranslatorWithContext for ColumnOptionDef {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        let definition_options = options.without_subqueries();
+        let options = &definition_options;
         match &self.option {
             ColumnOption::Unique(unique_constraint) => {
                 if let Some(characteristics) = unique_constraint.characteristics {

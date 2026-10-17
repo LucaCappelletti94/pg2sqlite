@@ -157,7 +157,8 @@ fn translate_check_constraint(
             check_constraint.expr
         )));
     }
-    match check_constraint.expr.translate_with_warnings(schema, options, emit) {
+    let options = options.without_subqueries();
+    match check_constraint.expr.translate_with_warnings(schema, &options, emit) {
         Ok(translated_expr) => {
             crate::impls::translator_impls::column_option::warn_no_inherit_dropped(
                 check_constraint,

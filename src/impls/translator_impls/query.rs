@@ -896,15 +896,15 @@ const AGGREGATE_NAMES: &[&str] = &[
     "multirange_agg",
 ];
 
+/// True when `func` names an aggregate, whether or not an `OVER` clause makes
+/// it a window call.
+pub(crate) fn is_aggregate_call(func: &Function) -> bool {
+    aggregate_function_name(func).is_some_and(|name| AGGREGATE_NAMES.contains(&name.as_str()))
+}
+
 fn is_aggregate_expression(expr: &Expr) -> bool {
     match expr {
-        Expr::Function(func) => {
-            if func.over.is_some() {
-                return false;
-            }
-            aggregate_function_name(func)
-                .is_some_and(|name| AGGREGATE_NAMES.contains(&name.as_str()))
-        }
+        Expr::Function(func) => func.over.is_none() && is_aggregate_call(func),
         Expr::BinaryOp { left, right, .. } => {
             is_aggregate_expression(left) || is_aggregate_expression(right)
         }
