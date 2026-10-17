@@ -3854,8 +3854,10 @@ pub(crate) fn translate_join_constraint<D: TranslationDirection>(
             return Err(if D::IS_FORWARD {
                 Error::forward_refusal(format!(
                     "the join alias in {clause} names the merged join columns, and SQLite's \
-                     USING takes no alias. Drop AS {alias} and refer to a merged column by its \
-                     bare name, or qualify it with one of the joined tables."
+                     USING takes no alias. Drop AS {alias} and write a merged column by its bare \
+                     name, or as coalesce over both joined tables' columns where the bare name is \
+                     ambiguous. Either table's column alone reads NULL on an outer join's \
+                     unmatched rows."
                 ))
             } else {
                 Error::reverse_unsupported_source_syntax(format!(

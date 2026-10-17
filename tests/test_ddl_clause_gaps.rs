@@ -300,8 +300,12 @@ fn sqlite_table_options_in_the_source_are_refused() {
         ("CREATE TABLE t (id INT PRIMARY KEY), STRICT;", "STRICT"),
         ("CREATE TABLE t (id INT PRIMARY KEY) WITHOUT ROWID, STRICT;", "WITHOUT ROWID, STRICT"),
     ] {
-        let error = translate(sql).expect_err(sql).to_string();
-        assert!(error.contains(option), "the refusal must name {option}: {error}");
+        let error = translate(sql).expect_err(sql);
+        let Error::TranslationRefusal(refusal) = error else {
+            panic!("expected a refusal for {sql}: {error}");
+        };
+        let detail = refusal.detail();
+        assert!(detail.contains(option), "the refusal must name {option}: {detail}");
     }
 }
 
