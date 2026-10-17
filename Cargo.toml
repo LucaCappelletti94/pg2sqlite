@@ -43,11 +43,7 @@ parking_lot = "0.12.5"
 # `optional = true` on regular dependencies. Still test-only: nothing
 # in `src/` references it unless `feature = "sqlitegis"` is set.
 [dependencies.sqlitegis]
-# 0.2.0 is the floor rather than a preference: the ellipsoid measures
-# `ST_LengthSpheroid`, `ST_AreaSpheroid` and `ST_PerimeterSpheroid` arrived in
-# 0.1.5, and 0.2.0 raises the `libsqlite3-sys` ceiling the rest of the graph
-# needs.
-version = "0.2.0"
+version = "0.3.0"
 default-features = false
 features = ["sqlite", "diesel-sqlite"]
 optional = true
