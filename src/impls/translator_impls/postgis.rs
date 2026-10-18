@@ -149,7 +149,9 @@ pub(crate) const POSTGIS_FUNCTION_CATALOG: &[(&str, i32)] = &[
     ("st_relatematch", 2),
     // -- Direct-only DDL helpers (SQLite-side) --
     ("createspatialindex", 2),
+    ("createspatialindex", 3),
     ("dropspatialindex", 2),
+    ("dropspatialindex", 3),
 ];
 
 /// Returns `true` when `(name, arity)` is implemented by SQLiteGIS. `name`

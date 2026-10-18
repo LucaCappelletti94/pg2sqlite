@@ -14,7 +14,7 @@ use alloc::{
 use core::ops::ControlFlow;
 
 use sql_traits::{
-    structs::{ColumnDefinition, ParserDB},
+    structs::{ColumnDefinition, ColumnScope, ParserDB, QueryOutput},
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
@@ -44,8 +44,8 @@ use crate::{
                 uuid_columns_of_table,
             },
             vector::{
-                is_halfvec_data_type, is_vector_data_type, maybe_wrap_text_vector_literal,
-                vector_columns_of_table,
+                halfvec_refusal, is_halfvec_data_type, is_vector_data_type,
+                maybe_wrap_text_vector_literal, vector_columns_of_table,
             },
         },
     },
@@ -339,24 +339,7 @@ pub(crate) fn scope_declines_column(
         || (bare_identifier_name(reference).is_some() && options.is_variable(column_name))
 }
 
-/// What the column `expr` names is declared as, read through the relations in
-/// scope.
-///
-/// Three answers, and the difference between the last two is what keeps a guess
-/// out of the output:
-///
-/// - `Ok(None)` when `expr` is not a column reference, so there is nothing to
-///   resolve and nothing to refuse,
-/// - `Ok(Some(_))` when the scope resolves the reference and `read_column`
-///   accepts the declaration, or `Ok(None)` when it declines it,
-/// - an error when `expr` is a reference the relations in scope cannot answer.
-///   That case used to be answered by scanning every table in the schema for a
-///   column of the same name, which reads another table's type when the names
-///   collide.
-///
-/// `read_column` sees the parsed declaration rather than `ColumnLike`'s
-/// normalised token, so it can read the structured type and the column's
-/// options, a collation among them.
+/// Resolves a column declaration and requires an inspectable definition.
 pub(crate) fn declared_in_scope<T: PartialEq>(
     expr: &Expr,
     schema: &ParserDB,
@@ -367,6 +350,36 @@ pub(crate) fn declared_in_scope<T: PartialEq>(
         &ParserDB,
         &crate::options::TranslationContext<'_>,
     ) -> Result<Option<T>, crate::errors::Error>,
+) -> Result<Option<T>, crate::errors::Error> {
+    read_scoped_declaration(expr, schema, options, read_column, read_expression, true)
+}
+
+/// Inspects a column declaration without claiming a type for opaque bindings.
+pub(crate) fn inspect_declared_in_scope<T: PartialEq>(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    read_column: impl Fn(&sqlparser::ast::ColumnDef) -> Option<T>,
+    read_expression: impl Fn(
+        &Expr,
+        &ParserDB,
+        &crate::options::TranslationContext<'_>,
+    ) -> Result<Option<T>, crate::errors::Error>,
+) -> Result<Option<T>, crate::errors::Error> {
+    read_scoped_declaration(expr, schema, options, read_column, read_expression, false)
+}
+
+fn read_scoped_declaration<T: PartialEq>(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    read_column: impl Fn(&sqlparser::ast::ColumnDef) -> Option<T>,
+    read_expression: impl Fn(
+        &Expr,
+        &ParserDB,
+        &crate::options::TranslationContext<'_>,
+    ) -> Result<Option<T>, crate::errors::Error>,
+    opaque_is_error: bool,
 ) -> Result<Option<T>, crate::errors::Error> {
     let reference = strip_nesting(expr);
     let bare_column;
@@ -408,6 +421,7 @@ pub(crate) fn declared_in_scope<T: PartialEq>(
             &read_expression,
         )? {
             DefinitionValue::Known(value) => Ok(value),
+            DefinitionValue::Opaque if !opaque_is_error => Ok(None),
             DefinitionValue::Opaque => {
                 Err(unresolved_reference(
                     reference,
@@ -480,6 +494,79 @@ fn evaluate_definition<T: PartialEq>(
             evaluate_definition(&anchor.definition(), schema, options, read_column, read_expression)
         }
         ColumnDefinition::Opaque => Ok(DefinitionValue::Opaque),
+    }
+}
+
+/// Inspects known outputs while preserving unknown wildcard widths.
+pub(crate) fn query_output_matches(
+    query: &Query,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    read_column: impl Fn(&sqlparser::ast::ColumnDef) -> bool,
+    read_expression: impl Fn(
+        &Expr,
+        &ParserDB,
+        &crate::options::TranslationContext<'_>,
+    ) -> Result<bool, Error>,
+) -> Result<bool, Error> {
+    let graph;
+    let scope = if let Some(scope) = options.query_scope(query) {
+        scope
+    } else {
+        graph = ColumnScope::from_query(
+            options.original_query().unwrap_or(query),
+            schema,
+            sql_traits::structs::IdentifierCase::AsWritten,
+        )?;
+        graph.scope_for_query(query).ok_or_else(|| {
+            Error::forward_refusal("The scalar query has no recorded output scope.".to_owned())
+        })?
+    };
+    for output in scope.output_definitions() {
+        if let QueryOutput::Column(definition) = output
+            && definition_matches(&definition, schema, options, &read_column, &read_expression)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn definition_matches(
+    definition: &ColumnDefinition<'_, '_, '_, ParserDB>,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    read_column: &impl Fn(&sqlparser::ast::ColumnDef) -> bool,
+    read_expression: &impl Fn(
+        &Expr,
+        &ParserDB,
+        &crate::options::TranslationContext<'_>,
+    ) -> Result<bool, Error>,
+) -> Result<bool, Error> {
+    match definition {
+        ColumnDefinition::Base { column, .. } => Ok(read_column(column.attribute())),
+        ColumnDefinition::Expression { expression, scope } => {
+            read_expression(expression, schema, &options.with_definition_scope(*scope))
+        }
+        ColumnDefinition::SetOperation { left, right, .. } => {
+            Ok(definition_matches(
+                &left.definition(),
+                schema,
+                options,
+                read_column,
+                read_expression,
+            )? || definition_matches(
+                &right.definition(),
+                schema,
+                options,
+                read_column,
+                read_expression,
+            )?)
+        }
+        ColumnDefinition::RecursiveUnion { anchor, .. } => {
+            definition_matches(&anchor.definition(), schema, options, read_column, read_expression)
+        }
+        ColumnDefinition::Opaque => Ok(false),
     }
 }
 
@@ -945,15 +1032,8 @@ pub(crate) fn numeric_minor_unit_scales_of_table(
         .collect()
 }
 
-/// Every column-typed rewrite a value must take before it is written into a
-/// table: a vector text literal becomes a `vec_f32` or `vec_f16` call, a uuid
-/// text literal becomes a 16-byte blob conversion under the blob
-/// representation, and a literal for a scaled `NUMERIC` column moves onto its
-/// minor-unit scale.
-///
-/// One home rather than one copy per writer. The per-assignment loop existed
-/// in three places and drifted twice: R110 found all three missing the
-/// scaling, R115 found two still missing the wraps.
+/// Storage-representation conversions applied to values written into typed
+/// columns.
 #[derive(Default)]
 pub(crate) struct ColumnRewrites {
     vector_cols: Vec<(String, bool)>,
@@ -1050,11 +1130,13 @@ impl ColumnRewrites {
             .find(|(col, _)| col.eq_ignore_ascii_case(column))
             .map(|(_, is_halfvec)| *is_halfvec)
         {
+            if is_halfvec {
+                return Err(halfvec_refusal());
+            }
             if is_param {
-                let func = if is_halfvec { "vec_f16" } else { "vec_f32" };
-                crate::impls::function_helpers::simple_function_expr(func, vec![value], None)
+                crate::impls::function_helpers::simple_function_expr("vec_f32", vec![value], None)
             } else {
-                maybe_wrap_text_vector_literal(value, is_halfvec)
+                maybe_wrap_text_vector_literal(value)
             }
         } else if self.uuid_cols.iter().any(|col| col.eq_ignore_ascii_case(column)) {
             if is_param {
@@ -1211,16 +1293,6 @@ pub(crate) fn scale_parameter(expr: Expr, scale: u32) -> Expr {
 }
 
 /// Applies the storage-representation conversion for a typed column position.
-///
-/// Takes the column's declared PostgreSQL `DataType` and the expression
-/// filling that position (already translated).  Sibling slices call this from
-/// INSERT/UPDATE/RLS; expression-position code uses
-/// `convert_beside_column_expr`.
-///
-/// Conversions: NUMERIC parameter → `CAST(ROUND(… * 10^s) AS INTEGER)`; UUID
-/// Blob → `unhex(replace(…))` or UDF; UUID Text literal → canonicalize,
-/// parameter passthrough; vector/halfvec → `vec_f32`/`vec_f16`; array
-/// parameter → refused (SQLite cannot parse PostgreSQL array text at run time).
 pub(crate) fn convert_value_for_column_type(
     data_type: &DataType,
     expr: Expr,
@@ -1254,16 +1326,17 @@ pub(crate) fn convert_value_for_column_type(
         }
     }
     if is_vector_data_type(data_type) {
-        let is_halfvec = is_halfvec_data_type(data_type);
-        let func = if is_halfvec { "vec_f16" } else { "vec_f32" };
+        if is_halfvec_data_type(data_type) {
+            return Err(halfvec_refusal());
+        }
         if is_bound_parameter(&expr) {
             return Ok(crate::impls::function_helpers::simple_function_expr(
-                func,
+                "vec_f32",
                 vec![expr],
                 None,
             ));
         }
-        return Ok(maybe_wrap_text_vector_literal(expr, is_halfvec));
+        return Ok(maybe_wrap_text_vector_literal(expr));
     }
     if matches!(data_type, DataType::Array(_)) && is_bound_parameter(&expr) {
         return Err(Error::forward_refusal(
@@ -1489,13 +1562,12 @@ pub(crate) fn column_storage(
         });
     }
     if is_vector_data_type(data_type) {
+        if is_halfvec_data_type(data_type) {
+            return Err(halfvec_refusal());
+        }
         return Ok(ColumnStorage::Vector {
             dimensions: crate::impls::translator_impls::vector::extract_dimensions(data_type),
-            element: if is_halfvec_data_type(data_type) {
-                VectorElement::Float16
-            } else {
-                VectorElement::Float32
-            },
+            element: VectorElement::Float32,
         });
     }
     if matches!(data_type, DataType::Array(_))

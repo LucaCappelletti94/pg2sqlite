@@ -55,10 +55,11 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         reject_compound_ordered_by_an_input_expression(self)?;
         let scope_substitute = crate::impls::shared_helpers::scope_query_for(self);
         let scope_query = scope_substitute.as_ref().unwrap_or(self);
-        let scope = if matches!(
-            scope_query.body.as_ref(),
-            SetExpr::Select(select) if select.from.is_empty()
-        ) {
+        let scope = if scope_query.with.is_none()
+            && matches!(
+                scope_query.body.as_ref(),
+                SetExpr::Select(select) if select.from.is_empty()
+            ) {
             None
         } else {
             Some(sql_traits::structs::ColumnScope::from_query(
@@ -67,7 +68,7 @@ impl crate::traits::translator::TranslatorWithContext for Query {
                 sql_traits::structs::IdentifierCase::AsWritten,
             )?)
         };
-        let scoped = scope.as_ref().map(|scope| options.with_scope(scope));
+        let scoped = scope.as_ref().map(|scope| options.with_query_scope(scope, self));
         let options = scoped.as_ref().unwrap_or(options);
         let noted = options.with_cte_clause(self.with.as_ref().or_else(|| options.cte_clause()));
         let options = &noted;

@@ -1,9 +1,4 @@
-//! Red tests: INSERT and UPDATE on `vector` / `halfvec` columns must wrap
-//! text-literal values with `vec_f32(...)` / `vec_f16(...)` so the BLOB
-//! STRICT main table accepts them. pgvector accepts `'[0.1,0.2,0.3]'` as
-//! input because it ships a text-input function on the `vector` type;
-//! SQLite has no equivalent coercion, so the translator has to insert the
-//! conversion call explicitly.
+//! Vector writes convert text inputs to native storage.
 
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
@@ -35,21 +30,6 @@ fn insert_into_vector_column_wraps_text_literal_with_vec_f32() {
     assert!(
         insert.contains("vec_f32('[0.1, 0.2, 0.3]')"),
         "expected vec_f32 wrap around the text literal; got: {insert}"
-    );
-    apply_vector_sql(sql);
-}
-
-#[test]
-fn insert_into_halfvec_column_wraps_text_literal_with_vec_f16() {
-    let sql = "
-        CREATE TABLE items (id INTEGER PRIMARY KEY, embedding halfvec(3));
-        INSERT INTO items (id, embedding) VALUES (1, '[0.1, 0.2, 0.3]');
-    ";
-    let out = translate(sql);
-    let insert = find_insert(&out);
-    assert!(
-        insert.contains("vec_f16('[0.1, 0.2, 0.3]')"),
-        "expected vec_f16 wrap around the text literal; got: {insert}"
     );
     apply_vector_sql(sql);
 }
@@ -195,21 +175,6 @@ fn update_set_vector_column_wraps_text_literal() {
 }
 
 #[test]
-fn update_set_halfvec_column_wraps_with_vec_f16() {
-    let sql = "
-        CREATE TABLE items (id INTEGER PRIMARY KEY, embedding halfvec(3));
-        UPDATE items SET embedding = '[0.1, 0.2, 0.3]' WHERE id = 1;
-    ";
-    let out = translate(sql);
-    let update = find_update(&out);
-    assert!(
-        update.contains("vec_f16('[0.1, 0.2, 0.3]')"),
-        "UPDATE SET on halfvec column must wrap with vec_f16; got: {update}"
-    );
-    apply_vector_sql(sql);
-}
-
-#[test]
 fn update_set_non_vector_column_not_wrapped() {
     let sql = "
         CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT, embedding vector(3));
@@ -284,37 +249,6 @@ fn apply_vector_sql(pg: &str) {
         .translate(&Pg2SqliteOptions::default())
         .expect("translate");
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    // vec0 0.1.9 requires float16[] blobs divisible by 4 (it stores them as
-    // float32 internally). helpers::register_vec_f16 produces true 2-byte f16
-    // values which vec0 rejects; register a float32-encoding shim instead.
-    conn.create_scalar_function(
-        "vec_f16",
-        1,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8
-            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            match ctx.get_raw(0) {
-                rusqlite::types::ValueRef::Null => Ok(rusqlite::types::Value::Null),
-                rusqlite::types::ValueRef::Text(t) => {
-                    let text = String::from_utf8_lossy(t);
-                    let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']');
-                    let bytes: Vec<u8> = trimmed
-                        .split(',')
-                        .filter_map(|s| s.trim().parse::<f32>().ok())
-                        .flat_map(f32::to_le_bytes)
-                        .collect();
-                    Ok(rusqlite::types::Value::Blob(bytes))
-                }
-                _ => {
-                    Err(rusqlite::Error::InvalidFunctionParameterType(
-                        0,
-                        rusqlite::types::Type::Text,
-                    ))
-                }
-            }
-        },
-    )
-    .expect("register vec_f16 float32-compat shim");
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
             .unwrap_or_else(|e| panic!("translated statement must execute: {e}\n{s}"));

@@ -49,8 +49,9 @@ use crate::{
         session_variable,
         shared_helpers::{
             declared_in_scope, declared_numeric_precision, declared_type_matches,
-            extract_column_references_from_function, function_argument_exprs, is_bound_parameter,
-            is_integral_expression, numeric_scale, referenced_column_name, rescale_minor_units,
+            extract_column_references_from_function, function_argument_exprs,
+            inspect_declared_in_scope, is_bound_parameter, is_integral_expression, numeric_scale,
+            query_output_matches, referenced_column_name, rescale_minor_units,
             scale_decimal_literal, scale_of, scale_parameter, scope_declines_column,
             translate_expr_recursive,
         },
@@ -1320,15 +1321,7 @@ crate::errors::Error::forward_refusal("AT TIME ZONE supports only literal UTC/lo
     Ok(simple_function_expr("datetime", vec![translated_timestamp, string_literal(&applied)], None))
 }
 
-/// Translate a vector type cast to the appropriate sqlite-vec function.
-///
-/// - `'[1,2,3]'::vector` → `vec_f32('[1,2,3]')` (32-bit float)
-/// - `'[1,2,3]'::halfvec` → `vec_f16('[1,2,3]')` (16-bit float)
-///
-/// The predicates come from `vector.rs`, which reads the LAST path segment of
-/// the type name, so `public.vector` counts. A local copy here read the FIRST
-/// segment, and the qualified spelling fell through to `CAST(... AS BLOB)`,
-/// which stores the text bytes as the vector.
+/// Lowers a supported vector cast to its native codec.
 fn translate_vector_cast(
     expr: &Expr,
     data_type: &DataType,
@@ -1336,27 +1329,55 @@ fn translate_vector_cast(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
+    if crate::impls::translator_impls::vector::is_halfvec_data_type(data_type) {
+        return Err(crate::impls::translator_impls::vector::halfvec_refusal());
+    }
     let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
-    let func_name = if crate::impls::translator_impls::vector::is_halfvec_data_type(data_type) {
-        "vec_f16"
-    } else {
-        "vec_f32"
-    };
-
-    Ok(simple_function_expr(func_name, vec![translated_expr], None))
+    Ok(simple_function_expr("vec_f32", vec![translated_expr], None))
 }
 
-/// Translate a pgvector distance operator to a sqlite-vec function call.
-///
-/// pgvector operators:
-/// - `<->` (LtDashGt) - Euclidean distance -> vec_distance_L2(a, b)
-/// - `<=>` (Spaceship) - Cosine distance -> vec_distance_cosine(a, b)
-/// - `<~>` (Custom) - Hamming distance -> vec_distance_hamming(a, b)
-///
-/// # Performance Note
-///
-/// sqlite-vec v0.1.x performs brute-force search (O(n)), not indexed search.
-/// ANN indexing is planned: <https://github.com/asg017/sqlite-vec/issues/25>
+fn halfvec_operand(
+    expr: &Expr,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<Option<()>, crate::errors::Error> {
+    if let Expr::Subquery(query) = expr {
+        return query_output_matches(
+            query,
+            schema,
+            options,
+            |column| {
+                crate::impls::translator_impls::vector::is_halfvec_data_type(&column.data_type)
+            },
+            |expr, schema, options| {
+                halfvec_operand(expr, schema, options).map(|value| value.is_some())
+            },
+        )
+        .map(|matched| matched.then_some(()));
+    }
+    let declared = inspect_declared_in_scope(
+        expr,
+        schema,
+        options,
+        |column| {
+            crate::impls::translator_impls::vector::is_halfvec_data_type(&column.data_type)
+                .then_some(())
+        },
+        halfvec_operand,
+    )?;
+    if declared.is_some() {
+        return Ok(declared);
+    }
+    let mut result = Ok(None);
+    for_each_child_expr(expr, &mut |child| {
+        if matches!(result, Ok(None)) {
+            result = halfvec_operand(child, schema, options);
+        }
+    });
+    result
+}
+
+/// Lowers a native vector distance without reinterpreting half-precision bytes.
 fn translate_vector_distance_op(
     left: &Expr,
     right: &Expr,
@@ -1365,6 +1386,11 @@ fn translate_vector_distance_op(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Expr, crate::errors::Error> {
+    if halfvec_operand(left, schema, options)?.is_some()
+        || halfvec_operand(right, schema, options)?.is_some()
+    {
+        return Err(crate::impls::translator_impls::vector::halfvec_refusal());
+    }
     let translated_left = left.translate_with_warnings(schema, options, emit)?;
     let translated_right = right.translate_with_warnings(schema, options, emit)?;
 
@@ -3293,6 +3319,42 @@ fn unwrap_pg_catalog_operator(parts: &[String]) -> Option<BinaryOperator> {
     })
 }
 
+fn reject_halfvec_reference(
+    expr: &Expr,
+    options: &crate::options::TranslationContext<'_>,
+) -> Result<(), crate::errors::Error> {
+    let pseudo;
+    let pseudo_reference = match expr {
+        Expr::Identifier(ident)
+            if ident.quote_style.is_none() && options.is_variable(&ident.value) =>
+        {
+            return Ok(());
+        }
+        Expr::CompoundIdentifier(parts)
+            if parts.len() == 2
+                && (parts[0].value.eq_ignore_ascii_case("NEW")
+                    || parts[0].value.eq_ignore_ascii_case("OLD")) =>
+        {
+            pseudo = Expr::Identifier(parts[1].clone());
+            Some(&pseudo)
+        }
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => None,
+        _ => return Ok(()),
+    };
+    for definition in options.column_definitions(expr, pseudo_reference) {
+        let Some(definition) = definition? else { continue };
+        if let ColumnDefinition::Base { column, .. } = definition
+            && crate::impls::translator_impls::vector::is_halfvec_data_type(
+                &column.attribute().data_type,
+            )
+        {
+            return Err(crate::impls::translator_impls::vector::halfvec_refusal());
+        }
+        break;
+    }
+    Ok(())
+}
+
 impl crate::traits::translator::TranslatorWithContext for Expr {
     type SQLiteEntry = Expr;
 
@@ -3303,6 +3365,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        reject_halfvec_reference(self, options)?;
         Ok(match self {
             // PostgreSQL's other spellings of a string literal have no SQLite
             // form: `$$hello$$` reads there as a parameter named `$hello$`,
