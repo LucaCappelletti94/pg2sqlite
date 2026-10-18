@@ -266,3 +266,21 @@ fn grouping_rewrite_rejects_non_aggregate_non_group_projection() {
         "Expected strict rewrite-shape error, got: {err}"
     );
 }
+
+#[test]
+fn grouping_rewrite_rejects_a_scalar_call_projection() {
+    let sql = format!(
+        "{}\nSELECT region, lower(product) AS item, SUM(amount) AS total
+         FROM sales
+         GROUP BY ROLLUP(region);",
+        sales_fixture_sql()
+    );
+
+    let err = Pg2Sqlite::default()
+        .sql(&sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .expect_err("a scalar call over a non-key column is not a grouped value")
+        .to_string();
+    assert!(err.contains("GROUPING SETS/ROLLUP/CUBE"), "{err}");
+}

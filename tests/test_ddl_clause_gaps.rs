@@ -570,3 +570,136 @@ fn ctas_infers_columns_and_preserves_rows() {
         .unwrap();
     assert_eq!(actual, [(10, "alpha".to_owned()), (20, "beta".to_owned())]);
 }
+
+mod subquery_positions {
+    use diesel::{connection::SimpleConnection, prelude::*, result::DatabaseErrorKind};
+
+    use super::{helpers, translate};
+
+    diesel::table! {
+        position_docs (id) {
+            id -> Integer,
+            value -> Integer,
+        }
+    }
+
+    fn database(source: &str) -> SqliteConnection {
+        let mut connection = helpers::establish_connection();
+        for statement in translate(source).unwrap() {
+            connection.batch_execute(&statement).unwrap();
+        }
+        connection
+    }
+
+    fn insert(
+        connection: &mut SqliteConnection,
+        id: i32,
+        value: i32,
+    ) -> diesel::QueryResult<usize> {
+        diesel::insert_into(position_docs::table)
+            .values((position_docs::id.eq(id), position_docs::value.eq(value)))
+            .execute(connection)
+    }
+
+    fn rows(connection: &mut SqliteConnection) -> Vec<(i32, i32)> {
+        position_docs::table
+            .select((position_docs::id, position_docs::value))
+            .order(position_docs::id)
+            .load(connection)
+            .unwrap()
+    }
+
+    #[test]
+    fn column_check_preserves_its_constraint() {
+        let mut connection = database(
+            "CREATE TABLE position_docs (
+                id INT PRIMARY KEY,
+                value INT NOT NULL CHECK (((value + 1) # 7) > 0)
+            );",
+        );
+        insert(&mut connection, 1, 23).unwrap();
+        assert!(matches!(
+            insert(&mut connection, 2, 6),
+            Err(diesel::result::Error::DatabaseError(DatabaseErrorKind::CheckViolation, _))
+        ));
+        assert_eq!(rows(&mut connection), [(1, 23)]);
+    }
+
+    #[test]
+    fn table_check_preserves_its_constraint() {
+        let mut connection = database(
+            "CREATE TABLE position_docs (
+                id INT PRIMARY KEY,
+                value INT NOT NULL,
+                CHECK (((value + 1) # 7) > 0)
+            );",
+        );
+        insert(&mut connection, 1, 23).unwrap();
+        assert!(matches!(
+            insert(&mut connection, 2, 6),
+            Err(diesel::result::Error::DatabaseError(DatabaseErrorKind::CheckViolation, _))
+        ));
+        assert_eq!(rows(&mut connection), [(1, 23)]);
+    }
+
+    #[test]
+    fn default_preserves_the_computed_value() {
+        let mut connection = database(
+            "CREATE TABLE position_docs (
+                id INT PRIMARY KEY,
+                value INT NOT NULL DEFAULT ((3 + 4) # 7)
+            );",
+        );
+        diesel::insert_into(position_docs::table)
+            .values(position_docs::id.eq(1))
+            .execute(&mut connection)
+            .unwrap();
+        assert_eq!(rows(&mut connection), [(1, 0)]);
+    }
+
+    #[test]
+    fn generated_column_preserves_the_computed_value() {
+        let mut connection = database(
+            "CREATE TABLE position_docs (
+                id INT PRIMARY KEY,
+                value INT GENERATED ALWAYS AS ((id + 1) # 7) STORED
+            );",
+        );
+        diesel::insert_into(position_docs::table)
+            .values(position_docs::id.eq(23))
+            .execute(&mut connection)
+            .unwrap();
+        assert_eq!(rows(&mut connection), [(23, 31)]);
+    }
+
+    #[test]
+    fn index_expression_preserves_uniqueness() {
+        let mut connection = database(
+            "CREATE TABLE position_docs (id INT PRIMARY KEY, value INT NOT NULL);
+             CREATE UNIQUE INDEX position_expression ON position_docs ((((value / 2) + 1) # 7));",
+        );
+        insert(&mut connection, 1, 23).unwrap();
+        assert!(matches!(
+            insert(&mut connection, 2, 22),
+            Err(diesel::result::Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _))
+        ));
+        assert_eq!(rows(&mut connection), [(1, 23)]);
+    }
+
+    #[test]
+    fn partial_index_preserves_its_row_selection() {
+        let mut connection = database(
+            "CREATE TABLE position_docs (id INT PRIMARY KEY, value INT NOT NULL);
+             CREATE UNIQUE INDEX position_partial ON position_docs (value)
+             WHERE ((value + 1) # 7) > 0;",
+        );
+        insert(&mut connection, 1, 6).unwrap();
+        insert(&mut connection, 2, 6).unwrap();
+        insert(&mut connection, 3, 23).unwrap();
+        assert!(matches!(
+            insert(&mut connection, 4, 23),
+            Err(diesel::result::Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _))
+        ));
+        assert_eq!(rows(&mut connection), [(1, 6), (2, 6), (3, 23)]);
+    }
+}

@@ -12,6 +12,7 @@ use alloc::{
 };
 
 pub(crate) mod ast_builder;
+pub(crate) mod bind_once;
 pub(crate) mod datetime_helpers;
 pub(crate) mod direction_wrappers;
 pub(crate) mod emitted_namespace;
