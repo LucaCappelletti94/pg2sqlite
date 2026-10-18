@@ -152,7 +152,7 @@ fn test_concat_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -185,7 +185,7 @@ fn test_concat_two_args() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -210,7 +210,7 @@ fn test_concat_single_arg() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -244,7 +244,7 @@ fn test_concat_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -292,7 +292,7 @@ fn test_concat_many_args_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -344,7 +344,7 @@ fn test_generated_column_translation() -> Result<(), Box<dyn std::error::Error>>
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let create_stmt = translated
         .iter()
@@ -378,7 +378,7 @@ fn test_generated_column_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -427,7 +427,7 @@ fn test_generated_column_expression() -> Result<(), Box<dyn std::error::Error>> 
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");

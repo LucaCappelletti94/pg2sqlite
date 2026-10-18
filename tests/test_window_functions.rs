@@ -445,7 +445,8 @@ fn test_filter_clause_to_case() {
         .sql(sql)
         .unwrap()
         .translate(&options)
-        .expect("translation must succeed");
+        .expect("translation must succeed")
+        .into_vec();
 
     let select_stmt = translated
         .iter()
@@ -490,7 +491,7 @@ fn test_filter_clause_aggregate_to_case() {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let select_stmt = translated
         .iter()
@@ -535,7 +536,7 @@ fn test_filter_clause_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -595,7 +596,7 @@ fn test_row_number_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -656,7 +657,7 @@ fn test_lag_lead_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -732,7 +733,7 @@ fn test_running_total_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -795,7 +796,7 @@ fn test_rank_partition_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -875,7 +876,7 @@ fn test_dense_rank_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -936,7 +937,7 @@ fn test_ntile_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -995,7 +996,7 @@ fn test_first_last_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -1063,7 +1064,7 @@ fn test_nth_value_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -1123,7 +1124,7 @@ fn test_aggregate_window_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");

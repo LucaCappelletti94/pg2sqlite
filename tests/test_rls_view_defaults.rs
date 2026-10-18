@@ -164,8 +164,12 @@ fn options() -> Pg2SqliteOptions {
 /// Applies the translated DDL. The emitted SQL is the artifact under test, so
 /// it runs as generated text; every other statement uses the typed DSL.
 fn apply(pg: &str) -> SqliteConnection {
-    let translated =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate(&options()).expect("translate");
+    let translated = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate(&options())
+        .expect("translate")
+        .into_vec();
 
     let mut conn = establish_connection();
     for statement in &translated {

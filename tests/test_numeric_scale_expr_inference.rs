@@ -273,6 +273,7 @@ fn insert_into_log(pg: &str) -> Option<String> {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .iter()
         .map(|statement| format!("{statement};"))
         .collect::<Vec<_>>()

@@ -270,7 +270,8 @@ fn rls_basic_engines_agree() {
             .sql(RLS_BASIC)
             .expect("parse rls_basic")
             .translate(&basic_options())
-            .expect("translate rls_basic");
+            .expect("translate rls_basic")
+            .into_vec();
         let mut conn = establish_connection();
         let triggers = apply_base_ddl(&mut conn, &translated);
         (BasicSqliteRunner { connection: conn, acting: ua() }, triggers)
@@ -568,7 +569,8 @@ fn rls_multiple_policies_engines_agree() {
             .sql(RLS_MULTIPLE_POLICIES)
             .expect("parse rls_multiple_policies")
             .translate(&multi_options())
-            .expect("translate rls_multiple_policies");
+            .expect("translate rls_multiple_policies")
+            .into_vec();
         let mut conn = establish_connection();
         let triggers = apply_base_ddl(&mut conn, &translated);
         (MultiSqliteRunner { connection: conn, acting: ua() }, triggers)
@@ -870,7 +872,8 @@ fn rls_tenant_isolation_engines_agree() {
             .sql(RLS_TENANT_ISOLATION)
             .expect("parse rls_tenant_isolation")
             .translate(&tenant_options())
-            .expect("translate rls_tenant_isolation");
+            .expect("translate rls_tenant_isolation")
+            .into_vec();
         let mut conn = establish_connection();
         let triggers = apply_base_ddl(&mut conn, &translated);
         (TenantSqliteRunner { connection: conn, acting: ua() }, triggers)
@@ -1204,7 +1207,8 @@ fn rls_public_access_engines_agree() {
             .sql(RLS_PUBLIC_ACCESS)
             .expect("parse rls_public_access")
             .translate(&public_options())
-            .expect("translate rls_public_access");
+            .expect("translate rls_public_access")
+            .into_vec();
         let mut conn = establish_connection();
         for stmt in &translated {
             diesel::sql_query(stmt.to_string())
@@ -1440,7 +1444,8 @@ fn rls_current_user_engines_agree() {
             .sql(RLS_CURRENT_USER)
             .expect("parse rls_current_user")
             .translate(&current_user_options())
-            .expect("translate rls_current_user");
+            .expect("translate rls_current_user")
+            .into_vec();
         let mut conn = establish_connection();
         for stmt in &translated {
             diesel::sql_query(stmt.to_string())

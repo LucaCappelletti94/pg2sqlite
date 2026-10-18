@@ -30,7 +30,7 @@ fn pk_constraint_columns_translated() {
     assert!(lower.contains("primary key"), "PRIMARY KEY should appear in output: {sql_str}");
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
         .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
@@ -53,7 +53,7 @@ fn unique_constraint_columns_translated() {
     assert!(lower.contains("unique"), "UNIQUE should appear in output: {sql_str}");
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
         .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
@@ -123,7 +123,8 @@ fn the_translatable_constraints_still_translate() {
     }
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&default_options()).unwrap();
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&default_options()).unwrap().into_vec();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
         .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
@@ -160,7 +161,8 @@ fn unique_nulls_distinct_is_translated() {
     );
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&default_options()).unwrap();
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate(&default_options()).unwrap().into_vec();
     let conn = SqliteConn::open_in_memory().unwrap();
     conn.execute_batch(&stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
         .unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));

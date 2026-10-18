@@ -7,6 +7,7 @@ fn translate(sql: &str) -> Result<String, String> {
         .sql(sql)
         .map_err(|e| e.to_string())?
         .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec)
         .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
         .map_err(|e| e.to_string())
 }
@@ -202,6 +203,7 @@ fn assert_all_stmts_parse_as_sqlite(pg_sql: &str) {
         .expect("parse")
         .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
     {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("translated statement must run in SQLite: {e}\n{stmt}"));
@@ -228,6 +230,7 @@ fn to_char_iso_year_week_day() {
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .into_iter()
         .find(|s| !s.to_string().starts_with("PRAGMA"))
         .expect("SELECT stmt")

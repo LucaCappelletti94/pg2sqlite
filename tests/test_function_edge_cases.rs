@@ -23,8 +23,12 @@ fn translate(sql: &str) -> Result<String, String> {
 }
 
 fn translate_ok(sql: &str) -> String {
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     stmts.iter().find(|s| matches!(s, sqlparser::ast::Statement::Query(_))).unwrap().to_string()
 }
 
@@ -32,8 +36,12 @@ fn translate_ok(sql: &str) -> String {
 /// in-memory SQLite. Use after a substring assert to prove the output is
 /// accepted by SQLite, not just parseable.
 fn execute_all(sql: &str) {
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     let conn = SqliteConn::open_in_memory().unwrap();
     let script = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script)
@@ -191,7 +199,8 @@ fn greatest_becomes_max() {
 fn least_still_translates_correctly() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE le_test (id INT PRIMARY KEY, a INTEGER NOT NULL, b INTEGER NOT NULL);
                SELECT LEAST(a, b) AS result FROM le_test;";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let select_sql = translated
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
@@ -235,7 +244,8 @@ fn filter_rewrite_semantic() -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE scores (id SERIAL PRIMARY KEY, value INTEGER NOT NULL);
         SELECT COUNT(value) FILTER (WHERE value > 5) AS high_count FROM scores;
     ";
-    let translated = Pg2Sqlite::default().sql(pg_sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(pg_sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
 

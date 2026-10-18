@@ -49,6 +49,7 @@ fn forward_dml(pg_dml: &str) -> String {
     let tr = Pg2Sqlite::default().sql(&format!("{PG_DDL}\n{pg_dml}")).expect("parse");
     tr.translate(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .into_iter()
         .rfind(|statement| !matches!(statement, sqlparser::ast::Statement::CreateTable(_)))
         .expect("at least one DML statement")
@@ -68,7 +69,9 @@ fn reverse(sqlite_sql: &str) -> Result<String, pg2sqlite::errors::Error> {
 /// Emitted DDL runs as text because it is the artifact under test.
 fn open_replica() -> SqliteConnection {
     let mut conn = SqliteConnection::establish(":memory:").expect("in-memory SQLite should open");
-    for stmt in pg2sqlite().translate(&Pg2SqliteOptions::default()).expect("translate DDL") {
+    for stmt in
+        pg2sqlite().translate(&Pg2SqliteOptions::default()).expect("translate DDL").into_vec()
+    {
         // Emitted DDL is the artifact under test, so it runs as text.
         diesel::sql_query(stmt.to_string())
             .execute(&mut conn)

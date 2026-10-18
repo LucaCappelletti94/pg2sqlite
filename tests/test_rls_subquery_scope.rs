@@ -159,8 +159,12 @@ fn opts_with_username() -> Pg2SqliteOptions {
 /// in-memory connection. The emitted DDL is the artifact under test, so it
 /// runs as generated text. All data operations use the typed DSL.
 fn apply(pg_sql: &str, opts: &Pg2SqliteOptions) -> SqliteConnection {
-    let stmts =
-        Pg2Sqlite::default().sql(pg_sql).expect("parse").translate(opts).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(pg_sql)
+        .expect("parse")
+        .translate(opts)
+        .expect("translate")
+        .into_vec();
     let mut conn = helpers::establish_connection();
     for stmt in &stmts {
         // Raw SQL is justified: the emitted DDL is the artifact under test.
@@ -384,7 +388,11 @@ fn mutual_unaliased_read_policies_refused_at_translation() {
             USING (EXISTS (SELECT 1 FROM a WHERE a.id = b.a_id));
     "#;
 
-    let result = Pg2Sqlite::default().sql(SQL).expect("parse").translate(&base_opts());
+    let result = Pg2Sqlite::default()
+        .sql(SQL)
+        .expect("parse")
+        .translate(&base_opts())
+        .map(pg2sqlite::script::Script::into_vec);
 
     let err = result.expect_err("mutual-reference cycle must be refused at translation");
     let msg = err.to_string();
@@ -444,6 +452,7 @@ fn an_outer_reference_inside_a_window_clause_is_rewritten() {
         .expect("parse")
         .translate_to_sql(&base_opts())
         .expect("translate")
+        .into_vec()
         .join("\n");
 
     assert!(
@@ -503,6 +512,7 @@ fn outer_reference_in_limit_is_rewritten_in_trigger() {
         .expect("parse")
         .translate_to_sql(&base_opts())
         .expect("translate")
+        .into_vec()
         .join("\n");
 
     assert!(
@@ -535,6 +545,7 @@ fn outer_reference_in_set_operation_arm_is_rewritten_in_trigger() {
         .expect("parse")
         .translate_to_sql(&base_opts())
         .expect("translate")
+        .into_vec()
         .join("\n");
 
     assert!(
@@ -566,6 +577,7 @@ fn outer_reference_in_set_operation_arm_is_rewritten_in_view() {
         .expect("parse")
         .translate_to_sql(&base_opts())
         .expect("translate")
+        .into_vec()
         .join("\n");
 
     assert!(

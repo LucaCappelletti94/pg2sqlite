@@ -68,7 +68,7 @@ fn dimensionless_vector_column_translation_still_executes() {
         .expect("translate");
 
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    for stmt in &report.statements {
+    for stmt in report.script.iter() {
         // rusqlite: applying translated DDL (dynamically generated, diesel DSL
         // cannot express DDL).
         conn.execute_batch(&stmt.to_string())

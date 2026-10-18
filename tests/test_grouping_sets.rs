@@ -258,7 +258,11 @@ fn grouping_rewrite_rejects_non_aggregate_non_group_projection() {
         sales_fixture_sql()
     );
 
-    let result = Pg2Sqlite::default().sql(&sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(&sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Expected strict error for unsupported projection shape");
     let err = result.unwrap_err().to_string();
     assert!(

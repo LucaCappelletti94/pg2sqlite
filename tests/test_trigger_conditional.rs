@@ -116,7 +116,7 @@ FOR EACH ROW EXECUTE FUNCTION notify_new_order();
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_v7_function_name("uuidv7");
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     // Snapshot the translated SQL for consistency checking
     let translated_sql =

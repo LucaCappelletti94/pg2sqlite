@@ -313,8 +313,12 @@ fn standard_array_keyword_type_errors_without_a_representation() {
 #[test]
 fn diesel_translated_schema_accepts_insert_and_query() {
     let fixture = include_str!("fixtures/missing_types.sql");
-    let stmts =
-        Pg2Sqlite::default().sql(fixture).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(fixture)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
     for stmt in &stmts {
@@ -355,7 +359,8 @@ fn float_with_a_precision_maps_to_real() {
         )
         .expect("script should parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap_or_else(|error| panic!("every FLOAT width should translate: {error}"));
+        .unwrap_or_else(|error| panic!("every FLOAT width should translate: {error}"))
+        .into_vec();
 
     let mut connection = SqliteConnection::establish(":memory:").expect("in-memory SQLite");
     for statement in &statements {
@@ -391,7 +396,8 @@ fn execute_pg(pg_sql: &str) {
         .sql(pg_sql)
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap();
+        .unwrap()
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
             .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));

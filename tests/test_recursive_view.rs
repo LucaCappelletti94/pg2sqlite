@@ -67,7 +67,7 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
 
     let options = Pg2SqliteOptions::default();
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -89,7 +89,7 @@ fn test_recursive_view_translation_snapshot() -> Result<(), Box<dyn std::error::
 
     let options = Pg2SqliteOptions::default();
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql =
         translated_migrations.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");

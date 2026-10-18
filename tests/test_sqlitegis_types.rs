@@ -11,7 +11,8 @@ fn geometry_column_translates_to_blob() {
         .sql("CREATE TABLE features (id INTEGER PRIMARY KEY, geom geometry);")
         .expect("parse CREATE TABLE with geometry column")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("geometry should translate to BLOB");
+        .expect("geometry should translate to BLOB")
+        .into_vec();
     let joined = sqlite.join("\n");
     assert!(
         joined.to_ascii_uppercase().contains("BLOB"),
@@ -30,7 +31,8 @@ fn geography_column_translates_to_blob() {
         .sql("CREATE TABLE features (id INTEGER PRIMARY KEY, geog geography);")
         .expect("parse CREATE TABLE with geography column")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("geography should translate to BLOB");
+        .expect("geography should translate to BLOB")
+        .into_vec();
     let joined = sqlite.join("\n");
     assert!(
         joined.to_ascii_uppercase().contains("BLOB"),

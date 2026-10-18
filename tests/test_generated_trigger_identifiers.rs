@@ -16,7 +16,11 @@ fn fts5_generated_trigger_sql_handles_quoted_identifiers() {
             USING GIN (to_tsvector('english', title || ' ' || "body-text"));
     "#;
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_ok(), "Translation should succeed for quoted FTS5 identifiers");
 
     let translated = result.unwrap().into_iter().map(|stmt| stmt.to_string()).collect::<Vec<_>>();
@@ -42,7 +46,11 @@ fn vec0_generated_trigger_sql_handles_quoted_identifiers() {
         );
     "#;
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_ok(), "Translation should succeed for quoted vec0 identifiers");
 
     let translated = result.unwrap().into_iter().map(|stmt| stmt.to_string()).collect::<Vec<_>>();

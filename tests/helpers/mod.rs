@@ -22,7 +22,7 @@ pub fn translate_pg(
     pg: &str,
     opts: &Pg2SqliteOptions,
 ) -> Result<Vec<String>, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default().sql(pg)?.translate_to_sql(opts)
+    Pg2Sqlite::default().sql(pg)?.translate_to_sql(opts).map(pg2sqlite::script::Script::into_vec)
 }
 
 /// Returns `true` when `stmt` is a translated user-level statement of `kind`
@@ -321,6 +321,7 @@ pub fn translate_statements(
         .sql(sql)
         .map_err(|err| err.to_string())?
         .translate(options)
+        .map(pg2sqlite::script::Script::into_vec)
         .map_err(|err| err.to_string())
 }
 

@@ -29,7 +29,7 @@ fn random_rewrite_handles_sqlite_min_i64_without_overflow() -> Result<(), Box<dy
 {
     let sql = "SELECT random() AS val";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
     // Skip the leading dialect PRAGMA to reach the SELECT itself.
     let select_sql =
         translated.iter().find(|s| !s.to_string().starts_with("PRAGMA")).unwrap().to_string();
@@ -70,7 +70,7 @@ fn random_rewrite_handles_sqlite_min_i64_without_overflow() -> Result<(), Box<dy
 fn random_covers_the_unit_interval() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "SELECT random() AS val";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
 
@@ -171,7 +171,7 @@ fn to_timestamp_epoch() {
 fn to_timestamp_epoch_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "SELECT to_timestamp(0) AS result";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
 
@@ -201,7 +201,7 @@ fn to_timestamp_epoch_semantic_nonzero() -> Result<(), Box<dyn std::error::Error
     // 1700000000 = 2023-11-14 22:13:20 UTC
     let sql = "SELECT to_timestamp(1700000000) AS result";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
 
@@ -253,7 +253,7 @@ fn timestamp_variants_semantic() -> Result<(), Box<dyn std::error::Error>> {
     for func in &["transaction_timestamp()", "statement_timestamp()", "clock_timestamp()"] {
         let sql = format!("SELECT {func} AS ts");
         let options = Pg2SqliteOptions::default();
-        let translated = Pg2Sqlite::default().sql(&sql)?.translate(&options)?;
+        let translated = Pg2Sqlite::default().sql(&sql)?.translate(&options)?.into_vec();
 
         let mut conn = SqliteConnection::establish(":memory:")?;
 

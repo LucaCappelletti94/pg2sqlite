@@ -155,7 +155,7 @@ fn date_trunc_without_over_semantic() -> Result<(), Box<dyn std::error::Error>> 
         SELECT date_trunc('day', created_at) AS truncated FROM events;
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(pg_sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(pg_sql)?.translate(&options)?.into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:")?;
 

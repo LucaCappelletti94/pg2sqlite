@@ -100,7 +100,7 @@ fn test_gin_to_fts5_translation_snapshot() -> Result<(), Box<dyn std::error::Err
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
@@ -145,7 +145,7 @@ fn test_fts5_search_works() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -222,7 +222,7 @@ fn test_fts5_performance_improvement() -> Result<(), Box<dyn std::error::Error>>
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -332,7 +332,7 @@ fn test_fts5_multi_column_search() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -413,7 +413,7 @@ fn test_fts5_triggers_update_delete() -> Result<(), Box<dyn std::error::Error>> 
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -493,7 +493,7 @@ fn test_at_at_operator_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
     let select_stmt = translated_sql
@@ -537,7 +537,7 @@ fn test_at_at_operator_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -601,7 +601,7 @@ fn test_prefix_matching_translation() -> Result<(), Box<dyn std::error::Error>> 
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -645,7 +645,7 @@ fn test_prefix_matching_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -689,7 +689,7 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
         CREATE INDEX idx ON docs USING GIN (to_tsvector('english', body));
         SELECT * FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('rust & safety');
     ";
-    let translated_and = Pg2Sqlite::default().sql(sql_and)?.translate(&options)?;
+    let translated_and = Pg2Sqlite::default().sql(sql_and)?.translate(&options)?.into_vec();
     let select = translated_and
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
@@ -713,7 +713,7 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
         CREATE INDEX idx2 ON docs2 USING GIN (to_tsvector('english', body));
         SELECT * FROM docs2 WHERE to_tsvector('english', body) @@ to_tsquery('rust | python');
     ";
-    let translated_or = Pg2Sqlite::default().sql(sql_or)?.translate(&options)?;
+    let translated_or = Pg2Sqlite::default().sql(sql_or)?.translate(&options)?.into_vec();
     let select = translated_or
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
@@ -734,7 +734,7 @@ fn test_tsquery_operators_translation() -> Result<(), Box<dyn std::error::Error>
         CREATE INDEX idx3 ON docs3 USING GIN (to_tsvector('english', body));
         SELECT * FROM docs3 WHERE to_tsvector('english', body) @@ to_tsquery('rust & !python');
     ";
-    let translated_not = Pg2Sqlite::default().sql(sql_not)?.translate(&options)?;
+    let translated_not = Pg2Sqlite::default().sql(sql_not)?.translate(&options)?.into_vec();
     let select = translated_not
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
@@ -763,7 +763,11 @@ fn test_ts_rank_error_message() {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
 
     assert!(result.is_err(), "ts_rank should produce an error");
     let err = result.unwrap_err().to_string();
@@ -784,7 +788,11 @@ fn test_ts_rank_cd_error_message() {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
 
     assert!(result.is_err(), "ts_rank_cd should produce an error");
     let err = result.unwrap_err().to_string();
@@ -808,7 +816,7 @@ fn test_fts5_with_custom_primary_key() -> Result<(), Box<dyn std::error::Error>>
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
@@ -871,7 +879,7 @@ fn test_at_at_operator_with_custom_primary_key() -> Result<(), Box<dyn std::erro
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -905,7 +913,11 @@ fn fts5_with_varchar_pk_causes_error() {
         CREATE TABLE fts_varchar_test (id VARCHAR(36) PRIMARY KEY, body TEXT);
         CREATE INDEX fts_varchar_test_fts ON fts_varchar_test USING GIN (to_tsvector('english', body));
     ";
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "FTS5 with VARCHAR primary key must cause a translation error");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -923,7 +935,11 @@ fn fts5_with_text_pk_causes_error() {
         CREATE TABLE fts_text_pk (id TEXT PRIMARY KEY, body TEXT);
         CREATE INDEX fts_text_pk_idx ON fts_text_pk USING GIN (to_tsvector('english', body));
     ";
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "FTS5 with TEXT primary key must cause a translation error");
 }
 
@@ -934,7 +950,8 @@ fn fts5_with_integer_pk_succeeds() -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE fts_int_pk (id INTEGER PRIMARY KEY, body TEXT);
         CREATE INDEX fts_int_pk_idx ON fts_int_pk USING GIN (to_tsvector('english', body));
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -992,7 +1009,8 @@ fn partial_gin_trigger_published_insert_blocked_by_bare_column() {
         .sql(PARTIAL_GIN_SQL)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:").expect("open db");
     // Apply the full translated schema including the buggy triggers.
@@ -1036,7 +1054,8 @@ fn partial_gin_trigger_unpublished_insert_blocked_by_bare_column() {
         .sql(PARTIAL_GIN_SQL)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:").expect("open db");
     for stmt in &translated {
@@ -1076,7 +1095,8 @@ fn partial_gin_backfill_indexes_all_rows_ignoring_predicate() {
         .sql(PARTIAL_GIN_SQL)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:").expect("open db");
 
@@ -1134,7 +1154,8 @@ fn partial_gin_update_crossing_predicate_boundary_syncs_index() {
         .sql(PARTIAL_GIN_SQL)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:").expect("open db");
     // Apply the full translated schema (CREATE TABLE, FTS5 virtual table,

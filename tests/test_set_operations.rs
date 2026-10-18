@@ -17,7 +17,7 @@ fn test_union_query_translation() {
         SELECT a, b FROM t1 UNION SELECT a, b FROM t2;
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(output.contains("UNION"), "Output should contain UNION keyword, got:\n{output}");
@@ -38,7 +38,7 @@ fn test_union_all_translation() {
         SELECT a FROM t1 UNION ALL SELECT a FROM t2;
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
@@ -62,7 +62,7 @@ fn test_intersect_translation() {
         SELECT a FROM t1 INTERSECT SELECT a FROM t2;
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
@@ -86,7 +86,7 @@ fn test_except_translation() {
         SELECT a FROM t1 EXCEPT SELECT a FROM t2;
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(output.contains("EXCEPT"), "Output should contain EXCEPT keyword, got:\n{output}");
@@ -108,7 +108,7 @@ fn test_union_all_executes_in_sqlite() -> Result<(), Box<dyn std::error::Error>>
         SELECT val FROM src1 UNION ALL SELECT val FROM src2;
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut conn = diesel::sqlite::SqliteConnection::establish(":memory:")?;
 
@@ -155,7 +155,7 @@ fn test_union_deduplicates_in_sqlite() -> Result<(), Box<dyn std::error::Error>>
         SELECT a FROM left_t UNION SELECT a FROM right_t;
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut conn = diesel::sqlite::SqliteConnection::establish(":memory:")?;
 
@@ -201,7 +201,8 @@ fn except_all_must_refuse_translation() {
     let result = Pg2Sqlite::default()
         .sql("SELECT 1 EXCEPT ALL SELECT 1")
         .unwrap()
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     match result {
         Ok(stmts) => {
             panic!(
@@ -228,7 +229,8 @@ fn intersect_all_must_refuse_translation() {
     let result = Pg2Sqlite::default()
         .sql("SELECT 1 INTERSECT ALL SELECT 1")
         .unwrap()
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     match result {
         Ok(stmts) => {
             panic!(

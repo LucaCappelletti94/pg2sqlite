@@ -18,7 +18,11 @@ fn opts() -> Pg2SqliteOptions {
 }
 
 fn translate_to_sql(schema: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default().sql(schema).expect("parse").translate_to_sql(&opts())
+    Pg2Sqlite::default()
+        .sql(schema)
+        .expect("parse")
+        .translate_to_sql(&opts())
+        .map(pg2sqlite::script::Script::into_vec)
 }
 
 fn refusal(schema: &str) -> String {

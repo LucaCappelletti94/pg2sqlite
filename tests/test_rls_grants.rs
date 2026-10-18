@@ -359,7 +359,8 @@ fn setup_database(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::
     let translated = Pg2Sqlite::default()
         .sql(include_str!("fixtures/groups.sql"))?
         .sql(include_str!("fixtures/rls_grants.sql"))?
-        .translate(&options)?;
+        .translate(&options)?
+        .into_vec();
     for stmt in &translated {
         diesel::sql_query(stmt.to_string()).execute(connection)?;
     }
@@ -717,7 +718,7 @@ fn test_rls_grants_translation_snapshot() -> Result<(), Box<dyn std::error::Erro
 
     let options = translation_options();
 
-    let translated = Pg2Sqlite::default().sql(&combined_sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(&combined_sql)?.translate(&options)?.into_vec();
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // Verify each statement is valid SQLite

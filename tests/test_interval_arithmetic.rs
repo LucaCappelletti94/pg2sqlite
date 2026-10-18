@@ -219,6 +219,7 @@ fn the_time_of_day_is_emitted_in_one_unit() {
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .join("\n");
     assert!(emitted.contains("'+90 minutes'"), "one exact modifier, got: {emitted}");
 }

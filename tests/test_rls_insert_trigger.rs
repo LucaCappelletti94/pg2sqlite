@@ -46,8 +46,12 @@ const RTS_SCHEMA: &str = "
 
 fn apply(pg: &str) -> SqliteConnection {
     let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let stmts =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&opts).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate")
+        .into_vec();
     let mut conn = SqliteConnection::establish(":memory:").expect("connect");
     // Translated DDL is not expressible via diesel's typed DSL.
     diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
@@ -162,8 +166,12 @@ const ITEMS_SCHEMA: &str = "
 
 fn apply_items(pg: &str) -> SqliteConnection {
     let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let stmts =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&opts).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(&opts)
+        .expect("translate")
+        .into_vec();
     let mut conn = SqliteConnection::establish(":memory:").expect("connect");
     diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
     for stmt in &stmts {
@@ -185,7 +193,8 @@ fn rls_two_column_maintenance_trigger_exemption_fires() {
         .sql(ITEMS_SCHEMA)
         .expect("parse")
         .translate_to_sql(&opts)
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let update_check = stmts
         .iter()
         .map(ToString::to_string)
@@ -262,7 +271,8 @@ fn rls_non_maintenance_before_insert_trigger_has_no_exemption() {
         .sql(NOTES_SCHEMA)
         .expect("parse")
         .translate_to_sql(&opts)
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let update_check = stmts
         .iter()
         .map(ToString::to_string)

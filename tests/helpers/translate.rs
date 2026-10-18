@@ -29,6 +29,7 @@ pub fn translate_default(sql: &str) -> String {
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()

@@ -409,7 +409,8 @@ fn sqlite_runner() -> SqliteRunner {
         .sql(SOURCE)
         .expect("parse source")
         .translate(&options())
-        .expect("translate source");
+        .expect("translate source")
+        .into_vec();
 
     let mut connection = establish_connection();
     for stmt in &translated {

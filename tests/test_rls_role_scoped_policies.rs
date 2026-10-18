@@ -78,7 +78,8 @@ fn opts_without_role() -> Pg2SqliteOptions {
 }
 
 fn apply(opts: &Pg2SqliteOptions) -> SqliteConnection {
-    let stmts = Pg2Sqlite::default().sql(PG).expect("parse").translate(opts).expect("translate");
+    let stmts =
+        Pg2Sqlite::default().sql(PG).expect("parse").translate(opts).expect("translate").into_vec();
     let mut conn = SqliteConnection::establish(":memory:").expect("open db");
     app_user_utils::register_impl(&mut conn, || "alice".to_string()).expect("register app_user");
     for s in &stmts {
@@ -129,7 +130,11 @@ fn role_scoped_policy_excluded_when_session_role_mismatch() {
 fn translation_refuses_role_scoped_policy_without_session_user_role() {
     // This call must return Err (naming the missing option). Currently it
     // returns Ok because filter_policies never checks policy.roles().
-    let result = Pg2Sqlite::default().sql(PG).expect("parse").translate(&opts_without_role());
+    let result = Pg2Sqlite::default()
+        .sql(PG)
+        .expect("parse")
+        .translate(&opts_without_role())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(
         result.is_err(),
         "translation must refuse a TO-scoped policy when with_session_user_role is not set, \

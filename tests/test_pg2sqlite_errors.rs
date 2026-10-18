@@ -119,7 +119,8 @@ fn statement_builder_is_chainable() {
     let stmt = stmts.into_iter().next().unwrap();
 
     let translator = Pg2Sqlite::default().statement(stmt);
-    let result = translator.translate(&Pg2SqliteOptions::default());
+    let result =
+        translator.translate(&Pg2SqliteOptions::default()).map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_ok());
     let statements = result.unwrap();
     assert_ne!(statements.len(), 0, "statement() translation must produce at least one statement");
@@ -128,7 +129,7 @@ fn statement_builder_is_chainable() {
 #[test]
 fn translate_with_empty_statements_returns_empty() {
     let translator = Pg2Sqlite::default();
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert!(result.is_empty(), "Empty translator should produce empty result");
 }
 
@@ -178,7 +179,7 @@ fn refusals_expose_direction_and_stable_category() {
 fn sql_can_load_multiple_statements() {
     let sql = "CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY);";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(result.len(), 3, "one pragma plus the two CREATE TABLEs, got: {}", result.len());
 }
 
@@ -190,7 +191,7 @@ fn translate_filters_non_translatable_statements() {
         ALTER TABLE t ADD COLUMN name TEXT;
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     // one pragma + CREATE TABLE + ALTER TABLE = 3 statements. CREATE EXTENSION
     // is filtered.
     assert_eq!(
@@ -213,7 +214,7 @@ fn translate_malformed_trigger_function_body_returns_error_not_panic() {
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        translator.translate(&Pg2SqliteOptions::default())
+        translator.translate(&Pg2SqliteOptions::default()).map(pg2sqlite::script::Script::into_vec)
     }));
     assert!(result.is_ok(), "translate should not panic on malformed function body");
 

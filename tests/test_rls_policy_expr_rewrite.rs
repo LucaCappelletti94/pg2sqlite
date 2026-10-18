@@ -9,7 +9,7 @@ use sqlparser::ast::Statement;
 
 fn translate(sql: &str) -> Result<Vec<Statement>, Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    Ok(Pg2Sqlite::default().sql(sql)?.translate(&options)?)
+    Ok(Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec())
 }
 
 fn apply_all(stmts: &[Statement]) -> Result<SqliteConnection, Box<dyn std::error::Error>> {

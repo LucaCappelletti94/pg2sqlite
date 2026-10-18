@@ -27,6 +27,6 @@ fn ups_ignores_symlink_directory_loops() {
         "ups() should ignore symlinked directories instead of recursing into loops, got: {result:?}"
     );
 
-    let translated = result.unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let translated = result.unwrap().translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert!(!translated.is_empty(), "Expected real migrations to still be discovered");
 }

@@ -238,7 +238,7 @@ fn setup_database(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_v7_function_name("uuidv7");
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
     for stmt in &translated {
         diesel::sql_query(stmt.to_string()).execute(connection)?;
     }
@@ -251,7 +251,7 @@ fn test_groups_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> 
     let options = Pg2SqliteOptions::default()
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_v7_function_name("uuidv7");
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     // Join all statements for snapshot
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");

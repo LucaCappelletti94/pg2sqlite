@@ -72,7 +72,7 @@ struct Embedding<'a> {
 fn test_vec0_rls_triggers_reference_backing_table() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = include_str!("fixtures/vector_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
-    let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?.into_vec();
 
     let translated_sql: Vec<String> = translated.iter().map(ToString::to_string).collect();
 
@@ -134,7 +134,7 @@ fn test_vec0_sync_works_with_rls() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = establish_connection();
     let fixture = include_str!("fixtures/vector_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
-    let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?.into_vec();
 
     // Execute translated SQL
     for stmt in &translated {
@@ -185,7 +185,7 @@ fn test_role_filtered_vector_translation_keeps_vec0_artifacts()
     let options = Pg2SqliteOptions::default()
         .with_session_user_role("readonly_user".to_string())
         .with_rls_audit_table_name("rls_audit".to_string());
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
     let output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
@@ -217,7 +217,7 @@ fn test_role_filtered_vector_translation_keeps_vec0_artifacts()
 fn test_vector_rls_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = include_str!("fixtures/vector_rls.sql");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit".to_string());
-    let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(fixture)?.translate(&options)?.into_vec();
 
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 

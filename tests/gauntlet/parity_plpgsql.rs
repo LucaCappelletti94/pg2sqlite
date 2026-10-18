@@ -62,7 +62,8 @@ fn apply_to_sqlite_with(fixture: &str, options: &Pg2SqliteOptions) -> SqliteConn
         .sql(fixture)
         .expect("parse fixture")
         .translate(options)
-        .expect("translate fixture");
+        .expect("translate fixture")
+        .into_vec();
     let mut conn = establish_connection();
     uuid_text_utils::register_impl(&mut conn, uuid_text_impl).expect("register uuid_text");
     for stmt in &translated {

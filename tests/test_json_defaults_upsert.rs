@@ -106,7 +106,7 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
 
     let options = Pg2SqliteOptions::default();
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -128,7 +128,7 @@ fn test_data_types_extended_snapshot() -> Result<(), Box<dyn std::error::Error>>
 
     let options = Pg2SqliteOptions::default();
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql =
         translated_migrations.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
@@ -232,7 +232,7 @@ fn test_upsert_insert_new_row() -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, counter INTEGER NOT NULL DEFAULT 0);
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -271,7 +271,7 @@ fn test_upsert_update_existing_row() -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, counter INTEGER NOT NULL DEFAULT 0);
     ";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");

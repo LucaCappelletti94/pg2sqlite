@@ -48,7 +48,8 @@ fn apply_schema(pg: &str) -> SqliteConnection {
         .sql(pg)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let mut conn = SqliteConnection::establish(":memory:").expect("connect");
     // Translated DDL cannot be expressed via diesel's typed DSL.
     diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");

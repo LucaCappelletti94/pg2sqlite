@@ -43,6 +43,7 @@ fn translate(pg: &str) -> Vec<String> {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
 }
 
 /// Every row of `projection`, ordered by id, through the emitted SQLite.

@@ -90,7 +90,7 @@ fn setup_with_options(
     pg: &str,
     options: &Pg2SqliteOptions,
 ) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(pg)?.translate(options)?;
+    let translated = Pg2Sqlite::default().sql(pg)?.translate(options)?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
     // Phase 1: tables and views (no triggers yet).
     // Phase 2 (inside): seed via diesel typed insert before triggers exist.
@@ -112,7 +112,7 @@ fn apply(
     pg: &str,
     options: &Pg2SqliteOptions,
 ) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(pg)?.translate(options)?;
+    let translated = Pg2Sqlite::default().sql(pg)?.translate(options)?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
     for statement in &translated {
         diesel::sql_query(statement.to_string()).execute(&mut conn)?;

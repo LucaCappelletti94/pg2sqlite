@@ -94,8 +94,12 @@ fn the_published_scale_decodes_a_value_written_through_the_emitted_sql() {
     let pg = "CREATE TABLE t (id int primary key, amount numeric(10,2));
               INSERT INTO t (id, amount) VALUES (1, 19.99);";
     let options = Pg2SqliteOptions::default();
-    let statements =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&options).expect("translate");
+    let statements = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(&options)
+        .expect("translate")
+        .into_vec();
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     for statement in &statements {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
@@ -121,8 +125,12 @@ fn the_published_uuid_storage_decodes_a_value_written_through_the_emitted_sql() 
     let pg = "CREATE TABLE t (id uuid primary key);
               INSERT INTO t (id) VALUES ('550e8400-e29b-41d4-a716-446655440000');";
     let options = Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob);
-    let statements =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&options).expect("translate");
+    let statements = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(&options)
+        .expect("translate")
+        .into_vec();
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     for statement in &statements {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");

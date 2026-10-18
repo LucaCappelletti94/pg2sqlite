@@ -94,7 +94,11 @@ fn distinct_on_wildcard_stays_unsupported() {
         SELECT DISTINCT ON (user_id) * FROM events ORDER BY user_id, ts DESC;
     ";
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Wildcard DISTINCT ON should remain unsupported");
     let err = result.unwrap_err().to_string();
     assert!(

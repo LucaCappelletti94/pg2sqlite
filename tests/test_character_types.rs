@@ -20,7 +20,8 @@ fn apply(pg: &str) -> SqliteConnection {
         .sql(pg)
         .expect("script should parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap_or_else(|error| panic!("script should translate: {error}"));
+        .unwrap_or_else(|error| panic!("script should translate: {error}"))
+        .into_vec();
 
     let mut connection =
         SqliteConnection::establish(":memory:").expect("in-memory SQLite should open");

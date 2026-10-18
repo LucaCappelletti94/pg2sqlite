@@ -27,7 +27,7 @@ fn test_vector_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     // Find the CREATE TABLE statement
     let create_table = translated
@@ -52,6 +52,7 @@ fn test_vector_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+
 fn test_l2_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
         CREATE TABLE items (
@@ -62,7 +63,7 @@ fn test_l2_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -96,7 +97,7 @@ fn test_cosine_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -129,7 +130,7 @@ fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -152,6 +153,7 @@ fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+
 /// The schema-qualified spelling of the same cast. pgvector commonly lives in
 /// a named schema, and a qualified type cast is ordinary PostgreSQL, so
 /// `'...'::public.vector` must lower exactly like `'...'::vector`. It used to
@@ -161,7 +163,8 @@ fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
 fn qualified_vector_cast_lowers_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
     let translated = Pg2Sqlite::default()
         .sql("SELECT '[1,2]'::public.vector AS v;")?
-        .translate(&Pg2SqliteOptions::default())?;
+        .translate(&Pg2SqliteOptions::default())?
+        .into_vec();
     let select_stmt = translated
         .iter()
         .find(|s| !s.to_string().starts_with("PRAGMA"))
@@ -183,6 +186,7 @@ fn qualified_vector_cast_lowers_to_vec_f32() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
+
 #[test]
 fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
@@ -194,7 +198,7 @@ fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>>
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
 
@@ -240,7 +244,7 @@ fn test_schema_qualified_vector_column_generates_vec0() -> Result<(), Box<dyn st
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
     let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
 
     let has_vec0 =
@@ -273,7 +277,7 @@ fn test_multiple_vector_columns() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql: Vec<_> = translated.iter().map(|s| s.to_string()).collect();
 
@@ -315,7 +319,7 @@ fn test_no_vector_columns_no_vec0() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     // Should have just the main table
     assert_eq!(
@@ -342,7 +346,7 @@ fn test_distance_with_cast() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -377,7 +381,7 @@ fn test_order_by_distance() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -412,7 +416,7 @@ fn test_vector_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> 
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
     insta::assert_snapshot!("vector_table_translation", translated_sql);
@@ -434,7 +438,7 @@ fn test_vector_query_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
     insta::assert_snapshot!("vector_query_translation", translated_sql);

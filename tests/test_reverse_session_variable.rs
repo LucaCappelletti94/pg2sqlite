@@ -146,7 +146,8 @@ fn the_forward_and_reverse_directions_are_inverses() {
         .sql(&postgres_source)
         .expect("the document parses")
         .translate(&options)
-        .expect("the setting becomes the paired call");
+        .expect("the setting becomes the paired call")
+        .into_vec();
     let sqlite_query = forward.last().expect("the query is emitted").to_string();
     assert!(sqlite_query.contains("app_user_id()"), "forward emits the paired call");
 
@@ -342,7 +343,8 @@ fn the_membership_test_round_trips() {
         .sql(&postgres_source)
         .expect("the document parses")
         .translate(&options)
-        .expect("the membership test becomes the guarded search");
+        .expect("the membership test becomes the guarded search")
+        .into_vec();
     let sqlite_query = forward.last().expect("the query is emitted").to_string();
     assert!(sqlite_query.contains("instr("), "forward emits the search, got: {sqlite_query}");
 

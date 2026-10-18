@@ -83,7 +83,7 @@ FOR EACH ROW EXECUTE FUNCTION propagate_delete();
 
     // 2. Translate to SQLite
     let translator = Pg2Sqlite::default().sql(sql)?;
-    let translated = translator.translate(&Pg2SqliteOptions::default())?;
+    let translated = translator.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     // 3. Verify Translation (Insta Snapshot)
     // We convert the vector of statements to a single string for snapshotting
@@ -214,7 +214,7 @@ fn test_delete_using_with_rls_table() -> Result<(), Box<dyn std::error::Error>> 
     ";
 
     let translator = Pg2Sqlite::default().sql(sql)?;
-    let translated = translator.translate(&options)?;
+    let translated = translator.translate(&options)?.into_vec();
 
     // Find the DELETE statement in the translated output
     let delete_stmt = translated

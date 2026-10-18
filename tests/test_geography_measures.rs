@@ -34,6 +34,7 @@ fn translate(pg: &str) -> String {
         .expect("parse")
         .translate_to_sql(&options())
         .expect("translate")
+        .into_vec()
         .pop()
         .expect("a probe statement")
 }

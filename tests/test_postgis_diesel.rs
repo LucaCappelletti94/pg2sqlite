@@ -24,14 +24,16 @@ fn every_sqlitegis_smoke_sql_translates_and_executes() {
     let mut failures: Vec<String> = Vec::new();
     for spec in SQLITE_DETERMINISTIC_FUNCTIONS {
         let pg_sql = format!("{};", spec.smoke_sql);
-        let translated =
-            match Pg2Sqlite::default().sql(&pg_sql).and_then(|t| t.translate_to_sql(&opts)) {
-                Ok(stmts) => stmts.join("; "),
-                Err(e) => {
-                    failures.push(format!("{}/{}: translate failed: {e:?}", spec.name, spec.n_arg));
-                    continue;
-                }
-            };
+        let translated = match Pg2Sqlite::default()
+            .sql(&pg_sql)
+            .and_then(|t| t.translate_to_sql(&opts).map(pg2sqlite::script::Script::into_vec))
+        {
+            Ok(stmts) => stmts.join("; "),
+            Err(e) => {
+                failures.push(format!("{}/{}: translate failed: {e:?}", spec.name, spec.n_arg));
+                continue;
+            }
+        };
         if let Err(e) = sql_query(&translated).execute(&mut conn) {
             failures.push(format!(
                 "{}/{}: execute failed for `{translated}`: {e:?}",

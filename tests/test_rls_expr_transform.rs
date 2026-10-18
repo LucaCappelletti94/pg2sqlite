@@ -9,13 +9,13 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 fn translate(sql: &str) -> Result<String, Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let stmts = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let stmts = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
     Ok(stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
 }
 
 fn apply_all(sql: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let stmts = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let stmts = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
     for stmt in &stmts {
         diesel::sql_query(stmt.to_string()).execute(&mut conn)?;

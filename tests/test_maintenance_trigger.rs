@@ -154,7 +154,7 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
 ";
 
     let translator = Pg2Sqlite::default().sql(sql)?;
-    let translated = translator.translate(&Pg2SqliteOptions::default())?;
+    let translated = translator.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     for stmt in &translated {
         println!("{stmt}");
@@ -219,7 +219,7 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
 ";
 
     let translator = Pg2Sqlite::default().sql(sql)?;
-    let translated = translator.translate(&Pg2SqliteOptions::default())?;
+    let translated = translator.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let trigger_sql = translated
         .iter()
@@ -284,7 +284,7 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
 ";
 
     let translator = Pg2Sqlite::default().sql(sql)?;
-    let translated = translator.translate(&Pg2SqliteOptions::default())?;
+    let translated = translator.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let trigger_sql = translated
         .iter()
@@ -341,7 +341,7 @@ FOR EACH ROW EXECUTE FUNCTION set_brands_edited_at();
 ";
 
     let translator = Pg2Sqlite::default().sql(sql)?;
-    let translated = translator.translate(&Pg2SqliteOptions::default())?;
+    let translated = translator.translate(&Pg2SqliteOptions::default())?.into_vec();
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>();
 
     let update_trigger_sql = translated_sql
@@ -508,7 +508,7 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
 
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
     let translator = Pg2Sqlite::default().sql(sql)?;
-    let translated = translator.translate(&options)?;
+    let translated = translator.translate(&options)?.into_vec();
 
     let trigger_sql = translated
         .iter()
@@ -580,7 +580,8 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();"
 
     let baseline = Pg2Sqlite::default()
         .sql(&spell("brands", "brands"))?
-        .translate_to_sql(&Pg2SqliteOptions::default())?;
+        .translate_to_sql(&Pg2SqliteOptions::default())?
+        .into_vec();
 
     for (decl, on) in [
         ("brands", "public.brands"),
@@ -589,7 +590,8 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();"
     ] {
         let translated = Pg2Sqlite::default()
             .sql(&spell(decl, on))?
-            .translate_to_sql(&Pg2SqliteOptions::default())?;
+            .translate_to_sql(&Pg2SqliteOptions::default())?
+            .into_vec();
         assert_eq!(
             translated, baseline,
             "declaring {decl} and triggering on {on} must not change the emitted script"
@@ -654,7 +656,7 @@ FOR EACH ROW EXECUTE FUNCTION update_brands_edited_at();
 ";
 
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let trigger_sql = translated
         .iter()
@@ -714,7 +716,8 @@ FOR EACH ROW EXECUTE FUNCTION widgets_maintain();
         .sql(sql)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let trigger_sql = stmts
         .iter()
@@ -776,7 +779,8 @@ FOR EACH ROW WHEN (OLD.id > 0) EXECUTE FUNCTION w2_maintain();
         .sql(sql)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let trigger_sql = stmts
         .iter()
@@ -872,7 +876,8 @@ FOR EACH ROW EXECUTE FUNCTION chain_maintain();
         .sql(sql)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:").expect("connect");
     diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
@@ -951,7 +956,8 @@ FOR EACH ROW EXECUTE FUNCTION ovr_maintain();
         .sql(sql)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:").expect("connect");
     diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");

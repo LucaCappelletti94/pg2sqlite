@@ -244,6 +244,7 @@ fn translated(pg: &str, options: &Pg2SqliteOptions) -> Vec<String> {
         .expect("parse PostgreSQL")
         .translate_to_sql(options)
         .expect("translate SQLite")
+        .into_vec()
 }
 
 fn apply(pg: &str, options: &Pg2SqliteOptions) -> SqliteConnection {

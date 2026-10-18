@@ -25,6 +25,7 @@ mod numeric {
             .expect("parse")
             .translate_to_sql(&Pg2SqliteOptions::default())
             .expect("translate")
+            .into_vec()
     }
 
     #[derive(QueryableByName, Debug, PartialEq)]
@@ -163,6 +164,7 @@ mod uuid_text {
                 &Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Text),
             )
             .expect("translate")
+            .into_vec()
     }
 
     #[derive(QueryableByName, Debug)]
@@ -253,6 +255,7 @@ mod uuid_blob {
                 &Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob),
             )
             .expect("translate")
+            .into_vec()
     }
 
     #[derive(QueryableByName, Debug)]
@@ -330,7 +333,8 @@ fn vector_param_insert_is_wrapped_in_translation() {
         )
         .expect("parse")
         .translate_to_sql(&opts)
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let insert = stmts
         .iter()
         .find(|s| s.to_ascii_uppercase().trim_start().starts_with("INSERT"))
@@ -356,7 +360,8 @@ fn array_param_insert_is_refused() {
              INSERT INTO t (id, tags) VALUES (1, $1);",
         )
         .expect("parse")
-        .translate(&opts);
+        .translate(&opts)
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(
         result.is_err(),
         "array placeholder INSERT must be refused; translated to: {:?}",

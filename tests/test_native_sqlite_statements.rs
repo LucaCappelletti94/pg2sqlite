@@ -34,6 +34,7 @@ fn emitted(pg: &str) -> Vec<String> {
         .expect("the fixture must parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translation must succeed")
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect();
@@ -49,7 +50,8 @@ fn emitted(pg: &str) -> Vec<String> {
 /// The generated SQL is the artifact under test, so it is executed as text. No
 /// typed query can stand in for "run exactly what the translator produced".
 fn apply(pg: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let statements = Pg2Sqlite::default().sql(pg)?.translate(&Pg2SqliteOptions::default())?;
+    let statements =
+        Pg2Sqlite::default().sql(pg)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
     for statement in &statements {
         sql_query(statement.to_string()).execute(&mut conn)?;
@@ -182,7 +184,8 @@ fn explain_analyze_is_rejected() {
     let result = Pg2Sqlite::default()
         .sql(&format!("{BASE} EXPLAIN ANALYZE INSERT INTO t (id, n) VALUES (1, 1);"))
         .expect("the fixture must parse")
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
 
     let Err(error) = result else {
         panic!("EXPLAIN ANALYZE must not silently become a plan that never runs");

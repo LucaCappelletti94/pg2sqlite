@@ -76,7 +76,7 @@ fn default_opts() -> Pg2SqliteOptions {
 /// statement uses the typed DSL.
 fn apply(pg: &str, opts: &Pg2SqliteOptions) -> SqliteConnection {
     let translated =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate(opts).expect("translate");
+        Pg2Sqlite::default().sql(pg).expect("parse").translate(opts).expect("translate").into_vec();
     let mut conn = establish_connection();
     for statement in &translated {
         diesel::sql_query(statement.to_string())
@@ -101,13 +101,15 @@ fn run_dml(
         .expect("parse")
         .translate(opts)
         .expect("translate schema")
+        .into_vec()
         .len();
     let combined = format!("{schema}\n{pg_dml}");
     let all = Pg2Sqlite::default()
         .sql(&combined)
         .expect("parse")
         .translate(opts)
-        .expect("translate combined");
+        .expect("translate combined")
+        .into_vec();
     let mut last = 0;
     for stmt in all.into_iter().skip(schema_count) {
         last = diesel::sql_query(stmt.to_string()).execute(conn)?;

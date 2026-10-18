@@ -136,7 +136,8 @@ fn delete_order_by_and_limit_translate_expressions() {
         .unwrap()
         .statement(delete_stmt)
         .translate(&Pg2SqliteOptions::default())
-        .unwrap();
+        .unwrap()
+        .into_vec();
 
     let output = stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
@@ -185,7 +186,8 @@ mod delete_alias {
             .sql(&format!("{SCHEMA}\n{source}"))
             .unwrap()
             .translate(&Pg2SqliteOptions::default())
-            .unwrap();
+            .unwrap()
+            .into_vec();
         let mut connection = SqliteConnection::establish(":memory:").unwrap();
         let mut delete = None;
         for statement in statements {

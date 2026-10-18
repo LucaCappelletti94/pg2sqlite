@@ -117,13 +117,16 @@ fn sweep(label: &str, cases: &[&str]) -> Vec<String> {
         .sql(FIXTURE)
         .expect("fixture parses")
         .translate_to_sql(&opts)
-        .expect("fixture translates");
+        .expect("fixture translates")
+        .into_vec();
 
     let mut bugs = Vec::new();
     for case in cases {
         let full = format!("{FIXTURE}\n{case}");
         let outcome = std::panic::catch_unwind(|| {
-            Pg2Sqlite::default().sql(&full).and_then(|p| p.translate_to_sql(&opts))
+            Pg2Sqlite::default()
+                .sql(&full)
+                .and_then(|p| p.translate_to_sql(&opts).map(pg2sqlite::script::Script::into_vec))
         });
         let all = match outcome {
             // A panic escaping the public API is a defect regardless of what

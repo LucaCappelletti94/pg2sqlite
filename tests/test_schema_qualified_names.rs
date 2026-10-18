@@ -7,7 +7,8 @@ use sql_traits::structs::ParserDB;
 use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
 fn translate(sql: &str) -> Result<Vec<Statement>, Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     Ok(translated)
 }
 

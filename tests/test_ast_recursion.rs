@@ -27,6 +27,7 @@ fn translate_ok(sql: &str) -> String {
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .into_iter()
         .find(|s| matches!(s, Statement::Query(_)))
         .unwrap()
@@ -40,6 +41,7 @@ fn translate_all(sql: &str) -> String {
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -301,8 +303,12 @@ FOR EACH ROW EXECUTE FUNCTION fn_group_by();
 
 fn exec_translated(pg_sql: &str) {
     let conn = Connection::open_in_memory().unwrap();
-    let stmts =
-        Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(pg_sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
             .unwrap_or_else(|e| panic!("SQLite rejected: {s}\n{e}"));

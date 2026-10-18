@@ -29,7 +29,7 @@ fn test_custom_suffix_renames_backing_table() {
     let sql = include_str!("fixtures/rls_basic.sql");
     let options = make_options_with_suffix("_secure");
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // Backing table should carry the custom suffix
@@ -60,7 +60,7 @@ fn test_custom_suffix_snapshot() {
     let sql = include_str!("fixtures/rls_basic.sql");
     let options = make_options_with_suffix("_secure");
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     insta::assert_snapshot!("custom_rls_suffix_translation", sql_output);
@@ -83,7 +83,7 @@ fn test_custom_suffix_in_foreign_keys() {
         ))
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"));
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // FK should reference the custom-suffixed backing table

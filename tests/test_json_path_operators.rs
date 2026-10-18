@@ -24,7 +24,8 @@ const DDL: &str = "CREATE TABLE t (id INT PRIMARY KEY, payload JSONB, arr JSONB,
 fn forward(postgres: &str) -> Result<String, pg2sqlite::errors::Error> {
     let statements = Pg2Sqlite::default()
         .sql(&format!("{DDL}{postgres};"))?
-        .translate_to_sql(&Pg2SqliteOptions::default())?;
+        .translate_to_sql(&Pg2SqliteOptions::default())?
+        .into_vec();
     Ok(statements.last().cloned().unwrap_or_default())
 }
 
