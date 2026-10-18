@@ -52,6 +52,11 @@ fuzz_target!(|input: FuzzInput| {
     let Ok(conn) = rusqlite::Connection::open_in_memory() else {
         return;
     };
+    if let Some(attached) = input.options.get_attached_tables()
+        && conn.execute("ATTACH ':memory:' AS ?1", [attached.schema()]).is_err()
+    {
+        return;
+    }
 
     // Other error classes (no such table/column/function, type
     // mismatch, constraint violation) are user-side references that

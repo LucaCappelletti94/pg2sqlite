@@ -10,7 +10,7 @@ A Rust library that translates PostgreSQL SQL into valid, runnable SQLite. It pa
 
 The contract is strict. Every returned statement is valid SQLite, an unimplemented equivalent is an explicit `Err` rather than SQL that fails at runtime, and constructs with no SQLite meaning (`CREATE FUNCTION`, `GRANT`, `COMMENT`, and similar) are dropped, reported as warnings by `translate_with_report` and left out silently by plain `translate`. Nothing that merely looks valid passes through, and the test suite checks behavior by executing the emitted SQL against SQLite rather than matching strings.
 
-`CREATE TEMPORARY TABLE` binds definition expressions to its declared columns and preserves the temporary modifier. `Script::iter()` applies pragmas followed by ordered initialization. `Script::connect()` validates replay before returning SQL, recreates connection-local objects and reruns temporary initialization against current persistent data.
+`CREATE TEMPORARY TABLE` preserves its modifier and declared-column bindings, and `Script::iter()` applies pragmas followed by ordered initialization. `Script::initialize()` selects fresh files with `FreshFiles` for tables placed by `with_attached_tables`. `Script::connect()` validates replay before returning SQL, recreates connection-local objects and reruns temporary initialization against current persistent data.
 
 The rewrites go beyond types. Row-Level Security becomes a renamed backing table, a view enforcing the `USING` clause, and `INSTEAD OF` triggers. A GIN `to_tsvector` index becomes an FTS5 virtual table with sync triggers. pgvector maps to [sqlite-vec](https://github.com/asg017/sqlite-vec) and PostGIS to the [SQLiteGIS](https://github.com/LucaCappelletti94/sqlitegis) extension. PL/pgSQL trigger bodies become SQLite trigger syntax, and SQLite DML translates back to PostgreSQL to sync replicas upstream. The crate is `no_std + alloc` and compiles for `wasm32-unknown-unknown`.
 
@@ -32,13 +32,17 @@ fn main() -> Result<(), pg2sqlite::errors::Error> {
         .sql(pg_sql)?
         .translate(&Pg2SqliteOptions::default())?;
 
-    assert_eq!(script.setup[0].to_string(), "PRAGMA case_sensitive_like = 1");
+    let mut initialization = script.initialize(FreshFiles::Main)?;
     assert_eq!(
-        script.initialization[0].to_string(),
+        initialization.next().expect("connection setup").to_string(),
+        "PRAGMA case_sensitive_like = 1"
+    );
+    assert_eq!(
+        initialization.next().expect("table definition").to_string(),
         "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, username TEXT NOT NULL) STRICT"
     );
     assert_eq!(
-        script.initialization[1].to_string(),
+        initialization.next().expect("seed").to_string(),
         "INSERT INTO users (username) VALUES ('alice') ON CONFLICT DO NOTHING"
     );
 
@@ -50,7 +54,7 @@ fn main() -> Result<(), pg2sqlite::errors::Error> {
 
 Divergences that survive translation because the difference lives in the engines, not in the emitted SQL.
 
-- **Connection pragmas.** The pragmas `foreign_keys = 1` and `case_sensitive_like = 1` sit in the script's `setup` part. They last only as long as the connection, so every connection that writes to the replica has to run that part, which the translation reports as a warning for foreign keys.
+- **Connection state.** The pragmas `foreign_keys = 1` and `case_sensitive_like = 1` and all `TEMP` objects last only as long as their connection. Every connection that writes to the replica must apply connection setup, which the translation reports as a warning for foreign keys.
 - **Case and collation.** SQLite folds ASCII only and compares byte-wise, so `lower`, `upper`, `ORDER BY`, `MIN`, and `MAX` diverge on non-ASCII or mixed-case text and `'a' < 'B'` answers false. `ILIKE` becomes `lower(...) LIKE lower(...) ESCAPE '\'`, and a pattern literal carrying a non-ASCII letter is refused unless `with_ilike_fold_function` names a Unicode-aware fold. An ICU-built SQLite or a `C`-collation PostgreSQL agrees with the server instead.
 - **Quiet answers.** PostgreSQL raises where SQLite answers. Division by zero gives `NULL`, `CAST('12abc' AS INTEGER)` gives 12, and integer overflow degrades to a float, while an `INTEGER` or `BIGINT` column carries no bound against any of it. `NUMERIC(p,s)` is the guarded exception, a scaled integer under a bounding `CHECK`, so overflowing the column fails.
 - **Stored representations.** What a column physically holds is not always what PostgreSQL would hand back. `translation_manifest` answers per column as a `ColumnStorage`, one of scaled minor units, UUID bytes or canonical text, JSON array text, packed floats with their width, or `Direct`.

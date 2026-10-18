@@ -26,8 +26,8 @@ use sql_traits::{
 use sqlparser::ast::{
     AlterTable, AlterTableOperation, ColumnOption, ConditionalStatements, CreateIndex, CreateTable,
     CreateTrigger, CreateView, Delete, Expr, Fetch, ForClause, ForeignKeyConstraint, FormatClause,
-    FromTable, Ident, Insert, LimitClause, LockClause, ObjectName, ObjectNamePart, OrderBy,
-    OrderByKind, PipeOperator, Query, RenameTableNameKind, Select, SelectItem,
+    FromTable, Ident, Insert, LimitClause, LockClause, ObjectName, ObjectNamePart, ObjectType,
+    OrderBy, OrderByKind, PipeOperator, Query, RenameTableNameKind, Select, SelectItem,
     SelectItemQualifiedWildcardKind, SetExpr, Setting, Statement, TableConstraint, TableFactor,
     TableObject, TableWithJoins, Update, Values, VisitMut, VisitorMut, With,
 };
@@ -39,60 +39,139 @@ use crate::{
         translator_impls::rls::resolve_trigger_table_name,
     },
     options::Pg2SqliteOptions,
-    script::ConnectionError,
+    script::{ConnectionError, FreshFiles},
 };
 
-/// Derives connection-local replay from a source-ordered bootstrap.
-pub(crate) fn connection_program(
-    bootstrap: &[Statement],
-    initial_schema: Option<&ParserDB>,
-    options: &Pg2SqliteOptions,
-) -> Result<Vec<Statement>, Error> {
-    if !bootstrap.iter().any(|statement| {
-        match statement {
-            Statement::CreateTable(create) => create.temporary,
-            Statement::CreateView(create) => create.temporary,
-            Statement::CreateTrigger(create) => create.temporary,
-            _ => false,
-        }
-    }) {
-        return Ok(Vec::new());
-    }
-    let state = walk(bootstrap, initial_schema, options)?;
-    let selected = replay_steps(&state, bootstrap);
-    let mut out = Vec::new();
-    let mut open: Option<usize> = None;
-    for (index, statement) in bootstrap.iter().enumerate() {
-        let step = &state.steps[index];
-        if !selected[index] {
-            continue;
-        }
-        if step.destinations.iter().any(|id| state.identities[*id].storage == Storage::Main) {
-            return Err(Error::forward_refusal(format!(
-                "statement {index} would repeat a persistent write while restoring temporary data"
-            )));
-        }
-        if let Some(tx) = step.transaction {
-            if open != Some(tx) {
-                if open.is_some() {
-                    out.push(commit_statement());
-                }
-                out.push(begin_statement());
-                open = Some(tx);
+pub(crate) struct Analysis {
+    state: Result<WalkState, ConnectionError>,
+    has_temp: bool,
+}
+
+impl Analysis {
+    pub(crate) fn new(
+        bootstrap: &[Statement],
+        initial_schema: Option<&ParserDB>,
+        options: &Pg2SqliteOptions,
+    ) -> Result<Self, Error> {
+        let has_temp = bootstrap.iter().any(|statement| {
+            match statement {
+                Statement::CreateTable(create) => create.temporary,
+                Statement::CreateView(create) => create.temporary,
+                Statement::CreateTrigger(create) => create.temporary,
+                _ => false,
             }
-        } else if open.take().is_some() {
+        });
+        let state = if has_temp || options.get_attached_tables().is_some() {
+            match walk(bootstrap, initial_schema, options) {
+                Ok(state) => Ok(state),
+                Err(Error::Connection(error)) => Err(error),
+                Err(Error::TranslationRefusal(refusal)) => {
+                    Err(ConnectionError::Translation(refusal))
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            Ok(WalkState::default())
+        };
+        Ok(Self { state, has_temp })
+    }
+
+    fn state(&self) -> Result<&WalkState, Error> {
+        match &self.state {
+            Ok(state) => Ok(state),
+            Err(ConnectionError::Translation(refusal)) => {
+                Err(Error::TranslationRefusal(refusal.clone()))
+            }
+            Err(error) => Err(Error::Connection(error.clone())),
+        }
+    }
+
+    pub(crate) fn connection_program(
+        &self,
+        bootstrap: &[Statement],
+    ) -> Result<Vec<Statement>, Error> {
+        if !self.has_temp {
+            return Ok(Vec::new());
+        }
+        let state = self.state()?;
+        let selected = replay_steps(state, bootstrap);
+        let mut out = Vec::new();
+        let mut open: Option<usize> = None;
+        for (index, statement) in bootstrap.iter().enumerate() {
+            let step = &state.steps[index];
+            if !selected[index] {
+                continue;
+            }
+            if step.destinations.iter().any(|id| state.identities[*id].storage == Storage::Main) {
+                return Err(Error::forward_refusal(format!(
+                    "statement {index} would repeat a persistent write while restoring temporary data"
+                )));
+            }
+            if let Some(tx) = step.transaction {
+                if open != Some(tx) {
+                    if open.is_some() {
+                        out.push(commit_statement());
+                    }
+                    out.push(begin_statement());
+                    open = Some(tx);
+                }
+            } else if open.take().is_some() {
+                out.push(commit_statement());
+            }
+            let mut rewritten = statement.clone();
+            if let ControlFlow::Break(error) =
+                Rewriter::replay(state, index).rewrite(&mut rewritten)
+            {
+                return Err(error.into());
+            }
+            out.push(rewritten);
+        }
+        if open.is_some() {
             out.push(commit_statement());
         }
-        let mut rewritten = statement.clone();
-        if let ControlFlow::Break(error) = Rewriter::replay(&state, index).rewrite(&mut rewritten) {
-            return Err(error.into());
+        Ok(out)
+    }
+
+    pub(crate) fn rebase_existing(
+        &self,
+        statements: &[Statement],
+        existing_tables: &BTreeSet<String>,
+        masks: &[u8],
+        files: FreshFiles,
+    ) -> Result<BTreeMap<usize, Statement>, Error> {
+        if existing_tables.is_empty() {
+            return Ok(BTreeMap::new());
         }
-        out.push(rewritten);
+        let state = self.state()?;
+        for (index, step) in state.steps.iter().enumerate() {
+            for name in &step.dropped_tables {
+                if existing_tables.contains(name) {
+                    return Err(Error::forward_refusal(format!(
+                        "table {name} exists in the target file, and statement {index} of the bootstrap \
+                     drops it. A statement written before the drop names the table as it then existed, \
+                     and that historical state cannot be rebuilt on top of the file. Remove the drop \
+                     from the batch, or create the file fresh."
+                    )));
+                }
+            }
+        }
+        let mut replacements = BTreeMap::new();
+        for (index, statement) in statements.iter().enumerate() {
+            if masks[index] & files.mask() == 0 || !carries_object_names(statement) {
+                continue;
+            }
+            let mut rewritten = statement.clone();
+            if let ControlFlow::Break(error) =
+                Rewriter::rebase(state, index, existing_tables).rewrite(&mut rewritten)
+            {
+                return Err(error.into());
+            }
+            if rewritten != *statement {
+                replacements.insert(index, rewritten);
+            }
+        }
+        Ok(replacements)
     }
-    if open.is_some() {
-        out.push(commit_statement());
-    }
-    Ok(out)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,8 +265,10 @@ struct Step {
     transaction: Option<usize>,
     undone: bool,
     names: Option<ScopeSnapshot>,
+    dropped_tables: Vec<String>,
 }
 
+#[derive(Default)]
 struct WalkState {
     identities: Vec<Identity>,
     steps: Vec<Step>,
@@ -283,7 +364,7 @@ impl Walker {
     }
 
     fn push(&mut self, class: Class) {
-        self.push_step(class, None, None, Vec::new());
+        self.push_step(class, None, None, Vec::new(), Vec::new());
     }
 
     fn push_step(
@@ -292,6 +373,7 @@ impl Walker {
         identity: Option<usize>,
         target: Option<usize>,
         destinations: Vec<usize>,
+        dropped_tables: Vec<String>,
     ) {
         self.steps.push(Step {
             class,
@@ -302,6 +384,7 @@ impl Walker {
             transaction: self.tx,
             undone: false,
             names: None,
+            dropped_tables,
         });
     }
 
@@ -406,7 +489,9 @@ impl Walker {
             Statement::CreateTrigger(create) => self.create_trigger(create, index)?,
             Statement::CreateIndex(create) => self.create_index(create, index)?,
             Statement::CreateVirtualTable { name, .. } => self.create_virtual_table(name, index)?,
-            Statement::Drop { names, temporary, .. } => self.drop(names, *temporary, index)?,
+            Statement::Drop { object_type, names, temporary, .. } => {
+                self.drop(*object_type, names, *temporary, index)?;
+            }
             Statement::DropTrigger(drop) => {
                 self.drop_trigger(&drop.trigger_name, index)?;
             }
@@ -467,6 +552,7 @@ impl Walker {
             Some(id),
             None,
             Vec::new(),
+            Vec::new(),
         );
         Ok(())
     }
@@ -508,6 +594,7 @@ impl Walker {
             },
             Some(id),
             None,
+            Vec::new(),
             Vec::new(),
         );
         Ok(())
@@ -610,6 +697,7 @@ impl Walker {
             Some(id),
             Some(on_id),
             Vec::new(),
+            Vec::new(),
         );
         Ok(())
     }
@@ -656,6 +744,7 @@ impl Walker {
             Some(id),
             Some(table_id),
             Vec::new(),
+            Vec::new(),
         );
         Ok(())
     }
@@ -676,13 +765,20 @@ impl Walker {
         }
         let id = self.new_identity(Storage::Main, Kind::Table, folded, display);
         self.identities[id].columns_known = false;
-        self.push_step(Class::PersistentDefinition, Some(id), None, Vec::new());
+        self.push_step(Class::PersistentDefinition, Some(id), None, Vec::new(), Vec::new());
         Ok(())
     }
 
-    fn drop(&mut self, names: &[ObjectName], temporary: bool, index: usize) -> Result<(), Error> {
+    fn drop(
+        &mut self,
+        object_type: ObjectType,
+        names: &[ObjectName],
+        temporary: bool,
+        index: usize,
+    ) -> Result<(), Error> {
         let mut identity: Option<usize> = None;
         let mut storage: Option<Storage> = None;
+        let mut dropped_tables = Vec::new();
         for name in names {
             let Some(ident) = last_ident(name) else {
                 return Err(Error::forward_refusal(format!(
@@ -696,6 +792,8 @@ impl Walker {
             } else {
                 self.owner(&folded)
             };
+            let dropped_file_table =
+                !temporary && temp_owner.is_none() && object_type == ObjectType::Table;
             if let Some((owner_storage, id)) = owner {
                 if identity.is_none() {
                     identity = Some(id);
@@ -708,6 +806,9 @@ impl Walker {
                 }
                 self.kill(id, owner_storage, &folded);
             }
+            if dropped_file_table {
+                dropped_tables.push(folded);
+            }
         }
         self.push_step(
             match storage {
@@ -718,6 +819,7 @@ impl Walker {
             identity,
             None,
             Vec::new(),
+            dropped_tables,
         );
         Ok(())
     }
@@ -742,6 +844,7 @@ impl Walker {
             },
             Some(id),
             None,
+            Vec::new(),
             Vec::new(),
         );
         Ok(())
@@ -812,6 +915,7 @@ impl Walker {
             },
             None,
             Some(id),
+            Vec::new(),
             Vec::new(),
         );
         Ok(())
@@ -895,7 +999,7 @@ impl Walker {
         } else {
             Class::PersistentDataWrite
         };
-        self.push_step(class, None, Some(id), destinations);
+        self.push_step(class, None, Some(id), destinations, Vec::new());
         self.steps[index].dependencies = dependencies;
         Ok(())
     }
@@ -1148,6 +1252,11 @@ enum Owner<'a> {
     AsIs(usize),
 }
 
+enum Mode<'a> {
+    Replay,
+    Rebase { existing: &'a BTreeSet<String> },
+}
+
 enum OpaqueColumns {
     Exact(Rc<Columns>),
     Unknown,
@@ -1263,6 +1372,7 @@ struct Rewriter<'a> {
     final_main: &'a BTreeMap<String, usize>,
     final_temp: &'a BTreeMap<String, usize>,
     scope: Option<&'a ScopeSnapshot>,
+    mode: Mode<'a>,
     defining: Option<usize>,
     index: usize,
     frames: Vec<Frame>,
@@ -1274,7 +1384,7 @@ struct Rewriter<'a> {
 }
 
 impl<'a> Rewriter<'a> {
-    fn replay(state: &'a WalkState, index: usize) -> Self {
+    fn at(state: &'a WalkState, index: usize, mode: Mode<'a>) -> Self {
         let scope = state.steps[index].names.as_ref();
         let schema_changed = scope.is_some_and(|scope| {
             scope
@@ -1287,6 +1397,7 @@ impl<'a> Rewriter<'a> {
             final_main: &state.final_main,
             final_temp: &state.final_temp,
             scope,
+            mode,
             defining: state.steps[index].identity,
             index,
             frames: Vec::new(),
@@ -1296,6 +1407,14 @@ impl<'a> Rewriter<'a> {
             changed: 0,
             schema_changed,
         }
+    }
+
+    fn replay(state: &'a WalkState, index: usize) -> Self {
+        Self::at(state, index, Mode::Replay)
+    }
+
+    fn rebase(state: &'a WalkState, index: usize, existing: &'a BTreeSet<String>) -> Self {
+        Self::at(state, index, Mode::Rebase { existing })
     }
 
     fn ident(&self, id: usize) -> &'a Identity {
@@ -1310,10 +1429,19 @@ impl<'a> Rewriter<'a> {
             .or_else(|| self.final_temp.get(folded))
             .or_else(|| self.final_main.get(folded))?;
         let identity = self.ident(id);
-        Some(if identity.storage == Storage::Temp && identity.kind == Kind::Table {
-            Owner::AsIs(id)
-        } else {
-            Owner::Final(identity)
+        Some(match self.mode {
+            Mode::Replay if identity.storage == Storage::Temp && identity.kind == Kind::Table => {
+                Owner::AsIs(id)
+            }
+            Mode::Replay => Owner::Final(identity),
+            Mode::Rebase { existing, .. }
+                if identity.storage == Storage::Main
+                    && (existing.contains(folded)
+                        || existing.contains(&identity.final_name_folded)) =>
+            {
+                Owner::Final(identity)
+            }
+            Mode::Rebase { .. } => Owner::AsIs(id),
         })
     }
 

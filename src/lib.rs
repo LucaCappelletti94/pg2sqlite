@@ -5,6 +5,7 @@ extern crate alloc;
 
 pub mod errors;
 pub(crate) mod impls;
+pub mod initialization;
 pub mod manifest;
 pub mod options;
 pub mod pg2sqlite;
@@ -16,12 +17,14 @@ pub mod warnings;
 pub mod prelude {
     pub use crate::{
         errors::{Error, RefusalCategory, SqlParseError, TranslationDirection, TranslationRefusal},
+        initialization::{InitializationError, InitializationPlan},
         manifest::{
-            ColumnManifestEntry, ColumnStorage, TableManifestEntry, VectorElement, WrapperKind,
+            ColumnManifestEntry, ColumnStorage, Placement, TableManifestEntry, VectorElement,
+            WrapperKind,
         },
-        options::{Pg2SqliteOptions, TranslationContext},
+        options::{AttachedTables, Pg2SqliteOptions, TranslationContext},
         pg2sqlite::Pg2Sqlite,
-        script::Script,
+        script::{FreshFiles, Script},
         traits::{
             ArrayRepresentation, ReverseTranslator, Schema, SessionVariableMapping,
             SessionVariablePattern, SessionVariableValue, Translator, TranslatorWithContext,

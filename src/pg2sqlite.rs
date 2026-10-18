@@ -28,15 +28,18 @@ use tempfile::TempDir;
 
 use crate::{
     impls::{
-        connection_program::connection_program,
+        connection_program::Analysis,
         emitted_namespace::{Source, reject_name_collisions, sourced},
         object_name::last_ident_value_or_display,
+        placement::place,
         translator_impls::{
             create_index::{FtsTranslation, analyze_fts_index},
             postgis,
             rls::generate_rls_audit_table,
         },
     },
+    initialization::compiler::{Lifetime, compile},
+    manifest::Placement,
     options::{Pg2SqliteOptions, TranslationContext},
     prelude::ReverseTranslator,
     script::Script,
@@ -717,13 +720,18 @@ impl Pg2Sqlite {
         initial_schema: Option<&ParserDB>,
     ) -> Result<PreparedTranslation, crate::errors::Error> {
         let prepared = self.prepare_schema(options, initial_schema)?;
-        let PreparedStatements { schema: _, options: _, statements, audit_table, mut warnings } =
+        let PreparedStatements { schema, options, statements, audit_table, mut warnings } =
             self.translate_prepared(prepared, |_| true)?;
-        let mut initialization: Vec<Statement> = statements.into_iter().flatten().collect();
+        let mut placed = place(&self.pg_statements, statements, &schema, &options)?;
         if let Some(audit_table) = audit_table {
-            initialization.insert(0, audit_table);
+            placed.bootstrap.insert(0, audit_table);
+            placed.scopes.insert(0, Placement::Main);
+            placed
+                .main_tables
+                .extend(options.get_rls_audit_table_name().map(str::to_ascii_lowercase));
         }
-        let connection = match connection_program(&initialization, initial_schema, options) {
+        let analysis = Analysis::new(&placed.bootstrap, initial_schema, &options)?;
+        let connection = match analysis.connection_program(&placed.bootstrap) {
             Ok(statements) => Ok(statements),
             Err(crate::errors::Error::Connection(error)) => Err(error),
             Err(crate::errors::Error::TranslationRefusal(refusal)) => {
@@ -731,6 +739,25 @@ impl Pg2Sqlite {
             }
             Err(error) => return Err(error),
         };
+        let lifetimes: Vec<Lifetime> = placed
+            .scopes
+            .iter()
+            .map(|scope| {
+                match scope {
+                    Placement::Main => Lifetime::Main,
+                    Placement::Attached => Lifetime::Attached,
+                    Placement::Temp => Lifetime::Connection,
+                }
+            })
+            .collect();
+        let initialization = compile(
+            placed.bootstrap,
+            &lifetimes,
+            &placed.main_tables,
+            &placed.attached_tables,
+            options.get_attached_tables().is_some(),
+            &analysis,
+        )?;
         let mut script = Script { setup: Vec::new(), initialization, connection };
 
         // PostgreSQL's LIKE is case-sensitive. SQLite's is case-insensitive for
@@ -805,7 +832,11 @@ impl Pg2Sqlite {
     ///
     /// # Errors
     ///
-    /// Returns an error if schema ingestion or translation fails.
+    /// Returns an error if schema ingestion or translation fails, and
+    /// [`Error::UnusableAttachedTables`](crate::errors::Error::UnusableAttachedTables)
+    /// when the tables configured with
+    /// [`with_attached_tables`](crate::options::Pg2SqliteOptions::with_attached_tables)
+    /// cannot be placed.
     pub fn translate_with_schema(
         &self,
         schema: &ParserDB,
@@ -849,7 +880,11 @@ impl Pg2Sqlite {
     ///
     /// # Errors
     ///
-    /// Returns an error if schema ingestion or translation fails.
+    /// Returns an error if schema ingestion or translation fails, and
+    /// [`Error::UnusableAttachedTables`](crate::errors::Error::UnusableAttachedTables)
+    /// when the tables configured with
+    /// [`with_attached_tables`](crate::options::Pg2SqliteOptions::with_attached_tables)
+    /// cannot be placed.
     pub fn translate_with_report_and_schema(
         &self,
         schema: &ParserDB,
@@ -884,7 +919,7 @@ impl Pg2Sqlite {
     ///     .translate_to_sql(&Pg2SqliteOptions::default())?;
     /// assert_eq!(script.setup, ["PRAGMA case_sensitive_like = 1"]);
     /// assert_eq!(
-    ///     script.initialization,
+    ///     script.initialization.iter().collect::<Vec<_>>(),
     ///     ["CREATE TABLE t (a INTEGER CHECK (a BETWEEN -2147483648 AND 2147483647)) STRICT"]
     /// );
     /// # Ok::<(), Error>(())
@@ -900,7 +935,11 @@ impl Pg2Sqlite {
     ///
     /// # Errors
     ///
-    /// Returns an error if schema ingestion or translation fails.
+    /// Returns an error if schema ingestion or translation fails, and
+    /// [`Error::UnusableAttachedTables`](crate::errors::Error::UnusableAttachedTables)
+    /// when the tables configured with
+    /// [`with_attached_tables`](crate::options::Pg2SqliteOptions::with_attached_tables)
+    /// cannot be placed.
     pub fn translate_to_sql_with_schema(
         &self,
         schema: &ParserDB,
@@ -985,8 +1024,9 @@ impl Pg2Sqlite {
         };
 
         let prepared = self.prepare_schema(options, None)?;
-        let PreparedStatements { schema, options, .. } =
+        let PreparedStatements { schema, options, statements, .. } =
             self.translate_prepared(prepared, Self::manifest_statement_needs_translation)?;
+        let placed = place(&self.pg_statements, statements, &schema, &options)?;
         let schema = &schema;
         let options = &options;
 
@@ -1030,7 +1070,14 @@ impl Pg2Sqlite {
                 })
                 .collect::<Result<Vec<_>, crate::errors::Error>>()?;
 
-            entries.push(TableManifestEntry { logical, physical, wrapper, columns });
+            entries.push(TableManifestEntry {
+                logical_placement: placed.home(&logical),
+                physical_placement: placed.home(&physical),
+                logical,
+                physical,
+                wrapper,
+                columns,
+            });
         }
 
         Ok(entries)

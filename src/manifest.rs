@@ -22,13 +22,29 @@ pub enum WrapperKind {
     ReadOnly,
 }
 
+/// The database schema containing an emitted object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// The persistent main database.
+    Main,
+    /// The persistent attached database.
+    Attached,
+    /// The connection-local `temp` schema.
+    Temp,
+}
+
 /// One table's translation outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableManifestEntry {
     /// The table name in the source (PostgreSQL) schema.
     pub logical: String,
+    /// Where the object named [`logical`](Self::logical) lives, which is the
+    /// view for [`WrapperKind::RlsView`] and the table itself otherwise.
+    pub logical_placement: Placement,
     /// The SQLite table that physically stores the rows.
     pub physical: String,
+    /// Where [`physical`](Self::physical) lives, never [`Placement::Temp`].
+    pub physical_placement: Placement,
     /// The wrapper generated around the physical table.
     pub wrapper: WrapperKind,
     /// How each column is physically represented, one entry per column in

@@ -53,7 +53,8 @@ fn external_schema_drives_column_dependent_rewrites() {
     diesel::sql_query("INSERT INTO docs VALUES (1, '{\"a\":1}'), (2, '[2,3]')")
         .execute(&mut connection)
         .expect("fixture rows should insert");
-    let rows = diesel::sql_query(report.script.initialization[0].to_string())
+    let query = report.script.initialization.iter().next().expect("translated query");
+    let rows = diesel::sql_query(query.to_string())
         .load::<TextValue>(&mut connection)
         .expect("translated query should execute");
     assert_eq!(rows.len(), 1);

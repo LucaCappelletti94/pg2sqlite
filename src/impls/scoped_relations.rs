@@ -25,6 +25,9 @@ pub(crate) fn relation_names<V: Visit>(node: &V) -> Vec<String> {
 }
 
 /// One query's CTE names and their visibility while its children are visited.
+/// A `WITH RECURSIVE` makes every sibling visible to every body, including
+/// forward ones, while a plain `WITH` makes only the earlier siblings
+/// visible.
 struct CteScope {
     aliases: Vec<Ident>,
     body_visibility: Vec<(usize, usize)>,
@@ -127,7 +130,6 @@ impl Visitor for RelationCollector {
         let (aliases, body_visibility) = query.with.as_ref().map_or_else(
             || (Vec::new(), Vec::new()),
             |with| {
-                let recursive = usize::from(with.recursive);
                 let aliases =
                     with.cte_tables.iter().map(|cte| cte.alias.name.clone()).collect::<Vec<_>>();
                 let body_visibility = with
@@ -135,7 +137,8 @@ impl Visitor for RelationCollector {
                     .iter()
                     .enumerate()
                     .map(|(index, cte)| {
-                        (ptr::from_ref(cte.query.as_ref()).addr(), index + recursive)
+                        let visible = if with.recursive { with.cte_tables.len() } else { index };
+                        (ptr::from_ref(cte.query.as_ref()).addr(), visible)
                     })
                     .collect();
                 (aliases, body_visibility)

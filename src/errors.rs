@@ -145,6 +145,9 @@ pub enum Error {
     /// Connection-local replay needs unavailable source history.
     #[error(transparent)]
     Connection(#[from] crate::script::ConnectionError),
+    /// Fresh-file selection cannot preserve source-ordered initialization.
+    #[error(transparent)]
+    Initialization(#[from] crate::initialization::InitializationError),
     /// Error when reverse RLS scanning encounters an expression variant that is
     /// not explicitly handled.
     #[error(
@@ -264,6 +267,14 @@ pub enum Error {
          with with_rls_table_suffix, or leave the default '_rls'."
     )]
     EmptyRlsTableSuffix,
+    /// Error when the tables configured with
+    /// [`with_attached_tables`](crate::options::Pg2SqliteOptions::with_attached_tables)
+    /// cannot be placed.
+    #[error("The attached tables cannot be placed: {reason}")]
+    UnusableAttachedTables {
+        /// Why the placement cannot be carried out.
+        reason: String,
+    },
     /// Error when a column reference cannot be resolved to a declared column
     /// through the relations in scope where it appears.
     #[error(
