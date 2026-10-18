@@ -28,6 +28,7 @@ fn translate(sql: &str) -> String {
         .unwrap()
         .translate(&options)
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -40,6 +41,7 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .unwrap()
         .translate(options)
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -274,7 +276,11 @@ fn missing_session_variable_mapping_error() {
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string());
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Expected error for missing mapping");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -308,7 +314,11 @@ fn missing_one_of_multiple_current_setting_mappings_errors() {
             "current_app_user",
         ));
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(
         result.is_err(),
         "Expected missing mapping error when one of multiple current_setting calls is unmapped"
@@ -578,7 +588,11 @@ fn missing_audit_table_name_error() {
             "current_app_user",
         ));
     // No audit table name configured
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Expected error for missing audit table name");
     let err = result.unwrap_err().to_string();
     assert!(err.contains("audit table name"), "Expected audit table name error: {err}");
@@ -1409,7 +1423,11 @@ fn missing_current_user_mapping_error() {
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string());
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Expected error for missing current_user mapping");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -1435,7 +1453,11 @@ fn missing_schema_qualified_current_setting_mapping_error() {
         .with_session_user_role("authenticated".to_string())
         .with_rls_audit_table_name("rls_audit".to_string());
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Expected error for missing session variable mapping");
     let err = result.unwrap_err().to_string();
     assert!(

@@ -57,7 +57,9 @@ fn test_rls_requires_audit_table_name() {
         ));
     // Note: NO .with_rls_audit_table_name() called
 
-    let result = Pg2Sqlite::default().sql(RLS_SCHEMA).and_then(|t| t.translate(&options));
+    let result = Pg2Sqlite::default()
+        .sql(RLS_SCHEMA)
+        .and_then(|t| t.translate(&options).map(pg2sqlite::script::Script::into_vec));
 
     // Should fail with RlsAuditTableNameRequired error
     assert!(result.is_err());
@@ -82,7 +84,7 @@ fn test_audit_table_uses_configured_name() -> Result<(), Box<dyn std::error::Err
         ))
         .with_rls_audit_table_name(custom_audit_name.to_string());
 
-    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?.into_vec();
     let sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // Should contain CREATE TABLE with the custom name
@@ -116,7 +118,7 @@ fn test_triggers_use_configured_audit_table() -> Result<(), Box<dyn std::error::
         ))
         .with_rls_audit_table_name(custom_audit_name.to_string());
 
-    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?.into_vec();
     let sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // Triggers should INSERT INTO the custom audit table
@@ -194,7 +196,7 @@ CREATE POLICY documents_insert_policy ON documents
         ))
         .with_rls_audit_table_name(audit_table_name.to_string());
 
-    let translated = Pg2Sqlite::default().sql(MONITOR_SCHEMA)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(MONITOR_SCHEMA)?.translate(&options)?.into_vec();
     let mut conn = establish_connection();
     for stmt in &translated {
         diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
@@ -255,7 +257,7 @@ fn test_strict_mode_blocks_violations() -> Result<(), Box<dyn std::error::Error>
         .with_rls_audit_table_name(audit_table_name.to_string())
         .with_strict_rls_validation(); // Enable strict mode
 
-    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?.into_vec();
     let sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // Strict mode should include RAISE(ABORT) in triggers
@@ -340,7 +342,7 @@ CREATE POLICY documents_insert_policy ON documents
         ))
         .with_rls_audit_table_name("rls_audit".to_string());
 
-    let translated = Pg2Sqlite::default().sql(VALIDATION_SCHEMA)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(VALIDATION_SCHEMA)?.translate(&options)?.into_vec();
     let sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
@@ -400,7 +402,7 @@ fn test_monitor_mode_snapshot() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .with_rls_audit_table_name("rls_violations".to_string());
 
-    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?.into_vec();
     let sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     insta::assert_snapshot!("rls_validation_monitor_mode", sql);
@@ -420,7 +422,7 @@ fn test_strict_mode_snapshot() -> Result<(), Box<dyn std::error::Error>> {
         .with_rls_audit_table_name("rls_violations".to_string())
         .with_strict_rls_validation();
 
-    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(RLS_SCHEMA)?.translate(&options)?.into_vec();
     let sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     insta::assert_snapshot!("rls_validation_strict_mode", sql);

@@ -35,6 +35,7 @@ fn rls_translation(sql: &str) -> Vec<String> {
         .expect("parse")
         .translate(&rls_options())
         .expect("translate")
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -57,6 +58,7 @@ fn translate(pg: &str) -> Vec<String> {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
 }
 
 /// Translates `pg` and applies every emitted statement. The emitted DDL is the
@@ -235,6 +237,7 @@ fn a_rename_without_row_level_security_still_translates() {
         .expect("parse")
         .translate(&rls_options())
         .expect("a plain rename must still translate")
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect();

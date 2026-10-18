@@ -49,6 +49,7 @@ fn translate(schema: &str, opts: &Pg2SqliteOptions) -> String {
         .expect("parse")
         .translate(opts)
         .expect("translate")
+        .into_vec()
         .iter()
         .map(|s| format!("{s};"))
         .collect::<Vec<_>>()
@@ -58,11 +59,19 @@ fn translate(schema: &str, opts: &Pg2SqliteOptions) -> String {
 fn translate_query_tail(pg_query: &str, schema: &str, opts: &Pg2SqliteOptions) -> String {
     // Same shape as `translator::translate_query` in the playground:
     // translate `schema + query` together and keep only the tail.
-    let schema_stmts =
-        Pg2Sqlite::default().sql(schema).expect("parse").translate(opts).expect("translate");
+    let schema_stmts = Pg2Sqlite::default()
+        .sql(schema)
+        .expect("parse")
+        .translate(opts)
+        .expect("translate")
+        .into_vec();
     let combined = format!("{schema};\n{pg_query}");
-    let combined_stmts =
-        Pg2Sqlite::default().sql(&combined).expect("parse").translate(opts).expect("translate");
+    let combined_stmts = Pg2Sqlite::default()
+        .sql(&combined)
+        .expect("parse")
+        .translate(opts)
+        .expect("translate")
+        .into_vec();
     combined_stmts
         .into_iter()
         .skip(schema_stmts.len())
@@ -141,7 +150,8 @@ fn plain_insert_still_uses_view_path() {
         ))
         .expect("parse")
         .translate(&opts)
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let last = translated.last().expect("at least one stmt").to_string();
     assert!(
         last.contains("INSERT INTO documents (") && !last.contains("documents_rls"),
@@ -174,7 +184,8 @@ fn insert_returning_through_custom_rls_suffix() {
         ))
         .expect("parse")
         .translate(&custom_opts)
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let last = translated.last().expect("at least one stmt").to_string();
     assert!(
         last.contains("INSERT INTO documents_inner"),
@@ -291,7 +302,8 @@ fn a_table_without_a_policy_still_returns_its_assigned_key() {
         .sql(&format!("{plain}\nINSERT INTO notes (body) VALUES ('b') RETURNING id;"))
         .expect("parse")
         .translate(&monitor_opts())
-        .expect("an unsplit table needs no rewrite");
+        .expect("an unsplit table needs no rewrite")
+        .into_vec();
     let last = translated.last().expect("at least one statement").to_string();
     assert!(last.contains("INSERT INTO notes"), "the insert must be untouched: {last}");
 }
@@ -313,7 +325,8 @@ mod m1_tests {
             .sql(schema)
             .expect("parse")
             .translate(&strict_opts())
-            .expect("translate");
+            .expect("translate")
+            .into_vec();
         let mut conn = SqliteConnection::establish(":memory:").expect("open db");
         for s in &stmts {
             // CREATE TABLE / CREATE VIEW / CREATE TRIGGER: DDL the typed DSL

@@ -69,6 +69,7 @@ fn sqlite_ddl() -> Vec<String> {
         .expect("parse schema")
         .translate_to_sql(&options())
         .expect("translate schema")
+        .into_vec()
 }
 
 /// Translates a PostgreSQL DML statement in the context of SCHEMA and returns
@@ -80,7 +81,8 @@ fn sqlite_dml(pg_dml: &str) -> Vec<String> {
         .sql(pg_dml)
         .expect("parse dml")
         .translate_to_sql(&options())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let skip = sqlite_ddl().len();
     all.into_iter().skip(skip).collect()
 }

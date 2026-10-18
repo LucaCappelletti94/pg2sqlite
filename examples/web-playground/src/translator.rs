@@ -23,7 +23,7 @@ pub fn translate(
     let start = elapsed_ms_fn();
     let stmts = Pg2Sqlite::default()
         .sql(pg_sql)
-        .and_then(|t| t.translate(options))
+        .and_then(|t| t.translate(options).map(pg2sqlite::script::Script::into_vec))
         .map_err(classify_error)?;
 
     let elapsed_ms = elapsed_ms_fn() - start;
@@ -44,12 +44,12 @@ pub fn translate_query(
 ) -> Result<String, TranslationError> {
     let schema_stmts = Pg2Sqlite::default()
         .sql(pg_schema_sql)
-        .and_then(|t| t.translate(options))
+        .and_then(|t| t.translate(options).map(pg2sqlite::script::Script::into_vec))
         .map_err(classify_error)?;
     let combined_sql = format!("{pg_schema_sql};\n{pg_query}");
     let combined_stmts = Pg2Sqlite::default()
         .sql(&combined_sql)
-        .and_then(|t| t.translate(options))
+        .and_then(|t| t.translate(options).map(pg2sqlite::script::Script::into_vec))
         .map_err(classify_error)?;
     let tail = combined_stmts.into_iter().skip(schema_stmts.len()).collect::<Vec<_>>();
     Ok(tail.iter().map(ToString::to_string).collect::<Vec<_>>().join(";\n"))

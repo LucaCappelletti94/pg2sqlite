@@ -67,6 +67,7 @@ fn translate_ok(pg: &str) -> String {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .pop()
         .expect("at least one statement")
 }
@@ -79,6 +80,7 @@ fn reverse_of(expression: &str) -> sqlparser::ast::Statement {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .pop()
         .expect("the SELECT");
 

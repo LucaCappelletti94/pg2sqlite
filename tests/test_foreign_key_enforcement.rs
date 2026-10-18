@@ -36,7 +36,8 @@ fn apply_on_a_default_connection(pg: &str) -> Option<String> {
         .sql(pg)
         .expect("fixture parses")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("fixture translates");
+        .expect("fixture translates")
+        .into_vec();
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     connection
         .execute_batch("PRAGMA foreign_keys = OFF;")
@@ -56,6 +57,7 @@ fn emitted(pg: &str) -> Vec<String> {
         .expect("fixture parses")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("fixture translates")
+        .into_vec()
 }
 
 /// The warnings `pg` emits.

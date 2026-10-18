@@ -116,7 +116,8 @@ fn setup_sq_diesel() -> SqliteConnection {
         .sql(&source)
         .expect("parse schema and seeds")
         .translate_to_sql(&values_options())
-        .expect("translate schema and seeds");
+        .expect("translate schema and seeds")
+        .into_vec();
 
     // establish_connection configures foreign_keys, recursive_triggers,
     // and UUID functions; none of the latter interfere with this schema.
@@ -139,7 +140,8 @@ fn setup_sq_rusqlite() -> RusqliteConn {
         .sql(&source)
         .expect("parse schema and seeds")
         .translate_to_sql(&values_options())
-        .expect("translate schema and seeds");
+        .expect("translate schema and seeds")
+        .into_vec();
 
     let sq = RusqliteConn::open_in_memory().expect("in-memory SQLite");
     sq.execute_batch("PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON;")
@@ -183,7 +185,8 @@ fn sq_sql_diesel(conn: &mut SqliteConnection, pg_query: &str) -> Vec<Option<Stri
         .sql(&full)
         .expect("parse query")
         .translate_to_sql(&values_options())
-        .expect("translate query");
+        .expect("translate query")
+        .into_vec();
     let probe = stmts.pop().expect("translation produced at least one statement");
     diesel::sql_query(probe.as_str())
         .load::<Val>(conn)
@@ -200,7 +203,8 @@ fn sq_sql_rusqlite(sq: &RusqliteConn, pg_query: &str) -> Vec<Option<String>> {
         .sql(&full)
         .expect("parse query")
         .translate_to_sql(&values_options())
-        .expect("translate query");
+        .expect("translate query")
+        .into_vec();
     let probe = stmts.pop().expect("translation produced at least one statement");
     let mut stmt =
         sq.prepare(&probe).unwrap_or_else(|e| panic!("SQLite prepare failed: {e}\n{probe}"));

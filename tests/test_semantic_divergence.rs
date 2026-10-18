@@ -21,6 +21,7 @@ fn translate(pg: &str) -> Vec<String> {
         .expect("parses")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translates")
+        .into_vec()
 }
 
 /// Apply the translated DDL, seed one row, then evaluate the translated form of

@@ -30,7 +30,12 @@ fn options() -> Pg2SqliteOptions {
 }
 
 fn translate(pg: &str) -> Vec<String> {
-    Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&options()).expect("translate")
+    Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(&options())
+        .expect("translate")
+        .into_vec()
 }
 
 fn refusal(pg: &str) -> String {

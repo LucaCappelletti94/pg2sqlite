@@ -16,8 +16,12 @@ fn extract_week_uses_the_iso_format() {
         CREATE TABLE week_test (id INTEGER PRIMARY KEY, ts TEXT);
         SELECT EXTRACT(WEEK FROM ts) FROM week_test;
     ";
-    let statements =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let statements = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     let query = statements
         .iter()
         .find(|statement| matches!(statement, sqlparser::ast::Statement::Query(_)))
@@ -39,7 +43,8 @@ fn extract_week_uses_the_iso_format() {
 fn extract_second_produces_valid_sqlite() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE sec2_test (id INTEGER PRIMARY KEY, ts TEXT NOT NULL);
                SELECT EXTRACT(SECOND FROM ts) AS secs FROM sec2_test;";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let select_sql = translated
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))

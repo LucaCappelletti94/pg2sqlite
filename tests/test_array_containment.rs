@@ -31,6 +31,7 @@ fn tr(pg: &str) -> String {
         .expect("parse")
         .translate_to_sql(&opts())
         .expect("translate")
+        .into_vec()
         .into_iter()
         .find(|s| !s.starts_with("PRAGMA"))
         .expect("at least one statement")
@@ -152,7 +153,8 @@ fn arr_items_conn() -> SqliteConnection {
         .sql(schema_and_query)
         .expect("parse schema")
         .translate_to_sql(&opts())
-        .expect("translate schema");
+        .expect("translate schema")
+        .into_vec();
 
     let mut conn = establish_connection();
     for stmt in &ddl {
@@ -180,6 +182,7 @@ fn tr_arr(select_pg: &str) -> String {
         .expect("parse")
         .translate_to_sql(&opts())
         .expect("translate")
+        .into_vec()
         .into_iter()
         .last()
         .expect("at least one statement")

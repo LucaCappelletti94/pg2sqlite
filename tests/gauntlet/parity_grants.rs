@@ -369,7 +369,8 @@ fn sqlite_runner() -> SqliteRunner {
         .sql(GRANTS)
         .expect("parse the permissions fixture")
         .translate(&options())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let mut connection = establish_connection();
     for statement in &translated {

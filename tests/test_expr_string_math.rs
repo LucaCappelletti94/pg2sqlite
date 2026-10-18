@@ -48,7 +48,7 @@ fn test_trim_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -72,7 +72,7 @@ fn test_trim_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:")?;
 
@@ -111,7 +111,7 @@ fn test_trim_variants_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -136,7 +136,7 @@ fn test_ceil_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -161,7 +161,7 @@ fn test_ceil_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:")?;
 
@@ -177,7 +177,7 @@ fn test_ceil_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .execute(&mut conn)?;
 
     let select_sql = "SELECT CEIL(num_val) as ceiled FROM data ORDER BY id";
-    let translated_select = Pg2Sqlite::default().sql(select_sql)?.translate(&options)?;
+    let translated_select = Pg2Sqlite::default().sql(select_sql)?.translate(&options)?.into_vec();
     let select_stmt = translated_select
         .iter()
         .find(|s| !s.to_string().starts_with("PRAGMA"))
@@ -211,7 +211,7 @@ fn test_floor_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -238,7 +238,7 @@ fn test_floor_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:")?;
 
@@ -254,7 +254,7 @@ fn test_floor_semantic() -> Result<(), Box<dyn std::error::Error>> {
         .execute(&mut conn)?;
 
     let select_sql = "SELECT FLOOR(num_val) as floored FROM data ORDER BY id";
-    let translated_select = Pg2Sqlite::default().sql(select_sql)?.translate(&options)?;
+    let translated_select = Pg2Sqlite::default().sql(select_sql)?.translate(&options)?.into_vec();
     let select_stmt = translated_select
         .iter()
         .find(|s| !s.to_string().starts_with("PRAGMA"))

@@ -10,7 +10,9 @@ mod helpers;
 fn translate(sql: &str) -> String {
     Pg2Sqlite::default()
         .sql(sql)
-        .and_then(|t| t.translate(&Pg2SqliteOptions::default()))
+        .and_then(|t| {
+            t.translate(&Pg2SqliteOptions::default()).map(pg2sqlite::script::Script::into_vec)
+        })
         .map_or_else(
             |e| panic!("translation failed: {e}"),
             |stmts| stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"),
@@ -20,7 +22,9 @@ fn translate(sql: &str) -> String {
 fn try_translate(sql: &str) -> Result<String, pg2sqlite::errors::Error> {
     Pg2Sqlite::default()
         .sql(sql)
-        .and_then(|t| t.translate(&Pg2SqliteOptions::default()))
+        .and_then(|t| {
+            t.translate(&Pg2SqliteOptions::default()).map(pg2sqlite::script::Script::into_vec)
+        })
         .map(|stmts| stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n"))
 }
 

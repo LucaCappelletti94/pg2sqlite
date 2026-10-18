@@ -29,7 +29,8 @@ fn ids_after(ddl: &str, writes: &[&str]) -> Vec<i64> {
         .sql(ddl)
         .expect("fixture parses")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("fixture translates");
+        .expect("fixture translates")
+        .into_vec();
 
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     for statement in &statements {
@@ -191,7 +192,8 @@ fn a_named_table_level_primary_key_keeps_its_name() {
         .sql("CREATE TABLE t (id SERIAL, n INT, CONSTRAINT t_pkey PRIMARY KEY (id));")
         .expect("fixture parses")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("fixture translates");
+        .expect("fixture translates")
+        .into_vec();
     let ddl = statements.join("\n");
     assert!(ddl.contains("CONSTRAINT t_pkey PRIMARY KEY AUTOINCREMENT"), "{ddl}");
 

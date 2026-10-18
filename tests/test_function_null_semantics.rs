@@ -73,6 +73,7 @@ fn assert_all_stmts_parse_as_sqlite(pg_sql: &str) {
         .expect("parse")
         .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
     {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("translated statement must run in SQLite: {e}\n{stmt}"));

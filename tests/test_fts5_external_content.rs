@@ -11,7 +11,8 @@ fn test_fts5_uses_external_content_mode() -> Result<(), Box<dyn std::error::Erro
         CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);
         CREATE INDEX docs_fts ON docs USING GIN (to_tsvector('english', body));
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let out = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
 
     // Must use external content mode
@@ -34,7 +35,8 @@ fn test_fts5_external_content_search_works() -> Result<(), Box<dyn std::error::E
         CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);
         CREATE INDEX docs_fts ON docs USING GIN (to_tsvector('english', body));
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
 
     for stmt in &translated {
@@ -90,7 +92,8 @@ fn test_fts5_backfill_insert_is_generated() -> Result<(), Box<dyn std::error::Er
         CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);
         CREATE INDEX docs_fts ON docs USING GIN (to_tsvector('english', body));
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let out = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
 
     // A backfill INSERT must be present after the triggers so pre-existing
@@ -115,7 +118,8 @@ fn test_fts5_backfill_populates_preexisting_rows() -> Result<(), Box<dyn std::er
         CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);
         CREATE INDEX docs_fts ON docs USING GIN (to_tsvector('english', body));
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
 
     // Create the table FIRST, insert rows BEFORE creating the FTS index, then
@@ -162,7 +166,8 @@ fn test_fts5_partial_index_generates_when_clause_in_triggers()
         CREATE INDEX articles_fts ON articles USING GIN (to_tsvector('english', body))
             WHERE published = true;
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let out = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
 
     // Four sync triggers carry the predicate: insert, delete, and the two

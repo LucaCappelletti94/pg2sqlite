@@ -115,7 +115,8 @@ fn quantifier_survivors(sql: &str) -> Vec<i64> {
         .sql(sql)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let mut survivors = Vec::new();
     for stmt in &stmts {
         let text = stmt.to_string();
@@ -260,7 +261,8 @@ fn sqlite_accepts(pg: &str) {
         .sql(pg)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for stmt in &stmts {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("emitted statement failed: {e}\n{stmt}"));

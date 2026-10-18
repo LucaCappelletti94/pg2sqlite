@@ -75,7 +75,8 @@ fn apply(pg: &str) -> SqliteConnection {
         .sql(pg)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit"))
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let mut conn = establish_connection();
     for statement in &translated {

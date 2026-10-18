@@ -70,8 +70,12 @@ mod text_tables {
 /// Translates `pg` and applies the emitted DDL, which is the artifact under
 /// test. Returns the connection so callers can exercise the schema.
 fn apply(pg: &str, options: &Pg2SqliteOptions) -> SqliteConnection {
-    let translated =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate(options).expect("translate");
+    let translated = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate(options)
+        .expect("translate")
+        .into_vec();
     let mut conn = establish_connection();
     for statement in &translated {
         // DDL cannot be expressed via the typed DSL; every other statement is.

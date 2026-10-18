@@ -113,7 +113,7 @@ fn translate_statement(
 /// Helper to create a connection and run translated SQL.
 fn translate_and_execute(sql: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default();
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
@@ -315,7 +315,7 @@ fn test_drop_view_cascade_stripped() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let drop_stmt = translated.iter().find(|s| s.to_string().contains("DROP VIEW")).unwrap();
     let drop_str = drop_stmt.to_string();
@@ -397,7 +397,7 @@ fn test_drop_trigger_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     // Find the DROP TRIGGER statement
     let drop_stmt = translated.iter().find(|s| s.to_string().contains("DROP TRIGGER"));

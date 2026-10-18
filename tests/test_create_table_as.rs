@@ -40,7 +40,7 @@ fn ctas_function_output_preserves_values_and_nulls() {
         Pg2Sqlite::default().sql("CREATE TABLE source(id INT PRIMARY KEY, value TEXT);").unwrap();
     let schema = translator.build_schema().unwrap();
     let mut connection = SqliteConnection::establish(":memory:").unwrap();
-    for sql in translator.translate_to_sql(&options).unwrap() {
+    for sql in translator.translate_to_sql(&options).unwrap().into_vec() {
         connection.batch_execute(&sql).unwrap();
     }
     let rows = [
@@ -54,6 +54,7 @@ fn ctas_function_output_preserves_values_and_nulls() {
         .unwrap()
         .translate_to_sql_with_schema(&schema, &options)
         .unwrap()
+        .into_vec()
     {
         connection.batch_execute(&sql).unwrap();
     }
@@ -73,7 +74,7 @@ fn ctas_materializes_selected_rows() {
         .unwrap();
     let schema = translator.build_schema().unwrap();
     let mut connection = SqliteConnection::establish(":memory:").unwrap();
-    for sql in translator.translate_to_sql(&options).unwrap() {
+    for sql in translator.translate_to_sql(&options).unwrap().into_vec() {
         connection.batch_execute(&sql).unwrap();
     }
     let rows = [
@@ -88,6 +89,7 @@ fn ctas_materializes_selected_rows() {
         .unwrap()
         .translate_to_sql_with_schema(&schema, &options)
         .unwrap()
+        .into_vec()
     {
         connection.batch_execute(&sql).unwrap();
     }

@@ -65,6 +65,7 @@ fn open(pg: &str, options: &Pg2SqliteOptions, subjects: Option<&'static str>) ->
         .expect("parse")
         .translate_to_sql(options)
         .expect("translate")
+        .into_vec()
         .iter()
         .map(|statement| format!("{statement};"))
         .collect::<Vec<_>>()
@@ -291,9 +292,7 @@ fn a_strict_set_valued_setting_translates_the_same_search() {
             "CREATE TABLE t (owner TEXT);\n\
              SELECT owner FROM t WHERE owner = ANY(string_to_array(current_setting('app.subjects'), ','));",
         )
-        .expect("parse")
-        .translate_to_sql(&options)
-        .expect("a strict set reads through the same search");
+        .expect("parse").translate_to_sql(&options).expect("a strict set reads through the same search").into_vec();
     let query = emitted.last().expect("the query is emitted");
     assert!(
         query.contains("instr(',' || current_app_subjects() || ',', ',' || owner || ',') > 0"),
@@ -605,9 +604,7 @@ fn an_unmapped_session_shaped_function_is_refused() {
             "CREATE TABLE ci (k TEXT);\n\
              SELECT k FROM ci WHERE k = ANY(string_to_array(current_setting('app.subjects'), ','));",
         )
-        .expect("parse")
-        .translate_to_sql(&options)
-        .expect_err("an unmapped session function must not be read three times")
+        .expect("parse").translate_to_sql(&options).expect_err("an unmapped session function must not be read three times")
         .to_string();
     assert!(error.contains("more than one place"), "the duplicated-operand refusal: {error}");
 }

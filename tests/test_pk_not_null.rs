@@ -6,7 +6,7 @@ use pg2sqlite::{pg2sqlite::Pg2Sqlite, prelude::*};
 fn test_pk_simple_int_nullable() {
     let sql = "CREATE TABLE test_int (id INT PRIMARY KEY)";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
-    let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
     assert_eq!(
         translated[1].to_string(),
@@ -19,7 +19,7 @@ fn test_pk_simple_int_nullable() {
 fn test_pk_simple_int_not_null() {
     let sql = "CREATE TABLE test_int_nn (id INT PRIMARY KEY NOT NULL)";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
-    let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
     assert_eq!(
         translated[1].to_string(),
@@ -35,7 +35,7 @@ fn test_pk_string_binary_nullable() {
     CREATE TABLE test_blob (id BYTEA PRIMARY KEY);
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
-    let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(translated.len(), 3, "the script leads with the dialect pragma");
     assert_eq!(
         translated[1].to_string(),
@@ -57,7 +57,7 @@ fn test_pk_composite() {
     );
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
-    let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let translated = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
     assert_eq!(
         translated[1].to_string(),

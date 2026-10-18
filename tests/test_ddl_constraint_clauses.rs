@@ -19,14 +19,17 @@ fn opts() -> Pg2SqliteOptions {
 }
 
 fn translate(sql: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default().sql(sql)?.translate_to_sql(&opts())
+    Pg2Sqlite::default()
+        .sql(sql)?
+        .translate_to_sql(&opts())
+        .map(pg2sqlite::script::Script::into_vec)
 }
 
 fn translate_with_warnings(
     sql: &str,
 ) -> Result<(Vec<String>, Vec<TranslationWarning>), pg2sqlite::errors::Error> {
     let report = Pg2Sqlite::default().sql(sql)?.translate_with_report(&opts())?;
-    let stmts = report.statements.iter().map(|s| s.to_string()).collect();
+    let stmts = report.script.iter().map(|s| s.to_string()).collect();
     Ok((stmts, report.warnings))
 }
 

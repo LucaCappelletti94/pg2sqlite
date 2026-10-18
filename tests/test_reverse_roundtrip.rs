@@ -33,7 +33,7 @@ fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
 fn forward_execute_reverse(pg_ddl: &str, pg_query: &str, options: &Pg2SqliteOptions) -> String {
     let translator = Pg2Sqlite::default().sql(&format!("{pg_ddl}\n{pg_query}")).unwrap();
     let schema = translator.build_schema().unwrap();
-    let forward_stmts = translator.clone().translate(options).unwrap();
+    let forward_stmts = translator.clone().translate(options).unwrap().into_vec();
 
     // Set up in-memory SQLite and execute DDL
     let mut conn =
@@ -224,7 +224,7 @@ fn functional_to_timestamp_with_data() -> Result<(), Box<dyn std::error::Error>>
     let options = Pg2SqliteOptions::default();
     let translator = Pg2Sqlite::default().sql(pg_sql)?;
     let schema = translator.build_schema()?;
-    let forward_stmts = translator.clone().translate(&options)?;
+    let forward_stmts = translator.clone().translate(&options)?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
 
@@ -277,7 +277,7 @@ fn functional_date_trunc_with_data() -> Result<(), Box<dyn std::error::Error>> {
     let options = Pg2SqliteOptions::default();
     let translator = Pg2Sqlite::default().sql(pg_sql)?;
     let schema = translator.build_schema()?;
-    let forward_stmts = translator.clone().translate(&options)?;
+    let forward_stmts = translator.clone().translate(&options)?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
 
@@ -369,7 +369,7 @@ fn forward_and_seed(pg_query: &str) -> (String, SqliteConnection) {
     let options = Pg2SqliteOptions::default();
     let translator =
         Pg2Sqlite::default().sql(&format!("{READINGS}\n{pg_query}")).expect("script should parse");
-    let statements = translator.translate(&options).expect("script should translate");
+    let statements = translator.translate(&options).expect("script should translate").into_vec();
 
     let mut connection =
         SqliteConnection::establish(":memory:").expect("in-memory SQLite should open");
@@ -486,7 +486,8 @@ fn restored_distinct_on_uses_the_restored_relation_scope() {
     let translator =
         Pg2Sqlite::default().sql(&format!("{ddl} {pg_query}")).expect("source should parse");
     let schema = translator.build_schema().expect("schema should build");
-    let forward = translator.clone().translate(&options).expect("source should translate");
+    let forward =
+        translator.clone().translate(&options).expect("source should translate").into_vec();
     let sqlite_sql = forward
         .iter()
         .find(|statement| matches!(statement, sqlparser::ast::Statement::Query(_)))
@@ -501,7 +502,8 @@ fn restored_distinct_on_uses_the_restored_relation_scope() {
         .sql(&format!("{ddl} {reversed};"))
         .expect("reversed query should parse")
         .translate(&options)
-        .expect("reversed query should translate");
+        .expect("reversed query should translate")
+        .into_vec();
     let round_tripped_sql = round_tripped
         .iter()
         .find(|statement| matches!(statement, sqlparser::ast::Statement::Query(_)))

@@ -193,7 +193,8 @@ fn test_trigger_translation_uses_last_insert_rowid() {
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_v7_function_name("uuidv7");
 
-    let translated = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap();
+    let translated =
+        Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap().into_vec();
 
     // Join all statements into one string for inspection
     let sqlite_sql: String =
@@ -264,7 +265,8 @@ fn test_trigger_shared_uuid_works_in_sqlite() {
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_v7_function_name("uuidv7");
 
-    let translated = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap();
+    let translated =
+        Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap().into_vec();
 
     // Snapshot the translated SQL for consistency checking
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
@@ -350,7 +352,8 @@ fn test_trigger_three_tables_shared_uuid() {
         .with_uuid_representation(UuidRepresentation::Blob)
         .with_uuid_v7_function_name("uuidv7");
 
-    let translated = Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap();
+    let translated =
+        Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&options).unwrap().into_vec();
 
     // Snapshot the translated SQL for consistency checking
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");

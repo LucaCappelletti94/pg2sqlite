@@ -25,7 +25,8 @@ fn test_is_distinct_from_translation_form() {
         .sql(sql)
         .expect("parses")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translates");
+        .expect("translates")
+        .into_vec();
     let out = select_sql(&translated);
 
     assert!(out.contains("IS DISTINCT FROM"), "the operator survives, got: {out}");
@@ -57,7 +58,8 @@ fn the_emitted_comparison_reparses_under_the_sqlite_dialect() {
             .sql(postgres)
             .expect("parses")
             .translate_to_sql(&Pg2SqliteOptions::default())
-            .expect("translates");
+            .expect("translates")
+            .into_vec();
         let emitted = translated.last().expect("a statement");
 
         sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, emitted)
@@ -77,7 +79,8 @@ fn test_is_distinct_from_semantic() -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE pairs (id SERIAL PRIMARY KEY, a TEXT, b TEXT);
         SELECT id FROM pairs WHERE a IS DISTINCT FROM b ORDER BY id;
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
 
     // Execute DDL (and the dialect pragma), whatever their position.
@@ -114,7 +117,8 @@ fn test_is_not_distinct_from_semantic() -> Result<(), Box<dyn std::error::Error>
         CREATE TABLE pairs (id SERIAL PRIMARY KEY, a TEXT, b TEXT);
         SELECT id FROM pairs WHERE a IS NOT DISTINCT FROM b ORDER BY id;
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
     execute_non_query_statements(&translated, &mut conn)?;
     diesel::sql_query(
@@ -174,7 +178,8 @@ struct NumericValue {
 }
 
 fn translate(sql: &str) -> Result<Vec<Statement>, Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     Ok(translated)
 }
 

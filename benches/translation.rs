@@ -371,7 +371,7 @@ fn prepare_query_shape(
     options: &Pg2SqliteOptions,
 ) -> Result<QueryShape, Error> {
     let parsed = Pg2Sqlite::default().sql(sql)?;
-    let translated = parsed.translate_with_schema(schema, options).unwrap();
+    let translated = parsed.translate_with_schema(schema, options).unwrap().into_vec();
     let query = rendered_query(&translated);
     Ok(QueryShape { name: name.to_string(), sql: sql.to_string(), parsed, translated, query })
 }
@@ -421,9 +421,9 @@ fn bench_query_pipeline(
     c.bench_function(&format!("query_shapes/full/{name}"), |b| {
         b.iter(|| {
             black_box(Pg2Sqlite::default().sql(black_box(sql)).and_then(|parsed| {
-                parsed.translate_with_schema(schema, options).map(|statements| {
-                    statements.iter().map(ToString::to_string).collect::<Vec<_>>()
-                })
+                parsed
+                    .translate_with_schema(schema, options)
+                    .map(|script| script.iter().map(ToString::to_string).collect::<Vec<_>>())
             }))
         });
     });
@@ -483,7 +483,7 @@ fn bench_query_shapes(c: &mut Criterion) {
 
     for &(name, sql) in CONSUMER_CASES {
         let parsed = Pg2Sqlite::default().sql(sql).unwrap();
-        let translated = parsed.translate_with_schema(&schema, &options).unwrap();
+        let translated = parsed.translate_with_schema(&schema, &options).unwrap().into_vec();
         let mut connection = fresh_fixture_connection();
         for statement in translated.iter().map(ToString::to_string) {
             connection.batch_execute(&statement).unwrap();
@@ -515,9 +515,9 @@ fn bench_query_shapes(c: &mut Criterion) {
         c.bench_function(&format!("query_shapes/full/{name}"), |b| {
             b.iter(|| {
                 black_box(Pg2Sqlite::default().sql(black_box(sql)).and_then(|parsed| {
-                    parsed.translate_with_schema(&schema, &options).map(|statements| {
-                        statements.iter().map(ToString::to_string).collect::<Vec<_>>()
-                    })
+                    parsed
+                        .translate_with_schema(&schema, &options)
+                        .map(|script| script.iter().map(ToString::to_string).collect::<Vec<_>>())
                 }))
             });
         });

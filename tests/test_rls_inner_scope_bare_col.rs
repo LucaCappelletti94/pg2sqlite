@@ -41,7 +41,12 @@ use schema::{docs2, docs2_rls, members};
 fn apply_with_seed(sql: &str, seed: impl FnOnce(&mut SqliteConnection)) -> SqliteConnection {
     let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
     // Emitted DDL cannot be expressed with the typed DSL.
-    let stmts = Pg2Sqlite::default().sql(sql).expect("parse").translate(&opts).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate(&opts)
+        .expect("translate")
+        .into_vec();
     let (triggers, base): (Vec<_>, Vec<_>) =
         stmts.iter().map(|s| s.to_string()).partition(|s| s.starts_with("CREATE TRIGGER"));
     let mut conn = helpers::establish_connection();

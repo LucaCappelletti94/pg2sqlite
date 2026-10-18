@@ -8,6 +8,7 @@ pub(crate) mod impls;
 pub mod manifest;
 pub mod options;
 pub mod pg2sqlite;
+pub mod script;
 pub mod traits;
 pub mod warnings;
 
@@ -20,6 +21,7 @@ pub mod prelude {
         },
         options::{Pg2SqliteOptions, TranslationContext},
         pg2sqlite::Pg2Sqlite,
+        script::Script,
         traits::{
             ArrayRepresentation, ReverseTranslator, Schema, SessionVariableMapping,
             SessionVariablePattern, SessionVariableValue, Translator, TranslatorWithContext,

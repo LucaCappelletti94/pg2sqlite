@@ -19,6 +19,7 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .unwrap()
         .translate(options)
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -187,8 +188,12 @@ fn select_into_with_comma_expression_produces_valid_sqlite_trigger_sql() {
         CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION trg_fn();
     "#;
 
-    let translated =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let translated = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     let sqlite_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join(";\n");
 
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -626,7 +631,8 @@ fn raise_info_single_space_is_dropped() -> Result<(), Box<dyn std::error::Error>
 
     // Translation must succeed — RAISE INFO is not valid SQLite and must be
     // dropped.
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let out = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
     assert!(
@@ -680,6 +686,7 @@ fn a_guarded_truncate_keeps_its_condition() {
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
     {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
     }
@@ -721,6 +728,7 @@ fn a_trigger_special_is_folded_in_a_statement_body() {
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
     {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
     }
@@ -781,6 +789,7 @@ fn a_with_update_in_a_trigger_body_runs() {
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
     {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
     }
@@ -815,6 +824,7 @@ fn a_with_update_naming_its_cte_columns_runs() {
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
     {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
     }
@@ -849,6 +859,7 @@ fn a_with_update_over_chained_ctes_runs() {
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
     {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
     }
@@ -908,6 +919,7 @@ fn a_volatile_cte_read_once_is_inlined() {
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
     {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
     }

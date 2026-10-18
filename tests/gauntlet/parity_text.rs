@@ -63,7 +63,8 @@ fn sqlite_conn() -> SqliteConnection {
         .sql(TABLE_DDL)
         .expect("parse table DDL")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate table DDL");
+        .expect("translate table DDL")
+        .into_vec();
     let mut conn = establish_connection();
     for stmt in &translated {
         diesel::sql_query(stmt.to_string())
@@ -121,7 +122,8 @@ fn translate_select(pg_select: &str) -> String {
         .sql(pg_select)
         .expect("parse PG SELECT")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate SELECT");
+        .expect("translate SELECT")
+        .into_vec();
     stmts.last().expect("non-empty translation output").to_string()
 }
 

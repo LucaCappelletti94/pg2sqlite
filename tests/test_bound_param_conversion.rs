@@ -25,8 +25,12 @@ fn uuid_text_opts() -> Pg2SqliteOptions {
 /// SQLite string and returns it.
 fn translate_query(schema_sql: &str, query_sql: &str, opt: &Pg2SqliteOptions) -> String {
     let full = format!("{schema_sql}\n{query_sql}");
-    let stmts =
-        Pg2Sqlite::default().sql(&full).expect("parse").translate_to_sql(opt).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(&full)
+        .expect("parse")
+        .translate_to_sql(opt)
+        .expect("translate")
+        .into_vec();
     stmts.into_iter().last().expect("at least one translated statement")
 }
 
@@ -61,8 +65,12 @@ fn run_with<P: rusqlite::Params>(
 /// Sets up a schema and seed data in a rusqlite connection using translated
 /// SQL.
 fn rusqlite_apply(sql: &str, opt: &Pg2SqliteOptions) -> RusqliteConn {
-    let stmts =
-        Pg2Sqlite::default().sql(sql).expect("parse").translate_to_sql(opt).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .expect("parse")
+        .translate_to_sql(opt)
+        .expect("translate")
+        .into_vec();
     let conn = RusqliteConn::open_in_memory().expect("in-memory SQLite");
     for s in &stmts {
         conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("setup: {e}\n{s}"));
@@ -297,7 +305,8 @@ fn vector_param_comparison_finds_row() {
             .sql(&format!("{schema}{seed}"))
             .expect("parse")
             .translate_to_sql(&opt)
-            .expect("translate");
+            .expect("translate")
+            .into_vec();
         // rusqlite: sqlite_vec extension is not exposed through diesel's API.
         let conn = helpers::vec_connection();
         for s in &stmts {
@@ -325,7 +334,8 @@ fn array_param_refused_with_message() {
     let result = Pg2Sqlite::default()
         .sql(&format!("{schema}\nSELECT id FROM arr WHERE tags = $1;"))
         .expect("parse")
-        .translate(&opt);
+        .translate(&opt)
+        .map(pg2sqlite::script::Script::into_vec);
     let err = result.expect_err("array parameter must be refused").to_string();
     assert!(err.to_lowercase().contains("array"), "error must mention array: {err}");
 }
@@ -437,7 +447,8 @@ fn vector_param_update_wraps_with_vec_f32() {
             .sql(&format!("{schema}{seed}"))
             .expect("parse")
             .translate_to_sql(&opt)
-            .expect("translate");
+            .expect("translate")
+            .into_vec();
         let conn = helpers::vec_connection();
         for s in &stmts {
             conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("setup: {e}\n{s}"));

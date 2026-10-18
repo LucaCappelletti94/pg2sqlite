@@ -229,7 +229,8 @@ fn translation_options() -> Pg2SqliteOptions {
 
 /// Helper to set up the database with all translated statements.
 fn setup_database() -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(SQL_FIXTURE)?.translate(&translation_options())?;
+    let translated =
+        Pg2Sqlite::default().sql(SQL_FIXTURE)?.translate(&translation_options())?.into_vec();
 
     let mut conn = establish_connection();
     write_is_exempt_utils::register_nondeterministic_impl(&mut conn, || {
@@ -255,7 +256,8 @@ fn insert_synced_user(
 
 #[test]
 fn test_grant_based_filtering_snapshot() -> Result<(), Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(SQL_FIXTURE)?.translate(&translation_options())?;
+    let translated =
+        Pg2Sqlite::default().sql(SQL_FIXTURE)?.translate(&translation_options())?.into_vec();
 
     let translated_sql = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 

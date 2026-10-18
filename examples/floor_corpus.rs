@@ -26,7 +26,8 @@ fn main() {
         .sql(FIXTURE)
         .expect("fixture parses")
         .translate_to_sql(&options)
-        .expect("fixture translates");
+        .expect("fixture translates")
+        .into_vec();
 
     let mut scripts = Vec::new();
     for (label, cases) in CORPUS_GROUPS {
@@ -35,7 +36,9 @@ fn main() {
             let Ok(parsed) = Pg2Sqlite::default().sql(&full) else {
                 continue;
             };
-            let Ok(all) = parsed.translate_to_sql(&options) else {
+            let Ok(all) =
+                parsed.translate_to_sql(&options).map(pg2sqlite::script::Script::into_vec)
+            else {
                 continue;
             };
             let statements: Vec<String> = setup

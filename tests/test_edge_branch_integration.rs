@@ -117,6 +117,7 @@ fn translate_script(pg: &str, options: &Pg2SqliteOptions) -> String {
         .expect("the script parses")
         .translate_to_sql(options)
         .expect("the script translates")
+        .into_vec()
         .pop()
         .expect("the script emits a statement")
 }
@@ -588,9 +589,7 @@ fn forward_expr_translation_covers_remaining_fts_extract_and_timezone_paths() {
              CREATE INDEX composite_docs_fts ON composite_docs USING GIN (to_tsvector('english', title)); \
              SELECT id FROM composite_docs WHERE to_tsvector('english', title) @@ to_tsquery('hello');",
         )
-        .expect("parse")
-        .translate(&options)
-        .unwrap_err();
+        .expect("parse").translate(&options).unwrap_err();
     assert!(unsupported_message(composite_pk_err).contains("single-column primary key"));
 
     // GIN index declared but tsquery argument is a non-literal expression: gate

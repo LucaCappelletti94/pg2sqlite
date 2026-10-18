@@ -247,7 +247,8 @@ fn apply_vector_sql(pg: &str) {
         .sql(pg)
         .expect("parse")
         .translate(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
@@ -326,6 +327,7 @@ fn translate_uuid_blob(sql: &str) -> String {
         .expect("parse")
         .translate(&Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob))
         .expect("translate")
+        .into_vec()
         .iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>()

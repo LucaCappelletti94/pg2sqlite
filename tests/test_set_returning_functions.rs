@@ -79,7 +79,8 @@ fn a_declared_function_passes_through() {
         .sql(&format!("{FIXTURE} SELECT * FROM some_extension_function(1);"))
         .expect("parse")
         .translate(&options)
-        .expect("a declared function is the caller's promise that it exists");
+        .expect("a declared function is the caller's promise that it exists")
+        .into_vec();
     assert!(!translated.is_empty(), "the document should translate into at least one statement");
 }
 

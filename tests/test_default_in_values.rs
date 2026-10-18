@@ -30,7 +30,10 @@ mod schema {
 }
 
 fn translate(pg: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default().sql(pg)?.translate_to_sql(&Pg2SqliteOptions::default())
+    Pg2Sqlite::default()
+        .sql(pg)?
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec)
 }
 
 fn apply(pg: &str) -> SqliteConnection {

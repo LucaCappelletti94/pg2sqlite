@@ -41,8 +41,12 @@ fn translate_rls_sample() -> String {
             "app.user_id",
             "current_app_user",
         ));
-    let stmts =
-        Pg2Sqlite::default().sql(RLS_SAMPLE).expect("parse").translate(&opts).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(RLS_SAMPLE)
+        .expect("parse")
+        .translate(&opts)
+        .expect("translate")
+        .into_vec();
     stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n")
 }
 

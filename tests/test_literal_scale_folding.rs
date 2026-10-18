@@ -21,6 +21,7 @@ fn translate(dml: &str) -> Result<Vec<String>, String> {
         .sql(&format!("{FIXTURE}\n{dml}"))
         .map_err(|e| e.to_string())?
         .translate_to_sql(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec)
         .map_err(|e| e.to_string())
 }
 

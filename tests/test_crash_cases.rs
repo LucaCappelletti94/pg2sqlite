@@ -57,7 +57,7 @@ fn run_crash_case(data: &[u8]) {
     // Try to parse and translate - we don't care about errors, only panics
     if let Ok(parsed) = Pg2Sqlite::default().sql(sql) {
         let options = Pg2SqliteOptions::default();
-        let _ = parsed.translate(&options);
+        let _ = parsed.translate(&options).map(pg2sqlite::script::Script::into_vec);
     }
 }
 

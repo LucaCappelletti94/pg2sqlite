@@ -38,7 +38,7 @@ fn report(pg: &str) -> TranslationReport {
 /// under test, so it is applied as generated text.
 fn apply(pg: &str) -> SqliteConnection {
     let mut conn = SqliteConnection::establish(":memory:").expect("connect");
-    for statement in report(pg).statements {
+    for statement in report(pg).script.into_vec() {
         diesel::sql_query(statement.to_string())
             .execute(&mut conn)
             .unwrap_or_else(|error| panic!("emitted statement failed: {statement}: {error}"));
@@ -128,7 +128,7 @@ fn rollback_and_chain_opens_the_next_transaction() {
 #[test]
 fn the_transaction_keyword_survives() {
     let sql = report(&format!("{BASE} BEGIN TRANSACTION; COMMIT;"))
-        .statements
+        .script
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -189,7 +189,7 @@ fn vacuum_options_are_dropped() {
 #[test]
 fn vacuum_of_a_table_becomes_a_bare_vacuum() {
     let sql = report(&format!("{BASE} VACUUM t;"))
-        .statements
+        .script
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()

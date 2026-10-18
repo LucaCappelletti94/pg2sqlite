@@ -22,7 +22,7 @@ fn test_statement() {
             .unwrap();
 
     let translator = Pg2Sqlite::default().statement(statement);
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(result.len(), 2, "the script leads with the dialect pragma");
     assert!(result[0].to_string().contains("case_sensitive_like"));
     assert!(result[1].to_string().contains("CREATE TABLE test_statement"));
@@ -35,7 +35,7 @@ fn test_statement() {
 #[test]
 fn test_sql() {
     let translator = Pg2Sqlite::default().sql("CREATE TABLE test_sql (id INT);").unwrap();
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(result.len(), 2, "the script leads with the dialect pragma");
     assert!(result[0].to_string().contains("case_sensitive_like"));
     assert!(result[1].to_string().contains("CREATE TABLE test_sql"));
@@ -52,7 +52,7 @@ fn test_file() {
     let path = file.path();
 
     let translator = Pg2Sqlite::default().file(path).unwrap();
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(result.len(), 2, "the script leads with the dialect pragma");
     assert!(result[0].to_string().contains("case_sensitive_like"));
     assert!(result[1].to_string().contains("CREATE TABLE test_file"));
@@ -79,7 +79,7 @@ fn test_ups() {
     write!(file2, "CREATE TABLE t2 (id INT);").unwrap();
 
     let translator = Pg2Sqlite::ups(dir.path()).unwrap();
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
 
     assert_eq!(result.len(), 3, "one pragma plus the two migrations");
     assert!(result[0].to_string().contains("case_sensitive_like"));
@@ -112,7 +112,7 @@ fn test_ups_until() {
     std::fs::write(&file3_path, "CREATE TABLE t3 (id INT);").unwrap();
 
     let translator = Pg2Sqlite::ups_until(root, &file2_path).unwrap();
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
 
     assert_eq!(result.len(), 3, "one pragma plus the two migrations");
     assert!(result[0].to_string().contains("case_sensitive_like"));
@@ -168,11 +168,13 @@ fn test_ups_until_last_migration_matches_ups() {
     let last_path = dir3.join("up.sql");
     std::fs::write(&last_path, "CREATE TABLE t3 (id INT);").unwrap();
 
-    let all = Pg2Sqlite::ups(root).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let all =
+        Pg2Sqlite::ups(root).unwrap().translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     let until_last = Pg2Sqlite::ups_until(root, &last_path)
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
-        .unwrap();
+        .unwrap()
+        .into_vec();
 
     let all_sql = all.iter().map(ToString::to_string).collect::<Vec<_>>();
     let until_last_sql = until_last.iter().map(ToString::to_string).collect::<Vec<_>>();
@@ -184,7 +186,8 @@ fn test_translate() {
     // Basic test of translate flow, more detailed translation tests are
     // elsewhere
     let translator = Pg2Sqlite::default().sql("CREATE TABLE test_trans (id INT);").unwrap();
-    let result = translator.translate(&Pg2SqliteOptions::default());
+    let result =
+        translator.translate(&Pg2SqliteOptions::default()).map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_ok());
     let statements = result.unwrap();
     assert_eq!(statements.len(), 2, "one pragma plus the CREATE");
@@ -199,7 +202,7 @@ fn test_on_conflict_do_update() {
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
     ";
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
-    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    let result = translator.translate(&Pg2SqliteOptions::default()).unwrap().into_vec();
     assert_eq!(result.len(), 3, "one pragma plus CREATE and INSERT");
 
     let insert_sql = result[2].to_string();
@@ -218,7 +221,8 @@ fn test_alter_table_add_column_is_translated() {
         .sql("CREATE TABLE t (id INT PRIMARY KEY); ALTER TABLE t ADD COLUMN name TEXT;")
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
-        .unwrap();
+        .unwrap()
+        .into_vec();
     assert_eq!(stmts.len(), 3, "pragma plus CREATE TABLE plus ADD COLUMN");
     assert!(stmts[2].to_string().contains("ADD COLUMN name TEXT"), "got: {}", stmts[2]);
     // Execute to prove real SQLite accepts the translated DDL.
@@ -237,7 +241,11 @@ fn test_missing_trigger_body_errors() {
         FOR EACH ROW
         EXECUTE FUNCTION docs_trigger_fn();
     "#;
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Missing trigger body should error");
     assert!(result.unwrap_err().to_string().contains("Trigger function"));
 }
@@ -250,7 +258,7 @@ fn test_index_skipped_for_role_without_access() {
         CREATE INDEX private_docs_title_idx ON private_docs(title);
     "#;
     let options = Pg2SqliteOptions::default().with_session_user_role("app_user");
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     assert!(
         stmts.iter().all(|s| !s.to_string().contains("CREATE INDEX private_docs_title_idx")),
         "Index should be filtered for role without SELECT"
@@ -266,7 +274,7 @@ fn test_index_skipped_for_role_without_access() {
 fn translate_to_sql_returns_strings() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE convenience_test (id INTEGER PRIMARY KEY, val TEXT);";
     let sql_strings =
-        Pg2Sqlite::default().sql(sql)?.translate_to_sql(&Pg2SqliteOptions::default())?;
+        Pg2Sqlite::default().sql(sql)?.translate_to_sql(&Pg2SqliteOptions::default())?.into_vec();
     assert!(!sql_strings.is_empty(), "translate_to_sql must return at least one statement");
     assert!(
         sql_strings[0].contains("case_sensitive_like"),

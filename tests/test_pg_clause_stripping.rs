@@ -11,7 +11,8 @@ fn for_update_stripped_from_select() -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE lock_test (id INTEGER PRIMARY KEY, val INTEGER NOT NULL);
         SELECT * FROM lock_test FOR UPDATE;
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let select_sql = translated
         .iter()
@@ -39,7 +40,8 @@ fn for_share_stripped_from_select() -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE lock_test2 (id INTEGER PRIMARY KEY, val INTEGER NOT NULL);
         SELECT * FROM lock_test2 FOR SHARE;
     ";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let select_sql = translated
         .iter()
@@ -72,7 +74,8 @@ fn an_explicit_null_ordering_reaches_sqlite() -> Result<(), Box<dyn std::error::
             "CREATE TABLE nulls_test (id INTEGER PRIMARY KEY, val INTEGER);
              SELECT val FROM nulls_test ORDER BY {ordering};"
         );
-        let translated = Pg2Sqlite::default().sql(&sql)?.translate(&Pg2SqliteOptions::default())?;
+        let translated =
+            Pg2Sqlite::default().sql(&sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
         let select_sql = translated
             .iter()
             .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))

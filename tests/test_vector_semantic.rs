@@ -59,7 +59,7 @@ fn test_translated_vector_table_works() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
 
@@ -103,7 +103,7 @@ fn test_vec0_knn_query_correctness() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
 
@@ -169,7 +169,7 @@ fn test_vec0_indexed_knn_large_dataset() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
 
@@ -296,7 +296,7 @@ fn test_vec0_faster_than_naive_at_scale() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
 
@@ -398,7 +398,7 @@ fn test_update_trigger_syncs_to_vec0() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
 
@@ -444,7 +444,7 @@ fn an_update_to_null_removes_the_row_from_the_index() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
     for stmt in &translated {
@@ -482,7 +482,7 @@ fn a_null_row_updated_to_a_vector_joins_the_index() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
     for stmt in &translated {
@@ -522,7 +522,7 @@ fn a_pk_update_moves_the_indexed_row() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
     for stmt in &translated {
@@ -552,7 +552,7 @@ fn test_delete_trigger_removes_from_vec0() -> Result<()> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     let db = Connection::open_in_memory()?;
 

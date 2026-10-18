@@ -8,7 +8,12 @@ mod translate_helpers;
 use translate_helpers::translate_default_err as translate_err;
 
 fn translate_to_stmts(pg: &str) -> Vec<String> {
-    Pg2Sqlite::default().sql(pg).unwrap().translate_to_sql(&Pg2SqliteOptions::default()).unwrap()
+    Pg2Sqlite::default()
+        .sql(pg)
+        .unwrap()
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec()
 }
 
 fn setup_and_query(pg: &str) -> (String, SqliteConnection) {

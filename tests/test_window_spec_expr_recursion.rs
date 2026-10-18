@@ -16,6 +16,7 @@ fn translate_ok(sql: &str) -> String {
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .into_iter()
         .find(|s| matches!(s, Statement::Query(_)))
         .unwrap()
@@ -154,7 +155,8 @@ fn execute_all_emitted(sql: &str) {
         .sql(sql)
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap();
+        .unwrap()
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
             .unwrap_or_else(|e| panic!("emitted SQL failed: {e}\n{s}"));

@@ -45,7 +45,11 @@ fn test_interval_translation_basic_errors() {
         SELECT * FROM events WHERE event_time > INTERVAL '1 day';
     ";
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "INTERVAL expression must cause a translation error");
     let err = result.unwrap_err().to_string().to_lowercase();
     assert!(err.contains("interval"), "Error must mention INTERVAL, got: {err}");
@@ -62,7 +66,11 @@ fn test_interval_with_time_unit_errors() {
         SELECT * FROM logs WHERE created_at > INTERVAL '2 hours';
     ";
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "INTERVAL expression must cause a translation error");
 }
 
@@ -79,7 +87,7 @@ fn test_interval_in_arithmetic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     // Verify translation succeeded
     assert!(!translated.is_empty(), "Should have translated statements");

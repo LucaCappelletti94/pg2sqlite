@@ -40,8 +40,9 @@ fn opts() -> Pg2SqliteOptions {
 
 #[test]
 fn fts_predicate_without_gin_index_errors_at_translate_time() {
-    let result =
-        Pg2Sqlite::default().sql(SCHEMA_WITHOUT_GIN_INDEX).and_then(|t| t.translate(&opts()));
+    let result = Pg2Sqlite::default()
+        .sql(SCHEMA_WITHOUT_GIN_INDEX)
+        .and_then(|t| t.translate(&opts()).map(pg2sqlite::script::Script::into_vec));
 
     // `Err(_)` is acceptable - the translator refused, which is the
     // expected behaviour. If translation succeeded, the output must
@@ -81,7 +82,8 @@ SELECT id FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('test');
         .sql(schema)
         .expect("parse")
         .translate(&opts())
-        .expect("translate must succeed when a matching GIN index is declared");
+        .expect("translate must succeed when a matching GIN index is declared")
+        .into_vec();
     let joined = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     assert!(
         joined.contains("docs_fts MATCH 'test'"),
@@ -137,7 +139,8 @@ SELECT id FROM Docs WHERE to_tsvector('english', body) @@ to_tsquery('test');
         .sql(schema)
         .expect("parse")
         .translate(&opts())
-        .expect("case-insensitive catalog lookup must allow the rewrite");
+        .expect("case-insensitive catalog lookup must allow the rewrite")
+        .into_vec();
     let joined = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     assert!(joined.contains("MATCH 'test'"), "expected FTS5 MATCH rewrite, got:\n{joined}");
     // Translated SQL is dynamically generated; rusqlite execute_batch proves
@@ -164,7 +167,8 @@ WHERE to_tsvector('english', b.title) @@ to_tsquery('needle');
         .sql(schema)
         .expect("parse")
         .translate(&opts())
-        .expect("the qualified document names the indexed relation");
+        .expect("the qualified document names the indexed relation")
+        .into_vec();
     let joined =
         statements.iter().map(|statement| statement.to_string()).collect::<Vec<_>>().join("\n");
     assert!(

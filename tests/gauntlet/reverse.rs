@@ -726,9 +726,10 @@ fn every_scalar_the_forward_direction_knows_reverses() {
 
     for row in &names {
         let call = format!("SELECT {}(s) FROM t", row.name);
-        let outbound = Pg2Sqlite::default()
-            .sql(&format!("{PROBE_DDL}{call};"))
-            .and_then(|parsed| parsed.translate_to_sql(&options));
+        let outbound =
+            Pg2Sqlite::default().sql(&format!("{PROBE_DDL}{call};")).and_then(|parsed| {
+                parsed.translate_to_sql(&options).map(pg2sqlite::script::Script::into_vec)
+            });
         let forward_knows = match &outbound {
             Ok(_) => true,
             Err(error) => {
@@ -931,7 +932,8 @@ fn reversed_storage_wrappers_answer_what_the_replica_answered() {
         .sql(&format!("{STORED_DDL}{STORED_ROWS}"))
         .expect("the fixture parses")
         .translate_to_sql(&options)
-        .expect("the fixture translates");
+        .expect("the fixture translates")
+        .into_vec();
     let mut sqlite = SqliteConnection::establish(":memory:").expect("SQLite opens");
     for statement in &replica {
         sql_query(statement).execute(&mut sqlite).expect("the emitted fixture applies");

@@ -74,7 +74,8 @@ fn char_column_length_check_is_enforced() {
         .sql("CREATE TABLE t (col CHAR(3) NOT NULL);")
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("DDL failed: {e}\n{s}"));
     }
@@ -156,7 +157,8 @@ fn instead_of_trigger_not_refused_as_conflicting() {
              CREATE TRIGGER t2 INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION f2();",
         )
         .expect("parse")
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     // The triggers may fail for other reasons but MUST NOT be flagged as
     // "multiple BEFORE/AFTER" since INSTEAD OF is excluded from the counter.
     if let Err(ref e) = result {

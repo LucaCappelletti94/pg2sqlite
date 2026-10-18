@@ -32,8 +32,12 @@ fn blob_opts() -> Pg2SqliteOptions {
 }
 
 fn translate(schema: &str, opts: &Pg2SqliteOptions) -> String {
-    let stmts =
-        Pg2Sqlite::default().sql(schema).expect("parse").translate(opts).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(schema)
+        .expect("parse")
+        .translate(opts)
+        .expect("translate")
+        .into_vec();
     stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n")
 }
 
@@ -84,12 +88,14 @@ fn update_uuid_text_literal_wraps_for_blob_representation() {
         .sql(&combined)
         .expect("parse")
         .translate(&blob_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let schema_stmts = Pg2Sqlite::default()
         .sql(&schema)
         .expect("parse")
         .translate(&blob_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let update_sql = combined_stmts
         .into_iter()
         .skip(schema_stmts.len())
@@ -151,7 +157,7 @@ fn uuid_text_to_blob_function_name_override_is_honoured() {
     // registration. Execute DDL with execute_batch; prepare (not execute) the
     // INSERT so SQLite validates the table reference and SQL syntax without
     // needing the UDF at call time.
-    let stmts = Pg2Sqlite::default().sql(&schema).unwrap().translate(&opts).unwrap();
+    let stmts = Pg2Sqlite::default().sql(&schema).unwrap().translate(&opts).unwrap().into_vec();
     let conn = Connection::open_in_memory().unwrap();
     for stmt in &stmts {
         let s = stmt.to_string();
@@ -182,7 +188,8 @@ fn uuid_cast_in_select_lowers_to_conversion_call() {
         .sql(&format!("SELECT '{UUID_HEX_STR}'::uuid AS id;"))
         .expect("parse")
         .translate(&opts)
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let stmt = translated
         .iter()
         .find(|s| !s.to_string().starts_with("PRAGMA"))
@@ -404,8 +411,12 @@ mod bind_param {
             CREATE TABLE u (pk INT PRIMARY KEY, id UUID);
             INSERT INTO u (pk, id) VALUES (1, $1);
         ";
-        let stmts =
-            Pg2Sqlite::default().sql(schema).expect("parse").translate(&opts).expect("translate");
+        let stmts = Pg2Sqlite::default()
+            .sql(schema)
+            .expect("parse")
+            .translate(&opts)
+            .expect("translate")
+            .into_vec();
 
         let mut conn = diesel::sqlite::SqliteConnection::establish(":memory:").expect("open db");
 

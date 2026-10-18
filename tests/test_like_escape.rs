@@ -119,6 +119,7 @@ fn switching_escaping_off_on_ilike_drops_the_clause() {
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .join("\n");
     assert!(!emitted.contains("ESCAPE"), "the empty escape must not survive: {emitted}");
 }
@@ -190,7 +191,8 @@ fn ilike_survives_a_round_trip() {
         .sql("CREATE TABLE t (a TEXT, b TEXT); SELECT a ILIKE b FROM t;")
         .unwrap()
         .translate_to_sql(&options)
-        .unwrap();
+        .unwrap()
+        .into_vec();
     let query = forward.iter().find(|s| s.starts_with("SELECT")).expect("a translated query");
     let back = translator.reverse_sql(query, &schema, &options).unwrap();
     assert_eq!(back[0].to_string(), "SELECT a ILIKE b FROM t");
@@ -206,7 +208,8 @@ fn a_plain_like_round_trips_to_the_same_reading() {
         .sql("CREATE TABLE t (a TEXT, b TEXT); SELECT a LIKE b FROM t;")
         .unwrap()
         .translate_to_sql(&options)
-        .unwrap();
+        .unwrap()
+        .into_vec();
     let query = first.iter().find(|s| s.starts_with("SELECT")).expect("a translated query").clone();
     assert!(query.contains(r"ESCAPE '\'"), "the forward emission carries the escape: {query}");
 
@@ -217,6 +220,7 @@ fn a_plain_like_round_trips_to_the_same_reading() {
         .sql(&format!("CREATE TABLE t (a TEXT, b TEXT); {back};"))
         .unwrap()
         .translate_to_sql(&options)
-        .unwrap();
+        .unwrap()
+        .into_vec();
     assert!(again.contains(&query), "a second pass must not change the emission: {again:?}");
 }

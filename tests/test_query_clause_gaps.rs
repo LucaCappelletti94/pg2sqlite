@@ -35,7 +35,10 @@ struct MaybeNumber {
 
 fn translated(source: &str) -> Result<Vec<Statement>, Error> {
     let schema = Pg2Sqlite::default().sql(SCHEMA)?.build_schema()?;
-    Pg2Sqlite::default().sql(source)?.translate_with_schema(&schema, &Pg2SqliteOptions::default())
+    Pg2Sqlite::default()
+        .sql(source)?
+        .translate_with_schema(&schema, &Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec)
 }
 
 fn query(source: &str) -> String {

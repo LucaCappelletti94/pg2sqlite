@@ -21,7 +21,8 @@ fn test_ascii_renamed_to_unicode() {
             .sql(sql)
             .unwrap()
             .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
-            .unwrap();
+            .unwrap()
+            .into_vec();
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         for stmt in &stmts {
             conn.execute_batch(&format!("{stmt};")).expect("translated SQL must execute in SQLite");

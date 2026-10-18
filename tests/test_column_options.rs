@@ -15,6 +15,7 @@ fn translate_with_options(sql: &str, options: &Pg2SqliteOptions) -> String {
         .unwrap()
         .translate(options)
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -99,7 +100,8 @@ fn default_uuid_generate_v4_function() {
     let result = Pg2Sqlite::default()
         .sql("CREATE TABLE t (id TEXT DEFAULT uuid_generate_v4());")
         .unwrap()
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_ok(), "uuid_generate_v4() default should be supported: {result:?}");
 }
 
@@ -211,7 +213,8 @@ fn default_now_translates_to_canonical_now() {
         .sql("CREATE TABLE now_test (id INTEGER PRIMARY KEY, created_at TEXT DEFAULT now());")
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap();
+        .unwrap()
+        .into_vec();
     for stmt in &stmts {
         diesel::sql_query(stmt).execute(&mut conn).unwrap();
     }
@@ -417,7 +420,12 @@ fn assert_stmt_parses_as_sqlite(sql: &str) {
 
 fn assert_all_stmts_parse_as_sqlite_with(pg_sql: &str, opts: &Pg2SqliteOptions) {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in Pg2Sqlite::default().sql(pg_sql).expect("parse").translate(opts).expect("translate")
+    for stmt in Pg2Sqlite::default()
+        .sql(pg_sql)
+        .expect("parse")
+        .translate(opts)
+        .expect("translate")
+        .into_vec()
     {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("emitted statement must run in SQLite: {e}\n{stmt}"));

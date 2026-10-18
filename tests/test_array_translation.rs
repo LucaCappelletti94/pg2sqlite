@@ -22,7 +22,7 @@ fn translate_all(
     pg: &str,
     options: &Pg2SqliteOptions,
 ) -> Result<Vec<String>, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default().sql(pg)?.translate_to_sql(options)
+    Pg2Sqlite::default().sql(pg)?.translate_to_sql(options).map(pg2sqlite::script::Script::into_vec)
 }
 
 /// Translate under JSON arrays and join the statements, for shape assertions.

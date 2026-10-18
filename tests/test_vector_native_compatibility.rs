@@ -181,7 +181,7 @@ fn a_trigger_variable_named_like_a_half_precision_column_is_the_variable() {
             "CREATE TABLE items(id INTEGER PRIMARY KEY, h BLOB); CREATE TABLE audit(n INTEGER);",
         )
         .unwrap();
-    for statement in statements {
+    for statement in statements.iter() {
         // Emitted statements are dynamic SQL.
         diesel::sql_query(statement.to_string()).execute(&mut connection).unwrap();
     }
@@ -229,7 +229,7 @@ fn an_explicit_caller_codec_preserves_genuine_binary16_bytes() {
     })
     .unwrap();
     let mut rows = Vec::new();
-    for statement in statements {
+    for statement in statements.iter() {
         // Emitted statements are dynamic SQL.
         let query = diesel::sql_query(statement.to_string());
         if matches!(statement, sqlparser::ast::Statement::Query(_)) {
@@ -259,7 +259,7 @@ fn float32_distance_executes_with_an_opaque_function_relation() {
         .unwrap();
     let mut connection = diesel::sqlite::SqliteConnection::establish(":memory:").unwrap();
     let mut rows = Vec::new();
-    for statement in statements {
+    for statement in statements.iter() {
         // Emitted statements are dynamic SQL.
         let query = diesel::sql_query(statement.to_string());
         if matches!(statement, sqlparser::ast::Statement::Query(_)) {
@@ -399,7 +399,7 @@ fn float32_scalar_outputs_preserve_binding_and_cardinality() {
             .translate_with_schema(&schema, &options)
             .expect(source);
         let mut rows = Vec::new();
-        for statement in statements {
+        for statement in statements.iter() {
             // Emitted statements are dynamic SQL.
             let query = diesel::sql_query(statement.to_string());
             if matches!(statement, sqlparser::ast::Statement::Query(_)) {

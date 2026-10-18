@@ -242,8 +242,13 @@ fn round_trip(select_list: &str) -> String {
     let translator =
         Pg2Sqlite::default().sql(&format!("{DDL}\nSELECT {select_list} FROM dt;")).expect("parses");
     let schema = translator.build_schema().expect("schema builds");
-    let emitted =
-        translator.clone().translate_to_sql(&options).expect("translates").pop().expect("a query");
+    let emitted = translator
+        .clone()
+        .translate_to_sql(&options)
+        .expect("translates")
+        .into_vec()
+        .pop()
+        .expect("a query");
     let reversed = translator
         .reverse_sql(&format!("{emitted};"), &schema, &options)
         .unwrap_or_else(|error| panic!("reversing {emitted} failed: {error}"));

@@ -145,6 +145,7 @@ fn returning_an_undeclared_column_is_left_to_the_engine() {
         .expect("parse")
         .translate(&monitor_options())
         .expect("a name no column answers to is not a column the database fills in")
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect();

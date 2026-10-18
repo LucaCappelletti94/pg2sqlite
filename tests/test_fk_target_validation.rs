@@ -84,7 +84,8 @@ fn closing_the_document_translates_the_former_fragment() {
         .sql(DANGLING_TABLE)
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("declaring the target in the same document must translate");
+        .expect("declaring the target in the same document must translate")
+        .into_vec();
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
     for s in &sql {
         diesel::sql_query(s.as_str()).execute(&mut conn).unwrap();

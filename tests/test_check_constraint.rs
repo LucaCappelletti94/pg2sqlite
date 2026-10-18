@@ -17,7 +17,8 @@ use rusqlite::Connection as SqliteConn;
 fn test_check_constraint_is_translated() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE items (id SERIAL PRIMARY KEY, quantity INT CHECK (quantity > 0));";
 
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let translated_sql = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
 
     // The translated DDL must contain the CHECK clause
@@ -54,7 +55,11 @@ fn test_check_constraint_with_unsupported_function_causes_error() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (array_length(col)));";
     let options = Pg2SqliteOptions::default();
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
 
     assert!(result.is_err(), "Expected translation error for unsupported function in CHECK");
     let error_msg = result.unwrap_err().to_string();
@@ -71,7 +76,7 @@ fn test_check_constraint_removed_with_option() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (array_length(col)));";
     let options = Pg2SqliteOptions::default().with_remove_unsupported_check_constraints();
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // The user-declared CHECK calling the unsupported function is removed.
@@ -92,7 +97,7 @@ fn test_valid_check_constraint_passes_through() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, price INTEGER, CHECK (price > 0));";
     let options = Pg2SqliteOptions::default();
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
@@ -117,7 +122,11 @@ fn test_nested_function_check_constraint_causes_error() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (col IS NULL OR array_length(col) > 0));";
     let options = Pg2SqliteOptions::default();
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
 
     assert!(result.is_err(), "Expected translation error for nested function in CHECK");
     let error_msg = result.unwrap_err().to_string();
@@ -134,7 +143,7 @@ fn test_nested_function_check_constraint_removed_with_option() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT, CHECK (col IS NULL OR array_length(col) > 0));";
     let options = Pg2SqliteOptions::default().with_remove_unsupported_check_constraints();
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // The user-declared nested CHECK calling the unsupported function is
@@ -158,7 +167,7 @@ fn test_column_level_check_is_translated() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, price INTEGER CHECK (price > 0));";
     let options = Pg2SqliteOptions::default();
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     assert!(
@@ -183,7 +192,7 @@ fn test_column_level_check_is_dropped_with_option() {
     let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, price INTEGER CHECK (price > 0));";
     let options = Pg2SqliteOptions::default().with_remove_unsupported_check_constraints();
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // The user-declared column-level CHECK is dropped; translator-added range
@@ -203,8 +212,12 @@ fn test_column_level_check_is_dropped_with_option() {
 #[test]
 fn table_check_translates_char_length() {
     let sql = "CREATE TABLE t (name TEXT, CHECK (char_length(name) > 0))";
-    let translated =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let translated = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
     let lower = sql_output.to_lowercase();
     assert!(lower.contains("length("), "expected char_length -> length translation: {sql_output}");
@@ -220,7 +233,8 @@ fn table_check_translates_char_length() {
 #[test]
 fn table_check_semantic() -> Result<(), Box<dyn std::error::Error>> {
     let pg_sql = "CREATE TABLE validated (name TEXT NOT NULL, CHECK (char_length(name) > 0))";
-    let translated = Pg2Sqlite::default().sql(pg_sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(pg_sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
 
@@ -244,7 +258,8 @@ fn table_check_semantic() -> Result<(), Box<dyn std::error::Error>> {
 fn test_check_constraint_string_length() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE products (id SERIAL PRIMARY KEY, code TEXT CHECK (length(code) >= 3));";
 
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
     for stmt in &translated {

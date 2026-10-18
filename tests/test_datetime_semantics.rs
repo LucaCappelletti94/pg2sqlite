@@ -36,6 +36,7 @@ fn translate_sql(pg: &str) -> Vec<String> {
         .expect("parses")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translates")
+        .into_vec()
 }
 
 /// Translate a PostgreSQL SQL fragment and return the error string. Handles

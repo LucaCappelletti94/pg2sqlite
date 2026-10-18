@@ -38,6 +38,7 @@ use crate::{
     },
     options::{Pg2SqliteOptions, TranslationContext},
     prelude::ReverseTranslator,
+    script::Script,
     traits::translator::TranslatorWithContext,
 };
 
@@ -203,11 +204,8 @@ fn statement_declares_foreign_key(statement: &Statement) -> bool {
         })
 }
 
-/// The warning a schema carrying a foreign key earns.
-///
-/// The pragma the script emits covers the connection the script runs on and
-/// no other, and a foreign key SQLite does not enforce is silent: the delete
-/// PostgreSQL refuses leaves an orphan row instead.
+/// The warning a schema carrying a foreign key earns, since a connection that
+/// skips the script's setup part leaves the key silently unenforced.
 fn foreign_key_pragma_warning() -> crate::warnings::TranslationWarning {
     crate::warnings::TranslationWarning::LossyDowngrade {
         construct: "FOREIGN KEY".to_string(),
@@ -216,9 +214,9 @@ fn foreign_key_pragma_warning() -> crate::warnings::TranslationWarning {
         location: "every connection that writes".to_string(),
         reason: "SQLite enforces a foreign key only while the connection carries PRAGMA \
                  foreign_keys = ON, which is off by default and is connection state rather than \
-                 database state. The emitted script sets it for the connection it is applied to; \
-                 every other connection that writes to the replica has to set it too, or the \
-                 delete PostgreSQL refuses will leave an orphan row with no error."
+                 database state. The script's setup part sets it, and every connection that \
+                 writes to the replica has to run that part, or the delete PostgreSQL refuses \
+                 will leave an orphan row with no error."
             .to_string(),
     }
 }
@@ -276,7 +274,7 @@ struct PreparedStatements {
 }
 
 struct PreparedTranslation {
-    statements: Vec<Statement>,
+    script: Script,
     warnings: Vec<crate::warnings::TranslationWarning>,
 }
 
@@ -729,11 +727,11 @@ impl Pg2Sqlite {
         let prepared = self.prepare_schema(options, initial_schema)?;
         let PreparedStatements { schema: _, options: _, statements, audit_table, mut warnings } =
             self.translate_prepared(prepared, |_| true)?;
-
-        let mut result: Vec<Statement> = statements.into_iter().flatten().collect();
+        let mut main: Vec<Statement> = statements.into_iter().flatten().collect();
         if let Some(audit_table) = audit_table {
-            result.insert(0, audit_table);
+            main.insert(0, audit_table);
         }
+        let mut script = Script { setup: Vec::new(), main };
 
         // PostgreSQL's LIKE is case-sensitive. SQLite's is case-insensitive for
         // ASCII unless the connection says otherwise, and no expression-level
@@ -748,20 +746,18 @@ impl Pg2Sqlite {
         // them. ILIKE is unaffected because it lowercases both operands.
         // No statements means no script, and an empty translation stays a
         // no-op the caller can skip.
-        if !result.is_empty() {
-            result.insert(0, case_sensitive_like_pragma());
+        if !script.is_empty() {
+            script.setup.push(case_sensitive_like_pragma());
         }
 
         // A foreign key SQLite does not enforce is worse than one it refuses:
         // the delete PostgreSQL rejects leaves an orphan row and says nothing.
-        // Enforcement is connection state, off by default, so the script sets
-        // it where it can and the warning names what a script cannot reach.
-        if result.iter().any(statement_declares_foreign_key) {
-            result.insert(0, foreign_keys_pragma());
+        if script.main.iter().any(statement_declares_foreign_key) {
+            script.setup.insert(0, foreign_keys_pragma());
             warnings.push(foreign_key_pragma_warning());
         }
 
-        Ok(PreparedTranslation { statements: result, warnings })
+        Ok(PreparedTranslation { script, warnings })
     }
 
     /// Translates loaded PostgreSQL statements to SQLite.
@@ -772,16 +768,13 @@ impl Pg2Sqlite {
     /// [`translation_manifest`](Self::translation_manifest) answers what each
     /// column holds.
     ///
-    /// Every non-empty script leads with `PRAGMA case_sensitive_like = 1`,
-    /// part of declaring the emitted dialect, since a pg2sqlite database
-    /// always wants SQLite to read `LIKE` the case-sensitive way PostgreSQL
-    /// does. Where the schema declares a foreign key the script additionally
-    /// leads with `PRAGMA foreign_keys = 1`, since SQLite enforces one only
-    /// while that pragma is on and it is off by default. A pragma is
-    /// connection state, so every other connection that writes to the
-    /// replica has to set them too, or a delete PostgreSQL refuses will
-    /// leave an orphan row with no error and a `LIKE` will match case the
-    /// source database never would.
+    /// The [`Script`] puts the connection pragmas in
+    /// [`setup`](Script::setup), `PRAGMA case_sensitive_like = 1` whenever
+    /// the script is not empty and `PRAGMA foreign_keys = 1` where the schema
+    /// declares a foreign key. A pragma is connection state, so every
+    /// connection to the replica has to run `setup`, or a delete PostgreSQL
+    /// refuses will leave an orphan row with no error and a `LIKE` will match
+    /// case the source database never would.
     ///
     /// Warnings about dropped or downgraded constructs are discarded on this
     /// path. Use [`translate_with_report`](Self::translate_with_report) to
@@ -797,14 +790,11 @@ impl Pg2Sqlite {
     /// # use pg2sqlite::pg2sqlite::Pg2Sqlite;
     /// # use pg2sqlite::options::Pg2SqliteOptions;
     /// let translator = Pg2Sqlite::default().sql("CREATE TABLE t (a INT);").unwrap();
-    /// let sqlite_statements = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    /// assert!(!sqlite_statements.is_empty());
+    /// let script = translator.translate(&Pg2SqliteOptions::default()).unwrap();
+    /// assert_eq!(script.main.len(), 1);
     /// ```
-    pub fn translate(
-        &self,
-        options: &Pg2SqliteOptions,
-    ) -> Result<Vec<Statement>, crate::errors::Error> {
-        Ok(self.prepare_translation(options, None)?.statements)
+    pub fn translate(&self, options: &Pg2SqliteOptions) -> Result<Script, crate::errors::Error> {
+        Ok(self.prepare_translation(options, None)?.script)
     }
 
     /// Translates loaded PostgreSQL statements using `schema` as the complete
@@ -820,12 +810,12 @@ impl Pg2Sqlite {
         &self,
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
-    ) -> Result<Vec<Statement>, crate::errors::Error> {
-        Ok(self.prepare_translation(options, Some(schema))?.statements)
+    ) -> Result<Script, crate::errors::Error> {
+        Ok(self.prepare_translation(options, Some(schema))?.script)
     }
 
     /// Translates the loaded PostgreSQL statements to SQLite and returns
-    /// a [`TranslationReport`] containing both the statements and any
+    /// a [`TranslationReport`] containing both the script and any
     /// warnings collected during translation. Warnings flag constructs
     /// that have no SQLite equivalent and were dropped or downgraded.
     ///
@@ -840,7 +830,7 @@ impl Pg2Sqlite {
     /// let report = Pg2Sqlite::default()
     ///     .sql("CREATE TABLE t (a INT);")?
     ///     .translate_with_report(&Pg2SqliteOptions::default())?;
-    /// assert_eq!(report.statements.len(), 2);
+    /// assert_eq!(report.script.main.len(), 1);
     /// assert!(report.warnings.is_empty());
     /// # Ok::<(), Error>(())
     /// ```
@@ -850,13 +840,12 @@ impl Pg2Sqlite {
         &self,
         options: &Pg2SqliteOptions,
     ) -> Result<crate::warnings::TranslationReport, crate::errors::Error> {
-        let PreparedTranslation { statements, warnings, .. } =
-            self.prepare_translation(options, None)?;
-        Ok(crate::warnings::TranslationReport { statements, warnings })
+        let PreparedTranslation { script, warnings } = self.prepare_translation(options, None)?;
+        Ok(crate::warnings::TranslationReport { script, warnings })
     }
 
-    /// Translates against a complete starting `schema` and returns statements
-    /// with their warnings.
+    /// Translates against a complete starting `schema` and returns the script
+    /// with its warnings.
     ///
     /// # Errors
     ///
@@ -866,12 +855,12 @@ impl Pg2Sqlite {
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
     ) -> Result<crate::warnings::TranslationReport, crate::errors::Error> {
-        let PreparedTranslation { statements, warnings, .. } =
+        let PreparedTranslation { script, warnings } =
             self.prepare_translation(options, Some(schema))?;
-        Ok(crate::warnings::TranslationReport { statements, warnings })
+        Ok(crate::warnings::TranslationReport { script, warnings })
     }
 
-    /// Convenience method: translates to a `Vec<String>` of SQL strings.
+    /// Translates to a [`Script`] of SQL strings.
     ///
     /// Bind parameters carry the PostgreSQL value; the emitted SQL performs any
     /// re-representation conversion. Reading a value back is the other
@@ -890,23 +879,21 @@ impl Pg2Sqlite {
     ///
     /// ```
     /// # use pg2sqlite::prelude::*;
-    /// let sql = Pg2Sqlite::default()
+    /// let script = Pg2Sqlite::default()
     ///     .sql("CREATE TABLE t (a INT);")?
     ///     .translate_to_sql(&Pg2SqliteOptions::default())?;
+    /// assert_eq!(script.setup, ["PRAGMA case_sensitive_like = 1"]);
     /// assert_eq!(
-    ///     sql,
-    ///     [
-    ///         "PRAGMA case_sensitive_like = 1",
-    ///         "CREATE TABLE t (a INTEGER CHECK (a BETWEEN -2147483648 AND 2147483647)) STRICT"
-    ///     ]
+    ///     script.main,
+    ///     ["CREATE TABLE t (a INTEGER CHECK (a BETWEEN -2147483648 AND 2147483647)) STRICT"]
     /// );
     /// # Ok::<(), Error>(())
     /// ```
     pub fn translate_to_sql(
         &self,
         options: &Pg2SqliteOptions,
-    ) -> Result<Vec<String>, crate::errors::Error> {
-        Ok(self.translate(options)?.into_iter().map(|s| s.to_string()).collect())
+    ) -> Result<Script<String>, crate::errors::Error> {
+        Ok(self.translate(options)?.map(|statement| statement.to_string()))
     }
 
     /// Translates against a complete starting `schema` and returns SQL strings.
@@ -918,12 +905,8 @@ impl Pg2Sqlite {
         &self,
         schema: &ParserDB,
         options: &Pg2SqliteOptions,
-    ) -> Result<Vec<String>, crate::errors::Error> {
-        Ok(self
-            .translate_with_schema(schema, options)?
-            .into_iter()
-            .map(|statement| statement.to_string())
-            .collect())
+    ) -> Result<Script<String>, crate::errors::Error> {
+        Ok(self.translate_with_schema(schema, options)?.map(|statement| statement.to_string()))
     }
 
     /// Builds a [`ParserDB`] schema from the loaded PostgreSQL statements,

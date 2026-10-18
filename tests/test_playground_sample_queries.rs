@@ -80,7 +80,8 @@ fn translate(schema: &str, options: &Pg2SqliteOptions) -> String {
         .sql(schema)
         .expect("parse schema")
         .translate(options)
-        .expect("translate schema");
+        .expect("translate schema")
+        .into_vec();
     stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n")
 }
 
@@ -100,12 +101,12 @@ fn run_query_once(
             // schema-driven rewrites get a complete table picture.
             let schema_stmts = Pg2Sqlite::default()
                 .sql(schema)
-                .and_then(|t| t.translate(options))
+                .and_then(|t| t.translate(options).map(pg2sqlite::script::Script::into_vec))
                 .unwrap_or_else(|e| panic!("[{}] schema translate failed: {e}", query.label));
             let combined = format!("{schema};\n{}", query.sql);
             let combined_stmts = Pg2Sqlite::default()
                 .sql(&combined)
-                .and_then(|t| t.translate(options))
+                .and_then(|t| t.translate(options).map(pg2sqlite::script::Script::into_vec))
                 .unwrap_or_else(|e| panic!("[{}] query translate failed: {e}", query.label));
             combined_stmts
                 .into_iter()
@@ -452,7 +453,8 @@ fn postgis_sample_queries_translate() {
                 .sql(q.sql)
                 .unwrap_or_else(|e| panic!("[{}] PostGIS parse failed: {e}", q.label))
                 .translate(&opts)
-                .unwrap_or_else(|e| panic!("[{}] PostGIS translate failed: {e}", q.label));
+                .unwrap_or_else(|e| panic!("[{}] PostGIS translate failed: {e}", q.label))
+                .into_vec();
         }
     }
 }

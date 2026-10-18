@@ -17,7 +17,7 @@ fn ilike_output_uses_lower_wrapping() {
     let sql = "CREATE TABLE t (id INT, name TEXT);
                SELECT * FROM t WHERE name ILIKE '%test%'";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let select = translated
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
@@ -37,7 +37,7 @@ fn not_ilike_output_uses_lower_wrapping() {
     let sql = "CREATE TABLE t (id INT, name TEXT);
                SELECT * FROM t WHERE name NOT ILIKE '%test%'";
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let select = translated
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
@@ -60,8 +60,9 @@ fn ilike_matches_case_insensitively_with_case_sensitive_like_pragma() {
     let query_sql = "SELECT * FROM words WHERE word ILIKE '%hello%'";
 
     let options = Pg2SqliteOptions::default();
-    let ddl = Pg2Sqlite::default().sql(schema_sql).unwrap().translate(&options).unwrap();
-    let query_stmts = Pg2Sqlite::default().sql(query_sql).unwrap().translate(&options).unwrap();
+    let ddl = Pg2Sqlite::default().sql(schema_sql).unwrap().translate(&options).unwrap().into_vec();
+    let query_stmts =
+        Pg2Sqlite::default().sql(query_sql).unwrap().translate(&options).unwrap().into_vec();
     // The translation leads with the pragma, so pick the query out by kind.
     assert!(
         query_stmts.iter().any(|s| matches!(s, sqlparser::ast::Statement::Pragma { .. })),
@@ -155,6 +156,7 @@ fn a_backslash_escape_is_untouched() {
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .join("\n");
     assert!(translated.contains("ESCAPE '\\'"), "the escape must survive verbatim: {translated}");
 
@@ -239,7 +241,8 @@ fn non_ascii_ilike_pattern_literal_is_refused() {
     let result = Pg2Sqlite::default()
         .sql("CREATE TABLE t (name TEXT); SELECT * FROM t WHERE name ILIKE 'CAF\u{00c9}%'")
         .unwrap()
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "non-ASCII ILIKE pattern must refuse without a fold option");
 }
 
@@ -277,7 +280,8 @@ fn with_fold_function_ilike_matches_non_ascii_case_insensitively() {
         )
         .expect("parse")
         .translate_to_sql(&options)
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
 
     let (probe, setup) = statements.split_last().expect("at least one statement");
     let conn = Connection::open_in_memory().expect("in-memory SQLite");

@@ -28,6 +28,7 @@ fn translate(pg: &str) -> Vec<String> {
         .expect("parse")
         .translate_to_sql(&options())
         .expect("translate")
+        .into_vec()
 }
 
 /// Applies everything but the last statement, then reads the last one's first
