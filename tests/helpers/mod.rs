@@ -426,90 +426,13 @@ pub fn register_sqlite_vec_once() {
     });
 }
 
-/// One `f32` as the 2 bytes of a little-endian IEEE 754 half.
-#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub fn f32_to_f16_le(x: f32) -> [u8; 2] {
-    let b: u32 = x.to_bits();
-    let sign: u16 = {
-        debug_assert!(b >> 31 <= 1);
-        (b >> 31) as u16 // deliberate: single-bit extraction, value 0 or 1
-    } << 15;
-    let exp32: i32 = {
-        let e = (b >> 23) & 0xFF;
-        debug_assert!(e <= 255);
-        e as i32 // deliberate: 8-bit field, always 0..=255, fits i32
-    };
-    let mantissa: u32 = b & 0x7F_FFFF;
-    let bits: u16 = if exp32 == 0xFF {
-        let top10: u16 = {
-            let m = mantissa >> 13;
-            debug_assert!(m <= 0x3FF);
-            m as u16 // deliberate: top-10 mantissa bits, value <= 0x3FF
-        };
-        if mantissa != 0 { 0x7E00 | sign | top10 } else { 0x7C00 | sign }
-    } else if exp32 == 0 {
-        sign
-    } else {
-        let e = exp32 - 127 + 15;
-        if e >= 31 {
-            0x7C00 | sign
-        } else if e <= 0 {
-            sign
-        } else {
-            debug_assert!(e > 0 && e <= 30);
-            debug_assert!(mantissa >> 13 <= 0x3FF);
-            let e16: u16 = e as u16; // deliberate: proven 1..=30, fits u16
-            let m16: u16 = (mantissa >> 13) as u16; // deliberate: <= 0x3FF, fits u16
-            sign | (e16 << 10) | m16
-        }
-    };
-    bits.to_le_bytes()
+/// Encodes an `f32` as little-endian IEEE 754 binary16.
+pub fn f32_to_f16_le(value: f32) -> [u8; 2] {
+    half::f16::from_f32(value).to_le_bytes()
 }
 
-/// Registers `vec_f16` on `conn`, which sqlite-vec 0.1.9 does not ship.
-///
-/// Produces true 2-byte halves, which is what a `::halfvec` cast means. A
-/// test that inserts into a `vec0` table needs its own float32-encoding shim
-/// instead, because vec0 0.1.9 stores `float16[]` as float32 and rejects a
-/// blob whose length is not divisible by four.
-///
-/// rusqlite directly, because diesel exposes neither `sqlite3_auto_extension`
-/// nor `create_scalar_function`.
-pub fn register_vec_f16(conn: &rusqlite::Connection) {
-    conn.create_scalar_function(
-        "vec_f16",
-        1,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8
-            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            match ctx.get_raw(0) {
-                rusqlite::types::ValueRef::Null => Ok(rusqlite::types::Value::Null),
-                rusqlite::types::ValueRef::Text(t) => {
-                    let text = String::from_utf8_lossy(t);
-                    let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']');
-                    let bytes: Vec<u8> = trimmed
-                        .split(',')
-                        .filter_map(|s| s.trim().parse::<f32>().ok())
-                        .flat_map(f32_to_f16_le)
-                        .collect();
-                    Ok(rusqlite::types::Value::Blob(bytes))
-                }
-                _ => {
-                    Err(rusqlite::Error::InvalidFunctionParameterType(
-                        0,
-                        rusqlite::types::Type::Text,
-                    ))
-                }
-            }
-        },
-    )
-    .expect("register vec_f16");
-}
-
-/// A fresh in-memory connection with sqlite-vec loaded and `vec_f16` present.
+/// Opens an in-memory connection with the native vector extension.
 pub fn vec_connection() -> rusqlite::Connection {
     register_sqlite_vec_once();
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory SQLite");
-    register_vec_f16(&conn);
-    conn
+    rusqlite::Connection::open_in_memory().expect("in-memory SQLite")
 }

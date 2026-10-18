@@ -427,6 +427,11 @@ fn translate_create_table(
     options: &crate::options::TranslationContext<'_>,
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
+    if create_table.columns.iter().any(|column| {
+        crate::impls::translator_impls::vector::is_halfvec_data_type(&column.data_type)
+    }) {
+        return Err(crate::impls::translator_impls::vector::halfvec_refusal());
+    }
     if let Some(role_filtered) =
         translate_create_table_for_role(create_table, schema, options, emit)?
     {

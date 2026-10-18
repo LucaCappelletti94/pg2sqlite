@@ -52,38 +52,6 @@ fn test_vector_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_halfvec_type_to_blob() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = "
-        CREATE TABLE items (
-            id INTEGER PRIMARY KEY,
-            embedding halfvec(768)
-        );
-    ";
-
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let create_table = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::CreateTable(_)))
-        .expect("Should have a CREATE TABLE statement")
-        .to_string();
-
-    assert!(
-        create_table.contains("BLOB"),
-        "halfvec(768) should translate to BLOB, got: {create_table}"
-    );
-    // Translated DDL is dynamically generated; rusqlite execute_batch proves
-    // SQLite accepts it.
-    rusqlite::Connection::open_in_memory()
-        .expect("in-memory SQLite")
-        .execute_batch(&format!("{create_table};"))
-        .unwrap_or_else(|e| panic!("SQLite rejected CREATE TABLE: {e}\n{create_table}"));
-
-    Ok(())
-}
-
-#[test]
 fn test_l2_distance_operator() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "
         CREATE TABLE items (
@@ -184,45 +152,6 @@ fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that ::halfvec cast is translated to vec_f16() (16-bit float, distinct
-/// from vec_f32).
-#[test]
-fn test_halfvec_cast_to_vec_f16() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = "
-        CREATE TABLE items (
-            id INTEGER PRIMARY KEY,
-            embedding BLOB
-        );
-        SELECT * FROM items WHERE embedding <=> '[1,2,3]'::halfvec < 0.5;
-    ";
-
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
-
-    let select_stmt = translated
-        .iter()
-        .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
-        .expect("Should have a SELECT statement")
-        .to_string();
-
-    assert!(
-        select_stmt.contains("vec_f16"),
-        "::halfvec cast should translate to vec_f16(), got: {select_stmt}"
-    );
-    assert!(
-        !select_stmt.contains("vec_f32"),
-        "::halfvec cast should not translate to vec_f32(), got: {select_stmt}"
-    );
-    // Execute all emitted statements with sqlite-vec and vec_f16 loaded.
-    let conn = helpers::vec_connection();
-    for stmt in &translated {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("SQLite rejected statement: {e}\n{stmt}"));
-    }
-
-    Ok(())
-}
-
 /// The schema-qualified spelling of the same cast. pgvector commonly lives in
 /// a named schema, and a qualified type cast is ordinary PostgreSQL, so
 /// `'...'::public.vector` must lower exactly like `'...'::vector`. It used to
@@ -248,29 +177,6 @@ fn qualified_vector_cast_lowers_to_vec_f32() -> Result<(), Box<dyn std::error::E
         "the CAST AS BLOB fallback stores text bytes as the vector, got: {select_stmt}"
     );
     // Execute the standalone SELECT with sqlite-vec loaded so vec_f32 is known.
-    helpers::vec_connection()
-        .execute_batch(&format!("{select_stmt};"))
-        .unwrap_or_else(|e| panic!("SQLite rejected SELECT: {e}\n{select_stmt}"));
-    Ok(())
-}
-
-/// The halfvec twin, which has its own copy of the same predicate.
-#[test]
-fn qualified_halfvec_cast_lowers_to_vec_f16() -> Result<(), Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default()
-        .sql("SELECT '[1,2]'::public.halfvec AS v;")?
-        .translate(&Pg2SqliteOptions::default())?;
-    let select_stmt = translated
-        .iter()
-        .find(|s| !s.to_string().starts_with("PRAGMA"))
-        .expect("user SELECT statement")
-        .to_string();
-
-    assert!(
-        select_stmt.contains("vec_f16('[1,2]')"),
-        "a qualified ::halfvec cast should lower to vec_f16(), got: {select_stmt}"
-    );
-    // Execute the standalone SELECT with vec_f16 registered so it is known.
     helpers::vec_connection()
         .execute_batch(&format!("{select_stmt};"))
         .unwrap_or_else(|e| panic!("SQLite rejected SELECT: {e}\n{select_stmt}"));

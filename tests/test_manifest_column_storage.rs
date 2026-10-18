@@ -8,6 +8,8 @@
 //! array column holds JSON text, and a vector column holds packed floats.
 //! Each test decodes a stored value using only what the manifest publishes.
 
+mod helpers;
+
 use pg2sqlite::{
     manifest::{ColumnStorage, VectorElement},
     prelude::{ArrayRepresentation, Pg2Sqlite, Pg2SqliteOptions, UuidRepresentation},
@@ -88,27 +90,6 @@ fn an_array_column_says_it_holds_json() {
 }
 
 #[test]
-fn a_vector_column_publishes_its_element_and_width() {
-    assert_eq!(
-        storage_of(
-            "CREATE TABLE t (id int primary key, e vector(3), h halfvec(4));",
-            &Pg2SqliteOptions::default()
-        ),
-        vec![
-            ("id".to_string(), ColumnStorage::Direct),
-            (
-                "e".to_string(),
-                ColumnStorage::Vector { dimensions: Some(3), element: VectorElement::Float32 }
-            ),
-            (
-                "h".to_string(),
-                ColumnStorage::Vector { dimensions: Some(4), element: VectorElement::Float16 }
-            ),
-        ]
-    );
-}
-
-#[test]
 fn the_published_scale_decodes_a_value_written_through_the_emitted_sql() {
     let pg = "CREATE TABLE t (id int primary key, amount numeric(10,2));
               INSERT INTO t (id, amount) VALUES (1, 19.99);";
@@ -161,4 +142,33 @@ fn the_published_uuid_storage_decodes_a_value_written_through_the_emitted_sql() 
         text
     });
     assert_eq!(hex, "550e8400e29b41d4a716446655440000");
+}
+
+#[test]
+fn the_published_vector_storage_decodes_a_value_written_through_the_emitted_sql() {
+    let pg = "CREATE TABLE t (id int primary key, e vector(3));
+              INSERT INTO t (id, e) VALUES (1, '[0.5, -1.5, 2.25]');";
+    let options = Pg2SqliteOptions::default();
+    let statements =
+        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&options).expect("translate");
+    helpers::register_sqlite_vec_once();
+    let connection = Connection::open_in_memory().expect("in-memory SQLite");
+    for statement in &statements {
+        connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
+    }
+
+    let ColumnStorage::Vector { dimensions, element } =
+        storage_of(pg, &options).into_iter().find(|(name, _)| name == "e").expect("e").1
+    else {
+        panic!("a vector column must publish its element and width");
+    };
+    assert_eq!((dimensions, element), (Some(3), VectorElement::Float32));
+
+    let stored: Vec<u8> =
+        connection.query_row("SELECT e FROM t", [], |row| row.get(0)).expect("read back");
+    let width = usize::try_from(dimensions.expect("a declared width")).expect("a native width");
+    assert_eq!(stored.len(), 4 * width);
+    let decoded: Vec<f32> =
+        stored.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect();
+    assert_eq!(decoded, vec![0.5, -1.5, 2.25]);
 }

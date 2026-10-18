@@ -323,8 +323,7 @@ fn reverse_strftime_epoch() {
 
 #[test]
 fn reverse_vec_f16_to_halfvec_cast() {
-    // Forward translates halfvec casts to vec_f16(); the reverse must restore
-    // ::halfvec.
+    // The reverse must restore ::halfvec.
     let schema_sql = "CREATE TABLE embeddings (id INT PRIMARY KEY, vec halfvec(3));";
     let pg = reverse(schema_sql, "SELECT vec_f16('[1,2,3]') FROM embeddings;");
     assert!(pg.contains("::halfvec"), "Expected ::halfvec cast: {pg}");

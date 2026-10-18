@@ -409,12 +409,10 @@ fn translate_custom_type(
     match custom_type_name.as_deref() {
         Some("serial" | "smallserial" | "bigserial" | "largeserial") => Ok(DataType::Integer(None)),
         Some("countrycode") => Ok(DataType::Text),
-        // PostGIS geometry/geography: EWKB blobs via the SQLiteGIS extension.
-        // pgvector vector/halfvec: BLOB main table + companion vec0 virtual table.
-        Some(
-            "geometry" | "geography" | "cas" | "molecularformula" | "mediatype" | "vector"
-            | "halfvec",
-        ) => Ok(DataType::Blob(None)),
+        Some("halfvec") => Err(super::vector::halfvec_refusal()),
+        Some("geometry" | "geography" | "cas" | "molecularformula" | "mediatype" | "vector") => {
+            Ok(DataType::Blob(None))
+        }
         _ => {
             // Distinguish built-in PostgreSQL types (wrong storage, not
             // obscure) from user-defined names (enum, domain,

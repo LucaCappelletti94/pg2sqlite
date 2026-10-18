@@ -137,13 +137,8 @@ const SQLITE_BUILTINS: &[&str] = &[
 /// reader: `avg` and `count` have no scalar form.
 const SQLITE_AGGREGATES: &[&str] = &["avg", "count"];
 
-/// Names this translator emits itself, which therefore have to survive a round
-/// back through the classifier.
-///
-/// `vec_f32` and `vec_f16` come from the pgvector lowering in
-/// [`crate::impls::translator_impls::vector`], and the sqlite-vec extension
-/// provides them wherever a vector column is usable at all.
-const TRANSLATOR_EMITTED: &[&str] = &["vec_f16", "vec_f32"];
+/// Native codec names emitted by vector lowering.
+const TRANSLATOR_EMITTED: &[&str] = &["vec_f32"];
 
 /// What SQLite ships only under `SQLITE_ENABLE_MATH_FUNCTIONS`, which is why
 /// none of them is in the inventory above.

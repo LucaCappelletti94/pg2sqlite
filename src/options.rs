@@ -12,7 +12,9 @@ use alloc::{
     vec::Vec,
 };
 
-use sql_traits::structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, ParserDB};
+use sql_traits::structs::{
+    ColumnDefinition, ColumnDefinitionScope, ColumnQueryScope, ColumnScope, ParserDB,
+};
 
 use crate::traits::{
     ArrayRepresentation, SessionVariableMapping, SessionVariablePattern, UuidRepresentation,
@@ -149,7 +151,11 @@ pub(crate) struct PrewalkCatalogs {
 
 #[derive(Clone, Copy)]
 enum TranslationScope<'a> {
-    Query { scope: &'a ColumnScope<'a, 'a, ParserDB>, pseudo_row: bool },
+    Query {
+        scope: &'a ColumnScope<'a, 'a, ParserDB>,
+        pseudo_row: bool,
+        original_query: Option<&'a sqlparser::ast::Query>,
+    },
     Definition(ColumnDefinitionScope<'a, 'a, 'a, ParserDB>),
 }
 
@@ -238,12 +244,24 @@ impl<'a> TranslationContext<'a> {
         TranslationContext {
             options: Cow::Borrowed(self.options.as_ref()),
             catalogs: Cow::Borrowed(self.catalogs.as_ref()),
-            scope: Some(TranslationScope::Query { scope, pseudo_row: false }),
+            scope: Some(TranslationScope::Query { scope, pseudo_row: false, original_query: None }),
             outer: Some(self),
             with: self.with,
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
         }
+    }
+
+    /// Retains original query identity alongside column resolution.
+    pub(crate) fn with_query_scope<'s>(
+        &'s self,
+        scope: &'s ColumnScope<'s, 's, ParserDB>,
+        query: &'s sqlparser::ast::Query,
+    ) -> TranslationContext<'s> {
+        let mut scoped = self.with_scope(scope);
+        scoped.scope =
+            Some(TranslationScope::Query { scope, pseudo_row: false, original_query: Some(query) });
+        scoped
     }
     pub(crate) fn with_pseudo_row_scope<'s>(
         &'s self,
@@ -252,7 +270,7 @@ impl<'a> TranslationContext<'a> {
         TranslationContext {
             options: Cow::Borrowed(self.options.as_ref()),
             catalogs: Cow::Borrowed(self.catalogs.as_ref()),
-            scope: Some(TranslationScope::Query { scope, pseudo_row: true }),
+            scope: Some(TranslationScope::Query { scope, pseudo_row: true, original_query: None }),
             outer: Some(self),
             with: self.with,
             variables: self.variables,
@@ -337,7 +355,7 @@ impl<'a> TranslationContext<'a> {
                 context = current.outer;
                 if let Some(scope) = current.scope {
                     return Some(match scope {
-                        TranslationScope::Query { scope, pseudo_row } => {
+                        TranslationScope::Query { scope, pseudo_row, .. } => {
                             scope.resolve_column_definition(
                                 pseudo_row_reference.filter(|_| pseudo_row).unwrap_or(reference),
                             )
@@ -350,6 +368,36 @@ impl<'a> TranslationContext<'a> {
             }
             None
         })
+    }
+
+    /// Borrows the recorded output scope for an original query node.
+    pub(crate) fn query_scope<'s>(
+        &'s self,
+        query: &sqlparser::ast::Query,
+    ) -> Option<ColumnQueryScope<'s, 's, 's, ParserDB>> {
+        let mut context = Some(self);
+        while let Some(current) = context {
+            if let Some(TranslationScope::Query { scope, .. }) = current.scope
+                && let Some(query_scope) = scope.scope_for_query(query)
+            {
+                return Some(query_scope);
+            }
+            context = current.outer;
+        }
+        None
+    }
+
+    /// Borrows the nearest original query enclosing an output inspection.
+    pub(crate) fn original_query(&self) -> Option<&sqlparser::ast::Query> {
+        let mut context = Some(self);
+        while let Some(current) = context {
+            if let Some(TranslationScope::Query { original_query: Some(query), .. }) = current.scope
+            {
+                return Some(query);
+            }
+            context = current.outer;
+        }
+        None
     }
 
     /// Records `(table, column)` as having a translated spatial index. Both

@@ -40,8 +40,8 @@ use sql_traits::{
     traits::{ColumnLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, SetExpr,
-    Statement, TriggerEvent, TriggerPeriod,
+    BinaryOperator, CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, SelectItem,
+    SetExpr, Statement, TriggerEvent, TriggerPeriod,
 };
 
 use crate::{
@@ -55,7 +55,7 @@ use crate::{
             last_ident, quote_identifier, quoted_ident, resolve_translation_table,
             sync_trigger_name,
         },
-        query_builder::{make_query, make_simple_select, single_expr_query},
+        query_builder::{make_query, make_simple_select},
         translator_impls::rls::resolve_trigger_table_name,
     },
     prelude::Pg2SqliteOptions,
@@ -86,11 +86,21 @@ pub(crate) fn is_vector_data_type(data_type: &DataType) -> bool {
 /// Check if a data type is the halfvec (16-bit float) type.
 pub(crate) fn is_halfvec_data_type(data_type: &DataType) -> bool {
     if let DataType::Custom(name, _) = data_type
-        && let Some(type_name) = crate::impls::object_name::last_catalog_name(name)
+        && let Some(type_name) = last_ident(name)
     {
-        return type_name == "halfvec";
+        return if type_name.quote_style.is_some() {
+            type_name.value == "halfvec"
+        } else {
+            type_name.value.eq_ignore_ascii_case("halfvec")
+        };
     }
     false
+}
+
+/// The typed refusal for unsupported native half-precision storage.
+#[must_use]
+pub(crate) fn halfvec_refusal() -> Error {
+    Error::forward_refusal("half-precision halfvec storage is not supported by sqlite-vec")
 }
 
 /// Extract dimension count from a vector type like vector(384).
@@ -172,9 +182,7 @@ fn create_vec0_virtual_table(
     // vec0(pk_id INTEGER PRIMARY KEY, column_name float[N])
     let pk_arg = format!("{} INTEGER PRIMARY KEY", quote_identifier(&format!("{pk_column}_id")));
     let dim_spec = vec_col.dimensions.map_or_else(String::new, |d| format!("[{d}]"));
-    // halfvec uses 16-bit floats (float16); vector uses 32-bit floats (float)
-    let vec_type = if vec_col.is_halfvec { "float16" } else { "float" };
-    let vec_arg = format!("{} {vec_type}{dim_spec}", quote_identifier(&vec_col.column_name));
+    let vec_arg = format!("{} float{dim_spec}", quote_identifier(&vec_col.column_name));
 
     let module_args = vec![Ident::new(pk_arg), Ident::new(vec_arg)];
 
@@ -272,6 +280,9 @@ pub fn generate_vec0_statements(
     emit: crate::warnings::WarningSink<'_>,
 ) -> Result<Vec<Statement>, Error> {
     let vector_cols = extract_vector_columns(create_table);
+    if vector_cols.iter().any(|column| column.is_halfvec) {
+        return Err(halfvec_refusal());
+    }
     if vector_cols.is_empty() {
         return Ok(Vec::new());
     }
@@ -328,32 +339,21 @@ pub fn generate_vec0_statements(
     Ok(statements)
 }
 
-/// Build a `vec_f32(expr)` or `vec_f16(expr)` function call.
-fn make_vec_conversion_call(arg: Expr, is_halfvec: bool) -> Expr {
-    let func_name = if is_halfvec { "vec_f16" } else { "vec_f32" };
-    simple_function_expr(func_name, vec![arg], None)
-}
-
-/// If `expr` is a single-quoted string literal, wrap it with the matching
-/// sqlite-vec conversion function so SQLite STRICT tables accept it in the
-/// BLOB column. Other expression shapes pass through unchanged. NULL,
-/// DEFAULT, identifiers, casts, and existing function calls (including the
-/// `vec_f32` / `vec_f16` calls the cast translator already lowers
-/// `'[...]'::vector` to) are left alone, so this helper is idempotent.
-///
-/// `(SELECT '[1,2,3]')` is the literal written another way, so the conversion
-/// goes inside the subquery. A subquery that reads a relation is left alone:
-/// its value may already be a vector BLOB, and wrapping one would convert
-/// twice.
-pub(crate) fn maybe_wrap_text_vector_literal(expr: Expr, is_halfvec: bool) -> Expr {
-    if let Some(projected) = scalar_subquery_projection(&expr)
-        && single_quoted_literal(projected).is_some()
+/// Wraps a text vector literal or its scalar subquery in the native float32
+/// codec.
+pub(crate) fn maybe_wrap_text_vector_literal(mut expr: Expr) -> Expr {
+    if scalar_subquery_projection(&expr)
+        .is_some_and(|projected| single_quoted_literal(projected).is_some())
+        && let Expr::Subquery(query) = &mut expr
+        && let SetExpr::Select(select) = query.body.as_mut()
+        && let [SelectItem::UnnamedExpr(literal)] = select.projection.as_mut_slice()
     {
-        let wrapped = make_vec_conversion_call(projected.clone(), is_halfvec);
-        return Expr::Subquery(Box::new(single_expr_query(wrapped, Vec::new(), None)));
+        let text = core::mem::replace(literal, Expr::Value(sqlparser::ast::Value::Null.into()));
+        *literal = simple_function_expr("vec_f32", vec![text], None);
+        return expr;
     }
     if single_quoted_literal(&expr).is_some() {
-        make_vec_conversion_call(expr, is_halfvec)
+        simple_function_expr("vec_f32", vec![expr], None)
     } else {
         expr
     }
