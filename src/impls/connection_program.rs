@@ -1,7 +1,9 @@
 //! Connection-local definitions and data replayed against the stored schema.
 
 mod columns;
+mod dml;
 mod headers;
+mod transactions;
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -22,13 +24,12 @@ use sql_traits::{
     traits::{DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    AlterTable, AlterTableOperation, AssignmentTarget, ColumnOption, ConditionalStatements,
-    CreateIndex, CreateTable, CreateTrigger, CreateView, Delete, Expr, Fetch, ForClause,
-    ForeignKeyConstraint, FormatClause, FromTable, Ident, Insert, LimitClause, LockClause,
-    ObjectName, ObjectNamePart, OrderBy, OrderByKind, PipeOperator, Query, RenameTableNameKind,
-    Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Setting, Statement,
-    TableConstraint, TableFactor, TableObject, TableWithJoins, Update, UpdateTableFromKind, Values,
-    VisitMut, VisitorMut, With,
+    AlterTable, AlterTableOperation, ColumnOption, ConditionalStatements, CreateIndex, CreateTable,
+    CreateTrigger, CreateView, Delete, Expr, Fetch, ForClause, ForeignKeyConstraint, FormatClause,
+    FromTable, Ident, Insert, LimitClause, LockClause, ObjectName, ObjectNamePart, OrderBy,
+    OrderByKind, PipeOperator, Query, RenameTableNameKind, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, Setting, Statement, TableConstraint, TableFactor,
+    TableObject, TableWithJoins, Update, Values, VisitMut, VisitorMut, With,
 };
 
 use crate::{
@@ -65,6 +66,11 @@ pub(crate) fn connection_program(
         let step = &state.steps[index];
         if !selected[index] {
             continue;
+        }
+        if step.destinations.iter().any(|id| state.identities[*id].storage == Storage::Main) {
+            return Err(Error::forward_refusal(format!(
+                "statement {index} would repeat a persistent write while restoring temporary data"
+            )));
         }
         if let Some(tx) = step.transaction {
             if open != Some(tx) {
@@ -112,6 +118,45 @@ enum Class {
     Other,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriteEvent {
+    Insert,
+    InsertOrUpdate,
+    Update,
+    Delete,
+}
+
+impl WriteEvent {
+    fn mask(self) -> u8 {
+        match self {
+            Self::Insert => 1,
+            Self::Update => 2,
+            Self::Delete => 4,
+            Self::InsertOrUpdate => Self::Insert.mask() | Self::Update.mask(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Write {
+    target: usize,
+    event: WriteEvent,
+}
+
+struct TriggerWrites {
+    identity: usize,
+    statement: usize,
+    events: u8,
+    writes: Vec<Write>,
+    retirements: Vec<usize>,
+}
+
+impl TriggerWrites {
+    fn active(&self, steps: &[Step]) -> bool {
+        !steps[self.statement].undone && self.retirements.iter().all(|index| steps[*index].undone)
+    }
+}
+
 struct Identity {
     index: usize,
     storage: Storage,
@@ -137,6 +182,7 @@ struct Step {
     identity: Option<usize>,
     target: Option<usize>,
     destinations: Vec<usize>,
+    dependencies: Vec<usize>,
     transaction: Option<usize>,
     undone: bool,
     names: Option<ScopeSnapshot>,
@@ -156,10 +202,12 @@ struct Walker {
     main: BTreeMap<String, usize>,
     temp: BTreeMap<String, usize>,
     steps: Vec<Step>,
+    triggers: Vec<TriggerWrites>,
     tx: Option<usize>,
     next_tx: usize,
     tx_committed: BTreeMap<usize, bool>,
-    savepoints: BTreeMap<String, usize>,
+    frames: Vec<transactions::Frame>,
+    journal: Vec<transactions::Undo>,
 }
 
 impl Walker {
@@ -234,11 +282,6 @@ impl Walker {
         snapshot
     }
 
-    fn open_transaction(&mut self) {
-        self.next_tx += 1;
-        self.tx = Some(self.next_tx);
-    }
-
     fn push(&mut self, class: Class) {
         self.push_step(class, None, None, Vec::new());
     }
@@ -255,6 +298,7 @@ impl Walker {
             identity,
             target,
             destinations,
+            dependencies: Vec::new(),
             transaction: self.tx,
             undone: false,
             names: None,
@@ -272,43 +316,16 @@ impl Walker {
         }
     }
 
-    fn insert_name(&mut self, storage: Storage, folded: String, id: usize) {
-        match storage {
-            Storage::Temp => {
-                self.temp.insert(folded, id);
-            }
-            Storage::Main => {
-                self.main.insert(folded, id);
-            }
-        }
-    }
-
-    fn remove_name(&mut self, storage: Storage, folded: &str) {
-        match storage {
-            Storage::Temp => {
-                self.temp.remove(folded);
-            }
-            Storage::Main => {
-                self.main.remove(folded);
-            }
-        }
-    }
-
     fn kill(&mut self, id: usize, storage: Storage, folded: &str) {
-        self.identities[id].dropped = true;
+        self.retire_identity(id);
         self.remove_name(storage, folded);
-        for other in &mut self.identities {
+        for other_id in 0..self.identities.len() {
+            let other = &self.identities[other_id];
             if other.attached == Some(id) && !other.dropped {
-                other.dropped = true;
                 let name = other.final_name_folded.clone();
-                match other.storage {
-                    Storage::Temp => {
-                        self.temp.remove(&name);
-                    }
-                    Storage::Main => {
-                        self.main.remove(&name);
-                    }
-                }
+                let storage = other.storage;
+                self.retire_identity(other_id);
+                self.remove_name(storage, &name);
             }
         }
     }
@@ -334,6 +351,7 @@ impl Walker {
             bases_unknown: false,
             dropped: false,
         });
+        self.record_creation(id);
         self.insert_name(storage, folded, id);
         id
     }
@@ -347,65 +365,40 @@ impl Walker {
                          emitted bootstrap does not carry"
                     )));
                 }
+                if self.tx.is_some() {
+                    return Err(Error::forward_refusal(format!(
+                        "statement {index} opens a nested transaction"
+                    )));
+                }
                 self.open_transaction();
                 self.push(Class::Other);
             }
             Statement::Commit { chain, .. } => {
-                if let Some(tx) = self.tx {
-                    self.tx_committed.insert(tx, true);
-                    self.savepoints.clear();
-                    if *chain {
-                        self.open_transaction();
-                    } else {
-                        self.tx = None;
-                    }
+                let active = self.tx.is_some();
+                self.finish_transaction(true);
+                if active && *chain {
+                    self.open_transaction();
                 }
                 self.push(Class::Other);
             }
             Statement::Rollback { chain, savepoint } => {
-                match savepoint {
-                    Some(name) => {
-                        if self.tx.is_none() {
-                            return Err(Error::forward_refusal(format!(
-                                "statement {index} rolls back to a savepoint outside a transaction"
-                            )));
-                        }
-                        let pos = self.savepoints.get(&fold(name)).copied().ok_or_else(|| {
-                            Error::forward_refusal(format!(
-                                "statement {index} rolls back to a savepoint the bootstrap never set"
-                            ))
-                        })?;
-                        for step in &mut self.steps[pos + 1..] {
-                            step.undone = true;
-                        }
-                    }
-                    None => {
-                        if let Some(tx) = self.tx {
-                            self.tx_committed.insert(tx, false);
-                            for step in &mut self.steps {
-                                if step.transaction == Some(tx) {
-                                    step.undone = true;
-                                }
-                            }
-                            self.savepoints.clear();
-                            if *chain {
-                                self.open_transaction();
-                            } else {
-                                self.tx = None;
-                            }
-                        }
+                if let Some(name) = savepoint {
+                    self.rollback_to(name, index)?;
+                } else {
+                    let active = self.tx.is_some();
+                    self.finish_transaction(false);
+                    if active && *chain {
+                        self.open_transaction();
                     }
                 }
                 self.push(Class::Other);
             }
             Statement::Savepoint { name } => {
-                if self.tx.is_some() {
-                    self.savepoints.insert(fold(name), index);
-                }
+                self.savepoint(name);
                 self.push(Class::Other);
             }
             Statement::ReleaseSavepoint { name } => {
-                self.savepoints.remove(&fold(name));
+                self.release(name, index)?;
                 self.push(Class::Other);
             }
             Statement::CreateTable(create) => self.create_table(create, index)?,
@@ -414,18 +407,18 @@ impl Walker {
             Statement::CreateIndex(create) => self.create_index(create, index)?,
             Statement::CreateVirtualTable { name, .. } => self.create_virtual_table(name, index)?,
             Statement::Drop { names, temporary, .. } => self.drop(names, *temporary, index)?,
+            Statement::DropTrigger(drop) => {
+                self.drop_trigger(&drop.trigger_name, index)?;
+            }
             Statement::AlterTable(alter) => self.alter(alter, index)?,
             Statement::Insert(insert) => {
-                let (folded, display) = insert_target(insert)?;
-                self.dml(index, &folded, &display)?;
+                self.dml(index, insert_target(insert)?, insert_event(insert))?;
             }
             Statement::Update(update) => {
-                let (folded, display) = update_target(update)?;
-                self.dml(index, &folded, &display)?;
+                self.dml(index, update_target(update)?, WriteEvent::Update)?;
             }
             Statement::Delete(delete) => {
-                let (folded, display) = delete_target(delete)?;
-                self.dml(index, &folded, &display)?;
+                self.dml(index, delete_target(delete)?, WriteEvent::Delete)?;
             }
             Statement::Query(query) => {
                 match query_action(query) {
@@ -577,6 +570,38 @@ impl Walker {
         }
         let id = self.new_identity(storage, Kind::Trigger, folded, display);
         self.identities[id].attached = Some(on_id);
+        let statements = match &create.statements {
+            Some(ConditionalStatements::Sequence { statements }) => statements.as_slice(),
+            Some(ConditionalStatements::BeginEnd(block)) => block.statements.as_slice(),
+            None => &[],
+        };
+        let mut writes = Vec::new();
+        for statement in statements {
+            if let Some((name, event)) = statement_write(statement)? {
+                let Some((_, target)) = self.owner(&name) else {
+                    return Err(Error::forward_refusal(format!(
+                        "statement {index} creates a trigger writing to unavailable relation {name}"
+                    )));
+                };
+                writes.push(Write { target, event });
+            }
+        }
+        let events = create.events.iter().fold(0, |events, event| {
+            events
+                | match event {
+                    sqlparser::ast::TriggerEvent::Insert => WriteEvent::Insert.mask(),
+                    sqlparser::ast::TriggerEvent::Update(_) => WriteEvent::Update.mask(),
+                    sqlparser::ast::TriggerEvent::Delete => WriteEvent::Delete.mask(),
+                    sqlparser::ast::TriggerEvent::Truncate => 0,
+                }
+        });
+        self.triggers.push(TriggerWrites {
+            identity: id,
+            statement: index,
+            events,
+            writes,
+            retirements: Vec::new(),
+        });
         self.push_step(
             match storage {
                 Storage::Temp => Class::TempDefinition,
@@ -676,6 +701,11 @@ impl Walker {
                     identity = Some(id);
                     storage = Some(owner_storage);
                 }
+                for trigger in &mut self.triggers {
+                    if self.identities[trigger.identity].attached == Some(id) {
+                        trigger.retirements.push(index);
+                    }
+                }
                 self.kill(id, owner_storage, &folded);
             }
         }
@@ -686,6 +716,31 @@ impl Walker {
                 None => Class::Other,
             },
             identity,
+            None,
+            Vec::new(),
+        );
+        Ok(())
+    }
+
+    fn drop_trigger(&mut self, name: &ObjectName, index: usize) -> Result<(), Error> {
+        let folded = fold(target_ident(name)?);
+        let Some(position) = self.triggers.iter().rposition(|trigger| {
+            self.identities[trigger.identity].final_name_folded == folded
+                && trigger.active(&self.steps)
+        }) else {
+            self.push(Class::Other);
+            return Ok(());
+        };
+        let id = self.triggers[position].identity;
+        let storage = self.identities[id].storage;
+        self.triggers[position].retirements.push(index);
+        self.kill(id, storage, &folded);
+        self.push_step(
+            match storage {
+                Storage::Temp => Class::TempDefinition,
+                Storage::Main => Class::PersistentDefinition,
+            },
+            Some(id),
             None,
             Vec::new(),
         );
@@ -725,18 +780,18 @@ impl Walker {
                     let old_folded = self.identities[id].final_name_folded.clone();
                     self.remove_name(storage, &old_folded);
                     self.insert_name(storage, new_folded.clone(), id);
-                    let ident = &mut self.identities[id];
-                    ident.final_name.clone_from(&new_ident.value);
-                    ident.final_name_folded = new_folded;
+                    self.rename_identity(id, &new_ident.value, new_folded);
                 }
                 AlterTableOperation::RenameColumn { old_column_name, new_column_name, .. } => {
                     self.rename_column(id, old_column_name, new_column_name);
                 }
                 AlterTableOperation::AddColumn { column_def, .. } => {
+                    self.checkpoint_columns(id);
                     let ident = &mut self.identities[id];
                     Rc::make_mut(&mut ident.columns).add(column_def.name.clone());
                 }
                 AlterTableOperation::DropColumn { column_names, .. } => {
+                    self.checkpoint_columns(id);
                     let ident = &mut self.identities[id];
                     for column in column_names {
                         Rc::make_mut(&mut ident.columns).remove(column);
@@ -763,49 +818,85 @@ impl Walker {
     }
 
     fn rename_column(&mut self, id: usize, old: &Ident, new: &Ident) {
+        self.checkpoint_columns(id);
         Rc::make_mut(&mut self.identities[id].columns).rename(old, new);
     }
 
-    fn dml(&mut self, index: usize, folded: &str, display: &str) -> Result<(), Error> {
-        let Some((storage, id)) = self.owner(folded) else {
+    fn dml(&mut self, index: usize, target: &Ident, event: WriteEvent) -> Result<(), Error> {
+        let folded = fold(target);
+        let display = &target.value;
+        let Some((_, id)) = self.owner(&folded) else {
             return Err(Error::forward_refusal(format!(
                 "statement {index} writes to {display}, which the bootstrap does not define where \
                  it sits"
             )));
         };
-        let ident = &self.identities[id];
-        let (class, destinations) = match ident.kind {
-            Kind::Table => {
-                (
-                    match storage {
-                        Storage::Temp => Class::TempDataWrite,
-                        Storage::Main => Class::PersistentDataWrite,
-                    },
-                    vec![id],
-                )
-            }
-            Kind::View => {
-                if ident.bases_unknown || ident.bases.is_empty() {
-                    (Class::PersistentDataWrite, vec![id])
-                } else {
-                    let all_temp = ident
-                        .bases
-                        .iter()
-                        .all(|base| self.identities[*base].storage == Storage::Temp);
-                    (
-                        if all_temp { Class::TempDataWrite } else { Class::PersistentDataWrite },
-                        ident.bases.clone(),
-                    )
+        if !matches!(self.identities[id].kind, Kind::Table | Kind::View) {
+            return Err(Error::forward_refusal(format!(
+                "statement {index} writes to {display}, which the bootstrap defines as a non-relation"
+            )));
+        }
+        let mut writes = vec![Write { target: id, event }];
+        let mut dependencies = Vec::new();
+        let mut cursor = 0;
+        while cursor < writes.len() {
+            let write = writes[cursor];
+            cursor += 1;
+            for base in &self.identities[write.target].bases {
+                if !dependencies.contains(base) {
+                    dependencies.push(*base);
                 }
             }
-            _ => {
-                return Err(Error::forward_refusal(format!(
-                    "statement {index} writes to {display}, which the bootstrap defines as a \
-                     non-relation"
-                )));
+            for trigger in &self.triggers {
+                let identity = &self.identities[trigger.identity];
+                if identity.attached != Some(write.target)
+                    || !trigger.active(&self.steps)
+                    || trigger.events & write.event.mask() == 0
+                {
+                    continue;
+                }
+                if !dependencies.contains(&trigger.identity) {
+                    dependencies.push(trigger.identity);
+                }
+                if let Some(scope) = &self.steps[trigger.statement].names {
+                    for dependency in scope.names.values() {
+                        let name = &self.identities[*dependency].final_name_folded;
+                        if let Some((_, dependency)) = self.owner(name)
+                            && !dependencies.contains(&dependency)
+                        {
+                            dependencies.push(dependency);
+                        }
+                    }
+                }
+                for effect in &trigger.writes {
+                    let name = &self.identities[effect.target].final_name_folded;
+                    let Some((_, target)) = self.owner(name) else {
+                        return Err(Error::forward_refusal(format!(
+                            "statement {index} invokes a trigger writing to unavailable relation {name}"
+                        )));
+                    };
+                    let effect = Write { target, event: effect.event };
+                    if !writes.contains(&effect) {
+                        writes.push(effect);
+                    }
+                }
             }
+        }
+        let mut destinations = Vec::new();
+        for write in writes {
+            if self.identities[write.target].kind == Kind::Table
+                && !destinations.contains(&write.target)
+            {
+                destinations.push(write.target);
+            }
+        }
+        let class = if destinations.iter().any(|id| self.identities[*id].storage == Storage::Temp) {
+            Class::TempDataWrite
+        } else {
+            Class::PersistentDataWrite
         };
         self.push_step(class, None, Some(id), destinations);
+        self.steps[index].dependencies = dependencies;
         Ok(())
     }
 }
@@ -824,6 +915,7 @@ fn walk(
             walker.steps[index].names = Some(snapshot);
         }
     }
+    walker.finish_transaction(false);
     let mut state = WalkState {
         identities: walker.identities,
         steps: walker.steps,
@@ -934,12 +1026,14 @@ fn replay_steps(state: &WalkState, statements: &[Statement]) -> Vec<bool> {
             step.identity
                 .into_iter()
                 .chain(step.target)
+                .chain(step.destinations.iter().copied())
+                .chain(step.dependencies.iter().copied())
                 .filter(|id| state.identities[*id].storage == Storage::Temp),
         );
     }
     for (index, statement) in statements.iter().enumerate() {
         let step = &state.steps[index];
-        if matches!(statement, Statement::Drop { .. })
+        if matches!(statement, Statement::Drop { .. } | Statement::DropTrigger(_))
             && retained(state, step)
             && step.identity.is_some_and(|id| needed.contains(&id))
         {
@@ -979,9 +1073,32 @@ fn commit_statement() -> Statement {
     Statement::Commit { chain: false, end: false, modifier: None }
 }
 
-fn insert_target(insert: &Insert) -> Result<(String, String), Error> {
+fn statement_write(statement: &Statement) -> Result<Option<(String, WriteEvent)>, Error> {
+    let (target, event) = match statement {
+        Statement::Insert(insert) => (insert_target(insert)?, insert_event(insert)),
+        Statement::Update(update) => (update_target(update)?, WriteEvent::Update),
+        Statement::Delete(delete) => (delete_target(delete)?, WriteEvent::Delete),
+        Statement::Query(query) => return query_action(query).map_or(Ok(None), statement_write),
+        _ => return Ok(None),
+    };
+    Ok(Some((fold(target), event)))
+}
+
+fn insert_event(insert: &Insert) -> WriteEvent {
+    if matches!(
+        &insert.on,
+        Some(sqlparser::ast::OnInsert::OnConflict(conflict))
+            if matches!(&conflict.action, sqlparser::ast::OnConflictAction::DoUpdate(_))
+    ) {
+        WriteEvent::InsertOrUpdate
+    } else {
+        WriteEvent::Insert
+    }
+}
+
+fn insert_target(insert: &Insert) -> Result<&Ident, Error> {
     match &insert.table {
-        TableObject::TableName(name) => target_name(name),
+        TableObject::TableName(name) => target_ident(name),
         _ => {
             Err(Error::forward_refusal(
                 "an INSERT target that is not a plain table name reached the emitted bootstrap",
@@ -990,9 +1107,9 @@ fn insert_target(insert: &Insert) -> Result<(String, String), Error> {
     }
 }
 
-fn update_target(update: &Update) -> Result<(String, String), Error> {
+fn update_target(update: &Update) -> Result<&Ident, Error> {
     match &update.table.relation {
-        TableFactor::Table { name, .. } => target_name(name),
+        TableFactor::Table { name, .. } => target_ident(name),
         _ => {
             Err(Error::forward_refusal(
                 "an UPDATE target that is not a plain table name reached the emitted bootstrap",
@@ -1001,7 +1118,7 @@ fn update_target(update: &Update) -> Result<(String, String), Error> {
     }
 }
 
-fn delete_target(delete: &Delete) -> Result<(String, String), Error> {
+fn delete_target(delete: &Delete) -> Result<&Ident, Error> {
     let tables = match &delete.from {
         FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
     };
@@ -1009,7 +1126,7 @@ fn delete_target(delete: &Delete) -> Result<(String, String), Error> {
         Error::forward_refusal("a DELETE without a table reached the emitted bootstrap")
     })?;
     match &table.relation {
-        TableFactor::Table { name, .. } => target_name(name),
+        TableFactor::Table { name, .. } => target_ident(name),
         _ => {
             Err(Error::forward_refusal(
                 "a DELETE target that is not a plain table name reached the emitted bootstrap",
@@ -1018,15 +1135,12 @@ fn delete_target(delete: &Delete) -> Result<(String, String), Error> {
     }
 }
 
-fn target_name(name: &ObjectName) -> Result<(String, String), Error> {
-    last_ident(name).map_or_else(
-        || {
-            Err(Error::forward_refusal(
-                "a data statement target without an identifier reached the emitted bootstrap",
-            ))
-        },
-        |ident| Ok((fold(ident), ident.value.clone())),
-    )
+fn target_ident(name: &ObjectName) -> Result<&Ident, Error> {
+    last_ident(name).ok_or_else(|| {
+        Error::forward_refusal(
+            "a data statement target without an identifier reached the emitted bootstrap",
+        )
+    })
 }
 
 enum Owner<'a> {
@@ -1051,6 +1165,7 @@ impl OpaqueColumns {
 enum Entry {
     Table(usize, bool),
     AliasedTable(usize, bool),
+    QualifiedTable(usize, bool),
     Opaque(OpaqueColumns),
     Cte(OpaqueColumns),
     CteReference { frame: usize, binding: usize },
@@ -1410,155 +1525,6 @@ impl<'a> Rewriter<'a> {
         }
         if let Some(predicate) = &mut create.predicate {
             predicate.visit(self)?;
-        }
-        self.pop_frame();
-        ControlFlow::Continue(())
-    }
-
-    fn rewrite_insert(&mut self, insert: &mut Insert) -> RewriteFlow {
-        let mut binding: Option<Binding> = None;
-        if let TableObject::TableName(name) = &mut insert.table
-            && let Some(folded) = last_ident(name).map(fold)
-        {
-            match self.owner(&folded) {
-                Some(Owner::Final(ident)) if ident.kind == Kind::Table => {
-                    rename_name(name, &ident.final_name);
-                    binding =
-                        Some(Binding { name: folded, entry: Entry::Table(ident.index, true) });
-                }
-                Some(Owner::AsIs(id)) if self.ident(id).kind == Kind::Table => {
-                    binding = Some(Binding { name: folded, entry: Entry::Table(id, false) });
-                }
-                _ => {}
-            }
-        }
-        if let Some(binding) = binding {
-            self.frames.push(Frame { bindings: vec![binding], visible_ctes: None });
-            for column in &mut insert.columns {
-                if let Some(ident) = last_ident_mut(column) {
-                    self.rewrite_column_in_scope(ident)?;
-                }
-            }
-            if let Some(source) = &mut insert.source {
-                self.visit_query(source)?;
-            }
-            if let Some(returning) = &mut insert.returning {
-                for item in returning {
-                    match item {
-                        SelectItem::ExprWithAlias { expr, .. }
-                        | SelectItem::UnnamedExpr(expr)
-                        | SelectItem::ExprWithAliases { expr, .. } => {
-                            expr.visit(self)?;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            self.pop_frame();
-        }
-        ControlFlow::Continue(())
-    }
-
-    fn rewrite_update(&mut self, update: &mut Update) -> RewriteFlow {
-        let mut frame = Frame { bindings: Vec::new(), visible_ctes: None };
-        if let TableFactor::Table { name, alias, .. } = &mut update.table.relation
-            && let Some(folded) = last_ident(name).map(fold)
-        {
-            match self.owner(&folded) {
-                Some(Owner::Final(ident)) if ident.kind == Kind::Table => {
-                    rename_name(name, &ident.final_name);
-                    frame.bindings.push(Binding {
-                        name: alias.as_ref().map(|a| fold(&a.name)).unwrap_or(folded),
-                        entry: Entry::table(ident.index, true, alias.is_some()),
-                    });
-                }
-                Some(Owner::AsIs(id)) if self.ident(id).kind == Kind::Table => {
-                    frame.bindings.push(Binding {
-                        name: alias.as_ref().map(|a| fold(&a.name)).unwrap_or(folded),
-                        entry: Entry::table(id, false, alias.is_some()),
-                    });
-                }
-                _ => {}
-            }
-        }
-        if let Some(from) = &mut update.from {
-            let tables = match from {
-                UpdateTableFromKind::BeforeSet(tables) | UpdateTableFromKind::AfterSet(tables) => {
-                    tables
-                }
-            };
-            for table in tables {
-                self.bind_factor_into(&mut table.relation, &mut frame.bindings)?;
-            }
-        }
-        self.frames.push(frame);
-        for assignment in &mut update.assignments {
-            match &mut assignment.target {
-                AssignmentTarget::ColumnName(column) => {
-                    if let Some(ident) = last_ident_mut(column) {
-                        self.rewrite_column_in_scope(ident)?;
-                    }
-                }
-                AssignmentTarget::Tuple(columns) => {
-                    for column in columns {
-                        if let Some(ident) = last_ident_mut(column) {
-                            self.rewrite_column_in_scope(ident)?;
-                        }
-                    }
-                }
-            }
-            assignment.value.visit(self)?;
-        }
-        if let Some(selection) = &mut update.selection {
-            selection.visit(self)?;
-        }
-        if let Some(limit) = &mut update.limit {
-            limit.visit(self)?;
-        }
-        self.pop_frame();
-        ControlFlow::Continue(())
-    }
-
-    fn rewrite_delete(&mut self, delete: &mut Delete) -> RewriteFlow {
-        let tables = match &mut delete.from {
-            FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
-        };
-        let mut frame = Frame { bindings: Vec::new(), visible_ctes: None };
-        if let Some(table) = tables.first_mut()
-            && let TableFactor::Table { name, alias, .. } = &mut table.relation
-            && let Some(folded) = last_ident(name).map(fold)
-        {
-            match self.owner(&folded) {
-                Some(Owner::Final(ident)) if ident.kind == Kind::Table => {
-                    rename_name(name, &ident.final_name);
-                    frame.bindings.push(Binding {
-                        name: alias.as_ref().map(|a| fold(&a.name)).unwrap_or(folded),
-                        entry: Entry::table(ident.index, true, alias.is_some()),
-                    });
-                }
-                Some(Owner::AsIs(id)) if self.ident(id).kind == Kind::Table => {
-                    frame.bindings.push(Binding {
-                        name: alias.as_ref().map(|a| fold(&a.name)).unwrap_or(folded),
-                        entry: Entry::table(id, false, alias.is_some()),
-                    });
-                }
-                _ => {}
-            }
-        }
-        for table in tables.iter_mut().skip(1) {
-            self.bind_factor_into(&mut table.relation, &mut frame.bindings)?;
-        }
-        if let Some(using) = &mut delete.using {
-            for table in using {
-                self.bind_factor_into(&mut table.relation, &mut frame.bindings)?;
-            }
-        }
-        self.frames.push(frame);
-        if let Some(selection) = &mut delete.selection {
-            selection.visit(self)?;
-        }
-        if let Some(limit) = &mut delete.limit {
-            limit.visit(self)?;
         }
         self.pop_frame();
         ControlFlow::Continue(())
@@ -1941,7 +1907,9 @@ impl<'a> Rewriter<'a> {
 
     fn resolve_entry(&self, entry: &Entry, column: &str) -> Option<Resolution> {
         match entry {
-            Entry::Table(table, rewrite) | Entry::AliasedTable(table, rewrite) => {
+            Entry::Table(table, rewrite)
+            | Entry::AliasedTable(table, rewrite)
+            | Entry::QualifiedTable(table, rewrite) => {
                 let Some(columns) = self.source_columns(*table) else {
                     return Some(Resolution::Opaque);
                 };
@@ -1962,6 +1930,9 @@ impl<'a> Rewriter<'a> {
         for frame in self.frames.iter().rev() {
             let mut found = None;
             for binding in &frame.bindings {
+                if matches!(binding.entry, Entry::QualifiedTable(_, _)) {
+                    continue;
+                }
                 if let Some(resolved) = self.resolve_entry(&binding.entry, column) {
                     if found.is_some() {
                         return None;

@@ -688,3 +688,15 @@ fn replayed_ctas_wildcard_preserves_merged_outer_join_values() {
         assert_eq!(rows, expected);
     }
 }
+
+#[path = "connection_replay/headers.rs"]
+mod header_coverage;
+
+#[path = "connection_replay/lifecycle.rs"]
+mod lifecycle_coverage;
+
+#[path = "connection_replay/transactions.rs"]
+mod transactions;
+
+#[path = "connection_replay/dml.rs"]
+mod dml;

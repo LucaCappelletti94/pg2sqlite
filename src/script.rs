@@ -43,7 +43,8 @@ pub struct Script<S = Statement> {
     /// Source-ordered definitions, triggers, seed writes and transaction
     /// controls.
     pub initialization: Vec<S>,
-    /// Final connection-local definitions and temporary-storage initialization.
+    /// Committed connection-local definitions and temporary-storage
+    /// initialization.
     pub connection: Result<Vec<S>, ConnectionError>,
 }
 
@@ -61,11 +62,12 @@ impl<S> Script<S> {
         self.setup.iter().chain(&self.initialization)
     }
 
-    /// Pragmas and final connection-local state for an existing database.
+    /// Pragmas and committed connection-local state for an existing database.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Connection`] when replay needs unavailable history.
+    /// Returns [`Error::Connection`] when replay needs unavailable history or
+    /// would repeat persistent table writes.
     pub fn connect(&self) -> Result<impl Iterator<Item = &S>, Error> {
         let connection =
             self.connection.as_ref().map_err(|error| Error::Connection(error.clone()))?;
