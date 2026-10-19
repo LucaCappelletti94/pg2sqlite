@@ -28,10 +28,10 @@ use crate::{
         ast_builder,
         function_helpers::{simple_function_expr, string_literal},
         object_name::{
-            fts_table_name, last_ident_value_or_display,
+            append_suffix, fts_table_name, last_ident_value_or_display,
             normalize_schema_qualified_object_name_for_sqlite, postgres_catalog_function_name,
             quoted_ident, resolve_translation_table, sqlite_unqualified_object_name,
-            sync_trigger_name,
+            sync_trigger_name, translation_table_has_rls,
         },
         query_builder::{
             from_relation, make_query, make_simple_select, plain_table_factor, single_expr_query,
@@ -615,6 +615,11 @@ impl crate::traits::translator::TranslatorWithContext for CreateIndex {
         }
 
         report_dropped_index_clauses(self, emit);
+        let indexed_table = if translation_table_has_rls(schema, &self.table_name)? {
+            append_suffix(&sqlite_table_name, options.get_rls_table_suffix())
+        } else {
+            sqlite_table_name
+        };
         let definition_options = options.without_subqueries();
         let options = &definition_options;
 
@@ -626,7 +631,7 @@ impl crate::traits::translator::TranslatorWithContext for CreateIndex {
         // rows collide.
         Ok(vec![Statement::CreateIndex(CreateIndex {
             name: self.name.clone(),
-            table_name: sqlite_unqualified_object_name(&sqlite_table_name),
+            table_name: sqlite_unqualified_object_name(&indexed_table),
             using: None,
             columns: self
                 .columns

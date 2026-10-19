@@ -49,6 +49,40 @@ fn unique_index() {
     execute_translated(sql);
 }
 
+mod catalogue {
+    diesel::table! {
+        sqlite_master (name) {
+            name -> Text,
+            tbl_name -> Text,
+        }
+    }
+}
+
+/// An index on a secured table indexes its backing table, since SQLite cannot
+/// index the view.
+#[test]
+fn index_on_a_secured_table_lands_on_its_backing_table() {
+    use catalogue::sqlite_master;
+    use diesel::{connection::SimpleConnection, prelude::*};
+
+    let sql = "
+        CREATE TABLE notes (id INT PRIMARY KEY, title TEXT);
+        ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+        CREATE INDEX notes_title ON notes (title);
+    ";
+    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
+    let mut connection = SqliteConnection::establish(":memory:").expect("in-memory SQLite");
+    for statement in helpers::translate_pg(sql, &options).expect("translate") {
+        connection.batch_execute(&statement).unwrap_or_else(|error| panic!("{error}\n{statement}"));
+    }
+    let indexed: String = sqlite_master::table
+        .filter(sqlite_master::name.eq("notes_title"))
+        .select(sqlite_master::tbl_name)
+        .first(&mut connection)
+        .expect("the index exists");
+    assert_eq!(indexed, "notes_rls");
+}
+
 #[test]
 fn index_if_not_exists() {
     let sql = "
