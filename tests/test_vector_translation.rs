@@ -153,7 +153,6 @@ fn test_vector_cast_to_vec_f32() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// The schema-qualified spelling of the same cast. pgvector commonly lives in
 /// a named schema, and a qualified type cast is ordinary PostgreSQL, so
 /// `'...'::public.vector` must lower exactly like `'...'::vector`. It used to
@@ -185,7 +184,6 @@ fn qualified_vector_cast_lowers_to_vec_f32() -> Result<(), Box<dyn std::error::E
         .unwrap_or_else(|e| panic!("SQLite rejected SELECT: {e}\n{select_stmt}"));
     Ok(())
 }
-
 
 #[test]
 fn test_vector_column_generates_vec0() -> Result<(), Box<dyn std::error::Error>> {

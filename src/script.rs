@@ -1,47 +1,82 @@
-//! The emitted script, split by how long each statement's effect lasts.
-//!
-//! A SQLite database file keeps its schema, while pragmas are connection state
-//! lost on close, so the file part runs once and the setup part on every open.
+//! Ordered file initialization and connection-local replay.
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use sqlparser::ast::Statement;
 
-/// A translation's statements, in parts run in field order.
-///
-/// Every connection runs [`setup`](Self::setup), and the connection creating
-/// the database then runs [`main`](Self::main).
+use crate::errors::{Error, TranslationRefusal};
+
+/// A dependency unavailable to connection-local replay.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConnectionError {
+    /// A source relation is absent from the final persistent schema.
+    #[error("connection replay needs dropped relation `{relation}` at statement {statement}")]
+    UnavailableRelation {
+        /// The required relation.
+        relation: String,
+        /// The zero-based initializer statement position.
+        statement: usize,
+    },
+    /// A source field is absent from the final persistent schema.
+    #[error(
+        "connection replay needs dropped column `{column}` of `{relation}` at statement {statement}"
+    )]
+    UnavailableColumn {
+        /// The required relation.
+        relation: String,
+        /// The required field.
+        column: String,
+        /// The zero-based initializer statement position.
+        statement: usize,
+    },
+    /// A connection definition cannot preserve its source semantics.
+    #[error(transparent)]
+    Translation(#[from] TranslationRefusal),
+}
+
+/// Ordered initialization plus the connection state recreated on every open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Script<S = Statement> {
-    /// Connection pragmas, `PRAGMA case_sensitive_like = 1` whenever the
-    /// script is not empty, so `LIKE` matches case as PostgreSQL does, and
-    /// `PRAGMA foreign_keys = 1` when a table declares a foreign key, since
-    /// SQLite enforces one only under that pragma.
+    /// Pragmas applied before initialization or connection replay.
     pub setup: Vec<S>,
-    /// Once per main database file.
-    pub main: Vec<S>,
+    /// Source-ordered definitions, triggers, seed writes and transaction
+    /// controls.
+    pub initialization: Vec<S>,
+    /// Final connection-local definitions and temporary-storage initialization.
+    pub connection: Result<Vec<S>, ConnectionError>,
 }
 
 impl<S> Script<S> {
     /// Whether no part holds a statement.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.setup.is_empty() && self.main.is_empty()
+        self.setup.is_empty()
+            && self.initialization.is_empty()
+            && self.connection.as_ref().is_ok_and(Vec::is_empty)
     }
 
-    /// The statements of every part, in the order a connection creating the
-    /// database runs them.
+    /// Connection pragmas followed by source-ordered initialization.
     pub fn iter(&self) -> impl Iterator<Item = &S> {
-        self.setup.iter().chain(&self.main)
+        self.setup.iter().chain(&self.initialization)
     }
 
-    /// The statements of every part, in the order a connection creating the
-    /// database runs them.
+    /// Pragmas and final connection-local state for an existing database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Connection`] when replay needs unavailable history.
+    pub fn connect(&self) -> Result<impl Iterator<Item = &S>, Error> {
+        let connection =
+            self.connection.as_ref().map_err(|error| Error::Connection(error.clone()))?;
+        Ok(self.setup.iter().chain(connection))
+    }
+
+    /// Connection pragmas followed by source-ordered initialization.
     #[must_use]
     pub fn into_vec(self) -> Vec<S> {
         let mut statements = self.setup;
-        statements.extend(self.main);
+        statements.extend(self.initialization);
         statements
     }
 
@@ -50,7 +85,10 @@ impl<S> Script<S> {
     pub fn map<T>(self, mut f: impl FnMut(S) -> T) -> Script<T> {
         Script {
             setup: self.setup.into_iter().map(&mut f).collect(),
-            main: self.main.into_iter().map(&mut f).collect(),
+            initialization: self.initialization.into_iter().map(&mut f).collect(),
+            connection: self
+                .connection
+                .map(|statements| statements.into_iter().map(&mut f).collect()),
         }
     }
 }

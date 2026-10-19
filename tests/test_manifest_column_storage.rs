@@ -161,7 +161,7 @@ fn the_published_vector_storage_decodes_a_value_written_through_the_emitted_sql(
         Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(&options).expect("translate");
     helpers::register_sqlite_vec_once();
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
-    for statement in &statements {
+    for statement in statements.iter() {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement executes");
     }
 

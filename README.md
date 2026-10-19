@@ -10,7 +10,7 @@ A Rust library that translates PostgreSQL SQL into valid, runnable SQLite. It pa
 
 The contract is strict. Every returned statement is valid SQLite, an unimplemented equivalent is an explicit `Err` rather than SQL that fails at runtime, and constructs with no SQLite meaning (`CREATE FUNCTION`, `GRANT`, `COMMENT`, and similar) are dropped, reported as warnings by `translate_with_report` and left out silently by plain `translate`. Nothing that merely looks valid passes through, and the test suite checks behavior by executing the emitted SQL against SQLite rather than matching strings.
 
-`CREATE TEMPORARY TABLE` binds definition expressions to its declared columns and preserves the temporary modifier.
+`CREATE TEMPORARY TABLE` binds definition expressions to its declared columns and preserves the temporary modifier. `Script::iter()` applies pragmas followed by ordered initialization. `Script::connect()` validates replay before returning SQL, recreates connection-local objects and reruns temporary initialization against current persistent data.
 
 The rewrites go beyond types. Row-Level Security becomes a renamed backing table, a view enforcing the `USING` clause, and `INSTEAD OF` triggers. A GIN `to_tsvector` index becomes an FTS5 virtual table with sync triggers. pgvector maps to [sqlite-vec](https://github.com/asg017/sqlite-vec) and PostGIS to the [SQLiteGIS](https://github.com/LucaCappelletti94/sqlitegis) extension. PL/pgSQL trigger bodies become SQLite trigger syntax, and SQLite DML translates back to PostgreSQL to sync replicas upstream. The crate is `no_std + alloc` and compiles for `wasm32-unknown-unknown`.
 
@@ -19,7 +19,7 @@ The rewrites go beyond types. Row-Level Security becomes a renamed backing table
 ```rust
 use pg2sqlite::prelude::*;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), pg2sqlite::errors::Error> {
     let pg_sql = "
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
@@ -34,11 +34,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(script.setup[0].to_string(), "PRAGMA case_sensitive_like = 1");
     assert_eq!(
-        script.main[0].to_string(),
+        script.initialization[0].to_string(),
         "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, username TEXT NOT NULL) STRICT"
     );
     assert_eq!(
-        script.main[1].to_string(),
+        script.initialization[1].to_string(),
         "INSERT INTO users (username) VALUES ('alice') ON CONFLICT DO NOTHING"
     );
 

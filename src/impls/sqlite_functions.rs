@@ -607,7 +607,7 @@ mod tests {
     fn forward(postgres: &str) -> Result<String, crate::errors::Error> {
         let script =
             Pg2Sqlite::default().sql(&format!("{DDL}{postgres};"))?.translate_to_sql(&options())?;
-        Ok(script.main.last().cloned().unwrap_or_default())
+        Ok(script.initialization.last().cloned().unwrap_or_default())
     }
 
     fn reversible_call(name: &str) -> Option<(String, String)> {

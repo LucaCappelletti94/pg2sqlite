@@ -62,6 +62,7 @@ fn call(connection: &mut SqliteConnection, source: &str, reverse: bool) {
             .expect("source helper")
             .translate(&options)
             .expect("forward native helper")
+            .into_vec()
     };
     // Emitted statements exercise the native helper ABI.
     for statement in statements {

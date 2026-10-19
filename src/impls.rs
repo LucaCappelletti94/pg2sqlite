@@ -13,6 +13,7 @@ use alloc::{
 
 pub(crate) mod ast_builder;
 pub(crate) mod bind_once;
+pub(crate) mod connection_program;
 pub(crate) mod datetime_helpers;
 pub(crate) mod direction_wrappers;
 pub(crate) mod emitted_namespace;
@@ -26,6 +27,7 @@ pub(crate) mod query_builder;
 pub(crate) mod replay;
 pub(crate) mod returning_scope;
 pub(crate) mod reverse_translator_impls;
+pub(crate) mod scoped_relations;
 pub(crate) mod session_variable;
 pub(crate) mod shared_helpers;
 pub(crate) mod sqlite_functions;

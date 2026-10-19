@@ -28,6 +28,7 @@ use tempfile::TempDir;
 
 use crate::{
     impls::{
+        connection_program::connection_program,
         emitted_namespace::{Source, reject_name_collisions, sourced},
         object_name::last_ident_value_or_display,
         translator_impls::{
@@ -718,11 +719,19 @@ impl Pg2Sqlite {
         let prepared = self.prepare_schema(options, initial_schema)?;
         let PreparedStatements { schema: _, options: _, statements, audit_table, mut warnings } =
             self.translate_prepared(prepared, |_| true)?;
-        let mut main: Vec<Statement> = statements.into_iter().flatten().collect();
+        let mut initialization: Vec<Statement> = statements.into_iter().flatten().collect();
         if let Some(audit_table) = audit_table {
-            main.insert(0, audit_table);
+            initialization.insert(0, audit_table);
         }
-        let mut script = Script { setup: Vec::new(), main };
+        let connection = match connection_program(&initialization, initial_schema, options) {
+            Ok(statements) => Ok(statements),
+            Err(crate::errors::Error::Connection(error)) => Err(error),
+            Err(crate::errors::Error::TranslationRefusal(refusal)) => {
+                Err(crate::script::ConnectionError::Translation(refusal))
+            }
+            Err(error) => return Err(error),
+        };
+        let mut script = Script { setup: Vec::new(), initialization, connection };
 
         // PostgreSQL's LIKE is case-sensitive. SQLite's is case-insensitive for
         // ASCII unless the connection says otherwise, and no expression-level
@@ -743,7 +752,7 @@ impl Pg2Sqlite {
 
         // A foreign key SQLite does not enforce is worse than one it refuses:
         // the delete PostgreSQL rejects leaves an orphan row and says nothing.
-        if script.main.iter().any(statement_declares_foreign_key) {
+        if script.initialization.iter().any(statement_declares_foreign_key) {
             script.setup.insert(0, foreign_keys_pragma());
             warnings.push(foreign_key_pragma_warning());
         }
@@ -782,7 +791,7 @@ impl Pg2Sqlite {
     /// # use pg2sqlite::options::Pg2SqliteOptions;
     /// let translator = Pg2Sqlite::default().sql("CREATE TABLE t (a INT);").unwrap();
     /// let script = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    /// assert_eq!(script.main.len(), 1);
+    /// assert_eq!(script.initialization.len(), 1);
     /// ```
     pub fn translate(&self, options: &Pg2SqliteOptions) -> Result<Script, crate::errors::Error> {
         Ok(self.prepare_translation(options, None)?.script)
@@ -821,7 +830,7 @@ impl Pg2Sqlite {
     /// let report = Pg2Sqlite::default()
     ///     .sql("CREATE TABLE t (a INT);")?
     ///     .translate_with_report(&Pg2SqliteOptions::default())?;
-    /// assert_eq!(report.script.main.len(), 1);
+    /// assert_eq!(report.script.initialization.len(), 1);
     /// assert!(report.warnings.is_empty());
     /// # Ok::<(), Error>(())
     /// ```
@@ -875,7 +884,7 @@ impl Pg2Sqlite {
     ///     .translate_to_sql(&Pg2SqliteOptions::default())?;
     /// assert_eq!(script.setup, ["PRAGMA case_sensitive_like = 1"]);
     /// assert_eq!(
-    ///     script.main,
+    ///     script.initialization,
     ///     ["CREATE TABLE t (a INTEGER CHECK (a BETWEEN -2147483648 AND 2147483647)) STRICT"]
     /// );
     /// # Ok::<(), Error>(())
