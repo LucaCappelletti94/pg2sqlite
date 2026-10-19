@@ -80,6 +80,7 @@ fn half_precision_casts_are_typed_refusals() {
         "SELECT '[0.1,0.2,0.3]'::public.halfvec(3);",
         "SELECT CAST(NULL AS halfvec(3));",
         "SELECT $1::halfvec(3);",
+        "CREATE TABLE items(id INT PRIMARY KEY, v vector(3)); SELECT v::halfvec FROM items;",
     ] {
         assert_refusal(source, None);
     }
@@ -385,6 +386,10 @@ fn float32_scalar_outputs_preserve_binding_and_cardinality() {
         ),
         (
             "WITH halves AS (SELECT * FROM scalar_vectors) SELECT i.id,(SELECT * FROM halves LIMIT 1) <-> i.v AS distance FROM (scalar_items i CROSS JOIN scalar_vectors b) ORDER BY i.id;",
+            paired.as_slice(),
+        ),
+        (
+            "SELECT id,v::vector <-> '[4,6,3]'::vector(3) AS distance FROM scalar_items ORDER BY id;",
             paired.as_slice(),
         ),
     ] {
