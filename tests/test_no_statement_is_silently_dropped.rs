@@ -56,6 +56,10 @@ const TABLE: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT);";
 /// The same table with a transaction opened after it.
 const TABLE_IN_TRANSACTION: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT); BEGIN;";
 
+/// The same transaction with a savepoint set, which `RELEASE SAVEPOINT` needs.
+const SAVEPOINT_IN_TRANSACTION: &str =
+    "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT); BEGIN; SAVEPOINT sp;";
+
 /// Same, plus a schema, a role, a function, and a policy, for the cases that
 /// alter or drop one of those.
 const SCHEMA: &str = "CREATE SCHEMA s;";
@@ -130,7 +134,11 @@ const CASES: &[Case] = &[
     emitted_in_transaction("COMMIT"),
     emitted_in_transaction("ROLLBACK"),
     emitted_in_transaction("SAVEPOINT sp"),
-    emitted_in_transaction("RELEASE SAVEPOINT sp"),
+    Case {
+        setup: SAVEPOINT_IN_TRANSACTION,
+        sql: "RELEASE SAVEPOINT sp",
+        outcome: Outcome::Emitted,
+    },
     // Consumed by the translation schema.
     consumed(TABLE, POLICY),
     consumed(
