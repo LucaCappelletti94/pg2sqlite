@@ -192,6 +192,9 @@ pub struct TranslationContext<'a> {
     /// Whether every relation available to the input is present in the schema.
     schema_is_complete: bool,
     subqueries_allowed: bool,
+    /// The body a trigger translated here executes in place of its function's
+    /// stored one, set when a replay renames what the body references.
+    rebound_body: Option<&'a sqlparser::ast::BeginEndStatements>,
 }
 
 impl<'a> TranslationContext<'a> {
@@ -208,6 +211,7 @@ impl<'a> TranslationContext<'a> {
             variables: &[],
             schema_is_complete: false,
             subqueries_allowed: true,
+            rebound_body: None,
         }
     }
     pub(crate) fn with_complete_schema(options: &'a Pg2SqliteOptions) -> Self {
@@ -227,6 +231,7 @@ impl<'a> TranslationContext<'a> {
             variables: &[],
             schema_is_complete: false,
             subqueries_allowed: true,
+            rebound_body: None,
         }
     }
 
@@ -253,6 +258,7 @@ impl<'a> TranslationContext<'a> {
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
+            rebound_body: self.rebound_body,
         }
     }
 
@@ -280,6 +286,7 @@ impl<'a> TranslationContext<'a> {
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
+            rebound_body: self.rebound_body,
         }
     }
 
@@ -296,6 +303,7 @@ impl<'a> TranslationContext<'a> {
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
+            rebound_body: self.rebound_body,
         }
     }
 
@@ -313,6 +321,7 @@ impl<'a> TranslationContext<'a> {
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
+            rebound_body: self.rebound_body,
         }
     }
 
@@ -327,7 +336,33 @@ impl<'a> TranslationContext<'a> {
             variables,
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
+            rebound_body: self.rebound_body,
         }
+    }
+
+    /// The same context translating a trigger with `body` in place of its
+    /// function's stored body.
+    pub(crate) fn with_rebound_body<'s>(
+        &'s self,
+        body: &'s sqlparser::ast::BeginEndStatements,
+    ) -> TranslationContext<'s> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: self.scope,
+            outer: self.outer,
+            with: self.with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+            subqueries_allowed: self.subqueries_allowed,
+            rebound_body: Some(body),
+        }
+    }
+
+    /// The body a trigger translated here executes in place of its
+    /// function's stored one.
+    pub(crate) const fn rebound_body(&self) -> Option<&sqlparser::ast::BeginEndStatements> {
+        self.rebound_body
     }
 
     /// Restricts expression translation to a position that forbids subqueries.
@@ -341,6 +376,7 @@ impl<'a> TranslationContext<'a> {
             variables: self.variables,
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: false,
+            rebound_body: self.rebound_body,
         }
     }
 

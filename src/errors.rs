@@ -142,6 +142,9 @@ pub enum Error {
     /// Translation cannot preserve the source construct.
     #[error(transparent)]
     TranslationRefusal(#[from] TranslationRefusal),
+    /// The connection part cannot be produced.
+    #[error(transparent)]
+    Connection(#[from] crate::script::ConnectionError),
     /// Error when reverse RLS scanning encounters an expression variant that is
     /// not explicitly handled.
     #[error(

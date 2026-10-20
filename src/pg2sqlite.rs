@@ -253,6 +253,19 @@ struct PreparedEpoch {
     start: usize,
     end: usize,
     schema: ParserDB,
+    /// Snapshots taken before each column change inside the epoch, which bind
+    /// the references written before that change.
+    bindings: Vec<(usize, ParserDB)>,
+}
+
+impl PreparedEpoch {
+    /// The schema a column reference in statement `index` binds against.
+    fn binding(&self, index: usize) -> &ParserDB {
+        self.bindings
+            .iter()
+            .find(|(change, _)| *change > index)
+            .map_or(&self.schema, |(_, schema)| schema)
+    }
 }
 
 struct PreparedSchema {
@@ -265,12 +278,25 @@ struct PreparedSchema {
     dispositions: Vec<crate::impls::transaction_blocks::Disposition>,
 }
 
+impl PreparedSchema {
+    /// The translation context for this batch, borrowing `options`.
+    fn context<'a>(&self, options: &'a Pg2SqliteOptions) -> TranslationContext<'a> {
+        if self.complete {
+            TranslationContext::with_complete_schema(options)
+        } else {
+            TranslationContext::new(options)
+        }
+    }
+}
+
 struct PreparedStatements {
     schema: ParserDB,
     options: Pg2SqliteOptions,
     statements: Vec<Vec<Statement>>,
     audit_table: Option<Statement>,
     warnings: Vec<crate::warnings::TranslationWarning>,
+    epochs: Vec<PreparedEpoch>,
+    dispositions: Vec<crate::impls::transaction_blocks::Disposition>,
 }
 
 struct PreparedTranslation {
@@ -352,7 +378,7 @@ impl Pg2Sqlite {
         Ok(input.finish())
     }
 
-    fn schema_statement_is_ignored(statement: &Statement) -> bool {
+    pub(crate) fn schema_statement_is_ignored(statement: &Statement) -> bool {
         match statement {
             Statement::CreateIndex(_) | Statement::CreateTrigger(_) | Statement::DropTrigger(_) => {
                 true
@@ -364,7 +390,7 @@ impl Pg2Sqlite {
         }
     }
 
-    fn schema_ends_epoch(statement: &Statement) -> bool {
+    pub(crate) fn schema_ends_epoch(statement: &Statement) -> bool {
         if let Statement::AlterTable(alter_table) = statement {
             return alter_table
                 .operations
@@ -376,6 +402,23 @@ impl Pg2Sqlite {
             Statement::Drop { object_type: ObjectType::Table | ObjectType::View, .. }
                 | Statement::RenameTable(_)
         )
+    }
+
+    /// Whether a statement changes a table's columns, which can change what a
+    /// column reference written before it binds to. An epoch keeps one
+    /// snapshot for translation, so the history records one more before
+    /// each such statement for binding references.
+    fn changes_columns(statement: &Statement) -> bool {
+        let Statement::AlterTable(alter_table) = statement else { return false };
+        alter_table.operations.iter().any(|operation| {
+            matches!(
+                operation,
+                AlterTableOperation::AddColumn { .. }
+                    | AlterTableOperation::AlterColumn { .. }
+                    | AlterTableOperation::DropColumn { .. }
+                    | AlterTableOperation::RenameColumn { .. }
+            )
+        })
     }
 
     fn manifest_statement_needs_translation(statement: &Statement) -> bool {
@@ -616,12 +659,16 @@ impl Pg2Sqlite {
                 .map(|offset| start + offset);
             let end = boundary.map_or(statements.len(), |index| index + 1);
             let schema_end = boundary.unwrap_or(end);
-            for statement in &statements[start..schema_end] {
+            let mut bindings = Vec::new();
+            for (index, statement) in statements[start..schema_end].iter().enumerate() {
+                if Self::changes_columns(statement) {
+                    bindings.push((start + index, input.snapshot()));
+                }
                 if !Self::schema_statement_is_ignored(statement) {
                     input = input.apply_statement(statement.clone())?;
                 }
             }
-            epochs.push(PreparedEpoch { start, end, schema: input.snapshot() });
+            epochs.push(PreparedEpoch { start, end, schema: input.snapshot(), bindings });
             if let Some(index) = boundary {
                 match input.apply_statement(statements[index].clone()) {
                     Ok(next) => input = next,
@@ -645,6 +692,7 @@ impl Pg2Sqlite {
     fn translate_prepared(
         &self,
         prepared: PreparedSchema,
+        context: &mut TranslationContext<'_>,
         mut should_translate: impl FnMut(&Statement) -> bool,
     ) -> Result<PreparedStatements, crate::errors::Error> {
         use sql_traits::traits::DatabaseLike;
@@ -654,17 +702,12 @@ impl Pg2Sqlite {
             options,
             epochs,
             had_rls_tables,
-            complete,
+            complete: _,
             dispositions,
             initial_schema,
         } = prepared;
         let statements = &self.pg_statements;
-        let mut context = if complete {
-            TranslationContext::with_complete_schema(&options)
-        } else {
-            TranslationContext::new(&options)
-        };
-        populate_prewalk_catalogs(statements, &mut context);
+        populate_prewalk_catalogs(statements, context);
 
         let mut warnings = Vec::new();
         let mut translated = Vec::with_capacity(statements.len());
@@ -672,7 +715,7 @@ impl Pg2Sqlite {
             populate_spatial_index_catalog(
                 &statements[epoch.start..epoch.end],
                 &epoch.schema,
-                &mut context,
+                context,
             );
             for (offset, statement) in statements[epoch.start..epoch.end].iter().enumerate() {
                 if !should_translate(statement) {
@@ -694,7 +737,7 @@ impl Pg2Sqlite {
                     crate::impls::transaction_blocks::Disposition::Translate => {
                         translated.push(statement.translate_with_warnings(
                             &epoch.schema,
-                            &context,
+                            context,
                             &mut emit,
                         )?);
                     }
@@ -716,7 +759,15 @@ impl Pg2Sqlite {
                 .chain(sourced(statements, &translated)),
         )?;
 
-        Ok(PreparedStatements { schema, options, statements: translated, audit_table, warnings })
+        Ok(PreparedStatements {
+            schema,
+            options,
+            statements: translated,
+            audit_table,
+            warnings,
+            epochs,
+            dispositions,
+        })
     }
 
     fn prepare_translation(
@@ -725,13 +776,37 @@ impl Pg2Sqlite {
         initial_schema: Option<&ParserDB>,
     ) -> Result<PreparedTranslation, crate::errors::Error> {
         let prepared = self.prepare_schema(options, initial_schema)?;
-        let PreparedStatements { schema: _, options: _, statements, audit_table, mut warnings } =
-            self.translate_prepared(prepared, |_| true)?;
+        let mut context = prepared.context(options);
+        let PreparedStatements {
+            schema,
+            options: _,
+            statements,
+            audit_table,
+            mut warnings,
+            epochs,
+            dispositions,
+        } = self.translate_prepared(prepared, &mut context, |_| true)?;
+        let units: Vec<crate::history::Unit<'_>> = epochs
+            .iter()
+            .flat_map(|epoch| {
+                (epoch.start..epoch.end).map(move |index| (index, epoch.binding(index)))
+            })
+            .map(|(index, binding)| {
+                crate::history::Unit {
+                    source: &self.pg_statements[index],
+                    binding,
+                    emitted: &statements[index],
+                    disposition: &dispositions[index],
+                }
+            })
+            .collect();
+        let connection = crate::history::connection_program(&units, &schema, &context);
+        drop(units);
         let mut main: Vec<Statement> = statements.into_iter().flatten().collect();
         if let Some(audit_table) = audit_table {
             main.insert(0, audit_table);
         }
-        let mut script = Script { setup: Vec::new(), main };
+        let mut script = Script { setup: Vec::new(), main, connection };
 
         // PostgreSQL's LIKE is case-sensitive. SQLite's is case-insensitive for
         // ASCII unless the connection says otherwise, and no expression-level
@@ -985,8 +1060,12 @@ impl Pg2Sqlite {
         };
 
         let prepared = self.prepare_schema(options, None)?;
-        let PreparedStatements { schema, options, .. } =
-            self.translate_prepared(prepared, Self::manifest_statement_needs_translation)?;
+        let mut context = prepared.context(options);
+        let PreparedStatements { schema, options, .. } = self.translate_prepared(
+            prepared,
+            &mut context,
+            Self::manifest_statement_needs_translation,
+        )?;
         let schema = &schema;
         let options = &options;
 
