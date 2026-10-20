@@ -45,6 +45,7 @@ use self::{
 };
 use super::StatementId;
 use crate::{
+    history::placement::{Files, Homes, home},
     impls::{
         scoped_relations::relation_occurrences,
         translator_impls::{delete::delete_scope_query, update::update_scope_query},
@@ -60,9 +61,18 @@ pub(super) fn rebind(
     position: StatementId,
     epoch: &ParserDB,
     final_schema: &ParserDB,
+    replay_homes: Files,
+    homes: &Homes,
 ) -> Result<Option<Statement>, ConnectionError> {
-    let mut planner =
-        Planner { epoch, final_schema, position, edits: Edits::default(), frames: Vec::new() };
+    let mut planner = Planner {
+        epoch,
+        final_schema,
+        position,
+        replay_homes,
+        homes,
+        edits: Edits::default(),
+        frames: Vec::new(),
+    };
     planner.relations(statement)?;
     planner.statement(statement)?;
     if planner.edits.is_empty() {
@@ -80,6 +90,8 @@ pub(super) fn rebind_trigger_body(
     position: StatementId,
     epoch: &ParserDB,
     final_schema: &ParserDB,
+    replay_homes: Files,
+    homes: &Homes,
 ) -> Result<Option<BeginEndStatements>, ConnectionError> {
     let Some(exec_body) = &create.exec_body else { return Ok(None) };
     let Ok(Some((mut body, _))) = epoch.function_body_with_context(&exec_body.func_desc.name)
@@ -108,8 +120,15 @@ pub(super) fn rebind_trigger_body(
         }
         statements.extend(parsed.pop());
     }
-    let mut planner =
-        Planner { epoch, final_schema, position, edits: Edits::default(), frames: Vec::new() };
+    let mut planner = Planner {
+        epoch,
+        final_schema,
+        position,
+        replay_homes,
+        homes,
+        edits: Edits::default(),
+        frames: Vec::new(),
+    };
     for statement in &statements {
         planner.relations(statement)?;
         planner.statement(statement)?;
@@ -139,6 +158,11 @@ struct Planner<'a> {
     epoch: &'a ParserDB,
     final_schema: &'a ParserDB,
     position: StatementId,
+    /// The homes the output replays in source order, whose objects keep their
+    /// historical names and so are not rebound.
+    replay_homes: Files,
+    /// The home of each created object, keyed by its SQLite-folded name.
+    homes: &'a Homes,
     edits: Edits,
     /// The stored relations each enclosing select lists, innermost last.
     frames: Vec<Vec<Listed>>,
@@ -157,28 +181,40 @@ impl Planner<'_> {
         Ok(())
     }
 
-    /// The final name of the file relation `name` denotes, or `None` for a
-    /// connection object or a name the epoch schema cannot resolve.
+    /// The final name the file relation `name` denotes, or `None` for a
+    /// connection object, a name the epoch schema cannot resolve, or an object
+    /// whose home the output replays in source order.
     fn current_relation(&self, name: &ObjectName) -> Result<Option<String>, ConnectionError> {
         match resolve(self.epoch, name) {
             Relation::Table(table) if !table.is_temporary() => {
-                let renamed = self
+                if self.replays_home(table.table_name()) {
+                    return Ok(None);
+                }
+                let current = self
                     .epoch
                     .table_identity(table)
                     .and_then(|id| self.final_schema.table_by_identity(id))
-                    .map(|current| current.table_name().to_owned());
-                renamed.map(Some).ok_or_else(|| self.dropped_relation(table.table_name()))
+                    .ok_or_else(|| self.dropped_relation(table.table_name()))?;
+                Ok(Some(current.table_name().to_owned()))
             }
             Relation::View(view) if !view.is_temporary() => {
-                let renamed = self
+                if self.replays_home(view.view_name()) {
+                    return Ok(None);
+                }
+                let current = self
                     .epoch
                     .view_identity(view)
                     .and_then(|id| self.final_schema.view_by_identity(id))
-                    .map(|current| current.view_name().to_owned());
-                renamed.map(Some).ok_or_else(|| self.dropped_relation(view.view_name()))
+                    .ok_or_else(|| self.dropped_relation(view.view_name()))?;
+                Ok(Some(current.view_name().to_owned()))
             }
             _ => Ok(None),
         }
+    }
+
+    /// Whether the output replays the home of the created object `relation`.
+    fn replays_home(&self, relation: &str) -> bool {
+        self.replay_homes.contains_placement(home(self.homes, relation))
     }
 
     fn dropped_relation(&self, relation: &str) -> ConnectionError {

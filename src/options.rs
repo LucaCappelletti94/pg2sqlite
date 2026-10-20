@@ -20,6 +20,36 @@ use crate::traits::{
     ArrayRepresentation, SessionVariableMapping, SessionVariablePattern, UuidRepresentation,
 };
 
+/// Tables whose storage lives in a database attached to the replica's
+/// connection, set with [`Pg2SqliteOptions::with_attached_tables`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct AttachedTables {
+    schema: String,
+    tables: Vec<String>,
+}
+
+impl AttachedTables {
+    /// The name the database is attached under, as in `ATTACH ... AS <schema>`.
+    #[must_use]
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// The source names of the tables placed in the attached database.
+    #[must_use]
+    pub fn tables(&self) -> &[String] {
+        &self.tables
+    }
+
+    /// Whether `table` is listed, comparing as SQLite compares names, without
+    /// regard to ASCII case.
+    #[must_use]
+    pub fn contains(&self, table: &str) -> bool {
+        self.tables.iter().any(|listed| listed.eq_ignore_ascii_case(table))
+    }
+}
+
 /// Struct to hold options for the translation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pg2SqliteOptions {
@@ -76,6 +106,8 @@ pub struct Pg2SqliteOptions {
     /// than `lower()`. This enables Unicode-aware case folding for non-ASCII
     /// patterns. Set via `with_ilike_fold_function`.
     ilike_fold_function: Option<String>,
+    /// Tables placed in an attached database. Set via `with_attached_tables`.
+    attached_tables: Option<AttachedTables>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -101,6 +133,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Pg2SqliteOptions {
             math_functions_available: bool::arbitrary(u)?,
             user_defined_functions: Vec::<String>::arbitrary(u)?,
             ilike_fold_function: Option::<String>::arbitrary(u)?,
+            attached_tables: Option::<AttachedTables>::arbitrary(u)?,
         })
     }
 }
@@ -126,6 +159,7 @@ impl Default for Pg2SqliteOptions {
             math_functions_available: false,
             user_defined_functions: Vec::new(),
             ilike_fold_function: None,
+            attached_tables: None,
         }
     }
 }
@@ -849,5 +883,42 @@ impl Pg2SqliteOptions {
     /// Returns the configured ILIKE case folding function name.
     pub fn get_ilike_fold_function(&self) -> Option<&str> {
         self.ilike_fold_function.as_deref()
+    }
+
+    #[must_use]
+    /// Places `tables` in `schema` and emits cross-database views and triggers
+    /// as `TEMP`.
+    ///
+    /// ```
+    /// # use pg2sqlite::prelude::*;
+    /// let options = Pg2SqliteOptions::default().with_attached_tables("shared", ["notes"]);
+    /// let script = Pg2Sqlite::default()
+    ///     .sql(
+    ///         "CREATE TABLE owners (id INT PRIMARY KEY);
+    ///          CREATE TABLE notes (id INT PRIMARY KEY, owner INT NOT NULL);
+    ///          CREATE VIEW owned AS SELECT n.id FROM notes n JOIN owners o ON o.id = n.owner;",
+    ///     )?
+    ///     .translate_to_sql(&options)?;
+    /// for statement in script.initialize(FreshFiles::Both)? {
+    ///     println!("{statement}");
+    /// }
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn with_attached_tables<S: Into<String>>(
+        mut self,
+        schema: impl Into<String>,
+        tables: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.attached_tables = Some(AttachedTables {
+            schema: schema.into(),
+            tables: tables.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
+
+    #[must_use]
+    /// Returns the tables placed in an attached database, if any.
+    pub fn get_attached_tables(&self) -> Option<&AttachedTables> {
+        self.attached_tables.as_ref()
     }
 }

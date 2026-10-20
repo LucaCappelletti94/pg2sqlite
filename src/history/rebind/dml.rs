@@ -106,6 +106,9 @@ impl Planner<'_> {
         table: &<ParserDB as DatabaseLike>::Table,
         ident: &Ident,
     ) -> Result<(), ConnectionError> {
+        if self.replays_home(table.table_name()) {
+            return Ok(());
+        }
         let Ok(Some(column)) = table.column(&ident.value, self.epoch, IdentifierCase::AsWritten)
         else {
             return Ok(());

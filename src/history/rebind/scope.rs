@@ -90,7 +90,7 @@ impl Planner<'_> {
         let Ok(columns) = table.columns(self.epoch) else { return Ok(None) };
         let mut names = Vec::new();
         for column in columns {
-            let current = if table.is_temporary() {
+            let current = if table.is_temporary() || self.replays_home(table.table_name()) {
                 column.column_name().to_owned()
             } else {
                 self.epoch
