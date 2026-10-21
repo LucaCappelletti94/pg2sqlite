@@ -264,6 +264,7 @@ struct PreparedSchema {
     had_rls_tables: bool,
     initial_schema: Option<ParserDB>,
     complete: bool,
+    dispositions: Vec<crate::impls::transaction_blocks::Disposition>,
 }
 
 struct PreparedStatements {
@@ -594,6 +595,7 @@ impl Pg2Sqlite {
         let statements = &self.pg_statements;
         crate::impls::translator_impls::rls::ensure_usable_rls_table_suffix(options)?;
         Self::reject_rename_of_secured_table(statements)?;
+        let dispositions = crate::impls::transaction_blocks::analyse(statements)?;
 
         let options = options.clone();
         let had_rls_tables = match initial_schema {
@@ -637,6 +639,7 @@ impl Pg2Sqlite {
             epochs,
             had_rls_tables,
             complete,
+            dispositions,
             initial_schema: initial_namespace,
         })
     }
@@ -648,8 +651,15 @@ impl Pg2Sqlite {
     ) -> Result<PreparedStatements, crate::errors::Error> {
         use sql_traits::traits::DatabaseLike;
 
-        let PreparedSchema { schema, options, epochs, had_rls_tables, complete, initial_schema } =
-            prepared;
+        let PreparedSchema {
+            schema,
+            options,
+            epochs,
+            had_rls_tables,
+            complete,
+            dispositions,
+            initial_schema,
+        } = prepared;
         let statements = &self.pg_statements;
         let mut context = if complete {
             TranslationContext::with_complete_schema(&options)
@@ -657,7 +667,6 @@ impl Pg2Sqlite {
             TranslationContext::new(&options)
         };
         populate_prewalk_catalogs(statements, &mut context);
-        let dispositions = crate::impls::transaction_blocks::analyse(statements)?;
 
         let mut warnings = Vec::new();
         let mut translated = Vec::with_capacity(statements.len());
