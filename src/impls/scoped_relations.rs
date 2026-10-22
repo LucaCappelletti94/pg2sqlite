@@ -2,14 +2,14 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
-use core::{ops::ControlFlow, ptr};
+use core::ops::ControlFlow;
 
-use sql_traits::utils::identifier_resolution::identifiers_match;
-use sqlparser::ast::{
-    FromTable, Ident, ObjectName, Query, SetExpr, Statement, TableFactor, Visit, Visitor,
+use sqlparser::ast::{Ident, ObjectName, Query, SetExpr, Statement, TableFactor, Visit, Visitor};
+
+use crate::impls::{
+    object_name::{last_ident, last_ident_value_or_display},
+    relation_scope::RelationScopes,
 };
-
-use crate::impls::object_name::{last_ident, last_ident_value_or_display};
 
 /// Physical relation names in first-occurrence order, ASCII-folded for SQLite.
 #[must_use]
@@ -30,40 +30,16 @@ pub(crate) fn relation_names<V: Visit>(node: &V) -> Vec<String> {
 pub(crate) fn relation_occurrences<V: Visit>(node: &V) -> Vec<ObjectName> {
     let mut collector = RelationCollector {
         occurrences: Vec::new(),
-        cte_scopes: Vec::new(),
-        physical_targets: Vec::new(),
+        scopes: RelationScopes::default(),
         inside_table_factor: false,
     };
     let _: ControlFlow<()> = node.visit(&mut collector);
     collector.occurrences
 }
 
-/// Which aliases a position of one query sees among its common-table
-/// expression names.
-#[derive(Clone, Copy)]
-enum BodyVisibility {
-    /// Every name in the list.
-    All,
-    /// Every name but the body's own, which only a `WITH RECURSIVE` body
-    /// can name.
-    ExceptSelf(usize),
-}
-
-/// One query's CTE names and their visibility while its children are visited.
-/// A name is visible to every sibling body and the query body, so a
-/// nonrecursive body cannot name itself.
-struct CteScope {
-    aliases: Vec<Ident>,
-    body_visibility: Vec<(usize, BodyVisibility)>,
-    visible: BodyVisibility,
-    restore: Option<BodyVisibility>,
-}
-
 struct RelationCollector {
     occurrences: Vec<ObjectName>,
-    cte_scopes: Vec<CteScope>,
-    /// Node identities distinguish write targets from lexical bindings.
-    physical_targets: Vec<usize>,
+    scopes: RelationScopes,
     /// Only a table factor's own relation can bind a common-table expression.
     inside_table_factor: bool,
 }
@@ -75,42 +51,7 @@ impl RelationCollector {
 
     /// Whether a one-part reference binds a visible common-table expression.
     fn bound_by_cte(&self, reference: &Ident) -> bool {
-        for scope in self.cte_scopes.iter().rev() {
-            for (index, alias) in scope.aliases.iter().enumerate() {
-                if matches!(&scope.visible, BodyVisibility::ExceptSelf(hidden) if *hidden == index)
-                {
-                    continue;
-                }
-                if !alias.value.eq_ignore_ascii_case(&reference.value) {
-                    continue;
-                }
-                if identifiers_match(
-                    &alias.value,
-                    alias.quote_style.is_some(),
-                    &reference.value,
-                    reference.quote_style.is_some(),
-                ) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Write targets always name storage.
-    fn record_target(&mut self, factor: &TableFactor) {
-        if let TableFactor::Table { name, .. } = factor {
-            self.physical_targets.push(ptr::from_ref(name).addr());
-        }
-    }
-
-    fn pop_query_scope(&mut self) {
-        let restore = self.cte_scopes.pop().and_then(|scope| scope.restore);
-        if let Some(visible) = restore
-            && let Some(parent) = self.cte_scopes.last_mut()
-        {
-            parent.visible = visible;
-        }
+        self.scopes.binding(reference).is_some()
     }
 }
 
@@ -118,64 +59,12 @@ impl Visitor for RelationCollector {
     type Break = ();
 
     fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<Self::Break> {
-        match statement {
-            Statement::Update(update) => self.record_target(&update.table.relation),
-            Statement::Merge(merge) => self.record_target(&merge.table),
-            Statement::Delete(delete) => {
-                let tables = match &delete.from {
-                    FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => {
-                        tables
-                    }
-                };
-                for entry in tables {
-                    self.record_target(&entry.relation);
-                }
-            }
-            _ => {}
-        }
+        self.scopes.record_targets(statement);
         ControlFlow::Continue(())
     }
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        let address = ptr::from_ref(query).addr();
-        let restore = self.cte_scopes.last_mut().and_then(|scope| {
-            scope
-                .body_visibility
-                .iter()
-                .find_map(|(child, visible)| (*child == address).then_some(*visible))
-                .map(|visible| {
-                    let restore = scope.visible;
-                    scope.visible = visible;
-                    restore
-                })
-        });
-        let (aliases, body_visibility) = query.with.as_ref().map_or_else(
-            || (Vec::new(), Vec::new()),
-            |with| {
-                let aliases =
-                    with.cte_tables.iter().map(|cte| cte.alias.name.clone()).collect::<Vec<_>>();
-                let body_visibility = with
-                    .cte_tables
-                    .iter()
-                    .enumerate()
-                    .map(|(index, cte)| {
-                        let visible = if with.recursive {
-                            BodyVisibility::All
-                        } else {
-                            BodyVisibility::ExceptSelf(index)
-                        };
-                        (ptr::from_ref(cte.query.as_ref()).addr(), visible)
-                    })
-                    .collect();
-                (aliases, body_visibility)
-            },
-        );
-        self.cte_scopes.push(CteScope {
-            aliases,
-            body_visibility,
-            visible: BodyVisibility::All,
-            restore,
-        });
+        self.scopes.enter(query);
 
         // Bare TABLE references do not fire the relation hook.
         if let SetExpr::Table(table) = query.body.as_ref()
@@ -189,7 +78,7 @@ impl Visitor for RelationCollector {
     }
 
     fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
-        self.pop_query_scope();
+        self.scopes.exit();
         ControlFlow::Continue(())
     }
 
@@ -205,8 +94,7 @@ impl Visitor for RelationCollector {
 
     fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
         let physical = if self.inside_table_factor && relation.0.len() == 1 {
-            let address = ptr::from_ref(relation).addr();
-            if self.physical_targets.contains(&address) {
+            if self.scopes.is_target(relation) {
                 true
             } else {
                 match last_ident(relation) {

@@ -277,3 +277,37 @@ fn a_forward_recursive_sibling_named_like_an_attached_table_is_lexical() {
         [(1, None, "seed".to_owned())]
     );
 }
+
+#[test]
+fn a_nonrecursive_forward_read_keeps_its_attached_storage_on_reconnect() {
+    let script = translate(&format!(
+        "{PAPERS}
+         CREATE VIEW forward_chain AS
+             WITH a AS (SELECT id FROM papers), papers AS (SELECT 7 AS id)
+             SELECT id FROM a;"
+    ))
+    .expect("translate");
+    let files = Files::new("nonrecursive-forward");
+    {
+        let mut connection = files.open();
+        files.attach(&mut connection);
+        run(&mut connection, script.initialize(FreshFiles::Both).expect("initialize both files"));
+        assert_eq!(
+            forward_chain::table
+                .select(forward_chain::id)
+                .load::<i32>(&mut connection)
+                .expect("read the attached table"),
+            [1]
+        );
+    }
+    let mut reopened = files.open();
+    files.attach(&mut reopened);
+    run(&mut reopened, script.connect().expect("connection program"));
+    assert_eq!(
+        forward_chain::table
+            .select(forward_chain::id)
+            .load::<i32>(&mut reopened)
+            .expect("read the attached table after reconnect"),
+        [1]
+    );
+}
