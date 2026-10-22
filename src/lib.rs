@@ -4,6 +4,7 @@
 extern crate alloc;
 
 pub mod errors;
+pub(crate) mod history;
 pub(crate) mod impls;
 pub mod manifest;
 pub mod options;

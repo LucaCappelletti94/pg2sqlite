@@ -282,6 +282,9 @@ fn generate_standard_trigger_body(
 ) -> Result<Option<sqlparser::ast::BeginEndStatements>, crate::errors::Error> {
     let function_name = &exec_body.func_desc.name;
     if let Some((mut body, mut context)) = schema.function_body_with_context(function_name)? {
+        if let Some(rebound) = options.rebound_body() {
+            body.clone_from(rebound);
+        }
         // Seed trigger-specific context so the body translator can
         // constant-fold TG_OP and TG_TABLE_NAME references.
         context.trigger_events = events
