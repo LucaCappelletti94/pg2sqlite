@@ -801,6 +801,6 @@
   </g>
 
   <!-- ==================== FOOTER ==================== -->
-  <text x="870" y="1820" font-family="Inter, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">github.com/LucaCappelletti94/pg2sqlite · May 2026</text>
+  <text x="870" y="1820" font-family="Inter, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">github.com/connetto-rs/pg2sqlite · May 2026</text>
 
 </svg>
