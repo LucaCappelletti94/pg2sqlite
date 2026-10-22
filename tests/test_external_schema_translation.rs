@@ -47,15 +47,16 @@ fn external_schema_drives_column_dependent_rewrites() {
         .translate_with_report_and_schema(&schema, &Pg2SqliteOptions::default())
         .expect("query should translate");
     assert!(report.warnings.is_empty(), "translation should be lossless");
-    assert_eq!(report.script.main.len(), 1, "the SELECT alone");
+    assert_eq!(report.script.files.len(), 1, "the SELECT alone");
 
     let mut connection = sqlite_with(ddl);
     diesel::sql_query("INSERT INTO docs VALUES (1, '{\"a\":1}'), (2, '[2,3]')")
         .execute(&mut connection)
         .expect("fixture rows should insert");
-    let rows = diesel::sql_query(report.script.main[0].to_string())
-        .load::<TextValue>(&mut connection)
-        .expect("translated query should execute");
+    let rows =
+        diesel::sql_query(report.script.files.iter().next().expect("the SELECT").to_string())
+            .load::<TextValue>(&mut connection)
+            .expect("translated query should execute");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].value.as_deref(), Some(r#"[{"a":1},[2,3]]"#));
 }

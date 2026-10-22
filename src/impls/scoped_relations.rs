@@ -38,12 +38,25 @@ pub(crate) fn relation_occurrences<V: Visit>(node: &V) -> Vec<ObjectName> {
     collector.occurrences
 }
 
+/// Which aliases a position of one query sees among its common-table
+/// expression names.
+#[derive(Clone, Copy)]
+enum BodyVisibility {
+    /// Every name in the list.
+    All,
+    /// Every name but the body's own, which only a `WITH RECURSIVE` body
+    /// can name.
+    ExceptSelf(usize),
+}
+
 /// One query's CTE names and their visibility while its children are visited.
+/// A name is visible to every sibling body and the query body, so a
+/// nonrecursive body cannot name itself.
 struct CteScope {
     aliases: Vec<Ident>,
-    body_visibility: Vec<(usize, usize)>,
-    visible_aliases: usize,
-    restore_parent_visibility: Option<usize>,
+    body_visibility: Vec<(usize, BodyVisibility)>,
+    visible: BodyVisibility,
+    restore: Option<BodyVisibility>,
 }
 
 struct RelationCollector {
@@ -63,7 +76,11 @@ impl RelationCollector {
     /// Whether a one-part reference binds a visible common-table expression.
     fn bound_by_cte(&self, reference: &Ident) -> bool {
         for scope in self.cte_scopes.iter().rev() {
-            for alias in scope.aliases.iter().take(scope.visible_aliases) {
+            for (index, alias) in scope.aliases.iter().enumerate() {
+                if matches!(&scope.visible, BodyVisibility::ExceptSelf(hidden) if *hidden == index)
+                {
+                    continue;
+                }
                 if !alias.value.eq_ignore_ascii_case(&reference.value) {
                     continue;
                 }
@@ -88,11 +105,11 @@ impl RelationCollector {
     }
 
     fn pop_query_scope(&mut self) {
-        let restore = self.cte_scopes.pop().and_then(|scope| scope.restore_parent_visibility);
-        if let Some(restore) = restore
+        let restore = self.cte_scopes.pop().and_then(|scope| scope.restore);
+        if let Some(visible) = restore
             && let Some(parent) = self.cte_scopes.last_mut()
         {
-            parent.visible_aliases = restore;
+            parent.visible = visible;
         }
     }
 }
@@ -121,21 +138,20 @@ impl Visitor for RelationCollector {
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
         let address = ptr::from_ref(query).addr();
-        let restore_parent_visibility = self.cte_scopes.last_mut().and_then(|scope| {
+        let restore = self.cte_scopes.last_mut().and_then(|scope| {
             scope
                 .body_visibility
                 .iter()
                 .find_map(|(child, visible)| (*child == address).then_some(*visible))
                 .map(|visible| {
-                    let restore = scope.visible_aliases;
-                    scope.visible_aliases = visible;
+                    let restore = scope.visible;
+                    scope.visible = visible;
                     restore
                 })
         });
         let (aliases, body_visibility) = query.with.as_ref().map_or_else(
             || (Vec::new(), Vec::new()),
             |with| {
-                let recursive = usize::from(with.recursive);
                 let aliases =
                     with.cte_tables.iter().map(|cte| cte.alias.name.clone()).collect::<Vec<_>>();
                 let body_visibility = with
@@ -143,18 +159,22 @@ impl Visitor for RelationCollector {
                     .iter()
                     .enumerate()
                     .map(|(index, cte)| {
-                        (ptr::from_ref(cte.query.as_ref()).addr(), index + recursive)
+                        let visible = if with.recursive {
+                            BodyVisibility::All
+                        } else {
+                            BodyVisibility::ExceptSelf(index)
+                        };
+                        (ptr::from_ref(cte.query.as_ref()).addr(), visible)
                     })
                     .collect();
                 (aliases, body_visibility)
             },
         );
-        let visible_aliases = aliases.len();
         self.cte_scopes.push(CteScope {
             aliases,
             body_visibility,
-            visible_aliases,
-            restore_parent_visibility,
+            visible: BodyVisibility::All,
+            restore,
         });
 
         // Bare TABLE references do not fire the relation hook.

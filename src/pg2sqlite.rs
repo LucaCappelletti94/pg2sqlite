@@ -780,12 +780,18 @@ impl Pg2Sqlite {
         let PreparedStatements {
             schema,
             options: _,
-            statements,
+            mut statements,
             audit_table,
             mut warnings,
             epochs,
             dispositions,
         } = self.translate_prepared(prepared, &mut context, |_| true)?;
+        let mut placed = crate::history::placement::place(
+            &self.pg_statements,
+            &mut statements,
+            &schema,
+            options,
+        )?;
         let units: Vec<crate::history::Unit<'_>> = epochs
             .iter()
             .flat_map(|epoch| {
@@ -800,13 +806,16 @@ impl Pg2Sqlite {
                 }
             })
             .collect();
-        let connection = crate::history::connection_program(&units, &schema, &context);
+        let connection = crate::history::connection_program(&units, &schema, &context, &mut placed);
+        let (main, attached) = crate::history::fresh_forms(&units, &mut placed, &schema, &context);
         drop(units);
-        let mut main: Vec<Statement> = statements.into_iter().flatten().collect();
-        if let Some(audit_table) = audit_table {
-            main.insert(0, audit_table);
-        }
-        let mut script = Script { setup: Vec::new(), main, connection };
+        let files = crate::initialization::InitializationPlan::new(
+            audit_table,
+            placed.unit_files.into_iter().zip(statements),
+            main,
+            attached,
+        );
+        let mut script = Script { setup: Vec::new(), files, connection };
 
         // PostgreSQL's LIKE is case-sensitive. SQLite's is case-insensitive for
         // ASCII unless the connection says otherwise, and no expression-level
@@ -827,7 +836,7 @@ impl Pg2Sqlite {
 
         // A foreign key SQLite does not enforce is worse than one it refuses:
         // the delete PostgreSQL rejects leaves an orphan row and says nothing.
-        if script.main.iter().any(statement_declares_foreign_key) {
+        if script.files.iter().any(statement_declares_foreign_key) {
             script.setup.insert(0, foreign_keys_pragma());
             warnings.push(foreign_key_pragma_warning());
         }
@@ -866,7 +875,7 @@ impl Pg2Sqlite {
     /// # use pg2sqlite::options::Pg2SqliteOptions;
     /// let translator = Pg2Sqlite::default().sql("CREATE TABLE t (a INT);").unwrap();
     /// let script = translator.translate(&Pg2SqliteOptions::default()).unwrap();
-    /// assert_eq!(script.main.len(), 1);
+    /// assert_eq!(script.files.len(), 1);
     /// ```
     pub fn translate(&self, options: &Pg2SqliteOptions) -> Result<Script, crate::errors::Error> {
         Ok(self.prepare_translation(options, None)?.script)
@@ -905,7 +914,7 @@ impl Pg2Sqlite {
     /// let report = Pg2Sqlite::default()
     ///     .sql("CREATE TABLE t (a INT);")?
     ///     .translate_with_report(&Pg2SqliteOptions::default())?;
-    /// assert_eq!(report.script.main.len(), 1);
+    /// assert_eq!(report.script.files.len(), 1);
     /// assert!(report.warnings.is_empty());
     /// # Ok::<(), Error>(())
     /// ```
@@ -959,7 +968,7 @@ impl Pg2Sqlite {
     ///     .translate_to_sql(&Pg2SqliteOptions::default())?;
     /// assert_eq!(script.setup, ["PRAGMA case_sensitive_like = 1"]);
     /// assert_eq!(
-    ///     script.main,
+    ///     script.files.iter().map(String::as_str).collect::<Vec<_>>(),
     ///     ["CREATE TABLE t (a INTEGER CHECK (a BETWEEN -2147483648 AND 2147483647)) STRICT"]
     /// );
     /// # Ok::<(), Error>(())
@@ -1061,13 +1070,19 @@ impl Pg2Sqlite {
 
         let prepared = self.prepare_schema(options, None)?;
         let mut context = prepared.context(options);
-        let PreparedStatements { schema, options, .. } = self.translate_prepared(
+        let PreparedStatements { schema, options, mut statements, .. } = self.translate_prepared(
             prepared,
             &mut context,
             Self::manifest_statement_needs_translation,
         )?;
         let schema = &schema;
         let options = &options;
+        let placed = crate::history::placement::place(
+            &self.pg_statements,
+            &mut statements,
+            schema,
+            options,
+        )?;
 
         let role = options.get_session_user_role().and_then(|name| schema.role(name));
 
@@ -1109,7 +1124,14 @@ impl Pg2Sqlite {
                 })
                 .collect::<Result<Vec<_>, crate::errors::Error>>()?;
 
-            entries.push(TableManifestEntry { logical, physical, wrapper, columns });
+            entries.push(TableManifestEntry {
+                logical_placement: placed.home(&logical),
+                physical_placement: placed.home(&physical),
+                logical,
+                physical,
+                wrapper,
+                columns,
+            });
         }
 
         Ok(entries)

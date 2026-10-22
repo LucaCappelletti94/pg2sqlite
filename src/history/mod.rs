@@ -6,6 +6,7 @@
 //! refuses when that history would write the database file again.
 
 mod effects;
+pub(crate) mod placement;
 mod rebind;
 mod transactions;
 
@@ -20,11 +21,14 @@ use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
 use self::{
     effects::{Catalog, Effects},
+    placement::{Files, Homes, Placed},
     transactions::{Outcome, Outline, TransactionId},
 };
 use crate::{
     errors::{Error, RefusalCategory, TranslationDirection, TranslationRefusal},
     impls::transaction_blocks::Disposition,
+    initialization::{Forms, InitializationError},
+    manifest::Placement,
     options::TranslationContext,
     pg2sqlite::Pg2Sqlite,
     script::ConnectionError,
@@ -61,6 +65,7 @@ pub(crate) fn connection_program(
     units: &[Unit<'_>],
     final_schema: &ParserDB,
     context: &TranslationContext<'_>,
+    placed: &mut Placed,
 ) -> Result<Vec<Statement>, ConnectionError> {
     let sources: Vec<Statement> = units.iter().map(|unit| unit.source.clone()).collect();
     let dispositions: Vec<Disposition> = units.iter().map(|unit| *unit.disposition).collect();
@@ -91,7 +96,7 @@ pub(crate) fn connection_program(
             )));
         }
     }
-    replay(units, &retained, &outline, final_schema, context)
+    replay(units, &retained, &outline, final_schema, context, placed)
 }
 
 /// Which units the surviving connection objects need.
@@ -131,8 +136,9 @@ fn replay(
     outline: &Outline,
     final_schema: &ParserDB,
     context: &TranslationContext<'_>,
+    placed: &mut Placed,
 ) -> Result<Vec<Statement>, ConnectionError> {
-    let mut schema = ReplaySchema::new(final_schema)?;
+    let mut schema = ReplaySchema::new(final_schema, Files::CONNECTION, &placed.homes)?;
     let mut program = Vec::new();
     let mut open: Option<TransactionId> = None;
     for (index, unit) in units.iter().enumerate() {
@@ -149,49 +155,32 @@ fn replay(
             }
             open = transaction;
         }
-        let rebound = rebind::rebind(unit.source, StatementId(index), unit.binding, final_schema)?;
-        let body = match unit.source {
-            Statement::CreateTrigger(create) => {
-                rebind::rebind_trigger_body(create, StatementId(index), unit.binding, final_schema)?
+        let rebound;
+        (schema, rebound) = replay_unit(
+            unit,
+            StatementId(index),
+            final_schema,
+            context,
+            Files::CONNECTION,
+            placed,
+            schema,
+        )?;
+        match rebound {
+            Some(statements) => {
+                program.extend(
+                    statements
+                        .into_iter()
+                        .filter(|statement| placed.is_connection_local(statement)),
+                );
             }
-            _ => None,
-        };
-        let rebound = match (rebound, &body) {
-            (None, Some(_)) => Some(unit.source.clone()),
-            (rebound, _) => rebound,
-        };
-        let Some(statement) = rebound else {
-            program.extend(unit.emitted.iter().cloned());
-            schema = schema.apply(unit.source)?;
-            continue;
-        };
-        // A statement ending an epoch was translated against the schema
-        // before it, and every other one against the schema after it.
-        let before = Pg2Sqlite::schema_ends_epoch(&statement);
-        if !before {
-            schema = schema.apply(&statement)?;
-        }
-        let rebound_context;
-        let context = match &body {
-            Some(body) => {
-                rebound_context = context.with_rebound_body(body);
-                &rebound_context
+            None => {
+                program.extend(
+                    unit.emitted
+                        .iter()
+                        .filter(|statement| placed.is_connection_local(statement))
+                        .cloned(),
+                );
             }
-            None => context,
-        };
-        match statement.translate_with_warnings(&schema.snapshot(), context, &mut |_| {}) {
-            Ok(statements) => program.extend(statements),
-            Err(Error::TranslationRefusal(refusal)) => {
-                return Err(ConnectionError::Translation(refusal));
-            }
-            Err(error) => {
-                return Err(refusal(format!(
-                    "statement {index} cannot be replayed on a new connection: {error}"
-                )));
-            }
-        }
-        if before {
-            schema = schema.apply(&statement)?;
         }
     }
     if open.is_some() {
@@ -200,20 +189,154 @@ fn replay(
     Ok(program)
 }
 
+/// The fresh-main and fresh-attached forms of every unit, each refused on its
+/// own when its rebinding needs history the target file does not have.
+pub(crate) fn fresh_forms(
+    units: &[Unit<'_>],
+    placed: &mut Placed,
+    final_schema: &ParserDB,
+    context: &TranslationContext<'_>,
+) -> (Forms<Statement>, Forms<Statement>) {
+    let main = replay_fresh(units, final_schema, context, Files::MAIN, placed);
+    let attached = if placed.attached_configured {
+        replay_fresh(units, final_schema, context, Files::ATTACHED, placed)
+    } else {
+        Err(InitializationError::NoAttachedDatabase)
+    };
+    (main, attached)
+}
+
+/// The units a fresh `file` runs, in source order, each `None` when it runs
+/// its emitted form or does not run.
+fn replay_fresh(
+    units: &[Unit<'_>],
+    final_schema: &ParserDB,
+    context: &TranslationContext<'_>,
+    file: Files,
+    placed: &mut Placed,
+) -> Forms<Statement> {
+    let replay_homes = file | Files::CONNECTION;
+    let mut schema = ReplaySchema::new(final_schema, replay_homes, &placed.homes)?;
+    let mut forms = Vec::with_capacity(units.len());
+    for (index, unit) in units.iter().enumerate() {
+        if !placed.unit_files[index].contains(file) {
+            forms.push(None);
+            continue;
+        }
+        let rebound;
+        (schema, rebound) = replay_unit(
+            unit,
+            StatementId(index),
+            final_schema,
+            context,
+            replay_homes,
+            placed,
+            schema,
+        )?;
+        forms.push(rebound);
+    }
+    Ok(forms)
+}
+
+/// Replays one unit against `schema`, returning the schema after it and the
+/// unit's placed statements when rebinding changed them.
+fn replay_unit(
+    unit: &Unit<'_>,
+    id: StatementId,
+    final_schema: &ParserDB,
+    context: &TranslationContext<'_>,
+    replay_homes: Files,
+    placed: &mut Placed,
+    mut schema: ReplaySchema,
+) -> Result<(ReplaySchema, Option<Vec<Statement>>), ConnectionError> {
+    let rebound =
+        rebind::rebind(unit.source, id, unit.binding, final_schema, replay_homes, &placed.homes)?;
+    let body = match unit.source {
+        Statement::CreateTrigger(create) => {
+            rebind::rebind_trigger_body(
+                create,
+                id,
+                unit.binding,
+                final_schema,
+                replay_homes,
+                &placed.homes,
+            )?
+        }
+        _ => None,
+    };
+    let rebound = match (rebound, &body) {
+        (None, Some(_)) => Some(unit.source.clone()),
+        (rebound, _) => rebound,
+    };
+    let Some(statement) = rebound else {
+        return Ok((schema.apply(unit.source)?, None));
+    };
+    // A statement ending an epoch was translated against the schema before it,
+    // and every other one against the schema after it.
+    let before = Pg2Sqlite::schema_ends_epoch(&statement);
+    if !before {
+        schema = schema.apply(&statement)?;
+    }
+    let rebound_context;
+    let context = match &body {
+        Some(body) => {
+            rebound_context = context.with_rebound_body(body);
+            &rebound_context
+        }
+        None => context,
+    };
+    let index = id.index();
+    let mut statements =
+        match statement.translate_with_warnings(&schema.snapshot(), context, &mut |_| {}) {
+            Ok(statements) => statements,
+            Err(Error::TranslationRefusal(refusal)) => {
+                return Err(ConnectionError::Translation(refusal));
+            }
+            Err(error) => {
+                return Err(refusal(format!("statement {index} cannot be replayed: {error}")));
+            }
+        };
+    for statement in &mut statements {
+        placed.place_rebound(statement).map_err(|error| {
+            match error {
+                Error::UnusableAttachedTables { reason } => refusal(reason),
+                error => refusal(format!("statement {index} cannot be placed: {error}")),
+            }
+        })?;
+    }
+    if before {
+        schema = schema.apply(&statement)?;
+    }
+    Ok((schema, Some(statements)))
+}
+
 /// The schema a replayed statement sees, which is the file's final schema
 /// plus the connection objects replayed so far.
 struct ReplaySchema(ParserDBIngestor);
 
 impl ReplaySchema {
-    fn new(final_schema: &ParserDB) -> Result<Self, ConnectionError> {
+    fn new(
+        final_schema: &ParserDB,
+        replay_homes: Files,
+        homes: &Homes,
+    ) -> Result<Self, ConnectionError> {
         let mut drops = Vec::new();
-        for view in final_schema.views().filter(|view| view.is_temporary()) {
-            drops.push(format!("DROP VIEW IF EXISTS pg_temp.{} CASCADE", quoted(view.view_name())));
+        for view in final_schema.views() {
+            drops.extend(drop_of(
+                view.view_name(),
+                view.is_temporary(),
+                replay_homes,
+                homes,
+                "VIEW",
+            ));
         }
-        for table in final_schema.tables().filter(|table| table.is_temporary()) {
-            drops.push(format!(
-                "DROP TABLE IF EXISTS pg_temp.{} CASCADE",
-                quoted(table.table_name())
+        for table in final_schema.tables() {
+            drops.extend(drop_of(
+                table.table_name(),
+                table.is_temporary(),
+                replay_homes,
+                homes,
+                "TABLE",
             ));
         }
         let mut schema = Self(final_schema.clone().into_ingestor());
@@ -245,6 +368,22 @@ impl ReplaySchema {
 
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// The drop that keeps a replayed object out of the reference schema, empty
+/// when the object keeps its final name.
+fn drop_of(
+    name: &str,
+    temporary: bool,
+    replay_homes: Files,
+    homes: &Homes,
+    kind: &str,
+) -> Option<String> {
+    let placement = if temporary { Placement::Temp } else { placement::home(homes, name) };
+    let schema = if temporary { "pg_temp." } else { "" };
+    replay_homes
+        .contains_placement(placement)
+        .then(|| format!("DROP {kind} IF EXISTS {schema}{} CASCADE", quoted(name)))
 }
 
 fn begin() -> Statement {

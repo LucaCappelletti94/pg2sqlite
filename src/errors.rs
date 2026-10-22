@@ -145,6 +145,9 @@ pub enum Error {
     /// The connection part cannot be produced.
     #[error(transparent)]
     Connection(#[from] crate::script::ConnectionError),
+    /// Fresh-file selection cannot preserve source-ordered initialization.
+    #[error(transparent)]
+    Initialization(#[from] crate::initialization::InitializationError),
     /// Error when reverse RLS scanning encounters an expression variant that is
     /// not explicitly handled.
     #[error(
@@ -255,6 +258,14 @@ pub enum Error {
         table_name: String,
         /// The RLS table suffix that was detected.
         suffix: String,
+    },
+    /// Error when the tables configured with
+    /// [`with_attached_tables`](crate::options::Pg2SqliteOptions::with_attached_tables)
+    /// cannot be placed.
+    #[error("The attached tables cannot be placed: {reason}")]
+    UnusableAttachedTables {
+        /// Why the placement cannot be carried out.
+        reason: String,
     },
     /// Error when the configured RLS backing table suffix cannot separate a
     /// backing table from the view that replaces it.

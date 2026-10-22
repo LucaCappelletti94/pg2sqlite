@@ -316,6 +316,9 @@ impl Planner<'_> {
         if rename_qualifier {
             self.edits.rename(parts[parts.len() - 2].span, replay_name.clone());
         }
+        if self.replays_home(table.table_name()) {
+            return Ok(None);
+        }
         if keeps_columns {
             return Ok(None);
         }
