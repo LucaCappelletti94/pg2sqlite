@@ -40,8 +40,9 @@ use core::ops::ControlFlow;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArgumentClause,
-    FunctionArguments, Ident, ObjectName, OrderByExpr, OrderByOptions, SelectItem, SetExpr,
-    SetOperator, SetQuantifier, TableAlias, TableFactor, Value, ValueWithSpan, visit_expressions,
+    FunctionArguments, Ident, InTarget, ObjectName, OrderByExpr, OrderByOptions, SelectItem,
+    SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor, Value, ValueWithSpan,
+    visit_expressions,
 };
 
 use crate::{
@@ -144,13 +145,13 @@ fn scalar_subquery_over_json_each(projection: Expr, array: Expr, selection: Opti
 /// Like `x <op> ALL(arr)` in this module, a NULL operand yields false where
 /// PostgreSQL yields NULL. See the divergence list in the module header.
 pub(crate) fn array_overlap(left: Expr, right: Expr) -> Expr {
-    let shares_an_element = Expr::InSubquery {
+    let shares_an_element = Expr::In {
         expr: Box::new(json_each_column(VALUE_COLUMN)),
-        subquery: Box::new(single_expr_query(
+        target: InTarget::Subquery(Box::new(single_expr_query(
             json_each_column(VALUE_COLUMN),
             from_relation(json_each_factor(right)),
             None,
-        )),
+        ))),
         negated: false,
         global: false,
     };

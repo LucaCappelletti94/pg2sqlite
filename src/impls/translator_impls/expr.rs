@@ -20,9 +20,9 @@ use sqlparser::{
     ast::{
         AccessExpr, Array, BinaryOperator, CaseWhen, CastKind, DataType, DateTimeField,
         ExactNumberInfo, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
-        Interval, JsonKeyUniqueness, JsonPredicateType, ObjectName, ObjectNamePart, Query,
-        SelectItem, SetExpr, Subscript, TableAlias, TableFactor, TimezoneInfo, UnaryOperator,
-        Value, ValueWithSpan, helpers::attached_token::AttachedToken,
+        InTarget, Interval, JsonKeyUniqueness, JsonPredicateType, ObjectName, ObjectNamePart,
+        Query, SelectItem, SetExpr, Subscript, TableAlias, TableFactor, TimezoneInfo,
+        UnaryOperator, Value, ValueWithSpan, helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
 };
@@ -224,9 +224,9 @@ fn translate_fts_expression(
         }
         _ => Expr::Identifier(Ident::new(pk_column)),
     };
-    Ok(Expr::InSubquery {
+    Ok(Expr::In {
         expr: Box::new(pk_reference),
-        subquery: Box::new(single_expr_query(
+        target: InTarget::Subquery(Box::new(single_expr_query(
             Expr::Identifier(Ident::new("rowid")),
             from_relation(plain_table_factor(ObjectName(vec![ObjectNamePart::Identifier(
                 Ident::new(fts_name.clone()),
@@ -239,7 +239,7 @@ fn translate_fts_expression(
                     span: sqlparser::tokenizer::Span::empty(),
                 })),
             }),
-        )),
+        ))),
         negated: false,
         global: false,
     })
@@ -436,9 +436,7 @@ pub(crate) fn is_boolean_expression(
         | Expr::IsNotUnknown(_)
         | Expr::IsDistinctFrom(_, _)
         | Expr::IsNotDistinctFrom(_, _)
-        | Expr::InList { .. }
-        | Expr::InSubquery { .. }
-        | Expr::InUnnest { .. }
+        | Expr::In { .. }
         | Expr::Between { .. }
         | Expr::Like { .. }
         | Expr::ILike { .. }
@@ -505,9 +503,9 @@ pub(crate) fn render_boolean_as_text(
 
 /// Builds `expr IN ('a', 'b', ...)`.
 fn string_set_membership(expr: Expr, values: &[&str]) -> Expr {
-    Expr::InList {
+    Expr::In {
         expr: Box::new(expr),
-        list: values.iter().map(|value| string_literal(value)).collect(),
+        target: InTarget::List(values.iter().map(|value| string_literal(value)).collect()),
         negated: false,
         global: false,
     }
@@ -1780,9 +1778,9 @@ fn translate_any_all_to_in(
     }
     if let Expr::Subquery(q) = right {
         let translated_left = left.translate_with_warnings(schema, options, emit)?;
-        return Ok(Expr::InSubquery {
+        return Ok(Expr::In {
             expr: Box::new(translated_left),
-            subquery: Box::new(q.translate_with_warnings(schema, options, emit)?),
+            target: InTarget::Subquery(Box::new(q.translate_with_warnings(schema, options, emit)?)),
             negated,
             global: false,
         });
@@ -1790,12 +1788,14 @@ fn translate_any_all_to_in(
     if let Some(elements) = quantifier_elements(right) {
         let scale = scale_of(left, schema, options).filter(|s| *s > 0);
         let translated_left = left.translate_with_warnings(schema, options, emit)?;
-        return Ok(Expr::InList {
+        return Ok(Expr::In {
             expr: Box::new(translated_left),
-            list: elements
-                .iter()
-                .map(|e| scale_or_translate(e, scale, schema, options, emit))
-                .collect::<Result<Vec<_>, _>>()?,
+            target: InTarget::List(
+                elements
+                    .iter()
+                    .map(|e| scale_or_translate(e, scale, schema, options, emit))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
             negated,
             global: false,
         });
@@ -2114,9 +2114,9 @@ fn array_containment(haystack: Expr, needle: Expr) -> Expr {
         from_relation(table_function_factor("json_each", vec![haystack], None, false)),
         None,
     ));
-    let not_in_haystack = Expr::InSubquery {
+    let not_in_haystack = Expr::In {
         expr: Box::new(Expr::Identifier(Ident::new("value"))),
-        subquery: haystack_values,
+        target: InTarget::Subquery(haystack_values),
         negated: true,
         global: false,
     };
@@ -3386,22 +3386,23 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     _ => translated,
                 }
             }
-            Expr::InList { expr: operand, list, negated, global } => {
+            Expr::In { expr: operand, target: InTarget::List(list), negated, global } => {
                 rebuild(|| {
                     let scale = scale_of(operand, schema, options).filter(|scale| *scale > 0);
-                    Ok::<Expr, crate::errors::Error>(Expr::InList {
+                    Ok::<Expr, crate::errors::Error>(Expr::In {
                         expr: Box::new(operand.translate_with_warnings(schema, options, emit)?),
-                        list: list
-                            .iter()
-                            .map(|item| {
-                                let v = scale_or_translate(item, scale, schema, options, emit)?;
-                                if scale.is_none() {
-                                    convert_beside_column_expr(operand, v, schema, options)
-                                } else {
-                                    Ok(v)
-                                }
-                            })
-                            .collect::<Result<Vec<_>, crate::errors::Error>>()?,
+                        target: InTarget::List(
+                            list.iter()
+                                .map(|item| {
+                                    let v = scale_or_translate(item, scale, schema, options, emit)?;
+                                    if scale.is_none() {
+                                        convert_beside_column_expr(operand, v, schema, options)
+                                    } else {
+                                        Ok(v)
+                                    }
+                                })
+                                .collect::<Result<Vec<_>, crate::errors::Error>>()?,
+                        ),
                         negated: *negated,
                         global: *global,
                     })
@@ -3932,7 +3933,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         .to_string(),
                 ));
             }
-            Expr::InUnnest { .. } => {
+            Expr::In { target: InTarget::Unnest(_), .. } => {
                 return Err(crate::errors::Error::forward_refusal(
                     "IN UNNEST (array unnesting) is not supported in SQLite. \
                          Use a subquery with a VALUES clause or a temporary table instead."
@@ -4345,9 +4346,12 @@ fn translate_is_json(
                 }
                 // Anything that is neither a container nor absent is a scalar.
                 JsonPredicateType::Scalar => {
-                    Expr::InList {
+                    Expr::In {
                         expr: Box::new(type_of),
-                        list: vec![string_literal("array"), string_literal("object")],
+                        target: InTarget::List(vec![
+                            string_literal("array"),
+                            string_literal("object"),
+                        ]),
                         negated: true,
                         global: false,
                     }
@@ -4412,7 +4416,7 @@ mod tests {
         ast::{
             AccessExpr, BinaryOperator, DateTimeField, Expr, Function, FunctionArg,
             FunctionArgExpr, FunctionArgOperator, FunctionArgumentList, FunctionArguments, Ident,
-            JsonPathElem, ObjectName, ObjectNamePart, Subscript,
+            InTarget, JsonPathElem, ObjectName, ObjectNamePart, Subscript,
         },
         dialect::PostgreSqlDialect,
         parser::Parser,
@@ -4590,7 +4594,7 @@ mod tests {
             emit,
         )
         .expect("ANY tuple should become IN list");
-        assert!(matches!(in_tuple, Expr::InList { .. }));
+        assert!(matches!(in_tuple, Expr::In { target: InTarget::List(_), .. }));
 
         let err = translate_any_all_to_in(
             &parse_expr("id"),
@@ -4615,10 +4619,11 @@ mod tests {
             .expect_err("chained subscript access should be rejected");
         assert!(chained.to_string().contains("Chained subscript access"), "got: {chained}");
 
-        let unsupported = Expr::InUnnest {
+        let unsupported = Expr::In {
             expr: Box::new(parse_expr("id")),
-            array_expr: Box::new(parse_expr("arr")),
+            target: InTarget::Unnest(Box::new(parse_expr("arr"))),
             negated: false,
+            global: false,
         };
         let err =
             unsupported.translate(&schema, &options).expect_err("unsupported expr should error");
@@ -4634,7 +4639,7 @@ mod tests {
             is_some: true,
         };
         let translated_any = any_expr.translate(&schema, &options).expect("ANY should translate");
-        assert!(matches!(translated_any, Expr::InList { .. }));
+        assert!(matches!(translated_any, Expr::In { target: InTarget::List(_), .. }));
     }
 
     #[test]

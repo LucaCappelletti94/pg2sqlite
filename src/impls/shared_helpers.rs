@@ -21,7 +21,7 @@ use sqlparser::ast::{
     Assignment, AssignmentTarget, BinaryOperator, CastKind, ColumnOption, DataType, Expr,
     ExprWithAlias, ExprWithAliasAndOrderBy, Fetch, FromTable, Function, FunctionArg,
     FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments, GeneratedAs,
-    GroupByExpr, HavingBound, Ident, Join, JoinConstraint, JoinOperator, LimitClause,
+    GroupByExpr, HavingBound, Ident, InTarget, Join, JoinConstraint, JoinOperator, LimitClause,
     ListAggOnOverflow, Measure, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectNamePart,
     OrderBy, OrderByExpr, OrderByKind, PipeOperator, PivotValueSource, Query, SelectItem, SetExpr,
     SetOperator, SetQuantifier, Setting, Statement, SymbolDefinition, TableAlias, TableFactor,
@@ -269,7 +269,7 @@ pub(crate) fn extract_columns_from_expr(expr: &Expr) -> ColumnReferences {
         Expr::Function(function) => extract_columns_from_function(function),
         Expr::Subquery(_)
         | Expr::Exists { .. }
-        | Expr::InSubquery { .. }
+        | Expr::In { target: InTarget::Subquery(_), .. }
         | Expr::Wildcard(_)
         | Expr::QualifiedWildcard(..)
         | Expr::MatchAgainst { .. } => ColumnReferences::Unknown,

@@ -83,7 +83,7 @@ fn scalar_subquery_scales_comparison_literal() {
 
 // ── B2: ANY(ARRAY[...]) literals scale ──────────────────────────────────────
 
-/// `amount = ANY(ARRAY[1.5, 2.5])` synthesises a scaled InList.
+/// `amount = ANY(ARRAY[1.5, 2.5])` synthesises a scaled `InTarget::List`.
 #[test]
 fn any_array_literals_are_scaled() {
     let rows =

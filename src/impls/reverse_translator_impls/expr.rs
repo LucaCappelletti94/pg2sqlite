@@ -16,7 +16,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::{
     ast::{
         BinaryOperator, CaseWhen, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
-        ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan,
+        InTarget, ObjectName, ObjectNamePart, UnaryOperator, Value, ValueWithSpan,
         helpers::attached_token::AttachedToken,
     },
     tokenizer::Span,
@@ -340,15 +340,16 @@ fn reverse_in_list(
     options: &crate::options::TranslationContext<'_>,
 ) -> Result<Expr, Error> {
     let scale = scale_of(operand, schema, options).filter(|&scale| scale > 0);
-    Ok(Expr::InList {
+    Ok(Expr::In {
         expr: Box::new(operand.reverse_translate(schema, options)?),
-        list: list
-            .iter()
-            .map(|item| {
-                let reversed = reverse_unscale_or_translate(item, scale, schema, options)?;
-                retype_against_peer(reversed, operand, schema, options)
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        target: InTarget::List(
+            list.iter()
+                .map(|item| {
+                    let reversed = reverse_unscale_or_translate(item, scale, schema, options)?;
+                    retype_against_peer(reversed, operand, schema, options)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         negated,
         global,
     })
@@ -485,7 +486,7 @@ impl ReverseTranslator for Expr {
                 retype_binary_operands(reversed, left, right, schema, options)
             }
 
-            Expr::InList { expr: operand, list, negated, global } => {
+            Expr::In { expr: operand, target: InTarget::List(list), negated, global } => {
                 reverse_in_list(operand, list, *negated, *global, schema, options)
             }
 

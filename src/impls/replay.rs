@@ -10,7 +10,7 @@
 use alloc::{format, string::String, vec::Vec};
 use core::ops::ControlFlow;
 
-use sqlparser::ast::{Expr, Function, Visit, Visitor};
+use sqlparser::ast::{Expr, Function, InTarget, Visit, Visitor};
 
 use crate::{
     errors::Error,
@@ -129,7 +129,9 @@ impl Visitor for ReplayCheck<'_, '_> {
     fn post_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
         let replays = match expr {
             Expr::Function(function) => self.call_replays(function),
-            Expr::Subquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } => false,
+            Expr::Subquery(_)
+            | Expr::Exists { .. }
+            | Expr::In { target: InTarget::Subquery(_), .. } => false,
             _ => true,
         };
         if replays {

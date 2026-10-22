@@ -18,7 +18,7 @@ use core::ops::ControlFlow;
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
     BeginEndStatements, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, ReturnStatementValue, Select,
+    GroupByExpr, Ident, InTarget, ObjectName, ObjectNamePart, Query, ReturnStatementValue, Select,
     SelectItem, Set, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
     ValueWithSpan, Visit, VisitMut, Visitor, VisitorMut, visit_expressions, visit_expressions_mut,
 };
@@ -263,8 +263,8 @@ impl PlPgSqlTranslator {
                 expr,
                 Expr::Subquery(_)
                     | Expr::Exists { .. }
-                    | Expr::InSubquery { .. }
-                    | Expr::InUnnest { .. }
+                    | Expr::In { target: InTarget::Subquery(_), .. }
+                    | Expr::In { target: InTarget::Unnest(_), .. }
             ) {
                 ControlFlow::Break(())
             } else {
@@ -926,7 +926,7 @@ impl PlPgSqlTranslator {
         }
 
         match expr {
-            Expr::InSubquery { subquery, .. }
+            Expr::In { target: InTarget::Subquery(subquery), .. }
             | Expr::Subquery(subquery)
             | Expr::Exists { subquery, .. } => {
                 maybe_inject_with(subquery, with, context, options);
@@ -1234,7 +1234,7 @@ impl PlPgSqlTranslator {
                 }
                 Self::transform_function_parts(func, context, options);
             }
-            Expr::InSubquery { expr: inner, subquery, .. } => {
+            Expr::In { expr: inner, target: InTarget::Subquery(subquery), .. } => {
                 Self::transform_expr(inner, context, options);
                 Self::transform_subquery(subquery, context, options);
             }
