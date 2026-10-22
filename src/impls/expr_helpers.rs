@@ -15,7 +15,9 @@ use alloc::{
     vec::Vec,
 };
 
-use sqlparser::ast::{CaseWhen, Expr, JsonPathElem, helpers::attached_token::AttachedToken};
+use sqlparser::ast::{
+    CaseWhen, Expr, InTarget, JsonPathElem, helpers::attached_token::AttachedToken,
+};
 
 /// Apply `f` to every direct child [`Expr`], rebuilding the node. Callers
 /// should match their "interesting" variants first and fall through for the
@@ -23,7 +25,7 @@ use sqlparser::ast::{CaseWhen, Expr, JsonPathElem, helpers::attached_token::Atta
 ///
 /// Adapter over [`try_map_expr_children`], the single variant table.
 /// Subqueries are left untouched, so callers needing subquery traversal must
-/// handle `InSubquery`/`Subquery`/`Exists` themselves.
+/// handle `InTarget::Subquery`/`Subquery`/`Exists` themselves.
 pub(crate) fn map_expr_children(expr: &Expr, f: &impl Fn(&Expr) -> Expr) -> Expr {
     let result = try_map_expr_children::<core::convert::Infallible>(
         expr,
@@ -55,7 +57,7 @@ pub(crate) fn rebuild<E>(make: impl FnOnce() -> Result<Expr, E>) -> Result<Expr,
 /// Every expression a call carries is a child here, so a caller that matches
 /// `Expr::Function` itself must not also delegate the same node, or the
 /// arguments are transformed twice. Recurses into `Subquery`, `Exists`, and
-/// `InSubquery` via `f_query`.
+/// `InTarget::Subquery` via `f_query`.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(crate) fn try_map_expr_children<E>(
     expr: &Expr,
@@ -258,14 +260,19 @@ pub(crate) fn try_map_expr_children<E>(
             })?
         }
 
-        Expr::InList { expr: inner, list, negated, global } => {
+        Expr::In { expr: inner, target, negated, global } => {
             rebuild(|| {
-                Ok(Expr::InList {
-                    expr: Box::new(f(inner)?),
-                    list: list.iter().map(&mut *f).collect::<Result<_, _>>()?,
-                    negated: *negated,
-                    global: *global,
-                })
+                let inner = Box::new(f(inner)?);
+                let target = match target {
+                    InTarget::List(list) => {
+                        InTarget::List(list.iter().map(&mut *f).collect::<Result<_, _>>()?)
+                    }
+                    InTarget::Subquery(subquery) => {
+                        InTarget::Subquery(Box::new(f_query(subquery)?))
+                    }
+                    InTarget::Unnest(array_expr) => InTarget::Unnest(Box::new(f(array_expr)?)),
+                };
+                Ok(Expr::In { expr: inner, target, negated: *negated, global: *global })
             })?
         }
         Expr::Tuple(items) => {
@@ -373,15 +380,6 @@ pub(crate) fn try_map_expr_children<E>(
                 }))
             })?
         }
-        Expr::InUnnest { expr: inner, array_expr, negated } => {
-            rebuild(|| {
-                Ok(Expr::InUnnest {
-                    expr: Box::new(f(inner)?),
-                    array_expr: Box::new(f(array_expr)?),
-                    negated: *negated,
-                })
-            })?
-        }
 
         Expr::CompoundFieldAccess { root, access_chain } => {
             rebuild(|| {
@@ -408,16 +406,6 @@ pub(crate) fn try_map_expr_children<E>(
         Expr::Exists { subquery, negated } => {
             rebuild(|| {
                 Ok(Expr::Exists { subquery: Box::new(f_query(subquery)?), negated: *negated })
-            })?
-        }
-        Expr::InSubquery { expr: inner, subquery, negated, global } => {
-            rebuild(|| {
-                Ok(Expr::InSubquery {
-                    expr: Box::new(f(inner)?),
-                    subquery: Box::new(f_query(subquery)?),
-                    negated: *negated,
-                    global: *global,
-                })
             })?
         }
 
@@ -798,11 +786,17 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             }
         }
 
-        // list children
-        Expr::InList { expr: inner, list, .. } => {
+        // list and unnest children, subquery targets stay untouched
+        Expr::In { expr: inner, target, .. } => {
             f(inner);
-            for e in list {
-                f(e);
+            match target {
+                InTarget::List(list) => {
+                    for e in list {
+                        f(e);
+                    }
+                }
+                InTarget::Subquery(_) => {}
+                InTarget::Unnest(array_expr) => f(array_expr),
             }
         }
         Expr::Tuple(items) => {
@@ -860,11 +854,6 @@ pub(crate) fn for_each_child_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             if let Some(e) = else_result {
                 f(e);
             }
-        }
-        Expr::InSubquery { expr: inner, .. } => f(inner),
-        Expr::InUnnest { expr: inner, array_expr, .. } => {
-            f(inner);
-            f(array_expr);
         }
         Expr::Interval(interval) => f(&interval.value),
 

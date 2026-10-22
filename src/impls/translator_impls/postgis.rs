@@ -186,7 +186,7 @@ use sql_traits::{
     structs::ParserDB,
     traits::{ColumnLike, TableLike},
 };
-use sqlparser::ast::{CreateIndex, Expr};
+use sqlparser::ast::{CreateIndex, Expr, InTarget};
 
 use crate::{
     errors::Error,
@@ -469,12 +469,12 @@ pub(crate) fn try_build_rtree_filter(
         from_relation(plain_table_factor(rtree_name)),
         Some(bounds),
     );
-    let indexed_row = Expr::InSubquery {
+    let indexed_row = Expr::In {
         expr: Box::new(Expr::CompoundIdentifier(vec![
             Ident::new(base_for_rowid),
             Ident::new("rowid"),
         ])),
-        subquery: Box::new(candidates),
+        target: InTarget::Subquery(Box::new(candidates)),
         negated: false,
         global: false,
     };

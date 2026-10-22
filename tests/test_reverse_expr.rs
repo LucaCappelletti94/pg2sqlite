@@ -3,7 +3,7 @@
 //!
 //! Covers all expression match arms: UnaryOp, Nested, BinaryOp, Cast, IsNull,
 //! IsNotNull, IsTrue, IsNotTrue, IsFalse, IsNotFalse, Exists, Like, ILike,
-//! InList, InSubquery, Between, Case, Subquery, Extract, Tuple, Trim, Ceil,
+//! In, Between, Case, Subquery, Extract, Tuple, Trim, Ceil,
 //! Floor, Position, Substring, Collate, and the fallback error.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, ReverseTranslator};

@@ -34,11 +34,11 @@ use sqlparser::{
         Assignment, AssignmentTarget, BinaryOperator, ColumnDef, ColumnOption, ColumnOptionDef,
         CreatePolicy, CreatePolicyCommand, CreatePolicyType, CreateTable, CreateTrigger, DataType,
         Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
-        FunctionArguments, FunctionDesc, HavingBound, Ident, JoinConstraint, JoinOperator,
-        ListAggOnOverflow, ObjectName, ObjectNamePart, Owner, SelectItem, SetExpr, Statement,
-        TableAlias, TableFactor, TriggerEvent, TriggerExecBody, TriggerExecBodyType, TriggerObject,
-        TriggerObjectKind, TriggerPeriod, UnaryOperator, Value, ValueWithSpan, Visit, VisitMut,
-        Visitor, VisitorMut, WindowType,
+        FunctionArguments, FunctionDesc, HavingBound, Ident, InTarget, JoinConstraint,
+        JoinOperator, ListAggOnOverflow, ObjectName, ObjectNamePart, Owner, SelectItem, SetExpr,
+        Statement, TableAlias, TableFactor, TriggerEvent, TriggerExecBody, TriggerExecBodyType,
+        TriggerObject, TriggerObjectKind, TriggerPeriod, UnaryOperator, Value, ValueWithSpan,
+        Visit, VisitMut, Visitor, VisitorMut, WindowType,
     },
     tokenizer::{Token, Word},
 };
@@ -577,7 +577,9 @@ fn scrub_policy_stable_exprs(
         type Break = ();
         fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
             match expr {
-                Expr::Subquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } => {
+                Expr::Subquery(_)
+                | Expr::Exists { .. }
+                | Expr::In { target: InTarget::Subquery(_), .. } => {
                     *expr = Expr::Value(ValueWithSpan::from(Value::Boolean(true)));
                 }
                 Expr::Function(func)
@@ -1039,7 +1041,7 @@ fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVari
         Expr::Subquery(query) | Expr::Exists { subquery: query, .. } => {
             collect_patterns_from_query(query, patterns);
         }
-        Expr::InSubquery { expr: inner, subquery, .. } => {
+        Expr::In { expr: inner, target: InTarget::Subquery(subquery), .. } => {
             collect_session_variable_patterns(inner, patterns);
             collect_patterns_from_query(subquery, patterns);
         }
@@ -1434,10 +1436,10 @@ fn transform_expr_generic(
             )))
         }
 
-        Expr::InSubquery { expr: inner, subquery, negated, global } => {
-            Expr::InSubquery {
+        Expr::In { expr: inner, target: InTarget::Subquery(subquery), negated, global } => {
+            Expr::In {
                 expr: Box::new(recurse(inner)),
-                subquery: Box::new(transform_query(
+                target: InTarget::Subquery(Box::new(transform_query(
                     subquery,
                     options,
                     table,
@@ -1445,7 +1447,7 @@ fn transform_expr_generic(
                     strategy.subquery_prefix(),
                     strategy.table_rename(),
                     strategy.facts(),
-                )),
+                ))),
                 negated: *negated,
                 global: *global,
             }
@@ -1881,7 +1883,7 @@ fn collect_subquery_tables(expr: &Expr, out: &mut Vec<String>) {
         Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
             collect_query_tables(subquery, out);
         }
-        Expr::InSubquery { subquery, expr: inner, .. } => {
+        Expr::In { target: InTarget::Subquery(subquery), expr: inner, .. } => {
             collect_subquery_tables(inner, out);
             collect_query_tables(subquery, out);
         }

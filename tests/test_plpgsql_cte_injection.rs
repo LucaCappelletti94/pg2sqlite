@@ -1,6 +1,6 @@
 //! Tests for PL/pgSQL inject_with_into_in_subqueries missing arms (GROUP G).
 //!
-//! G1: Case, InList, Between, Cast, Function, Tuple arms missing from
+//! G1: Case, `Expr::In`, Between, Cast, Function, Tuple arms missing from
 //! catch-all. When a CTE-referencing subquery is nested inside one of these
 //! expressions, the WITH clause must be injected into the subquery.
 //!
