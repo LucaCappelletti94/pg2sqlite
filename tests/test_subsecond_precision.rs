@@ -24,6 +24,7 @@ fn translate(pg: &str) -> String {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .pop()
         .expect("a probe statement")
 }

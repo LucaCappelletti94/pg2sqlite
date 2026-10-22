@@ -83,7 +83,8 @@ fn apply() -> SqliteConnection {
         .sql(DIVERGE_SCHEMA)
         .expect("parse")
         .translate(&strict_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let mut conn = establish_connection();
     for statement in &translated {
         // DDL emitted by the translator cannot be expressed with the typed DSL.
@@ -100,13 +101,15 @@ fn run_dml(conn: &mut SqliteConnection, pg_dml: &str) -> QueryResult<usize> {
         .expect("parse")
         .translate(&strict_opts())
         .expect("translate")
+        .into_vec()
         .len();
     let combined = format!("{DIVERGE_SCHEMA}\n{pg_dml}");
     let all = Pg2Sqlite::default()
         .sql(&combined)
         .expect("parse combined")
         .translate(&strict_opts())
-        .expect("translate combined");
+        .expect("translate combined")
+        .into_vec();
     let mut last = 0usize;
     for stmt in all.into_iter().skip(schema_len) {
         // Translator output: raw sql_query is correct here.

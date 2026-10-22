@@ -33,7 +33,8 @@ fn run(pg: &str, probe: &str) -> Vec<Pair> {
         .sql(pg)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let mut connection = SqliteConnection::establish(":memory:").expect("connect");
     for statement in &statements {
         diesel::sql_query(statement)

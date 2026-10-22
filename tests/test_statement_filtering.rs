@@ -273,8 +273,12 @@ fn mixed_statements_filters_correctly() {
         ALTER TABLE t ADD COLUMN email TEXT;
         DROP INDEX idx_name;
     ";
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     // one pragma + CREATE TABLE + CREATE INDEX + ALTER TABLE + DROP INDEX = 5
     // statements. Only CREATE EXTENSION is filtered: ALTER TABLE ADD COLUMN
     // is now translated.

@@ -13,7 +13,11 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use translate_helpers::translate_default as translate;
 
 fn translate_err(sql: &str) -> String {
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     match result {
         Err(e) => e.to_string(),
         Ok(stmts) => {
@@ -618,6 +622,7 @@ fn table_fk_to_rls_table() {
         .unwrap()
         .translate(&options)
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -662,6 +667,7 @@ fn column_fk_to_rls_table() {
         .unwrap()
         .translate(&options)
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -685,6 +691,7 @@ fn check_constraint_with_function_removed() {
         .unwrap()
         .translate(&options)
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -700,8 +707,12 @@ fn create_or_replace_view_emits_drop_then_create() {
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
         CREATE OR REPLACE VIEW active AS SELECT * FROM users;
     ";
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     // one pragma + table + DROP VIEW IF EXISTS + CREATE VIEW = 4 statements
     assert_eq!(stmts.len(), 4, "Expected 4 statements, got {stmts:?}");
     assert!(
@@ -722,7 +733,11 @@ fn materialized_view_error() {
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
         CREATE MATERIALIZED VIEW mv AS SELECT * FROM users;
     ";
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Expected error for MATERIALIZED VIEW");
 }
 
@@ -765,7 +780,8 @@ fn delete_using_with_rls_table_join() {
             "app.user_id",
             "current_app_user",
         ));
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate_to_sql(&options).unwrap();
+    let stmts =
+        Pg2Sqlite::default().sql(sql).unwrap().translate_to_sql(&options).unwrap().into_vec();
     let delete_stmt =
         stmts.iter().find(|s| s.starts_with("DELETE")).expect("should emit the DELETE").clone();
     assert!(
@@ -951,6 +967,7 @@ fn before_trigger_on_rls_table() {
         .unwrap()
         .translate(&options)
         .unwrap()
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()

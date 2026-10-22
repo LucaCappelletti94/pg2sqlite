@@ -43,7 +43,8 @@ fn test_default_gen_random_uuid() {
     let translator = Pg2Sqlite::default().sql(sql).unwrap();
     let translated = translator
         .translate(&Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob))
-        .unwrap();
+        .unwrap()
+        .into_vec();
 
     assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
     let stmt = translated[1].to_string();
@@ -64,7 +65,8 @@ fn uuid_default_uses_registered_uuid_function() {
         .sql(sql)
         .expect("Failed to parse SQL")
         .translate(&Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Blob))
-        .expect("Failed to translate SQL");
+        .expect("Failed to translate SQL")
+        .into_vec();
 
     assert_eq!(translated.len(), 2, "the script leads with the dialect pragma");
     diesel::sql_query(translated[1].to_string())
@@ -88,7 +90,11 @@ fn uuid_default_uses_registered_uuid_function() {
 #[test]
 fn uuid_without_repr_still_errors() {
     let sql = "CREATE TABLE t (id UUID PRIMARY KEY);";
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "UUID without representation should error");
     let err = result.unwrap_err().to_string();
     assert!(

@@ -59,8 +59,12 @@ use schema::{items, ledger, notes, pay_rls};
 /// `CHECK` constraints, and `CREATE TRIGGER` bodies that Diesel's typed DSL
 /// cannot express.
 fn setup_for_dml(pg: &str, opts: &Pg2SqliteOptions) -> (SqliteConnection, String) {
-    let mut stmts =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(opts).expect("translate");
+    let mut stmts = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(opts)
+        .expect("translate")
+        .into_vec();
     let dml = stmts.pop().expect("translation must emit at least one statement");
     let mut conn = establish_connection();
     for stmt in &stmts {

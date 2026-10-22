@@ -31,6 +31,7 @@ fn translate(pg: &str, options: &Pg2SqliteOptions) -> Vec<String> {
         .expect("parse")
         .translate_to_sql(options)
         .expect("translate")
+        .into_vec()
         .into_iter()
         .filter(|statement| !statement.starts_with("PRAGMA"))
         .collect()

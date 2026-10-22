@@ -39,7 +39,12 @@ fn apply(policy_sql: &str) -> SqliteConnection {
     let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
     let sql = format!("{TABLE_SQL}{policy_sql}");
     // Emitted DDL cannot be expressed with the typed DSL.
-    let stmts = Pg2Sqlite::default().sql(&sql).expect("parse").translate(&opts).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(&sql)
+        .expect("parse")
+        .translate(&opts)
+        .expect("translate")
+        .into_vec();
     let mut conn = helpers::establish_connection();
     for stmt in &stmts {
         diesel::sql_query(stmt.to_string())

@@ -40,7 +40,8 @@ CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
         .sql(&pg)
         .expect("fixture parses")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("fixture translates");
+        .expect("fixture translates")
+        .into_vec();
 
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     for statement in &statements {

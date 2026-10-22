@@ -86,7 +86,8 @@ fn hash_arrow_array_index_path_is_refused() {
 fn hash_arrow_round_trip_forward_output_is_valid_postgres() {
     let sql = format!("{SCHEMA}\nSELECT payload #> '{{a}}' FROM t;");
     let tr = Pg2Sqlite::default().sql(&sql).expect("forward parse");
-    let stmts = tr.clone().translate(&Pg2SqliteOptions::default()).expect("forward translate");
+    let stmts =
+        tr.clone().translate(&Pg2SqliteOptions::default()).expect("forward translate").into_vec();
     let forward_sqlite = stmts
         .iter()
         .map(ToString::to_string)

@@ -27,7 +27,7 @@ fn warnings_for(ddl: &str) -> Vec<TranslationWarning> {
         .expect("translate");
 
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
-    for statement in &report.statements {
+    for statement in report.script.iter() {
         connection
             .execute_batch(&format!("{statement};"))
             .unwrap_or_else(|error| panic!("emitted statement failed: {statement}: {error}"));
@@ -83,7 +83,8 @@ fn dropping_the_payload_leaves_the_uniqueness_alone() {
         .sql(&format!("{FIXTURE}\nCREATE UNIQUE INDEX i ON ic (a) INCLUDE (b);"))
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     for statement in &statements {
         connection.execute_batch(&format!("{statement};")).expect("emitted statement");

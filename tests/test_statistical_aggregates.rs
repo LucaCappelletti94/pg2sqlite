@@ -30,7 +30,12 @@ fn declared() -> Pg2SqliteOptions {
 }
 
 fn translate(pg: &str, options: &Pg2SqliteOptions) -> Vec<String> {
-    Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(options).expect("translate")
+    Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(options)
+        .expect("translate")
+        .into_vec()
 }
 
 /// Applies every emitted statement but the last against a connection carrying

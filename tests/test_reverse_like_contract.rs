@@ -78,7 +78,8 @@ fn a_script_with_a_like_carries_the_pragma() {
         .sql(&format!("{SCHEMA}\nSELECT s FROM t WHERE s LIKE 'a%';"))
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     assert!(
         statements.iter().any(|s| s.contains("case_sensitive_like")),
         "the pragma is what the contract points at: {statements:?}"
@@ -97,7 +98,8 @@ fn a_script_without_a_like_still_carries_the_pragma() {
         .sql(SCHEMA)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     assert!(
         statements.iter().any(|s| s.contains("case_sensitive_like")),
         "the emitted dialect declares PostgreSQL LIKE semantics unconditionally: {statements:?}"
@@ -112,7 +114,8 @@ fn an_ilike_only_script_carries_the_pragma() {
         .sql(&format!("{SCHEMA}\nSELECT s FROM t WHERE s ILIKE 'a%';"))
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     assert!(statements.iter().any(|s| s.contains("case_sensitive_like")), "{statements:?}");
 }
 

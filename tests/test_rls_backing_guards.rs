@@ -327,7 +327,7 @@ fn apply_with_exemption(pg: &str) -> SqliteConnection {
 /// the artifact under test; every subsequent data-path call uses the typed DSL.
 fn apply(pg: &str, opts: &Pg2SqliteOptions) -> SqliteConnection {
     let translated =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate(opts).expect("translate");
+        Pg2Sqlite::default().sql(pg).expect("parse").translate(opts).expect("translate").into_vec();
     let mut conn = establish_connection();
     for statement in &translated {
         // DDL emitted by the translator cannot be expressed with the typed DSL.
@@ -407,6 +407,7 @@ fn rendered_translation(pg: &str, opts: &Pg2SqliteOptions) -> Vec<String> {
         .expect("parse")
         .translate(opts)
         .expect("translate")
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -426,6 +427,7 @@ fn translate_dml_tail(pg_dml: &str, schema: &str, opts: &Pg2SqliteOptions) -> Ve
         .expect("parse schema")
         .translate(opts)
         .expect("translate schema")
+        .into_vec()
         .len();
     let combined = format!("{schema}\n{pg_dml}");
     Pg2Sqlite::default()
@@ -433,6 +435,7 @@ fn translate_dml_tail(pg_dml: &str, schema: &str, opts: &Pg2SqliteOptions) -> Ve
         .expect("parse combined")
         .translate(opts)
         .expect("translate combined")
+        .into_vec()
         .into_iter()
         .skip(schema_len)
         .map(|s| s.to_string())

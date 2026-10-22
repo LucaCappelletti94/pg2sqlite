@@ -68,7 +68,12 @@ fn opts() -> Pg2SqliteOptions {
 }
 
 fn apply() -> SqliteConnection {
-    let stmts = Pg2Sqlite::default().sql(PG).expect("parse").translate(&opts()).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(PG)
+        .expect("parse")
+        .translate(&opts())
+        .expect("translate")
+        .into_vec();
     let mut conn = SqliteConnection::establish(":memory:").expect("open db");
     // app_user() maps current_setting('app.user'). Returns a static string so
     // the closure is 'static.

@@ -115,7 +115,8 @@ fn update_with_joined_target_table_is_rejected() {
         .sql(sql)
         .unwrap()
         .statement(update_stmt)
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
 
     assert!(result.is_err(), "Expected unsupported UPDATE target join error");
     let err = result.unwrap_err().to_string();
@@ -143,7 +144,8 @@ fn forward_update_limit_translates_expressions() {
         .unwrap()
         .statement(update_stmt)
         .translate(&Pg2SqliteOptions::default())
-        .unwrap();
+        .unwrap()
+        .into_vec();
 
     let output = stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 

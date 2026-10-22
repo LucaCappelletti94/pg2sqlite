@@ -24,6 +24,7 @@ fn translate(pg: &str) -> String {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .join("\n")
 }
 
@@ -42,7 +43,8 @@ fn a_scaled_numeric_becomes_an_integer() {
         .sql("CREATE TABLE t (id INT PRIMARY KEY, price NUMERIC(10,2));")
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let sql = stmts.join("\n");
     assert!(sql.contains("price INTEGER"), "expected a scaled integer column: {sql}");
     assert!(!sql.to_uppercase().contains("REAL"), "REAL is what loses the exactness: {sql}");
@@ -76,7 +78,8 @@ fn an_unscaled_numeric_is_a_plain_integer() {
         .sql("CREATE TABLE t (id INT PRIMARY KEY, n NUMERIC(10));")
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let sql = stmts.join("\n");
     assert!(sql.contains("n INTEGER"), "{sql}");
     let conn = rusqlite::Connection::open_in_memory().unwrap();

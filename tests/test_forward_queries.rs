@@ -372,7 +372,11 @@ fn distinct_on_returns_error() {
         CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
         SELECT DISTINCT ON (id) * FROM users;
     ";
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Expected error for DISTINCT ON");
     let err = result.unwrap_err().to_string();
     assert!(err.contains("DISTINCT ON"), "Expected DISTINCT ON error: {err}");
@@ -513,7 +517,7 @@ fn test_wildcard_select_column_translation() -> Result<(), Box<dyn std::error::E
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -542,7 +546,7 @@ fn test_wildcard_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
@@ -591,8 +595,12 @@ fn test_wildcard_semantic() -> Result<(), Box<dyn std::error::Error>> {
 fn exec_translated(pg_sql: &str) {
     use diesel::connection::SimpleConnection;
     let mut conn = SqliteConnection::establish(":memory:").unwrap();
-    let stmts =
-        Pg2Sqlite::default().sql(pg_sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(pg_sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     for s in &stmts {
         conn.batch_execute(&format!("{s};"))
             .unwrap_or_else(|e| panic!("SQLite rejected translated statement: {s}\n{e}"));

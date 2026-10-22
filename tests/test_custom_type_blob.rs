@@ -21,8 +21,12 @@ fn cas_type_maps_to_blob_not_binary() {
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
     let conn = Connection::open_in_memory().unwrap();
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     let script = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
@@ -36,8 +40,12 @@ fn molecular_formula_maps_to_blob_not_binary() {
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
     let conn = Connection::open_in_memory().unwrap();
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     let script = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }
@@ -51,8 +59,12 @@ fn media_type_maps_to_blob_not_binary() {
     // Execute the emitted DDL to prove real SQLite accepts the translated
     // schema.
     let conn = Connection::open_in_memory().unwrap();
-    let stmts =
-        Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default()).unwrap();
+    let stmts = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec();
     let script = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
     conn.execute_batch(&script).unwrap_or_else(|e| panic!("translated DDL must execute: {e}"));
 }

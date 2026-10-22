@@ -29,7 +29,8 @@ fn rejection(pg: &str) -> String {
     let result = Pg2Sqlite::default()
         .sql(pg)
         .expect("the fixture must parse")
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
 
     match result {
         Ok(statements) => {

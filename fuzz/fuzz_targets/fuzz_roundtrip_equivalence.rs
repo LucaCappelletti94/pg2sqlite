@@ -89,7 +89,7 @@ fuzz_target!(|input: FuzzInput| {
     let Ok(stmts1) = parsed1.translate(options) else {
         return;
     };
-    let sqlite1 = render(&stmts1);
+    let sqlite1 = render(&stmts1.into_vec());
 
     // Reverse: SQLite1 -> PG2 (uses the same options as forward so a
     // divergence is a real disagreement between the two translators,
@@ -106,7 +106,7 @@ fuzz_target!(|input: FuzzInput| {
     let Ok(stmts2) = parsed2.translate(options) else {
         return;
     };
-    let sqlite2 = render(&stmts2);
+    let sqlite2 = render(&stmts2.into_vec());
 
     if sqlite1 != sqlite2 {
         panic!(

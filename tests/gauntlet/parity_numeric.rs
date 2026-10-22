@@ -109,6 +109,7 @@ fn translate_dml(base: &Pg2Sqlite, sql: &str) -> String {
         .expect("parse DML")
         .translate_to_sql(&options())
         .expect("translate DML")
+        .into_vec()
         .into_iter()
         .last()
         .expect("at least one translated statement")
@@ -148,7 +149,8 @@ fn pg_setup() -> PgConnection {
 /// DDL is applied via `diesel::sql_query` because CREATE TABLE is not
 /// expressible in the diesel typed DSL.
 fn sqlite_setup(base: &Pg2Sqlite) -> SqliteConnection {
-    let ddl_stmts = base.clone().translate_to_sql(&options()).expect("translate amounts DDL");
+    let ddl_stmts =
+        base.clone().translate_to_sql(&options()).expect("translate amounts DDL").into_vec();
     let mut conn = establish_connection();
     for stmt in &ddl_stmts {
         // Migration DDL: sql_query is the correct form here.

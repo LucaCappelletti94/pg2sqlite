@@ -27,7 +27,8 @@ fn probe_column_names(query: &str) -> Vec<String> {
         .sql(&format!("{FIXTURE} {query};"))
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let probe = statements.pop().expect("the script should emit at least one statement");
 
     let connection = Connection::open_in_memory().expect("in-memory SQLite");

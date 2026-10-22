@@ -29,7 +29,8 @@ fn applied() -> Connection {
         .sql(SCHEMA)
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     for statement in &statements {
         connection

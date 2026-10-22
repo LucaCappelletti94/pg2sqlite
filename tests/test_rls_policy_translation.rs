@@ -24,7 +24,8 @@ fn apply(pg: &str) -> rusqlite::Connection {
         .sql(pg)
         .expect("parse")
         .translate_to_sql(&options())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
             .unwrap_or_else(|e| panic!("SQLite rejected output: {e}\n{s}"));

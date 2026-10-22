@@ -23,6 +23,7 @@ fn translate(pg: &str) -> String {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .pop()
         .expect("a probe statement")
 }
@@ -92,7 +93,8 @@ fn a_plain_like_is_case_sensitive_on_both_engines() {
         .sql("SELECT 'ABC' LIKE 'abc';")
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     let mut answer = None;
     for statement in &statements {

@@ -56,6 +56,7 @@ fn diesel_compound_queries_preserve_pagination_and_bind_identity() {
         .unwrap()
         .translate_with_schema(&schema, &Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .into_iter()
         .find_map(|statement| {
             match statement {

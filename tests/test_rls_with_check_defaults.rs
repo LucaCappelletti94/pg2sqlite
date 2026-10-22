@@ -86,7 +86,7 @@ const TABLE: &str = "
 fn setup(policies: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     let pg = format!("{TABLE}{policies}");
     let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let translated = Pg2Sqlite::default().sql(&pg)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(&pg)?.translate(&options)?.into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
     let (triggers, base): (Vec<_>, Vec<_>) =

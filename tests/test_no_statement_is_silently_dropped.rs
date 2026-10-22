@@ -321,7 +321,7 @@ fn outcome_of(case: &Case) -> Outcome {
         return Outcome::Rejected;
     };
 
-    if full.statements.len() > baseline.statements.len() {
+    if full.script.iter().count() > baseline.script.iter().count() {
         Outcome::Emitted
     } else if full.warnings.len() > baseline.warnings.len() {
         Outcome::Warned
@@ -412,13 +412,13 @@ fn a_consumed_policy_still_produces_row_level_security() {
     );
 
     assert!(
-        with_policy.statements.len() > without_policy.statements.len(),
+        with_policy.script.iter().count() > without_policy.script.iter().count(),
         "the policy must add statements to the output, otherwise it is being dropped"
     );
     assert!(
-        with_policy.statements.iter().any(|statement| statement.to_string().contains("'me'")),
+        with_policy.script.iter().any(|statement| statement.to_string().contains("'me'")),
         "the policy predicate must appear in the emitted SQL: {:?}",
-        with_policy.statements.iter().map(ToString::to_string).collect::<Vec<_>>()
+        with_policy.script.iter().map(ToString::to_string).collect::<Vec<_>>()
     );
 }
 
@@ -457,8 +457,8 @@ fn a_trigger_function_is_silent_while_a_lone_one_warns() {
     // Guards the silence against being vacuous: it is only correct because the
     // body really did reach the output.
     assert!(
-        with_trigger.statements.iter().any(|statement| statement.to_string().contains("'stamped'")),
+        with_trigger.script.iter().any(|statement| statement.to_string().contains("'stamped'")),
         "the function body must appear inside the emitted trigger: {:?}",
-        with_trigger.statements.iter().map(ToString::to_string).collect::<Vec<_>>()
+        with_trigger.script.iter().map(ToString::to_string).collect::<Vec<_>>()
     );
 }

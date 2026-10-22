@@ -112,6 +112,7 @@ fn translate(schema: &str, opts: &Pg2SqliteOptions) -> String {
         .expect("parse")
         .translate(opts)
         .expect("translate")
+        .into_vec()
         .iter()
         .map(|s| format!("{s};"))
         .collect::<Vec<_>>()

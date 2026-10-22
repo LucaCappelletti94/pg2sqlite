@@ -34,7 +34,9 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 fn assert_translates_and_runs(pg_sql: &str) -> String {
     let stmts = Pg2Sqlite::default()
         .sql(pg_sql)
-        .and_then(|t| t.translate(&Pg2SqliteOptions::default()))
+        .and_then(|t| {
+            t.translate(&Pg2SqliteOptions::default()).map(pg2sqlite::script::Script::into_vec)
+        })
         .expect("translation must succeed");
 
     let translated_sql = stmts.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("; ");

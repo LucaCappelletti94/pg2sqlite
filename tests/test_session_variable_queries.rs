@@ -60,6 +60,7 @@ fn translate(pg: &str, options: &Pg2SqliteOptions) -> Result<Vec<String>, Error>
         .sql(pg)
         .expect("the document parses as PostgreSQL")
         .translate(options)
+        .map(pg2sqlite::script::Script::into_vec)
         .map(|statements| statements.iter().map(ToString::to_string).collect())
 }
 

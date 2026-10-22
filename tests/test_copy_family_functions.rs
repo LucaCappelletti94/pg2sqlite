@@ -22,6 +22,7 @@ fn translate_ok(pg: &str, options: &Pg2SqliteOptions) -> String {
         .expect("parse")
         .translate_to_sql(options)
         .expect("expected translation to succeed")
+        .into_vec()
         .into_iter()
         .find(|s| !s.starts_with("PRAGMA"))
         .expect("expected a user statement")

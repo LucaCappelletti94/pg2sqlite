@@ -24,7 +24,7 @@
 #[allow(unused_imports)]
 use alloc::{string::String, vec::Vec};
 
-use sqlparser::ast::Statement;
+use crate::script::Script;
 
 /// A warning emitted during translation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,17 +105,16 @@ impl core::fmt::Display for TranslationWarning {
     }
 }
 
-/// Combined output of [`Pg2Sqlite::translate_with_report`]: the translated
-/// statements plus any warnings collected during translation.
+/// Combined output of [`Pg2Sqlite::translate_with_report`], the translated
+/// script plus any warnings collected during translation.
 ///
 /// [`Pg2Sqlite::translate_with_report`]: crate::pg2sqlite::Pg2Sqlite::translate_with_report
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslationReport {
-    /// Translated SQLite statements. Equivalent to the `Vec<Statement>`
-    /// returned by [`Pg2Sqlite::translate`].
+    /// The translated script, the one [`Pg2Sqlite::translate`] returns.
     ///
     /// [`Pg2Sqlite::translate`]: crate::pg2sqlite::Pg2Sqlite::translate
-    pub statements: Vec<Statement>,
+    pub script: Script,
     /// Warnings collected during translation. Empty when nothing was
     /// dropped or downgraded.
     pub warnings: Vec<TranslationWarning>,

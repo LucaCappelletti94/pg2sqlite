@@ -32,8 +32,12 @@ fn text_uuid_opts() -> Pg2SqliteOptions {
 
 /// Translate and execute every emitted statement in a fresh SQLite database.
 fn run(pg: &str, opts: &Pg2SqliteOptions) {
-    let stmts =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(opts).expect("translate");
+    let stmts = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(opts)
+        .expect("translate")
+        .into_vec();
     let conn = Connection::open_in_memory().unwrap();
     for s in &stmts {
         conn.execute_batch(&format!("{s};"))
@@ -156,7 +160,8 @@ fn bit_n_maps_to_text_not_integer() {
         .sql("CREATE TABLE t (col bit(4));")
         .expect("parse")
         .translate_to_sql(&default_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let sql = stmts.join("\n");
     assert!(sql.contains("TEXT"), "bit(n) must map to TEXT, got: {sql}");
     assert!(!sql.to_uppercase().contains("INTEGER"), "bit(n) must not map to INTEGER, got: {sql}");
@@ -184,7 +189,8 @@ fn overlong_bit_value_is_rejected() {
         .sql("CREATE TABLE t (col bit(4));")
         .expect("parse")
         .translate_to_sql(&default_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("DDL failed: {e}\n{s}"));
     }
@@ -204,7 +210,8 @@ fn bit_varying_n_accepts_at_boundary_and_rejects_past_it() {
         .sql("CREATE TABLE t (col bit varying(3));")
         .expect("parse")
         .translate_to_sql(&default_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("{e}\n{s}"));
     }
@@ -260,7 +267,8 @@ fn a_non_binary_value_written_later_fails_the_check() {
         .sql("CREATE TABLE t (col bit(3));")
         .expect("parse")
         .translate_to_sql(&default_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("DDL failed: {e}\n{s}"));
     }
@@ -343,7 +351,8 @@ fn smallint_above_upper_bound_is_rejected() {
         .sql("CREATE TABLE t (col smallint);")
         .expect("parse")
         .translate_to_sql(&default_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("{e}\n{s}"));
     }
@@ -360,7 +369,8 @@ fn smallint_below_lower_bound_is_rejected() {
         .sql("CREATE TABLE t (col smallint);")
         .expect("parse")
         .translate_to_sql(&default_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("{e}\n{s}"));
     }
@@ -386,7 +396,8 @@ fn integer_above_upper_bound_is_rejected() {
         .sql("CREATE TABLE t (col integer);")
         .expect("parse")
         .translate_to_sql(&default_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     for s in &stmts {
         conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("{e}\n{s}"));
     }
@@ -1026,7 +1037,8 @@ fn a_bound_parameter_in_a_checked_column_passes_through() {
         )
         .expect("parse")
         .translate_to_sql(&default_opts())
-        .expect("translate");
+        .expect("translate")
+        .into_vec();
     let insert = statements.last().expect("two statements");
     assert!(insert.contains("VALUES (?1, ?2, ?3)"), "{insert}");
 }

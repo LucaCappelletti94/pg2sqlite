@@ -21,6 +21,7 @@ fn logged(body: &str) -> Result<Option<String>, String> {
         ))
         .map_err(|error| error.to_string())?
         .translate_to_sql(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec)
         .map_err(|error| error.to_string())?;
 
     let connection = Connection::open_in_memory().expect("in-memory SQLite");

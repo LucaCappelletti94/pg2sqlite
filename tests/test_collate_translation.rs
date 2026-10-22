@@ -30,7 +30,11 @@ struct User {
 fn pg_collation_name_causes_error() {
     let sql = "CREATE TABLE coll_test (id INTEGER PRIMARY KEY, name TEXT);
                SELECT * FROM coll_test ORDER BY name COLLATE \"en_US\";";
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&Pg2SqliteOptions::default());
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
     assert!(result.is_err(), "Non-SQLite collation must cause a translation error");
     let err = result.unwrap_err().to_string().to_lowercase();
     assert!(
@@ -44,7 +48,8 @@ fn pg_collation_name_causes_error() {
 fn nocase_collation_still_works() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "CREATE TABLE nc_test (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
                SELECT * FROM nc_test ORDER BY name COLLATE NOCASE;";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let select_sql = translated
         .iter()
         .find(|s| matches!(s, sqlparser::ast::Statement::Query(_)))
@@ -73,7 +78,7 @@ fn test_collate_translation() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let select_stmt = translated
         .iter()
@@ -103,7 +108,7 @@ fn test_collate_semantic() -> Result<(), Box<dyn std::error::Error>> {
     ";
 
     let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection = SqliteConnection::establish(":memory:").expect("Failed to connect");
 
@@ -182,7 +187,8 @@ fn c_and_posix_collations_sort_in_byte_order() {
             .sql(&sql)
             .expect("script should parse")
             .translate(&Pg2SqliteOptions::default())
-            .unwrap_or_else(|error| panic!("COLLATE \"{collation}\" should translate: {error}"));
+            .unwrap_or_else(|error| panic!("COLLATE \"{collation}\" should translate: {error}"))
+            .into_vec();
 
         assert_eq!(
             emitted_collation(&translated),

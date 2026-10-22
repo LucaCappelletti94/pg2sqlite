@@ -52,7 +52,7 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
         ))
         .with_rls_audit_table_name("rls_audit".to_string());
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection = establish_connection();
 
@@ -83,7 +83,7 @@ fn test_multiple_policies_translation_snapshot() -> Result<(), Box<dyn std::erro
             "current_app_department",
         ));
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql =
         translated_migrations.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
@@ -369,7 +369,8 @@ CREATE POLICY mix1_all ON mix1 FOR ALL USING (owner = 'alice');
             .sql(SCHEMA)
             .expect("parse")
             .translate(&options)
-            .expect("translate");
+            .expect("translate")
+            .into_vec();
         let mut connection = SqliteConnection::establish(":memory:").expect("open db");
         let (triggers, base): (Vec<_>, Vec<_>) = statements
             .iter()

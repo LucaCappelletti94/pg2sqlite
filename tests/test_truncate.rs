@@ -78,7 +78,7 @@ fn apply_with(
     pg: &str,
     options: &Pg2SqliteOptions,
 ) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let statements = Pg2Sqlite::default().sql(pg)?.translate(options)?;
+    let statements = Pg2Sqlite::default().sql(pg)?.translate(options)?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
     for statement in &statements {
         sql_query(statement.to_string()).execute(&mut conn)?;
@@ -109,7 +109,8 @@ fn truncate_empties_the_table() -> Result<(), Box<dyn std::error::Error>> {
 
     let statements = Pg2Sqlite::default()
         .sql(&format!("{BASE} TRUNCATE docs;"))?
-        .translate(&Pg2SqliteOptions::default())?;
+        .translate(&Pg2SqliteOptions::default())?
+        .into_vec();
     let truncation = statements.last().expect("a statement must be emitted for TRUNCATE");
     sql_query(truncation.to_string()).execute(&mut conn)?;
 
@@ -135,7 +136,8 @@ fn truncate_empties_every_named_table() -> Result<(), Box<dyn std::error::Error>
 
     let statements = Pg2Sqlite::default()
         .sql(&format!("{BASE} TRUNCATE docs, notes;"))?
-        .translate(&Pg2SqliteOptions::default())?;
+        .translate(&Pg2SqliteOptions::default())?
+        .into_vec();
     // The schema is already applied, so only the truncation statements run.
     for statement in statements.iter().filter(|s| s.to_string().starts_with("DELETE FROM")) {
         sql_query(statement.to_string()).execute(&mut conn)?;
@@ -159,7 +161,8 @@ fn truncate_accepts_the_table_keyword_and_only() -> Result<(), Box<dyn std::erro
 
         let statements = Pg2Sqlite::default()
             .sql(&format!("{BASE} {form}"))?
-            .translate(&Pg2SqliteOptions::default())?;
+            .translate(&Pg2SqliteOptions::default())?
+            .into_vec();
         let truncation = statements.last().expect("a statement must be emitted");
         sql_query(truncation.to_string()).execute(&mut conn)?;
 
@@ -184,7 +187,8 @@ fn truncate_restart_identity_restarts_the_identifiers() -> Result<(), Box<dyn st
 
     let statements = Pg2Sqlite::default()
         .sql(&format!("{BASE} TRUNCATE docs RESTART IDENTITY;"))?
-        .translate(&Pg2SqliteOptions::default())?;
+        .translate(&Pg2SqliteOptions::default())?
+        .into_vec();
     sql_query(statements.last().expect("a statement must be emitted").to_string())
         .execute(&mut conn)?;
 
@@ -255,7 +259,7 @@ fn truncate_of_an_rls_table_empties_the_backing_table() -> Result<(), Box<dyn st
     // mirroring the triggers-disabled authoritative-load contract. The id=2 row
     // deliberately fails the policy: TRUNCATE must remove rows the session user
     // cannot write.
-    let statements = Pg2Sqlite::default().sql(ddl)?.translate(&options)?;
+    let statements = Pg2Sqlite::default().sql(ddl)?.translate(&options)?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
     let (triggers, base): (Vec<_>, Vec<_>) =
         statements.iter().map(ToString::to_string).partition(|s| s.starts_with("CREATE TRIGGER"));
@@ -275,7 +279,7 @@ fn truncate_of_an_rls_table_empties_the_backing_table() -> Result<(), Box<dyn st
     }
 
     let statements =
-        Pg2Sqlite::default().sql(&format!("{ddl} TRUNCATE docs;"))?.translate(&options)?;
+        Pg2Sqlite::default().sql(&format!("{ddl} TRUNCATE docs;"))?.translate(&options)?.into_vec();
     let truncation = statements.last().expect("a statement must be emitted for TRUNCATE");
     sql_query(truncation.to_string()).execute(&mut conn)?;
 

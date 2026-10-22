@@ -28,18 +28,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         INSERT INTO users (username) VALUES ('alice') ON CONFLICT DO NOTHING;
     ";
 
-    let sqlite_statements = Pg2Sqlite::default()
+    let script = Pg2Sqlite::default()
         .sql(pg_sql)?
         .translate(&Pg2SqliteOptions::default())?;
 
-    assert_eq!(sqlite_statements.len(), 3);
-    assert_eq!(sqlite_statements[0].to_string(), "PRAGMA case_sensitive_like = 1");
+    assert_eq!(script.setup[0].to_string(), "PRAGMA case_sensitive_like = 1");
     assert_eq!(
-        sqlite_statements[1].to_string(),
+        script.main[0].to_string(),
         "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, username TEXT NOT NULL) STRICT"
     );
     assert_eq!(
-        sqlite_statements[2].to_string(),
+        script.main[1].to_string(),
         "INSERT INTO users (username) VALUES ('alice') ON CONFLICT DO NOTHING"
     );
 
@@ -51,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Divergences that survive translation because the difference lives in the engines, not in the emitted SQL.
 
-- **Connection pragmas.** The script sets `foreign_keys = 1` and `case_sensitive_like = 1` only for the connection that applies it, and every connection that later writes to the replica has to set `foreign_keys` too, which the translation reports as a warning.
+- **Connection pragmas.** The pragmas `foreign_keys = 1` and `case_sensitive_like = 1` sit in the script's `setup` part. They last only as long as the connection, so every connection that writes to the replica has to run that part, which the translation reports as a warning for foreign keys.
 - **Case and collation.** SQLite folds ASCII only and compares byte-wise, so `lower`, `upper`, `ORDER BY`, `MIN`, and `MAX` diverge on non-ASCII or mixed-case text and `'a' < 'B'` answers false. `ILIKE` becomes `lower(...) LIKE lower(...) ESCAPE '\'`, and a pattern literal carrying a non-ASCII letter is refused unless `with_ilike_fold_function` names a Unicode-aware fold. An ICU-built SQLite or a `C`-collation PostgreSQL agrees with the server instead.
 - **Quiet answers.** PostgreSQL raises where SQLite answers. Division by zero gives `NULL`, `CAST('12abc' AS INTEGER)` gives 12, and integer overflow degrades to a float, while an `INTEGER` or `BIGINT` column carries no bound against any of it. `NUMERIC(p,s)` is the guarded exception, a scaled integer under a bounding `CHECK`, so overflowing the column fails.
 - **Stored representations.** What a column physically holds is not always what PostgreSQL would hand back. `translation_manifest` answers per column as a `ColumnStorage`, one of scaled minor units, UUID bytes or canonical text, JSON array text, packed floats with their width, or `Direct`.

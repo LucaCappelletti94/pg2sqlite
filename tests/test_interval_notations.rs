@@ -22,6 +22,7 @@ fn tr(pg: &str) -> String {
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
         .expect("translate")
+        .into_vec()
         .into_iter()
         .find(|s| !s.starts_with("PRAGMA"))
         .expect("at least one user statement")

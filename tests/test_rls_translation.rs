@@ -65,7 +65,7 @@ fn test_rls_select_policy_filters_rows() -> Result<(), Box<dyn std::error::Error
         ));
 
     // Translate the SQL
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     // Snapshot the translated SQL for consistency checking
     let translated_sql =
@@ -148,7 +148,7 @@ fn test_rls_insert_policy_enforces_owner() -> Result<(), Box<dyn std::error::Err
             "current_app_user",
         ));
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection = establish_connection();
 
@@ -205,7 +205,7 @@ fn test_rls_update_policy_restricts_updates() -> Result<(), Box<dyn std::error::
             "current_app_user",
         ));
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection = establish_connection();
 
@@ -293,7 +293,7 @@ fn test_rls_delete_policy_restricts_deletes() -> Result<(), Box<dyn std::error::
             "current_app_user",
         ));
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection = establish_connection();
 
@@ -384,7 +384,7 @@ fn test_rls_all_policy_works_like_individual_policies() -> Result<(), Box<dyn st
             "current_app_user",
         ));
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     // Snapshot the translated SQL for consistency checking
     let translated_sql =
@@ -511,7 +511,8 @@ fn test_missing_session_variable_mapping_error() -> Result<(), Box<dyn std::erro
     // Note: NOT calling .with_session_variable()
 
     // Translation should fail with SessionVariableMappingNotFound error
-    let result = Pg2Sqlite::default().sql(sql)?.translate(&options);
+    let result =
+        Pg2Sqlite::default().sql(sql)?.translate(&options).map(pg2sqlite::script::Script::into_vec);
 
     assert!(
         result.is_err(),

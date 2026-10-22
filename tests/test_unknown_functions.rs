@@ -16,6 +16,7 @@ fn translate(pg: &str, options: &Pg2SqliteOptions) -> Result<Vec<String>, String
         .sql(pg)
         .map_err(|error| error.to_string())?
         .translate_to_sql(options)
+        .map(pg2sqlite::script::Script::into_vec)
         .map_err(|error| error.to_string())
 }
 

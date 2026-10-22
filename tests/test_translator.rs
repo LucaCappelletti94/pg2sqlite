@@ -71,7 +71,8 @@ fn test_translator() -> Result<(), Box<dyn std::error::Error>> {
                 &Pg2SqliteOptions::default()
                     .with_remove_unsupported_check_constraints()
                     .with_uuid_representation(UuidRepresentation::Blob),
-            )?;
+            )?
+            .into_vec();
 
     // We try to parse the translated migrations using the `sqlparser` crate,
     // for the `SQLite` dialect.

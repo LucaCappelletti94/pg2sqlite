@@ -56,7 +56,8 @@ fn table_info(conn: &mut SqliteConnection) -> Result<Vec<ColumnInfo>, Box<dyn st
 /// Translates `pg` and applies every emitted statement. The emitted DDL is the
 /// artifact under test, so it is applied as generated text.
 fn apply(pg: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(pg)?.translate(&Pg2SqliteOptions::default())?;
+    let translated =
+        Pg2Sqlite::default().sql(pg)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     let mut conn = SqliteConnection::establish(":memory:")?;
     for statement in &translated {
         diesel::sql_query(statement.to_string()).execute(&mut conn)?;
@@ -268,6 +269,7 @@ fn enable_row_level_security_emits_no_alter_and_still_builds_the_wrapper()
     let emitted: Vec<String> = Pg2Sqlite::default()
         .sql(sql)?
         .translate(&options)?
+        .into_vec()
         .iter()
         .map(ToString::to_string)
         .collect();
@@ -432,7 +434,8 @@ fn alter_on_a_protected_table_lands_on_the_backing_table() -> Result<(), Box<dyn
              ALTER TABLE docs ADD COLUMN extra TEXT;
              ALTER TABLE docs DROP COLUMN gone;",
         )?
-        .translate(&options)?;
+        .translate(&options)?
+        .into_vec();
 
     let mut conn = SqliteConnection::establish(":memory:")?;
     for statement in &translated {

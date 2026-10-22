@@ -38,6 +38,7 @@ fn forward(pg_sql: &str) -> Vec<String> {
         .unwrap()
         .translate_to_sql(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
 }
 
 const TV_SCHEMA: &str = "CREATE TABLE tv (id INT PRIMARY KEY, v INT); CREATE TABLE src (n INT);";

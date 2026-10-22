@@ -63,7 +63,7 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
             "current_app_user",
         ));
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection = establish_connection();
 
@@ -90,7 +90,7 @@ fn test_public_access_translation_snapshot() -> Result<(), Box<dyn std::error::E
             "current_app_user",
         ));
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql =
         translated_migrations.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");

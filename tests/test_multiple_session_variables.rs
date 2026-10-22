@@ -31,7 +31,7 @@ fn test_multiple_session_vars_snapshot() {
     let sql = include_str!("fixtures/rls_multi_session_vars.sql");
     let options = make_options();
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     insta::assert_snapshot!("multiple_session_vars_translation", sql_output);
@@ -44,7 +44,7 @@ fn test_both_session_variable_patterns_are_mapped() {
     let sql = include_str!("fixtures/rls_multi_session_vars.sql");
     let options = make_options();
 
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
     let sql_output = translated.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
     // current_setting('app.user_id') → current_app_user()
@@ -84,7 +84,11 @@ fn test_missing_session_variable_for_current_setting_fails() {
         .with_rls_audit_table_name("rls_audit".to_string())
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"));
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
 
     assert!(
         result.is_err(),

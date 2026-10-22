@@ -42,7 +42,8 @@ fn apply(pg: &str) -> SqliteConnection {
         .sql(pg)
         .expect("script should parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .unwrap_or_else(|error| panic!("script should translate: {error}"));
+        .unwrap_or_else(|error| panic!("script should translate: {error}"))
+        .into_vec();
 
     let mut connection =
         SqliteConnection::establish(":memory:").expect("in-memory SQLite should open");
@@ -146,6 +147,7 @@ fn reject(pg: &str) -> String {
         .sql(pg)
         .expect("script should parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec)
     {
         Err(error) => error.to_string(),
         Ok(emitted) => panic!("expected a rejection, got: {}", emitted.join("\n")),

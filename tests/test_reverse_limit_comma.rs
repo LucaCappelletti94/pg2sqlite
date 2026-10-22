@@ -56,7 +56,8 @@ fn a_round_trip_preserves_both_numbers() {
         .sql(&format!("{SCHEMA}{pg};"))
         .expect("parse")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("forward");
+        .expect("forward")
+        .into_vec();
     let back = fwd_stmts.join("\n");
     assert!(back.contains("LIMIT 10"), "{back}");
     assert!(back.contains("OFFSET 5"), "{back}");

@@ -20,7 +20,10 @@ fn opts() -> Pg2SqliteOptions {
 
 /// Translates `sql` with the given options and returns the string vec.
 fn translate(sql: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default().sql(sql)?.translate_to_sql(&opts())
+    Pg2Sqlite::default()
+        .sql(sql)?
+        .translate_to_sql(&opts())
+        .map(pg2sqlite::script::Script::into_vec)
 }
 
 /// Translates `sql` and collects warnings alongside the string vec.
@@ -28,7 +31,7 @@ fn translate_with_warnings(
     sql: &str,
 ) -> Result<(Vec<String>, Vec<TranslationWarning>), pg2sqlite::errors::Error> {
     let report = Pg2Sqlite::default().sql(sql)?.translate_with_report(&opts())?;
-    let stmts = report.statements.iter().map(|s| s.to_string()).collect();
+    let stmts = report.script.iter().map(|s| s.to_string()).collect();
     Ok((stmts, report.warnings))
 }
 
@@ -547,7 +550,7 @@ fn ctas_infers_columns_and_preserves_rows() {
     let translator = Pg2Sqlite::default().sql("CREATE TABLE members (id INT, name TEXT);").unwrap();
     let schema = translator.build_schema().unwrap();
     let mut connection = helpers::establish_connection();
-    for statement in translator.translate_to_sql(&opts()).unwrap() {
+    for statement in translator.translate_to_sql(&opts()).unwrap().into_vec() {
         diesel::sql_query(statement).execute(&mut connection).unwrap();
     }
     let rows = [
@@ -559,7 +562,8 @@ fn ctas_infers_columns_and_preserves_rows() {
         .sql("CREATE TABLE archive AS SELECT id, name FROM members;")
         .unwrap()
         .translate_to_sql_with_schema(&schema, &opts())
-        .unwrap();
+        .unwrap()
+        .into_vec();
     for statement in statements {
         diesel::sql_query(statement).execute(&mut connection).unwrap();
     }

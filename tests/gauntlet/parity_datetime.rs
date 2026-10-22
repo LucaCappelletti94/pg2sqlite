@@ -204,7 +204,8 @@ fn sqlite_setup() -> SqliteConnection {
         .sql(SCHEMA_PG)
         .expect("parse moments DDL")
         .translate(&options())
-        .expect("translate moments DDL");
+        .expect("translate moments DDL")
+        .into_vec();
 
     let mut conn = establish_connection();
 
@@ -269,7 +270,8 @@ fn sqlite_eval(conn: &mut SqliteConnection, pg_expr: &str, ids: &[i32]) -> Vec<O
         .sql(&pg_sql)
         .expect("parse for sqlite_eval")
         .translate(&options())
-        .expect("translate for sqlite_eval");
+        .expect("translate for sqlite_eval")
+        .into_vec();
     let translated = stmts.last().expect("translated SELECT").to_string();
     // diesel::sql_query is correct: the query is dynamically produced by the
     // translator and cannot be expressed as a typed Diesel query.

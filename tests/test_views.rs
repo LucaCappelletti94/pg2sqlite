@@ -117,7 +117,7 @@ fn translate_and_setup() -> Result<diesel::SqliteConnection, Box<dyn std::error:
 
     let options = Pg2SqliteOptions::default();
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let mut connection =
         diesel::SqliteConnection::establish(":memory:").expect("Failed to connect");
@@ -138,7 +138,7 @@ fn test_views_translation_snapshot() -> Result<(), Box<dyn std::error::Error>> {
 
     let options = Pg2SqliteOptions::default();
 
-    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated_migrations = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
 
     let translated_sql =
         translated_migrations.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
@@ -265,7 +265,11 @@ fn test_materialized_view_error() {
 
     let options = Pg2SqliteOptions::default();
 
-    let result = Pg2Sqlite::default().sql(sql).unwrap().translate(&options);
+    let result = Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&options)
+        .map(pg2sqlite::script::Script::into_vec);
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -282,7 +286,7 @@ fn test_or_replace_view_emits_drop_then_create() {
 
     let options = Pg2SqliteOptions::default();
 
-    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap();
+    let stmts = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
 
     assert_eq!(stmts.len(), 3, "the script leads with the dialect pragma, then DROP + CREATE");
     let drop = stmts[1].to_string();
@@ -312,8 +316,8 @@ fn test_or_replace_view_diesel_roundtrip() -> Result<(), Box<dyn std::error::Err
     let replace_sql = "CREATE OR REPLACE VIEW item_names AS SELECT id, name FROM items;";
 
     let options = Pg2SqliteOptions::default();
-    let setup_stmts = Pg2Sqlite::default().sql(setup_sql)?.translate(&options)?;
-    let replace_stmts = Pg2Sqlite::default().sql(replace_sql)?.translate(&options)?;
+    let setup_stmts = Pg2Sqlite::default().sql(setup_sql)?.translate(&options)?.into_vec();
+    let replace_stmts = Pg2Sqlite::default().sql(replace_sql)?.translate(&options)?.into_vec();
 
     let mut conn = diesel::SqliteConnection::establish(":memory:")?;
 

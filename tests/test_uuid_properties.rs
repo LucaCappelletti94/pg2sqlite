@@ -160,7 +160,7 @@ fn get_create_table_sql(
         UuidVersion::V7 => options.with_uuid_v7_function_name(uuid_func_name),
     };
 
-    let translated = translator.translate(&options).unwrap();
+    let translated = translator.translate(&options).unwrap().into_vec();
     translated
         .iter()
         .find(|s| !s.to_string().starts_with("PRAGMA"))
@@ -323,7 +323,7 @@ fn uuid_function_name_accepts_str_literal() -> Result<(), Box<dyn std::error::Er
         .with_uuid_function_name("my_uuid_fn"); // &str, not String
     // Use gen_random_uuid() as DEFAULT so the function name appears in output.
     let sql = "CREATE TABLE uuid_str_test (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL);";
-    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?;
+    let translated = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
     let ddl = translated.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n");
     assert!(
         ddl.contains("my_uuid_fn"),

@@ -33,7 +33,10 @@ struct Numbered {
     ordinality: i32,
 }
 fn translate(pg: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
-    Pg2Sqlite::default().sql(pg)?.translate_to_sql(&Pg2SqliteOptions::default())
+    Pg2Sqlite::default()
+        .sql(pg)?
+        .translate_to_sql(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec)
 }
 
 /// Arrays need a declared representation before `UNNEST` can be lowered, so the
@@ -41,7 +44,10 @@ fn translate(pg: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
 fn translate_with_json_arrays(pg: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
     let options = Pg2SqliteOptions::default()
         .with_array_representation(pg2sqlite::prelude::ArrayRepresentation::Json);
-    Pg2Sqlite::default().sql(pg)?.translate_to_sql(&options)
+    Pg2Sqlite::default()
+        .sql(pg)?
+        .translate_to_sql(&options)
+        .map(pg2sqlite::script::Script::into_vec)
 }
 
 fn translate_err(pg: &str) -> String {

@@ -26,6 +26,7 @@ fn translate_ok(sql: &str) -> String {
         .unwrap()
         .translate(&Pg2SqliteOptions::default())
         .unwrap()
+        .into_vec()
         .into_iter()
         .find(|s| matches!(s, Statement::Query(_)))
         .unwrap()

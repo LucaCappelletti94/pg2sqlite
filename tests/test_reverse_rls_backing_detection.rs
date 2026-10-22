@@ -115,7 +115,8 @@ fn a_declared_table_named_like_a_backing_table_is_emitted_under_that_name() {
         .sql(PLAIN_WITH_SUFFIXED_NAME)
         .expect("schema parses")
         .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("a plain table translates");
+        .expect("a plain table translates")
+        .into_vec();
     assert_eq!(
         emitted,
         [

@@ -58,9 +58,7 @@ fn a_deferred_foreign_key_still_translates() {
             "CREATE TABLE p (id int primary key);
              CREATE TABLE c (id int primary key, pid int REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED);",
         )
-        .expect("fixture parses")
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .expect("a deferred foreign key is translatable");
+        .expect("fixture parses").translate_to_sql(&Pg2SqliteOptions::default()).expect("a deferred foreign key is translatable").into_vec();
     let connection = Connection::open_in_memory().expect("in-memory SQLite");
     for statement in &statements {
         connection

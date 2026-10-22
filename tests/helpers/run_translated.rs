@@ -27,8 +27,12 @@ use rusqlite::Connection;
 /// Panics when translation fails, when an emitted statement will not execute,
 /// or when the script emits nothing.
 pub fn run_translated_with(pg: &str, options: &Pg2SqliteOptions) -> Vec<Option<String>> {
-    let mut statements =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate_to_sql(options).expect("translate");
+    let mut statements = Pg2Sqlite::default()
+        .sql(pg)
+        .expect("parse")
+        .translate_to_sql(options)
+        .expect("translate")
+        .into_vec();
     let probe = statements.pop().expect("script should emit at least one statement");
 
     let connection = Connection::open_in_memory().expect("in-memory SQLite");

@@ -27,7 +27,8 @@ fn rejection(pg: &str) -> String {
     let result = Pg2Sqlite::default()
         .sql(pg)
         .expect("the fixture must parse")
-        .translate(&Pg2SqliteOptions::default());
+        .translate(&Pg2SqliteOptions::default())
+        .map(pg2sqlite::script::Script::into_vec);
 
     match result {
         Ok(statements) => {
@@ -90,7 +91,8 @@ fn execute_function_in_a_trigger_still_translates() -> Result<(), Box<dyn std::e
         CREATE TRIGGER t_bump BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION bump();
     ";
 
-    let statements = Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?;
+    let statements =
+        Pg2Sqlite::default().sql(sql)?.translate(&Pg2SqliteOptions::default())?.into_vec();
     assert!(
         statements.iter().any(|s| s.to_string().contains("CREATE TRIGGER")),
         "the trigger must still be emitted: {statements:?}"
