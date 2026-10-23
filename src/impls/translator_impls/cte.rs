@@ -6,12 +6,44 @@ use core::ops::ControlFlow;
 #[cfg(feature = "std")]
 use std::{borrow::Cow, collections::BTreeSet};
 
+use sql_traits::structs::{ColumnScope, ParserDB, QueryOutput};
 use sqlparser::ast::{
-    Ident, ObjectName, ObjectNamePart, Query, SetExpr, Statement, TableAlias, TableFactor, Visit,
-    VisitMut, Visitor, VisitorMut,
+    Ident, ObjectName, ObjectNamePart, Query, SetExpr, Statement, TableAlias, TableAliasColumnDef,
+    TableFactor, Visit, VisitMut, Visitor, VisitorMut, With,
 };
 
 use crate::impls::{object_name::last_ident, relation_scope::RelationScopes};
+
+/// Completes each CTE's column list with its source output names, which a
+/// stored column rename would otherwise change in SQLite.
+pub(super) fn pin_output_names(
+    with: &mut With,
+    source: &With,
+    scope: &ColumnScope<'_, '_, ParserDB>,
+) {
+    for (cte, written) in with.cte_tables.iter_mut().zip(&source.cte_tables) {
+        let Some(outputs) = scope.scope_for_query(&written.query) else { continue };
+        let declared = cte.alias.columns.len();
+        let mut names: Vec<Ident> =
+            cte.alias.columns.iter().map(|column| column.name.clone()).collect();
+        let mut known = true;
+        for output in outputs.outputs().skip(declared) {
+            let QueryOutput::Column { name: Some((name, quoted)), .. } = output else {
+                known = false;
+                break;
+            };
+            names.push(if quoted { Ident::with_quote('"', name) } else { Ident::new(name) });
+        }
+        let distinct = names.iter().enumerate().all(|(index, name)| {
+            names[..index].iter().all(|earlier| !earlier.value.eq_ignore_ascii_case(&name.value))
+        });
+        if known && distinct && names.len() > declared {
+            cte.alias.columns.extend(
+                names.drain(declared..).map(|name| TableAliasColumnDef { name, data_type: None }),
+            );
+        }
+    }
+}
 
 pub(super) fn preserve_bindings(query: &Query) -> Cow<'_, Query> {
     let Some(with) = &query.with else { return Cow::Borrowed(query) };

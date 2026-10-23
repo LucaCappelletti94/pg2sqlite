@@ -88,6 +88,15 @@ impl TranslationDirection for Forward {
         insert.translate_with_warnings(schema, options, emit)
     }
 
+    fn translate_update(
+        update: &sqlparser::ast::Update,
+        schema: &ParserDB,
+        options: &crate::options::TranslationContext<'_>,
+        emit: crate::warnings::WarningSink<'_>,
+    ) -> Result<sqlparser::ast::Update, Error> {
+        update.translate_with_warnings(schema, options, emit)
+    }
+
     fn translate_delete(
         delete: &sqlparser::ast::Delete,
         schema: &ParserDB,

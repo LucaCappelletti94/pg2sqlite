@@ -101,6 +101,12 @@ pub(crate) trait TranslationDirection {
         options: &Self::Options<'_>,
         emit: crate::warnings::WarningSink<'_>,
     ) -> Result<sqlparser::ast::Insert, Error>;
+    fn translate_update(
+        update: &sqlparser::ast::Update,
+        schema: &ParserDB,
+        options: &Self::Options<'_>,
+        emit: crate::warnings::WarningSink<'_>,
+    ) -> Result<sqlparser::ast::Update, Error>;
     fn translate_delete(
         delete: &sqlparser::ast::Delete,
         schema: &ParserDB,
@@ -522,8 +528,8 @@ pub(crate) fn query_output_matches(
             Error::forward_refusal("The scalar query has no recorded output scope.".to_owned())
         })?
     };
-    for output in scope.output_definitions() {
-        if let QueryOutput::Column(definition) = output
+    for output in scope.outputs() {
+        if let QueryOutput::Column { definition, .. } = output
             && definition_matches(&definition, schema, options, &read_column, &read_expression)?
         {
             return Ok(true);
@@ -3585,7 +3591,7 @@ pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
             SetExpr::Insert(Statement::Insert(D::translate_insert(ins, schema, options, emit)?))
         }
         SetExpr::Update(Statement::Update(upd)) => {
-            SetExpr::Update(Statement::Update(translate_update::<D>(upd, schema, options, emit)?))
+            SetExpr::Update(Statement::Update(D::translate_update(upd, schema, options, emit)?))
         }
         SetExpr::Delete(Statement::Delete(del)) => {
             SetExpr::Delete(Statement::Delete(D::translate_delete(del, schema, options, emit)?))
@@ -4562,6 +4568,15 @@ mod tests {
             Ok(insert.clone())
         }
 
+        fn translate_update(
+            update: &sqlparser::ast::Update,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
+        ) -> Result<sqlparser::ast::Update, Error> {
+            Ok(update.clone())
+        }
+
         fn translate_delete(
             delete: &sqlparser::ast::Delete,
             _schema: &ParserDB,
@@ -4613,6 +4628,15 @@ mod tests {
             _emit: crate::warnings::WarningSink<'_>,
         ) -> Result<sqlparser::ast::Insert, Error> {
             Ok(insert.clone())
+        }
+
+        fn translate_update(
+            update: &sqlparser::ast::Update,
+            _schema: &ParserDB,
+            _options: &Pg2SqliteOptions,
+            _emit: crate::warnings::WarningSink<'_>,
+        ) -> Result<sqlparser::ast::Update, Error> {
+            Ok(update.clone())
         }
 
         fn translate_delete(

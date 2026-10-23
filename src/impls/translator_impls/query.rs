@@ -75,7 +75,22 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         let noted = options.with_cte_clause(query.with.as_ref().or_else(|| options.cte_clause()));
         let options = &noted;
 
-        let with = translate_with_clause(query.with.as_ref(), schema, options, emit)?;
+        let mut with = translate_with_clause(query.with.as_ref(), schema, options, emit)?;
+        if let (Some(with), Some(source), Some(scope)) =
+            (with.as_mut(), scope_query.with.as_ref(), scope.as_ref())
+        {
+            match options.written_schema().filter(|written| !core::ptr::eq(*written, schema)) {
+                Some(written) => {
+                    let written = sql_traits::structs::ColumnScope::from_query(
+                        scope_query,
+                        written,
+                        sql_traits::structs::IdentifierCase::AsWritten,
+                    )?;
+                    super::cte::pin_output_names(with, source, &written);
+                }
+                None => super::cte::pin_output_names(with, source, scope),
+            }
+        }
         let order_by = translate_order_by(query.order_by.as_ref(), schema, options, emit)?;
         let (limit_clause, fetch) = forward_translate_limit_and_fetch(
             query.limit_clause.as_ref(),
