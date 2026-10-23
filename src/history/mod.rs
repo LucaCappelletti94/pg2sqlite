@@ -244,8 +244,8 @@ fn replay_fresh(
 }
 
 /// Replays one unit against `schema`, returning the schema after it and the
-/// unit's placed statements when rebinding changed them. The replay `owned`
-/// the unit when its target files run it in full.
+/// unit's placed statements when rebinding changed them. `owned` is set when
+/// the unit's target files run it in full.
 fn replay_unit(
     unit: &Unit<'_>,
     id: StatementId,
@@ -386,11 +386,7 @@ impl ReplaySchema {
             Statement::AlterPolicy(policy) => recreated(&policy.table_name),
             Statement::DropPolicy(policy) => recreated(&policy.table_name),
             Statement::Drop {
-                object_type:
-                    ObjectType::Table
-                    | ObjectType::View
-                    | ObjectType::MaterializedView
-                    | ObjectType::Index,
+                object_type: ObjectType::Table | ObjectType::View | ObjectType::Index,
                 names,
                 ..
             } => names.first().map_or(owned, recreated),
