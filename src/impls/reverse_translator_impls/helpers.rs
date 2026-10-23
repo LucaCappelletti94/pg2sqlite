@@ -82,6 +82,15 @@ impl TranslationDirection for Reverse {
         insert.reverse_translate(schema, options)
     }
 
+    fn translate_update(
+        update: &sqlparser::ast::Update,
+        schema: &ParserDB,
+        options: &crate::options::TranslationContext<'_>,
+        _emit: crate::warnings::WarningSink<'_>,
+    ) -> Result<sqlparser::ast::Update, Error> {
+        update.reverse_translate(schema, options)
+    }
+
     fn translate_delete(
         delete: &sqlparser::ast::Delete,
         schema: &ParserDB,

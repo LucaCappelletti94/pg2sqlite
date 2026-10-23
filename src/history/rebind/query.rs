@@ -39,6 +39,18 @@ impl Planner<'_> {
         query: &Query,
         header: Header,
     ) -> Result<(), ConnectionError> {
+        self.scopes.enter(query);
+        let result = self.query_body(scope, query, header);
+        self.scopes.exit();
+        result
+    }
+
+    fn query_body(
+        &mut self,
+        scope: &ColumnScope<'_, '_, ParserDB>,
+        query: &Query,
+        header: Header,
+    ) -> Result<(), ConnectionError> {
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
                 self.query(scope, &cte.query, Header::Keep)?;
@@ -299,7 +311,9 @@ impl Planner<'_> {
             _ => return Ok(None),
         };
         let Some((qualifier, _)) = binding.relation() else { return Ok(None) };
-        let Some(entry) = self.listed(qualifier) else { return Ok(None) };
+        let Some(entry) = self.listed(qualifier).filter(|entry| !entry.lexical) else {
+            return Ok(None);
+        };
         let replay_name = entry.replay_name.clone();
         let rename_qualifier =
             !entry.aliased && parts.len() >= 2 && replay_name != parts[parts.len() - 2].value;

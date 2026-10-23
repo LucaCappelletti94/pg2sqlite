@@ -47,6 +47,7 @@ use super::StatementId;
 use crate::{
     history::placement::{Files, Homes, home},
     impls::{
+        relation_scope::RelationScopes,
         scoped_relations::relation_occurrences,
         translator_impls::{delete::delete_scope_query, update::update_scope_query},
     },
@@ -72,6 +73,7 @@ pub(super) fn rebind(
         homes,
         edits: Edits::default(),
         frames: Vec::new(),
+        scopes: RelationScopes::default(),
     };
     planner.relations(statement)?;
     planner.statement(statement)?;
@@ -128,6 +130,7 @@ pub(super) fn rebind_trigger_body(
         homes,
         edits: Edits::default(),
         frames: Vec::new(),
+        scopes: RelationScopes::default(),
     };
     for statement in &statements {
         planner.relations(statement)?;
@@ -164,8 +167,10 @@ struct Planner<'a> {
     /// The home of each created object, keyed by its SQLite-folded name.
     homes: &'a Homes,
     edits: Edits,
-    /// The stored relations each enclosing select lists, innermost last.
+    /// The relations each enclosing select lists, innermost last.
     frames: Vec<Vec<Listed>>,
+    /// The common table expressions visible to the query being planned.
+    scopes: RelationScopes,
 }
 
 impl Planner<'_> {
@@ -248,12 +253,14 @@ impl Planner<'_> {
                 let mut exprs: Vec<&Expr> =
                     update.assignments.iter().map(|assignment| &assignment.value).collect();
                 exprs.extend(update.selection.as_ref());
-                self.dml(&scope_query, &exprs)
+                self.dml(&scope_query, 1, &exprs)
             }
             Statement::Delete(delete) => {
                 let scope_query = delete_scope_query(delete);
                 let exprs: Vec<&Expr> = delete.selection.iter().collect();
-                self.dml(&scope_query, &exprs)
+                let (sqlparser::ast::FromTable::WithFromKeyword(targets)
+                | sqlparser::ast::FromTable::WithoutKeyword(targets)) = &delete.from;
+                self.dml(&scope_query, targets.len(), &exprs)
             }
             _ => Ok(()),
         }
