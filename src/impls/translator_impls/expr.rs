@@ -674,8 +674,9 @@ fn translate_trim(
         let translated_expr = expr.translate_with_warnings(schema, options, emit)?;
         let char_arg = match trim_what {
             Some(e) => Some(e.translate_with_warnings(schema, options, emit)?),
-            // trim_characters is the pg-dialect "TRIM(LEADING FROM str USING chars)" form;
-            // treat the first character expression as the trim set when present.
+            // trim_characters is the pg-dialect "TRIM(LEADING FROM str USING
+            // chars)" form; treat the first character expression as the trim
+            // set when present.
             None => {
                 trim_characters
                     .and_then(|c| c.first())
@@ -2186,7 +2187,8 @@ fn convert_beside_column_expr(
     .ok()
     .flatten();
     match data_type {
-        // A comparison widens the zoneless column to an instant rather than narrowing the instant.
+        // A comparison widens the zoneless column to an instant rather than
+        // narrowing the instant.
         Some(dt)
             if crate::impls::temporal_literals::temporal_literal_kind(&dt).is_some_and(
                 |kind| kind != crate::impls::temporal_literals::TemporalLiteralKind::TIMESTAMPTZ,
@@ -2957,10 +2959,11 @@ fn translate_binary_op(
                      REGEXP extension, which cannot honor case-insensitive matching even when registered."
                 .to_string()));
         }
-        // Array containment (@> / <@). When both operands resolve to arrays under
-        // the JSON representation, rewrite via NOT EXISTS / json_each anti-join.
-        // For jsonb operands the refusal names jsonb so the message does not
-        // mislead array callers who forgot to set ArrayRepresentation::Json.
+        // Array containment (@> / <@). When both operands resolve to arrays
+        // under the JSON representation, rewrite via NOT EXISTS / json_each
+        // anti-join. For jsonb operands the refusal names jsonb so the message
+        // does not mislead array callers who forgot to set
+        // ArrayRepresentation::Json.
         BinaryOperator::AtArrow => {
             if is_json_array_representation(options)
                 && (is_array_expression(left, schema, options)?
@@ -3685,7 +3688,8 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
             Expr::AtTimeZone { timestamp, time_zone } => {
                 translate_at_time_zone(timestamp, time_zone, schema, options, emit)?
             }
-            // UNKNOWN is rewritten as a NULL check on the boolean expression result.
+            // UNKNOWN is rewritten as a NULL check on the boolean expression
+            // result.
             Expr::IsUnknown(inner) => {
                 Expr::IsNull(Box::new(inner.translate_with_warnings(schema, options, emit)?))
             }
@@ -3966,7 +3970,8 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                         .to_string(),
                 ));
             }
-            // Not, Minus, Plus and BitwiseNot fall through and keep the operator.
+            // Not, Minus, Plus and BitwiseNot fall through and keep the
+            // operator.
             Expr::UnaryOp { op, expr } => {
                 rebuild(|| {
                     Ok(match op {
@@ -4073,7 +4078,8 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
                     translate_expr_recursive::<Forward>(self, schema, options, emit)?
                 }
             }
-            // All remaining variants: delegate structural recursion to shared helper.
+            // All remaining variants: delegate structural recursion to shared
+            // helper.
             _ => translate_expr_recursive::<Forward>(self, schema, options, emit)?,
         })
     }

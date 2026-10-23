@@ -491,13 +491,14 @@ impl ReverseTranslator for Insert {
                         &all_table_columns,
                     )?);
                 }
-                // INSERT OR FAIL and INSERT OR ABORT abort on conflict, which is
-                // exactly what a plain PostgreSQL INSERT does, so the OR clause is
-                // dropped and `insert.on` stays None. INSERT OR ROLLBACK also
-                // aborts but additionally rolls back any enclosing transaction,
-                // a behaviour that cannot be replicated in PostgreSQL from within a
-                // single statement, yet the safest translation is still a plain
-                // INSERT rather than a silent mutation.
+                // INSERT OR FAIL and INSERT OR ABORT abort on conflict, which
+                // is exactly what a plain PostgreSQL INSERT does, so the OR
+                // clause is dropped and `insert.on` stays None. INSERT OR
+                // ROLLBACK also aborts but additionally rolls back any
+                // enclosing transaction, a behaviour that cannot be replicated
+                // in PostgreSQL from within a single statement, yet the safest
+                // translation is still a plain INSERT rather than a silent
+                // mutation.
                 SqliteOnConflict::Rollback | SqliteOnConflict::Abort | SqliteOnConflict::Fail => {}
             }
         }

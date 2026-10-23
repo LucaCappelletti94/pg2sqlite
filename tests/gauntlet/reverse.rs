@@ -151,8 +151,9 @@ const ACCEPT_CASES: &[(&str, &str)] = &[
     ("SELECT time() FROM t", "date_and_time"),
     // --- json functions (test_reverse_json_functions.rs,
     // test_reverse_output_is_valid_postgres.rs)
-    // json_set and json_insert wrap the value in to_jsonb(); hex casts the argument to bytea.
-    // json_type(x) is now refused (vocabulary mismatch); json_type(x, path) still works.
+    // json_set and json_insert wrap the value in to_jsonb(); hex casts the
+    // argument to bytea. json_type(x) is now refused (vocabulary mismatch);
+    // json_type(x, path) still works.
     ("SELECT json(s) FROM t", "json_functions"),
     ("SELECT json_set(payload, '$.a', 1) FROM t", "json_functions"),
     ("SELECT json_insert(payload, '$.a', 1) FROM t", "json_functions"),
@@ -178,7 +179,8 @@ const ACCEPT_CASES: &[(&str, &str)] = &[
     ("SELECT group_concat(DISTINCT s) FROM t", "scalar_functions"),
     // hex(x) now casts the argument to bytea so encode() accepts it.
     ("SELECT hex(s) FROM t", "scalar_functions"),
-    // --- strftime (test_reverse_strftime.rs, test_reverse_output_is_valid_postgres.rs)
+    // --- strftime (test_reverse_strftime.rs,
+    // test_reverse_output_is_valid_postgres.rs)
     ("SELECT strftime('%Y-01-01 00:00:00', ts) FROM t", "strftime"),
     ("SELECT strftime('%Y', ts) FROM t", "strftime"),
     ("SELECT strftime('%Y-%m-%d', ts) FROM t", "strftime"),
@@ -200,10 +202,12 @@ const ACCEPT_CASES: &[(&str, &str)] = &[
     // test_reverse_scalar_functions.rs)
     ("SELECT s FROM t WHERE s GLOB 'a*'", "glob"),
     ("SELECT s FROM t WHERE s GLOB 'a?b'", "glob"),
-    // --- REGEXP to POSIX (test_reverse_output_is_valid_postgres.rs, test_reverse_expr.rs)
+    // --- REGEXP to POSIX (test_reverse_output_is_valid_postgres.rs,
+    // test_reverse_expr.rs)
     ("SELECT s FROM t WHERE s REGEXP '^[A-Z]'", "regexp"),
     ("SELECT s FROM t WHERE s NOT REGEXP '^[A-Z]'", "regexp"),
-    // --- INSERT OR REPLACE / OR IGNORE (test_reverse_output_is_valid_postgres.rs)
+    // --- INSERT OR REPLACE / OR IGNORE
+    // (test_reverse_output_is_valid_postgres.rs)
     ("INSERT OR IGNORE INTO t (id, n) VALUES (1, 42)", "insert_or_ignore"),
     ("INSERT OR REPLACE INTO t (id, s, n) VALUES (1, 'x', 42)", "insert_or_replace"),
     ("INSERT OR REPLACE INTO t (id) VALUES (1)", "insert_or_replace"),
@@ -369,7 +373,8 @@ const ACCEPT_CASES: &[(&str, &str)] = &[
         r"SELECT `x`.`c` FROM `t` AS `x` JOIN `t` AS `y` ON `x`.`c` = `y`.`c` WHERE `x`.`c` IN (SELECT `c` FROM `t`)",
         "ident_quoting",
     ),
-    // --- OR REPLACE (test_reverse_or_replace.rs, no triggers in schema so no refusal)
+    // --- OR REPLACE (test_reverse_or_replace.rs, no triggers in schema so no
+    // refusal)
     ("INSERT OR REPLACE INTO u VALUES (1, 'x', 'y')", "or_replace"),
     ("INSERT OR IGNORE INTO u VALUES (1, 'x', 'y')", "or_replace"),
     ("INSERT OR ABORT INTO u VALUES (1, 'x', 'y')", "or_replace"),
@@ -416,7 +421,8 @@ const EXECUTE_CASES: &[(&str, &str)] = &[
     ("SELECT ifnull(1, 0)", "COALESCE(1, 0) returns 1"),
     // iif(1 > 0, 'yes', 'no') -> CASE WHEN returns 'yes'
     ("SELECT iif(1 > 0, 'yes', 'no')", "CASE WHEN returns 'yes'"),
-    // unixepoch() -> floor(EXTRACT(EPOCH FROM NOW()))::BIGINT returns current epoch seconds
+    // unixepoch() -> floor(EXTRACT(EPOCH FROM NOW()))::BIGINT returns current
+    // epoch seconds
     ("SELECT unixepoch()", "returns current epoch as whole seconds"),
     // nullif(1, 0) -> nullif(1, 0) returns 1
     ("SELECT nullif(1, 0)", "returns 1"),

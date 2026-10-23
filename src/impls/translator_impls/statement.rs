@@ -828,11 +828,12 @@ fn translate_alter_table_operation(
             Ok(Some(AlterTableOperation::AddColumn {
                 column_keyword: *column_keyword,
                 if_not_exists: *if_not_exists,
-                // Route through the same translator the CREATE TABLE path uses so
-                // type mapping, STRICT-legal types, and the parenthesisation
-                // SQLite requires of a non-literal DEFAULT all apply. No primary
-                // key columns are passed: SQLite cannot add a primary key with
-                // ALTER TABLE, so an added column is never its rowid alias.
+                // Route through the same translator the CREATE TABLE path uses
+                // so type mapping, STRICT-legal types, and the parenthesisation
+                // SQLite requires of a non-literal DEFAULT all apply. No
+                // primary key columns are passed: SQLite cannot add a primary
+                // key with ALTER TABLE, so an added column is never its rowid
+                // alias.
                 column_def: translate_column_def(
                     column_def,
                     &alter_table.name,
@@ -845,7 +846,8 @@ fn translate_alter_table_operation(
             }))
         }
         // Row level security is realised as the view and trigger set built from
-        // the schema, which already records these, so they carry no ALTER TABLE.
+        // the schema, which already records these, so they carry no ALTER
+        // TABLE.
         AlterTableOperation::EnableRowLevelSecurity
         | AlterTableOperation::DisableRowLevelSecurity
         | AlterTableOperation::ForceRowLevelSecurity
@@ -1865,10 +1867,10 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
                 statements
             }
             // Statements that are already SQLite's own syntax, passed through
-            // unchanged. A pragma name is a SQLite setting and an attached alias is
-            // a database handle, so neither is a schema-qualified object to
-            // normalise. A savepoint name needs no normalising either, and
-            // `ROLLBACK TO SAVEPOINT` is SQLite's own spelling.
+            // unchanged. A pragma name is a SQLite setting and an attached
+            // alias is a database handle, so neither is a schema-qualified
+            // object to normalise. A savepoint name needs no normalising
+            // either, and `ROLLBACK TO SAVEPOINT` is SQLite's own spelling.
             Self::Savepoint { .. }
             | Self::ReleaseSavepoint { .. }
             | Self::Pragma { .. }
@@ -1891,7 +1893,8 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
             }
             Self::Rollback { chain, savepoint } => translate_rollback(*chain, savepoint.as_ref()),
             Self::Vacuum(vacuum) => translate_vacuum(vacuum, emit),
-            // DROP TABLE/VIEW/INDEX - translate to SQLite (strip CASCADE/RESTRICT)
+            // DROP TABLE/VIEW/INDEX - translate to SQLite (strip
+            // CASCADE/RESTRICT)
             Self::Drop { object_type, if_exists, names, cascade, .. } => {
                 match object_type {
                     // SQLite supports these object types
@@ -1950,7 +1953,8 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
                     }
                 }
             }
-            // DROP TRIGGER - translate to SQLite (strip table name and CASCADE/RESTRICT)
+            // DROP TRIGGER - translate to SQLite (strip table name and
+            // CASCADE/RESTRICT)
             Self::DropTrigger(drop_trigger) => {
                 vec![Statement::DropTrigger(sqlparser::ast::DropTrigger {
                     if_exists: drop_trigger.if_exists,
@@ -2103,8 +2107,8 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
                     Some(name.to_string().as_str()),
                 ));
             }
-            // Already SQLite's own syntax, so these pass through. A table name is
-            // normalised the way every other table reference is, since a
+            // Already SQLite's own syntax, so these pass through. A table name
+            // is normalised the way every other table reference is, since a
             // schema-qualified PostgreSQL name has no SQLite counterpart.
             Statement::Analyze(analyze) => {
                 let mut analyze = analyze.clone();
@@ -2133,8 +2137,9 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
             // The policy statements drive the row level security view and
             // trigger set built from the final schema state (`rls.rs`,
             // `filter_policies`). The schema statements make a qualified name
-            // resolvable (`object_name.rs`, `schema_resolves`) and SQLite has no
-            // schema for the name to keep, so the qualifier is stripped instead.
+            // resolvable (`object_name.rs`, `schema_resolves`) and SQLite has
+            // no schema for the name to keep, so the qualifier is stripped
+            // instead.
             Self::CreatePolicy(_)
             | Self::AlterPolicy(_)
             | Self::DropPolicy { .. }

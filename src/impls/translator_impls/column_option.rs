@@ -91,7 +91,8 @@ impl crate::traits::translator::TranslatorWithContext for ColumnOptionDef {
                 Ok(Some(self.clone()))
             }
             // Translate CHECK constraints to SQLite CHECK syntax.
-            // When `remove_unsupported_check_constraints` is set, silently drop them instead.
+            // When `remove_unsupported_check_constraints` is set, silently drop
+            // them instead.
             ColumnOption::Check(check) => {
                 if check.enforced == Some(false) {
                     return Err(crate::errors::Error::forward_refusal(format!(

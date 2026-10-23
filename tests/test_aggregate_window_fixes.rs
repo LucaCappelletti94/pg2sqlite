@@ -35,7 +35,8 @@ fn setup_and_query(pg: &str) -> (String, SqliteConnection) {
 struct WindowRow {
     #[diesel(sql_type = diesel::sql_types::Integer)]
     id: i32,
-    // Window function result; diesel::sql_query required (no OVER in the typed DSL).
+    // Window function result; diesel::sql_query required (no OVER in the typed
+    // DSL).
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     total: i64,
 }

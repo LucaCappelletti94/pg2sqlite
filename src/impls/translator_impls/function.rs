@@ -195,10 +195,10 @@ pub(crate) const FORWARD_RENAMES: &[(&str, &str)] = &[
     // greatest and least are NOT renames: SQLite's scalar MAX and MIN return
     // NULL when any argument is NULL. See `FunctionTranslation::Extremum`.
     // json_agg and jsonb_agg are NOT renames: a JSON column is TEXT in SQLite
-    // and would be quoted rather than nested. See `FunctionTranslation::JsonAgg`.
-    // json_object_agg and jsonb_object_agg are NOT renames: bare json_group_object
-    // returns '{}' over an empty set while PostgreSQL returns NULL. See
-    // `FunctionTranslation::JsonObjectAgg`.
+    // and would be quoted rather than nested. See
+    // `FunctionTranslation::JsonAgg`. json_object_agg and jsonb_object_agg are
+    // NOT renames: bare json_group_object returns '{}' over an empty set while
+    // PostgreSQL returns NULL. See `FunctionTranslation::JsonObjectAgg`.
     // json_typeof and jsonb_typeof are NOT renames: json_type answers over a
     // different vocabulary. See `FunctionTranslation::JsonTypeof`.
     // quote_literal and quote_nullable are NOT renames: they differ on NULL,
@@ -1902,7 +1902,8 @@ impl crate::traits::translator::TranslatorWithContext for Function {
                 // `YYYY-MM-DD HH:MM:SS`.
                 let format_str = match field_str.as_str() {
                     "second" | "seconds" => "%Y-%m-%d %H:%M:%S",
-                    // milliseconds: SQLite %f gives fractional seconds to three digits.
+                    // milliseconds: SQLite %f gives fractional seconds to three
+                    // digits.
                     "millisecond" | "milliseconds" => "%Y-%m-%d %H:%M:%f",
                     "minute" | "minutes" => "%Y-%m-%d %H:%M:00",
                     "hour" | "hours" => "%Y-%m-%d %H:00:00",
