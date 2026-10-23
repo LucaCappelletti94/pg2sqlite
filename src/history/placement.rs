@@ -84,6 +84,12 @@ pub(crate) fn home(homes: &Homes, name: &str) -> Placement {
     homes.get(&key(name)).copied().unwrap_or(Placement::Main)
 }
 
+/// Where the table, view or index `name` lives, `Main` for an object the
+/// batch does not create.
+pub(crate) fn home_of(homes: &Homes, name: &ObjectName) -> Placement {
+    homes.get(&key_of(name)).copied().unwrap_or(Placement::Main)
+}
+
 /// The placement of every object, with the emitted statements qualified and
 /// marked to match.
 pub(crate) struct Placed {
@@ -426,7 +432,7 @@ fn statement_placement(
     logical_storage: &Homes,
     trigger_homes: &Homes,
 ) -> Placement {
-    let home = |name: &ObjectName| homes.get(&key_of(name)).copied().unwrap_or(Placement::Main);
+    let home = |name: &ObjectName| home_of(homes, name);
     match statement {
         Statement::CreateTrigger(trigger) => {
             let reads = relation_names(trigger);
@@ -478,7 +484,7 @@ fn place_statement(
     trigger_homes: &mut Homes,
 ) -> Result<Placement, Error> {
     let placement = statement_placement(statement, homes, logical_storage, trigger_homes);
-    let home = |name: &ObjectName| homes.get(&key_of(name)).copied().unwrap_or(Placement::Main);
+    let home = |name: &ObjectName| home_of(homes, name);
     Ok(match statement {
         Statement::CreateTrigger(trigger) => {
             if placement == Placement::Temp {

@@ -42,9 +42,11 @@ struct Step<S> {
     files: Files,
     /// The emitted form, run by the both-files initialization.
     base: Vec<S>,
-    /// The fresh-main form, when rebinding changed it.
+    /// The fresh-main form, when rebinding changed it or the unit belongs to
+    /// the existing attached file and runs only its connection objects.
     main_rebound: Option<Vec<S>>,
-    /// The fresh-attached form, when rebinding changed it.
+    /// The fresh-attached form, when rebinding changed it or the unit belongs
+    /// to the existing main file and runs only its connection objects.
     attached_rebound: Option<Vec<S>>,
 }
 

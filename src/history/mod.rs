@@ -17,7 +17,11 @@ use sql_traits::{
     structs::{ParserDB, ParserDBIngestor},
     traits::{DatabaseLike, TableLike, ViewLike},
 };
-use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
+use sqlparser::{
+    ast::{ObjectName, ObjectType, Statement},
+    dialect::PostgreSqlDialect,
+    parser::Parser,
+};
 
 use self::{
     effects::{Catalog, Effects},
@@ -156,15 +160,8 @@ fn replay(
             open = transaction;
         }
         let rebound;
-        (schema, rebound) = replay_unit(
-            unit,
-            StatementId(index),
-            final_schema,
-            context,
-            Files::CONNECTION,
-            placed,
-            schema,
-        )?;
+        (schema, rebound) =
+            replay_unit(unit, StatementId(index), final_schema, context, true, placed, schema)?;
         match rebound {
             Some(statements) => {
                 program.extend(
@@ -208,6 +205,10 @@ pub(crate) fn fresh_forms(
 
 /// The units a fresh `file` runs, in source order, each `None` when it runs
 /// its emitted form or does not run.
+///
+/// A unit of the existing file runs only its connection-local statements,
+/// since the new connection needs its `TEMP` objects while the file already
+/// holds the rest.
 fn replay_fresh(
     units: &[Unit<'_>],
     final_schema: &ParserDB,
@@ -215,40 +216,47 @@ fn replay_fresh(
     file: Files,
     placed: &mut Placed,
 ) -> Forms<Statement> {
-    let replay_homes = file | Files::CONNECTION;
-    let mut schema = ReplaySchema::new(final_schema, replay_homes, &placed.homes)?;
+    let mut schema = ReplaySchema::new(final_schema, file | Files::CONNECTION, &placed.homes)?;
     let mut forms = Vec::with_capacity(units.len());
     for (index, unit) in units.iter().enumerate() {
-        if !placed.unit_files[index].contains(file) {
+        let owned = placed.unit_files[index].contains(file);
+        if !owned
+            && !schema.replays(unit.source, false, &placed.homes)
+            && !unit.emitted.iter().any(|statement| placed.is_connection_local(statement))
+        {
             forms.push(None);
             continue;
         }
         let rebound;
-        (schema, rebound) = replay_unit(
-            unit,
-            StatementId(index),
-            final_schema,
-            context,
-            replay_homes,
-            placed,
-            schema,
-        )?;
-        forms.push(rebound);
+        (schema, rebound) =
+            replay_unit(unit, StatementId(index), final_schema, context, owned, placed, schema)?;
+        if owned {
+            forms.push(rebound);
+            continue;
+        }
+        let local = |statement: &Statement| placed.is_connection_local(statement);
+        forms.push(Some(match rebound {
+            Some(statements) => statements.into_iter().filter(local).collect(),
+            None => unit.emitted.iter().filter(|statement| local(statement)).cloned().collect(),
+        }));
     }
     Ok(forms)
 }
 
 /// Replays one unit against `schema`, returning the schema after it and the
-/// unit's placed statements when rebinding changed them.
+/// unit's placed statements when rebinding changed them. The replay `owned`
+/// the unit when its target files run it in full.
 fn replay_unit(
     unit: &Unit<'_>,
     id: StatementId,
     final_schema: &ParserDB,
     context: &TranslationContext<'_>,
-    replay_homes: Files,
+    owned: bool,
     placed: &mut Placed,
     mut schema: ReplaySchema,
 ) -> Result<(ReplaySchema, Option<Vec<Statement>>), ConnectionError> {
+    let replay_homes = schema.homes;
+    let replays = schema.replays(unit.source, owned, &placed.homes);
     let rebound =
         rebind::rebind(unit.source, id, unit.binding, final_schema, replay_homes, &placed.homes)?;
     let body = match unit.source {
@@ -269,12 +277,15 @@ fn replay_unit(
         (rebound, _) => rebound,
     };
     let Some(statement) = rebound else {
-        return Ok((schema.apply(unit.source)?, None));
+        if replays {
+            schema = schema.apply(unit.source)?;
+        }
+        return Ok((schema, None));
     };
     // A statement ending an epoch was translated against the schema before it,
     // and every other one against the schema after it.
     let before = Pg2Sqlite::schema_ends_epoch(&statement);
-    if !before {
+    if replays && !before {
         schema = schema.apply(&statement)?;
     }
     let rebound_context;
@@ -304,15 +315,20 @@ fn replay_unit(
             }
         })?;
     }
-    if before {
+    if replays && before {
         schema = schema.apply(&statement)?;
     }
     Ok((schema, Some(statements)))
 }
 
-/// The schema a replayed statement sees, which is the file's final schema
-/// plus the connection objects replayed so far.
-struct ReplaySchema(ParserDBIngestor);
+/// The schema a replayed statement sees, which is the final schema with the
+/// relations the replayed files hold removed and their history replayed so
+/// far.
+struct ReplaySchema {
+    ingestor: ParserDBIngestor,
+    /// The files whose relations the replay recreates.
+    homes: Files,
+}
 
 impl ReplaySchema {
     fn new(
@@ -339,7 +355,8 @@ impl ReplaySchema {
                 "TABLE",
             ));
         }
-        let mut schema = Self(final_schema.clone().into_ingestor());
+        let mut schema =
+            Self { ingestor: final_schema.clone().into_ingestor(), homes: replay_homes };
         for drop in drops {
             let statements = Parser::parse_sql(&PostgreSqlDialect {}, &drop)
                 .map_err(|error| refusal(format!("{drop} does not parse: {error}")))?;
@@ -350,19 +367,58 @@ impl ReplaySchema {
         Ok(schema)
     }
 
+    /// Whether `statement` changes this schema. A change to a relation counts
+    /// when the replay recreates that relation, since one it keeps already has
+    /// its final form. Functions and roles belong to no file and keep their
+    /// final form too. Any other statement counts when its unit is `owned`,
+    /// run in full by the replay.
+    fn replays(&self, statement: &Statement, owned: bool, homes: &Homes) -> bool {
+        let recreated =
+            |name: &ObjectName| self.homes.contains_placement(placement::home_of(homes, name));
+        match statement {
+            Statement::CreateTable(create) => recreated(&create.name),
+            Statement::CreateView(view) => recreated(&view.name),
+            Statement::CreateIndex(index) => recreated(&index.table_name),
+            Statement::AlterTable(alter) => recreated(&alter.name),
+            Statement::CreateTrigger(trigger) => recreated(&trigger.table_name),
+            Statement::DropTrigger(drop) => drop.table_name.as_ref().map_or(owned, recreated),
+            Statement::CreatePolicy(policy) => recreated(&policy.table_name),
+            Statement::AlterPolicy(policy) => recreated(&policy.table_name),
+            Statement::DropPolicy(policy) => recreated(&policy.table_name),
+            Statement::Drop {
+                object_type:
+                    ObjectType::Table
+                    | ObjectType::View
+                    | ObjectType::MaterializedView
+                    | ObjectType::Index,
+                names,
+                ..
+            } => names.first().map_or(owned, recreated),
+            Statement::CreateFunction(_)
+            | Statement::AlterFunction(_)
+            | Statement::DropFunction(_)
+            | Statement::CreateRole(_)
+            | Statement::AlterRole { .. }
+            | Statement::Drop { object_type: ObjectType::Role, .. } => false,
+            _ => owned,
+        }
+    }
+
     fn snapshot(&self) -> ParserDB {
-        self.0.snapshot()
+        self.ingestor.snapshot()
     }
 
     fn apply(self, statement: &Statement) -> Result<Self, ConnectionError> {
         if Pg2Sqlite::schema_statement_is_ignored(statement) {
             return Ok(self);
         }
-        self.0.apply_statement(statement.clone()).map(Self).map_err(|error| {
+        let homes = self.homes;
+        let ingestor = self.ingestor.apply_statement(statement.clone()).map_err(|error| {
             refusal(format!(
                 "replaying `{statement}` on a new connection fails against the final schema: {error}"
             ))
-        })
+        })?;
+        Ok(Self { ingestor, homes })
     }
 }
 

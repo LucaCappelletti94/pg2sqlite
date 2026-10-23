@@ -73,6 +73,13 @@ mod main_catalogue {
             name -> Text,
         }
     }
+
+    diesel::table! {
+        main.papers_rls (id) {
+            id -> Integer,
+            title -> Text,
+        }
+    }
 }
 
 use schema::{notes, paper_shares, paper_shares_rls, papers, papers_rls, sqlite_master};
@@ -104,9 +111,10 @@ fn translate(pg: &str, options: &Pg2SqliteOptions) -> Result<Script<String>, Err
     Pg2Sqlite::default().sql(pg)?.translate_to_sql(options)
 }
 
-/// A main and an attached database file, removed when dropped.
+/// Two main database files sharing one attached file, removed when dropped.
 struct Files {
     main: PathBuf,
+    second_main: PathBuf,
     shared: PathBuf,
 }
 
@@ -116,6 +124,7 @@ impl Files {
         let stem = format!("pg2sqlite-attached-{}-{name}", std::process::id());
         let files = Self {
             main: directory.join(format!("{stem}-main.db")),
+            second_main: directory.join(format!("{stem}-second-main.db")),
             shared: directory.join(format!("{stem}-shared.db")),
         };
         files.remove();
@@ -124,13 +133,24 @@ impl Files {
 
     fn remove(&self) {
         let _ = std::fs::remove_file(&self.main);
+        let _ = std::fs::remove_file(&self.second_main);
         let _ = std::fs::remove_file(&self.shared);
     }
 
     /// A connection serving `caller`, with the shared file attached.
     fn connect(&self, caller: &str) -> SqliteConnection {
+        self.open(&self.main, caller)
+    }
+
+    /// A connection serving `caller` from the second main file, with the
+    /// shared file attached.
+    fn connect_second(&self, caller: &str) -> SqliteConnection {
+        self.open(&self.second_main, caller)
+    }
+
+    fn open(&self, main: &std::path::Path, caller: &str) -> SqliteConnection {
         let mut connection =
-            SqliteConnection::establish(self.main.to_str().expect("utf-8 path")).expect("open");
+            SqliteConnection::establish(main.to_str().expect("utf-8 path")).expect("open");
         let caller = caller.to_owned();
         current_app_user_utils::register_impl(&mut connection, move || caller.clone())
             .expect("register the caller function");
@@ -238,6 +258,105 @@ fn a_second_connection_running_the_connection_program_sees_its_own_caller_rows()
     let mut bob = files.connect("bob");
     run(&mut bob, script.connect().expect("connection program"));
     assert_eq!(visible_papers(&mut bob), [(11, "shared to bob".to_owned())]);
+}
+
+#[test]
+fn a_second_main_file_reads_an_existing_shared_file_through_its_policy() {
+    const NOTES: &str = "
+        CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT NOT NULL);
+        ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY notes_read ON notes FOR SELECT
+            USING (owner = current_setting('app.user_id', true));
+    ";
+    let script =
+        translate(NOTES, &options().with_attached_tables("shared", ["notes"])).expect("translate");
+    let files = Files::new("second-main");
+    {
+        let mut alice = files.connect("alice");
+        run(&mut alice, script.initialize(FreshFiles::Both).expect("initialize"));
+        set_write_exempt(true);
+        diesel::insert_into(notes::table)
+            .values(&[
+                (notes::id.eq(1), notes::owner.eq("alice")),
+                (notes::id.eq(2), notes::owner.eq("bob")),
+            ])
+            .execute(&mut alice)
+            .expect("seed notes");
+        set_write_exempt(false);
+    }
+
+    let mut bob = files.connect_second("bob");
+    run(&mut bob, script.initialize(FreshFiles::Main).expect("main-only initialization"));
+    let visible: Vec<(i32, String)> =
+        notes::table.order(notes::id).load(&mut bob).expect("read notes");
+    assert_eq!(visible, [(2, "bob".to_owned())]);
+}
+
+#[test]
+fn a_fresh_attached_store_keeps_a_main_policy_that_reads_it() {
+    let script = translate(PAPERS, &options().with_attached_tables("shared", ["paper_shares"]))
+        .expect("translate");
+    let files = Files::new("fresh-attached-policy");
+    {
+        let mut alice = files.connect("alice");
+        run(&mut alice, script.initialize(FreshFiles::Both).expect("initialize"));
+        set_write_exempt(true);
+        diesel::insert_into(main_catalogue::papers_rls::table)
+            .values((
+                main_catalogue::papers_rls::id.eq(10),
+                main_catalogue::papers_rls::title.eq("kept"),
+            ))
+            .execute(&mut alice)
+            .expect("seed papers");
+        set_write_exempt(false);
+    }
+    std::fs::remove_file(&files.shared).expect("remove the closed store");
+
+    let mut alice = files.connect("alice");
+    run(&mut alice, script.initialize(FreshFiles::Attached).expect("attached-only initialization"));
+    assert_eq!(visible_papers(&mut alice), []);
+    diesel::insert_into(paper_shares::table)
+        .values((
+            paper_shares::id.eq(1),
+            paper_shares::paper_id.eq(10),
+            paper_shares::grantee.eq("alice"),
+        ))
+        .execute(&mut alice)
+        .expect("share a paper in the new store");
+    assert_eq!(visible_papers(&mut alice), [(10, "kept".to_owned())]);
+}
+
+#[test]
+fn a_fresh_attached_store_keeps_the_policy_of_an_unrelated_main_table() {
+    const NOTES: &str = "
+        CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT NOT NULL);
+        ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY notes_read ON notes FOR SELECT
+            USING (owner = current_setting('app.user_id', true));
+        CREATE TABLE papers (id INT PRIMARY KEY, title TEXT NOT NULL);
+    ";
+    let script = translate(NOTES, &placed_options()).expect("translate");
+    let files = Files::new("fresh-attached-unrelated");
+    {
+        let mut alice = files.connect("alice");
+        run(&mut alice, script.initialize(FreshFiles::Both).expect("initialize"));
+        set_write_exempt(true);
+        diesel::insert_into(notes::table)
+            .values(&[
+                (notes::id.eq(1), notes::owner.eq("alice")),
+                (notes::id.eq(2), notes::owner.eq("bob")),
+            ])
+            .execute(&mut alice)
+            .expect("seed notes");
+        set_write_exempt(false);
+    }
+    std::fs::remove_file(&files.shared).expect("remove the closed store");
+
+    let mut bob = files.connect("bob");
+    run(&mut bob, script.initialize(FreshFiles::Attached).expect("attached-only initialization"));
+    let visible: Vec<(i32, String)> =
+        notes::table.order(notes::id).load(&mut bob).expect("read notes");
+    assert_eq!(visible, [(2, "bob".to_owned())]);
 }
 
 #[test]
