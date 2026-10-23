@@ -33,7 +33,7 @@ use crate::{
 };
 
 const DEBOUNCE_MS: u32 = 700;
-const REPO_URL: &str = "https://github.com/LucaCappelletti94/pg2sqlite";
+const REPO_URL: &str = "https://github.com/connetto-rs/pg2sqlite";
 const SPONSOR_URL: &str = "https://github.com/sponsors/LucaCappelletti94";
 
 fn main() {

@@ -25,7 +25,7 @@ jobs:
           args: >-
             --verbose
             --no-progress
-            --exclude '^https://codecov\.io/gh/LucaCappelletti94/pg2sqlite(?:/.*)?$'
+            --exclude '^https://codecov\.io/gh/connetto-rs/pg2sqlite(?:/.*)?$'
             './**/*.md'
             './**/*.rs'
           # Fail the action if broken links are found

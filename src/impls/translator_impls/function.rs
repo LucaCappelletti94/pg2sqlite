@@ -1208,7 +1208,7 @@ fn classify_unrecognised_function(
         if postgis::is_postgis_shaped_name(name) {
             return FunctionTranslation::Unsupported(format!(
                 "{name}() looks like a PostGIS function but is not implemented by the SQLiteGIS \
-             extension, see https://github.com/LucaCappelletti94/sqlitegis for the supported \
+             extension, see https://github.com/connetto-rs/sqlitegis for the supported \
              list."
             ));
         }

@@ -1,5 +1,5 @@
 //! PostGIS-equivalent function catalog mirrored from the SQLiteGIS extension
-//! (<https://github.com/LucaCappelletti94/sqlitegis>, published as `sqlitegis`
+//! (<https://github.com/connetto-rs/sqlitegis>, published as `sqlitegis`
 //! on crates.io).
 //!
 //! Used by the function dispatcher in `function.rs` to decide whether an
