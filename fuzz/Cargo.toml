@@ -21,7 +21,7 @@ arbitrary = { version = "1", features = ["derive"] }
 # context type. Track the same `main` branch pg2sqlite does: no lockfile is
 # committed, so both copies resolve to the same current commit on a fresh
 # build and the trait bounds line up.
-sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", branch = "main", default-features = false, features = ["std"] }
+sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main", default-features = false, features = ["std"] }
 # Direct dep so the round-trip harness can name `Statement` for its
 # render helper. Routed through the `[patch.crates-io]` block at the
 # bottom of this file onto the same apache main sqlparser pg2sqlite uses.

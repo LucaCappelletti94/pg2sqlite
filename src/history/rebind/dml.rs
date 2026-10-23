@@ -79,7 +79,7 @@ impl Planner<'_> {
                 .map(|relation| TableWithJoins { relation, joins: Vec::new() })
                 .collect(),
         );
-        self.dml(&scope_query, &exprs)
+        self.dml(&scope_query, 2, &exprs)
     }
 
     /// Renames the columns an assignment writes.
@@ -131,10 +131,11 @@ impl Planner<'_> {
     }
 
     /// Plans a data-modifying statement's expressions in the scope of the
-    /// relations it lists.
+    /// relations it lists, the first `targets` of which are written tables.
     pub(super) fn dml(
         &mut self,
         scope_query: &Query,
+        targets: usize,
         exprs: &[&Expr],
     ) -> Result<(), ConnectionError> {
         let Ok(scope) = ColumnScope::from_query(scope_query, self.epoch, IdentifierCase::AsWritten)
@@ -144,8 +145,12 @@ impl Planner<'_> {
         let SetExpr::Select(select) = scope_query.body.as_ref() else { return Ok(()) };
         let Some(outer) = scope.scope_for_select(select) else { return Ok(()) };
         let mut listed = Vec::new();
-        for table in &select.from {
-            self.list(&table.relation, &mut listed)?;
+        for (index, table) in select.from.iter().enumerate() {
+            if index < targets {
+                self.list_target(&table.relation, &mut listed)?;
+            } else {
+                self.list(&table.relation, &mut listed)?;
+            }
             for join in &table.joins {
                 self.list(&join.relation, &mut listed)?;
             }

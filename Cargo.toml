@@ -6,7 +6,7 @@ rust-version = "1.88"
 license = "MIT"
 description = "Translates PostgreSQL SQL into valid runnable SQLite SQL, emitting semantically equivalent output for types, RLS, FTS5, pgvector, and PostGIS constructs."
 homepage = "https://pg2sqlite.luca.phd"
-repository = "https://github.com/LucaCappelletti94/pg2sqlite"
+repository = "https://github.com/connetto-rs/pg2sqlite"
 documentation = "https://docs.rs/pg2sqlite"
 readme = "README.md"
 keywords = ["postgresql", "sqlite", "sql", "translation", "migration"]
@@ -14,8 +14,8 @@ categories = ["database", "parser-implementations"]
 
 [dependencies]
 sqlparser = { version = "0.63", default-features = false, features = ["visitor"] }
-sqlparser-plpgsql = { git = "https://github.com/LucaCappelletti94/sqlparser-plpgsql", branch = "main", features = ["body-parse"] }
-sql-traits = { git = "https://github.com/earth-metabolome-initiative/sql-traits", branch = "main", default-features = false }
+sqlparser-plpgsql = { git = "https://github.com/connetto-rs/sqlparser-plpgsql", branch = "main", features = ["body-parse"] }
+sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main", default-features = false }
 git2 = { version = "0.21", optional = true }
 tempfile = { version = "3.27", optional = true }
 thiserror = { version = "2.0", default-features = false }

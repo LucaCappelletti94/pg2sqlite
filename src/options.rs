@@ -229,6 +229,9 @@ pub struct TranslationContext<'a> {
     /// The body a trigger translated here executes in place of its function's
     /// stored one, set when a replay renames what the body references.
     rebound_body: Option<&'a sqlparser::ast::BeginEndStatements>,
+    /// The schema as the statement being translated was written, which names
+    /// a wildcard's columns before a later column change in its epoch.
+    written_schema: Option<&'a ParserDB>,
 }
 
 impl<'a> TranslationContext<'a> {
@@ -246,6 +249,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: false,
             subqueries_allowed: true,
             rebound_body: None,
+            written_schema: None,
         }
     }
     pub(crate) fn with_complete_schema(options: &'a Pg2SqliteOptions) -> Self {
@@ -266,6 +270,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: false,
             subqueries_allowed: true,
             rebound_body: None,
+            written_schema: None,
         }
     }
 
@@ -293,6 +298,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
             rebound_body: self.rebound_body,
+            written_schema: self.written_schema,
         }
     }
 
@@ -321,6 +327,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
             rebound_body: self.rebound_body,
+            written_schema: self.written_schema,
         }
     }
 
@@ -338,6 +345,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
             rebound_body: self.rebound_body,
+            written_schema: self.written_schema,
         }
     }
 
@@ -356,6 +364,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
             rebound_body: self.rebound_body,
+            written_schema: self.written_schema,
         }
     }
 
@@ -371,6 +380,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
             rebound_body: self.rebound_body,
+            written_schema: self.written_schema,
         }
     }
 
@@ -390,6 +400,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: self.subqueries_allowed,
             rebound_body: Some(body),
+            written_schema: self.written_schema,
         }
     }
 
@@ -397,6 +408,31 @@ impl<'a> TranslationContext<'a> {
     /// function's stored one.
     pub(crate) const fn rebound_body(&self) -> Option<&sqlparser::ast::BeginEndStatements> {
         self.rebound_body
+    }
+
+    /// The same context noting `schema` as the one the statement was written
+    /// against.
+    pub(crate) fn with_written_schema<'s>(
+        &'s self,
+        schema: &'s ParserDB,
+    ) -> TranslationContext<'s> {
+        TranslationContext {
+            options: Cow::Borrowed(self.options.as_ref()),
+            catalogs: Cow::Borrowed(self.catalogs.as_ref()),
+            scope: self.scope,
+            outer: self.outer,
+            with: self.with,
+            variables: self.variables,
+            schema_is_complete: self.schema_is_complete,
+            subqueries_allowed: self.subqueries_allowed,
+            rebound_body: self.rebound_body,
+            written_schema: Some(schema),
+        }
+    }
+
+    /// The schema the statement being translated was written against.
+    pub(crate) const fn written_schema(&self) -> Option<&ParserDB> {
+        self.written_schema
     }
 
     /// Restricts expression translation to a position that forbids subqueries.
@@ -411,6 +447,7 @@ impl<'a> TranslationContext<'a> {
             schema_is_complete: self.schema_is_complete,
             subqueries_allowed: false,
             rebound_body: self.rebound_body,
+            written_schema: self.written_schema,
         }
     }
 

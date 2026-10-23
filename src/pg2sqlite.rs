@@ -737,7 +737,7 @@ impl Pg2Sqlite {
                     crate::impls::transaction_blocks::Disposition::Translate => {
                         translated.push(statement.translate_with_warnings(
                             &epoch.schema,
-                            context,
+                            &context.with_written_schema(epoch.binding(epoch.start + offset)),
                             &mut emit,
                         )?);
                     }

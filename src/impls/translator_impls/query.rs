@@ -47,14 +47,16 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        let bound = super::cte::preserve_bindings(self);
+        let query = bound.as_ref();
         // Everything below reads column types through the relations this query
         // exposes rather than through every table of that name in the schema,
         // so the scope is attached before any expression is translated. A
         // subquery builds its own when its own `Query` is translated.
-        reject_distinct_ordered_by_an_unselected_expression(self)?;
-        reject_compound_ordered_by_an_input_expression(self)?;
-        let scope_substitute = crate::impls::shared_helpers::scope_query_for(self);
-        let scope_query = scope_substitute.as_ref().unwrap_or(self);
+        reject_distinct_ordered_by_an_unselected_expression(query)?;
+        reject_compound_ordered_by_an_input_expression(query)?;
+        let scope_substitute = crate::impls::shared_helpers::scope_query_for(query);
+        let scope_query = scope_substitute.as_ref().unwrap_or(query);
         let scope = if scope_query.with.is_none()
             && matches!(
                 scope_query.body.as_ref(),
@@ -68,25 +70,41 @@ impl crate::traits::translator::TranslatorWithContext for Query {
                 sql_traits::structs::IdentifierCase::AsWritten,
             )?)
         };
-        let scoped = scope.as_ref().map(|scope| options.with_query_scope(scope, self));
+        let scoped = scope.as_ref().map(|scope| options.with_query_scope(scope, query));
         let options = scoped.as_ref().unwrap_or(options);
-        let noted = options.with_cte_clause(self.with.as_ref().or_else(|| options.cte_clause()));
+        let noted = options.with_cte_clause(query.with.as_ref().or_else(|| options.cte_clause()));
         let options = &noted;
 
-        let with = translate_with_clause(self.with.as_ref(), schema, options, emit)?;
-        let order_by = translate_order_by(self.order_by.as_ref(), schema, options, emit)?;
+        let mut with = translate_with_clause(query.with.as_ref(), schema, options, emit)?;
+        if let (Some(with), Some(source), Some(scope)) =
+            (with.as_mut(), scope_query.with.as_ref(), scope.as_ref())
+        {
+            match options.written_schema().filter(|written| !core::ptr::eq(*written, schema)) {
+                Some(written) => {
+                    let written = sql_traits::structs::ColumnScope::from_query(
+                        scope_query,
+                        written,
+                        sql_traits::structs::IdentifierCase::AsWritten,
+                    )?;
+                    super::cte::pin_output_names(with, source, &written);
+                }
+                None => super::cte::pin_output_names(with, source, scope),
+            }
+        }
+        let order_by = translate_order_by(query.order_by.as_ref(), schema, options, emit)?;
         let (limit_clause, fetch) = forward_translate_limit_and_fetch(
-            self.limit_clause.as_ref(),
-            self.fetch.as_ref(),
+            query.limit_clause.as_ref(),
+            query.fetch.as_ref(),
             schema,
             options,
             emit,
         )?;
-        let settings = translate_query_settings(self.settings.as_ref(), schema, options, emit)?;
-        let pipe_operators = translate_pipe_operators(&self.pipe_operators, schema, options, emit)?;
+        let settings = translate_query_settings(query.settings.as_ref(), schema, options, emit)?;
+        let pipe_operators =
+            translate_pipe_operators(&query.pipe_operators, schema, options, emit)?;
 
         if let Some(rewritten) = try_translate_distinct_on_query(
-            self,
+            query,
             schema,
             options,
             with.clone(),
@@ -101,7 +119,7 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         }
 
         if let Some(rewritten) = try_translate_grouping_query(
-            self,
+            query,
             schema,
             options,
             with.clone(),
@@ -116,19 +134,19 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         }
 
         // Emit warning if FOR UPDATE or FOR SHARE is present
-        if !self.locks.is_empty() || self.for_clause.is_some() {
+        if !query.locks.is_empty() || query.for_clause.is_some() {
             emit(TranslationWarning::LossyDrop {
                 construct: "FOR UPDATE / FOR SHARE".to_string(),
                 reason: "SQLite has no row-level locking; the clause is dropped".to_string(),
             });
         }
 
-        let body = match self.body.as_ref() {
+        let body = match query.body.as_ref() {
             // Inherited CTEs require the SELECT-local scope.
-            SetExpr::Select(select) if self.with.is_some() || options.cte_clause().is_none() => {
+            SetExpr::Select(select) if query.with.is_some() || options.cte_clause().is_none() => {
                 SetExpr::Select(Box::new(select.translate_with_warnings(schema, options, emit)?))
             }
-            _ => self.body.translate_with_warnings(schema, options, emit)?,
+            _ => query.body.translate_with_warnings(schema, options, emit)?,
         };
         Ok(build_query_envelope(
             body,
@@ -137,7 +155,7 @@ impl crate::traits::translator::TranslatorWithContext for Query {
             limit_clause,
             fetch,
             settings,
-            self.format_clause.clone(),
+            query.format_clause.clone(),
             pipe_operators,
         ))
     }

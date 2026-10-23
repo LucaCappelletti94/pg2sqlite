@@ -21,12 +21,15 @@ pub(super) enum Relation<'a> {
     Other,
 }
 
-/// One relation a `FROM` clause lists by a stored name.
+/// One relation a `FROM` clause lists.
 pub(super) struct Listed {
     /// The name the select's references qualify it by, ASCII-folded.
     pub(super) qualifier: String,
     /// Whether the qualifier is an explicit alias.
     pub(super) aliased: bool,
+    /// Whether the relation is a common table expression or derived table,
+    /// whose columns no stored rename reaches.
+    pub(super) lexical: bool,
     /// For a view, the ASCII-folded names of the outputs that are bare column
     /// references and so follow a renamed column, as SQLite renames them.
     pub(super) view: Option<Vec<String>>,
@@ -36,16 +39,52 @@ pub(super) struct Listed {
     pub(super) columns: Option<Vec<(String, String)>>,
 }
 
+impl Listed {
+    fn lexical(qualifier: &Ident, aliased: bool) -> Self {
+        Self {
+            qualifier: qualifier.value.to_ascii_lowercase(),
+            aliased,
+            lexical: true,
+            view: None,
+            replay_name: qualifier.value.clone(),
+            columns: None,
+        }
+    }
+}
+
 impl Planner<'_> {
-    /// Records the stored relations a `FROM` item names.
+    /// Records the relations a `FROM` item names.
     pub(super) fn list(
         &self,
         factor: &TableFactor,
         listed: &mut Vec<Listed>,
     ) -> Result<(), ConnectionError> {
+        self.list_as(factor, listed, false)
+    }
+
+    /// Records a written table, which no common table expression can name.
+    pub(super) fn list_target(
+        &self,
+        factor: &TableFactor,
+        listed: &mut Vec<Listed>,
+    ) -> Result<(), ConnectionError> {
+        self.list_as(factor, listed, true)
+    }
+
+    fn list_as(
+        &self,
+        factor: &TableFactor,
+        listed: &mut Vec<Listed>,
+        target: bool,
+    ) -> Result<(), ConnectionError> {
         match factor {
             TableFactor::Table { name, alias, args: None, .. } => {
                 let Some(written) = last(name) else { return Ok(()) };
+                if !target && name.0.len() == 1 && self.scopes.binding(written).is_some() {
+                    let qualifier = alias.as_ref().map_or(written, |alias| &alias.name);
+                    listed.push(Listed::lexical(qualifier, alias.is_some()));
+                    return Ok(());
+                }
                 let (temporary, view, columns) = match resolve(self.epoch, name) {
                     Relation::Table(table) => (table.is_temporary(), None, self.columns(table)?),
                     Relation::View(view) => {
@@ -64,6 +103,7 @@ impl Planner<'_> {
                         .map_or(&written.value, |alias| &alias.name.value)
                         .to_ascii_lowercase(),
                     aliased: alias.is_some(),
+                    lexical: false,
                     view,
                     replay_name,
                     columns,
@@ -71,10 +111,15 @@ impl Planner<'_> {
                 Ok(())
             }
             TableFactor::NestedJoin { table_with_joins, .. } => {
-                self.list(&table_with_joins.relation, listed)?;
+                self.list_as(&table_with_joins.relation, listed, target)?;
                 for join in &table_with_joins.joins {
-                    self.list(&join.relation, listed)?;
+                    self.list_as(&join.relation, listed, target)?;
                 }
+                Ok(())
+            }
+            TableFactor::Derived { alias: Some(alias), .. }
+            | TableFactor::Table { alias: Some(alias), args: Some(_), .. } => {
+                listed.push(Listed::lexical(&alias.name, true));
                 Ok(())
             }
             _ => Ok(()),
