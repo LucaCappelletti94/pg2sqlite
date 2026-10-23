@@ -404,8 +404,9 @@ impl ReverseTranslator for Expr {
                 )))
             }
 
-            // GLOB is case-sensitive globbing. Convert literal patterns to LIKE.
-            // A character class (e.g. [abc]) or a non-literal pattern is rejected.
+            // GLOB is case-sensitive globbing. Convert literal patterns to
+            // LIKE. A character class (e.g. [abc]) or a non-literal pattern is
+            // rejected.
             Expr::BinaryOp { op: BinaryOperator::Glob, left, right } => {
                 translate_glob_to_like(left, right, false, schema, options)
             }
@@ -470,7 +471,8 @@ impl ReverseTranslator for Expr {
             }
             Expr::Collate { collation, .. } => reverse_collate(self, collation, schema, options),
 
-            // SQLite uses JSONPath ('$.a'), PostgreSQL uses text-array ('{a}'); convert.
+            // SQLite uses JSONPath ('$.a'), PostgreSQL uses text-array ('{a}');
+            // convert.
             Expr::BinaryOp {
                 op: op @ (BinaryOperator::HashArrow | BinaryOperator::HashLongArrow),
                 left,

@@ -51,10 +51,12 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
     // This affects two comparisons:
     //
     //   ts + INTERVAL '1 day' for row 4 (ts = '2024-03-05 14:07:09.250'):
-    //     PG gives '2024-03-06 14:07:09.25', SQLite gives '2024-03-06 14:07:09'.
+    //     PG gives '2024-03-06 14:07:09.25', SQLite gives '2024-03-06
+    // 14:07:09'.
     //
-    //   tstz AT TIME ZONE '+05:30' for row 4 (tstz = '2024-03-05 14:07:09.250'):
-    //     PG gives '2024-03-05 08:37:09.25', SQLite gives '2024-03-05 08:37:09'.
+    //   tstz AT TIME ZONE '+05:30' for row 4 (tstz = '2024-03-05
+    // 14:07:09.250'):     PG gives '2024-03-05 08:37:09.25', SQLite gives
+    // '2024-03-05 08:37:09'.
     //
     // Both comparisons are limited to rows 1-3 (whole-second timestamps) so
     // no runtime failure is triggered. Row 4 is excluded with a comment.

@@ -136,7 +136,8 @@ fn json_functions_reverse_to_postgres_spellings() {
         // text, so neither gives back what SQLite answered.
         ("SELECT json_extract(payload, '$.a') FROM t", Rejected),
         ("SELECT json_patch(payload, payload) FROM t", Emits("||")),
-        // json_type(x) is refused: PostgreSQL's vocabulary collapses six SQLite names.
+        // json_type(x) is refused: PostgreSQL's vocabulary collapses six SQLite
+        // names.
         ("SELECT json_type(payload) FROM t", Rejected),
         ("SELECT json_array_length(payload) FROM t", Emits("jsonb_array_length")),
         ("SELECT json_group_array(s) FROM t", Emits("json_agg")),

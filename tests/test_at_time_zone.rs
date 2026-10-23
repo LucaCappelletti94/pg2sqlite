@@ -234,9 +234,9 @@ fn the_reversal_is_the_expression_it_came_from() {
         "aware AT TIME ZONE '+05:30'",
         "naive AT TIME ZONE 'UTC'",
         "aware AT TIME ZONE 'UTC'",
-        // Nested, because sqlparser's Display adds no parentheses and PostgreSQL
-        // reads AT TIME ZONE left to right, so the reversal has to come back
-        // associating the same way it went out.
+        // Nested, because sqlparser's Display adds no parentheses and
+        // PostgreSQL reads AT TIME ZONE left to right, so the reversal has to
+        // come back associating the same way it went out.
         "naive AT TIME ZONE 'UTC' AT TIME ZONE 'UTC'",
     ] {
         let expected =

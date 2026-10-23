@@ -1453,7 +1453,8 @@ fn transform_expr_generic(
             }
         }
 
-        // All other variants: delegate structural recursion to map_expr_children
+        // All other variants: delegate structural recursion to
+        // map_expr_children
         other => map_expr_children(other, &recurse),
     }
 }

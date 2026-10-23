@@ -370,9 +370,10 @@ pub fn reverse_function(
 
     match func_name.as_str() {
         "group_concat" => FunctionReversal::ToStringAgg,
-        // json_array_length(json) exists in PostgreSQL, but jsonb_array_length(jsonb) is the
-        // overload for JSONB-typed arguments. The choice depends on the argument's declared
-        // column type and is resolved in reverse_translate_function where schema is available.
+        // json_array_length(json) exists in PostgreSQL, but
+        // jsonb_array_length(jsonb) is the overload for JSONB-typed arguments.
+        // The choice depends on the argument's declared column type and is
+        // resolved in reverse_translate_function where schema is available.
         "json_array_length" => FunctionReversal::JsonArrayLength,
         // datetime('now') -> NOW(), datetime(x) -> x AT TIME ZONE 'UTC'
         "datetime" => {
@@ -546,7 +547,8 @@ pub fn reverse_function(
             FunctionReversal::PassThrough
         }
         // TRIM(str, chars) -> TRIM(BOTH chars FROM str)
-        // Single-arg TRIM(str) is parsed as Expr::Trim, not Function; pass through.
+        // Single-arg TRIM(str) is parsed as Expr::Trim, not Function; pass
+        // through.
         "trim" => {
             if let FunctionArguments::List(list) = args
                 && list.args.len() == 2
@@ -635,7 +637,8 @@ pub fn reverse_function(
         // unixepoch(x) -> EXTRACT(EPOCH FROM x)
         "unixepoch" => FunctionReversal::ToExtractEpoch,
         // typeof(x): pg_typeof returns a registered type name; SQLite returns a
-        // storage-class string. The values differ, so this is not a translation.
+        // storage-class string. The values differ, so this is not a
+        // translation.
         "typeof" => {
             FunctionReversal::Reject(
                 "typeof: PostgreSQL's pg_typeof returns a registered type name, \
@@ -660,13 +663,15 @@ pub fn reverse_function(
                     .to_string(),
             )
         }
-        // changes(): connection-scoped SQLite state with no PostgreSQL equivalent.
+        // changes(): connection-scoped SQLite state with no PostgreSQL
+        // equivalent.
         "changes" => {
             FunctionReversal::Reject(
                 "changes: connection-scoped SQLite state with no PostgreSQL equivalent".to_string(),
             )
         }
-        // last_insert_rowid(): connection-scoped SQLite state with no PostgreSQL equivalent.
+        // last_insert_rowid(): connection-scoped SQLite state with no
+        // PostgreSQL equivalent.
         "last_insert_rowid" => {
             FunctionReversal::Reject(
                 "last_insert_rowid: connection-scoped SQLite state with no PostgreSQL equivalent"
@@ -680,11 +685,11 @@ pub fn reverse_function(
                     .to_string(),
             )
         }
-        // random(): SQLite returns a signed 64-bit integer; PostgreSQL returns a double
-        // in [0, 1). Passing through silently changes the value range.
-        // The forward translator emits (CAST(random() AS REAL) + 9223372036854775808.0)
-        // / 18446744073709551616.0, which the expression reverse translator recognises
-        // and converts back to random().
+        // random(): SQLite returns a signed 64-bit integer; PostgreSQL returns
+        // a double in [0, 1). Passing through silently changes the value range.
+        // The forward translator emits (CAST(random() AS REAL) +
+        // 9223372036854775808.0) / 18446744073709551616.0, which the expression
+        // reverse translator recognises and converts back to random().
         "random" => {
             FunctionReversal::Reject(
                 "random: SQLite returns a signed 64-bit integer; PostgreSQL returns a \
@@ -1586,7 +1591,8 @@ pub fn reverse_translate_function(
         FunctionReversal::ToExtractEpoch => {
             let exprs = function_argument_exprs(&func.args);
             let value = match exprs.as_slice() {
-                // No argument: current time as whole seconds; extract carries a fraction.
+                // No argument: current time as whole seconds; extract carries a
+                // fraction.
                 [] => return Ok(current_epoch_seconds()),
                 // One argument: SQLite truncates toward zero, same as floor.
                 [value] => {

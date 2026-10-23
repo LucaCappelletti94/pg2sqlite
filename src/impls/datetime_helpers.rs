@@ -73,7 +73,8 @@ pub(crate) fn datetime_field_key(field: &DateTimeField) -> Option<DatePartKey> {
         DateTimeField::Minute | DateTimeField::Minutes => Some(DatePartKey::Minute),
         DateTimeField::Second | DateTimeField::Seconds => Some(DatePartKey::Second),
         // PostgreSQL EXTRACT(DOW/DOY ...) uses Dow/Doy variants, not the
-        // MySQL-style DayOfWeek/DayOfYear variants. Map both so either form works.
+        // MySQL-style DayOfWeek/DayOfYear variants. Map both so either form
+        // works.
         DateTimeField::Dow | DateTimeField::DayOfWeek => Some(DatePartKey::DayOfWeek),
         DateTimeField::Doy | DateTimeField::DayOfYear => Some(DatePartKey::DayOfYear),
         DateTimeField::Epoch => Some(DatePartKey::Epoch),
