@@ -145,3 +145,43 @@ fn reverse_output_reparses_as_postgres() {
         reparse_pg(&out);
     }
 }
+
+fn try_reverse(sqlite_sql: &str) -> Result<String, pg2sqlite::errors::Error> {
+    let translator = Pg2Sqlite::default().sql(SCHEMA).unwrap();
+    let schema = translator.build_schema().unwrap();
+    translator
+        .reverse_sql(sqlite_sql, &schema, &Pg2SqliteOptions::default())
+        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+}
+
+/// A SQLite string literal in an identifier position names that identifier, so
+/// it reverses to a double-quoted one.
+#[test]
+fn reverse_translation_rewrites_string_literal_identifiers() {
+    for (sqlite_sql, expected) in [
+        ("SELECT c AS 'label' FROM t", r#"SELECT c AS "label" FROM t"#),
+        ("SELECT c 'label' FROM t", r#"SELECT c AS "label" FROM t"#),
+        ("SELECT c AS 'it''s' FROM t", r#"SELECT c AS "it's" FROM t"#),
+        ("SELECT x.c FROM t AS 'x'", r#"SELECT x.c FROM t AS "x""#),
+    ] {
+        let out = reverse(sqlite_sql);
+        assert_eq!(out, expected, "{sqlite_sql}");
+        reparse_pg(&out);
+    }
+}
+
+/// PostgreSQL has no zero-length identifier, so an empty delimited SQLite
+/// identifier is refused.
+#[test]
+fn reverse_translation_refuses_empty_delimited_identifiers() {
+    for sqlite_sql in [
+        "SELECT c AS '' FROM t",
+        "SELECT c '' FROM t",
+        r#"SELECT c AS "" FROM t"#,
+        "SELECT c AS `` FROM t",
+        "SELECT c AS [] FROM t",
+    ] {
+        let error = try_reverse(sqlite_sql).expect_err(sqlite_sql);
+        assert!(error.to_string().contains("zero-length"), "{sqlite_sql}: {error}");
+    }
+}
