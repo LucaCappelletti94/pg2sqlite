@@ -149,6 +149,16 @@ impl<S> InitializationPlan<S> {
         self.steps.into_iter().flat_map(|step| step.base)
     }
 
+    /// Every statement of every form, rebound ones included.
+    pub(crate) fn statements_mut(&mut self) -> impl Iterator<Item = &mut S> {
+        self.steps.iter_mut().flat_map(|step| {
+            step.base
+                .iter_mut()
+                .chain(step.main_rebound.iter_mut().flatten())
+                .chain(step.attached_rebound.iter_mut().flatten())
+        })
+    }
+
     pub(crate) fn map<T>(self, mut f: impl FnMut(S) -> T) -> InitializationPlan<T> {
         let mut forms = |statements: Vec<S>| statements.into_iter().map(&mut f).collect();
         let steps = self
