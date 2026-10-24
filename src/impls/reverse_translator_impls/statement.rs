@@ -472,9 +472,9 @@ impl ReverseTranslator for Statement {
         rewrite_placeholders_for_postgres(&mut translated)?;
 
         // Reverse output is presented as PostgreSQL, which accepts only
-        // double-quoted identifiers. Rewrite any backtick or bracket quoting
-        // the SQLite parse produced.
-        normalize_identifier_quotes(&mut translated);
+        // double-quoted identifiers. Rewrite any backtick, bracket or string
+        // quoting the SQLite parse produced.
+        normalize_identifier_quotes(&mut translated)?;
         Ok(translated)
     }
 }

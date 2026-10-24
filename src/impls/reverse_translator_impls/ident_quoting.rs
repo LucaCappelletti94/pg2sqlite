@@ -2,11 +2,13 @@
 //!
 //! Three concerns live here:
 //!
-//! 1. **Quote normalisation.** SQLite accepts three delimited-identifier styles
-//!    (`` `ident` ``, `[ident]`, and `"ident"`); PostgreSQL accepts only
+//! 1. **Quote normalisation.** SQLite accepts four delimited-identifier styles
+//!    (`` `ident` ``, `[ident]`, `"ident"`, and a `'ident'` string literal
+//!    where its grammar names an identifier); PostgreSQL accepts only
 //!    `"ident"`. Reverse translation presents its output as PostgreSQL, so
 //!    every identifier it emits must carry `Some('"')` (or `None` when
-//!    unquoted).
+//!    unquoted). PostgreSQL has no zero-length identifier, so an empty
+//!    delimited one is refused.
 //!
 //!    Only the quote style changes. The identifier text is preserved byte for
 //!    byte. SQLite treats quoted identifiers case-insensitively while
@@ -43,26 +45,37 @@ use crate::errors::Error;
 // ─── 1. Quote normalisation
 // ───────────────────────────────────────────────────
 
-/// Rewrites backtick- and bracket-quoted identifiers to double-quoted, the only
-/// delimited form PostgreSQL accepts.
+/// Rewrites backtick-, bracket- and single-quoted identifiers to double-quoted,
+/// the only delimited form PostgreSQL accepts.
 struct IdentQuoteNormalizer;
 
 impl VisitorMut for IdentQuoteNormalizer {
-    type Break = Infallible;
+    type Break = Error;
 
     fn post_visit_ident(&mut self, ident: &mut Ident) -> ControlFlow<Self::Break> {
-        if matches!(ident.quote_style, Some('`' | '[')) {
+        if ident.quote_style.is_some() && ident.value.is_empty() {
+            return ControlFlow::Break(Error::reverse_refusal(format!(
+                "{ident} is a zero-length identifier, which PostgreSQL cannot name."
+            )));
+        }
+        if matches!(ident.quote_style, Some('`' | '[' | '\'')) {
             ident.quote_style = Some('"');
         }
         ControlFlow::Continue(())
     }
 }
 
-/// Rewrites every backtick- or bracket-quoted identifier in `node` to
-/// double-quoted, leaving unquoted (`None`) and already double-quoted
-/// identifiers untouched and preserving identifier text byte for byte.
-pub(crate) fn normalize_identifier_quotes<N: VisitMut>(node: &mut N) {
-    let _ = node.visit(&mut IdentQuoteNormalizer);
+/// Rewrites every backtick-, bracket- or single-quoted identifier in `node` to
+/// double-quoted, preserving identifier text byte for byte.
+///
+/// # Errors
+///
+/// Refuses an empty delimited identifier.
+pub(crate) fn normalize_identifier_quotes<N: VisitMut>(node: &mut N) -> Result<(), Error> {
+    match node.visit(&mut IdentQuoteNormalizer) {
+        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(error) => Err(error),
+    }
 }
 
 // ─── 2. Pseudo-expression quoting ────────────────────────────────────────────
@@ -188,7 +201,7 @@ mod tests {
 
     fn norm(sql: &str) -> String {
         let mut stmts = Parser::parse_sql(&SQLiteDialect {}, sql).unwrap();
-        normalize_identifier_quotes(&mut stmts[0]);
+        normalize_identifier_quotes(&mut stmts[0]).unwrap();
         stmts[0].to_string()
     }
 
