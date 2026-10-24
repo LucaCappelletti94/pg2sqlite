@@ -1052,6 +1052,9 @@ pub(crate) struct ColumnRewrites {
     /// float special SQLite cannot hold, a bit string in PostgreSQL's own
     /// spelling, or a temporal value to bring to the text the column holds.
     literal_checked_cols: Vec<(String, DataType)>,
+    /// Boolean and scaled `NUMERIC` columns, where a string literal stands for
+    /// the boolean or number PostgreSQL reads it as.
+    typed_text_cols: Vec<(String, DataType)>,
 }
 
 impl ColumnRewrites {
@@ -1090,6 +1093,13 @@ impl ColumnRewrites {
             numeric_scales: numeric_minor_unit_scales_of_table(table, schema),
             array_cols,
             literal_checked_cols,
+            typed_text_cols: table
+                .columns(schema)
+                .into_iter()
+                .flatten()
+                .filter(|col| reads_typed_text(&col.attribute().data_type))
+                .map(|col| (col.column_name().to_string(), col.attribute().data_type.clone()))
+                .collect(),
         }
     }
 
@@ -1111,6 +1121,7 @@ impl ColumnRewrites {
             && self.numeric_scales.is_empty()
             && self.array_cols.is_empty()
             && self.literal_checked_cols.is_empty()
+            && self.typed_text_cols.is_empty()
     }
 
     /// Finishes a translated value written into `column`, handling both
@@ -1160,6 +1171,12 @@ impl ColumnRewrites {
                 value = scale_parameter(value, *scale);
             }
         } else {
+            if let Some((_, data_type)) =
+                self.typed_text_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(column))
+                && let Some(literal) = typed_text_literal(data_type, &value)?
+            {
+                value = literal;
+            }
             scale_literal_for_column(&mut value, column, &self.numeric_scales)?;
             if let Some((_, data_type)) =
                 self.literal_checked_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(column))
@@ -1304,6 +1321,7 @@ pub(crate) fn convert_value_for_column_type(
     expr: Expr,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, Error> {
+    let expr = typed_text_literal(data_type, &expr)?.unwrap_or(expr);
     if let Some(scale) = minor_unit_scale(data_type) {
         if is_bound_parameter(&expr) {
             return Ok(scale_parameter(expr, scale));
@@ -1376,6 +1394,95 @@ pub(crate) fn convert_value_for_column_type(
         return check_json_document_literal(data_type, expr);
     }
     Ok(expr)
+}
+
+/// Whether a string literal written into a column of this type stands for a
+/// boolean or a number, which the column stores as an integer.
+pub(crate) fn reads_typed_text(data_type: &DataType) -> bool {
+    minor_unit_scale(data_type).is_some() || matches!(data_type, DataType::Bool | DataType::Boolean)
+}
+
+/// The literal a string written into a boolean or scaled `NUMERIC` column
+/// stands for, which PostgreSQL reads with the column type's input function,
+/// or `None` for any other column or expression.
+///
+/// # Errors
+///
+/// Returns [`Error::TranslationRefusal`] for text the input function rejects,
+/// and for `NaN` and the infinities, which a column of minor units cannot hold.
+pub(crate) fn typed_text_literal(data_type: &DataType, expr: &Expr) -> Result<Option<Expr>, Error> {
+    if minor_unit_scale(data_type).is_some() {
+        return numeric_text_literal(expr);
+    }
+    if matches!(data_type, DataType::Bool | DataType::Boolean) {
+        return boolean_text_literal(expr);
+    }
+    Ok(None)
+}
+
+/// Reads a quoted decimal, `'1.50'` or `' -2.5 '`, back as the number literal
+/// it coerces to, or `None` when the text is not one number.
+pub(crate) fn quoted_decimal_as_number(text: &str) -> Option<Expr> {
+    let trimmed = text.trim();
+    let unsigned = trimmed.strip_prefix(['-', '+']).unwrap_or(trimmed);
+    let shape_holds = !unsigned.is_empty()
+        && unsigned.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && unsigned.chars().filter(|c| *c == '.').count() <= 1
+        && unsigned.chars().any(|c| c.is_ascii_digit());
+    if !shape_holds {
+        return None;
+    }
+
+    let digits =
+        if trimmed.starts_with('-') { format!("-{unsigned}") } else { unsigned.to_string() };
+    Some(Expr::Value(ValueWithSpan {
+        value: Value::Number(digits, false),
+        span: sqlparser::tokenizer::Span::empty(),
+    }))
+}
+
+fn numeric_text_literal(expr: &Expr) -> Result<Option<Expr>, Error> {
+    let Some(text) = crate::impls::function_helpers::single_quoted_literal(expr) else {
+        return Ok(None);
+    };
+    quoted_decimal_as_number(text).map(Some).ok_or_else(|| {
+        Error::forward_refusal(format!(
+            "'{text}' is not a number a NUMERIC column can hold as minor units, so it cannot be \
+             written into one."
+        ))
+    })
+}
+
+fn boolean_text_literal(expr: &Expr) -> Result<Option<Expr>, Error> {
+    let Some(text) = crate::impls::function_helpers::single_quoted_literal(expr) else {
+        return Ok(None);
+    };
+    let Some(value) = postgres_bool(text) else {
+        return Err(Error::forward_refusal(format!(
+            "'{text}' is not a boolean PostgreSQL accepts, so it cannot be written into a boolean \
+             column."
+        )));
+    };
+    Ok(Some(Expr::Value(Value::Boolean(value).with_empty_span())))
+}
+
+/// PostgreSQL's `parse_bool`, which takes any case-insensitive prefix of
+/// `true`, `false`, `yes` and `no`, at least two letters of `on` and `off`, and
+/// `1` or `0`.
+fn postgres_bool(text: &str) -> Option<bool> {
+    let value = text.trim().to_ascii_lowercase();
+    let prefix_of = |word: &str, least: usize| value.len() >= least && word.starts_with(&value);
+    match value.chars().next()? {
+        't' if prefix_of("true", 1) => Some(true),
+        'f' if prefix_of("false", 1) => Some(false),
+        'y' if prefix_of("yes", 1) => Some(true),
+        'n' if prefix_of("no", 1) => Some(false),
+        'o' if prefix_of("on", 2) => Some(true),
+        'o' if prefix_of("off", 2) => Some(false),
+        '1' if value.len() == 1 => Some(true),
+        '0' if value.len() == 1 => Some(false),
+        _ => None,
+    }
 }
 
 /// Converts PostgreSQL's hex-format `bytea` literal into the bytes it names.

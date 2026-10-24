@@ -22,7 +22,10 @@ use crate::{
     errors::Error,
     impls::{
         object_name::last_ident_value_or_display,
-        shared_helpers::{declares_identity, minor_unit_scale, scale_decimal_literal},
+        shared_helpers::{
+            declares_identity, minor_unit_scale, quoted_decimal_as_number, scale_decimal_literal,
+            typed_text_literal,
+        },
         translator_impls::{
             data_type::{
                 bit_binary_digits_check_expr, bit_exact_length_check_expr, bit_length,
@@ -72,27 +75,6 @@ fn scaled_numeric_default(expr: &Expr, scale: u32) -> Result<Option<Expr>, Error
         }
         _ => Ok(None),
     }
-}
-
-/// Reads a quoted decimal, `'1.50'` or `' -2.5 '`, back as the number literal
-/// it coerces to, or `None` when the text is not one number.
-fn quoted_decimal_as_number(text: &str) -> Option<Expr> {
-    let trimmed = text.trim();
-    let unsigned = trimmed.strip_prefix(['-', '+']).unwrap_or(trimmed);
-    let shape_holds = !unsigned.is_empty()
-        && unsigned.chars().all(|c| c.is_ascii_digit() || c == '.')
-        && unsigned.chars().filter(|c| *c == '.').count() <= 1
-        && unsigned.chars().any(|c| c.is_ascii_digit());
-    if !shape_holds {
-        return None;
-    }
-
-    let digits =
-        if trimmed.starts_with('-') { format!("-{unsigned}") } else { unsigned.to_string() };
-    Some(Expr::Value(ValueWithSpan {
-        value: Value::Number(digits, false),
-        span: sqlparser::tokenizer::Span::empty(),
-    }))
 }
 
 /// The `DEFAULT` a column declares, in the units the translated column stores.
@@ -148,6 +130,9 @@ pub(crate) fn declared_default(
 /// A declared default in the units the translated column stores.
 fn scaled_default(column: &ColumnDef, expr: &Expr) -> Result<Expr, Error> {
     let Some(scale) = minor_unit_scale(&column.data_type) else {
+        if let Some(boolean) = typed_text_literal(&column.data_type, expr)? {
+            return Ok(boolean);
+        }
         // For NUMERIC(p,0), round fractional literal defaults at translation
         // time.
         return Ok(round_scale_zero_default(&column.data_type, expr));
