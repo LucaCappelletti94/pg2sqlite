@@ -165,6 +165,7 @@ fn reverse_numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Exp
     ) {
         return false;
     }
+    #[cfg_attr(feature = "std", recursive::recursive)]
     fn addressable(expr: &Expr) -> bool {
         match expr {
             Expr::Identifier(_)
@@ -178,6 +179,7 @@ fn reverse_numeric_rules_may_apply(op: &BinaryOperator, left: &Expr, right: &Exp
             _ => false,
         }
     }
+    #[cfg_attr(feature = "std", recursive::recursive)]
     fn numeric_candidate(expr: &Expr) -> bool {
         match expr {
             Expr::Value(ValueWithSpan { value: Value::Number(_, _), .. }) => true,
@@ -210,6 +212,7 @@ fn reverse_unscale_or_translate(
 
 /// Rescales integer literals inside an already-translated scale-preserving
 /// call.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn reverse_scale_call_arguments(call: Expr, scale: u32) -> Result<Expr, Error> {
     let Expr::Function(mut function) = call else { return Ok(call) };
     if !is_scale_preserving_call(&function) {
@@ -235,6 +238,7 @@ fn reverse_scale_call_arguments(call: Expr, scale: u32) -> Result<Expr, Error> {
 }
 
 /// True when `expr` is definitely non-text, so `||` would fail in PostgreSQL.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_definitely_non_text(
     expr: &Expr,
     schema: &ParserDB,
@@ -382,6 +386,7 @@ impl ReverseTranslator for Expr {
     type Schema = ParserDB;
     type PostgresEntry = Self;
 
+    #[cfg_attr(feature = "std", recursive::recursive)]
     fn reverse_translate(
         &self,
         schema: &Self::Schema,

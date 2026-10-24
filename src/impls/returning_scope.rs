@@ -182,6 +182,7 @@ impl<'a> Scope<'a> {
         }
     }
 
+    #[cfg_attr(feature = "std", recursive::recursive)]
     fn rewrite_expr(&self, expr: &Expr) -> Result<Expr, Error> {
         match expr {
             Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {

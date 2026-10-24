@@ -1706,6 +1706,7 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
+        crate::impls::stack_headroom::ensure();
         let mut translated: Vec<Statement> = match self {
             Self::CreateTable(create_table) => {
                 translate_create_table(create_table, schema, options, emit)?

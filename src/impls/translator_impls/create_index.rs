@@ -121,6 +121,7 @@ fn lower_argument(function: &Function) -> Option<&Expr> {
     plain_argument_expr(argument)
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_reproducible_fts_document(expr: &Expr) -> bool {
     match expr {
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
@@ -142,6 +143,7 @@ fn is_reproducible_fts_document(expr: &Expr) -> bool {
 }
 
 /// Returns the columns in a `to_tsvector` document that FTS5 can reproduce.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn analyze_fts_expression(expr: &Expr) -> Option<Vec<String>> {
     match expr {
         Expr::Function(function) => {

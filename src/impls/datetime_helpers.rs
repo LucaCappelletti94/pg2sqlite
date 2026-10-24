@@ -421,6 +421,7 @@ fn take_last_argument(expr: &mut Expr) -> Option<Expr> {
 /// Whether `expr` is a timestamp one of SQLite's date functions computed,
 /// which is text without an offset.
 #[must_use]
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn is_offset_less_timestamp_call(expr: &Expr) -> bool {
     let Expr::Function(function) = peel_nested(expr) else { return false };
     let named = |name| super::function_helpers::is_function_named(function, name);

@@ -131,6 +131,7 @@ pub(crate) fn make_uuid_conversion_call(arg: Expr, options: &Pg2SqliteOptions) -
 /// `(SELECT '<uuid>')` is the literal written another way, so the conversion
 /// goes inside the subquery. A subquery that reads a relation is left alone:
 /// its value may already be a BLOB, and wrapping one would convert twice.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn maybe_wrap_text_uuid_literal(
     expr: Expr,
     options: &Pg2SqliteOptions,

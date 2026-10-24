@@ -117,6 +117,7 @@ impl Planner<'_> {
         })
     }
 
+    #[cfg_attr(feature = "std", recursive::recursive)]
     pub(super) fn set_expr(
         &mut self,
         scope: &ColumnScope<'_, '_, ParserDB>,
@@ -229,6 +230,7 @@ impl Planner<'_> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "std", recursive::recursive)]
     pub(super) fn factor<'s, 'q, 'd>(
         &mut self,
         scope: &ColumnScope<'_, '_, ParserDB>,
@@ -266,6 +268,7 @@ impl Planner<'_> {
 
     /// Plans one expression, returning the previous name of the column it is
     /// when it is a bare reference to a renamed file column.
+    #[cfg_attr(feature = "std", recursive::recursive)]
     pub(super) fn expr<'s, 'q, 'd>(
         &mut self,
         scope: &ColumnScope<'_, '_, ParserDB>,

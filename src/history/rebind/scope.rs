@@ -71,6 +71,7 @@ impl Planner<'_> {
         self.list_as(factor, listed, true)
     }
 
+    #[cfg_attr(feature = "std", recursive::recursive)]
     fn list_as(
         &self,
         factor: &TableFactor,

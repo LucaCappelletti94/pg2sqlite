@@ -563,6 +563,7 @@ fn place_statement(
     })
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(super) fn primary_write_target(statement: &Statement) -> Option<&ObjectName> {
     fn factor(factor: &TableFactor) -> Option<&ObjectName> {
         match factor {

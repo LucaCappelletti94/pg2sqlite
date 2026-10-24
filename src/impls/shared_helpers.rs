@@ -207,6 +207,7 @@ pub(crate) fn match_partial_not_supported_error() -> Error {
 ///
 /// The qualifier of a compound name is dropped, since it may be an alias rather
 /// than a table.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn referenced_column_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Identifier(ident) => Some(ident.value.as_str()),
@@ -264,6 +265,7 @@ impl Visitor for FunctionColumnCollector {
 
 /// Returns every column name `expr` mentions.
 #[must_use]
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn extract_columns_from_expr(expr: &Expr) -> ColumnReferences {
     match expr {
         Expr::Identifier(ident) => ColumnReferences::Complete(vec![ident.value.clone()]),
@@ -452,6 +454,7 @@ enum DefinitionValue<T> {
     Opaque,
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn evaluate_definition<T: PartialEq>(
     definition: &ColumnDefinition<'_, '_, '_, ParserDB>,
     schema: &ParserDB,
@@ -538,6 +541,7 @@ pub(crate) fn query_output_matches(
     Ok(false)
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn definition_matches(
     definition: &ColumnDefinition<'_, '_, '_, ParserDB>,
     schema: &ParserDB,
@@ -661,6 +665,7 @@ fn has_nested_join(entry: &sqlparser::ast::TableWithJoins) -> bool {
 }
 
 /// Appends `entry` and everything a nested join inside it hides.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn flatten_relations(
     entry: &sqlparser::ast::TableWithJoins,
     out: &mut Vec<sqlparser::ast::TableWithJoins>,
@@ -704,6 +709,7 @@ pub(crate) fn relations_scope_query(
 }
 
 /// Unwraps parentheses, which carry no meaning for resolution.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn strip_nesting(expr: &Expr) -> &Expr {
     match expr {
         Expr::Nested(inner) => strip_nesting(inner),
@@ -720,6 +726,7 @@ fn unresolved_reference(reference: &Expr, reason: &str) -> crate::errors::Error 
 
 /// True when the column `expr` names is declared with a type `predicate`
 /// accepts.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn declared_type_matches(
     expr: &Expr,
     schema: &ParserDB,
@@ -739,6 +746,7 @@ pub(crate) fn declared_type_matches(
 }
 
 /// True when `expr` is a whole number by construction, so its scale is 0.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn is_integral_expression(
     expr: &Expr,
     schema: &ParserDB,
@@ -833,6 +841,7 @@ pub(crate) fn is_scale_preserving_call(function: &Function) -> bool {
     })
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn numeric_precision_and_scale_of(
     expr: &Expr,
     schema: &ParserDB,
@@ -1912,6 +1921,7 @@ pub(crate) fn scale_literal_for_column(
 }
 
 /// True when `expr` is a number literal with a decimal point.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_decimal_number_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => digits.contains('.'),
@@ -3624,6 +3634,7 @@ fn translate_select_with_from<D: TranslationDirection>(
 /// becomes a select over it as a derived table, so `(SELECT a FROM t ORDER BY
 /// a LIMIT 1) UNION (SELECT b FROM t ORDER BY b DESC LIMIT 1)` keeps
 /// answering 1, 30.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn unparenthesize_compound_operand(operand: sqlparser::ast::SetExpr) -> sqlparser::ast::SetExpr {
     use sqlparser::ast::SetExpr;
 
@@ -3655,6 +3666,7 @@ fn unparenthesize_compound_operand(operand: sqlparser::ast::SetExpr) -> sqlparse
 }
 
 /// Shared `SetExpr` translation. Forward errors on `Table` and `Merge`.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn translate_set_expr_shared<D: TranslationDirection>(
     set_expr: &sqlparser::ast::SetExpr,
     schema: &ParserDB,
@@ -4103,6 +4115,7 @@ fn subquery_is_trivially_uncorrelated(query: &Query) -> bool {
 }
 
 #[allow(clippy::too_many_lines)]
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn translate_table_factor<D: TranslationDirection>(
     table_factor: &TableFactor,
     schema: &ParserDB,

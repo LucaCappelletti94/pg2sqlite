@@ -48,6 +48,7 @@ use crate::{
 /// `recursive_triggers = ON` (measured: `too many levels of trigger
 /// recursion`). References to columns assigned LATER stay raw, because reading
 /// the pre-update row is exactly what PostgreSQL does for them.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn compose_assignment_refs(expr: &Expr, assigned: &[(String, Expr)]) -> Expr {
     let earlier = |name: &str| {
         assigned
@@ -221,6 +222,7 @@ fn route_trigger_table_factor(
     Ok(())
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn route_trigger_query_writes(
     query: &mut Query,
     schema: &ParserDB,

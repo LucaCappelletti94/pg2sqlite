@@ -43,6 +43,7 @@ pub(crate) const DISTINCT_ON_ROWNUM_ALIAS: &str = "__pg2sqlite_rn";
 impl crate::traits::translator::TranslatorWithContext for Query {
     type SQLiteEntry = Query;
 
+    #[cfg_attr(feature = "std", recursive::recursive)]
     fn translate_with_warnings(
         &self,
         schema: &sql_traits::structs::ParserDB,
@@ -395,6 +396,7 @@ fn reject_compound_ordered_by_an_input_expression(
 
 /// The output column names of a set operation, taken from its leftmost
 /// branch, which is where PostgreSQL takes them from.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn compound_output_names(body: &SetExpr) -> Vec<String> {
     match body {
         SetExpr::SetOperation { left, .. } => compound_output_names(left),
@@ -1003,6 +1005,7 @@ pub(crate) fn is_aggregate_call(func: &Function) -> bool {
     aggregate_function_name(func).is_some_and(|name| AGGREGATE_NAMES.contains(&name.as_str()))
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_aggregate_expression(expr: &Expr) -> bool {
     match expr {
         Expr::Function(func) => func.over.is_none() && is_aggregate_call(func),

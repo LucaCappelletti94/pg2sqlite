@@ -402,6 +402,7 @@ enum RowWrite<'a> {
 }
 
 /// What `statement` writes, or `None` when it writes no rows.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn row_write(statement: &Statement) -> Option<RowWrite<'_>> {
     match statement {
         Statement::Insert(insert) => {

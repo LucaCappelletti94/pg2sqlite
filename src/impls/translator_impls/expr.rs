@@ -280,6 +280,7 @@ fn translate_extract(
 /// Under the JSON array representation an array column is TEXT holding a JSON
 /// array, so nothing about the value distinguishes it from a string and the
 /// declared type is the only evidence there is.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_array_expression(
     expr: &Expr,
     schema: &ParserDB,
@@ -396,6 +397,7 @@ fn translate_boolean_cast(
 }
 
 /// The word PostgreSQL renders a boolean literal as, when `expr` is one.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn boolean_literal_word(expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::Nested(inner) => boolean_literal_word(inner),
@@ -413,6 +415,7 @@ fn boolean_literal_word(expr: &Expr) -> Option<&'static str> {
 /// and nothing downstream can tell it from a count. Anything this does not
 /// recognise is left alone, which keeps a value that merely happens to be 1
 /// from being rendered as a word.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn is_boolean_expression(
     expr: &Expr,
     schema: &ParserDB,
@@ -3362,6 +3365,7 @@ impl crate::traits::translator::TranslatorWithContext for Expr {
     type SQLiteEntry = Expr;
 
     #[allow(clippy::too_many_lines)]
+    #[cfg_attr(feature = "std", recursive::recursive)]
     fn translate_with_warnings(
         &self,
         schema: &sql_traits::structs::ParserDB,
