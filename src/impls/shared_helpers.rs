@@ -1052,6 +1052,9 @@ pub(crate) struct ColumnRewrites {
     /// float special SQLite cannot hold, a bit string in PostgreSQL's own
     /// spelling, or a temporal value to bring to the text the column holds.
     literal_checked_cols: Vec<(String, DataType)>,
+    /// Boolean and scaled `NUMERIC` columns, where a string literal stands for
+    /// the boolean or number PostgreSQL reads it as.
+    typed_text_cols: Vec<(String, DataType)>,
 }
 
 impl ColumnRewrites {
@@ -1090,6 +1093,13 @@ impl ColumnRewrites {
             numeric_scales: numeric_minor_unit_scales_of_table(table, schema),
             array_cols,
             literal_checked_cols,
+            typed_text_cols: table
+                .columns(schema)
+                .into_iter()
+                .flatten()
+                .filter(|col| reads_typed_text(&col.attribute().data_type))
+                .map(|col| (col.column_name().to_string(), col.attribute().data_type.clone()))
+                .collect(),
         }
     }
 
@@ -1111,6 +1121,7 @@ impl ColumnRewrites {
             && self.numeric_scales.is_empty()
             && self.array_cols.is_empty()
             && self.literal_checked_cols.is_empty()
+            && self.typed_text_cols.is_empty()
     }
 
     /// Finishes a translated value written into `column`, handling both
@@ -1160,6 +1171,12 @@ impl ColumnRewrites {
                 value = scale_parameter(value, *scale);
             }
         } else {
+            if let Some((_, data_type)) =
+                self.typed_text_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(column))
+                && let Some(literal) = typed_text_literal(data_type, &value)?
+            {
+                value = literal;
+            }
             scale_literal_for_column(&mut value, column, &self.numeric_scales)?;
             if let Some((_, data_type)) =
                 self.literal_checked_cols.iter().find(|(name, _)| name.eq_ignore_ascii_case(column))
@@ -1304,18 +1321,15 @@ pub(crate) fn convert_value_for_column_type(
     expr: Expr,
     options: &Pg2SqliteOptions,
 ) -> Result<Expr, Error> {
+    let expr = typed_text_literal(data_type, &expr)?.unwrap_or(expr);
     if let Some(scale) = minor_unit_scale(data_type) {
         if is_bound_parameter(&expr) {
             return Ok(scale_parameter(expr, scale));
         }
-        let number = numeric_text_literal(&expr)?;
-        if let Some(scaled) = scale_decimal_literal(number.as_ref().unwrap_or(&expr), scale)? {
+        if let Some(scaled) = scale_decimal_literal(&expr, scale)? {
             return Ok(scaled);
         }
         return Ok(expr);
-    }
-    if matches!(data_type, DataType::Bool | DataType::Boolean) {
-        return boolean_text_literal(expr);
     }
     if matches!(data_type, DataType::Uuid) {
         match options.get_uuid_representation() {
@@ -1382,59 +1396,66 @@ pub(crate) fn convert_value_for_column_type(
     Ok(expr)
 }
 
-/// The number a string literal written into a `NUMERIC` column holds, which
-/// PostgreSQL reads with the type's input function, or `None` for any other
-/// expression.
+/// Whether a string literal written into a column of this type stands for a
+/// boolean or a number, which the column stores as an integer.
+pub(crate) fn reads_typed_text(data_type: &DataType) -> bool {
+    minor_unit_scale(data_type).is_some() || matches!(data_type, DataType::Bool | DataType::Boolean)
+}
+
+/// The literal a string written into a boolean or scaled `NUMERIC` column
+/// stands for, which PostgreSQL reads with the column type's input function,
+/// or `None` for any other column or expression.
 ///
 /// # Errors
 ///
-/// Returns [`Error::TranslationRefusal`] for text PostgreSQL would not accept,
+/// Returns [`Error::TranslationRefusal`] for text the input function rejects,
 /// and for `NaN` and the infinities, which a column of minor units cannot hold.
+pub(crate) fn typed_text_literal(data_type: &DataType, expr: &Expr) -> Result<Option<Expr>, Error> {
+    if minor_unit_scale(data_type).is_some() {
+        return numeric_text_literal(expr);
+    }
+    if matches!(data_type, DataType::Bool | DataType::Boolean) {
+        return boolean_text_literal(expr);
+    }
+    Ok(None)
+}
+
+/// Reads a quoted decimal, `'1.50'` or `' -2.5 '`, back as the number literal
+/// it coerces to, or `None` when the text is not one number.
+pub(crate) fn quoted_decimal_as_number(text: &str) -> Option<Expr> {
+    let trimmed = text.trim();
+    let unsigned = trimmed.strip_prefix(['-', '+']).unwrap_or(trimmed);
+    let shape_holds = !unsigned.is_empty()
+        && unsigned.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && unsigned.chars().filter(|c| *c == '.').count() <= 1
+        && unsigned.chars().any(|c| c.is_ascii_digit());
+    if !shape_holds {
+        return None;
+    }
+
+    let digits =
+        if trimmed.starts_with('-') { format!("-{unsigned}") } else { unsigned.to_string() };
+    Some(Expr::Value(ValueWithSpan {
+        value: Value::Number(digits, false),
+        span: sqlparser::tokenizer::Span::empty(),
+    }))
+}
+
 fn numeric_text_literal(expr: &Expr) -> Result<Option<Expr>, Error> {
     let Some(text) = crate::impls::function_helpers::single_quoted_literal(expr) else {
         return Ok(None);
     };
-    let trimmed = text.trim();
-    let (negated, unsigned) = match trimmed.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
-    };
-    let (mantissa, exponent) = unsigned
-        .split_once(['e', 'E'])
-        .map_or((unsigned, None), |(mantissa, exponent)| (mantissa, Some(exponent)));
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let digits = |part: &str| part.chars().all(|character| character.is_ascii_digit());
-    let exponent_valid = exponent.is_none_or(|exponent| {
-        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
-        !exponent.is_empty() && digits(exponent)
-    });
-    if (whole.is_empty() && fraction.is_empty())
-        || !digits(whole)
-        || !digits(fraction)
-        || !exponent_valid
-    {
-        return Err(Error::forward_refusal(format!(
+    quoted_decimal_as_number(text).map(Some).ok_or_else(|| {
+        Error::forward_refusal(format!(
             "'{text}' is not a number a NUMERIC column can hold as minor units, so it cannot be \
              written into one."
-        )));
-    }
-    let number = crate::impls::function_helpers::number_literal(unsigned);
-    Ok(Some(if negated {
-        Expr::UnaryOp { op: UnaryOperator::Minus, expr: Box::new(number) }
-    } else {
-        number
-    }))
+        ))
+    })
 }
 
-/// A string literal written into a boolean column, read the way PostgreSQL's
-/// `boolin` reads it, and every other expression unchanged.
-///
-/// # Errors
-///
-/// Returns [`Error::TranslationRefusal`] for text `boolin` rejects.
-fn boolean_text_literal(expr: Expr) -> Result<Expr, Error> {
-    let Some(text) = crate::impls::function_helpers::single_quoted_literal(&expr) else {
-        return Ok(expr);
+fn boolean_text_literal(expr: &Expr) -> Result<Option<Expr>, Error> {
+    let Some(text) = crate::impls::function_helpers::single_quoted_literal(expr) else {
+        return Ok(None);
     };
     let Some(value) = postgres_bool(text) else {
         return Err(Error::forward_refusal(format!(
@@ -1442,7 +1463,7 @@ fn boolean_text_literal(expr: Expr) -> Result<Expr, Error> {
              column."
         )));
     };
-    Ok(Expr::Value(Value::Boolean(value).with_empty_span()))
+    Ok(Some(Expr::Value(Value::Boolean(value).with_empty_span())))
 }
 
 /// PostgreSQL's `parse_bool`, which takes any case-insensitive prefix of

@@ -158,3 +158,30 @@ fn a_string_literal_in_a_numeric_column_is_scaled_like_a_number() {
         ));
     }
 }
+
+#[test]
+fn string_literals_in_updates_upserts_and_defaults_read_as_their_column_type() {
+    let read = |pg: &str| {
+        run_translated_with(
+            &format!(
+                "CREATE TABLE t (id int PRIMARY KEY, flag boolean DEFAULT 'y', \
+                 amount numeric(10,2) DEFAULT '2.5');
+                 {pg}
+                 SELECT CAST(flag AS TEXT) || ' ' || CAST(amount AS TEXT) FROM t;"
+            ),
+            &Pg2SqliteOptions::default(),
+        )
+    };
+    assert_eq!(read("INSERT INTO t (id) VALUES (1);"), vec![Some("true 2.50".to_string())]);
+    assert_eq!(
+        read("INSERT INTO t (id) VALUES (1); UPDATE t SET flag = 'off', amount = '7.5';"),
+        vec![Some("false 7.50".to_string())]
+    );
+    assert_eq!(
+        read(
+            "INSERT INTO t (id) VALUES (1);
+             INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET flag = 'n', amount = '-1';"
+        ),
+        vec![Some("false -1.00".to_string())]
+    );
+}
