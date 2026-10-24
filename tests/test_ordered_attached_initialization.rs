@@ -84,6 +84,18 @@ fn run<'a>(connection: &mut SqliteConnection, statements: impl Iterator<Item = &
     }
 }
 
+/// A connection to a new main file with the existing shared file attached.
+fn second_connection(files: &tempfile::TempDir) -> SqliteConnection {
+    let mut connection =
+        SqliteConnection::establish(files.path().join("second-main.db").to_str().expect("path"))
+            .expect("second main");
+    diesel::sql_query("ATTACH DATABASE ? AS shared")
+        .bind::<diesel::sql_types::Text, _>(files.path().join("shared.db").to_str().expect("path"))
+        .execute(&mut connection)
+        .expect("attach shared");
+    connection
+}
+
 #[test]
 fn a_failed_source_transaction_rolls_back_both_file_initializers() {
     let sql = "BEGIN;
@@ -204,19 +216,70 @@ fn an_existing_shared_file_is_not_initialized_for_a_second_main_file() {
         let mut first = connection(&files);
         run(&mut first, script.initialize(FreshFiles::Both).expect("initialize"));
     }
-    let mut second =
-        SqliteConnection::establish(files.path().join("second-main.db").to_str().expect("path"))
-            .expect("second main");
-    diesel::sql_query("ATTACH DATABASE ? AS shared")
-        .bind::<diesel::sql_types::Text, _>(files.path().join("shared.db").to_str().expect("path"))
-        .execute(&mut second)
-        .expect("attach shared");
+    let mut second = second_connection(&files);
     run(&mut second, script.initialize(FreshFiles::Main).expect("main-only initialization"));
     let notes =
         schema::notes::table.select(schema::notes::id).load::<i32>(&mut second).expect("notes");
     let papers =
         schema::papers::table.select(schema::papers::id).load::<i32>(&mut second).expect("papers");
     assert_eq!((notes, papers), (vec![7], vec![1]));
+}
+
+#[test]
+fn a_second_main_file_maintains_full_text_search_in_an_existing_shared_file() {
+    use diesel::expression::IntoSql;
+
+    let script = translated(
+        "CREATE TABLE papers(id INT PRIMARY KEY, body TEXT NOT NULL);
+         CREATE INDEX papers_fts ON papers USING GIN(to_tsvector('english', body));",
+    );
+    let files = tempfile::TempDir::new().expect("files");
+    {
+        let mut first = connection(&files);
+        run(&mut first, script.initialize(FreshFiles::Both).expect("initialize"));
+    }
+    let mut second = second_connection(&files);
+    run(&mut second, script.initialize(FreshFiles::Main).expect("main-only initialization"));
+    diesel::insert_into(schema::papers::table)
+        .values((schema::papers::id.eq(1), schema::papers::body.eq("needle")))
+        .execute(&mut second)
+        .expect("write the shared table");
+    let matches = schema::papers_fts::table
+        .filter(schema::Matches::new(
+            schema::papers_fts::body,
+            "needle".into_sql::<diesel::sql_types::Text>(),
+        ))
+        .select(schema::papers_fts::rowid)
+        .load::<i64>(&mut second)
+        .expect("full-text search");
+    assert_eq!(matches, [1]);
+}
+
+#[test]
+fn a_second_main_file_fires_a_trigger_on_an_existing_shared_table() {
+    let script = translated(
+        "CREATE TABLE notes(id INT PRIMARY KEY);
+         CREATE TABLE papers(id INT PRIMARY KEY, body TEXT NOT NULL);
+         CREATE FUNCTION note_paper() RETURNS trigger AS $$
+         BEGIN INSERT INTO notes VALUES(NEW.id); RETURN NEW; END;
+         $$ LANGUAGE plpgsql;
+         CREATE TRIGGER paper_note AFTER INSERT ON papers FOR EACH ROW
+             EXECUTE FUNCTION note_paper();",
+    );
+    let files = tempfile::TempDir::new().expect("files");
+    {
+        let mut first = connection(&files);
+        run(&mut first, script.initialize(FreshFiles::Both).expect("initialize"));
+    }
+    let mut second = second_connection(&files);
+    run(&mut second, script.initialize(FreshFiles::Main).expect("main-only initialization"));
+    diesel::insert_into(schema::papers::table)
+        .values((schema::papers::id.eq(3), schema::papers::body.eq("noted")))
+        .execute(&mut second)
+        .expect("write the shared table");
+    let notes =
+        schema::notes::table.select(schema::notes::id).load::<i32>(&mut second).expect("notes");
+    assert_eq!(notes, [3]);
 }
 
 #[test]
@@ -314,13 +377,7 @@ fn a_new_account_uses_final_column_names_in_an_existing_shared_file() {
         let mut first = connection(&files);
         run(&mut first, script.initialize(FreshFiles::Both).expect("initialize"));
     }
-    let mut second =
-        SqliteConnection::establish(files.path().join("second-main.db").to_str().expect("path"))
-            .expect("second main");
-    diesel::sql_query("ATTACH DATABASE ? AS shared")
-        .bind::<diesel::sql_types::Text, _>(files.path().join("shared.db").to_str().expect("path"))
-        .execute(&mut second)
-        .expect("attach shared");
+    let mut second = second_connection(&files);
     run(&mut second, script.initialize(FreshFiles::Main).expect("main-only initialization"));
     let labels = schema::labels::table
         .select(schema::labels::title)
