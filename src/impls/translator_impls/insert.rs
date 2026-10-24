@@ -939,15 +939,23 @@ fn rewrite_rls_view_insert<'schema>(
 
     // Strict mode: redirect to the backing table. The BEFORE INSERT guard on
     // the backing table keeps WITH CHECK enforcement on this path.
-    let suffix = options.get_rls_table_suffix();
-    let backing_name = format!("{}{suffix}", last.value);
-    let mut new_parts = table_name.0.clone();
-    if let Some(last_part) = new_parts.last_mut() {
-        *last_part =
-            sqlparser::ast::ObjectNamePart::Identifier(sqlparser::ast::Ident::new(backing_name));
-    }
-    insert.table = TableObject::TableName(sqlparser::ast::ObjectName(new_parts));
+    insert.table = TableObject::TableName(backing_table_name(table_name, options));
     Ok(target)
+}
+
+/// `table_name` with its last part renamed to the RLS backing table.
+pub(crate) fn backing_table_name(
+    table_name: &sqlparser::ast::ObjectName,
+    options: &crate::options::TranslationContext<'_>,
+) -> sqlparser::ast::ObjectName {
+    let mut parts = table_name.0.clone();
+    if let Some(last) = parts.last_mut()
+        && let Some(ident) = last.as_ident()
+    {
+        let backing = format!("{}{}", ident.value, options.get_rls_table_suffix());
+        *last = sqlparser::ast::ObjectNamePart::Identifier(sqlparser::ast::Ident::new(backing));
+    }
+    sqlparser::ast::ObjectName(parts)
 }
 
 /// The first returned column whose value the database supplies rather than the

@@ -60,7 +60,11 @@ pub(crate) fn trigger(
 }
 
 pub(crate) fn insert(table: ObjectName, columns: Vec<ObjectName>, source: Query) -> Statement {
-    Statement::Insert(Insert {
+    Statement::Insert(insert_body(table, columns, source))
+}
+
+pub(crate) fn insert_body(table: ObjectName, columns: Vec<ObjectName>, source: Query) -> Insert {
+    Insert {
         insert_token: AttachedToken::empty(),
         optimizer_hints: Vec::new(),
         or: None,
@@ -89,7 +93,7 @@ pub(crate) fn insert(table: ObjectName, columns: Vec<ObjectName>, source: Query)
         multi_table_into_clauses: Vec::new(),
         multi_table_when_clauses: Vec::new(),
         multi_table_else_clause: None,
-    })
+    }
 }
 
 pub(crate) fn values(rows: Vec<Vec<Expr>>) -> Query {

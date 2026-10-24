@@ -17,6 +17,7 @@ pub(crate) mod column;
 pub(crate) mod column_option;
 mod condition_injection;
 mod constraint_characteristic;
+mod copy;
 pub(crate) mod create_index;
 mod create_table;
 mod create_trigger;
