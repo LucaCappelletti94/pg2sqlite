@@ -283,6 +283,30 @@ fn a_second_main_file_fires_a_trigger_on_an_existing_shared_table() {
 }
 
 #[test]
+fn a_second_main_file_initializes_a_script_that_creates_a_role() {
+    let script = translated(
+        "CREATE TABLE notes(id INT PRIMARY KEY);
+         CREATE TABLE papers(id INT PRIMARY KEY, body TEXT NOT NULL);
+         CREATE ROLE reader;
+         GRANT SELECT ON papers TO reader;
+         INSERT INTO notes VALUES(7);
+         INSERT INTO papers VALUES(1, 'shared');",
+    );
+    let files = tempfile::TempDir::new().expect("files");
+    {
+        let mut first = connection(&files);
+        run(&mut first, script.initialize(FreshFiles::Both).expect("initialize"));
+    }
+    let mut second = second_connection(&files);
+    run(&mut second, script.initialize(FreshFiles::Main).expect("main-only initialization"));
+    let notes =
+        schema::notes::table.select(schema::notes::id).load::<i32>(&mut second).expect("notes");
+    let papers =
+        schema::papers::table.select(schema::papers::id).load::<i32>(&mut second).expect("papers");
+    assert_eq!((notes, papers), (vec![7], vec![1]));
+}
+
+#[test]
 fn added_column_foreign_keys_cannot_cross_the_attached_boundary() {
     let sql = "CREATE TABLE parents(id INT PRIMARY KEY);
         CREATE TABLE children(id INT PRIMARY KEY);
