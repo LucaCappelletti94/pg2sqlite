@@ -44,13 +44,12 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     AlterTable, AlterTableOperation, AlterTableType, BeginTransactionKind, BinaryOperator,
-    CascadeOption, ColumnDef, ColumnOption, CopySource, CopyTarget, CreateFunction,
-    CreateTableOptions, CreateView, Delete, DescribeAlias, DiscardObject, DropBehavior,
-    ExceptionWhen, Expr, FromTable, Ident, Merge, ObjectName, ObjectNamePart, ObjectType, Query,
-    RenameTable, RenameTableNameKind, Set, SqlOption, Statement, TableFactor, TableWithJoins,
-    TransactionAccessMode, TransactionMode, TransactionModifier, TriggerEvent, TriggerPeriod,
-    Truncate, TruncateIdentityOption, UnaryOperator, VacuumStatement, ViewColumnDef,
-    helpers::attached_token::AttachedToken,
+    CascadeOption, ColumnDef, ColumnOption, CreateFunction, CreateTableOptions, CreateView, Delete,
+    DescribeAlias, DiscardObject, DropBehavior, ExceptionWhen, Expr, FromTable, Ident, Merge,
+    ObjectName, ObjectNamePart, ObjectType, Query, RenameTable, RenameTableNameKind, Set,
+    SqlOption, Statement, TableFactor, TableWithJoins, TransactionAccessMode, TransactionMode,
+    TransactionModifier, TriggerEvent, TriggerPeriod, Truncate, TruncateIdentityOption,
+    UnaryOperator, VacuumStatement, ViewColumnDef, helpers::attached_token::AttachedToken,
 };
 
 use crate::{
@@ -1081,34 +1080,6 @@ fn reject_untranslatable_truncate_options(truncate: &Truncate) -> Result<(), Err
     }
 }
 
-/// Rejects `COPY`, which SQLite has no statement for in any of its forms.
-///
-/// Refusing rather than dropping matters most for `COPY ... FROM stdin`, whose
-/// rows are carried inline in the migration file, so a silent drop loses data.
-///
-/// Translating that form into multi-row `INSERT`s would be the better answer
-/// for a migration translator, and it is not implemented, so it is refused with
-/// the rest.
-fn reject_copy(source: &CopySource, to: bool, target: &CopyTarget) -> Error {
-    let subject = match source {
-        CopySource::Table { table_name, .. } => format!("COPY {table_name}"),
-        CopySource::Query(_) => "COPY (query)".to_owned(),
-    };
-
-    let advice = if to {
-        "SQLite has no COPY statement, and the translator cannot write the destination. Export the \
-         rows with your client instead."
-    } else if matches!(target, CopyTarget::Stdin) {
-        "SQLite has no COPY statement. The rows are carried inline in this statement, so they \
-         would be lost outright. Rewrite the payload as INSERT statements."
-    } else {
-        "SQLite has no COPY statement, and the translator cannot read the source. Load the rows \
-         with INSERT statements instead."
-    };
-
-    Error::forward_refusal(format!("{subject} cannot be translated. {advice}"))
-}
-
 /// Rejects `MERGE`, which has no SQLite form.
 ///
 /// `INSERT ... ON CONFLICT DO UPDATE` resembles a translation without being
@@ -2086,8 +2057,23 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
             }
             Statement::RenameTable(renames) => return Err(reject_rename_table(renames)),
             Statement::Truncate(truncate) => translate_truncate(truncate, schema, options, emit)?,
-            Statement::Copy { source, to, target, .. } => {
-                return Err(reject_copy(source, *to, target));
+            Statement::Copy {
+                source,
+                to,
+                target,
+                options: copy_options,
+                legacy_options,
+                payload,
+            } => {
+                let copy = super::copy::Copy {
+                    source,
+                    to: *to,
+                    target,
+                    options: copy_options,
+                    legacy_options,
+                    payload: payload.as_ref(),
+                };
+                super::copy::translate_copy(&copy, schema, options, emit)?
             }
             Statement::Merge(merge) => return Err(reject_merge(merge)),
             Statement::Prepare { name, .. } => {
