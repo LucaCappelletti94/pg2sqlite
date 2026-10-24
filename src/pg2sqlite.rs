@@ -816,6 +816,11 @@ impl Pg2Sqlite {
             attached,
         );
         let mut script = Script { setup: Vec::new(), files, connection };
+        // Last, so the replay and rebinding forms built above are covered too.
+        for statement in script.files.statements_mut().chain(script.connection.iter_mut().flatten())
+        {
+            crate::impls::sqlite_keywords::quote_reserved_identifiers(statement);
+        }
 
         // PostgreSQL's LIKE is case-sensitive. SQLite's is case-insensitive for
         // ASCII unless the connection says otherwise, and no expression-level
