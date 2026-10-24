@@ -4,13 +4,15 @@
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::{
-    borrow::ToOwned,
+    borrow::{Cow, ToOwned},
     boxed::Box,
     format,
     string::{String, ToString},
     vec,
     vec::Vec,
 };
+#[cfg(feature = "std")]
+use std::borrow::Cow;
 
 use sql_traits::structs::ParserDB;
 use sqlparser::ast::{
@@ -47,8 +49,8 @@ impl crate::traits::translator::TranslatorWithContext for Query {
         options: &crate::options::TranslationContext<'_>,
         emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
     ) -> Result<Self::SQLiteEntry, crate::errors::Error> {
-        let bound = super::cte::preserve_bindings(self);
-        let query = bound.as_ref();
+        let merged = merge_parenthesized_body(self)?;
+        let query: &Query = &super::cte::preserve_bindings(&merged);
         // Everything below reads column types through the relations this query
         // exposes rather than through every table of that name in the schema,
         // so the scope is attached before any expression is translated. A
@@ -196,6 +198,86 @@ fn build_query_envelope(
         pipe_operators,
     }
 }
+
+/// Moves the clauses around a parenthesized query body into the query inside,
+/// where PostgreSQL attaches them and where SQLite can take them.
+///
+/// # Errors
+///
+/// Refuses a clause given both inside and outside the parentheses, which
+/// PostgreSQL rejects.
+fn merge_parenthesized_body(query: &Query) -> Result<Cow<'_, Query>, crate::errors::Error> {
+    if !matches!(query.body.as_ref(), SetExpr::Query(_)) {
+        return Ok(Cow::Borrowed(query));
+    }
+    let mut merged = query.clone();
+    while let SetExpr::Query(inner) = *merged.body {
+        let inner = *inner;
+        merged = Query {
+            with: only_once("WITH", inner.with, merged.with)?,
+            body: inner.body,
+            order_by: only_once("ORDER BY", inner.order_by, merged.order_by)?,
+            limit_clause: merge_limits(
+                (inner.limit_clause, inner.fetch.is_some()),
+                (merged.limit_clause, merged.fetch.is_some()),
+            )?,
+            fetch: inner.fetch.or(merged.fetch),
+            locks: [inner.locks, merged.locks].concat(),
+            for_clause: only_once("FOR", inner.for_clause, merged.for_clause)?,
+            settings: only_once("SETTINGS", inner.settings, merged.settings)?,
+            format_clause: only_once("FORMAT", inner.format_clause, merged.format_clause)?,
+            pipe_operators: [inner.pipe_operators, merged.pipe_operators].concat(),
+        };
+    }
+    Ok(Cow::Owned(merged))
+}
+
+/// The inner and outer `LIMIT` and `OFFSET` as one clause, where a `FETCH`
+/// counts as a `LIMIT` as it does in PostgreSQL.
+fn merge_limits(
+    (inner, inner_fetches): (Option<LimitClause>, bool),
+    (outer, outer_fetches): (Option<LimitClause>, bool),
+) -> Result<Option<LimitClause>, crate::errors::Error> {
+    let (inner_limit, inner_offset, mut limit_by) = limit_parts(inner);
+    let (outer_limit, outer_offset, outer_limit_by) = limit_parts(outer);
+    if (inner_limit.is_some() || inner_fetches) && (outer_limit.is_some() || outer_fetches) {
+        return Err(multiple_clauses("LIMIT"));
+    }
+    let offset = only_once("OFFSET", inner_offset, outer_offset)?;
+    let limit = inner_limit.or(outer_limit);
+    limit_by.extend(outer_limit_by);
+    Ok((limit.is_some() || offset.is_some() || !limit_by.is_empty())
+        .then_some(LimitClause::LimitOffset { limit, offset, limit_by }))
+}
+
+fn limit_parts(clause: Option<LimitClause>) -> (Option<Expr>, Option<Offset>, Vec<Expr>) {
+    match clause {
+        None => (None, None, Vec::new()),
+        Some(LimitClause::LimitOffset { limit, offset, limit_by }) => (limit, offset, limit_by),
+        Some(LimitClause::OffsetCommaLimit { offset, limit }) => {
+            (Some(limit), Some(Offset { value: offset, rows: OffsetRows::None }), Vec::new())
+        }
+    }
+}
+
+fn only_once<T>(
+    clause: &str,
+    inner: Option<T>,
+    outer: Option<T>,
+) -> Result<Option<T>, crate::errors::Error> {
+    match (inner, outer) {
+        (Some(_), Some(_)) => Err(multiple_clauses(clause)),
+        (inner, outer) => Ok(inner.or(outer)),
+    }
+}
+
+fn multiple_clauses(clause: &str) -> crate::errors::Error {
+    crate::errors::Error::forward_refusal(format!(
+        "multiple {clause} clauses not allowed: PostgreSQL rejects a {clause} given both inside \
+         and outside the parentheses around a query."
+    ))
+}
+
 /// Refuses `SELECT DISTINCT ... ORDER BY x` where `x` is not in the select
 /// list.
 ///
