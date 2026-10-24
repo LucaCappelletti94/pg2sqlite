@@ -278,13 +278,6 @@ impl Format {
         let quote = written.quote.unwrap_or('"');
         let escape = written.escape.unwrap_or(quote);
         let null = written.null.unwrap_or_else(|| if csv { String::new() } else { "\\N".into() });
-        for (name, character) in [("delimiter", delimiter), ("quote", quote), ("escape", escape)] {
-            if !character.is_ascii() {
-                return Err(invalid_option(&format!(
-                    "COPY {name} must be a single one-byte character"
-                )));
-            }
-        }
         if matches!(delimiter, '\n' | '\r') {
             return Err(invalid_option("COPY delimiter cannot be newline or carriage return"));
         }
